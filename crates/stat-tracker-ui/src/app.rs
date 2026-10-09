@@ -82,6 +82,7 @@ pub enum Message {
     OpenAbout,
     DismissNotes,
     OpenNotesLink(String),
+    ToggleUpdateNotes,
     ToggleReleaseDetails {
         surface: notes::NotesSurface,
         version: String,
@@ -160,6 +161,7 @@ pub struct TrackerApp {
     pub update_notes: Vec<ShownRelease>,
     update_open_details: HashSet<String>,
     update_show_older: bool,
+    pub update_notes_expanded: bool,
     dialog_open_details: HashSet<String>,
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
@@ -298,6 +300,7 @@ impl TrackerApp {
             update_notes: Vec::new(),
             update_open_details: HashSet::new(),
             update_show_older: false,
+            update_notes_expanded: update::update_notes_expanded_default(),
             dialog_open_details: HashSet::new(),
             dialog_show_older: false,
             notes_dialog,
@@ -790,6 +793,7 @@ impl TrackerApp {
             Message::UpdateChecked(info) => {
                 self.update_open_details.clear();
                 self.update_show_older = false;
+                self.update_notes_expanded = update::update_notes_expanded_default();
                 self.update_notes = info
                     .as_ref()
                     .map(|i| {
@@ -855,6 +859,10 @@ impl TrackerApp {
                 if !open.remove(&version) {
                     open.insert(version);
                 }
+                Task::none()
+            }
+            Message::ToggleUpdateNotes => {
+                self.update_notes_expanded = !self.update_notes_expanded;
                 Task::none()
             }
             Message::ShowOlderReleases(surface) => {

@@ -627,32 +627,93 @@ async fn download_and_run_bootstrap(
     ))
 }
 
+/// Notes stay closed until the player presses What's new.
+pub fn update_notes_expanded_default() -> bool {
+    false
+}
+
+/// The banner draws release cards only after that button.
+pub fn banner_shows_notes(expanded: bool) -> bool {
+    expanded
+}
+
+/// Heading for the compact banner. One line, no extra punctuation.
+pub fn banner_title(latest: &str) -> String {
+    format!("Update available: v{latest}")
+}
+
+/// Characters of the player summary kept on the compact banner.
+pub const BANNER_LEAD_CHARS: usize = 110;
+
+/// First sentence of the newest release, cut on a word boundary when it is long.
+pub fn banner_lead(summary: &str) -> String {
+    let sentence = first_sentence(summary.trim());
+    truncate_clean(sentence, BANNER_LEAD_CHARS)
+}
+
+fn first_sentence(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            let rest = text[i + 1..].trim_start();
+            if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return text[..=i].trim();
+            }
+        }
+        i += 1;
+    }
+    text
+}
+
+fn truncate_clean(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut end = text.len();
+    for (seen, (i, _)) in text.char_indices().enumerate() {
+        if seen == keep {
+            end = i;
+            break;
+        }
+    }
+    let cut = text[..end].trim_end();
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > 0 => &cut[..space],
+        _ => cut,
+    };
+    let cut = cut.trim_end_matches(['.', ',', ';', ':']);
+    format!("{cut}...")
+}
+
 pub fn banner<'a>(
     info: &UpdateInfo,
     progress: &UpdateProgress,
     plan: &UpdatePlan,
     notes: &'a [crate::notes::ShownRelease],
     notes_ui: crate::notes::NotesUi<'a>,
+    notes_expanded: bool,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
     let running = matches!(progress, UpdateProgress::Running);
     let can_run = plan.can_run() && !running && !matches!(progress, UpdateProgress::Succeeded(_));
+    let lead = notes
+        .first()
+        .map(|section| banner_lead(&section.summary))
+        .filter(|lead| !lead.is_empty());
 
     let mut body = column![
-        text(format!("Update available — v{}", info.latest))
+        text(banner_title(&info.latest))
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
-        text(format!(
-            "You're on v{}. Update now downloads the release and runs the installer, or copy the command and run it in a terminal.",
-            info.current
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_MEDIUM)
-        .color(TEXT_2),
     ]
-    .spacing(10);
+    .spacing(8);
+    if let Some(lead) = lead {
+        body = body.push(text(lead).size(SIZE_BODY).font(FONT_MEDIUM).color(TEXT_2));
+    }
 
     match progress {
         UpdateProgress::Idle => {}
@@ -736,11 +797,26 @@ pub fn banner<'a>(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::OpenUpdate(url)),
+        button(
+            text(if banner_shows_notes(notes_expanded) {
+                "Hide what's new"
+            } else {
+                "What's new"
+            })
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT),
+        )
+        .padding(Padding::from([8, 16]))
+        .style(theme::ghost_btn())
+        .on_press(Message::ToggleUpdateNotes),
     ]
     .spacing(8);
 
     body = body.push(actions);
-    body = body.push(update_notes_block(info, notes, notes_ui));
+    if banner_shows_notes(notes_expanded) {
+        body = body.push(update_notes_block(info, notes, notes_ui));
+    }
 
     container(body)
         .padding(PAD_INNER)
@@ -846,6 +922,30 @@ mod tests {
             ]
         );
         assert!(select_newer_release("0.4.23", &releases).is_none());
+    }
+
+    #[test]
+    fn update_banner_notes_start_collapsed() {
+        assert!(!update_notes_expanded_default());
+        assert!(!banner_shows_notes(update_notes_expanded_default()));
+        assert!(banner_shows_notes(true));
+        assert_eq!(banner_title("0.4.23"), "Update available: v0.4.23");
+        assert!(!banner_title("0.4.23").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn banner_lead_keeps_one_sentence_and_cuts_on_a_word() {
+        let summary = "You can turn on an extra number reader that only writes a private log on this computer. It does not change your saved games or what gets uploaded, and it stays off unless you enable it.";
+        assert_eq!(
+            banner_lead(summary),
+            "You can turn on an extra number reader that only writes a private log on this computer."
+        );
+        let long = "alpha ".repeat(40);
+        let cut = banner_lead(long.trim());
+        assert!(cut.ends_with("..."), "{cut}");
+        assert!(cut.chars().count() <= BANNER_LEAD_CHARS, "{cut}");
+        assert!(!cut[..cut.len() - 3].ends_with(' '));
+        assert_eq!(banner_lead("Short note."), "Short note.");
     }
 
     #[test]

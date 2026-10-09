@@ -292,6 +292,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             &app.update_plan,
             &app.update_notes,
             app.update_notes_ui(),
+            app.update_notes_expanded,
         ));
     }
 
