@@ -39,6 +39,57 @@ pub struct ApiError {
     pub details: Option<String>,
 }
 
+/// Seconds from a governor JSON body's `retry_after`.
+///
+/// `{"error":"rate_limited","retry_after":N}` yields `N` when `N` is a JSON
+/// number or a numeric string in `1..=3600`. Any other body is `None`,
+/// including plain text, password-lockout JSON, negatives, and waits over an hour.
+pub fn json_retry_after(body: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error").and_then(|error| error.as_str()) != Some("rate_limited") {
+        return None;
+    }
+    match value.get("retry_after")? {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .filter(|seconds| (1..=3600).contains(seconds)),
+        serde_json::Value::String(text) => text
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| (1..=3600).contains(seconds)),
+        _ => None,
+    }
+}
+
+/// Shown for a 429 that does not carry a usable `retry_after`.
+pub const TRY_AGAIN_LATER: &str = "Too many requests. Try again later.";
+
+/// Member copy for a 429 with a usable wait: `Try again in N s`.
+///
+/// Returns `None` when the status is not 429 or [`json_retry_after`] finds no
+/// wait. Callers that must not show a raw `rate_limited` code use
+/// [`too_many_requests_message`] for that case.
+pub fn rate_limited_retry_message(status: u16, body: &str) -> Option<String> {
+    if status != 429 {
+        return None;
+    }
+    let secs = json_retry_after(body)?;
+    Some(format!("Try again in {secs} s"))
+}
+
+/// Member copy for any HTTP 429.
+///
+/// A usable wait is `Try again in N s`. Every other 429, including a
+/// `rate_limited` body whose wait is missing, not an integer, or over 3600
+/// seconds, is [`TRY_AGAIN_LATER`].
+pub fn too_many_requests_message(status: u16, body: &str) -> Option<String> {
+    if status != 429 {
+        return None;
+    }
+    Some(rate_limited_retry_message(status, body).unwrap_or_else(|| TRY_AGAIN_LATER.to_string()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiSuccess<T> {
     pub data: T,
@@ -110,4 +161,99 @@ fn encode_cursor(offset: u32) -> String {
 
 fn decode_cursor(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{json_retry_after, rate_limited_retry_message};
+
+    #[test]
+    fn json_retry_after_reads_number_or_numeric_string() {
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":12}"#),
+            Some(12)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":" 4 "}"#),
+            Some(4)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":0}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"0"}"#),
+            None
+        );
+        assert_eq!(json_retry_after(r#"{"error":"rate_limited"}"#), None);
+        assert_eq!(
+            json_retry_after(r#"{"error":"too many login attempts","retry_after":9}"#),
+            None
+        );
+        assert_eq!(json_retry_after("Too Many Requests! Wait for 9s"), None);
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":3600}"#),
+            Some(3600)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":3601}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"3601"}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":-1}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"-5"}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":1.5}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"abc"}"#),
+            None
+        );
+        assert_eq!(json_retry_after("[]"), None);
+        assert_eq!(json_retry_after("null"), None);
+    }
+
+    #[test]
+    fn governor_json_429_uses_retry_after() {
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited","retry_after":9}"#)
+                .as_deref(),
+            Some("Try again in 9 s")
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited","retry_after":1}"#)
+                .as_deref(),
+            Some("Try again in 1 s")
+        );
+    }
+
+    #[test]
+    fn plain_text_and_lockout_429_are_not_governor_json() {
+        assert_eq!(
+            rate_limited_retry_message(429, "Too Many Requests! Wait for 9s"),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"too many login attempts"}"#),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(400, r#"{"error":"rate_limited","retry_after":9}"#),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited"}"#),
+            None
+        );
+    }
 }
