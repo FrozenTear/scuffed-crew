@@ -558,8 +558,8 @@ async fn main() {
     // F-API-003: existing teams have no team_channel rows until backfill.
     scuffed_site_server::team_channels::backfill_on_startup(&state).await;
 
-    // Hourly session cleanup. Device-link codes have their own 60 second timer
-    // below, and POST /api/link/start runs a pass as well.
+    // Hourly session cleanup. Device-link codes have their own 60 second timer.
+
     let cleanup_db = db.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));

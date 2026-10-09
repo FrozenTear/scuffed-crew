@@ -261,9 +261,10 @@ impl Database {
     ///
     /// A pending code can be denied by any member. An approved code that has
     /// not been collected yet can be denied only by `member_id`, the member
-    /// who approved it. The caller revokes `daemon_token_id` when it is set.
-    /// The secret on the previous row is wiped in memory and in the update.
-    /// Returns `None` when there was nothing this member can deny.
+    /// who approved it. When that row has a daemon token, the token is revoked
+    /// before the status write. A failed revoke leaves the row unchanged so a
+    /// later deny, or cleanup, can try again. Returns `None` when there was
+    /// nothing this member can deny.
     pub async fn deny_device_link(
         &self,
         user_code: &str,
@@ -271,13 +272,43 @@ impl Database {
     ) -> DbResult<Option<DeviceLinkDenial>> {
         let user_code_hash = hash_session_token(user_code);
         with_timeout(async {
+            let mut listed = self
+                .client
+                .query(
+                    "SELECT * FROM device_link
+                     WHERE user_code_hash = $h AND expires_at > time::now()
+                     AND (status = $pending OR (status = $approved AND member_id = $mid))
+                     LIMIT 1",
+                )
+                .bind(("h", user_code_hash.clone()))
+                .bind(("pending", PENDING.to_string()))
+                .bind(("approved", APPROVED.to_string()))
+                .bind(("mid", member_id.to_string()))
+                .await?
+                .check()?;
+            let mut rows: Vec<DbDeviceLink> = listed.take(0)?;
+            let Some(mut row) = rows.pop() else {
+                return Ok(None);
+            };
+            let denial = DeviceLinkDenial {
+                member_id: row.member_id.clone(),
+                daemon_token_id: row.daemon_token_id.clone(),
+            };
+            if let (Some(token_id), Some(owner)) = (&denial.daemon_token_id, &denial.member_id) {
+                if let Err(error) = self.revoke_daemon_token(token_id, owner).await {
+                    wipe_handover(&mut row);
+                    return Err(error);
+                }
+            }
+            wipe_handover(&mut row);
+
             let mut result = self
                 .client
                 .query(
                     "UPDATE device_link SET status = $denied, handover_token = NONE
                      WHERE user_code_hash = $h AND expires_at > time::now()
                      AND (status = $pending OR (status = $approved AND member_id = $mid))
-                     RETURN BEFORE",
+                     RETURN AFTER",
                 )
                 .bind(("denied", DENIED.to_string()))
                 .bind(("h", user_code_hash))
@@ -286,15 +317,13 @@ impl Database {
                 .bind(("mid", member_id.to_string()))
                 .await?
                 .check()?;
-            let rows: Vec<DbDeviceLink> = result.take(0)?;
-            let Some(mut row) = rows.into_iter().next() else {
+            let mut updated: Vec<DbDeviceLink> = result.take(0)?;
+            for updated_row in &mut updated {
+                wipe_handover(updated_row);
+            }
+            if updated.is_empty() {
                 return Ok(None);
-            };
-            let denial = DeviceLinkDenial {
-                member_id: row.member_id.clone(),
-                daemon_token_id: row.daemon_token_id.clone(),
-            };
-            wipe_handover(&mut row);
+            }
             Ok(Some(denial))
         })
         .await
@@ -350,9 +379,10 @@ impl Database {
     /// Delete codes whose `expires_at` is at or before now.
     ///
     /// An approved code that expired before the device collected the token is
-    /// revoked first, and its handover secret is cleared. The delete runs only
-    /// after those revokes succeed, so a failed revoke leaves the row for the
-    /// next pass. A token that was already handed over stays active.
+    /// revoked first, and so is a denied code whose token is still active.
+    /// The handover secret is cleared. The delete runs only after those
+    /// revokes succeed, so a failed revoke leaves the row for the next pass.
+    /// A token that was already handed over stays active.
     pub async fn cleanup_expired_device_links(&self) -> DbResult<u64> {
         self.cleanup_expired_device_links_before(Utc::now()).await
     }
@@ -380,11 +410,13 @@ impl Database {
                 .client
                 .query(
                     "SELECT member_id, daemon_token_id FROM device_link
-                     WHERE expires_at <= $cutoff AND status = $approved
-                     AND member_id IS NOT NONE AND daemon_token_id IS NOT NONE",
+                     WHERE expires_at <= $cutoff
+                     AND member_id IS NOT NONE AND daemon_token_id IS NOT NONE
+                     AND (status = $approved OR status = $denied)",
                 )
                 .bind(("cutoff", cutoff_at))
                 .bind(("approved", APPROVED.to_string()))
+                .bind(("denied", DENIED.to_string()))
                 .await?
                 .check()?;
             let rows: Vec<Uncollected> = listed.take(0)?;
@@ -901,6 +933,100 @@ mod tests {
         assert_eq!(
             removed_now, 0,
             "wall-clock cleanup does not touch a code that expires later"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_revoke_on_deny_is_recovered_by_cleanup() {
+        let db = test_db().await;
+        seed_member(&db).await;
+        let secret = "aa".repeat(32);
+        db.insert_device_link("RECOV234", &"11".repeat(32), "Recover", "1.0.0")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &secret, "Recover")
+            .await
+            .unwrap();
+        let token_id = db.list_daemon_tokens("linkmember").await.unwrap()[0]
+            .id
+            .clone();
+        assert!(db
+            .approve_device_link("RECOV234", "linkmember", &token_id, &secret)
+            .await
+            .unwrap());
+
+        db.client
+            .query("UPDATE daemon_token SET member_id = 'not-the-member' WHERE label = 'Recover'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            db.deny_device_link("RECOV234", "linkmember").await.is_err(),
+            "a failed revoke is an error"
+        );
+
+        let mut stored = db.client.query("SELECT * FROM device_link").await.unwrap();
+        let rows: Vec<DbDeviceLink> = stored.take(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].status, "approved",
+            "a failed revoke does not mark the code denied"
+        );
+        assert!(
+            rows[0].handover_token.is_some(),
+            "a failed revoke leaves the handover in place"
+        );
+        drop(rows);
+
+        #[derive(Deserialize, SurrealValue)]
+        struct Active {
+            is_active: bool,
+        }
+        let mut before = db
+            .client
+            .query("SELECT is_active FROM daemon_token WHERE label = 'Recover'")
+            .await
+            .unwrap();
+        let active: Vec<Active> = before.take(0).unwrap();
+        assert!(active[0].is_active, "the token is still active");
+
+        // The owner matches again, but the row is denied with the token still
+        // live. Cleanup used to skip that row and delete it, which left the
+        // token active for good.
+        db.client
+            .query("UPDATE daemon_token SET member_id = 'linkmember' WHERE label = 'Recover'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.client
+            .query(
+                "UPDATE device_link SET status = 'denied', expires_at = time::now() - 1s
+                 WHERE device_label = 'Recover'",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let removed = db.cleanup_expired_device_links().await.unwrap();
+        assert_eq!(removed, 1);
+        let mut after = db
+            .client
+            .query("SELECT is_active FROM daemon_token WHERE label = 'Recover'")
+            .await
+            .unwrap();
+        let active: Vec<Active> = after.take(0).unwrap();
+        assert!(
+            !active[0].is_active,
+            "cleanup revokes a denied code whose token was still active"
+        );
+        let mut left = db.client.query("SELECT * FROM device_link").await.unwrap();
+        let rows: Vec<DbDeviceLink> = left.take(0).unwrap();
+        assert!(
+            rows.is_empty(),
+            "the denied row is deleted only after the token is revoked"
         );
     }
 }

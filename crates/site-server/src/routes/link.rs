@@ -23,8 +23,10 @@
 //! That deny revokes the daemon token. Another member's approve or deny is the
 //! same `invalid code` error, and the token stays active. If the code expires
 //! first, cleanup revokes the uncollected token and clears its handover secret.
-//! That pass runs about every 60 seconds from server start, and also when a
-//! device calls start.
+//! A deny revokes the daemon token before it writes `denied`. If that revoke
+//! fails, the code stays approved. Cleanup also revokes a denied code whose
+//! token is still active. The sweep starts with the server and runs about
+//! every 60 seconds.
 //!
 //! Codes are read from the JSON body only. A query string that carries one is
 //! stripped before the trace layer logs the URI, and the request is rejected.
@@ -380,9 +382,6 @@ pub async fn start(
     State(state): State<AppState>,
     Json(body): Json<DeviceLinkStartRequest>,
 ) -> Result<Json<DeviceLinkStartResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(_error) = state.db.cleanup_expired_device_links().await {
-        tracing::error!("device link cleanup failed");
-    }
     let device_label = validate_device_label(&body.device_label).map_err(bad_request)?;
     let app_version = validate_app_version(&body.app_version).map_err(bad_request)?;
     let (user_code, canonical_user) = generate_user_code();
@@ -548,9 +547,9 @@ pub async fn approve(
 ///
 /// Pending codes are open to any signed-in member. An approved code that the
 /// device has not collected yet can be denied only by the member who approved
-/// it, and that deny revokes the daemon token. If the revoke fails, the
-/// response is an error, not `ok: true`. Any other member gets `invalid code`
-/// and the token stays active.
+/// it. The daemon token is revoked before the code is marked denied. If that
+/// revoke fails, the response is an error, not `ok: true`, and the code stays
+/// approved. Any other member gets `invalid code` and the token stays active.
 pub async fn deny(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -574,11 +573,7 @@ pub async fn deny(
         .await
     {
         Ok(Some(denied)) => {
-            if let (Some(token_id), Some(member_id)) = (denied.daemon_token_id, denied.member_id) {
-                if let Err(_error) = state.db.revoke_daemon_token(&token_id, &member_id).await {
-                    tracing::error!("device link deny could not revoke daemon token");
-                    return internal().into_response();
-                }
+            if let Some(token_id) = denied.daemon_token_id {
                 audit(
                     &state.db,
                     &member.member.id,

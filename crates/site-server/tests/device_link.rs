@@ -1962,6 +1962,16 @@ async fn deny_returns_an_error_when_revoke_fails() {
         rows[0]["is_active"], true,
         "a failed revoke leaves the token active: {rows:?}"
     );
+    let mut links = db
+        .client
+        .query("SELECT status FROM device_link WHERE device_label = 'Living Room PC'")
+        .await
+        .unwrap();
+    let link_rows: Vec<serde_json::Value> = links.take(0).unwrap();
+    assert_eq!(
+        link_rows[0]["status"], "approved",
+        "a failed revoke does not mark the code denied: {link_rows:?}"
+    );
 }
 
 const OTHER_SESSION: &str = "link-other-session";
