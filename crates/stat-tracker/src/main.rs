@@ -5552,7 +5552,10 @@ where
         "syncing unsynced matches"
     );
     // Quarantine can leave deletes with no match rows. Those still need one
-    // request. There is nothing to split.
+    // request. There is nothing to split. A deletes-only 400 still retries
+    // forever (backoff, same as a 5xx). That matters if the server ever
+    // validates deleted_sessions: one bad id keeps the delete queue retrying,
+    // because there are no match rows to isolate.
     if to_upload.is_empty() {
         return match upload(Vec::new(), tombstones.clone()).await {
             Ok(resp) => {
@@ -11277,9 +11280,12 @@ mod tests {
         );
         let bad_row = rows.iter().find(|row| row.session_id == bad).unwrap();
         assert!(!bad_row.synced);
-        assert_eq!(
-            bad_row.upload_rejection(),
-            Some("matches[0]: hero is not allowed")
+        assert_eq!(bad_row.upload_rejection(), Some("hero is not allowed"));
+        assert!(
+            rows.iter()
+                .filter(|row| row.session_id != bad)
+                .all(|row| row.synced && row.upload_rejection().is_none()),
+            "only the refused row is quarantined"
         );
         assert!(store.get_unsynced().await.unwrap().is_empty());
 

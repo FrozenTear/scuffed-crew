@@ -1288,6 +1288,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_error_mid_split_keeps_the_accepted_half_and_retry_after() {
+        // Left half of 8 succeeds. The right half splits, then a 503 lands
+        // on its left child while the sibling is still queued. Further
+        // requests must not run: if `halt` stayed false, 6..8 would be sent.
+        let rows: Vec<usize> = (0..8).collect();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let retry = std::time::Duration::from_secs(30);
+        let isolation = isolate_rejected(&rows, |batch| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let first = batch[0];
+            let len = batch.len();
+            let wait = retry;
+            async move {
+                if len == 8 {
+                    Err(payload_reject(400))
+                } else if first == 0 {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: len as u32,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                } else if len == 4 {
+                    Err(payload_reject(422))
+                } else if first == 4 && len == 2 {
+                    Err(SyncUploadError {
+                        message: "unavailable".into(),
+                        status: Some(503),
+                        retry_after: Some(wait),
+                    })
+                } else {
+                    panic!("request after 503 must not be sent, got {first}..+{len}");
+                }
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(isolation.requests, 4);
+        assert_eq!(isolation.accepted, vec![0, 1, 2, 3]);
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![4, 5, 6, 7]);
+        let stopped = isolation.stopped.expect("503 stops the pass");
+        assert_eq!(stopped.status, Some(503));
+        assert_eq!(stopped.retry_after, Some(retry));
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::ServerError {
+                retry_after: Some(wait)
+            } if wait == retry
+        ));
+    }
+
+    #[tokio::test]
+    async fn batch_sizes_and_several_bad_rows() {
+        // N=1 refused cannot be told from a server-wide refusal.
+        let alone = isolate_case(1, &[0]).await;
+        assert!(alone.accepted.is_empty());
+        assert!(alone.rejected.is_empty());
+        assert_eq!(alone.deferred, vec![0]);
+        assert!(
+            alone
+                .stopped
+                .expect("n=1")
+                .message
+                .starts_with(SERVER_REFUSING_UPLOADS)
+        );
+
+        let one_ok = isolate_case(1, &[]).await;
+        assert_eq!(one_ok.accepted, vec![0]);
+        assert!(one_ok.rejected.is_empty());
+        assert!(one_ok.stopped.is_none());
+        assert_eq!(one_ok.requests, 1);
+
+        // N=2, one bad row.
+        let pair = isolate_case(2, &[1]).await;
+        assert_eq!(pair.accepted, vec![0]);
+        assert_eq!(pair.rejected.len(), 1);
+        assert_eq!(pair.rejected[0].index, 1);
+        assert!(pair.stopped.is_none());
+
+        // N=2, both refused.
+        let both = isolate_case(2, &[0, 1]).await;
+        assert!(both.accepted.is_empty());
+        assert!(both.rejected.is_empty());
+        assert_eq!(both.deferred, vec![0, 1]);
+        assert!(both.stopped.is_some());
+
+        // Odd length, one bad row in the longer half.
+        let odd = isolate_case(5, &[2]).await;
+        assert_eq!(odd.rejected.len(), 1);
+        assert_eq!(odd.rejected[0].index, 2);
+        assert_eq!(odd.accepted.len(), 4);
+        assert!(odd.stopped.is_none());
+        assert!(!odd.accepted.contains(&2));
+
+        // Several bad rows.
+        let many = isolate_case(7, &[1, 4, 6]).await;
+        let mut rejected: Vec<usize> = many.rejected.iter().map(|row| row.index).collect();
+        rejected.sort_unstable();
+        assert_eq!(rejected, vec![1, 4, 6]);
+        assert_eq!(many.accepted.len(), 4);
+        assert!(many.stopped.is_none());
+        for index in [1, 4, 6] {
+            assert!(!many.accepted.contains(&index));
+        }
+    }
+
+    async fn isolate_case(n: usize, bad: &[usize]) -> UploadIsolation {
+        let rows: Vec<usize> = (0..n).collect();
+        isolate_rejected(&rows, |batch| {
+            let bad_here = batch.iter().any(|index| bad.contains(index));
+            let inserted = batch.len() as u32;
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
     async fn server_and_auth_errors_do_not_split_the_batch() {
         let cases = [
             None,

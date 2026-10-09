@@ -1257,8 +1257,25 @@ struct SessionStamp {
     last_capture_at: SurrealDatetime,
 }
 
+/// Drop a leading `matches[<n>]: ` from the server's batch error. The index
+/// is the position inside one HTTP body, which changes every time the batch
+/// is split, so it is not a stable description of the row.
+fn strip_match_index_prefix(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix("matches[") else {
+        return message;
+    };
+    let Some(end) = rest.find("]:") else {
+        return message;
+    };
+    let index = &rest[..end];
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return message;
+    }
+    rest[end + 2..].trim_start()
+}
+
 fn clip_reject_message(message: &str) -> String {
-    let message = message.trim();
+    let message = strip_match_index_prefix(message.trim());
     const MAX: usize = 400;
     if message.is_empty() {
         return "Upload rejected".to_string();
@@ -2547,10 +2564,7 @@ mod tests {
         let stored = store.get_all_matches().await.unwrap();
         let bad_row = stored.iter().find(|row| row.session_id == "bad").unwrap();
         assert!(!bad_row.synced);
-        assert_eq!(
-            bad_row.upload_rejection(),
-            Some("matches[0]: hero is not allowed")
-        );
+        assert_eq!(bad_row.upload_rejection(), Some("hero is not allowed"));
         store
             .apply_command(&StoreCommand::RetryUpload {
                 session_id: "bad".into(),
@@ -2590,6 +2604,76 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].upload_rejection().is_none());
         assert_eq!(pending[0].corrected_elims, Some(9));
+    }
+
+    #[tokio::test]
+    async fn reject_message_drops_the_batch_index() {
+        let cases = [
+            (
+                "a",
+                "matches[0]: hero is not allowed",
+                "hero is not allowed",
+            ),
+            ("b", "matches[12]: map is unknown", "map is unknown"),
+            ("c", "hero is not allowed", "hero is not allowed"),
+            ("d", "matches[0]: ", "Upload rejected"),
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        for (index, (sid, raw, _)) in cases.iter().enumerate() {
+            store.insert_match(snap(sid, index as u32)).await.unwrap();
+            let rows = store.get_unsynced().await.unwrap();
+            let row = rows
+                .into_iter()
+                .find(|row| row.session_id == *sid)
+                .expect("row");
+            store
+                .quarantine_upload(&SyncClaim::capture(std::slice::from_ref(&row)), raw)
+                .await
+                .unwrap();
+        }
+        let stored = store.get_all_matches().await.unwrap();
+        for (sid, _, expect) in cases {
+            let row = stored.iter().find(|row| row.session_id == sid).unwrap();
+            assert_eq!(row.upload_rejection(), Some(expect), "{sid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_reject_survives_store_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = LocalStore::open(dir.path()).await.unwrap();
+            store.insert_match(snap("bad", 2)).await.unwrap();
+            let rows = store.get_unsynced().await.unwrap();
+            store
+                .quarantine_upload(
+                    &SyncClaim::capture(&rows),
+                    "matches[3]: hero is not allowed",
+                )
+                .await
+                .unwrap();
+        }
+        let store = reopen_store(dir.path()).await;
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].synced);
+        assert_eq!(rows[0].upload_rejection(), Some("hero is not allowed"));
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    async fn reopen_store(path: &std::path::Path) -> LocalStore {
+        let mut last = None;
+        for _ in 0..20 {
+            match LocalStore::open(path).await {
+                Ok(store) => return store,
+                Err(err) => {
+                    last = Some(err.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        panic!("store did not reopen: {}", last.unwrap_or_default());
     }
 
     #[tokio::test]
