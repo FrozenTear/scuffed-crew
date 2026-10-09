@@ -52,13 +52,16 @@ struct MapStats {
     draws: u32,
 }
 
+fn default_recognizer() -> String {
+    scuffed_types::RECOGNIZER_OCR_V1.to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct PersonalMatch {
     #[allow(dead_code)]
     id: String,
     hero: String,
     map_name: String,
-    #[allow(dead_code)]
     game_mode: String,
     role: String,
     outcome: String,
@@ -67,7 +70,16 @@ struct PersonalMatch {
     assists: u32,
     damage: u32,
     healing: u32,
+    /// Match JSON from before mitigation was returned. A missing value is 0.
+    #[serde(default)]
+    mitigation: u32,
     played_at: DateTime<Utc>,
+    /// Reader that produced the row. Missing JSON is the old reader, `ocr-v1`.
+    #[serde(default = "default_recognizer")]
+    recognizer: String,
+    /// Cell names the reader flagged. Missing JSON is an empty list.
+    #[serde(default)]
+    suspect_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -338,12 +350,34 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     .match-identity { min-width: 0; }
+    .match-hero-line {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        min-width: 0;
+    }
     .match-card .match-hero {
         color: var(--text);
         font-weight: 500;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        min-width: 0;
+    }
+    .match-hero-line .tracker-badge { flex-shrink: 0; }
+    /* Unsure cells: a dotted underline plus a question mark, not color alone. */
+    .stat-unsure {
+        text-decoration-line: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 0.18em;
+    }
+    .stat-unsure-mark {
+        margin-left: 0.1em;
+        font-size: 0.7em;
+        font-weight: 700;
+        vertical-align: super;
+        line-height: 0;
+        text-decoration: none;
     }
     .match-card .match-map {
         color: var(--text-2);
@@ -1148,6 +1182,62 @@ pub fn Stats() -> Element {
             // Tab content
             {tab_body}
         }
+    }
+}
+
+#[cfg(test)]
+mod match_row_tests {
+    use super::{MatchPage, PersonalMatch};
+
+    fn row_json(extra: &str) -> String {
+        format!(
+            r#"{{
+                "id": "m1",
+                "hero": "Ana",
+                "map_name": "Ilios",
+                "game_mode": "control",
+                "role": "Support",
+                "outcome": "victory",
+                "elims": 1,
+                "deaths": 2,
+                "assists": 3,
+                "damage": 4,
+                "healing": 5,
+                "played_at": "2026-03-15T12:00:00Z"{extra}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn missing_reader_fields_default_to_old_reader_and_empty() {
+        let row: PersonalMatch = serde_json::from_str(&row_json("")).expect("row");
+        assert_eq!(row.recognizer, "ocr-v1");
+        assert!(row.suspect_fields.is_empty());
+        assert_eq!(row.mitigation, 0);
+
+        let row = row_json("");
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{row}],"next_cursor":null}}"#))
+                .expect("page");
+        assert_eq!(page.data[0].recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert!(page.data[0].suspect_fields.is_empty());
+    }
+
+    #[test]
+    fn present_reader_fields_deserialize() {
+        let raw = row_json(
+            r#","mitigation":9,"recognizer":"cv-v1","suspect_fields":["hero","not-a-cell"]"#,
+        );
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{raw}],"next_cursor":null}}"#))
+                .expect("page");
+        assert_eq!(page.data[0].recognizer, "cv-v1");
+        assert_eq!(
+            page.data[0].suspect_fields,
+            vec!["hero".to_string(), "not-a-cell".to_string()]
+        );
+        assert_eq!(page.data[0].mitigation, 9);
+        assert!(page.next_cursor.is_none());
     }
 }
 
