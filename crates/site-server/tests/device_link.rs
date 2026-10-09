@@ -311,15 +311,14 @@ async fn happy_path_issues_a_revocable_token_once() {
 
     let (status, body) = send(
         &app,
-        trusted(
-            Method::GET,
-            "/api/stats/token-check",
-            None,
-            Some(&token),
-        ),
+        trusted(Method::GET, "/api/stats/token-check", None, Some(&token)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "minted token must pass token-check: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "minted token must pass token-check: {body}"
+    );
     assert_eq!(json_of(&body)["display_name"], "Link User");
 
     let (status, _) = send(
@@ -348,12 +347,7 @@ async fn happy_path_issues_a_revocable_token_once() {
 
     let (status, _) = send(
         &app,
-        trusted(
-            Method::GET,
-            "/api/stats/token-check",
-            None,
-            Some(&token),
-        ),
+        trusted(Method::GET, "/api/stats/token-check", None, Some(&token)),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
