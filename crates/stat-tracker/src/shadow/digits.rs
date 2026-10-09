@@ -1895,7 +1895,7 @@ mod tests {
             index: 0,
             team_size: team,
         };
-        for (team, pitch) in [(5usize, 0.083), (6usize, 0.074)] {
+        for (team, pitch) in [(5usize, 0.086), (6usize, 0.074)] {
             let zeros = vec![[0u32; 6]; team * 2];
             let drawn = with_row_pitch(&synth_board(&zeros, team, 3), pitch);
             let board = reader.read_board(&frame_with_board(&drawn));
@@ -1948,7 +1948,7 @@ mod tests {
                     img.put_pixel(x, y, Rgb([18, 20, 32]));
                 }
             }
-            with_row_pitch(&DynamicImage::ImageRgb8(img), 0.083)
+            with_row_pitch(&DynamicImage::ImageRgb8(img), 0.086)
         };
         let empty_rows = reader.read_board(&frame_with_board(&shell));
         assert_eq!(empty_rows.status, crate::shadow::BoardStatus::NotFound);
@@ -1988,7 +1988,7 @@ mod tests {
     fn empty_reader_config_does_not_flag_unattempted_fields() {
         let reader = crate::shadow::Reader::load(&crate::shadow::ReaderConfig::default());
         assert!(!reader.has_heroes());
-        let drawn = with_row_pitch(&synth_board(&sample_values(5), 5, 3), 0.083);
+        let drawn = with_row_pitch(&synth_board(&sample_values(5), 5, 3), 0.086);
         let board = reader.read_board(&frame_with_board(&drawn));
         assert_eq!(
             (board.status, board.team_size),

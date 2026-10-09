@@ -341,9 +341,9 @@ fn has_stat_rows(d: &digits::BoardRead) -> bool {
 }
 
 /// The size comes from Tracker's own rule, `RowScan::checked_team_size`
-/// (#158): split at a row pitch of 0.079 (6v6 below, 5v5 at or above), pitches
-/// outside 0.062 to 0.095 ignored, and dip and spectral pitches that both
-/// count but disagree give no size. Here that is
+/// (#158, #201): a pitch below 0.080 is 6v6, a pitch above 0.083 is 5v5, and
+/// a pitch in that band is not a size. Pitches outside 0.062 to 0.095 are
+/// ignored, and two pitches that disagree give no size. Here that is
 /// [`BoardStatus::TeamSizeUnknown`], as the capture path rejects such a frame
 /// as team size uncertain. With no pitch at all there is no layout either,
 /// where `checked_team_size` would default to 5. Nothing guesses a size.
@@ -391,12 +391,11 @@ pub struct MapName {
 /// ([`crate::parse::canonical_map`]) so both readers emit the same string and
 /// mode ([`crate::parse::map_mode`]).
 ///
-/// Two banner maps fold onto a different map in ocr-v1's table: "Temple of
-/// Anubis" (pattern `anubis` gives Throne of Anubis) and "Ecopoint:
-/// Antarctica" (pattern `antarctic` gives Antarctic Peninsula). The banner
-/// match knows which map it saw, so those keep their own name and are
-/// suspect rather than stored as the wrong map. Maps ocr-v1 has no entry for
-/// (Practice Range, Hanamura, ...) also keep their banner name, suspect.
+/// Temple of Anubis and Ecopoint: Antarctica are their own rows in the
+/// table now, so they are stored under those names. A banner name that
+/// `canonical_map` folds onto a different banner map stays suspect instead
+/// of being stored as the wrong map. A name the table does not have also
+/// stays suspect.
 pub fn map_name(info: &MapInfo) -> MapName {
     let other_banner_map = |n: &str| super::banner::MAPS.iter().any(|m| m.name == n);
     match crate::parse::canonical_map(info.name) {
@@ -785,12 +784,13 @@ mod tests {
     #[test]
     fn disagreeing_or_implausible_pitches_are_team_size_unknown() {
         let unknown = Err(BoardStatus::TeamSizeUnknown);
-        // the real 1080p 6v6 case: dip 0.0794 says 5, spectral 0.0754 says 6
+        // 0.0794 is under 0.080, so both pitches are 6v6 and they agree.
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0794), Some(0.0754)), 6),
-            unknown
+            Ok(6)
         );
-        // both plausible, opposite sides of the 0.079 split
+        // 0.083 sits in the no-guess band, so the size stays unknown even
+        // when the other pitch is a clear 6v6.
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.083), Some(0.074)), 6),
             unknown
@@ -807,11 +807,13 @@ mod tests {
             layout_from_scan(&scan(1, None, None), 0),
             Err(BoardStatus::NotFound)
         );
-        // agreeing or single plausible pitches still read
+        // agreeing pitches above the 5v5 floor still read
         assert_eq!(
-            layout_from_scan(&scan(5, Some(0.083), Some(0.084)), 6),
+            layout_from_scan(&scan(5, Some(0.084), Some(0.086)), 6),
             Ok(5)
         );
+        // a lone pitch inside the band is not a size
+        assert_eq!(layout_from_scan(&scan(5, Some(0.081), None), 6), unknown);
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0745), Some(0.102)), 6),
             Ok(6)
@@ -835,9 +837,6 @@ mod tests {
         assert_eq!(b.team_size, None);
     }
 
-    /// The two banner maps ocr-v1's table folds onto another map.
-    const OCR_V1_COLLISIONS: [&str; 2] = ["Temple of Anubis", "Ecopoint: Antarctica"];
-
     #[test]
     fn map_names_match_ocr_v1_for_every_template() {
         use crate::parse::{canonical_map, map_mode};
@@ -845,8 +844,9 @@ mod tests {
         let mut known = 0;
         for info in MAPS {
             let n = map_name(info);
+            let other_banner = |name: &str| MAPS.iter().any(|m| m.name == name);
             match canonical_map(info.name) {
-                Some(v1) if !OCR_V1_COLLISIONS.contains(&info.name) => {
+                Some(v1) if v1 == info.name || !other_banner(&v1) => {
                     assert_eq!(n.name, v1, "{} differs from ocr-v1", info.key);
                     assert!(n.known_to_ocr_v1, "{}", info.key);
                     assert_eq!(n.mode, map_mode(&v1).or(info.mode), "{}", info.key);
@@ -857,6 +857,7 @@ mod tests {
                 }
                 Some(v1) => {
                     assert_ne!(v1, info.name);
+                    assert!(other_banner(&v1), "{}", info.key);
                     assert_eq!(n.name, info.name, "keeps its own map");
                     assert!(!n.known_to_ocr_v1, "{} must stay suspect", info.key);
                 }
@@ -866,11 +867,9 @@ mod tests {
                 }
             }
         }
-        // every map in ocr-v1's table is in the banner pack
-        assert_eq!(known, 34);
-        for c in OCR_V1_COLLISIONS {
-            assert!(MAPS.iter().any(|m| m.name == c), "{c}");
-        }
+        // Temple of Anubis and Ecopoint: Antarctica are their own rows, and
+        // every banner map now has a table name (some fold onto a longer one).
+        assert_eq!(known, MAPS.len());
     }
 
     #[test]

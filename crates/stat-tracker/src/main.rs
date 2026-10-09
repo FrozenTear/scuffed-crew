@@ -1129,8 +1129,8 @@ fn append_unrecorded_row(data_dir: &std::path::Path, row: &serde_json::Value) {
     }
 }
 
-/// Deathmatch is local only. Log once at info and append the same jsonl the
-/// unrecorded path uses, so a later close does not warn again.
+/// Deathmatch and practice are local only. Log once at info and append the
+/// same jsonl the unrecorded path uses, so a later close does not warn again.
 fn note_untracked_once(data_dir: &std::path::Path, g: &ActiveGame, reason: &str) {
     if untracked_already_noted(data_dir, &g.session_id, reason) {
         return;
@@ -1139,7 +1139,7 @@ fn note_untracked_once(data_dir: &std::path::Path, g: &ActiveGame, reason: &str)
         session_id = %g.session_id,
         map = g.map.as_deref().unwrap_or("?"),
         reason,
-        "deathmatch: not tracked"
+        "untracked map: not uploaded"
     );
     let row = serde_json::json!({
         "closed_at": Utc::now().to_rfc3339(),
@@ -1203,7 +1203,11 @@ fn end_screen_split_log(
 /// warn for that session.
 fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str) {
     if parse::map_is_untracked(g.map.as_deref().unwrap_or("")) {
-        note_untracked_once(data_dir, g, "deathmatch: not tracked");
+        note_untracked_once(
+            data_dir,
+            g,
+            parse::untracked_close_reason(g.map.as_deref().unwrap_or("")),
+        );
         return;
     }
     if g.session_created {
@@ -2665,9 +2669,10 @@ async fn apply_capture_report(
             false
         }
         Ok(report) if !report.recorded => {
-            // A fuzzy Guillard read must not rename an open Busan session.
-            // Only a trusted map (top bar or accolade) may adopt Deathmatch,
-            // and only onto an empty session or one that is already Deathmatch.
+            // A fuzzy Guillard or Practice Range read must not rename an open
+            // Busan session. Only a trusted map (top bar or accolade) may
+            // adopt an untracked map, and only onto an empty session or one
+            // that is already untracked.
             if let Some(map) = report.map.clone()
                 && parse::map_is_untracked(&map)
                 && report
@@ -2677,9 +2682,10 @@ async fn apply_capture_report(
             {
                 let current = g.map.as_deref().unwrap_or("");
                 if current.is_empty() || parse::map_is_untracked(current) {
+                    let reason = parse::untracked_close_reason(&map);
                     g.map = Some(map);
                     g.map_source = report.map_source;
-                    note_untracked_once(data_dir, g, "deathmatch: not tracked");
+                    note_untracked_once(data_dir, g, reason);
                     persist_active_game(data_dir, Some(g));
                 }
                 return false;
@@ -3930,6 +3936,13 @@ async fn write_carried_after_current(
     .await
 }
 
+/// Whether the staged row is stored or dropped before insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedRow {
+    Store,
+    Drop,
+}
+
 /// Map, mode, and the PvE gate for one staged capture.
 ///
 /// An untrusted Château Guillard read is dropped back to the session map
@@ -3938,6 +3951,11 @@ async fn write_carried_after_current(
 /// session stays Unknown. A trusted Deathmatch map stays, and the caller
 /// stores that row locally. Adlersbrunn with stats on only one team is not
 /// stored as Eichenwalde.
+///
+/// An untrusted read of a local-only map with no open map is dropped,
+/// except when this capture is the stat-reset split. That split stores
+/// the new session with an empty map. The review hold keeps it unsynced
+/// until a pick, and it is not uploaded as the game that just closed.
 fn prepare_capture_row(
     parsed: &mut storage::PersonalMatch,
     staged: &mut StagedCapture,
@@ -3945,15 +3963,16 @@ fn prepare_capture_row(
     panel_raw: Option<&str>,
     board_text: &str,
     both_teams: bool,
-) -> bool {
+) -> PreparedRow {
     if parse::map_is_untracked(&staged.map_name)
         && !staged
             .map_source
             .is_some_and(|source| source.trusted_for_board_split())
     {
         // `session_map` is the open game. On a split that game is the one
-        // being closed, and an untrusted Deathmatch read must not name the
-        // new session after it.
+        // being closed, and an untrusted read must not name the new session
+        // after it. With no open map the row would be blank, and a blank
+        // map uploads, so the capture is dropped.
         let fallback = if staged.split {
             None
         } else {
@@ -3962,12 +3981,22 @@ fn prepare_capture_row(
         staged.map_name = fallback.unwrap_or("").to_string();
         staged.recorded_map = (!staged.map_name.is_empty()).then(|| staged.map_name.clone());
         staged.map_source = None;
+        if staged.map_name.is_empty() && !staged.split {
+            tracing::info!("untracked map with no open game is not stored");
+            return PreparedRow::Drop;
+        }
     }
     parsed.map_name = staged.map_name.clone();
     parsed.game_mode = parse::stored_game_mode(&parsed.map_name);
     let alias = panel_raw.is_some_and(parse::is_adlersbrunn_alias)
         || parse::is_adlersbrunn_alias(board_text);
-    parse::reject_pve_adlersbrunn(alias, &parsed.map_name, both_teams)
+    if parse::reject_pve_adlersbrunn(alias, &parsed.map_name, both_teams) {
+        tracing::info!(
+            "adlersbrunn scoreboard has stats on only one team, not stored as Eichenwalde"
+        );
+        return PreparedRow::Drop;
+    }
+    PreparedRow::Store
 }
 
 fn blank_rejected_report(
@@ -4557,10 +4586,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 map_panel_raw.as_deref(),
                 &ocr_result.raw_text,
                 parse::both_teams_have_stats(&rows, team_size),
-            ) {
-                tracing::info!(
-                    "adlersbrunn scoreboard has stats on only one team, not stored as Eichenwalde"
-                );
+            ) == PreparedRow::Drop
+            {
                 return Ok(blank_rejected_report(outcome, session_id, hero_auth, &req));
             }
 
@@ -5623,8 +5650,9 @@ where
         }
     };
     let (local_only, unsynced): (Vec<_>, Vec<_>) = unsynced.into_iter().partition(|row| {
-        let mode = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
-        !parse::stats_row_is_tracked(row.display_map_name(), &mode)
+        let sent = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
+        !parse::stats_row_is_tracked(row.display_map_name(), &row.game_mode)
+            || !parse::stats_row_is_tracked(row.display_map_name(), &sent)
     });
     if !local_only.is_empty() {
         let claims = storage::SyncClaim::capture(&local_only);
@@ -8787,7 +8815,8 @@ mod tests {
                 panel,
                 text_map,
                 true,
-            ) {
+            ) == PreparedRow::Drop
+            {
                 let report = CaptureReport {
                     recorded: false,
                     outcome: staged.outcome,
@@ -11495,6 +11524,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn arcade_and_stadium_rows_stay_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let local = [
+            ("assault", "Hanamura", "Assault"),
+            ("elim", "Black Forest", "Elimination"),
+            ("ctf", "Ayutthaya", "Capture the Flag"),
+            ("race", "Powder Keg Mine", "Payload Race"),
+            ("shop", "Workshop Chamber", "Workshop"),
+            ("stadium", "Arena Victoriae", "Stadium"),
+            ("temple", "Temple of Anubis", "Assault"),
+        ];
+        for (id, map, mode) in local {
+            let mut row = test_match(id, "victory");
+            row.map_name = map.into();
+            row.game_mode = mode.into();
+            store.insert_match(row).await.unwrap();
+        }
+        let mut busan = test_match("busan-row", "victory");
+        busan.map_name = "Busan".into();
+        busan.game_mode = "Control".into();
+        store.insert_match(busan).await.unwrap();
+        let mut mode_only = test_match("mode-assault", "victory");
+        mode_only.map_name = "Busan".into();
+        mode_only.game_mode = "Assault".into();
+        store.insert_match(mode_only).await.unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() =
+                    matches.into_iter().map(|row| row.session_id).collect();
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert_eq!(*seen.lock().unwrap(), vec!["busan-row".to_string()]);
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter().all(|row| row.synced),
+            "local-only rows are marked synced and not left pending: {rows:?}"
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn one_bad_row_uploads_the_rest_and_stays_quarantined() {
         let n = 8_i64;
         let dir = tempfile::tempdir().unwrap();
@@ -12823,7 +12900,7 @@ mod tests {
             "player GAILLARD",
             true,
         );
-        assert!(!reject);
+        assert_eq!(reject, PreparedRow::Store);
         assert_eq!(staged.map_name, "Busan");
         assert_eq!(parsed.map_name, "Busan");
         assert_eq!(parsed.game_mode, "Control");
@@ -12834,38 +12911,47 @@ mod tests {
     fn the_adlersbrunn_gate_rejects_a_one_letter_misread_without_both_teams() {
         let (mut staged, mut parsed) =
             staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
-        assert!(prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            None,
-            Some("ADLERSBRUNM"),
-            "",
-            false,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("ADLERSBRUNM"),
+                "",
+                false,
+            ),
+            PreparedRow::Drop
+        );
         let (mut staged, mut parsed) =
             staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
-        assert!(!prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            None,
-            Some("ADLERSBRUNM"),
-            "",
-            true,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("ADLERSBRUNM"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
         let (mut staged, mut parsed) =
             staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
-        assert!(!prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            None,
-            Some("EICHENWALDE"),
-            "",
-            false,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("EICHENWALDE"),
+                "",
+                false,
+            ),
+            PreparedRow::Store
+        );
         let (mut staged, mut parsed) =
             staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
-        assert!(
-            !prepare_capture_row(
+        assert_eq!(
+            prepare_capture_row(
                 &mut parsed,
                 &mut staged,
                 None,
@@ -12873,6 +12959,7 @@ mod tests {
                 "",
                 false,
             ),
+            PreparedRow::Store,
             "a one-letter Eichenwalde misread is not an Adlersbrunn alias"
         );
     }
@@ -12886,14 +12973,17 @@ mod tests {
             "Château Guillard",
             Some(boundary::MapSource::TopBar),
         );
-        assert!(!prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            None,
-            Some("CHATEAU GUILLARD"),
-            "",
-            true,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("CHATEAU GUILLARD"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
         assert_eq!(parsed.map_name, "Château Guillard");
         assert_eq!(parsed.game_mode, "Deathmatch");
         commit_capture_rows(
@@ -12931,14 +13021,17 @@ mod tests {
             "Château Guillard",
             Some(boundary::MapSource::TopBar),
         );
-        assert!(!prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            None,
-            Some("CHATEAU GUILLARD"),
-            "",
-            true,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("CHATEAU GUILLARD"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
         assert_eq!(parsed.game_mode, "Deathmatch");
         let board = {
             let mut fields = vec![
@@ -13037,6 +13130,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn practice_range_never_uploads_and_is_not_held_for_review() {
+        let name = parse::canonical_map("PRACTICE RANGE").expect("practice range");
+        assert_eq!(name, "Practice Range");
+        assert_eq!(parse::stored_game_mode(&name), "Practice");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let (mut staged, mut parsed) =
+            staged_row("practice", &name, Some(boundary::MapSource::TopBar));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("PRACTICE RANGE"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
+        assert_eq!(parsed.map_name, "Practice Range");
+        assert_eq!(parsed.game_mode, "Practice");
+        assert!(
+            parse::review_suspect_fields(&parsed.map_name, &parsed.game_mode, &parsed.hero)
+                .is_empty(),
+            "a known practice map with a mode is not a blank-map review hold"
+        );
+        commit_capture_rows(
+            &store,
+            dir.path(),
+            &staged,
+            &parsed,
+            SurrealDatetime::from(Utc::now()),
+        )
+        .await
+        .unwrap();
+
+        // No open map: do not store a blank row. A blank map uploads, and
+        // the review hold would keep it until someone picked a map.
+        let (mut fuzzy, mut fuzzy_parsed) = staged_row(
+            "practice-fuzzy",
+            &name,
+            Some(boundary::MapSource::TextFallback),
+        );
+        assert_eq!(
+            prepare_capture_row(
+                &mut fuzzy_parsed,
+                &mut fuzzy,
+                None,
+                Some("PRACTICE"),
+                "",
+                true
+            ),
+            PreparedRow::Drop
+        );
+        assert!(fuzzy.map_name.is_empty());
+
+        // An open game keeps its map. The practice misread must not replace it.
+        let (mut open, mut open_parsed) =
+            staged_row("busan-open", &name, Some(boundary::MapSource::TextFallback));
+        assert_eq!(
+            prepare_capture_row(
+                &mut open_parsed,
+                &mut open,
+                Some("Busan"),
+                Some("PRACTICE RANGE"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
+        assert_eq!(open_parsed.map_name, "Busan");
+        assert_eq!(open_parsed.game_mode, "Control");
+        commit_capture_rows(
+            &store,
+            dir.path(),
+            &open,
+            &open_parsed,
+            SurrealDatetime::from(Utc::now()),
+        )
+        .await
+        .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() = matches
+                    .into_iter()
+                    .map(|row| (row.session_id, row.map_name, row.game_mode))
+                    .collect();
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        let uploaded = seen.lock().unwrap().clone();
+        assert_eq!(
+            uploaded,
+            vec![("busan-open".into(), "Busan".into(), "Control".into())]
+        );
+        assert!(
+            uploaded
+                .iter()
+                .all(|(_, map, mode)| map != "Practice Range" && mode != "Practice")
+        );
+
+        let practice = store.get_session_snapshots("practice").await.unwrap();
+        assert_eq!(practice.len(), 1);
+        assert!(
+            practice[0].synced,
+            "practice is kept locally, not left unsynced"
+        );
+        assert!(practice[0].upload_rejection().is_none());
+        assert!(
+            parse::review_suspect_fields(
+                practice[0].display_map_name(),
+                &practice[0].game_mode,
+                practice[0].display_hero(),
+            )
+            .is_empty()
+        );
+        assert!(
+            store
+                .get_session_snapshots("practice-fuzzy")
+                .await
+                .unwrap()
+                .is_empty(),
+            "an untrusted practice read is not stored as a blank map"
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+
+        let again = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let again_upload = std::sync::Arc::clone(&again);
+        let second = try_sync_with(&store, dir.path(), None, move |_, _| {
+            let again_upload = std::sync::Arc::clone(&again_upload);
+            async move {
+                again_upload.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(second, sync::SyncAttempt::NoServerCall));
+        assert!(!again.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn an_untrusted_guillard_report_does_not_rename_an_open_game() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
@@ -13111,14 +13351,17 @@ mod tests {
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         let (mut staged, mut parsed) =
             staged_row("carry-order", "Busan", Some(boundary::MapSource::TopBar));
-        assert!(!prepare_capture_row(
-            &mut parsed,
-            &mut staged,
-            Some("Busan"),
-            Some("BUSAN"),
-            "",
-            true,
-        ));
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                Some("Busan"),
+                Some("BUSAN"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
         let current = Utc::now();
         staged.carried = Some(fresh_counters(2));
         staged.carried_hero = Some("Tracer".into());

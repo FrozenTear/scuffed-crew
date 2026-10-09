@@ -47,7 +47,9 @@ pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
     for m in &snap.matches {
         let map = m.display_map_name();
         let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
-        if !stat_tracker::parse::stats_row_is_tracked(map, &mode) {
+        if !stat_tracker::parse::stats_row_is_tracked(map, &m.game_mode)
+            || !stat_tracker::parse::stats_row_is_tracked(map, &mode)
+        {
             continue;
         }
         if m.session_id.is_empty() {
@@ -151,5 +153,29 @@ mod tests {
         let games = games_from_snapshot(&snap);
         assert!(games.iter().all(|game| game.session_id != "edited-to-dm"));
         assert_eq!(games.len(), tracked);
+    }
+
+    #[test]
+    fn practice_range_is_left_out_of_history() {
+        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+        let tracked = games_from_snapshot(&snap).len();
+        let mut practice = snap.matches[0].clone();
+        practice.session_id = "practice-range".into();
+        practice.map_name = "Practice Range".into();
+        practice.game_mode = "Practice".into();
+        practice.outcome = "victory".into();
+        snap.matches.insert(0, practice);
+        let games = games_from_snapshot(&snap);
+        assert_eq!(games.len(), tracked);
+        assert!(games.iter().all(|game| game.session_id != "practice-range"));
+
+        let mut assault = snap.matches[0].clone();
+        assault.session_id = "hanamura".into();
+        assault.map_name = "Hanamura".into();
+        assault.game_mode = "Assault".into();
+        snap.matches.insert(0, assault);
+        let games = games_from_snapshot(&snap);
+        assert_eq!(games.len(), tracked);
+        assert!(games.iter().all(|game| game.session_id != "hanamura"));
     }
 }
