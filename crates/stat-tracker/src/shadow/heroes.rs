@@ -498,10 +498,10 @@ impl Kernel {
                 let qrow = &plane[start..start + side];
                 let wrow = &self.w[y * side..(y + 1) * side];
                 let drow = &self.dev[ch][y * side..(y + 1) * side];
-                let (qc, qc_tail) = qrow.as_chunks::<LANES>();
-                let (wc, wc_tail) = wrow.as_chunks::<LANES>();
-                let (dc, dc_tail) = drow.as_chunks::<LANES>();
-                let tail = (qc_tail, wc_tail, dc_tail);
+                let (qc, qt) = qrow.as_chunks::<LANES>();
+                let (wc, wt) = wrow.as_chunks::<LANES>();
+                let (dc, dt) = drow.as_chunks::<LANES>();
+                let tail = (qt, wt, dt);
                 for ((qv, wv), dv) in qc.iter().zip(wc).zip(dc) {
                     for l in 0..LANES {
                         let vm = qv[l] * wv[l];
