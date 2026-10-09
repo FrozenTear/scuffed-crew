@@ -18,6 +18,18 @@ use serde::Serialize;
 /// Rotate the live file at this size.
 pub const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Recognizer id assumed for lines written before the `recognizer` field
+/// existed (tracker 0.4.23 and earlier).
+pub const LEGACY_RECOGNIZER: &str = "cv-v1";
+
+/// The recognizer id of a parsed log line; lines without the field are
+/// [`LEGACY_RECOGNIZER`].
+pub fn recognizer_of(line: &serde_json::Value) -> &str {
+    line.get("recognizer")
+        .and_then(|v| v.as_str())
+        .unwrap_or(LEGACY_RECOGNIZER)
+}
+
 /// One disagreeing or suspect cell.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CellDiff {
@@ -38,6 +50,9 @@ pub struct CellDiff {
 pub struct ShadowRecord {
     /// Capture time of the frame (RFC 3339, UTC).
     pub ts: String,
+    /// [`super::digits::RECOGNIZER_ID`] of the build that wrote the line.
+    /// Values and confidences are only comparable within one id.
+    pub recognizer: &'static str,
     pub session: String,
     /// Full frame height in pixels (1080, 1440, ...).
     pub resolution: u32,
@@ -116,6 +131,7 @@ mod tests {
     fn record(i: usize) -> ShadowRecord {
         ShadowRecord {
             ts: "2026-10-08T18:00:00Z".into(),
+            recognizer: crate::shadow::digits::RECOGNIZER_ID,
             session: format!("session-{i}"),
             resolution: 1440,
             team_size: 5,
@@ -151,6 +167,25 @@ mod tests {
         assert_eq!(v["diffs"][0]["field"], "DMG");
         assert_eq!(v["diffs"][0]["matcher"], 1284);
         assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn every_line_names_the_recognizer() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = ShadowLog::new(dir.path());
+        log.append(&record(1));
+        log.append(&record(2));
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["recognizer"], crate::shadow::digits::RECOGNIZER_ID);
+            assert_eq!(recognizer_of(&v), crate::shadow::digits::RECOGNIZER_ID);
+        }
+        // a line from before the field existed reads as the legacy id
+        let old: serde_json::Value =
+            serde_json::from_str(r#"{"ts":"2026-10-08T19:45:39.981Z","cells":72,"diffs":[]}"#)
+                .unwrap();
+        assert_eq!(recognizer_of(&old), "cv-v1");
     }
 
     #[test]

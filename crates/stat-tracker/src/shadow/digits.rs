@@ -1075,7 +1075,12 @@ pub fn read_board(
                 prepare_cell(seg)
             });
             let r = read_cell(cell.as_ref(), tpl, k);
-            let confidence = r.margin.clamp(0.0, 1.0) as f32;
+            // NaN cannot reach the log: it becomes 0 (and therefore suspect).
+            let confidence = if r.margin.is_finite() {
+                r.margin.clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
             CellRead {
                 value: r.value,
                 confidence,
@@ -1400,48 +1405,56 @@ mod tests {
 
     /// Snapshot fixtures: synthetic boards only (template glyph means drawn
     /// on a flat background), degraded in fixed, deterministic ways so the
-    /// confidences spread out and a few cells go suspect. No captured pixels.
+    /// confidences spread out, both template sizes are used and a few cells
+    /// go suspect. Chosen so every cell sits at least `SNAP_LINE_GAP` from
+    /// the suspect line. No captured pixels.
     fn snapshot_fixtures() -> Vec<(&'static str, DynamicImage)> {
         let want = sample_values(6);
-        let clean = synth_board(&want, 6, 3);
+        let spaced = synth_board(&want, 6, 3);
         let touching = synth_board(&want, 6, 0);
-        let small = clean.resize_exact(1248, 756, image::imageops::Triangle);
-        let mut s: u32 = 0x5eed_1234;
-        let mut noisy = |w: u32, h: u32| {
-            let mut img = clean
-                .resize_exact(w, h, image::imageops::Triangle)
-                .to_rgb8();
-            for px in img.pixels_mut() {
-                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                let d = ((s >> 24) % 25) as i32 - 12;
-                for ch in px.0.iter_mut() {
-                    *ch = (*ch as i32 + d).clamp(0, 255) as u8;
+        // resize, then add fixed LCG noise of +-amp per pixel
+        let degrade = |src: &DynamicImage, w: u32, h: u32, amp: i32| {
+            let mut img = src.resize_exact(w, h, image::imageops::Triangle).to_rgb8();
+            let mut s: u32 = 0x5eed_1234;
+            if amp > 0 {
+                for px in img.pixels_mut() {
+                    s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let d = ((s >> 24) % (2 * amp as u32 + 1)) as i32 - amp;
+                    for ch in px.0.iter_mut() {
+                        *ch = (*ch as i32 + d).clamp(0, 255) as u8;
+                    }
                 }
             }
             DynamicImage::ImageRgb8(img)
         };
-        // between the two template sizes, then half scale (below both)
-        let odd = noisy(1331, 806);
-        let tiny = noisy(832, 504);
         vec![
-            ("clean", clean),
-            ("touching", touching),
-            ("small", small),
-            ("odd_noisy", odd),
-            ("tiny_noisy", tiny),
+            ("clean", spaced.clone()),
+            ("touching", touching.clone()),
+            ("noisy", degrade(&spaced, 1664, 1007, 20)),
+            ("odd_noisy", degrade(&spaced, 1331, 806, 12)),
+            ("small_touching", degrade(&touching, 1150, 696, 0)),
+            ("tiny_noisy", degrade(&spaced, 1000, 605, 12)),
         ]
     }
 
-    /// One line per cell: fixture, row, field, value, confidence (2 dp), suspect.
-    fn snapshot_reads() -> Vec<String> {
+    /// Fingerprinted cells must be at least this far from `SUSPECT_CONF`, so
+    /// float noise can never flip a pinned suspect flag.
+    const SNAP_LINE_GAP: f32 = 0.05;
+    /// Tolerance for the pinned sample confidences.
+    const SNAP_CONF_TOL: f32 = 0.02;
+
+    /// (fixture/row/field key, value, confidence, suspect) for every cell.
+    fn snapshot_cells() -> Vec<(String, Option<u32>, f32, bool)> {
         let mut out = Vec::new();
         for (name, img) in snapshot_fixtures() {
             let read = read_board(&img, 6, Duration::from_secs(10)).unwrap();
             for (r, row) in read.rows.iter().enumerate() {
                 for (k, c) in row.cells.iter().enumerate() {
-                    out.push(format!(
-                        "{name} r{r} {} {:?} {:.2} {}",
-                        FIELDS[k], c.value, c.confidence, c.suspect
+                    out.push((
+                        format!("{name} r{r} {}", FIELDS[k]),
+                        c.value,
+                        c.confidence,
+                        c.suspect,
                     ));
                 }
             }
@@ -1449,10 +1462,33 @@ mod tests {
         out
     }
 
-    /// FNV-1a 64 over the snapshot lines.
-    fn snapshot_fingerprint(lines: &[String]) -> u64 {
+    /// The calibration constants, hashed with the output so a change to any
+    /// of them needs a bump even if no fixture cell moves.
+    fn calibration_params() -> Vec<f64> {
+        let mut p = vec![SUSPECT_CONF as f64, PM_REF];
+        p.extend_from_slice(&TYP_1440);
+        p.extend_from_slice(&TYP_1080);
+        p
+    }
+
+    /// FNV-1a 64 over the id, the calibration constants, and each cell's key,
+    /// value and suspect flag. Confidences are left out on purpose (they are
+    /// checked with a tolerance on the sample lines instead), so tiny float
+    /// differences between platforms cannot change it.
+    fn snapshot_fingerprint(
+        id: &str,
+        params: &[f64],
+        cells: &[(String, Option<u32>, f32, bool)],
+    ) -> u64 {
+        let mut text = format!("{id}\n");
+        for p in params {
+            text.push_str(&format!("{:016x}\n", p.to_bits()));
+        }
+        for (key, value, _, suspect) in cells {
+            text.push_str(&format!("{key} {value:?} {suspect}\n"));
+        }
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in lines.join("\n").bytes() {
+        for b in text.bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
@@ -1462,33 +1498,37 @@ mod tests {
     #[test]
     #[ignore]
     fn print_snapshot_reads() {
-        let lines = snapshot_reads();
-        for l in &lines {
-            println!("SNAP {l}");
+        let cells = snapshot_cells();
+        for (key, value, conf, suspect) in &cells {
+            println!("SNAP {key} {value:?} {conf:.4} {suspect}");
         }
-        println!("FINGERPRINT {:#018x}", snapshot_fingerprint(&lines));
+        let fp = snapshot_fingerprint(RECOGNIZER_ID, &calibration_params(), &cells);
+        println!("FINGERPRINT {fp:#018x}");
     }
 
-    /// Output fingerprint per recognizer id, oldest first. Append only: a new
-    /// id goes at the end with the fingerprint the failing test prints; never
-    /// edit an existing entry.
-    const RECOGNIZER_HISTORY: &[(&str, u64)] =
-        &[("cv-v1", 0xb42753ed1222dfaa), ("cv-v2", 0x8ab56b86663fcb05)];
+    /// Output fingerprint per recognizer id, oldest first, under the scheme in
+    /// `snapshot_fingerprint`. Append only: a new id goes at the end with the
+    /// fingerprint the failing test prints; never edit an existing entry.
+    ///
+    /// `cv-v1` was computed by running the 0.4.23 matcher on these same
+    /// fixtures with its one calibration constant (raw suspect margin 0.06)
+    /// as `params`.
+    const RECOGNIZER_HISTORY: &[(&str, u64)] = &[
+        ("cv-v1", 0xa20c_600c_992e_6cd5),
+        ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
+    ];
 
-    /// Readable part of the pinned snapshot for the current id.
-    const SNAPSHOT_SAMPLE: &[&str] = &[
-        "clean r0 A Some(3) 0.79 false",
-        "clean r0 MIT Some(2347) 0.76 false",
-        "touching r2 E Some(27) 0.93 false",
-        "touching r2 DMG Some(18744) 0.89 false",
-        "small r7 E Some(16) 0.91 false",
-        "small r7 DMG Some(22058) 0.73 false",
-        "odd_noisy r0 DMG Some(5480) 0.52 false",
-        "odd_noisy r1 E Some(0) 0.64 false",
-        "odd_noisy r4 MIT Some(104512) 0.60 false",
-        "tiny_noisy r0 MIT Some(2347) 0.32 true",
-        "tiny_noisy r6 MIT Some(1000) 0.33 true",
-        "tiny_noisy r9 H Some(280) 0.33 true",
+    /// Readable part of the pinned snapshot for the current id: key, value,
+    /// confidence (checked within `SNAP_CONF_TOL`) and suspect flag.
+    const SNAPSHOT_SAMPLE: &[(&str, Option<u32>, f32, bool)] = &[
+        ("clean r0 E", Some(12), 0.925, false),
+        ("clean r0 H", Some(950), 0.864, false),
+        ("touching r0 D", Some(3), 0.790, false),
+        ("odd_noisy r2 DMG", Some(18744), 0.447, false),
+        ("small_touching r3 H", Some(23456), 0.487, false),
+        ("small_touching r10 DMG", Some(11111), 0.111, true),
+        ("tiny_noisy r0 DMG", Some(5480), 0.246, true),
+        ("tiny_noisy r7 DMG", Some(22058), 0.275, true),
     ];
 
     #[test]
@@ -1509,8 +1549,16 @@ mod tests {
                 );
             }
         }
-        let lines = snapshot_reads();
-        let fp = snapshot_fingerprint(&lines);
+        let cells = snapshot_cells();
+        for (key, _, conf, _) in &cells {
+            assert!(
+                (*conf - SUSPECT_CONF).abs() >= SNAP_LINE_GAP,
+                "fixture cell {key} has confidence {conf:.3}, within {SNAP_LINE_GAP} of the \
+                 suspect line {SUSPECT_CONF}: pick or adjust fixtures so float noise cannot \
+                 flip its suspect flag"
+            );
+        }
+        let fp = snapshot_fingerprint(RECOGNIZER_ID, &calibration_params(), &cells);
         assert_eq!(
             fp,
             RECOGNIZER_HISTORY.last().unwrap().1,
@@ -1518,11 +1566,31 @@ mod tests {
              (new id, {fp:#018x}) to RECOGNIZER_HISTORY and refresh SNAPSHOT_SAMPLE \
              (cargo test print_snapshot_reads -- --ignored --nocapture)"
         );
-        for want in SNAPSHOT_SAMPLE {
+        for (key, value, conf, suspect) in SNAPSHOT_SAMPLE {
+            let got = cells
+                .iter()
+                .find(|c| c.0 == *key)
+                .unwrap_or_else(|| panic!("no snapshot cell {key}"));
+            assert_eq!((got.1, got.3), (*value, *suspect), "snapshot cell {key}");
             assert!(
-                lines.iter().any(|l| l == want),
-                "snapshot line missing: {want}"
+                (got.2 - conf).abs() <= SNAP_CONF_TOL,
+                "snapshot cell {key}: confidence {:.3}, pinned {conf} +- {SNAP_CONF_TOL}",
+                got.2
             );
+        }
+    }
+
+    #[test]
+    fn confidence_is_clamped_to_unit_range() {
+        for (key, _, conf, _) in snapshot_cells() {
+            assert!((0.0..=1.0).contains(&conf), "{key}: confidence {conf}");
+        }
+        let want = sample_values(5);
+        for gap in [3, 0] {
+            let read = read_board(&synth_board(&want, 5, gap), 5, Duration::from_secs(10)).unwrap();
+            for c in read.rows.iter().flat_map(|r| r.cells.iter()) {
+                assert!((0.0..=1.0).contains(&c.confidence), "{c:?}");
+            }
         }
     }
 
