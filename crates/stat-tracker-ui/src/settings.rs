@@ -57,25 +57,26 @@ pub enum SettingsToggle {
 ///
 /// Today the control is one checkbox. Off is [`Self::OcrV1`] (nothing extra
 /// is stored). On is [`Self::Extra`], which writes `shadow_recognizer = true`
-/// and runs the cv-v2 test reader as a private log. A later picker can list
-/// [`Self::choices`] in this order and still write the same bool until the
-/// config key itself becomes an id.
+/// and runs the shadow test reader as a private log. The extra reader's id
+/// is [`stat_tracker::shadow::digits::RECOGNIZER_ID`], so the next bump of
+/// that constant shows up here. A later picker can list [`Self::choices`]
+/// in this order and still write the same bool until the config key itself
+/// becomes an id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreboardReader {
     /// Default. Saved games use ocr-v1. The extra reader is off.
     OcrV1,
-    /// Extra test reader (cv-v2). Private log only.
+    /// Extra test reader. Id is the shadow matcher's `RECOGNIZER_ID`.
     Extra,
 }
 
 impl ScoreboardReader {
     pub const OCR_V1: &'static str = "ocr-v1";
-    pub const CV_V2: &'static str = "cv-v2";
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::OcrV1 => Self::OCR_V1,
-            Self::Extra => Self::CV_V2,
+            Self::Extra => stat_tracker::shadow::digits::RECOGNIZER_ID,
         }
     }
 
@@ -1369,7 +1370,10 @@ mod tests {
             [ScoreboardReader::OcrV1, ScoreboardReader::Extra]
         );
         assert_eq!(ScoreboardReader::OcrV1.id(), "ocr-v1");
-        assert_eq!(ScoreboardReader::Extra.id(), "cv-v2");
+        assert_eq!(
+            ScoreboardReader::Extra.id(),
+            stat_tracker::shadow::digits::RECOGNIZER_ID
+        );
         assert!(!ScoreboardReader::OcrV1.file_flag());
         assert!(ScoreboardReader::Extra.file_flag());
         assert!(shadow_toggle_interactive(false));
@@ -1404,7 +1408,10 @@ cooldown_secs = 60
 
         form.set_toggle(SettingsToggle::ShadowRecognizer, true);
         assert_eq!(form.persisted_reader(), ScoreboardReader::Extra);
-        assert_eq!(form.displayed_reader().id(), ScoreboardReader::CV_V2);
+        assert_eq!(
+            form.displayed_reader().id(),
+            stat_tracker::shadow::digits::RECOGNIZER_ID
+        );
         let saved = toml::to_string_pretty(&form.to_config(&base)).unwrap();
         assert!(saved.contains("shadow_recognizer = true"), "{saved}");
         assert!(saved.contains("the streamer"), "{saved}");
@@ -1481,5 +1488,66 @@ cooldown_secs = 60
         assert!(out.shadow_recognizer);
         let raw = toml::to_string_pretty(&out).unwrap();
         assert!(raw.contains("shadow_recognizer = true"), "{raw}");
+    }
+
+    #[test]
+    fn unchanged_save_keeps_commented_config_byte_for_byte() {
+        let raw = "\
+# local tracker config
+data_dir = \"/tmp/sst-keep-comments\"
+
+# scoreboard name
+player_name = \"the streamer\"
+
+session_window_secs = 900
+
+# quiet time before a finished game is closed
+finished_game_close_secs = 240
+
+debug_ocr = true
+ocr_threads = 2
+game_process_names = [\"Overwatch.exe\", \"wine\"]
+
+# extra number reader (private log only)
+shadow_recognizer = true
+
+[auto_detect]
+# watch for match start and end
+enabled = false
+poll_interval_secs = 8
+cooldown_secs = 60
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+";
+        let loaded: Config = toml::from_str(raw).expect("commented config must parse");
+        assert!(loaded.shadow_recognizer);
+        let form = SettingsForm::from_config_and_shadow(
+            &loaded,
+            Config::shadow_control(loaded.shadow_recognizer, None),
+        );
+        assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
+        assert!(
+            form.displayed_reader().file_flag(),
+            "the checkbox is on when the file says shadow_recognizer = true"
+        );
+        assert!(!form.shadow.locked);
+        assert_eq!(
+            form.persisted_reader().id(),
+            stat_tracker::shadow::digits::RECOGNIZER_ID
+        );
+
+        let saved =
+            Config::text_for_save(Some(raw), &form.to_config(&loaded)).expect("unchanged save");
+        assert_eq!(
+            saved, raw,
+            "an unchanged save must keep the file byte for byte"
+        );
+        assert!(saved.contains("# extra number reader (private log only)"));
+        assert!(saved.contains("# scoreboard name"));
+        assert!(saved.contains("# watch for match start and end"));
+        assert!(saved.contains("finished_game_close_secs = 240"));
+        assert!(saved.contains("not-a-real-token"));
     }
 }

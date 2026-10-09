@@ -292,17 +292,40 @@ impl Config {
             .join("config.toml"))
     }
 
-    /// Serialize and write the config, owner-readable only — the file carries
+    /// Serialize and write the config, owner-readable only. The file carries
     /// the sync bearer token.
+    ///
+    /// When the file already on disk parses as this same config, it is left
+    /// untouched, so comments and key layout survive an unchanged Settings save.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = Self::config_path()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let toml = toml::to_string_pretty(self)?;
+        let existing = std::fs::read_to_string(&path).ok();
+        let toml = Self::text_for_save(existing.as_deref(), self)?;
+        if existing.as_deref() == Some(toml.as_str()) {
+            return Ok(());
+        }
         std::fs::write(&path, toml)?;
         Self::restrict_permissions(&path);
         Ok(())
+    }
+
+    /// Text `save` would write. An `existing` document that parses as `next`
+    /// is returned unchanged (byte for byte), comments included. Anything
+    /// else is a fresh pretty-printed document.
+    pub fn text_for_save(
+        existing: Option<&str>,
+        next: &Self,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(existing) = existing
+            && let Ok(loaded) = toml::from_str::<Self>(existing)
+            && loaded == *next
+        {
+            return Ok(existing.to_string());
+        }
+        Ok(toml::to_string_pretty(next)?)
     }
 
     /// Best-effort chmod 600 (no-op off unix).
