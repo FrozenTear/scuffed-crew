@@ -3,12 +3,14 @@
 //! The regions are ocr-v1's (`detect::match_end`), as fractions of the
 //! centred 16:9 game rect, one [`Layout`] each, tagged with a source id:
 //!
-//! | source        | screen                                   | region (x, y)        | plane | real frames |
-//! |---------------|------------------------------------------|----------------------|-------|-------------|
-//! | `accolade`    | post-match accolade screen, player cards | 0.5-25.5%, 3.5-9.5%  | max   | 52 (1440p)  |
-//! | `rank_screen` | competitive rank screen (incl. defeat)   | 1-25%, 14.5-22.5%    | min   | 98 (1440p)  |
-//! | `end_title`   | centred italic end title                 | 32-68%, 34-52%       | max   | none        |
-//! | `tab_header`  | post-match Tab board header              | 30-70%, 2-24%        | min   | none        |
+//! * `accolade`: post-match accolade screen, player cards; region x 0.5-25.5%, y 3.5-9.5%;
+//!   plane `max`; real frames: 52 (1440p).
+//! * `rank_screen`: competitive rank screen (incl. defeat); region x 1-25%, y 14.5-22.5%;
+//!   plane `min`; real frames: 98 (1440p).
+//! * `end_title`: centred italic end title; region x 32-68%, y 34-52%;
+//!   plane `max`; real frames: none.
+//! * `tab_header`: post-match Tab board header; region x 30-70%, y 2-24%;
+//!   plane `min`; real frames: none.
 //!
 //! The plane makes the reader colour-blind: `max` (brightest channel) reads
 //! a team-coloured word the same in any bright colour, `min` (darkest
