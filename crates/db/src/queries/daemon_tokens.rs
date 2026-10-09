@@ -18,6 +18,11 @@ struct DbDaemonToken {
     is_active: bool,
     created_at: SurrealDatetime,
     last_used_at: Option<SurrealDatetime>,
+    /// NONE means the token does not expire. Read by the validate query, not Rust.
+    #[serde(default)]
+    #[surreal(default)]
+    #[allow(dead_code)]
+    expires_at: Option<SurrealDatetime>,
 }
 
 fn db_to_token(db: DbDaemonToken) -> DaemonToken {
@@ -52,6 +57,7 @@ impl Database {
                 is_active: true,
                 created_at: SurrealDatetime::from(chrono::Utc::now()),
                 last_used_at: None,
+                expires_at: None,
             };
             let created: Option<DbDaemonToken> =
                 self.client.create("daemon_token").content(db_tok).await?;
@@ -67,7 +73,10 @@ impl Database {
             let token_hash = hash_session_token(raw_token);
             let mut result = self
                 .client
-                .query("SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true")
+                .query(
+                    "SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true \
+                     AND (expires_at IS NONE OR expires_at > time::now())",
+                )
                 .bind(("tok", token_hash.clone()))
                 .await?;
             let tokens: Vec<DbDaemonToken> = result.take(0)?;
