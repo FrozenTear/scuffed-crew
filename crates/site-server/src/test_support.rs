@@ -46,6 +46,8 @@ pub(crate) async fn test_state() -> AppState {
             allowed_origins: vec!["http://localhost:3000".into()],
         },
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+        reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
+        reports_enabled: true,
         notifier: None,
         nostr_challenge_key: [0u8; 32],
         consumed_challenges: crate::challenge_store::ConsumedChallengeStore::new(),

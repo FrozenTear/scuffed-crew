@@ -33,6 +33,9 @@ base64 = "0.22"
 tower_governor = "0.8.0"
 ipnet = "2"
 zeroize = "1"
+sha2 = "0.10"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

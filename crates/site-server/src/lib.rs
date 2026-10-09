@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod rate_limit;
 pub mod routes;
 pub mod seed;
+pub mod stat_reports;
 pub mod state;
 pub mod team_channels;
 #[cfg(test)]
@@ -463,6 +464,26 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.
         // Audit log
+        .route(
+            "/api/stat-reports",
+            post(routes::stat_reports::create_stat_report)
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .get(routes::stat_reports::list_stat_reports),
+        )
+        .route(
+            "/api/stat-reports/{id}/manifest",
+            get(routes::stat_reports::read_stat_report_manifest),
+        )
+        .route(
+            "/api/stat-reports/{id}/withdraw",
+            post(routes::stat_reports::withdraw_stat_report),
+        )
+        .route(
+            "/api/stat-reports/{id}",
+            get(routes::stat_reports::download_stat_report)
+                .delete(routes::stat_reports::delete_stat_report)
+                .patch(routes::stat_reports::withdraw_stat_report),
+        )
         .route("/api/audit-log", get(routes::audit_log::list_audit_log))
         // Moderation routes
         .route(
@@ -697,7 +718,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // routes, including a wrong method on a known path, are resolved
         // before this fallback.
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
-        // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
+        // 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB.
+        // Stat-report uploads raise only their own POST route to 10 MB.
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
