@@ -266,6 +266,9 @@ pub struct StatsSeason {
     /// `Some(Pending)` is representable, but [`Self::choose`] never writes it.
     /// `Id(current)` follows; any other id is pinned.
     pick: Signal<Option<ResolvedSeason>>,
+    /// Bumps when another document writes `stats-season-v2` or clears storage.
+    /// localStorage itself is not a signal.
+    storage_rev: Signal<u64>,
 }
 
 impl StatsSeason {
@@ -321,6 +324,11 @@ impl StatsSeason {
         // just highlighted is painted back. The memo's PartialEq keeps an
         // unchanged filter from refetching.
         self.pick.set(next);
+    }
+
+    #[cfg(test)]
+    fn apply_storage_event(self, key: Option<&str>) {
+        note_season_storage(key, self.pick, self.storage_rev);
     }
 }
 
@@ -420,18 +428,86 @@ thread_local! {
     static TEST_PROBE: std::cell::Cell<Option<StatsSeason>> = const { std::cell::Cell::new(None) };
 }
 
+/// `storage` handler. A matching key drops the in-session pick and bumps
+/// `rev` so the memo re-reads localStorage. Other keys are ignored.
+/// A null key is `localStorage.clear()`.
+fn note_season_storage(
+    key: Option<&str>,
+    mut pick: Signal<Option<ResolvedSeason>>,
+    mut rev: Signal<u64>,
+) {
+    if storage_event_targets_season(key) {
+        pick.set(None);
+        rev += 1;
+    }
+}
+
+fn storage_event_targets_season(key: Option<&str>) -> bool {
+    match key {
+        None => true,
+        Some(key) => key == STATS_SEASON_KEY,
+    }
+}
+
+/// Listen for `stats-season-v2` writes from another tab.
+///
+/// The `storage` event does not fire in the document that wrote the key.
+/// Installed once and removed on unmount (`use_drop`). Do not `Closure::forget`.
+/// `Closure::wrap` aborts off wasm32. Native tests call [`note_season_storage`]
+/// and skip this listener.
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+fn use_season_storage_sync(mut on_key: impl FnMut(Option<&str>) + 'static) {
+    use std::rc::Rc;
+
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    type StorageHandler = Closure<dyn FnMut(web_sys::StorageEvent)>;
+
+    fn listener_fn(closure: &StorageHandler) -> &js_sys::Function {
+        closure.as_ref().unchecked_ref()
+    }
+
+    let listener = use_hook(move || {
+        let closure: Rc<StorageHandler> = Rc::new(Closure::wrap(Box::new(
+            move |event: web_sys::StorageEvent| {
+                let key = event.key();
+                on_key(key.as_deref());
+            },
+        )
+            as Box<dyn FnMut(web_sys::StorageEvent)>));
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback("storage", listener_fn(&closure));
+        }
+        closure
+    });
+    let listener = listener.clone();
+    use_drop(move || {
+        if let Some(window) = web_sys::window() {
+            let _ = window.remove_event_listener_with_callback("storage", listener_fn(&listener));
+        }
+    });
+}
+
+/// `Closure::wrap` aborts off wasm32, so the listener is not installed.
+#[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+fn use_season_storage_sync(_on_key: impl FnMut(Option<&str>) + 'static) {}
+
 /// Shared season filter for My Stats, member stats, and leaderboards.
 ///
 /// Call it once, unconditionally, at the top of the page. The three pages
 /// share `stats-season-v2`, so a pick on one page is the pick on the others.
 pub fn use_stats_season() -> StatsSeason {
     let pick = use_signal(|| None::<ResolvedSeason>);
+    let storage_rev = use_signal(|| 0u64);
     let (rows, refresh, error) = use_season_rows();
     // The memo is the only signal stats resources should read. It notifies
     // only when PartialEq says the view changed, so nothing saved stays
     // one all-time fetch after the season list arrives. The select token
     // rides along so a render does not read storage on its own.
+    // `storage_rev` is how another tab's `storage` event gets into this memo.
     let view = use_memo(move || {
+        let _storage_rev = storage_rev();
         let choice = pick();
         let v2 = read_v2();
         let legacy = read_legacy();
@@ -487,12 +563,17 @@ pub fn use_stats_season() -> StatsSeason {
         }
     });
 
+    use_season_storage_sync(move |key| {
+        note_season_storage(key, pick, storage_rev);
+    });
+
     StatsSeason {
         view,
         rows,
         refresh,
         error,
         pick,
+        storage_rev,
     }
 }
 
@@ -1783,5 +1864,104 @@ mod tests {
         assert!(!html.contains("<select"), "{html}");
         assert!(!html.contains("<label"), "{html}");
         assert!(!html.contains("for="), "{html}");
+    }
+
+    #[test]
+    fn storage_event_only_follows_the_live_season_key() {
+        assert!(storage_event_targets_season(Some(STATS_SEASON_KEY)));
+        assert!(storage_event_targets_season(None));
+        assert!(!storage_event_targets_season(Some(LEGACY_SEASON_KEY)));
+        assert!(!storage_event_targets_season(Some("stats-ui-density")));
+        assert!(!storage_event_targets_season(Some("")));
+    }
+
+    fn fire_storage(dom: &mut VirtualDom, key: Option<&str>) {
+        dom.in_runtime(|| {
+            let season = TEST_PROBE.with(|slot| slot.get().expect("season probe mounted"));
+            season.apply_storage_event(key);
+        });
+        pump(dom);
+    }
+
+    #[test]
+    fn other_tab_season_write_replaces_the_in_session_pick() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        set_seasons(vec![
+            season_row("season-4", "Season 4", true),
+            season_row("season-3", "Season 3", false),
+        ]);
+        let mut dom = mount();
+        choose(&mut dom, Some("season-3"));
+        assert_eq!(read_v2().as_deref(), Some("season-3"));
+
+        // Storage moved, but an unrelated key must not drop this tab's pick.
+        put_v2(CURRENT_SEASON);
+        fire_storage(&mut dom, Some("stats-ui-density"));
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "season-3");
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("season=season-3")),
+            "{:?}",
+            render_paths()
+        );
+
+        fire_storage(&mut dom, Some(STATS_SEASON_KEY));
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "current");
+        assert_option_not_selected(&html, "season-3");
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("season=season-4")),
+            "{:?}",
+            render_paths()
+        );
+    }
+
+    #[test]
+    fn cleared_storage_event_returns_to_all_time() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        set_seasons(vec![season_row("season-4", "Season 4", true)]);
+        let mut dom = mount();
+        choose(&mut dom, Some(CURRENT_SEASON));
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+
+        write_v2(None);
+        fire_storage(&mut dom, None);
+        assert_eq!(read_v2(), None);
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "");
+        assert_option_not_selected(&html, "current");
+        assert_eq!(render_paths().last().map(String::as_str), Some(ROLE_PATH));
+    }
+
+    #[test]
+    fn season_storage_listener_is_installed_and_removed() {
+        let src = include_str!("season_select.rs");
+        let add = format!("add_event_listener_with_callback({}", "\"storage\"");
+        let remove = format!("remove_event_listener_with_callback({}", "\"storage\"");
+        assert!(src.contains(&add), "storage listener must be registered");
+        assert!(
+            src.contains(&remove),
+            "storage listener must be removed on unmount"
+        );
+        let drop_call = format!("use_{}(move", "drop");
+        assert!(src.contains(&drop_call), "removal belongs in use_drop");
+        let hook = format!("use_season_storage_sync{}", "(");
+        assert!(
+            src.matches(&hook).count() >= 3,
+            "wasm, native stub, and the hook call must all exist"
+        );
+        let note = format!("note_season_storage{}", "(");
+        assert!(
+            src.matches(&note).count() >= 3,
+            "the listener and the test hook must share the re-read"
+        );
     }
 }

@@ -1,5 +1,7 @@
 //! Small shared helpers used across pages and components.
 
+use dioxus::prelude::*;
+
 /// First `max_chars` Unicode scalars of `s`.
 ///
 /// Never panics and never slices inside a scalar. Short strings are returned
@@ -213,6 +215,106 @@ pub fn format_local_datetime(iso: &str) -> String {
         return local;
     }
     format_datetime_utc(iso)
+}
+
+/// Visible forum stamp plus the machine values for a `<time>` element.
+///
+/// `text` comes from [`format_local_datetime`]. When that string has no zone
+/// (the wasm local clock), a short offset such as `UTC-5` is appended, or
+/// `local` when the offset cannot be read. `datetime` and `title` carry the
+/// original ISO instant and a UTC minute label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTimeView {
+    pub text: String,
+    pub datetime: Option<String>,
+    pub title: Option<String>,
+}
+
+pub fn local_time_view(iso: &str) -> LocalTimeView {
+    let formatted = format_local_datetime(iso);
+    if !looks_like_timestamp(iso) || formatted == iso {
+        return LocalTimeView {
+            text: formatted,
+            datetime: None,
+            title: None,
+        };
+    }
+    let utc = format_datetime_utc(iso);
+    LocalTimeView {
+        text: append_zone(formatted, local_zone_suffix(iso)),
+        datetime: Some(iso.to_string()),
+        title: Some(format!("{iso} ({utc})")),
+    }
+}
+
+/// Forum stamp wrapped in `<time datetime>` when `iso` is a timestamp.
+pub fn local_time_node(iso: &str) -> Element {
+    let view = local_time_view(iso);
+    if let (Some(datetime), Some(title)) = (view.datetime, view.title) {
+        let text = view.text;
+        rsx! {
+            time {
+                datetime: "{datetime}",
+                title: "{title}",
+                "{text}"
+            }
+        }
+    } else {
+        let text = view.text;
+        rsx! { span { "{text}" } }
+    }
+}
+
+fn looks_like_timestamp(iso: &str) -> bool {
+    matches!(
+        (iso.get(..10), iso.get(11..16)),
+        (Some(_), Some(_)) if iso.as_bytes().get(10) == Some(&b'T')
+    )
+}
+
+/// Keep a stamp that already says `UTC`. Otherwise append `zone`, or `local`.
+fn append_zone(text: String, zone: Option<String>) -> String {
+    if text.ends_with(" UTC") {
+        text
+    } else {
+        match zone {
+            Some(zone) => format!("{text} {zone}"),
+            None => format!("{text} local"),
+        }
+    }
+}
+
+/// `minutes_east` is local time minus UTC. `0` is `UTC+0`, `-300` is `UTC-5`,
+/// `330` is `UTC+5:30`.
+fn format_utc_offset(minutes_east: f64) -> Option<String> {
+    if !minutes_east.is_finite() {
+        return None;
+    }
+    let mins = minutes_east.round() as i32;
+    let sign = if mins >= 0 { '+' } else { '-' };
+    let abs = mins.abs();
+    let hours = abs / 60;
+    let minutes = abs % 60;
+    if minutes == 0 {
+        Some(format!("UTC{sign}{hours}"))
+    } else {
+        Some(format!("UTC{sign}{hours}:{minutes:02}"))
+    }
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+fn local_zone_suffix(iso: &str) -> Option<String> {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(iso));
+    if !date.get_time().is_finite() {
+        return None;
+    }
+    // getTimezoneOffset is minutes to add to local time to reach UTC.
+    format_utc_offset(-date.get_timezone_offset())
+}
+
+#[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+fn local_zone_suffix(_iso: &str) -> Option<String> {
+    None
 }
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -470,6 +572,96 @@ mod tests {
             "2026-07-10 22:55 UTC"
         );
         assert_eq!(format_local_datetime("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn utc_offset_labels_are_short() {
+        assert_eq!(format_utc_offset(0.0).as_deref(), Some("UTC+0"));
+        assert_eq!(format_utc_offset(-300.0).as_deref(), Some("UTC-5"));
+        assert_eq!(format_utc_offset(330.0).as_deref(), Some("UTC+5:30"));
+        assert_eq!(format_utc_offset(-90.0).as_deref(), Some("UTC-1:30"));
+        assert_eq!(format_utc_offset(f64::NAN), None);
+    }
+
+    #[test]
+    fn append_zone_keeps_utc_and_marks_local() {
+        assert_eq!(
+            append_zone("2026-07-10 22:55 UTC".into(), None),
+            "2026-07-10 22:55 UTC"
+        );
+        assert_eq!(
+            append_zone("2026-07-11 00:55".into(), Some("UTC-5".into())),
+            "2026-07-11 00:55 UTC-5"
+        );
+        assert_eq!(
+            append_zone("2026-07-11 00:55".into(), None),
+            "2026-07-11 00:55 local"
+        );
+    }
+
+    #[test]
+    fn local_time_view_keeps_iso_for_the_time_element() {
+        let iso = "2026-07-10T22:55:07.962043010Z";
+        let view = local_time_view(iso);
+        assert_eq!(view.datetime.as_deref(), Some(iso));
+        assert_eq!(
+            view.title.as_deref(),
+            Some("2026-07-10T22:55:07.962043010Z (2026-07-10 22:55 UTC)")
+        );
+        assert!(view.text.contains("2026-07-10 22:55"), "{}", view.text);
+        let raw = local_time_view("not a timestamp");
+        assert_eq!(raw.text, "not a timestamp");
+        assert_eq!(raw.datetime, None);
+        assert_eq!(raw.title, None);
+    }
+
+    #[test]
+    fn local_time_node_sets_datetime_and_title() {
+        fn probe() -> Element {
+            local_time_node("2026-07-10T22:55:07.962043010Z")
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("datetime=\"2026-07-10T22:55:07.962043010Z\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("title=\"2026-07-10T22:55:07.962043010Z (2026-07-10 22:55 UTC)\""),
+            "{html}"
+        );
+        assert!(html.contains("<time"), "{html}");
+        assert!(html.contains("2026-07-10 22:55"), "{html}");
+    }
+
+    #[test]
+    fn local_time_node_leaves_plain_text_unwrapped() {
+        fn probe() -> Element {
+            local_time_node("not a timestamp")
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(!html.contains("<time"), "{html}");
+        assert!(html.contains("not a timestamp"), "{html}");
+    }
+
+    #[test]
+    fn forum_pages_render_dates_through_local_time_node() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pages");
+        for rel in ["forum.rs", "forum_thread.rs"] {
+            let text = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|err| panic!("read {rel}: {err}"));
+            assert!(
+                text.contains("local_time_node("),
+                "{rel} must wrap forum dates"
+            );
+            assert!(
+                !text.contains("format_local_datetime("),
+                "{rel} must not print the bare local stamp"
+            );
+        }
     }
 
     #[test]
