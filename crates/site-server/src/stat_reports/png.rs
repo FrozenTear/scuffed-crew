@@ -183,6 +183,9 @@ fn inflate_exact(idat: &[u8], expected: u64) -> Result<(), String> {
     if total != expected {
         return Err("png idat does not match the image size".into());
     }
+    if dec.total_in() != idat.len() as u64 {
+        return Err("png has bytes after the image data".into());
+    }
     Ok(())
 }
 
@@ -251,5 +254,40 @@ mod tests {
     fn rejects_jpeg_magic() {
         let err = prepare_png(&[0xFF, 0xD8, 0xFF, 0x00]).unwrap_err();
         assert!(err.contains("jpeg"), "{err}");
+    }
+
+    #[test]
+    fn rejects_text_after_iend_and_after_image_data() {
+        let mut after_iend = tiny_rgb();
+        after_iend.extend_from_slice(b"HIDDENTEXT");
+        let err = prepare_png(&after_iend).unwrap_err();
+        assert!(err.contains("iend") || err.contains("after"), "{err}");
+
+        let hidden = append_idat_bytes(&tiny_rgb(), b"HIDDENTEXT");
+        assert!(hidden.windows(10).any(|w| w == b"HIDDENTEXT"));
+        let err = prepare_png(&hidden).unwrap_err();
+        assert!(err.contains("after the image data"), "{err}");
+    }
+
+    fn append_idat_bytes(png: &[u8], extra: &[u8]) -> Vec<u8> {
+        let mut i = 8usize;
+        let mut out = png[..8].to_vec();
+        while i + 12 <= png.len() {
+            let len = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+            let ctype = &png[i + 4..i + 8];
+            let end = i + 12 + len;
+            if ctype == b"IDAT" {
+                let mut data = png[i + 8..i + 8 + len].to_vec();
+                data.extend_from_slice(extra);
+                out.extend(chunk(b"IDAT", &data));
+            } else {
+                out.extend_from_slice(&png[i..end]);
+            }
+            i = end;
+            if ctype == b"IEND" {
+                break;
+            }
+        }
+        out
     }
 }

@@ -413,6 +413,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stat-reports",
             post(routes::stat_reports::create_stat_report)
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
                 .get(routes::stat_reports::list_stat_reports),
         )
         .route(
@@ -663,9 +664,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // routes, including a wrong method on a known path, are resolved
         // before this fallback.
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
-        // 10 MB matches the stat-report cap. Officer image uploads still
-        // enforce their own 5 MB cap in the handler.
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        // 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB.
+        // Stat-report uploads raise only their own POST route to 10 MB.
+        .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

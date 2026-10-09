@@ -23,7 +23,9 @@ use scuffed_auth::crypto::hash_session_token;
 use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::create_router;
-use scuffed_site_server::stat_reports::sweep_stat_reports;
+use scuffed_site_server::stat_reports::{
+    open_reports_dir, reports_dir_conflicts, sweep_stat_reports,
+};
 use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{DAILY_REPORT_CAP, MAX_BUNDLE_BYTES, RETENTION_DAYS};
 
@@ -38,6 +40,10 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
+    harness_enabled(true).await
+}
+
+async fn harness_enabled(reports_enabled: bool) -> Harness {
     let db = Database::connect_memory().await.expect("mem db");
     run_migrations(&db.client).await.expect("migrations");
     seed_user(
@@ -84,6 +90,7 @@ async fn harness() -> Harness {
         },
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: reports_dir.clone(),
+        reports_enabled,
         notifier: None,
         nostr_challenge_key: [0u8; 32],
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -603,6 +610,143 @@ async fn send_raw(
     (status, bytes)
 }
 
+async fn send_with_headers(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+fn age_file(path: &std::path::Path, secs: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn manifest_shell(own_name: bool, glyphs: bool, files: Vec<Value>) -> Value {
+    json!({
+        "bundle_version": 1,
+        "app_version": "0.0.0",
+        "recognizers": { "matcher": "cv-v3", "ocr": "ocr-v1" },
+        "resolution": { "width": 1920, "height": 1080 },
+        "ui_scale": null,
+        "reason": { "category": "wrong_stats", "text": "elims looked high" },
+        "session_id": "sess-example",
+        "game": {
+            "map": "Busan",
+            "mode": "Control",
+            "result": "Defeat",
+            "team_size": 5,
+            "captured_at": "2026-10-09T12:00:00Z"
+        },
+        "reads": read_block(),
+        "corrections": {},
+        "consent": {
+            "training": false,
+            "own_name_included": own_name,
+            "glyphs_included": glyphs
+        },
+        "files": files
+    })
+}
+
+fn log_file_entry(log: &[u8]) -> Value {
+    json!({
+        "path": "log.txt",
+        "sha256": sha256_hex(log),
+        "bytes": log.len(),
+        "role": "log",
+        "screen_class": null
+    })
+}
+
+fn zip_manifest(manifest: Value, blobs: Vec<(&str, Vec<u8>)>) -> Built {
+    let mut files = vec![(
+        "manifest.json".to_string(),
+        serde_json::to_vec(&manifest).unwrap(),
+    )];
+    for (name, bytes) in blobs {
+        files.push((name.to_string(), bytes));
+    }
+    Built {
+        bytes: zip_stored(&files),
+    }
+}
+
+/// Glyph or own-name file, with the matching consent flag on or off.
+fn consent_bundle(kind: &str, consented: bool) -> Built {
+    let png = tiny_png();
+    let log = b"synthetic log line\n".to_vec();
+    let (path, extra) = if kind == "glyph" {
+        (
+            "crops/glyph-ab12cd34.png",
+            json!({
+                "path": "crops/glyph-ab12cd34.png",
+                "sha256": sha256_hex(&png),
+                "bytes": png.len(),
+                "role": "glyph",
+                "screen_class": null,
+                "id": "ab12cd34",
+                "reader_guess": "A",
+                "confidence": 0.4
+            }),
+        )
+    } else {
+        (
+            "crops/own-name.png",
+            json!({
+                "path": "crops/own-name.png",
+                "sha256": sha256_hex(&png),
+                "bytes": png.len(),
+                "role": "own_name",
+                "screen_class": null
+            }),
+        )
+    };
+    let manifest = manifest_shell(
+        kind == "own_name" && consented,
+        kind == "glyph" && consented,
+        vec![log_file_entry(&log), extra],
+    );
+    zip_manifest(manifest, vec![("log.txt", log), (path, png)])
+}
+
+fn named_crop_bundle(path: &str, screen_class: &str) -> Built {
+    let png = tiny_png();
+    let log = b"synthetic log line\n".to_vec();
+    let crop = json!({
+        "path": path,
+        "sha256": sha256_hex(&png),
+        "bytes": png.len(),
+        "role": "crop",
+        "screen_class": screen_class
+    });
+    let manifest = manifest_shell(false, false, vec![log_file_entry(&log), crop]);
+    zip_manifest(manifest, vec![("log.txt", log), (path, png)])
+}
+
 fn zip_count(dir: &PathBuf) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
@@ -1095,7 +1239,9 @@ async fn sweep_removes_expired_rows_orphan_files_and_missing_files() {
         .unwrap();
 
     let orphan = "abcdef0123456789abcdef0123456789";
-    std::fs::write(h.reports_dir.join(format!("{orphan}.zip")), b"orphan").unwrap();
+    let orphan_path = h.reports_dir.join(format!("{orphan}.zip"));
+    std::fs::write(&orphan_path, b"orphan").unwrap();
+    age_file(&orphan_path, 11 * 60);
 
     let outcome = sweep_stat_reports(&h.state.db, &h.reports_dir)
         .await
@@ -1130,4 +1276,447 @@ async fn sweep_removes_expired_rows_orphan_files_and_missing_files() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(list["reports"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn glyph_and_own_name_files_require_consent() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(consent_bundle("glyph", false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(consent_bundle("glyph", true).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(consent_bundle("own_name", false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(consent_bundle("own_name", true).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn crop_names_outside_the_allowlist_are_rejected() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(named_crop_bundle("crops/notes.png", "scoreboard").bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(named_crop_bundle("crops/frame.png", "potg").bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn daily_cap_is_checked_before_the_zip_is_parsed() {
+    let h = harness().await;
+    for _ in 0..DAILY_REPORT_CAP {
+        let (status, _) = send(
+            &h.app,
+            Method::POST,
+            "/api/stat-reports",
+            Some(MEMBER_TOKEN),
+            Some(valid_bundle(false).bytes),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let bad = bundle_with(false, tiny_png(), false, None, Some(2)).bytes;
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(bad),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn expired_reports_are_hidden_from_list_and_download() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    h.state
+        .db
+        .set_stat_report_clock(
+            &id,
+            Utc::now() - Duration::days(40),
+            Some(Utc::now() - Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+
+    for token in [MEMBER_TOKEN, OFFICER_TOKEN] {
+        let (status, list) =
+            send(&h.app, Method::GET, "/api/stat-reports", Some(token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            list["reports"].as_array().unwrap().is_empty(),
+            "{token} still lists {id}: {list}"
+        );
+    }
+    let (status, _, _) = send_with_headers(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}"),
+        OFFICER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}/manifest"),
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, training) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(true).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let training_id = training["id"].as_str().unwrap().to_string();
+    h.state
+        .db
+        .set_stat_report_clock(&training_id, Utc::now() - Duration::days(40), None)
+        .await
+        .unwrap();
+    let (status, list) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<_> = list["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![training_id.as_str()]);
+}
+
+#[tokio::test]
+async fn download_sets_attachment_and_nosniff_headers() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
+    let (status, headers, bytes) = send_with_headers(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}"),
+        OFFICER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!bytes.is_empty());
+    let disposition = headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        disposition.contains(&format!("filename=\"stat-report-{id}.zip\"")),
+        "{disposition}"
+    );
+    assert_eq!(
+        headers
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+}
+
+#[tokio::test]
+async fn failed_file_delete_keeps_the_row_for_retry() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    let zip = h.reports_dir.join(format!("{id}.zip"));
+    std::fs::remove_file(&zip).unwrap();
+    std::fs::create_dir(&zip).unwrap();
+
+    let (status, _) = send(
+        &h.app,
+        Method::DELETE,
+        &format!("/api/stat-reports/{id}"),
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(zip.exists());
+    let (status, list) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["reports"][0]["id"], id);
+
+    h.state
+        .db
+        .set_stat_report_clock(
+            &id,
+            Utc::now() - Duration::days(40),
+            Some(Utc::now() - Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+    let outcome = sweep_stat_reports(&h.state.db, &h.reports_dir)
+        .await
+        .unwrap();
+    assert_eq!(outcome.expired, 0);
+    assert!(zip.exists());
+    assert!(h.state.db.get_stat_report(&id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn withdraw_keeps_the_row_when_file_delete_fails() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(true).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    h.state
+        .db
+        .set_stat_report_clock(&id, Utc::now() - Duration::days(40), None)
+        .await
+        .unwrap();
+    let zip = h.reports_dir.join(format!("{id}.zip"));
+    std::fs::remove_file(&zip).unwrap();
+    std::fs::create_dir(&zip).unwrap();
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        &format!("/api/stat-reports/{id}/withdraw"),
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(h.state.db.get_stat_report(&id).await.unwrap().is_some());
+    assert!(zip.exists());
+}
+
+#[tokio::test]
+async fn delete_succeeds_when_the_file_is_already_gone() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    std::fs::remove_file(h.reports_dir.join(format!("{id}.zip"))).unwrap();
+    let (status, body) = send(
+        &h.app,
+        Method::DELETE,
+        &format!("/api/stat-reports/{id}"),
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], true);
+    assert!(h.state.db.get_stat_report(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sweep_keeps_training_consent_reports() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(true).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    h.state
+        .db
+        .set_stat_report_clock(&id, Utc::now() - Duration::days(40), None)
+        .await
+        .unwrap();
+    let outcome = sweep_stat_reports(&h.state.db, &h.reports_dir)
+        .await
+        .unwrap();
+    assert_eq!(outcome.expired, 0);
+    assert!(h.reports_dir.join(format!("{id}.zip")).exists());
+    let (status, list) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["reports"][0]["id"], id);
+    assert_eq!(list["reports"][0]["training_consent"], true);
+}
+
+#[tokio::test]
+async fn sweep_skips_orphan_files_inside_the_grace_period() {
+    let h = harness().await;
+    let fresh = "11111111111111111111111111111111";
+    let stale = "22222222222222222222222222222222";
+    let fresh_zip = h.reports_dir.join(format!("{fresh}.zip"));
+    let stale_zip = h.reports_dir.join(format!("{stale}.zip"));
+    let fresh_partial = h.reports_dir.join(format!("{fresh}.zip.partial"));
+    let stale_partial = h.reports_dir.join(format!("{stale}.zip.partial"));
+    std::fs::write(&fresh_zip, b"fresh").unwrap();
+    std::fs::write(&stale_zip, b"stale").unwrap();
+    std::fs::write(&fresh_partial, b"fresh-partial").unwrap();
+    std::fs::write(&stale_partial, b"stale-partial").unwrap();
+    age_file(&stale_zip, 11 * 60);
+    age_file(&stale_partial, 11 * 60);
+
+    let outcome = sweep_stat_reports(&h.state.db, &h.reports_dir)
+        .await
+        .unwrap();
+    assert_eq!(outcome.orphan_files, 2);
+    assert!(fresh_zip.exists());
+    assert!(fresh_partial.exists());
+    assert!(!stale_zip.exists());
+    assert!(!stale_partial.exists());
+}
+
+#[tokio::test]
+async fn reports_disable_when_the_directory_cannot_be_opened() {
+    let h = harness_enabled(false).await;
+    let (status, body) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "Report uploads are disabled");
+
+    let root = std::env::temp_dir().join(format!("scuffed-reports-open-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let uploads = root.join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    let parent = root.join("locked-parent");
+    std::fs::create_dir(&parent).unwrap();
+    let missing = parent.join("reports");
+    let mut perms = std::fs::metadata(&parent).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&parent, perms.clone()).unwrap();
+    let (_, enabled) = open_reports_dir(&missing, &uploads).await;
+    assert!(!enabled);
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&parent, perms).unwrap();
+
+    let blocked = root.join("not-a-directory");
+    std::fs::write(&blocked, b"x").unwrap();
+    let (_, enabled) = open_reports_dir(&blocked, &uploads).await;
+    assert!(!enabled);
+
+    let reports = root.join("reports");
+    let (opened, enabled) = open_reports_dir(&reports, &uploads).await;
+    assert!(enabled);
+    assert!(opened.is_absolute());
+
+    let linked = root.join("linked-reports");
+    std::os::unix::fs::symlink(&uploads, &linked).unwrap();
+    assert!(reports_dir_conflicts(&linked, &uploads));
+    assert!(!reports_dir_conflicts(&reports, &uploads));
+    let _ = std::fs::remove_dir_all(&root);
 }

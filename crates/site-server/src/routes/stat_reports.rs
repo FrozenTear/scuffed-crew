@@ -91,11 +91,33 @@ fn officer_item(report: &StatReport) -> StatReportListItem {
 }
 
 fn configured(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !state.reports_enabled {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Report uploads are disabled",
+        ));
+    }
     if reports_dir_conflicts(&state.reports_dir, &state.upload_dir) {
         tracing::error!("REPORTS_DIR overlaps the upload directory or the web root");
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
     }
     Ok(())
+}
+
+fn report_is_current(report: &StatReport) -> bool {
+    report.expires_at.is_none_or(|exp| exp > Utc::now())
+}
+
+async fn delete_files_or_keep_row(
+    state: &AppState,
+    id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    remove_report_files(&state.reports_dir, id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, report_id = %id, "stat report file delete failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+        })
 }
 
 async fn load_owned(
@@ -126,7 +148,6 @@ pub async fn create_stat_report(
     if body.len() as u64 > MAX_BUNDLE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "Bundle is too large"));
     }
-    let accepted = accept_bundle(&body).map_err(map_bundle)?;
 
     let start = utc_day_start(Utc::now());
     let stored = state
@@ -143,6 +164,7 @@ pub async fn create_stat_report(
             "Daily report limit reached",
         ));
     }
+    let accepted = accept_bundle(&body).map_err(map_bundle)?;
 
     ensure_reports_dir(&state.reports_dir)
         .await
@@ -179,8 +201,10 @@ pub async fn create_stat_report(
         expires_at,
     };
     if let Err(error) = state.db.insert_stat_report(&row).await {
-        remove_report_files(&state.reports_dir, &id).await;
-        tracing::error!(%error, "stat report insert failed");
+        if let Err(file_error) = remove_report_files(&state.reports_dir, &id).await {
+            tracing::error!(%file_error, report_id = %id, "stat report file delete failed");
+        }
+        tracing::error!(%error, report_id = %id, "stat report insert failed");
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
     }
 
@@ -193,8 +217,8 @@ pub async fn create_stat_report(
             err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
         })?;
     if stored > DAILY_REPORT_CAP {
+        delete_files_or_keep_row(&state, &id).await?;
         let _ = state.db.delete_stat_report(&id).await;
-        remove_report_files(&state.reports_dir, &id).await;
         return Err(err(
             StatusCode::TOO_MANY_REQUESTS,
             "Daily report limit reached",
@@ -206,9 +230,9 @@ pub async fn create_stat_report(
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && final_path.exists() => {}
         Err(error) => {
-            tracing::error!(%error, "stat report rename failed");
+            tracing::error!(%error, report_id = %id, "stat report rename failed");
+            delete_files_or_keep_row(&state, &id).await?;
             let _ = state.db.delete_stat_report(&id).await;
-            remove_report_files(&state.reports_dir, &id).await;
             return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
         }
     }
@@ -280,6 +304,7 @@ pub async fn list_stat_reports(
         tracing::error!(%error, "stat report list failed");
         err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
     })?;
+    let rows: Vec<_> = rows.into_iter().filter(report_is_current).collect();
     let reports = if officer {
         rows.iter().map(officer_item).collect()
     } else {
@@ -296,10 +321,13 @@ pub async fn download_stat_report(
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     configured(&state)?;
     let report = load_owned(&state, &id).await?;
+    if !report_is_current(&report) {
+        return Err(err(StatusCode::NOT_FOUND, "Report not found"));
+    }
     let bytes = tokio::fs::read(report_zip_path(&state.reports_dir, &report.id))
         .await
         .map_err(|error| {
-            tracing::error!(%error, "stat report read failed");
+            tracing::error!(%error, report_id = %report.id, "stat report read failed");
             err(StatusCode::NOT_FOUND, "Report not found")
         })?;
     audit(
@@ -317,6 +345,8 @@ pub async fn download_stat_report(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
         .header(header::CONTENT_DISPOSITION, filename)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(bytes))
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
 }
@@ -329,6 +359,9 @@ pub async fn read_stat_report_manifest(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     configured(&state)?;
     let report = load_owned(&state, &id).await?;
+    if !report_is_current(&report) {
+        return Err(err(StatusCode::NOT_FOUND, "Report not found"));
+    }
     let bytes = tokio::fs::read(report_zip_path(&state.reports_dir, &report.id))
         .await
         .map_err(|_| err(StatusCode::NOT_FOUND, "Report not found"))?;
@@ -374,7 +407,7 @@ pub async fn delete_stat_report(
     if report.member_id != member.member.id && !officer {
         return Err(err(StatusCode::FORBIDDEN, "Forbidden"));
     }
-    remove_report_files(&state.reports_dir, &report.id).await;
+    delete_files_or_keep_row(&state, &report.id).await?;
     state
         .db
         .delete_stat_report(&report.id)
@@ -472,7 +505,7 @@ async fn delete_for_withdraw(
     member: &OrgMember,
     report: &StatReport,
 ) -> Result<StatReportWithdrawn, (StatusCode, Json<ErrorResponse>)> {
-    remove_report_files(&state.reports_dir, &report.id).await;
+    delete_files_or_keep_row(state, &report.id).await?;
     state
         .db
         .delete_stat_report(&report.id)

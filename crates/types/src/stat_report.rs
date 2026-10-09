@@ -617,22 +617,12 @@ fn valid_rel_path(path: &str) -> bool {
     true
 }
 
+/// Crop paths the spec names. Suspect-cell files are not given names there,
+/// so they are not accepted.
+const CROP_PATHS: &[&str] = &["crops/scoreboard.png", "crops/frame.png"];
+
 fn is_plain_crop_path(path: &str) -> bool {
-    let Some(name) = path.strip_prefix("crops/") else {
-        return false;
-    };
-    if name.contains('/') || !name.to_ascii_lowercase().ends_with(".png") {
-        return false;
-    }
-    if name == "own-name.png" || name == "own-name-hud.png" {
-        return false;
-    }
-    if let Some(rest) = name.strip_prefix("glyph-")
-        && rest.strip_suffix(".png").is_some_and(is_glyph_id)
-    {
-        return false;
-    }
-    true
+    CROP_PATHS.contains(&path)
 }
 
 fn is_glyph_id(id: &str) -> bool {
@@ -777,6 +767,19 @@ mod tests {
         v["bundle_version"] = serde_json::json!(2);
         let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
         assert!(err.contains("bundle_version"), "{err}");
+    }
+
+    #[test]
+    fn crop_names_are_limited_to_the_spec_allowlist() {
+        let mut denied = sample();
+        denied["files"][1]["path"] = serde_json::json!("crops/notes.png");
+        let err = parse_bundle_manifest(&serde_json::to_vec(&denied).unwrap()).unwrap_err();
+        assert!(err.contains("crop") || err.contains("path"), "{err}");
+
+        let mut frame = sample();
+        frame["files"][1]["path"] = serde_json::json!("crops/frame.png");
+        frame["files"][1]["screen_class"] = serde_json::json!("potg");
+        parse_bundle_manifest(&serde_json::to_vec(&frame).unwrap()).unwrap();
     }
 
     #[test]

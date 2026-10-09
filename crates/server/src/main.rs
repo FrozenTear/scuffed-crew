@@ -115,14 +115,9 @@ async fn main() {
         .await
         .expect("Failed to create upload directory");
 
-    let reports_dir = scuffed_site_server::stat_reports::reports_dir_from_env();
-    if scuffed_site_server::stat_reports::reports_dir_conflicts(&reports_dir, &upload_dir) {
-        eprintln!("error: REPORTS_DIR must sit outside the upload directory and the web root");
-        std::process::exit(1);
-    }
-    scuffed_site_server::stat_reports::ensure_reports_dir(&reports_dir)
-        .await
-        .expect("Failed to create reports directory");
+    let reports_configured = scuffed_site_server::stat_reports::reports_dir_from_env();
+    let (reports_dir, reports_enabled) =
+        scuffed_site_server::stat_reports::open_reports_dir(&reports_configured, &upload_dir).await;
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -178,6 +173,7 @@ async fn main() {
         oauth_config,
         upload_dir,
         reports_dir: reports_dir.clone(),
+        reports_enabled,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -223,7 +219,9 @@ async fn main() {
         }
     });
 
-    scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
+    if reports_enabled {
+        scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
+    }
 
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
@@ -312,6 +310,7 @@ mod compression_shell {
             },
             upload_dir: root.join("uploads"),
             reports_dir: root.join("reports"),
+            reports_enabled: true,
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(

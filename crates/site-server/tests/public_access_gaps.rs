@@ -39,6 +39,7 @@ async fn test_state() -> AppState {
         },
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
+        reports_enabled: true,
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
