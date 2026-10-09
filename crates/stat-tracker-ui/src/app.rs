@@ -7,7 +7,7 @@ use iced::widget::image::Handle;
 use iced::widget::{column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
-use stat_tracker::config::Config;
+use stat_tracker::config::{Config, ShadowRecognizerControl};
 
 use crate::aggregate::GameFilter;
 use crate::capture::{self, PreviewShot};
@@ -33,6 +33,10 @@ const SETTINGS_SAVED_RESTART: &str =
 const SETTINGS_SAVE_REFUSED: &str =
     "Could not read config.toml, so settings were not saved. Fix that file, then try again.";
 
+/// The file parsed, but it is not the snapshot this form was built from.
+const SETTINGS_RELOADED_FROM_DISK: &str = "\
+config.toml changed on disk. Settings reloaded from the file, please review and save again.";
+
 /// How long the unreadable-config toast stays up before it clears itself.
 const REFUSED_TOAST_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -40,10 +44,69 @@ fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
 }
 
-/// Every Save re-reads the file. The startup flag is not consulted.
-/// `Ok` means the file parses now and the in-place edit may proceed.
+/// Every Save re-reads the file. `Err` means it still does not parse.
 fn reread_config_for_save(path: &std::path::Path) -> Result<Config, &'static str> {
     Config::read_at(path).map_err(|_| SETTINGS_SAVE_REFUSED)
+}
+
+/// Result of pressing Save against the config file.
+#[derive(Debug, PartialEq)]
+enum SettingsFileSave {
+    /// The file does not parse. Nothing was written.
+    Unreadable,
+    /// The form was built while the file was unreadable, or the parsed file
+    /// differs from that snapshot. Nothing was written.
+    Reloaded(Config),
+    /// The on-disk parse matched the snapshot, and the form was written.
+    Saved(Config),
+}
+
+#[derive(Debug)]
+enum SettingsSaveError {
+    /// Sync URL or shortcut check failed. The file was not written.
+    Blocked(String),
+    /// The in-place write failed.
+    Write(String),
+}
+
+/// Re-read `path`, then either refuse, reload, or write the form in place.
+///
+/// A write happens only when the file parses as `snapshot`. The form's sync
+/// URL and shortcut checks run in `before_write`, after that match, so a
+/// reload is not blocked by the empty defaults a broken startup file leaves
+/// in the form. The write is `form.to_config(snapshot)` then [`Config::save_at`],
+/// which edits `shadow_recognizer` in place when that is the only change.
+fn save_settings_form(
+    path: &std::path::Path,
+    form_built_unreadable: bool,
+    snapshot: &Config,
+    form: &SettingsForm,
+    before_write: impl FnOnce() -> Result<(), String>,
+) -> Result<SettingsFileSave, SettingsSaveError> {
+    let fresh = match reread_config_for_save(path) {
+        Err(_) => return Ok(SettingsFileSave::Unreadable),
+        Ok(fresh) => fresh,
+    };
+    if form_built_unreadable || fresh != *snapshot {
+        return Ok(SettingsFileSave::Reloaded(fresh));
+    }
+    before_write().map_err(SettingsSaveError::Blocked)?;
+    let next = form.to_config(snapshot);
+    next.save_at(path)
+        .map_err(|err| SettingsSaveError::Write(err.to_string()))?;
+    Ok(SettingsFileSave::Saved(next))
+}
+
+/// Form fields from `fresh`, keeping the shortcut the member was editing.
+fn form_after_disk_reload(
+    previous: &SettingsForm,
+    fresh: &Config,
+    shadow: ShadowRecognizerControl,
+) -> SettingsForm {
+    let mut next = SettingsForm::from_config_and_shadow(fresh, shadow);
+    next.overlay_hotkey = previous.overlay_hotkey.clone();
+    next.overlay_hotkey_enabled = previous.overlay_hotkey_enabled;
+    next
 }
 
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
@@ -718,61 +781,73 @@ impl TrackerApp {
                         return Task::none();
                     }
                 };
-                match reread_config_for_save(&config_path) {
-                    Ok(fresh) => {
-                        self.config_unreadable = false;
-                        self.saved_config = fresh;
-                        if self.toast.as_deref() == Some(SETTINGS_SAVE_REFUSED) {
-                            self.toast = None;
-                            self.toast_shown_at = None;
+                let sync_url = self.settings.sync_url.clone();
+                let hotkey_enabled = self.settings.overlay_hotkey_enabled;
+                let hotkey_bind = self.settings.overlay_hotkey.clone();
+                let mut stored_hotkey = None;
+                let outcome = save_settings_form(
+                    &config_path,
+                    self.config_unreadable,
+                    &self.saved_config,
+                    &self.settings,
+                    || {
+                        // Block the whole save. Writing the form would either store
+                        // the cleartext URL or drop the sync block; the file on disk
+                        // stays as it is until the URL is https, loopback http, or blank.
+                        // This runs only after the file matches the form's snapshot, so
+                        // a reload of a fixed file is not stopped by the default URL.
+                        if let Some(problem) = settings::sync_url_problem(&sync_url) {
+                            return Err(problem.to_string());
                         }
-                    }
-                    Err(_) => {
+                        let hotkey = OverlayHotkey::normalized(hotkey_enabled, &hotkey_bind);
+                        stored_hotkey = Some(hotkey.validate_for_save()?);
+                        Ok(())
+                    },
+                );
+                match outcome {
+                    Ok(SettingsFileSave::Unreadable) => {
                         self.config_unreadable = true;
                         self.show_refused_toast();
-                        return Task::none();
                     }
-                }
-                // Block the whole save. Writing the form would either store
-                // the cleartext URL or drop the sync block; the file on disk
-                // stays as it is until the URL is https, loopback http, or blank.
-                if let Some(problem) = settings::sync_url_problem(&self.settings.sync_url) {
-                    self.toast = Some(problem.to_string());
-                    return Task::none();
-                }
-                let hotkey = OverlayHotkey::normalized(
-                    self.settings.overlay_hotkey_enabled,
-                    &self.settings.overlay_hotkey,
-                );
-                match hotkey.validate_for_save() {
-                    Ok(hotkey) => {
-                        let config = self.settings.to_config(&self.saved_config);
-                        match settings::save_config(&config) {
-                            Ok(()) => {
-                                if let Err(e) =
-                                    seasons::save_overlay_hotkey(&self.data_dir, &hotkey)
-                                {
-                                    self.toast =
-                                        Some(format!("Could not save companion shortcut: {e}"));
-                                    return Task::none();
-                                }
-                                let daemon_up = daemon::is_daemon_running(&self.data_dir);
-                                self.saved_config = config;
-                                self.health_status = self.health_now();
-                                self.overlay_hotkey = hotkey;
-                                self.settings = SettingsForm::from_config(&self.saved_config);
-                                self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
-                                self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                                self.toast = Some(toast_after_successful_save(daemon_up).into());
-                                self.toast_shown_at = None;
-                            }
-                            Err(e) => {
-                                self.toast = Some(format!("Could not save settings: {e}"));
-                            }
+                    Ok(SettingsFileSave::Reloaded(fresh)) => {
+                        self.settings = form_after_disk_reload(
+                            &self.settings,
+                            &fresh,
+                            fresh.shadow_recognizer_control(),
+                        );
+                        self.saved_config = fresh;
+                        self.config_unreadable = false;
+                        self.health_status = self.health_now();
+                        self.toast = Some(SETTINGS_RELOADED_FROM_DISK.to_string());
+                        self.toast_shown_at = None;
+                    }
+                    Ok(SettingsFileSave::Saved(config)) => {
+                        let Some(hotkey) = stored_hotkey else {
+                            self.toast = Some(
+                                "Could not save settings: shortcut was not checked".to_string(),
+                            );
+                            return Task::none();
+                        };
+                        if let Err(e) = seasons::save_overlay_hotkey(&self.data_dir, &hotkey) {
+                            self.toast = Some(format!("Could not save companion shortcut: {e}"));
+                            return Task::none();
                         }
+                        let daemon_up = daemon::is_daemon_running(&self.data_dir);
+                        self.saved_config = config;
+                        self.config_unreadable = false;
+                        self.health_status = self.health_now();
+                        self.overlay_hotkey = hotkey;
+                        self.settings = SettingsForm::from_config(&self.saved_config);
+                        self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
+                        self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
+                        self.toast = Some(toast_after_successful_save(daemon_up).into());
+                        self.toast_shown_at = None;
                     }
-                    Err(e) => {
-                        self.toast = Some(e);
+                    Err(SettingsSaveError::Blocked(message)) => {
+                        self.toast = Some(message);
+                    }
+                    Err(SettingsSaveError::Write(message)) => {
+                        self.toast = Some(format!("Could not save settings: {message}"));
                     }
                 }
                 Task::none()
@@ -1451,6 +1526,7 @@ mod tests {
         for copy in [
             super::SETTINGS_SAVED_RESTART,
             super::SETTINGS_SAVE_REFUSED,
+            super::SETTINGS_RELOADED_FROM_DISK,
             "Settings saved",
         ] {
             assert!(!copy.contains('—'), "{copy}");
@@ -1466,7 +1542,9 @@ mod tests {
     }
 
     #[test]
-    fn save_succeeds_after_the_config_file_is_fixed() {
+    fn save_reloads_a_fixed_or_hand_edited_config_instead_of_overwriting_it() {
+        use crate::settings::{SettingsForm, SettingsToggle};
+
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         let broken = "\
@@ -1475,18 +1553,29 @@ token = \"secret-token-must-stay\"
 ";
         std::fs::write(&path, broken).expect("seed broken file");
 
-        let mut config_unreadable = true;
-        assert!(
-            config_unreadable,
-            "startup still treats the broken file as unreadable"
+        // Startup: the file did not parse, so the form is defaults.
+        let mut snapshot = Config::default();
+        let mut form = SettingsForm::from_config_and_shadow(
+            &snapshot,
+            Config::shadow_control(snapshot.shadow_recognizer, None),
         );
-        let refused = super::reread_config_for_save(&path);
-        config_unreadable = refused.is_err();
-        assert!(config_unreadable);
-        assert_eq!(refused, Err(super::SETTINGS_SAVE_REFUSED));
+        let mut form_built_unreadable = true;
+        assert!(form.player_name.is_empty());
+        assert!(form.sync_token.is_empty());
+
+        let mut checked_before_reload = false;
+        let refused =
+            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
+                checked_before_reload = true;
+                Ok(())
+            })
+            .expect("refuse is not a write error");
+        assert!(!checked_before_reload);
+        assert_eq!(refused, super::SettingsFileSave::Unreadable);
         assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), broken);
 
         let fixed = "\
+# scoreboard name
 data_dir = \"/tmp/sst-fixed-on-disk\"
 player_name = \"the streamer\"
 session_window_secs = 1800
@@ -1505,24 +1594,116 @@ token = \"secret-token-must-stay\"
 ";
         std::fs::write(&path, fixed).expect("fix the file");
 
-        let fresh = super::reread_config_for_save(&path).expect("fixed file parses");
-        config_unreadable = false;
-        assert!(!config_unreadable);
-        assert!(!fresh.shadow_recognizer);
-        let mut next = fresh.clone();
-        next.shadow_recognizer = true;
-        next.save_at(&path)
-            .expect("Save succeeds without a restart");
+        // (a) First Save reloads the fixed file and does not write the defaults.
+        let mut checked_before_reload = false;
+        let reloaded =
+            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
+                checked_before_reload = true;
+                Err("sync check must not run before a reload".into())
+            })
+            .expect("reload is not a write error");
+        assert!(!checked_before_reload);
+        let super::SettingsFileSave::Reloaded(fresh) = reloaded else {
+            panic!("first save after the fix must reload, got {reloaded:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&path).expect("file"), fixed);
+        form = super::form_after_disk_reload(
+            &form,
+            &fresh,
+            Config::shadow_control(fresh.shadow_recognizer, None),
+        );
+        snapshot = fresh;
+        form_built_unreadable = false;
+        assert_eq!(form.player_name, "the streamer");
+        assert_eq!(form.sync_token, "secret-token-must-stay");
+        assert_eq!(form.sync_url, "https://crew.example");
+        assert!(!snapshot.shadow_recognizer);
 
-        let saved = std::fs::read_to_string(&path).expect("saved");
+        // Second Save, after the member toggles the reader, writes only that key.
+        form.set_toggle(SettingsToggle::ShadowRecognizer, true);
+        let saved =
+            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || Ok(()))
+                .expect("second save writes");
+        let super::SettingsFileSave::Saved(written) = saved else {
+            panic!("second save must write the toggle, got {saved:?}");
+        };
+        assert!(written.shadow_recognizer);
+        let text = std::fs::read_to_string(&path).expect("saved");
         let loaded = Config::read_at(&path).expect("load after save");
         assert!(loaded.shadow_recognizer);
-        assert!(saved.contains("secret-token-must-stay"));
-        assert!(saved.contains("[auto_detect]"));
-        assert!(saved.contains("[sync]"));
-        let header = saved.find("[auto_detect]").expect("header");
-        assert_eq!(saved[..header].matches("shadow_recognizer").count(), 1);
-        assert!(saved[..header].contains("shadow_recognizer = true"));
+        assert_eq!(
+            loaded.player_name.as_deref(),
+            Some("the streamer"),
+            "the reloaded name must survive the toggle write"
+        );
+        assert_eq!(
+            loaded.sync.as_ref().map(|sync| sync.token.as_str()),
+            Some("secret-token-must-stay")
+        );
+        let header = text.find("[auto_detect]").expect("tables");
+        assert_eq!(
+            &text[header..],
+            &fixed[fixed.find("[auto_detect]").expect("tables")..]
+        );
+        assert_eq!(text[..header].matches("shadow_recognizer").count(), 1);
+        assert!(text[..header].contains("shadow_recognizer = true"));
+        assert!(text.contains("# scoreboard name"));
+        assert!(text.contains("player_name = \"the streamer\""));
+
+        // (b) A hand edit while the form is open is reloaded, not overwritten.
+        let hand_edited = fixed.replace(
+            "player_name = \"the streamer\"",
+            "player_name = \"the other account\"",
+        );
+        let hand_edited = hand_edited.replace(
+            "token = \"secret-token-must-stay\"",
+            "token = \"token-edited-on-disk\"",
+        );
+        std::fs::write(&path, &hand_edited).expect("hand edit");
+        form.set_toggle(SettingsToggle::ShadowRecognizer, false);
+        let outcome =
+            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
+                Err("must not write over a hand edit".into())
+            })
+            .expect("hand edit reloads");
+        let super::SettingsFileSave::Reloaded(fresh) = outcome else {
+            panic!("a hand edit must reload, got {outcome:?}");
+        };
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("hand edit kept"),
+            hand_edited
+        );
+        form = super::form_after_disk_reload(
+            &form,
+            &fresh,
+            Config::shadow_control(fresh.shadow_recognizer, None),
+        );
+        assert_eq!(form.player_name, "the other account");
+        assert_eq!(form.sync_token, "token-edited-on-disk");
+        assert!(!form.sync_token.is_empty());
+
+        // The startup flag reloads even when the parsed values already match.
+        let defaults_path = dir.path().join("defaults.toml");
+        let defaults = Config::default();
+        let defaults_text = toml::to_string_pretty(&defaults).expect("pretty");
+        std::fs::write(&defaults_path, &defaults_text).expect("write defaults");
+        let round_trip = Config::read_at(&defaults_path).expect("read defaults");
+        assert_eq!(round_trip, defaults);
+        let defaults_form = SettingsForm::from_config_and_shadow(
+            &defaults,
+            Config::shadow_control(defaults.shadow_recognizer, None),
+        );
+        let mut dirty = defaults_form;
+        dirty.set_toggle(SettingsToggle::ShadowRecognizer, true);
+        let flagged = super::save_settings_form(&defaults_path, true, &defaults, &dirty, || {
+            Err("must not write while the form was built unreadable".into())
+        })
+        .expect("flagged reload");
+        assert!(matches!(flagged, super::SettingsFileSave::Reloaded(_)));
+        assert_eq!(
+            std::fs::read_to_string(&defaults_path).expect("defaults"),
+            defaults_text
+        );
     }
 
     #[test]
