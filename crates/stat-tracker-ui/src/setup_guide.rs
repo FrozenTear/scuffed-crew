@@ -15,6 +15,9 @@
 //! * `GET /api/stats/token-check` returns `{display_name}` or
 //!   `{"error":"Unauthorized"}` for any failure. HTTP 429 is a wait, not
 //!   that failure. One check per button press.
+//! * HTTP 404 on token-check or `POST /api/link/start` means this server
+//!   does not have those routes yet. The token is still saved, and site
+//!   sign-in is hidden in favour of pasting a token.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -35,6 +38,10 @@ pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
 pub const REACH_SITE: &str = "Could not reach the site. Check the address and try again.";
 pub const TOKEN_REJECTED: &str = "That token wasn't accepted, check it and try again";
+pub const TOKEN_UNCHECKED: &str =
+    "The token is saved. This server doesn't support a token check yet.";
+pub const LINK_UNSUPPORTED: &str =
+    "This server doesn't support sign-in from the app yet. Paste a token instead.";
 pub const SIGNED_IN: &str = "Signed in. The tracker will use this token.";
 pub const LINK_DENIED: &str = "The site declined this sign-in. You can paste a token instead.";
 pub const LINK_EXPIRED: &str = "That sign-in code expired. Start again to get a new one.";
@@ -85,6 +92,8 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         CAPTURE_FAILED,
         REACH_SITE,
         TOKEN_REJECTED,
+        TOKEN_UNCHECKED,
+        LINK_UNSUPPORTED,
         SIGNED_IN,
         LINK_DENIED,
         LINK_EXPIRED,
@@ -562,9 +571,15 @@ pub fn parse_poll_body(body: &str) -> Result<PollOutcome, String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenCheckResult {
-    Connected { display_name: String },
+    Connected {
+        display_name: String,
+    },
     Rejected,
-    Wait { seconds: Option<u64> },
+    Wait {
+        seconds: Option<u64>,
+    },
+    /// HTTP 404: the route is not on this server yet.
+    Unchecked,
 }
 
 pub fn map_token_check(status: u16, body: &str, retry_after_secs: Option<u64>) -> TokenCheckResult {
@@ -572,6 +587,9 @@ pub fn map_token_check(status: u16, body: &str, retry_after_secs: Option<u64>) -
         return TokenCheckResult::Wait {
             seconds: retry_after_secs,
         };
+    }
+    if status == 404 {
+        return TokenCheckResult::Unchecked;
     }
     if status == 200
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
@@ -592,6 +610,7 @@ pub fn token_check_message(result: &TokenCheckResult) -> String {
         TokenCheckResult::Connected { display_name } => connected_as(display_name),
         TokenCheckResult::Rejected => TOKEN_REJECTED.to_string(),
         TokenCheckResult::Wait { seconds } => rate_limit_message(*seconds),
+        TokenCheckResult::Unchecked => TOKEN_UNCHECKED.to_string(),
     }
 }
 
@@ -638,6 +657,13 @@ pub struct LinkStart {
     pub machine: LinkMachine,
 }
 
+/// `Unsupported` is HTTP 404: this server does not have `/api/link/start` yet.
+#[derive(Debug, Clone)]
+pub enum LinkStartOutcome {
+    Ready(LinkStart),
+    Unsupported,
+}
+
 impl std::fmt::Debug for LinkStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinkStart")
@@ -650,7 +676,7 @@ pub async fn start_link(
     base: String,
     device_label: String,
     app_version: String,
-) -> Result<LinkStart, String> {
+) -> Result<LinkStartOutcome, String> {
     let client = http_client()?;
     let url = format!("{base}/api/link/start");
     let response = client
@@ -665,6 +691,9 @@ pub async fn start_link(
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     let text = response.text().await.unwrap_or_default();
+    if status.as_u16() == 404 {
+        return Ok(LinkStartOutcome::Unsupported);
+    }
     if status.as_u16() == 429 {
         return Err(rate_limit_message(retry));
     }
@@ -699,9 +728,9 @@ pub async fn start_link(
         return Err(UNREADABLE_SITE.to_string());
     }
     log_link_status("started");
-    Ok(LinkStart {
+    Ok(LinkStartOutcome::Ready(LinkStart {
         machine: LinkMachine::start(device_code, user_code, base, interval, expires_in),
-    })
+    }))
 }
 
 pub async fn poll_link(base: String, device_code: String) -> Result<PollOutcome, String> {
@@ -791,7 +820,7 @@ pub enum SetupMessage {
     TabReady(Result<MemoryFrame, String>),
     ConfirmScoreboard,
     SignIn,
-    LinkStarted(Result<LinkStart, String>),
+    LinkStarted(Result<LinkStartOutcome, String>),
     PollReady(Result<PollOutcome, String>),
     CheckToken,
     TokenChecked(Result<TokenCheckResult, String>),
@@ -814,6 +843,8 @@ pub struct GuideUi {
     paste_open: bool,
     paste_token: String,
     link_busy: bool,
+    /// Set after `POST /api/link/start` returns 404. Site sign-in stays hidden.
+    link_unsupported: bool,
     link: Option<LinkMachine>,
     link_message: Option<String>,
     poll_inflight: bool,
@@ -848,6 +879,7 @@ impl GuideUi {
             paste_open: false,
             paste_token: String::new(),
             link_busy: false,
+            link_unsupported: false,
             link: None,
             link_message: None,
             poll_inflight: false,
@@ -912,6 +944,9 @@ impl GuideUi {
     }
 
     pub fn set_sync_url(&mut self, value: String) {
+        if value != self.sync_url {
+            self.link_unsupported = false;
+        }
         self.sync_url = value;
     }
 
@@ -971,7 +1006,7 @@ impl GuideUi {
     }
 
     pub fn begin_sign_in(&mut self) -> Option<(String, String, String)> {
-        if self.link_busy || self.poll_inflight {
+        if self.link_unsupported || self.link_busy || self.poll_inflight {
             return None;
         }
         let base = match normalize_base(&self.sync_url) {
@@ -988,17 +1023,25 @@ impl GuideUi {
         Some((base, DEVICE_LABEL.to_string(), self.app_version.clone()))
     }
 
-    pub fn link_started(&mut self, result: Result<LinkStart, String>) {
+    pub fn link_started(&mut self, result: Result<LinkStartOutcome, String>) {
         self.link_busy = false;
         match result {
-            Ok(start) => {
+            Ok(LinkStartOutcome::Ready(start)) => {
                 let interval = start.machine.interval_secs();
+                self.link_unsupported = false;
                 self.link_message = Some(format!(
                     "Enter this code on the site: {}",
                     start.machine.user_code()
                 ));
                 self.link = Some(start.machine);
                 self.next_poll_at = Some(Instant::now() + Duration::from_secs(interval));
+            }
+            Ok(LinkStartOutcome::Unsupported) => {
+                self.link_unsupported = true;
+                self.paste_open = true;
+                self.link = None;
+                self.next_poll_at = None;
+                self.link_message = Some(LINK_UNSUPPORTED.to_string());
             }
             Err(message) => self.link_message = Some(message),
         }
@@ -1120,26 +1163,30 @@ impl GuideUi {
             Ok(result) => {
                 self.token_message = Some(token_check_message(&result));
                 match result {
-                    TokenCheckResult::Connected { .. } => {
-                        let server_url = normalize_base(&self.sync_url).ok()?;
-                        let token = self.paste_token.trim().to_string();
-                        if token.is_empty() {
-                            return None;
-                        }
-                        if let Some(machine) = self.link.as_mut() {
-                            machine.mark_approved(token.clone());
-                        }
-                        self.next_poll_at = None;
-                        self.saved_token = true;
-                        Some(SetupDiskPatch {
-                            setup_completed: None,
-                            sync: Some(SyncConfig { server_url, token }),
-                        })
+                    TokenCheckResult::Connected { .. } | TokenCheckResult::Unchecked => {
+                        self.save_pasted_token()
                     }
                     TokenCheckResult::Rejected | TokenCheckResult::Wait { .. } => None,
                 }
             }
         }
+    }
+
+    fn save_pasted_token(&mut self) -> Option<SetupDiskPatch> {
+        let server_url = normalize_base(&self.sync_url).ok()?;
+        let token = self.paste_token.trim().to_string();
+        if token.is_empty() {
+            return None;
+        }
+        if let Some(machine) = self.link.as_mut() {
+            machine.mark_approved(token.clone());
+        }
+        self.next_poll_at = None;
+        self.saved_token = true;
+        Some(SetupDiskPatch {
+            setup_completed: None,
+            sync: Some(SyncConfig { server_url, token }),
+        })
     }
 
     pub fn prepare_site_url(&mut self) -> Option<String> {
@@ -1176,6 +1223,7 @@ impl GuideUi {
         self.poll_inflight = false;
         self.next_poll_at = None;
         self.link_busy = false;
+        self.link_unsupported = false;
         self.test_frame = None;
         self.tab_frame = None;
     }
@@ -1355,12 +1403,14 @@ fn sync_body(guide: &GuideUi) -> Element<'_, Message> {
     if guide.saved_token {
         col = col.push(body_text("A token is already saved. You can replace it."));
     }
-    let sign_in = if guide.link_busy {
-        None
-    } else {
-        Some(Message::Setup(SetupMessage::SignIn))
-    };
-    col = col.push(guide_button("Sign in with the site", true, sign_in));
+    if sign_in_offered(guide) {
+        let sign_in = if guide.link_busy {
+            None
+        } else {
+            Some(Message::Setup(SetupMessage::SignIn))
+        };
+        col = col.push(guide_button("Sign in with the site", true, sign_in));
+    }
     if let Some(machine) = &guide.link {
         col = col.push(
             text(machine.user_code())
@@ -1404,6 +1454,10 @@ fn sync_body(guide: &GuideUi) -> Element<'_, Message> {
         }
     }
     col.into()
+}
+
+fn sign_in_offered(guide: &GuideUi) -> bool {
+    !guide.link_unsupported
 }
 
 fn pack_body(guide: &GuideUi) -> Element<'_, Message> {
@@ -1994,9 +2048,13 @@ mod tests {
             (404, vec![], r#"{"error":"Unauthorized"}"#.to_string())
         });
 
-        let started = start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
+        let started = match start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
             .await
-            .expect("start");
+            .expect("start")
+        {
+            LinkStartOutcome::Ready(start) => start,
+            LinkStartOutcome::Unsupported => panic!("this mock implements link start"),
+        };
         assert_eq!(started.machine.user_code(), "ABCD-EFGH");
         assert_eq!(started.machine.device_code_for_request(), secret);
         assert!(!format!("{:?}", started.machine).contains(secret));
@@ -2037,5 +2095,52 @@ mod tests {
         let ok = check_token(base, "tok-1".into()).await.expect("200");
         assert_eq!(token_check_message(&ok), "Connected as FrozenTear");
         assert_eq!(*checks.lock().expect("checks"), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_routes_save_the_token_and_hide_site_sign_in() {
+        let base = spawn_mock(|head, _body| {
+            if head.contains("POST /api/link/start") || head.contains("GET /api/stats/token-check")
+            {
+                return (404, vec![], r#"{"error":"Unauthorized"}"#.to_string());
+            }
+            (500, vec![], "nope".to_string())
+        });
+
+        let started = start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
+            .await
+            .expect("404 is a result, not a transport error");
+        assert!(matches!(started, LinkStartOutcome::Unsupported));
+
+        let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
+        guide.sync_url = base.clone();
+        guide.paste_token = "tok-1".into();
+        assert!(sign_in_offered(&guide));
+        guide.link_started(Ok(LinkStartOutcome::Unsupported));
+        assert!(guide.link_unsupported);
+        assert!(guide.paste_open);
+        assert!(!guide.link_busy);
+        assert!(guide.link.is_none());
+        assert!(!sign_in_offered(&guide));
+        assert!(guide.begin_sign_in().is_none());
+        assert_eq!(guide.link_message.as_deref(), Some(LINK_UNSUPPORTED));
+        assert_ne!(guide.link_message.as_deref(), Some(TOKEN_REJECTED));
+
+        let checked = check_token(base, "tok-1".into()).await.expect("404 check");
+        assert_eq!(checked, TokenCheckResult::Unchecked);
+        assert_eq!(
+            map_token_check(404, r#"{"error":"Unauthorized"}"#, None),
+            TokenCheckResult::Unchecked
+        );
+        assert_eq!(token_check_message(&checked), TOKEN_UNCHECKED);
+        assert_ne!(token_check_message(&checked), TOKEN_REJECTED);
+        let patch = guide.token_checked(Ok(checked)).expect("token is saved");
+        let sync = patch.sync.expect("sync");
+        assert_eq!(sync.token, "tok-1");
+        assert_eq!(sync.server_url, guide.sync_url);
+        assert_eq!(guide.token_message.as_deref(), Some(TOKEN_UNCHECKED));
+
+        guide.set_sync_url(format!("{}/other", guide.sync_url.trim_end_matches('/')));
+        assert!(sign_in_offered(&guide));
     }
 }
