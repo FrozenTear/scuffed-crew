@@ -380,4 +380,84 @@ grep -q 'still running' "$TMP/active.err" \
 [[ -x "$PREFIX/bin/stat-tracker-gui" ]] || fail "a still-running tracker was uninstalled"
 pass "a tracker that is still running is not uninstalled"
 
+# A parent that is itself a symlink is not followed. The file stays, and
+# the script does not say the uninstall finished.
+run_install "$HOME_DIR" "$PREFIX"
+mv "$PREFIX/bin" "$PREFIX/real-bin"
+ln -s "$PREFIX/real-bin" "$PREFIX/bin"
+set +e
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null 2>"$TMP/symlink.err"
+link_code=$?
+set -e
+[[ "$link_code" -ne 0 ]] || fail "a symlinked bin directory exited 0"
+grep -q 'Still there' "$TMP/symlink.err" \
+    || fail "symlinked bin was not reported: $(cat "$TMP/symlink.err")"
+if grep -q 'Uninstall complete' "$TMP/symlink.err"; then
+    fail "symlinked bin said uninstall was complete"
+fi
+[[ -f "$PREFIX/real-bin/stat-tracker-gui" ]] \
+    || fail "file behind a symlinked bin directory was removed"
+rm -rf "$PREFIX/bin" "$PREFIX/real-bin"
+pass "a symlinked parent is reported as still there"
+
+# /home as a symlink (Silverblue) still removes the real files.
+LINK_BASE="$TMP/silverblue"
+mkdir -p "$LINK_BASE/var/home/user"
+ln -s "$LINK_BASE/var/home" "$LINK_BASE/home"
+LINK_HOME="$LINK_BASE/home/user"
+LINK_PREFIX="$LINK_HOME/.local"
+run_install "$LINK_HOME" "$LINK_PREFIX"
+env HOME="$LINK_HOME" PREFIX="$LINK_PREFIX" \
+    SCUFFED_SYSTEMCTL=/bin/true \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ ! -e "$LINK_PREFIX/bin/stat-tracker-gui" ]] \
+    || fail "home symlink left the GUI in place"
+[[ ! -e "$LINK_BASE/var/home/user/.local/bin/stat-tracker-gui" ]] \
+    || fail "home symlink left the real GUI in place"
+pass "a symlinked home folder still removes the tracker files"
+
+# The package command is printed once.
+run_install "$HOME_DIR" "$PREFIX"
+pac_both="$(env HOME="$HOME_DIR" PREFIX="$PREFIX" PATH="$TMP/fakepac:$PATH" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes 2>&1)"
+pac_count="$(printf '%s\n' "$pac_both" | grep -c 'sudo pacman -R scuffed-stat-tracker' || true)"
+[[ "$pac_count" -eq 1 ]] || fail "package command was printed $pac_count times: $pac_both"
+pass "package remove command is printed once"
+
+# --purge follows data-dir.conf, and only tracker files inside a broad folder.
+write_dropin() {
+    local home="$1" data="$2"
+    local drop="$home/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf"
+    mkdir -p "$(dirname "$drop")"
+    cat > "$drop" << EOF
+# scuffed-stat-tracker data_dir drop-in
+[Service]
+ReadWritePaths=-$data
+EOF
+}
+for broad in ".config" "Documents" "Games"; do
+    run_install "$HOME_DIR" "$PREFIX"
+    DATA="$HOME_DIR/$broad"
+    mkdir -p "$DATA/stats.surrealkv" "$DATA/other-app" "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv"
+    printf 'games\n' > "$DATA/stats.surrealkv/db"
+    printf 'stay\n' > "$DATA/keep-me.txt"
+    printf 'other\n' > "$DATA/other-app/file"
+    printf 'default\n' > "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv/db"
+    write_dropin "$HOME_DIR" "$DATA"
+    env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+        SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+        bash "$UNINSTALL" --purge --yes >/dev/null
+    [[ -d "$DATA" ]] || fail "$broad folder was removed"
+    [[ "$(cat "$DATA/keep-me.txt")" == "stay" ]] || fail "$broad neighbor was removed"
+    [[ "$(cat "$DATA/other-app/file")" == "other" ]] || fail "$broad other app was removed"
+    [[ ! -e "$DATA/stats.surrealkv" ]] || fail "$broad tracker database was left"
+    [[ "$(cat "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv/db")" == "default" ]] \
+        || fail "default saved games were removed while purging $broad"
+    [[ -d "$PREFIX" ]] || fail "install folder was removed while purging $broad"
+done
+pass "purge uses data-dir.conf and leaves other files in broad folders"
+
 echo "all uninstall path checks passed"

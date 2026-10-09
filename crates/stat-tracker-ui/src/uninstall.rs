@@ -361,6 +361,13 @@ pub fn open_dialog(
     owner: Option<PackageOwner>,
     data_dir: &Path,
 ) -> UninstallDialog {
+    if !home_is_usable(home) {
+        return UninstallDialog::Manual {
+            detail: "Could not find your home folder. Nothing will be removed.".into(),
+            command: None,
+            paths: Vec::new(),
+        };
+    }
     let appimage = appimage_file(exe);
     match decide(exe, home, owner) {
         InstallOrigin::Bootstrap { prefix } => {
@@ -539,6 +546,21 @@ fn is_data_or_config_dir(path: &Path, home: &Path, prefix: &Path) -> bool {
         || path == spec_path(home, prefix, PathClass::Config)
 }
 
+/// Home from the environment is empty when it cannot be found. `/` is not a
+/// home folder. Uninstall refuses both.
+pub fn home_is_usable(home: &Path) -> bool {
+    !home.as_os_str().is_empty() && home.is_absolute() && home != Path::new("/") && home.is_dir()
+}
+
+/// The AppImage path from the environment counts only when this program is
+/// actually an AppImage. A normal install must not pick up a leftover value.
+pub fn appimage_override(exe: &Path, from_env: Option<PathBuf>) -> Option<PathBuf> {
+    if !is_appimage(exe) {
+        return None;
+    }
+    from_env.filter(|path| !path.as_os_str().is_empty())
+}
+
 pub fn preview(
     home: &Path,
     prefix: &Path,
@@ -584,10 +606,10 @@ pub fn preview(
         });
     }
     if delete_data {
-        let data_note = if confined_path(data_dir, home, prefix) {
-            "Saved games, debug images, and logs."
-        } else {
+        let data_note = if !confined_path(data_dir, home, prefix) {
             "This folder is outside your home folder, so it will be left in place."
+        } else {
+            "Only the tracker's saved games, debug images, and logs in this folder. Other files stay."
         };
         groups.push(PreviewGroup {
             heading: "Saved games",
@@ -623,6 +645,9 @@ fn manifest_lines(home: &Path, prefix: &Path) -> Vec<PathBuf> {
 }
 
 pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
+    if !home_is_usable(&req.home) {
+        return Err("Could not find your home folder. Nothing was removed.".into());
+    }
     let InstallOrigin::Bootstrap { prefix } = &req.origin else {
         return Ok(UninstallReport {
             skipped: true,
@@ -642,19 +667,26 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
     let plan = removal_plan(&req.home, &req.prefix, req.appimage.as_deref());
     let mut removed: Vec<PathBuf> = Vec::new();
     let mut left: Vec<PathBuf> = plan.files.clone();
+    let mut skipped: Vec<PathBuf> = Vec::new();
     while !left.is_empty() {
         let path = left[0].clone();
-        match remove_exact_file(&path, &req.home) {
-            Ok(true) => {
+        match remove_exact_file(&path, &req.home, &req.prefix) {
+            Ok(RemoveOutcome::Removed) => {
                 removed.push(left.remove(0));
             }
-            Ok(false) => {
+            Ok(RemoveOutcome::Absent) => {
                 left.remove(0);
+            }
+            Ok(RemoveOutcome::Skipped) => {
+                skipped.push(left.remove(0));
             }
             Err(_) => {
                 return Err(partial_message(&removed, &left));
             }
         }
+    }
+    if !skipped.is_empty() {
+        return Err(partial_message(&removed, &skipped));
     }
     if let Some(lib_dir) = lib_dir(&req.home, &req.prefix) {
         rmdir_empty_tree(&lib_dir);
@@ -663,20 +695,13 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
 
     if req.delete_data {
         let config = spec_path(&req.home, &req.prefix, PathClass::Config);
-        let mut dirs = Vec::new();
-        if confined_path(&req.data_dir, &req.home, &req.prefix) {
-            dirs.push(req.data_dir.clone());
+        if let Err(still) = purge_saved_games(&req.data_dir, &req.home, &req.prefix) {
+            left.push(still);
+            return Err(partial_message(&removed, &left));
         }
-        if confined_path(&config, &req.home, &req.prefix) && !dirs.iter().any(|dir| dir == &config)
-        {
-            dirs.push(config);
-        }
-        for dir in dirs {
-            if remove_listed_tree(&dir, &req.home).is_err() {
-                left.push(dir);
-                return Err(partial_message(&removed, &left));
-            }
-            removed.push(dir);
+        if let Err(still) = purge_settings(&config, &req.home, &req.prefix) {
+            left.push(still);
+            return Err(partial_message(&removed, &left));
         }
     }
 
@@ -745,6 +770,10 @@ fn unit_is_missing(output: &std::process::Output) -> bool {
         || lower.contains("does not exist")
         || lower.contains("not loaded")
         || lower.contains("no such file")
+        || lower.contains("failed to connect to bus")
+        || lower.contains("not been booted with systemd")
+        || lower.contains("no medium found")
+        || lower.contains("failed to connect to user scope")
 }
 
 fn run_systemctl(bin: &Path, args: &[&str]) -> Result<std::process::Output, String> {
@@ -770,47 +799,195 @@ fn is_directory_class(class: PathClass) -> bool {
     )
 }
 
-fn remove_exact_file(path: &Path, home: &Path) -> Result<bool, String> {
+enum RemoveOutcome {
+    Removed,
+    /// Not on disk, or a settings file this pass must leave alone.
+    Absent,
+    /// On disk, but a parent symlink means it was not removed.
+    Skipped,
+}
+
+fn remove_exact_file(path: &Path, home: &Path, prefix: &Path) -> Result<RemoveOutcome, String> {
     if too_broad(path, home) || is_config_toml(path) {
-        return Ok(false);
+        return Ok(RemoveOutcome::Absent);
     }
-    if !parents_are_real(path) {
-        return Ok(false);
+    let target = removal_target(path);
+    if parent_is_symlink(path) || !parents_are_real(&target) {
+        return Ok(if path_exists(path) || path_exists(&target) {
+            RemoveOutcome::Skipped
+        } else {
+            RemoveOutcome::Absent
+        });
     }
-    match fs::symlink_metadata(path) {
+    if !confined_path(&target, home, prefix) && !confined_path(path, home, prefix) {
+        return Ok(if path_exists(path) {
+            RemoveOutcome::Skipped
+        } else {
+            RemoveOutcome::Absent
+        });
+    }
+    let unlink = if path_exists(&target) { &target } else { path };
+    match fs::symlink_metadata(unlink) {
         Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
-            fs::remove_file(path)
-                .map_err(|err| format!("could not remove {}: {err}", path.display()))?;
-            Ok(true)
+            fs::remove_file(unlink)
+                .map_err(|err| format!("could not remove {}: {err}", unlink.display()))?;
+            Ok(RemoveOutcome::Removed)
         }
-        Ok(_) => Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(format!("could not read {}: {err}", path.display())),
+        Ok(_) => Ok(RemoveOutcome::Absent),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(RemoveOutcome::Absent),
+        Err(err) => Err(format!("could not read {}: {err}", unlink.display())),
     }
 }
 
-fn remove_listed_tree(dir: &Path, home: &Path) -> Result<(), String> {
-    if too_broad(dir, home) || dir == home {
-        return Err(format!("refusing to delete {}", dir.display()));
+/// Files and folders the tracker writes inside its saved-games folder.
+/// Anything else in that folder stays, including when the folder is
+/// `~/.config`, `~/Documents`, or `~/Games`.
+fn is_tracker_data_name(name: &str) -> bool {
+    matches!(
+        name,
+        "stats.surrealkv"
+            | "vacuum.tmp"
+            | "live_snapshot.json"
+            | "live_snapshot.json.tmp"
+            | "matches.jsonl"
+            | "commands"
+            | "daemon.pid"
+            | "daemon.log"
+            | "daemon.log.1"
+            | "debug"
+            | "shadow"
+            | "tessdata"
+            | "active_game.json"
+            | "sync_auth.json"
+            | "portraits"
+            | "ui_state.json"
+    ) || name.starts_with("stats.surrealkv.pre-vacuum-")
+}
+
+fn is_broad_saved_folder(dir: &Path, home: &Path) -> bool {
+    if dir == home || dir == Path::new("/") {
+        return true;
     }
-    if !parents_are_real(dir) {
-        return Err(format!(
-            "refusing to delete {} because a parent is a symlink",
-            dir.display()
-        ));
+    matches!(
+        dir.file_name().and_then(|name| name.to_str()),
+        Some(
+            "Documents"
+                | "Games"
+                | "Desktop"
+                | "Downloads"
+                | "Music"
+                | "Pictures"
+                | "Videos"
+                | "Public"
+                | "Templates"
+                | "config"
+        )
+    )
+}
+
+/// True when `child` is `dir` or sits inside it.
+fn dir_contains(dir: &Path, child: &Path) -> bool {
+    child == dir || child.starts_with(dir)
+}
+
+fn removal_target(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    fs::canonicalize(parent)
+        .map(|canon| canon.join(name))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn parent_is_symlink(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        fs::symlink_metadata(parent).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
+}
+
+/// Delete only the tracker's own files inside `dir`. Never the folder when
+/// it contains the install folder, the settings folder, or other files.
+/// A symlink is not followed. Returns the path that is still present.
+fn purge_saved_games(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
+    if !confined_path(dir, home, prefix) {
+        return Ok(());
     }
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            Err(format!("refusing to follow symlink {}", dir.display()))
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(dir.to_path_buf()),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(dir.to_path_buf());
+    }
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    let config = spec_path(home, prefix, PathClass::Config);
+    let protected = dir_contains(dir, prefix) || dir_contains(dir, &config);
+    let entries = fs::read_dir(dir).map_err(|_| dir.to_path_buf())?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_tracker_data_name(name) {
+            continue;
         }
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(dir)
-            .map_err(|err| format!("could not delete {}: {err}", dir.display())),
-        Ok(_) => {
-            fs::remove_file(dir).map_err(|err| format!("could not delete {}: {err}", dir.display()))
+        let child = entry.path();
+        let child_meta = fs::symlink_metadata(&child).map_err(|_| child.clone())?;
+        if child_meta.file_type().is_symlink() {
+            return Err(child);
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(format!("could not read {}: {err}", dir.display())),
+        if child_meta.is_dir() {
+            fs::remove_dir_all(&child).map_err(|_| child)?;
+        } else {
+            fs::remove_file(&child).map_err(|_| child)?;
+        }
     }
+    if protected || is_broad_saved_folder(dir, home) {
+        return Ok(());
+    }
+    let _ = fs::remove_dir(dir);
+    Ok(())
+}
+
+fn purge_settings(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
+    if !confined_path(dir, home, prefix) {
+        return Ok(());
+    }
+    if dir_contains(dir, prefix) {
+        return Ok(());
+    }
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(dir.to_path_buf()),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(dir.to_path_buf());
+    }
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    for name in ["config.toml", "session.env"] {
+        let file = dir.join(name);
+        if !path_exists(&file) {
+            continue;
+        }
+        let meta = fs::symlink_metadata(&file).map_err(|_| file.clone())?;
+        if meta.file_type().is_symlink() {
+            return Err(file);
+        }
+        if fs::remove_file(&file).is_err() {
+            return Err(file);
+        }
+    }
+    let _ = fs::remove_dir(dir);
+    Ok(())
 }
 
 fn rmdir_empty_tree(dir: &Path) {
@@ -1297,15 +1474,17 @@ mod tests {
 
     #[test]
     fn usr_path_without_a_package_owner_is_not_a_script_install() {
-        let home = Path::new("/home/player");
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
         let exe = Path::new("/usr/bin/stat-tracker-gui");
         assert!(matches!(
-            decide(exe, home, None),
+            decide(exe, &home, None),
             InstallOrigin::Outside { .. }
         ));
         let dialog = open_dialog(
             exe,
-            home,
+            &home,
             None,
             &home.join(".local/share/scuffed-stat-tracker"),
         );
@@ -1785,5 +1964,162 @@ mod tests {
         assert!(err.contains("Still there"), "{err}");
         assert!(!err.contains("Os {"), "{err}");
         assert!(prefix.join("bin/stat-tracker-gui").is_file());
+    }
+
+    #[test]
+    fn broad_saved_folders_keep_other_files() {
+        for name in [".config", "Documents", "Games"] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let prefix = home.join(".local");
+            fs::create_dir_all(&home).unwrap();
+            layout(&home, &prefix);
+            let data = home.join(name);
+            write(&data.join("stats.surrealkv/db"), "games\n");
+            write(&data.join("keep-me.txt"), "stay\n");
+            write(&data.join("other-app/file"), "other\n");
+            let install_note = prefix.join("keep-install.txt");
+            write(&install_note, "install\n");
+            let mut req = request(
+                &home,
+                &prefix,
+                true,
+                decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+            );
+            req.data_dir = data.clone();
+            apply(&req).unwrap();
+            assert!(data.is_dir(), "{name}");
+            assert_eq!(
+                fs::read_to_string(data.join("keep-me.txt")).unwrap(),
+                "stay\n"
+            );
+            assert_eq!(
+                fs::read_to_string(data.join("other-app/file")).unwrap(),
+                "other\n"
+            );
+            assert!(!data.join("stats.surrealkv").exists(), "{name}");
+            assert_eq!(fs::read_to_string(&install_note).unwrap(), "install\n");
+            assert!(prefix.is_dir(), "{name}");
+            if name == ".config" {
+                assert!(!spec_path(&home, &prefix, PathClass::Config).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn unusable_home_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("opt").join("scuffed");
+        let exe = prefix.join("bin/stat-tracker-gui");
+        write(&exe, "gui\n");
+        assert!(!home_is_usable(Path::new("/")));
+        assert!(!home_is_usable(Path::new("")));
+        assert!(!home_is_usable(&dir.path().join("missing")));
+        for home in [
+            PathBuf::from("/"),
+            PathBuf::from(""),
+            dir.path().join("missing"),
+        ] {
+            match open_dialog(&exe, &home, None, &dir.path().join("data")) {
+                UninstallDialog::Manual { detail, .. } => {
+                    assert!(detail.contains("home folder"), "{detail}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+            let err = apply(&UninstallRequest {
+                home,
+                prefix: prefix.clone(),
+                data_dir: dir.path().join("data"),
+                appimage: None,
+                delete_data: true,
+                origin: InstallOrigin::Bootstrap {
+                    prefix: prefix.clone(),
+                },
+                systemctl: dir.path().join("systemctl"),
+            })
+            .unwrap_err();
+            assert!(err.contains("home folder"), "{err}");
+            assert_eq!(fs::read_to_string(&exe).unwrap(), "gui\n");
+        }
+    }
+
+    #[test]
+    fn appimage_env_is_ignored_unless_this_program_is_an_appimage() {
+        let image = PathBuf::from("/tmp/Scuffed.AppImage");
+        assert_eq!(
+            appimage_override(Path::new("/usr/bin/stat-tracker-gui"), Some(image.clone())),
+            None
+        );
+        let mounted = Path::new("/tmp/.mount_Scuffed/stat-tracker-gui");
+        assert_eq!(appimage_override(mounted, Some(image.clone())), Some(image));
+        assert_eq!(appimage_override(mounted, None), None);
+    }
+
+    #[test]
+    fn no_user_bus_still_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        write(
+            &req.systemctl,
+            "#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\necho 'System has not been booted with systemd as init system (PID 1). Can\\'t operate.' >&2\nexit 1\n",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&req.systemctl, perms).unwrap();
+        }
+        apply(&req).unwrap();
+        assert!(!prefix.join("bin/stat-tracker-gui").exists());
+    }
+
+    #[test]
+    fn home_symlink_still_removes_the_tracker_files() {
+        let base = tempfile::tempdir().unwrap();
+        let real_home = base.path().join("var").join("home").join("user");
+        fs::create_dir_all(&real_home).unwrap();
+        let home_link = base.path().join("home");
+        std::os::unix::fs::symlink(base.path().join("var").join("home"), &home_link).unwrap();
+        let home = home_link.join("user");
+        let prefix = home.join(".local");
+        layout(&home, &prefix);
+        let exe = prefix.join("bin/stat-tracker-gui");
+        assert!(exe.is_file());
+        apply(&request(&home, &prefix, false, decide(&exe, &home, None))).unwrap();
+        assert!(!exe.exists());
+        assert!(!real_home.join(".local/bin/stat-tracker-gui").exists());
+    }
+
+    #[test]
+    fn symlink_parent_is_reported_as_still_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let bin = prefix.join("bin");
+        let real_bin = prefix.join("real-bin");
+        fs::rename(&bin, &real_bin).unwrap();
+        std::os::unix::fs::symlink(&real_bin, &bin).unwrap();
+        let err = apply(&request(
+            &home,
+            &prefix,
+            false,
+            decide(&bin.join("stat-tracker-gui"), &home, None),
+        ))
+        .unwrap_err();
+        assert!(err.contains("Still there"), "{err}");
+        assert!(!err.contains("Uninstall complete"), "{err}");
+        assert!(real_bin.join("stat-tracker-gui").is_file());
     }
 }

@@ -1099,17 +1099,23 @@ impl TrackerApp {
             }
             Message::OpenUninstall => {
                 let exe = std::env::current_exe().unwrap_or_default();
-                let home = dirs::home_dir().unwrap_or_default();
+                let Some(home) =
+                    dirs::home_dir().filter(|home| crate::uninstall::home_is_usable(home))
+                else {
+                    self.toast =
+                        Some("Could not find your home folder. Nothing was removed.".into());
+                    self.toast_shown_at = Some(SystemTime::now());
+                    return Task::none();
+                };
                 let owner = crate::uninstall::probe_package_owner(&exe);
                 let mut dialog = crate::uninstall::open_dialog(&exe, &home, owner, &self.data_dir);
                 if let crate::uninstall::UninstallDialog::Confirm { appimage, .. } = &mut dialog
                     && appimage.is_none()
-                    && let Some(path) = std::env::var_os("APPIMAGE")
                 {
-                    let path = PathBuf::from(path);
-                    if !path.as_os_str().is_empty() {
-                        *appimage = Some(path);
-                    }
+                    *appimage = crate::uninstall::appimage_override(
+                        &exe,
+                        std::env::var_os("APPIMAGE").map(PathBuf::from),
+                    );
                 }
                 self.uninstall_dialog = Some(dialog);
                 self.uninstall_busy = false;

@@ -92,9 +92,30 @@ if [[ -e "$GUI_BIN" || -L "$GUI_BIN" ]]; then
         pkg="${owner#* }"
         package_remove_command "$kind" "$pkg"
         info "Package manager owns $GUI_BIN. Nothing was removed."
-        info "Run: $(package_remove_command "$kind" "$pkg")"
         exit 0
     fi
+fi
+
+# Custom saved-games folder from the unit drop-in, when the installer wrote one.
+# Read it before any file is removed. The app uses this same folder.
+data_dir_from_dropin() {
+    local drop="$1" line value
+    [[ -f "$drop" ]] || return 1
+    grep -q 'scuffed-stat-tracker data_dir drop-in' "$drop" || return 1
+    line="$(grep -E '^ReadWritePaths=' "$drop" | head -n 1)" || return 1
+    [[ -n "$line" ]] || return 1
+    value="${line#ReadWritePaths=}"
+    if [[ "$value" == \"*\" ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    value="${value#-}"
+    [[ "$value" == /* ]] || return 1
+    printf '%s\n' "$value"
+}
+
+DROPIN="$(require_path "data dir drop-in" dropin data-dir.conf)"
+if custom="$(data_dir_from_dropin "$DROPIN")"; then
+    DATA_DIR="$custom"
 fi
 
 # A parent symlink would make a listed path point somewhere else.
@@ -198,6 +219,7 @@ confine_file() {
 # Exact absolute paths only. A glob character is not expanded.
 # Each path must resolve under the home folder or the install folder.
 declare -a REMOVE_FILES=()
+declare -a SKIPPED_FILES=()
 if [[ -f "$MANIFEST" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line#"${line%%[![:space:]]*}"}"
@@ -206,7 +228,11 @@ if [[ -f "$MANIFEST" ]]; then
         [[ "$line" == /* ]] || continue
         resolved=""
         if ! resolved="$(confine_file "$line")"; then
-            warn "not removing $line (outside your home folder and the install folder)"
+            if [[ -e "$line" || -L "$line" ]] && ! parents_are_real "$line"; then
+                SKIPPED_FILES+=("$line")
+            else
+                warn "not removing $line (outside your home folder and the install folder)"
+            fi
             continue
         fi
         REMOVE_FILES+=("$resolved")
@@ -257,7 +283,7 @@ for idx in "${!REMOVE_FILES[@]}"; do
         continue
     fi
     if ! parents_are_real "$f"; then
-        warn "not removing $f (a parent directory is a symlink)"
+        SKIPPED_FILES+=("$f")
         continue
     fi
     # Settings stay unless --purge removes the settings folder later.
@@ -299,6 +325,33 @@ for idx in "${!REMOVE_FILES[@]}"; do
     REMOVED_PATHS+=("$f")
     removed=$((removed + 1))
 done
+
+join_paths() {
+    local text="" item
+    if [[ $# -eq 0 ]]; then
+        printf 'nothing'
+        return 0
+    fi
+    for item in "$@"; do
+        if [[ -n "$text" ]]; then
+            text="$text, $item"
+        else
+            text="$item"
+        fi
+    done
+    printf '%s' "$text"
+}
+
+if [[ ${#SKIPPED_FILES[@]} -gt 0 ]]; then
+    left_text="$(join_paths "${SKIPPED_FILES[@]}")"
+    if [[ ${#REMOVED_PATHS[@]} -eq 0 ]]; then
+        error "Uninstall stopped. Nothing was removed. Still there: $left_text."
+    else
+        removed_text="$(join_paths "${REMOVED_PATHS[@]}")"
+        error "Uninstall stopped. Removed $removed_text. Still there: $left_text."
+    fi
+    exit 1
+fi
 info "Removed $removed installed file(s)."
 
 if [[ -d "$LIB_DIR" && ! -L "$LIB_DIR" ]] && parents_are_real "$LIB_DIR"; then
@@ -322,35 +375,112 @@ if [[ $PURGE -eq 0 && $ASSUME_YES -eq 0 && -t 0 && -t 2 ]]; then
     esac
 fi
 
-if [[ $PURGE -eq 1 ]]; then
-    for d in "$DATA_DIR" "$CONFIG_DIR"; do
-        case "$d" in
-            /|""|"$HOME")
-                error "refusing to delete $d"
-                exit 1
-                ;;
-        esac
-        if [[ -L "$d" ]]; then
-            warn "not deleting $d (symlink)"
-            continue
+# Direct children the tracker writes. Other names in the folder stay.
+tracker_data_name() {
+    case "$1" in
+        stats.surrealkv|vacuum.tmp|live_snapshot.json|live_snapshot.json.tmp|\
+        matches.jsonl|commands|daemon.pid|daemon.log|daemon.log.1|debug|shadow|\
+        tessdata|active_game.json|sync_auth.json|portraits|ui_state.json)
+            return 0
+            ;;
+        stats.surrealkv.pre-vacuum-*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+broad_saved_folder() {
+    local base
+    base="$(basename "$1")"
+    case "$base" in
+        Documents|Games|Desktop|Downloads|Music|Pictures|Videos|Public|Templates|config)
+            return 0
+            ;;
+    esac
+    [[ "$1" == "$HOME" || "$1" == "/" ]]
+}
+
+# True when $2 is $1 or a child of $1.
+dir_contains() {
+    [[ -n "$1" && ( "$2" == "$1" || "$2" == "$1"/* ) ]]
+}
+
+# Remove tracker files inside $1. Leave the folder when it holds the install
+# folder, the settings folder, or any other files.
+purge_saved_games() {
+    local d="$1" child name
+    case "$d" in
+        /|""|"$HOME")
+            warn "not deleting $d"
+            return 0
+            ;;
+    esac
+    if [[ -L "$d" ]]; then
+        error "Uninstall stopped. Still there: $d."
+        exit 1
+    fi
+    if [[ ! -d "$d" ]]; then
+        return 0
+    fi
+    resolved=""
+    if ! resolved="$(confine_file "$d")"; then
+        warn "not deleting $d (outside your home folder and the install folder)"
+        return 0
+    fi
+    d="$resolved"
+    shopt -s nullglob dotglob
+    for child in "$d"/*; do
+        name="$(basename "$child")"
+        [[ "$name" == "." || "$name" == ".." ]] && continue
+        tracker_data_name "$name" || continue
+        if [[ -L "$child" ]]; then
+            error "Uninstall stopped. Still there: $child."
+            exit 1
         fi
-        if ! parents_are_real "$d"; then
-            warn "not deleting $d (a parent directory is a symlink)"
-            continue
-        fi
-        resolved=""
-        if ! resolved="$(confine_file "$d")"; then
-            warn "not deleting $d (outside your home folder and the install folder)"
-            continue
-        fi
-        d="$resolved"
-        if [[ -d "$d" ]]; then
-            rm -rf -- "$d"
-        elif [[ -e "$d" ]]; then
-            rm -f -- "$d"
+        if [[ -d "$child" ]]; then
+            rm -rf -- "$child"
+        else
+            rm -f -- "$child"
         fi
     done
-    info "Deleted local data and config."
+    shopt -u nullglob dotglob
+    if dir_contains "$d" "$PREFIX" || dir_contains "$d" "$CONFIG_DIR" || broad_saved_folder "$d"; then
+        return 0
+    fi
+    rmdir "$d" 2>/dev/null || true
+}
+
+purge_settings() {
+    local d="$1"
+    if [[ -L "$d" ]]; then
+        error "Uninstall stopped. Still there: $d."
+        exit 1
+    fi
+    if [[ ! -d "$d" ]]; then
+        return 0
+    fi
+    resolved=""
+    if ! resolved="$(confine_file "$d")"; then
+        warn "not deleting $d (outside your home folder and the install folder)"
+        return 0
+    fi
+    d="$resolved"
+    local name
+    for name in config.toml session.env; do
+        if [[ -f "$d/$name" && ! -L "$d/$name" ]]; then
+            rm -f -- "$d/$name"
+        fi
+    done
+    rmdir "$d" 2>/dev/null || true
+}
+
+if [[ $PURGE -eq 1 ]]; then
+    purge_saved_games "$DATA_DIR"
+    if [[ "$CONFIG_DIR" != "$DATA_DIR" ]]; then
+        purge_settings "$CONFIG_DIR"
+    fi
+    info "Deleted the tracker's saved games and settings."
 else
     info "Kept local data ($DATA_DIR) and config ($CONFIG_DIR)."
 fi
