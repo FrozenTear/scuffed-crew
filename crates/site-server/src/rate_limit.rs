@@ -205,8 +205,7 @@ fn host_net(ip: IpAddr) -> IpNet {
     }
 }
 
-/// JSON 429 shared by every governor layer, the device-link limiters,
-/// and the per-member Nostr limiter.
+/// JSON 429 shared by every governor layer and the per-member Nostr limiter.
 ///
 /// Body is `{"error":"rate_limited","retry_after":N}` with
 /// `Content-Type: application/json` and `Cache-Control: no-store`.
