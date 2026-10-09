@@ -41,6 +41,10 @@ struct DbPersonalMatch {
     uploaded_at: SurrealDatetime,
     #[surreal(default)]
     edited: bool,
+    /// Absent on rows written before the column existed (NONE / missing).
+    #[serde(default)]
+    #[surreal(default)]
+    recognizer: Option<String>,
 }
 
 fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
@@ -66,6 +70,8 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
         played_at: db.played_at.into(),
         uploaded_at: db.uploaded_at.into(),
         edited: db.edited,
+        recognizer: scuffed_types::effective_recognizer(db.recognizer.as_deref().unwrap_or(""))
+            .to_string(),
     }
 }
 
@@ -154,7 +160,7 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited,
+    edited = $edited, recognizer = $recognizer,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -163,7 +169,7 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited,
+    edited = $edited, recognizer = $recognizer,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -272,6 +278,10 @@ impl Database {
                 .bind(("healing", m.healing))
                 .bind(("mit", m.mitigation))
                 .bind(("edited", m.edited))
+                .bind((
+                    "recognizer",
+                    scuffed_types::effective_recognizer(&m.recognizer).to_string(),
+                ))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
                 .await?
                 .check()?;
@@ -867,7 +877,7 @@ const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
 
 const PERSONAL_MATCH_MIGRATION_COLS: &str =
     "id, member_id, session_id, hero, map_name, game_mode, \
-     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, played_at, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, played_at, \
      uploaded_at";
 
 #[cfg(test)]
@@ -1395,7 +1405,7 @@ async fn relocate_personal_match(
                 role = $role, outcome = $outcome,
                 elims = $elims, deaths = $deaths, assists = $assists,
                 damage = $damage, healing = $healing, mitigation = $mit,
-                edited = $edited,
+                edited = $edited, recognizer = $recognizer,
                 played_at = $played, uploaded_at = $uploaded"#,
         )
         .bind(("rid", rid))
@@ -1413,6 +1423,11 @@ async fn relocate_personal_match(
         .bind(("healing", row.healing))
         .bind(("mit", row.mitigation))
         .bind(("edited", row.edited))
+        .bind((
+            "recognizer",
+            scuffed_types::effective_recognizer(row.recognizer.as_deref().unwrap_or(""))
+                .to_string(),
+        ))
         .bind(("played", row.played_at))
         .bind(("uploaded", row.uploaded_at))
         .await?
@@ -1452,6 +1467,7 @@ mod tests {
             played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
             uploaded_at: Utc::now(),
             edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         }
     }
 
@@ -1524,6 +1540,59 @@ mod tests {
         let s2 = db.list_personal_matches("m1", 10, 0).await.unwrap();
         let s2 = s2.iter().find(|r| r.session_id == "s2").unwrap();
         assert!(!s2.edited);
+        assert_eq!(s2.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+    }
+
+    /// A row inserted the way a pre-column server wrote it (no recognizer in
+    /// the SET clause) reads back as ocr-v1. An explicit cv-v1 upload stores
+    /// cv-v1. Leaderboard totals still count the row.
+    #[tokio::test]
+    async fn missing_recognizer_reads_as_ocr_v1_and_cv_v1_round_trips() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS recognizer ON personal_match;
+                   CREATE personal_match SET
+                       member_id = 'm-legacy',
+                       session_id = 'legacy-rec',
+                       hero = 'Ana',
+                       map_name = 'Oasis',
+                       game_mode = 'control',
+                       role = 'Support',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 1,
+                       assists = 1,
+                       damage = 1,
+                       healing = 1,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let legacy = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert_eq!(legacy[0].elims, 7);
+
+        let mut uploaded = entry("s-cv", "victory", 9);
+        uploaded.member_id = "m-legacy".into();
+        uploaded.recognizer = "cv-v1".into();
+        db.upsert_personal_matches("m-legacy", &[uploaded])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        let cv = rows.iter().find(|r| r.session_id == "s-cv").unwrap();
+        assert_eq!(cv.recognizer, "cv-v1");
+        let stats = db.get_personal_stats("m-legacy").await.unwrap();
+        assert_eq!(stats.total_matches, 2);
+        assert_eq!(stats.wins, 2);
     }
 
     #[tokio::test]

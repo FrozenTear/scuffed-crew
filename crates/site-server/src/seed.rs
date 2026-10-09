@@ -492,6 +492,7 @@ async fn seed_personal_matches(
                 played_at,
                 uploaded_at: now,
                 edited: false,
+                recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             }
         })
         .collect();
