@@ -9110,7 +9110,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fallback_board_yields_to_one_clean_read_and_a_later_ghost_is_rate_capped() {
+    async fn a_fallback_board_yields_to_two_matching_clean_reads_and_a_later_ghost_is_rate_capped()
+    {
         let mut night = Night::new().await;
         night.begin_on("Dorado", "Wrecking Ball");
         night
@@ -9136,7 +9137,22 @@ mod tests {
                 NIGHT_CLEAN,
             )
             .await;
-        let cleaned = night.game().gate.expect("clean read stored");
+        let once = night.game().gate.expect("first clean read stored");
+        assert_eq!(once.accepted.assists, 40, "one low read keeps the latch");
+        assert_eq!(once.accepted.deaths, 18);
+        assert!(once.low_trust);
+
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(2, 0, 0, 1105, 259, 450),
+                "Wrecking Ball",
+                Some(0),
+                Some("Dorado"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let cleaned = night.game().gate.expect("second clean read stored");
         assert_eq!(cleaned.accepted.assists, 0);
         assert_eq!(cleaned.accepted.deaths, 0);
         assert_eq!(cleaned.accepted.damage, 1105);
