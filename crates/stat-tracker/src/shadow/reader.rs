@@ -8,10 +8,17 @@
 //!   over the whole board: `0..=9` for 5v5, `0..=11` for 6v6 (team 1 first,
 //!   then team 2, the order the digit and hero matchers already use).
 //!
-//! Every field is always present, in [`field_names`] order. A field the
-//! reader could not read has no value, confidence 0 and `suspect: true`:
+//! When no Tab board is on the frame, the read says so ([`BoardStatus`]):
+//! `team_size` is `None` and only the match fields (`map`, `mode`, `result`)
+//! are present, all unread. Nothing falls back to 5v5.
+//!
+//! Otherwise every field is always present, in [`field_names`] order. A field
+//! the reader could not read has no value, confidence 0 and `suspect: true`:
 //!
 //! * no hero icon pack (or no map / result pack): those fields are suspect,
+//! * `map` goes through ocr-v1's own name function
+//!   ([`crate::parse::canonical_map`], see [`map_name`]) so both readers store
+//!   the same string; a map ocr-v1 cannot name is kept but suspect,
 //! * `mode` comes from the map (single-mode maps only) and is suspect
 //!   whenever the map is,
 //! * `result` comes from result frames (accolade screen, rank screen, see
@@ -31,7 +38,7 @@ use std::time::{Duration, Instant};
 use image::DynamicImage;
 use serde::Serialize;
 
-use super::banner::MapTemplates;
+use super::banner::{MapInfo, MapTemplates};
 use super::digits;
 use super::heroes::{HeroTemplates, RowClass};
 use super::result::{ResultEvidence, ResultRead, ResultTemplates};
@@ -70,10 +77,26 @@ impl FieldRead {
     }
 }
 
+/// Whether a Tab board was found on the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardStatus {
+    /// A board with a measured 5v5 or 6v6 layout: every field is present.
+    Read,
+    /// No board structure (same preflight as the capture path: row dips or
+    /// header stat labels). `team_size` is `None`, no row fields.
+    NotFound,
+    /// Passed the preflight (header labels) but no row pitch was measured,
+    /// so there is no 5v5 or 6v6 layout. `team_size` is `None`, no row fields.
+    TeamSizeUnknown,
+}
+
 /// Every field of one frame.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BoardRead {
-    pub team_size: usize,
+    pub status: BoardStatus,
+    /// 5 or 6; `None` unless `status` is [`BoardStatus::Read`].
+    pub team_size: Option<usize>,
     pub fields: Vec<FieldRead>,
     pub elapsed_ms: u32,
 }
@@ -112,9 +135,12 @@ pub fn suspect_field_names(board: &BoardRead) -> Vec<String> {
         .collect()
 }
 
+/// Match-level fields, present on every read (also without a board).
+pub const MATCH_FIELDS: [&str; 3] = ["map", "mode", "result"];
+
 /// All field names for a board of `team_size` (5 or 6), in output order.
 pub fn field_names(team_size: usize) -> Vec<String> {
-    let mut out = vec!["map".to_string(), "mode".into(), "result".into()];
+    let mut out: Vec<String> = MATCH_FIELDS.iter().map(|s| s.to_string()).collect();
     for r in 0..2 * team_size {
         out.push(format!("r{r}.hero"));
         for s in STAT_FIELDS {
@@ -184,11 +210,19 @@ impl Reader {
     }
 
     /// Read every field of one full Tab frame. `result` stays suspect.
+    /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
+    /// [`not_found`] with that status: no team size, no row fields, no map.
     pub fn read_board(&self, frame: &DynamicImage) -> BoardRead {
         let t0 = Instant::now();
         let scoreboard = crate::ocr::preprocess::crop_scoreboard(frame);
-        let team_size = crate::detect::hero_portrait::detect_team_size(&scoreboard);
-        let team_size = if team_size == 6 { 6 } else { 5 };
+        let team_size = match board_layout(&scoreboard) {
+            Ok(n) => n,
+            Err(status) => {
+                let mut b = not_found(status);
+                b.elapsed_ms = elapsed_ms(t0);
+                return b;
+            }
+        };
         let digit_read = digits::read_board(&scoreboard, team_size, READ_BUDGET).ok();
         let hero_read = self
             .heroes
@@ -202,25 +236,21 @@ impl Reader {
         if let Some(maps) = &self.maps {
             let m = maps.read(&frame.to_rgb8());
             if let Some(info) = m.map {
-                set(
-                    &mut board,
-                    "map",
-                    Value::Text(info.name.into()),
-                    m.score,
-                    m.suspect,
-                );
-                if let Some(mode) = info.mode {
+                let n = map_name(info);
+                let suspect = m.suspect || !n.known_to_ocr_v1;
+                set(&mut board, "map", Value::Text(n.name), m.score, suspect);
+                if let Some(mode) = n.mode {
                     set(
                         &mut board,
                         "mode",
                         Value::Text(mode.into()),
                         m.score,
-                        m.suspect,
+                        suspect,
                     );
                 }
             }
         }
-        board.elapsed_ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        board.elapsed_ms = elapsed_ms(t0);
         board
     }
 
@@ -264,6 +294,85 @@ impl Reader {
     }
 }
 
+fn elapsed_ms(t0: Instant) -> u32 {
+    t0.elapsed().as_millis().min(u32::MAX as u128) as u32
+}
+
+/// The layout of a cropped scoreboard. A board is found with the capture
+/// path's preflight (main.rs): row dips at a plausible pitch, or 3 to 10
+/// header stat labels. The size must come from a measured row pitch: with no
+/// pitch at all there is no layout, where `RowScan::team_size` would say 5.
+///
+/// With a pitch, the size is `RowScan::team_size` (spectral pitch when the
+/// two disagree), as before. `checked_team_size` is stricter and returns
+/// `None` on 7 real 1080p 6v6 boards in the eval set (dip pitch 0.0794, just
+/// over the 0.079 split, spectral 0.074 to 0.075), where the spectral answer
+/// 6 is right, so it is not used here.
+pub fn board_layout(scoreboard: &DynamicImage) -> Result<usize, BoardStatus> {
+    let scan = crate::detect::hero_portrait::scan_rows(scoreboard);
+    let labels = crate::ocr::preprocess::header_label_groups(scoreboard).len();
+    if !scan.looks_like_scoreboard() && !(3..=10).contains(&labels) {
+        return Err(BoardStatus::NotFound);
+    }
+    if scan.spectral_pitch.is_none() && scan.median_pitch.is_none() {
+        return Err(BoardStatus::TeamSizeUnknown);
+    }
+    match scan.team_size() {
+        n @ (5 | 6) => Ok(n),
+        _ => Err(BoardStatus::TeamSizeUnknown),
+    }
+}
+
+/// A read for a frame without a usable board: `team_size` is `None` and only
+/// the match fields are present, all unread.
+pub fn not_found(status: BoardStatus) -> BoardRead {
+    BoardRead {
+        status,
+        team_size: None,
+        fields: MATCH_FIELDS
+            .iter()
+            .map(|s| FieldRead::unread(s.to_string()))
+            .collect(),
+        elapsed_ms: 0,
+    }
+}
+
+/// The map name and mode the reader emits for a banner match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapName {
+    pub name: String,
+    pub mode: Option<&'static str>,
+    /// ocr-v1's table names this map (as this map, not another one). When
+    /// false, the field stays suspect: ocr-v1 would not store the name.
+    pub known_to_ocr_v1: bool,
+}
+
+/// Route a banner match through ocr-v1's map-name function
+/// ([`crate::parse::canonical_map`]) so both readers emit the same string and
+/// mode ([`crate::parse::map_mode`]).
+///
+/// Two banner maps fold onto a different map in ocr-v1's table: "Temple of
+/// Anubis" (pattern `anubis` gives Throne of Anubis) and "Ecopoint:
+/// Antarctica" (pattern `antarctic` gives Antarctic Peninsula). The banner
+/// match knows which map it saw, so those keep their own name and are
+/// suspect rather than stored as the wrong map. Maps ocr-v1 has no entry for
+/// (Practice Range, Hanamura, ...) also keep their banner name, suspect.
+pub fn map_name(info: &MapInfo) -> MapName {
+    let other_banner_map = |n: &str| super::banner::MAPS.iter().any(|m| m.name == n);
+    match crate::parse::canonical_map(info.name) {
+        Some(n) if n == info.name || !other_banner_map(&n) => MapName {
+            mode: crate::parse::map_mode(&n).or(info.mode),
+            name: n,
+            known_to_ocr_v1: true,
+        },
+        _ => MapName {
+            name: info.name.to_string(),
+            mode: info.mode,
+            known_to_ocr_v1: false,
+        },
+    }
+}
+
 /// The `result` field a match's evidence supports.
 pub fn result_field(evidence: &ResultEvidence) -> FieldRead {
     let d = evidence.decide();
@@ -291,7 +400,8 @@ pub fn assemble(
     hero_rows: Option<&[super::heroes::HeroRead]>,
 ) -> BoardRead {
     let mut board = BoardRead {
-        team_size,
+        status: BoardStatus::Read,
+        team_size: Some(team_size),
         fields: field_names(team_size)
             .into_iter()
             .map(FieldRead::unread)
@@ -503,6 +613,131 @@ mod tests {
         let f = result_field(&e);
         assert_eq!(f.value, Some(Value::Text("defeat".into())));
         assert!(!f.suspect);
+    }
+
+    #[test]
+    fn no_board_is_not_found_without_team_size() {
+        let reader = Reader::load(&ReaderConfig::default());
+        for (w, h) in [(2560, 1440), (1920, 1080)] {
+            for img in [
+                DynamicImage::new_rgb8(w, h),
+                DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    w,
+                    h,
+                    image::Rgb([200, 200, 200]),
+                )),
+            ] {
+                let b = reader.read_board(&img);
+                assert_eq!(b.status, BoardStatus::NotFound, "{w}x{h}");
+                assert_eq!(b.team_size, None, "no 5v5 fallback");
+                let names: Vec<&str> = b.fields.iter().map(|f| f.name.as_str()).collect();
+                assert_eq!(names, MATCH_FIELDS);
+                assert!(b.fields.iter().all(|f| f.suspect && f.value.is_none()));
+            }
+        }
+        let json = serde_json::to_string(&not_found(BoardStatus::NotFound)).unwrap();
+        assert!(json.contains(r#""status":"not_found""#), "{json}");
+        assert!(json.contains(r#""team_size":null"#), "{json}");
+        let b = assemble(6, None, None);
+        assert_eq!((b.status, b.team_size), (BoardStatus::Read, Some(6)));
+    }
+
+    #[test]
+    fn not_found_keeps_a_result_slot() {
+        let mut b = not_found(BoardStatus::TeamSizeUnknown);
+        b.set_result(FieldRead {
+            name: "result".into(),
+            value: Some(Value::Text("victory".into())),
+            confidence: 0.9,
+            suspect: false,
+        });
+        assert_eq!(
+            b.get("result").unwrap().value,
+            Some(Value::Text("victory".into()))
+        );
+        assert_eq!(b.team_size, None);
+    }
+
+    /// The two banner maps ocr-v1's table folds onto another map.
+    const OCR_V1_COLLISIONS: [&str; 2] = ["Temple of Anubis", "Ecopoint: Antarctica"];
+
+    #[test]
+    fn map_names_match_ocr_v1_for_every_template() {
+        use crate::parse::{canonical_map, map_mode};
+        use crate::shadow::banner::MAPS;
+        let mut known = 0;
+        for info in MAPS {
+            let n = map_name(info);
+            match canonical_map(info.name) {
+                Some(v1) if !OCR_V1_COLLISIONS.contains(&info.name) => {
+                    assert_eq!(n.name, v1, "{} differs from ocr-v1", info.key);
+                    assert!(n.known_to_ocr_v1, "{}", info.key);
+                    assert_eq!(n.mode, map_mode(&v1).or(info.mode), "{}", info.key);
+                    // ocr-v1 is idempotent on what we emit: storing it and
+                    // canonicalising again gives the same string
+                    assert_eq!(canonical_map(&n.name).as_deref(), Some(v1.as_str()));
+                    known += 1;
+                }
+                Some(v1) => {
+                    assert_ne!(v1, info.name);
+                    assert_eq!(n.name, info.name, "keeps its own map");
+                    assert!(!n.known_to_ocr_v1, "{} must stay suspect", info.key);
+                }
+                None => {
+                    assert_eq!(n.name, info.name, "{}", info.key);
+                    assert!(!n.known_to_ocr_v1, "{} unknown to ocr-v1", info.key);
+                }
+            }
+        }
+        // every map in ocr-v1's table is in the banner pack
+        assert_eq!(known, 34);
+        for c in OCR_V1_COLLISIONS {
+            assert!(MAPS.iter().any(|m| m.name == c), "{c}");
+        }
+    }
+
+    #[test]
+    fn accented_map_names_match_ocr_v1_with_and_without_accents() {
+        use crate::parse::canonical_map;
+        use crate::shadow::banner::MAPS;
+        let by_key = |k: &str| MAPS.iter().find(|m| m.key == k).unwrap();
+        let cases = [
+            (
+                "Watchpoint: Grímsvötn",
+                &[
+                    "Watchpoint: Grímsvötn",
+                    "Watchpoint: Grimsvotn",
+                    "WATCHPOINT: GRÍMSVÖTN",
+                    "GRIMSVOTN",
+                    "Grímsvötn",
+                    "grimsvötn",
+                ][..],
+            ),
+            (
+                "Esperanca",
+                &[
+                    "Esperança",
+                    "Esperanca",
+                    "ESPERANÇA",
+                    "ESPERANCA",
+                    "esperança",
+                ][..],
+            ),
+        ];
+        for (want, spellings) in cases {
+            let info = MAPS.iter().find(|m| m.name == want).unwrap();
+            assert_eq!(map_name(info).name, want);
+            assert!(map_name(info).known_to_ocr_v1);
+            for s in spellings {
+                assert_eq!(canonical_map(s).as_deref(), Some(want), "{s}");
+            }
+        }
+        // by banner key too, so a renamed template entry cannot slip through
+        assert_eq!(
+            map_name(by_key("watchpoint-grimsvotn")).name,
+            "Watchpoint: Grímsvötn"
+        );
+        assert_eq!(map_name(by_key("esperanca")).name, "Esperanca");
     }
 
     #[test]

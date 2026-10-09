@@ -20,6 +20,6 @@ pub mod result;
 pub mod worker;
 
 pub use reader::{
-    BoardRead, FieldRead, Reader, ReaderConfig, Value, field_names, init, read_board, read_result,
-    result_field, suspect_field_names,
+    BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, Value, field_names, init,
+    map_name, read_board, read_result, result_field, suspect_field_names,
 };
