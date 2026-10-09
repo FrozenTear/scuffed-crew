@@ -156,6 +156,120 @@ pub struct DaemonUser {
     pub member: Member,
 }
 
+/// 401 body for `GET /api/stats/token-check`.
+///
+/// Missing header, bad token, revoked token, and expired token all use this
+/// string so the response does not say which check failed.
+pub const TOKEN_CHECK_UNAUTHORIZED: &str = "Unauthorized";
+
+/// How a daemon-token 401 is worded.
+#[derive(Clone, Copy)]
+enum DaemonUnauthorized {
+    /// Upload and daemon-config keep their existing distinct messages.
+    Distinct,
+    /// Token-check: one body for every token failure.
+    Opaque,
+}
+
+impl DaemonUnauthorized {
+    fn missing(self) -> &'static str {
+        match self {
+            Self::Distinct => "Missing Bearer token",
+            Self::Opaque => TOKEN_CHECK_UNAUTHORIZED,
+        }
+    }
+
+    fn rejected(self) -> &'static str {
+        match self {
+            Self::Distinct => "Invalid or revoked daemon token",
+            Self::Opaque => TOKEN_CHECK_UNAUTHORIZED,
+        }
+    }
+}
+
+fn unauthorized(error: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
+fn internal_error() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+/// Shared daemon-token auth for upload, daemon-config, and token-check.
+///
+/// `validate_daemon_token` sets `last_used_at` when the token is accepted.
+/// That write already happens on the upload path. Rejected tokens, including
+/// revoked and expired ones, do not update `last_used_at`.
+async fn authenticate_daemon(
+    parts: &mut Parts,
+    state: &AppState,
+    unauthorized_mode: DaemonUnauthorized,
+) -> Result<DaemonUser, (StatusCode, Json<ErrorResponse>)> {
+    let auth_header = parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| unauthorized(unauthorized_mode.missing()))?;
+
+    let member_id = state
+        .db
+        .validate_daemon_token(auth_header)
+        .await
+        .map_err(|_e| internal_error())?
+        .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?;
+
+    let member = state
+        .db
+        .get_member(&member_id)
+        .await
+        .map_err(|_e| internal_error())?
+        .ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            )
+        })?;
+
+    if !member.is_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Membership inactive".into(),
+            }),
+        ));
+    }
+
+    let suspended_or_banned = state
+        .db
+        .is_member_suspended_or_banned(&member.id)
+        .await
+        .map_err(|_e| internal_error())?;
+
+    if suspended_or_banned {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Member is suspended or banned".into(),
+            }),
+        ));
+    }
+
+    Ok(DaemonUser { member })
+}
+
 impl FromRequestParts<AppState> for DaemonUser {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
@@ -163,93 +277,26 @@ impl FromRequestParts<AppState> for DaemonUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "Missing Bearer token".into(),
-                    }),
-                )
-            })?;
+        authenticate_daemon(parts, state, DaemonUnauthorized::Distinct).await
+    }
+}
 
-        let member_id = state
-            .db
-            .validate_daemon_token(auth_header)
-            .await
-            .map_err(|_e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Internal error".into(),
-                    }),
-                )
-            })?
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "Invalid or revoked daemon token".into(),
-                    }),
-                )
-            })?;
+/// Daemon token auth for `GET /api/stats/token-check`.
+///
+/// Same checks as [`DaemonUser`]. Token failures share one 401 body.
+pub struct OpaqueDaemonUser {
+    pub member: Member,
+}
 
-        let member = state
-            .db
-            .get_member(&member_id)
-            .await
-            .map_err(|_e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Internal error".into(),
-                    }),
-                )
-            })?
-            .ok_or_else(|| {
-                (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse {
-                        error: "Member not found".into(),
-                    }),
-                )
-            })?;
+impl FromRequestParts<AppState> for OpaqueDaemonUser {
+    type Rejection = (StatusCode, Json<ErrorResponse>);
 
-        if !member.is_active {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "Membership inactive".into(),
-                }),
-            ));
-        }
-
-        let suspended_or_banned = state
-            .db
-            .is_member_suspended_or_banned(&member.id)
-            .await
-            .map_err(|_e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Internal error".into(),
-                    }),
-                )
-            })?;
-
-        if suspended_or_banned {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "Member is suspended or banned".into(),
-                }),
-            ));
-        }
-
-        Ok(DaemonUser { member })
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let DaemonUser { member } =
+            authenticate_daemon(parts, state, DaemonUnauthorized::Opaque).await?;
+        Ok(OpaqueDaemonUser { member })
     }
 }
