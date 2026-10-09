@@ -12,10 +12,11 @@
 //! `suspect_fields` and does not replace the policy map or mode.
 //!
 //! The whole ocr-v1 read is kept, with recognizer `ocr-v1` and no suspect
-//! list, when the board is missing, the team size is unknown, or the member's
-//! own row is uncertain or does not agree with the new reader's row index.
-//! The recognizer is also `ocr-v1` when every stored field fell back to
-//! ocr-v1.
+//! list, when the board is missing, the team size is unknown, the member's
+//! own row is uncertain or does not agree with the new reader's row index,
+//! or the board is marked read but has no digit values (the digit pass can
+//! miss its time budget after the columns are found). The recognizer is
+//! also `ocr-v1` when every stored field fell back to ocr-v1.
 
 use scuffed_types::{RECOGNIZER_OCR_V1, SUSPECT_FIELD_NAMES};
 
@@ -106,7 +107,7 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     let Some(board) = board else {
         return keep();
     };
-    if board.status != BoardStatus::Read {
+    if board.status != BoardStatus::Read || !has_digit_value(board) {
         return keep();
     }
     let OwnRow::Identified { index, team_size } = own else {
@@ -307,6 +308,27 @@ fn take_int(
     None
 }
 
+/// At least one stat cell has a number. Unread placeholders, including a
+/// `Read` board whose digit pass returned no values, do not.
+fn has_digit_value(board: &BoardRead) -> bool {
+    board
+        .fields
+        .iter()
+        .any(|field| matches!(field.value, Some(Value::Int(_))) && is_stat_field(&field.name))
+}
+
+fn is_stat_field(name: &str) -> bool {
+    let Some((row, suffix)) = name.split_once('.') else {
+        return false;
+    };
+    let Some(digits) = row.strip_prefix('r') else {
+        return false;
+    };
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && matches!(suffix, "e" | "a" | "d" | "dmg" | "h" | "mit")
+}
+
 /// The digit reader ran on this row. A row of unread placeholders did not.
 fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
     ["e", "a", "d", "dmg", "h", "mit"].iter().any(|suffix| {
@@ -481,6 +503,64 @@ mod tests {
         assert_eq!(saved.hero, "Kiriko");
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
         assert_eq!(saved.suspect_fields, vec!["d".to_string()]);
+    }
+
+    #[test]
+    fn read_board_with_no_digit_values_keeps_the_whole_ocr_v1_read() {
+        // Columns were found, so the reader marks the board read, but the
+        // digit pass produced no numbers (its time budget ran out). A
+        // confident map, mode, result, or hero on that board is not a read.
+        let mut board = BoardRead {
+            status: BoardStatus::Read,
+            team_size: Some(5),
+            fields: crate::shadow::field_names(5)
+                .into_iter()
+                .map(|name| unread(&name))
+                .collect(),
+            elapsed_ms: 1,
+        };
+        for (name, value) in [
+            ("map", "Ilios"),
+            ("mode", "Escort"),
+            ("result", "defeat"),
+            ("r0.hero", "Kiriko"),
+        ] {
+            let field = board
+                .fields
+                .iter_mut()
+                .find(|field| field.name == name)
+                .unwrap();
+            field.value = Some(Value::Text(value.into()));
+            field.confidence = 0.95;
+            field.suspect = false;
+        }
+        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
+        let before = ocr();
+        assert_eq!(saved.map, before.map);
+        assert_eq!(saved.mode, before.mode);
+        assert_eq!(saved.result, before.result);
+        assert_eq!(saved.hero, before.hero);
+        assert_eq!(saved.elims, before.elims);
+        assert_eq!(saved.assists, before.assists);
+        assert_eq!(saved.deaths, before.deaths);
+        assert_eq!(saved.damage, before.damage);
+        assert_eq!(saved.healing, before.healing);
+        assert_eq!(saved.mitigation, before.mitigation);
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
+        assert!(saved.suspect_fields.is_empty());
+
+        // A stored 0 is a digit value, so this path does not apply.
+        let zero = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "r0.e")
+            .unwrap();
+        zero.value = Some(Value::Int(0));
+        zero.confidence = 0.9;
+        zero.suspect = false;
+        let with_zero = merge_saved(&ocr(), identified(0, 5), Some(&board));
+        assert_eq!(with_zero.elims, 0);
+        assert_ne!(with_zero.recognizer, RECOGNIZER_OCR_V1);
     }
 
     #[test]

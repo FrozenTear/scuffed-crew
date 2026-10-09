@@ -226,6 +226,9 @@ impl Reader {
                 return b;
             }
         };
+        // Err here (the time budget, after the columns were found) is not a
+        // digit read. assemble still marks the board Read, with no digit
+        // values. reader_apply keeps the whole ocr-v1 row for that board.
         let digit_read = digits::read_board(&scoreboard, team_size, READ_BUDGET).ok();
         if digit_read.as_ref().is_some_and(|d| !has_stat_rows(d)) {
             let mut b = not_found(BoardStatus::NotFound);
