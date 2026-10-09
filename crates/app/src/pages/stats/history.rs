@@ -20,14 +20,21 @@ fn outcome_class(outcome: &str) -> &'static str {
 
 /// Visible label when a row was not read by the old Tesseract reader.
 const NEW_READER_BADGE: &str = "New reader (alpha)";
+/// Short label when the row is too narrow for the full badge.
+const NEW_READER_BADGE_SHORT: &str = "alpha";
 /// Tooltip for [`NEW_READER_BADGE`].
 const NEW_READER_TITLE: &str = "Read by the new stat reader, still in testing";
-/// Title and accessible name on a cell the reader flagged.
-const UNSURE_TEXT: &str = "The reader was unsure about this value";
+/// Rest of the unsure tooltip, after the stat name.
+const UNSURE_TAIL: &str = "the reader was unsure about this value";
 
 /// `true` when this row should show the new-reader badge.
+/// Empty and missing ids count as `ocr-v1`.
 pub(super) fn show_new_reader_badge(recognizer: &str) -> bool {
-    recognizer != scuffed_types::RECOGNIZER_OCR_V1
+    scuffed_types::effective_recognizer(recognizer) != scuffed_types::RECOGNIZER_OCR_V1
+}
+
+fn unsure_title(stat_name: &str) -> String {
+    format!("{stat_name}: {UNSURE_TAIL}")
 }
 
 /// `true` when `name` is a known match cell and this row flagged it.
@@ -37,19 +44,24 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
         && suspect_fields.iter().any(|field| field == name)
 }
 
-fn unsure_mark() -> Element {
+/// Question mark stays outside the clipped value. "(unsure)" is real text for
+/// screen readers, which skip aria-label on a plain span.
+fn unsure_note() -> Element {
     rsx! {
-        span {
-            class: "stat-unsure-mark",
-            title: UNSURE_TEXT,
-            aria_label: UNSURE_TEXT,
-            "?"
-        }
+        span { class: "stat-unsure-mark", aria_hidden: "true", "?" }
+        span { class: "sr-only", "(unsure)" }
     }
 }
 
-/// One match-row value. An unsure cell gets a question mark plus the unsure title.
-fn marked_value(class: &str, text: &str, fallback_title: Option<&str>, unsure: bool) -> Element {
+/// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
+/// text, and a tooltip that still names the stat.
+fn marked_value(
+    class: &str,
+    text: &str,
+    stat_name: &str,
+    titled_when_sure: bool,
+    unsure: bool,
+) -> Element {
     let class = if unsure {
         if class.is_empty() {
             "stat-unsure".to_string()
@@ -60,28 +72,48 @@ fn marked_value(class: &str, text: &str, fallback_title: Option<&str>, unsure: b
         class.to_string()
     };
     let text = text.to_string();
-    if unsure {
-        rsx! {
-            span {
-                class: "{class}",
-                title: UNSURE_TEXT,
-                "{text}"
-                {unsure_mark()}
+    let title = if unsure {
+        Some(unsure_title(stat_name))
+    } else if titled_when_sure {
+        Some(stat_name.to_string())
+    } else {
+        None
+    };
+    if let Some(title) = title {
+        if unsure {
+            rsx! {
+                span {
+                    class: "{class}",
+                    title: "{title}",
+                    span { class: "stat-value-text", "{text}" }
+                    {unsure_note()}
+                }
             }
-        }
-    } else if let Some(title) = fallback_title {
-        let title = title.to_string();
-        rsx! {
-            span {
-                class: "{class}",
-                title: "{title}",
-                "{text}"
+        } else if class.is_empty() {
+            rsx! {
+                span {
+                    title: "{title}",
+                    span { class: "stat-value-text", "{text}" }
+                }
+            }
+        } else {
+            rsx! {
+                span {
+                    class: "{class}",
+                    title: "{title}",
+                    span { class: "stat-value-text", "{text}" }
+                }
             }
         }
     } else if class.is_empty() {
-        rsx! { span { "{text}" } }
+        rsx! { span { class: "stat-value-text", "{text}" } }
     } else {
-        rsx! { span { class: "{class}", "{text}" } }
+        rsx! {
+            span {
+                class: "{class}",
+                span { class: "stat-value-text", "{text}" }
+            }
+        }
     }
 }
 
@@ -199,13 +231,14 @@ pub(super) fn history_tab(
                                         m.map_name.clone()
                                     };
                                     let role_label = stored_role_label(&m.role);
-                                    let fields = &m.suspect_fields;
+                                    let fields = m.suspect_fields.as_deref().unwrap_or(&[]);
                                     let map_unsure = cell_is_unsure(fields, "map");
                                     let mode_unsure = cell_is_unsure(fields, "mode");
                                     let result_unsure = cell_is_unsure(fields, "result");
                                     let hero_unsure = cell_is_unsure(fields, "hero");
                                     let mit_unsure = cell_is_unsure(fields, "mit");
-                                    let new_reader = show_new_reader_badge(&m.recognizer);
+                                    let new_reader =
+                                        show_new_reader_badge(m.recognizer.as_deref().unwrap_or(""));
                                     let mode_text = m.game_mode.clone();
                                     let mit_text = format!("MIT {}", m.mitigation);
                                     rsx! {
@@ -213,35 +246,33 @@ pub(super) fn history_tab(
                                             {marked_value(
                                                 &format!("match-outcome {oc}"),
                                                 &m.outcome,
-                                                None,
+                                                "Result",
+                                                false,
                                                 result_unsure,
                                             )}
                                             div { class: "match-identity",
                                                 div { class: "match-hero-line",
-                                                    {marked_value("match-hero", &m.hero, None, hero_unsure)}
+                                                    {marked_value("match-hero", &m.hero, "Hero", false, hero_unsure)}
                                                     if new_reader {
                                                         span {
-                                                            class: "tracker-badge",
+                                                            class: "tracker-badge reader-badge",
                                                             title: NEW_READER_TITLE,
-                                                            "{NEW_READER_BADGE}"
+                                                            span { class: "reader-badge-full", "{NEW_READER_BADGE}" }
+                                                            span { class: "reader-badge-short", "{NEW_READER_BADGE_SHORT}" }
                                                         }
                                                     }
                                                 }
                                                 div { class: "match-map",
-                                                    {marked_value("", &map_label, None, map_unsure)}
+                                                    {marked_value("match-map-name", &map_label, "Map", false, map_unsure)}
                                                     if mode_unsure {
-                                                        span {
-                                                            " · "
-                                                            {marked_value("", &mode_text, None, true)}
-                                                        }
+                                                        span { class: "match-map-sep", " · " }
+                                                        {marked_value("stat-flagged", &mode_text, "Mode", false, true)}
                                                     }
-                                                    " · "
+                                                    span { class: "match-map-sep", " · " }
                                                     "{role_label}"
                                                     if mit_unsure {
-                                                        span {
-                                                            " · "
-                                                            {marked_value("", &mit_text, None, true)}
-                                                        }
+                                                        span { class: "match-map-sep", " · " }
+                                                        {marked_value("stat-flagged", &mit_text, "Mitigation", false, true)}
                                                     }
                                                 }
                                             }
@@ -249,31 +280,36 @@ pub(super) fn history_tab(
                                                 {marked_value(
                                                     "match-stat",
                                                     &m.elims.to_string(),
-                                                    Some("Eliminations"),
+                                                    "Eliminations",
+                                                    true,
                                                     cell_is_unsure(fields, "e"),
                                                 )}
                                                 {marked_value(
                                                     "match-stat",
                                                     &m.deaths.to_string(),
-                                                    Some("Deaths"),
+                                                    "Deaths",
+                                                    true,
                                                     cell_is_unsure(fields, "d"),
                                                 )}
                                                 {marked_value(
                                                     "match-stat",
                                                     &m.assists.to_string(),
-                                                    Some("Assists"),
+                                                    "Assists",
+                                                    true,
                                                     cell_is_unsure(fields, "a"),
                                                 )}
                                                 {marked_value(
                                                     "match-stat match-stat-wide",
                                                     &m.damage.to_string(),
-                                                    Some("Damage"),
+                                                    "Damage",
+                                                    true,
                                                     cell_is_unsure(fields, "dmg"),
                                                 )}
                                                 {marked_value(
                                                     "match-stat match-stat-wide",
                                                     &m.healing.to_string(),
-                                                    Some("Healing"),
+                                                    "Healing",
+                                                    true,
                                                     cell_is_unsure(fields, "h"),
                                                 )}
                                             }
@@ -350,8 +386,8 @@ mod tests {
             healing: 5555,
             mitigation,
             played_at: played_at(),
-            recognizer: recognizer.to_string(),
-            suspect_fields: suspect.iter().map(|name| (*name).to_string()).collect(),
+            recognizer: Some(recognizer.to_string()),
+            suspect_fields: Some(suspect.iter().map(|name| (*name).to_string()).collect()),
         }
     }
 
@@ -361,7 +397,10 @@ mod tests {
         assert!(!show_new_reader_badge(scuffed_types::RECOGNIZER_OCR_V1));
         assert!(show_new_reader_badge("cv-v1"));
         assert!(show_new_reader_badge("OCR-V1"));
-        assert!(show_new_reader_badge(""));
+        assert!(!show_new_reader_badge(""));
+        assert!(!show_new_reader_badge(scuffed_types::effective_recognizer(
+            ""
+        )));
     }
 
     #[test]
@@ -429,6 +468,7 @@ mod tests {
                         6666,
                     ),
                     row("old", "ocr-v1", &[], "Reinhardt", "Havana", "control", 6),
+                    row("blank", "", &[], "Brigitte", "Nepal", "flashpoint", 8),
                 ],
                 next_cursor: None,
             };
@@ -447,17 +487,26 @@ mod tests {
 
         assert_eq!(html.matches(NEW_READER_BADGE).count(), 1, "{html}");
         assert!(
-            html.contains("class=\"tracker-badge\""),
+            html.contains("class=\"tracker-badge reader-badge\""),
             "badge uses the existing tracker badge style: {html}"
         );
+        assert!(html.contains(NEW_READER_BADGE_SHORT), "{html}");
         assert!(
             html.contains(&format!("title=\"{NEW_READER_TITLE}\"")),
             "{html}"
+        );
+        assert!(
+            !html.contains("aria-label="),
+            "unsure text is not an aria-label on a plain span: {html}"
         );
         assert!(html.contains("Reinhardt"), "{html}");
         assert!(
             !html.contains("control"),
             "an unflagged mode stays off the row: {html}"
+        );
+        assert!(
+            !html.contains("flashpoint"),
+            "an empty recognizer does not flag the row: {html}"
         );
         assert!(html.contains("push"), "{html}");
         assert!(html.contains("6666"), "{html}");
@@ -471,16 +520,26 @@ mod tests {
             "unknown names add no mark: {html}"
         );
         assert_eq!(
-            html.matches(&format!("aria-label=\"{UNSURE_TEXT}\""))
-                .count(),
+            html.matches("(unsure)").count(),
             scuffed_types::SUSPECT_FIELD_NAMES.len(),
             "{html}"
         );
+        assert!(html.contains("class=\"sr-only\""), "{html}");
         assert!(
-            html.contains(&format!(
-                "class=\"stat-unsure\" title=\"{UNSURE_TEXT}\">Ilios"
-            )),
+            html.contains(&format!("title=\"{}\"", unsure_title("Eliminations"))),
             "{html}"
+        );
+        assert!(
+            html.contains(&format!("title=\"{}\"", unsure_title("Mitigation"))),
+            "{html}"
+        );
+        assert!(
+            html.contains("class=\"stat-value-text\">Ana</span><span class=\"stat-unsure-mark\""),
+            "the mark sits outside the clipped hero text: {html}"
+        );
+        assert!(
+            html.contains("class=\"stat-flagged stat-unsure\""),
+            "flagged mode and mitigation keep their own room: {html}"
         );
         assert!(html.contains("class=\"match-stat stat-unsure\""), "{html}");
         assert!(html.contains(">11<") || html.contains(">11"), "{html}");
