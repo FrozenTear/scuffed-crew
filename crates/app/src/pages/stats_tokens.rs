@@ -34,24 +34,34 @@ const TOKENS_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
-    .token-reveal {
+    .tracker-setup {
         background: var(--surface);
-        border: 1px solid var(--accent);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem;
         margin-bottom: 1.5rem;
     }
-    .token-reveal p {
+    .tracker-setup.has-token {
+        border-color: var(--accent);
+    }
+    .tracker-setup h2 {
+        font-family: var(--font-head);
+        font-size: 1rem;
+        color: var(--text);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 0 0 0.5rem;
+    }
+    .tracker-setup p {
         color: var(--text-2);
         font-size: 0.85rem;
-        margin-bottom: 0.5rem;
+        margin: 0 0 0.5rem;
     }
-    .token-reveal .warning {
-        color: var(--warn);
-        font-size: 0.8rem;
-        font-weight: 600;
+    .tracker-setup a {
+        color: var(--accent);
+        font-size: 0.85rem;
     }
-    .token-reveal code {
+    .tracker-setup code {
         display: block;
         background: var(--bg);
         border: 1px solid var(--border);
@@ -64,10 +74,98 @@ const TOKENS_CSS: &str = r#"
         margin: 0.5rem 0;
         user-select: all;
     }
+    .tracker-setup-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-top: 0.75rem;
+    }
 "#;
+
+/// First-run sync setup is documented in the stat-tracker readme (Running).
+const TRACKER_SETUP_DOC_PATH: &str = "crates/stat-tracker/README.md";
+const TRACKER_SETUP_DOC_HREF: &str =
+    "https://github.com/FrozenTear/scuffed-crew/blob/main/crates/stat-tracker/README.md";
+const TRACKER_SETUP_TITLE: &str = "Set up the tracker";
+const TRACKER_SETUP_BODY: &str = "Paste this token into the tracker app's first-run setup, on the Sync step. Copy it right after you create it, since it is shown only once.";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%b %d, %Y %H:%M").to_string()
+}
+
+async fn copy_daemon_token(text: &str) -> Result<(), &'static str> {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let window = web_sys::window().ok_or("no window")?;
+    let navigator = js_sys::Reflect::get(&window, &JsValue::from_str("navigator"))
+        .map_err(|_| "no navigator")?;
+    if navigator.is_null() || navigator.is_undefined() {
+        return Err("no navigator");
+    }
+    let clipboard = js_sys::Reflect::get(&navigator, &JsValue::from_str("clipboard"))
+        .map_err(|_| "no clipboard")?;
+    if clipboard.is_null() || clipboard.is_undefined() {
+        return Err("no clipboard");
+    }
+    let write = js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+        .map_err(|_| "no clipboard")?;
+    let write = write
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "no clipboard")?;
+    let promise = write
+        .call1(&clipboard, &JsValue::from_str(text))
+        .map_err(|_| "copy failed")?;
+    let promise = promise
+        .dyn_into::<js_sys::Promise>()
+        .map_err(|_| "copy failed")?;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|_| "copy failed")?;
+    Ok(())
+}
+
+#[component]
+fn TrackerSetupBox(
+    token: Option<String>,
+    on_copy: EventHandler<MouseEvent>,
+    on_dismiss: EventHandler<MouseEvent>,
+) -> Element {
+    let class = if token.is_some() {
+        "tracker-setup has-token"
+    } else {
+        "tracker-setup"
+    };
+    rsx! {
+        div { class: "{class}",
+            h2 { "{TRACKER_SETUP_TITLE}" }
+            p { "{TRACKER_SETUP_BODY}" }
+            p {
+                a {
+                    href: "{TRACKER_SETUP_DOC_HREF}",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    "Stat tracker setup"
+                }
+            }
+            if let Some(raw) = token {
+                p { "Your new token:" }
+                code { "{raw}" }
+                div { class: "tracker-setup-actions",
+                    button {
+                        class: "btn-add",
+                        onclick: move |evt| on_copy.call(evt),
+                        "Copy"
+                    }
+                    button {
+                        class: "btn-cancel",
+                        onclick: move |evt| on_dismiss.call(evt),
+                        "Dismiss"
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -118,6 +216,23 @@ pub fn StatsTokens() -> Element {
         });
     };
 
+    let on_copy = move |_: MouseEvent| {
+        let Some(raw) = revealed_token() else {
+            return;
+        };
+        spawn(async move {
+            if copy_daemon_token(&raw).await.is_ok() {
+                toast.show(Toast::success("Token copied."));
+            } else {
+                toast.show(Toast::error("Could not copy the token."));
+            }
+        });
+    };
+
+    let on_dismiss = move |_: MouseEvent| {
+        revealed_token.set(None);
+    };
+
     let on_revoke = move |token_id: String| {
         spawn(async move {
             let result = ApiClient::web()
@@ -145,17 +260,10 @@ pub fn StatsTokens() -> Element {
                 button { class: "btn-add", onclick: open_create, "+ New Token" }
             }
 
-            if let Some(raw) = revealed_token() {
-                div { class: "token-reveal",
-                    p { "Your new token:" }
-                    code { "{raw}" }
-                    p { class: "warning", "Copy this now — it will not be shown again." }
-                    button {
-                        class: "btn-cancel",
-                        onclick: move |_| revealed_token.set(None),
-                        "Dismiss"
-                    }
-                }
+            TrackerSetupBox {
+                token: revealed_token(),
+                on_copy: on_copy,
+                on_dismiss: on_dismiss,
             }
 
             {
@@ -222,5 +330,77 @@ pub fn StatsTokens() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn assert_plain_copy(text: &str) {
+        assert!(!text.contains('\u{2014}'), "em dash in {text}");
+        assert!(!text.contains('\u{2013}'), "en dash in {text}");
+    }
+
+    #[test]
+    fn setup_copy_points_at_the_stat_tracker_readme() {
+        assert_eq!(TRACKER_SETUP_TITLE, "Set up the tracker");
+        assert!(TRACKER_SETUP_BODY.contains("first-run setup"));
+        assert!(TRACKER_SETUP_BODY.contains("Sync step"));
+        assert_eq!(TRACKER_SETUP_DOC_PATH, "crates/stat-tracker/README.md");
+        assert!(TRACKER_SETUP_DOC_HREF.contains(TRACKER_SETUP_DOC_PATH));
+        assert_plain_copy(TRACKER_SETUP_TITLE);
+        assert_plain_copy(TRACKER_SETUP_BODY);
+        let readme =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../stat-tracker/README.md");
+        assert!(
+            readme.is_file(),
+            "setup doc missing at {}",
+            readme.display()
+        );
+    }
+
+    #[test]
+    fn setup_box_hides_copy_until_a_token_exists() {
+        fn view() -> Element {
+            rsx! {
+                TrackerSetupBox {
+                    token: None,
+                    on_copy: |_| {},
+                    on_dismiss: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("Set up the tracker"), "{html}");
+        assert!(html.contains("first-run setup"), "{html}");
+        assert!(html.contains("Sync step"), "{html}");
+        assert!(html.contains(TRACKER_SETUP_DOC_PATH), "{html}");
+        assert!(!html.contains(">Copy</button>"), "{html}");
+        assert_plain_copy(&html);
+    }
+
+    #[test]
+    fn setup_box_offers_copy_for_a_new_token() {
+        fn view() -> Element {
+            rsx! {
+                TrackerSetupBox {
+                    token: Some("sst_test_token".to_string()),
+                    on_copy: |_| {},
+                    on_dismiss: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("sst_test_token"), "{html}");
+        assert!(html.contains(">Copy</button>"), "{html}");
+        assert!(html.contains(TRACKER_SETUP_DOC_PATH), "{html}");
+        assert_plain_copy(&html);
     }
 }
