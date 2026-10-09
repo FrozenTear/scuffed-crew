@@ -5544,7 +5544,15 @@ where
     let claims = storage::SyncClaim::capture(&unsynced);
     let mut newest_first = unsynced;
     newest_first.reverse(); // get_unsynced is played_at ASC
-    let to_upload = storage::latest_per_game(newest_first);
+    let staged = storage::latest_per_game(newest_first);
+    let (review_held, to_upload): (Vec<_>, Vec<_>) =
+        staged.into_iter().partition(sync::row_needs_review);
+    if !review_held.is_empty() {
+        tracing::info!(games = review_held.len(), "held games for review, not sent");
+    }
+    if to_upload.is_empty() && tombstones.is_empty() {
+        return sync::SyncAttempt::NoServerCall;
+    }
     tracing::info!(
         rows = claims.len(),
         games = to_upload.len(),
@@ -7601,6 +7609,97 @@ mod tests {
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn blank_map_and_unknown_hero_stay_local_until_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut missed_map = test_match("held-map", "victory");
+        missed_map.map_name.clear();
+        missed_map.game_mode.clear();
+        store.insert_match(missed_map).await.unwrap();
+        let mut unknown_hero = test_match("held-hero", "victory");
+        unknown_hero.hero = "Unknown".into();
+        store.insert_match(unknown_hero).await.unwrap();
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let calls_bg = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            *calls_bg.lock().unwrap() += 1;
+            async { Ok(upload_ok()) }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::NoServerCall));
+        assert_eq!(*calls.lock().unwrap(), 0);
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| !row.synced)
+        );
+
+        store
+            .edit_match(
+                "held-map",
+                &storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .edit_match(
+                "held-hero",
+                &storage::MatchEdit {
+                    hero: Some("Ana".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_bg = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_bg = std::sync::Arc::clone(&seen_bg);
+            async move {
+                seen_bg.lock().unwrap().extend(matches);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let got = seen.lock().unwrap().clone();
+        let body = serde_json::to_string(&sync::upload_request(&got, &[])).unwrap();
+        assert!(!body.contains("\"map_name\":\"\""));
+        assert!(!body.contains("\"game_mode\":\"\""));
+        assert!(!body.contains("Unknown"));
+        let parsed: scuffed_types::api::StatsUploadRequest = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.matches.len(), 2);
+        assert!(
+            parsed
+                .matches
+                .iter()
+                .any(|m| m.map_name == "King's Row" && m.game_mode == "Hybrid" && m.hero == "Ana")
+        );
+        assert!(
+            parsed
+                .matches
+                .iter()
+                .any(|m| m.map_name == "Busan" && m.game_mode == "Control" && m.hero == "Ana")
+        );
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.synced)
+        );
     }
 
     /// Shadow mode is log only: the same capture stored and uploaded with the

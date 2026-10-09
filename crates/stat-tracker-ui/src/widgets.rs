@@ -313,7 +313,7 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     };
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.display_map())
             .size(SIZE_FEATURED)
             .font(FONT_EXTRABOLD)
             .color(TEXT),
@@ -354,7 +354,7 @@ pub fn compact_game_card_clickable(game: &Game, selected: bool) -> Element<'stat
 fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Message> {
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.display_map())
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
@@ -638,7 +638,7 @@ pub fn expanded_game_card<'a>(
     let sid = game.session_id.clone();
     let mut body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.display_map())
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
@@ -655,6 +655,10 @@ pub fn expanded_game_card<'a>(
         action_row(game, editing, confirm_delete),
     ]
     .spacing(10);
+
+    if game.needs_review() {
+        body = body.push(review_panel(game));
+    }
 
     if let Some(message) = game.upload_reject.as_deref() {
         body = body.push(upload_rejected_panel(game.session_id.clone(), message));
@@ -869,10 +873,70 @@ fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Ele
     .into()
 }
 
+fn review_panel(game: &Game) -> Element<'static, Message> {
+    let fields = game.review_fields();
+    let mut col = column![
+        text("Needs review. This game stays on this machine until you pick the missing fields.")
+            .size(SIZE_BODY)
+            .font(FONT_MEDIUM)
+            .color(theme::WARN),
+    ]
+    .spacing(8)
+    .width(Fill);
+
+    if fields
+        .iter()
+        .any(|field| *field == "map" || *field == "mode")
+    {
+        col = col.push(label_text("Pick a map"));
+        col = col.push(
+            text("Mode follows the map.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in stat_tracker::parse::known_map_names() {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                name.to_string(),
+                game.map_name == name,
+                Message::PickMap {
+                    session_id: sid,
+                    map: name.to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    if fields.contains(&"hero") {
+        col = col.push(label_text("Pick a hero"));
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in scuffed_types::HEROES {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                (*name).to_string(),
+                game.hero == *name,
+                Message::PickHero {
+                    session_id: sid,
+                    hero: (*name).to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    col.into()
+}
+
 fn role_and_edited(game: &Game) -> Element<'static, Message> {
     let mut r = row![label_text(game.role.label())]
         .spacing(8)
         .align_y(Alignment::Center);
+    if game.needs_review() {
+        r = r.push(status_chip("needs review", theme::WARN));
+    }
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
     }

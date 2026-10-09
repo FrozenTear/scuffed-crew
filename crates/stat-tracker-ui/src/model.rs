@@ -272,6 +272,27 @@ impl Game {
         display_hero_name(&self.hero)
     }
 
+    /// Title for a missing map. The stored string stays empty so a blank
+    /// read is not shown as a map name.
+    pub fn display_map(&self) -> String {
+        let trimmed = self.map_name.trim();
+        if trimmed.is_empty() {
+            "Map needed".into()
+        } else {
+            self.map_name.clone()
+        }
+    }
+
+    /// `map`, `mode`, and `hero` names from the server suspect list.
+    /// Empty when this game can be uploaded.
+    pub fn review_fields(&self) -> Vec<&'static str> {
+        stat_tracker::parse::review_suspect_fields(&self.map_name, "", &self.hero)
+    }
+
+    pub fn needs_review(&self) -> bool {
+        !self.review_fields().is_empty()
+    }
+
     pub fn has_stat_line(&self) -> bool {
         self.elims + self.deaths + self.assists + self.damage + self.healing + self.mitigation > 0
     }
@@ -415,6 +436,51 @@ mod tests {
         assert_eq!(display_hero_name("Unknown"), "Unknown hero");
         assert_eq!(display_hero_name("unknown"), "Unknown hero");
         assert_eq!(display_hero_name("Ana"), "Ana");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::{Game, GameOcr, Outcome, Role};
+    use chrono::Utc;
+
+    fn game(hero: &str, map: &str) -> Game {
+        Game {
+            session_id: "s".into(),
+            hero: hero.into(),
+            map_name: map.into(),
+            role: Role::Support,
+            outcome: Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+        }
+    }
+
+    #[test]
+    fn blank_map_and_unknown_hero_need_a_pick() {
+        let blank = game("Ana", "");
+        assert_eq!(blank.display_map(), "Map needed");
+        assert_eq!(blank.review_fields(), vec!["map", "mode"]);
+        assert!(blank.needs_review());
+
+        let unknown = game("Unknown", "Busan");
+        assert_eq!(unknown.review_fields(), vec!["hero"]);
+        assert!(unknown.needs_review());
+
+        let ready = game("Ana", "King's Row");
+        assert!(ready.review_fields().is_empty());
+        assert!(!ready.needs_review());
+        assert_eq!(ready.display_map(), "King's Row");
     }
 }
 
