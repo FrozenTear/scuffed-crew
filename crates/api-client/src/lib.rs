@@ -14,8 +14,8 @@ pub enum ClientError {
 
 /// HTTP failure that keeps `Retry-After` separate from the body.
 ///
-/// Link sign-in uses this so a 429 can quote the header and ignore the
-/// response text. Other callers keep [`ClientError`].
+/// Link sign-in uses this so a 429 can fall back to `Retry-After` when the
+/// JSON body has no usable `retry_after`. Other callers keep [`ClientError`].
 #[derive(Debug)]
 pub enum ObservedError {
     Http {

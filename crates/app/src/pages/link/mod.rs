@@ -18,8 +18,8 @@ use api::LinkCallError;
 /// Shown for a wrong, expired, or already-used code. Those cases stay identical.
 pub const CODE_DIDNT_WORK: &str = "That code didn't work. Check the app and try again.";
 
-/// Plain-language 429 when the server sent no `Retry-After` header.
-pub const RATE_LIMITED: &str = "Too many tries. Wait a moment and try again.";
+/// 429 with no usable wait. Same sentence as [`scuffed_types::TRY_AGAIN_LATER`].
+pub const RATE_LIMITED: &str = scuffed_types::TRY_AGAIN_LATER;
 
 pub const NOT_A_MEMBER: &str = "You need to be an org member to link a device.";
 
@@ -43,9 +43,6 @@ pub const LINK_STEP_ENTER: &str = "link-step-enter";
 pub const LINK_STEP_CONFIRM: &str = "link-step-confirm";
 pub const LINK_STEP_APPROVED: &str = "link-step-approved";
 pub const LINK_STEP_DENIED: &str = "link-step-denied";
-
-/// Waits longer than this, or a missing header, use the plain 429 sentence.
-const RETRY_AFTER_CAP_SECS: u64 = 3600;
 
 const RETURN_STORAGE_KEY: &str = "scuffed.return-to-link";
 const RETURN_STORAGE_VALUE: &str = "1";
@@ -162,34 +159,28 @@ fn is_rejected_code(status: u16) -> bool {
     matches!(status, 400 | 404 | 409 | 410)
 }
 
-/// Seconds from a `Retry-After` delay or HTTP-date.
+/// Seconds from a `Retry-After` delay-seconds header.
 ///
-/// `scuffed_types` has no `json_retry_after` on this branch, so the wrong-code
-/// 429 is read from this header. The JSON body is not parsed for a wait.
-/// `None` means missing, unreadable, or longer than [`RETRY_AFTER_CAP_SECS`].
-pub fn retry_after_seconds(
-    header: Option<&str>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<u64> {
+/// Only `1..=3600`, the same window as [`scuffed_types::json_retry_after`].
+/// An HTTP-date is not read here.
+fn header_retry_after(header: Option<&str>) -> Option<u64> {
     let raw = header?.trim();
-    if raw.is_empty() {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let secs = if raw.bytes().all(|byte| byte.is_ascii_digit()) {
-        raw.parse().ok()?
-    } else {
-        let when = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
-        let delta = when.with_timezone(&chrono::Utc) - now;
-        u64::try_from(delta.num_seconds().max(1)).unwrap_or(u64::MAX)
-    };
-    let secs = secs.max(1);
-    (secs <= RETRY_AFTER_CAP_SECS).then_some(secs)
+    let secs: u64 = raw.parse().ok()?;
+    (1..=3600).contains(&secs).then_some(secs)
 }
 
-pub fn rate_limit_message_at(header: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
-    match retry_after_seconds(header, now) {
-        Some(1) => "Too many tries. Try again in 1 second.".to_string(),
-        Some(secs) => format!("Too many tries. Try again in {secs} seconds."),
+/// JSON `retry_after` first, then the `Retry-After` header.
+fn link_wait_seconds(body: &str, header: Option<&str>) -> Option<u64> {
+    scuffed_types::json_retry_after(body).or_else(|| header_retry_after(header))
+}
+
+pub fn rate_limit_message(body: &str, header: Option<&str>) -> String {
+    match link_wait_seconds(body, header) {
+        Some(1) => "Try again in 1 second.".to_string(),
+        Some(secs) => format!("Try again in {secs} seconds."),
         None => RATE_LIMITED.to_string(),
     }
 }
@@ -242,11 +233,7 @@ fn json_error_is(body: &str, code: &str) -> bool {
         .is_some_and(|found| found == code)
 }
 
-pub fn rate_limit_message(header: Option<&str>) -> String {
-    rate_limit_message_at(header, chrono::Utc::now())
-}
-
-/// A 403 `bad_origin` is its own sentence. A 429 uses `retry_after`, not the payload.
+/// A 403 `bad_origin` is its own sentence. A 429 uses the JSON wait, then the header.
 pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -> UserNotice {
     match status {
         Some(401) => UserNotice::SignIn,
@@ -254,7 +241,7 @@ pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -
             UserNotice::Text(ORIGIN_UNCONFIRMED.to_string())
         }
         Some(403) => UserNotice::Text(NOT_A_MEMBER.to_string()),
-        Some(429) => UserNotice::Text(rate_limit_message(retry_after)),
+        Some(429) => UserNotice::Text(rate_limit_message(body, retry_after)),
         Some(status) if is_rejected_code(status) => {
             UserNotice::Text(message_for_code_problem("invalid code").to_string())
         }
@@ -886,9 +873,10 @@ mod tests {
                 r#"{"error":"rate_limited","retry_after":90}"#,
                 None
             ),
-            UserNotice::Text(RATE_LIMITED.to_string())
+            UserNotice::Text("Try again in 90 seconds.".to_string())
         );
-        assert_eq!(RATE_LIMITED, "Too many tries. Wait a moment and try again.");
+        assert_eq!(RATE_LIMITED, "Too many requests. Try again later.");
+        assert_eq!(RATE_LIMITED, scuffed_types::TRY_AGAIN_LATER);
         assert!(!RATE_LIMITED.chars().any(|c| c.is_ascii_digit()));
         assert_ne!(
             user_notice(Some(429), "expired", None),
@@ -897,27 +885,53 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_uses_retry_after_and_ignores_the_body() {
-        let header = user_notice(
+    fn rate_limit_prefers_json_retry_after_then_the_header() {
+        let json_first = user_notice(
             Some(429),
             r#"{"error":"rate_limited","retry_after":9}"#,
             Some("90"),
         );
         assert_eq!(
-            header,
-            UserNotice::Text("Too many tries. Try again in 90 seconds.".to_string())
+            json_first,
+            UserNotice::Text("Try again in 9 seconds.".to_string())
         );
-        let shown = match header {
+        let shown = match json_first {
             UserNotice::Text(text) => text,
             UserNotice::SignIn => panic!("429 is not a sign-in"),
         };
+        assert!(!shown.contains("90"));
         assert!(!shown.contains("rate_limited"));
         assert!(!shown.contains("retry_after"));
+
+        assert_eq!(
+            user_notice(
+                Some(429),
+                r#"{"error":"rate_limited","retry_after":" 4 "}"#,
+                None
+            ),
+            UserNotice::Text("Try again in 4 seconds.".to_string())
+        );
+        assert_eq!(
+            user_notice(
+                Some(429),
+                r#"{"error":"rate_limited","retry_after":1}"#,
+                None
+            ),
+            UserNotice::Text("Try again in 1 second.".to_string())
+        );
+        assert_eq!(
+            user_notice(
+                Some(429),
+                r#"{"error":"too many login attempts","retry_after":9}"#,
+                Some("3")
+            ),
+            UserNotice::Text("Try again in 3 seconds.".to_string())
+        );
 
         let governor = user_notice(Some(429), "Too Many Requests! Wait for 9s", Some("2"));
         assert_eq!(
             governor,
-            UserNotice::Text("Too many tries. Try again in 2 seconds.".to_string())
+            UserNotice::Text("Try again in 2 seconds.".to_string())
         );
         let governor_text = match governor {
             UserNotice::Text(text) => text,
@@ -930,35 +944,30 @@ mod tests {
             user_notice(Some(429), "Too Many Requests! Wait for 9s", None),
             UserNotice::Text(RATE_LIMITED.to_string())
         );
-        assert_eq!(retry_after_seconds(Some("0"), chrono::Utc::now()), Some(1));
         assert_eq!(
-            rate_limit_message(Some("  45  ")),
-            "Too many tries. Try again in 45 seconds."
+            rate_limit_message("", Some("  45  ")),
+            "Try again in 45 seconds."
+        );
+        assert_eq!(rate_limit_message("", Some("1")), "Try again in 1 second.");
+        assert_eq!(
+            rate_limit_message("", Some("3600")),
+            "Try again in 3600 seconds."
+        );
+        assert_eq!(rate_limit_message("", Some("3601")), RATE_LIMITED);
+        assert_eq!(rate_limit_message("", Some("0")), RATE_LIMITED);
+        assert_eq!(
+            rate_limit_message("", Some("Fri, 09 Oct 2026 13:00:30 GMT")),
+            RATE_LIMITED
         );
         assert_eq!(
-            rate_limit_message(Some("1")),
-            "Too many tries. Try again in 1 second."
+            user_notice(
+                Some(429),
+                r#"{"error":"rate_limited","retry_after":3601}"#,
+                None
+            ),
+            UserNotice::Text(RATE_LIMITED.to_string())
         );
-        assert_eq!(
-            rate_limit_message(Some("3600")),
-            "Too many tries. Try again in 3600 seconds."
-        );
-        assert_eq!(rate_limit_message(Some("3601")), RATE_LIMITED);
-        assert_eq!(retry_after_seconds(Some("3601"), chrono::Utc::now()), None);
-        assert_eq!(rate_limit_message(None), RATE_LIMITED);
-
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-09T13:00:00Z")
-            .expect("now")
-            .with_timezone(&chrono::Utc);
-        let when = "Fri, 09 Oct 2026 13:00:30 GMT";
-        assert_eq!(retry_after_seconds(Some(when), now), Some(30));
-        assert_eq!(
-            rate_limit_message_at(Some(when), now),
-            "Too many tries. Try again in 30 seconds."
-        );
-        let far = "Fri, 09 Oct 2026 15:00:01 GMT";
-        assert_eq!(retry_after_seconds(Some(far), now), None);
-        assert_eq!(rate_limit_message_at(Some(far), now), RATE_LIMITED);
+        assert_eq!(rate_limit_message("", None), RATE_LIMITED);
     }
 
     fn render_entry(root: fn() -> Element) -> String {
@@ -1135,9 +1144,9 @@ mod tests {
             COULD_NOT_REACH,
             APPROVED_COPY,
             DENIED_COPY,
-            "Too many tries. Try again in 90 seconds.",
-            "Too many tries. Try again in 1 second.",
-            "Too many tries. Try again in 3600 seconds.",
+            "Try again in 90 seconds.",
+            "Try again in 1 second.",
+            "Try again in 3600 seconds.",
             "Enter the code from the app.",
         ] {
             assert!(!text.contains('\u{2014}'), "{text}");
