@@ -204,6 +204,20 @@ fn destination_after_sign_in(is_member: bool, return_to_link: bool) -> Route {
     }
 }
 
+/// Read the `/link` return, then clear it.
+///
+/// `honor_link_return` is false for a sign-in that never goes back to `/link`
+/// (register). That still clears a flag left in the tab.
+fn route_after_credentials(is_member: bool, honor_link_return: bool) -> Route {
+    let return_to_link = if honor_link_return {
+        super::link::take_return_to_link()
+    } else {
+        false
+    };
+    super::link::clear_return_to_link();
+    destination_after_sign_in(is_member, return_to_link)
+}
+
 /// Banner for a browser URL in the shape `history.current_route()` returns
 /// (`pathname` + `search` + `hash`). Only the login route is considered.
 ///
@@ -368,23 +382,18 @@ pub fn Login() -> Element {
                 .await
             {
                 Ok(_) => {
-                    // Take the flag before auth updates, so the app effect
-                    // cannot spend it on a full-page jump.
-                    let return_to_link = super::link::take_return_to_link();
-                    match client.get_me().await {
-                        Ok(me) => {
-                            let is_member = me.member.is_some();
-                            auth.set(AuthState {
-                                user: Some(me_to_user_info(&me)),
-                                loading: false,
-                            });
-                            // Align with register / Nostr: bare accounts go to Apply.
-                            nav.replace(destination_after_sign_in(is_member, return_to_link));
-                        }
-                        Err(_) => {
-                            nav.replace(destination_after_sign_in(true, return_to_link));
-                        }
+                    let me = client.get_me().await;
+                    let is_member = me.as_ref().map(|me| me.member.is_some()).unwrap_or(true);
+                    // Take and clear before auth updates, so the app effect
+                    // cannot spend a stale flag on a full-page jump.
+                    let route = route_after_credentials(is_member, true);
+                    if let Ok(me) = me {
+                        auth.set(AuthState {
+                            user: Some(me_to_user_info(&me)),
+                            loading: false,
+                        });
                     }
+                    nav.replace(route);
                 }
                 Err(_) => {
                     error.set(Some("Invalid username or password".into()));
@@ -424,14 +433,16 @@ pub fn Login() -> Element {
                 .await
             {
                 Ok(_) => {
+                    // Register never returns to `/link`. Drop a flag left in the tab
+                    // before auth updates, or the app effect would follow it.
+                    let route = route_after_credentials(false, false);
                     if let Ok(me) = client.get_me().await {
                         auth.set(AuthState {
                             user: Some(me_to_user_info(&me)),
                             loading: false,
                         });
                     }
-                    // New accounts exist to join — funnel straight to the application.
-                    nav.replace(Route::Apply {});
+                    nav.replace(route);
                 }
                 Err(e) => {
                     error.set(Some(match e {
@@ -461,21 +472,16 @@ pub fn Login() -> Element {
             match nostr_login_flow().await {
                 Ok(()) => {
                     let client = ApiClient::web();
-                    let return_to_link = super::link::take_return_to_link();
-                    match client.get_me().await {
-                        Ok(me) => {
-                            let is_member = me.member.is_some();
-                            auth.set(AuthState {
-                                user: Some(me_to_user_info(&me)),
-                                loading: false,
-                            });
-                            // New/bare users go straight to the application funnel.
-                            nav.replace(destination_after_sign_in(is_member, return_to_link));
-                        }
-                        Err(_) => {
-                            nav.replace(destination_after_sign_in(true, return_to_link));
-                        }
+                    let me = client.get_me().await;
+                    let is_member = me.as_ref().map(|me| me.member.is_some()).unwrap_or(true);
+                    let route = route_after_credentials(is_member, true);
+                    if let Ok(me) = me {
+                        auth.set(AuthState {
+                            user: Some(me_to_user_info(&me)),
+                            loading: false,
+                        });
                     }
+                    nav.replace(route);
                 }
                 Err(msg) => {
                     error.set(Some(msg));
@@ -751,6 +757,31 @@ mod tests {
         assert!(!Route::LinkDevice {}.to_string().contains('?'));
         assert_eq!(destination_after_sign_in(true, false), Route::Home {});
         assert_eq!(destination_after_sign_in(false, false), Route::Apply {});
+    }
+
+    #[test]
+    fn sign_in_clears_the_link_flag_when_it_is_used_or_skipped() {
+        super::super::link::clear_return_to_link();
+
+        super::super::link::arm_return_to_link();
+        assert!(super::super::link::return_to_link_pending());
+        assert_eq!(route_after_credentials(true, true), Route::LinkDevice {});
+        assert!(
+            !super::super::link::return_to_link_pending(),
+            "following /link consumes the flag"
+        );
+
+        super::super::link::arm_return_to_link();
+        assert_eq!(route_after_credentials(true, false), Route::Home {});
+        assert!(
+            !super::super::link::return_to_link_pending(),
+            "a sign-in that stays off /link drops the flag"
+        );
+
+        super::super::link::arm_return_to_link();
+        assert_eq!(route_after_credentials(false, false), Route::Apply {});
+        assert!(!super::super::link::return_to_link_pending());
+        assert!(!Route::Apply {}.to_string().contains('?'));
     }
 
     #[test]

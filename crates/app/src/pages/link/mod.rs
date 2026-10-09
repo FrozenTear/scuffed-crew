@@ -52,6 +52,9 @@ const RETURN_STORAGE_VALUE: &str = "1";
 
 thread_local! {
     static RETURN_TO_LINK: Cell<bool> = const { Cell::new(false) };
+    /// Session copy of the return flag. Host tests read this. Wasm also writes
+    /// `sessionStorage`, which is cleared through the same path.
+    static STORED_RETURN_TO_LINK: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Uppercase and drop whitespace. Hyphens stay.
@@ -192,11 +195,12 @@ pub fn rate_limit_message_at(header: Option<&str>, now: chrono::DateTime<chrono:
 }
 
 /// `aria-invalid` and `aria-describedby` for the code field.
-pub fn code_field_aria(has_error: bool) -> (&'static str, Option<&'static str>) {
+/// Both are omitted when the field has no error.
+pub fn code_field_aria(has_error: bool) -> (Option<&'static str>, Option<&'static str>) {
     if has_error {
-        ("true", Some(LINK_ERROR_ID))
+        (Some("true"), Some(LINK_ERROR_ID))
     } else {
-        ("false", None)
+        (None, None)
     }
 }
 
@@ -295,10 +299,22 @@ pub(crate) fn arm_return_to_link() {
 
 pub(crate) fn take_return_to_link() -> bool {
     let memory = RETURN_TO_LINK.with(|flag| flag.replace(false));
-    memory || take_stored_return_flag()
+    let stored = take_stored_return_flag();
+    memory || stored
+}
+
+/// Drop a pending `/link` return without following it.
+pub(crate) fn clear_return_to_link() {
+    RETURN_TO_LINK.with(|flag| flag.set(false));
+    let _ = take_stored_return_flag();
+}
+
+pub(crate) fn return_to_link_pending() -> bool {
+    RETURN_TO_LINK.with(|flag| flag.get()) || STORED_RETURN_TO_LINK.with(|flag| flag.get())
 }
 
 fn store_return_flag() {
+    STORED_RETURN_TO_LINK.with(|flag| flag.set(true));
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
         if let Some(storage) = session_storage() {
@@ -308,6 +324,11 @@ fn store_return_flag() {
 }
 
 fn take_stored_return_flag() -> bool {
+    let mirrored = STORED_RETURN_TO_LINK.with(|flag| flag.replace(false));
+    mirrored || take_browser_return_flag()
+}
+
+fn take_browser_return_flag() -> bool {
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
         let Some(storage) = session_storage() else {
@@ -598,9 +619,6 @@ pub fn LinkDevice() -> Element {
         });
     };
 
-    let has_error = notice().is_some();
-    let (code_invalid, code_described_by) = code_field_aria(has_error);
-
     rsx! {
         style { {CSS} }
         div { class: "link-page",
@@ -608,44 +626,12 @@ pub fn LinkDevice() -> Element {
                 h1 { "Link the stat tracker" }
                 match step() {
                     LinkStep::Enter => rsx! {
-                        h2 {
-                            id: LINK_STEP_ENTER,
-                            class: "link-step",
-                            tabindex: "-1",
-                            "Type the short code shown in the app."
-                        }
-                        if let Some(text) = notice() {
-                            p {
-                                id: LINK_ERROR_ID,
-                                class: "link-error",
-                                role: "alert",
-                                "{text}"
-                            }
-                        }
-                        form { onsubmit: on_lookup,
-                            div { class: "link-field",
-                                label { r#for: "link-code", "Device code" }
-                                input {
-                                    id: "link-code",
-                                    name: "link-code",
-                                    r#type: "text",
-                                    autocomplete: "off",
-                                    autocapitalize: "characters",
-                                    spellcheck: false,
-                                    maxlength: 32,
-                                    value: "{code}",
-                                    disabled: busy(),
-                                    aria_invalid: code_invalid,
-                                    aria_describedby: code_described_by,
-                                    oninput: move |e| code.set(e.value()),
-                                }
-                            }
-                            button {
-                                class: "ui-btn ui-btn--primary ui-btn--md",
-                                r#type: "submit",
-                                disabled: busy(),
-                                if busy() { "Checking the code." } else { "Continue" }
-                            }
+                        LinkCodeEntry {
+                            code: code(),
+                            notice: notice(),
+                            busy: busy(),
+                            on_lookup: on_lookup,
+                            on_code: move |value| code.set(value),
                         }
                     },
                     LinkStep::Confirm { code: shown } => rsx! {
@@ -717,6 +703,60 @@ pub fn LinkDevice() -> Element {
                         }
                     },
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn LinkCodeEntry(
+    code: String,
+    notice: Option<String>,
+    busy: bool,
+    on_lookup: EventHandler<Event<FormData>>,
+    on_code: EventHandler<String>,
+) -> Element {
+    let has_error = notice.is_some();
+    let (code_invalid, code_described_by) = code_field_aria(has_error);
+    rsx! {
+        h2 {
+            id: LINK_STEP_ENTER,
+            class: "link-step",
+            tabindex: "-1",
+            "Type the short code shown in the app."
+        }
+        if let Some(text) = notice {
+            p {
+                id: LINK_ERROR_ID,
+                class: "link-error",
+                role: "alert",
+                "{text}"
+            }
+        }
+        form {
+            onsubmit: move |evt| on_lookup.call(evt),
+            div { class: "link-field",
+                label { r#for: "link-code", "Device code" }
+                input {
+                    id: "link-code",
+                    name: "link-code",
+                    r#type: "text",
+                    autocomplete: "off",
+                    autocapitalize: "characters",
+                    spellcheck: false,
+                    maxlength: 32,
+                    value: "{code}",
+                    disabled: busy,
+                    aria_invalid: code_invalid,
+                    aria_describedby: code_described_by,
+                    oninput: move |evt| on_code.call(evt.value()),
+                }
+            }
+            button {
+                class: "ui-btn ui-btn--primary ui-btn--md",
+                r#type: "submit",
+                disabled: busy,
+                if busy { "Checking the code." } else { "Continue" }
             }
         }
     }
@@ -920,11 +960,83 @@ mod tests {
         assert_eq!(rate_limit_message_at(Some(far), now), RATE_LIMITED);
     }
 
+    fn render_entry(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn error_entry() -> Element {
+        rsx! {
+            LinkCodeEntry {
+                code: "ABCD".to_string(),
+                notice: Some("Enter the code from the app.".to_string()),
+                busy: false,
+                on_lookup: |_| {},
+                on_code: |_| {},
+            }
+        }
+    }
+
+    fn clean_entry() -> Element {
+        rsx! {
+            LinkCodeEntry {
+                code: "ABCD".to_string(),
+                notice: None,
+                busy: false,
+                on_lookup: |_| {},
+                on_code: |_| {},
+            }
+        }
+    }
+
     #[test]
-    fn errors_are_alerts_and_steps_take_focus() {
-        assert_eq!(code_field_aria(true), ("true", Some(LINK_ERROR_ID)));
-        assert_eq!(code_field_aria(false), ("false", None));
-        assert_eq!(LINK_ERROR_ID, "link-code-error");
+    fn error_state_exposes_alert_and_invalid_code_field() {
+        let html = render_entry(error_entry);
+        assert!(html.contains("role=\"alert\""), "{html}");
+        assert!(html.contains("id=\"link-code-error\""), "{html}");
+        assert!(
+            html.contains("aria-invalid=\"true\""),
+            "the code field is invalid while an error is showing: {html}"
+        );
+        assert!(
+            html.contains("aria-describedby=\"link-code-error\""),
+            "the input points at the error: {html}"
+        );
+        let input = html
+            .split("<input")
+            .nth(1)
+            .expect("code input")
+            .split('>')
+            .next()
+            .expect("input tag");
+        assert!(
+            input.contains("aria-invalid=\"true\""),
+            "aria-invalid belongs on the input: {input}"
+        );
+        assert!(
+            input.contains("aria-describedby=\"link-code-error\""),
+            "aria-describedby belongs on the input: {input}"
+        );
+    }
+
+    #[test]
+    fn clean_code_field_omits_aria_invalid() {
+        let html = render_entry(clean_entry);
+        assert!(!html.contains("role=\"alert\""), "{html}");
+        assert!(
+            !html.contains("aria-invalid"),
+            "a valid field omits aria-invalid: {html}"
+        );
+        assert!(
+            !html.contains("aria-describedby"),
+            "a valid field has no error to describe: {html}"
+        );
+        assert!(html.contains("id=\"link-code\""), "{html}");
+    }
+
+    #[test]
+    fn steps_take_focus_on_their_heading() {
         assert_eq!(step_focus_id(&LinkStep::Enter), LINK_STEP_ENTER);
         assert_eq!(
             step_focus_id(&LinkStep::Confirm {
@@ -935,14 +1047,6 @@ mod tests {
         assert_eq!(step_focus_id(&LinkStep::Approved), LINK_STEP_APPROVED);
         assert_eq!(step_focus_id(&LinkStep::Denied), LINK_STEP_DENIED);
         assert_ne!(LINK_STEP_ENTER, LINK_STEP_CONFIRM);
-
-        let src = include_str!("mod.rs");
-        assert!(src.contains("role: \"alert\""));
-        assert!(src.contains("aria_invalid: code_invalid"));
-        assert!(src.contains("aria_describedby: code_described_by"));
-        assert!(src.contains("tabindex: \"-1\""));
-        assert!(src.contains("focus_link_step"));
-        assert!(src.contains("id: LINK_ERROR_ID"));
     }
 
     #[test]
@@ -1042,9 +1146,16 @@ mod tests {
 
     #[test]
     fn return_flag_round_trip_stores_no_code() {
+        clear_return_to_link();
+        assert!(!return_to_link_pending());
         assert!(!take_return_to_link());
         arm_return_to_link();
+        assert!(return_to_link_pending());
         assert!(take_return_to_link());
+        assert!(
+            !return_to_link_pending(),
+            "consuming the flag clears the session copy too"
+        );
         assert!(!take_return_to_link());
     }
 }
