@@ -234,14 +234,40 @@ pub struct PortraitRect {
     pub h: u32,
 }
 
+/// 2560x1440 scoreboard crop width (`crop_scoreboard` on a 16:9 frame).
+///
+/// The row grid below was measured on that crop (1664x1007). Crop width
+/// scales with the frame (1664 at 1440p, 1248 at 1080p). Crop height does
+/// not: `1440 * 0.70` truncates to 1007, while `1080 * 0.70` is 756. A
+/// height pitch (`h * 58 / 1000`, then times the row index) drops the
+/// leftover fraction on every row, so the last 1080p portrait sits 5px
+/// (5v5) or 6px (6v6) above the same row on the 1440p grid. Scaling the
+/// reference rows by width keeps 1440p pixel-identical and lands 1080p on
+/// that grid.
+const PORTRAIT_REF_W: u32 = 1664;
+/// `1007 * 12 / 100` on the 1440p crop.
+const PORTRAIT_REF_START_Y: u32 = 120;
+/// `1007 * 7 / 100` (5v5) and `1007 * 58 / 1000` (6v6).
+const PORTRAIT_REF_PITCH_5: u32 = 70;
+const PORTRAIT_REF_PITCH_6: u32 = 58;
+
+fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
+    let r = PORTRAIT_REF_W as u64;
+    (((ref_px as u64 * board_w as u64) + r / 2) / r) as u32
+}
+
 /// Shared portrait geometry for 5v5 / 6v6 scoreboard crops.
 ///
 /// OW2 Tab scoreboard layout (after `crop_scoreboard`):
 /// - 5 or 6 player rows per team
 /// - Hero portrait at the left edge of each row
 /// - Rows start ~12% from top
-/// - Portrait ~leftmost 5–6% of width, square
+/// - Portrait ~leftmost 5-6% of width, square
 /// - One-row team gap between team 1 and team 2
+///
+/// A rect that would run past the crop is clamped to the crop. The crop
+/// itself is already clamped to the frame in `crop_scoreboard`. Stat and
+/// digit cells use `crop_player_row`, not this grid.
 pub fn portrait_rect(
     scoreboard_dims: (u32, u32),
     row_idx: usize,
@@ -257,24 +283,33 @@ pub fn portrait_rect(
     }
 
     let portrait_w = w * 6 / 100;
-    let portrait_h = portrait_w; // square
     let portrait_x = w / 100;
+    if portrait_x >= w || portrait_w == 0 {
+        return None;
+    }
 
-    // 5v5: rows take ~7% of height each; 6v6: ~5.8% each
-    let row_height = match team_size {
-        6 => h * 58 / 1000,
-        _ => h * 7 / 100,
+    // 5v5: rows take ~7% of the 1440p crop each; 6v6: ~5.8%.
+    // The team gap is one extra row of that pitch.
+    let pitch = if team_size == 6 {
+        PORTRAIT_REF_PITCH_6
+    } else {
+        PORTRAIT_REF_PITCH_5
     };
-    let start_y = h * 12 / 100;
-    // Gap between teams scales with team size (one extra row-height of padding)
-    let team2_offset = row_height * (team_size as u32 + 1);
-
     let team = (row_idx / team_size) as u32;
     let row_in_team = (row_idx % team_size) as u32;
-    let base_y = start_y + if team == 0 { 0 } else { team2_offset };
-    let y = base_y + row_in_team * row_height;
+    let steps = if team == 0 {
+        row_in_team
+    } else {
+        team_size as u32 + 1 + row_in_team
+    };
+    let y = scale_portrait_px(PORTRAIT_REF_START_Y + steps * pitch, w);
+    if y >= h {
+        return None;
+    }
 
-    if y + portrait_h > h || portrait_x + portrait_w > w {
+    let portrait_w = portrait_w.min(w - portrait_x);
+    let portrait_h = portrait_w.min(h - y);
+    if portrait_h == 0 {
         return None;
     }
 
@@ -790,6 +825,64 @@ mod portrait_rect_tests {
         assert!(portrait_rect((0, 1000), 0, 5).is_none());
         assert!(portrait_rect((1000, 0), 0, 5).is_none());
         assert!(portrait_rect((1000, 1000), 0, 0).is_none());
+    }
+
+    /// `crop_scoreboard` on a synthetic 16:9 frame. No game pixels: only the
+    /// rectangle the crop and the portrait grid agree on.
+    fn board_dims(frame_w: u32, frame_h: u32) -> (u32, u32) {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(frame_w, frame_h));
+        let board = crate::ocr::preprocess::crop_scoreboard(&img);
+        (board.width(), board.height())
+    }
+
+    #[test]
+    fn last_1080_portrait_matches_1440_scaled_by_width() {
+        // 2560x1440 -> 1664x1007. 1920x1080 -> 1248x756. Height is not 0.75x
+        // (1007 * 3/4 = 755.25) because `1440 * 0.70` truncates to 1007.
+        let d1440 = board_dims(2560, 1440);
+        let d1080 = board_dims(1920, 1080);
+        assert_eq!(d1440, (1664, 1007));
+        assert_eq!(d1080, (1248, 756));
+
+        // Reference grid, pinned so a 1080 fix cannot slide 1440.
+        assert_eq!(portrait_rect(d1440, 0, 5).unwrap().y, 120);
+        assert_eq!(portrait_rect(d1440, 9, 5).unwrap().y, 820);
+        assert_eq!(portrait_rect(d1440, 0, 6).unwrap().y, 120);
+        assert_eq!(portrait_rect(d1440, 11, 6).unwrap().y, 816);
+
+        // Truncating the height pitch left these 5px and 6px high.
+        assert_eq!(portrait_rect(d1080, 9, 5).unwrap().y, 615);
+        assert_eq!(portrait_rect(d1080, 11, 6).unwrap().y, 612);
+
+        for team in [5usize, 6] {
+            for row in 0..(team * 2) {
+                let src = portrait_rect(d1440, row, team).unwrap();
+                let dst = portrait_rect(d1080, row, team).unwrap();
+                let expect_y = ((src.y as u64 * d1080.0 as u64) + 1664 / 2) / 1664;
+                assert_eq!(
+                    dst.y, expect_y as u32,
+                    "team {team} row {row} must scale with board width"
+                );
+                assert!(
+                    dst.y + dst.h <= d1080.1,
+                    "team {team} row {row} bottom {} past crop {}",
+                    dst.y + dst.h,
+                    d1080.1
+                );
+                assert_eq!(dst.w, dst.h, "team {team} row {row} stays square");
+            }
+        }
+    }
+
+    #[test]
+    fn portrait_rect_clamps_to_the_crop() {
+        // 1440-wide crop, short height: row 0 starts at y=120 and the
+        // square portrait (99px) would run past y=150.
+        let r = portrait_rect((1664, 150), 0, 5).expect("partial row");
+        assert_eq!(r.y, 120);
+        assert_eq!(r.w, 99);
+        assert_eq!(r.h, 30);
+        assert!(portrait_rect((1664, 100), 0, 5).is_none());
     }
 }
 
