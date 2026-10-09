@@ -1121,7 +1121,7 @@ pub fn crop_player_row(
         (1, row_index - team_size)
     };
 
-    let row_h = (team2_start - team1_start) / (team_size as u32 + 1);
+    let row_h = row_slot_height(h, team_size);
 
     let base_y = if team == 0 { team1_start } else { team2_start };
     let y = base_y + (team_row as u32 * row_h);
@@ -1132,6 +1132,17 @@ pub fn crop_player_row(
     }
 
     Some(scoreboard.crop_imm(0, y, w, actual_h))
+}
+
+/// Pixel height of one scoreboard row slot.
+///
+/// The band from the header to team 2, divided into `team_size` rows plus
+/// the one-row gap. [`crop_player_row`] crops with this height. Dividing by
+/// the crop height is the row pitch the team-size check compares.
+pub(crate) fn row_slot_height(crop_h: u32, team_size: usize) -> u32 {
+    let team1_start = (crop_h as f64 * HEADER_RATIO) as u32;
+    let team2_start = (crop_h as f64 * TEAM2_START_RATIO) as u32;
+    (team2_start - team1_start) / (team_size as u32 + 1)
 }
 
 /// Extract a stat cell from a player row using dynamic column boundaries.
