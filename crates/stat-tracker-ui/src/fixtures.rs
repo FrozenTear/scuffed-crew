@@ -89,6 +89,8 @@ fn pm(
         edited_at: None,
         heroes_played: Vec::new(),
         segment_resolutions: Vec::new(),
+        recognizer: String::new(),
+        suspect_fields: Vec::new(),
     }
 }
 

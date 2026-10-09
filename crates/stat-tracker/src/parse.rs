@@ -125,6 +125,8 @@ pub fn read_scoreboard(
             edited_at: None,
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+            suspect_fields: Vec::new(),
         },
     })
 }
@@ -243,6 +245,14 @@ pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
 /// Mode stored on a row, from the canonical map that was actually kept.
 pub fn stored_game_mode(canonical: &str) -> String {
     map_mode(canonical).unwrap_or("").to_string()
+}
+
+/// A row with a blank map, mode, or hero must not be uploaded.
+///
+/// Whitespace-only counts as blank. Hero `Unknown` is a real stored value
+/// and is not blank.
+pub fn upload_identity_blank(map_name: &str, game_mode: &str, hero: &str) -> bool {
+    map_name.trim().is_empty() || game_mode.trim().is_empty() || hero.trim().is_empty()
 }
 
 /// Extract the six stats from one OCR'd row. Columns are positional:

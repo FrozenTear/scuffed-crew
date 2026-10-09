@@ -571,21 +571,31 @@ pub fn upload_request(
         // server aggregates and the leaderboard reflect manual fixes, and
         // flag edited rows for the site badge. The immutable OCR reads stay
         // local; the transparency detail lives in the tracker GUI.
-        .map(|m| StatsUploadEntry {
-            session_id: m.session_id.clone(),
-            hero: m.display_hero().to_string(),
-            map_name: m.display_map_name().to_string(),
-            game_mode: crate::parse::uploaded_game_mode(m.display_map_name(), &m.game_mode),
-            role: m.display_role().to_string(),
-            outcome: m.display_outcome().to_string(),
-            elims: m.display_elims(),
-            deaths: m.display_deaths(),
-            assists: m.display_assists(),
-            damage: m.display_damage(),
-            healing: m.display_healing(),
-            mitigation: m.display_mitigation(),
-            played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
-            edited: m.is_edited(),
+        .filter_map(|m| {
+            let hero = m.display_hero().to_string();
+            let map_name = m.display_map_name().to_string();
+            let game_mode = crate::parse::uploaded_game_mode(&map_name, &m.game_mode);
+            if crate::parse::upload_identity_blank(&map_name, &game_mode, &hero) {
+                return None;
+            }
+            Some(StatsUploadEntry {
+                session_id: m.session_id.clone(),
+                hero,
+                map_name,
+                game_mode,
+                role: m.display_role().to_string(),
+                outcome: m.display_outcome().to_string(),
+                elims: m.display_elims(),
+                deaths: m.display_deaths(),
+                assists: m.display_assists(),
+                damage: m.display_damage(),
+                healing: m.display_healing(),
+                mitigation: m.display_mitigation(),
+                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
+                edited: m.is_edited(),
+                recognizer: m.stored_recognizer().to_string(),
+                suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
+            })
         })
         .collect();
     StatsUploadRequest {

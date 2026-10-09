@@ -542,6 +542,8 @@ mod cache_http_tests {
                 mitigation: 0,
                 played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
                 edited,
+                recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+                suspect_fields: Vec::new(),
             }],
             deleted_sessions: vec![],
         }

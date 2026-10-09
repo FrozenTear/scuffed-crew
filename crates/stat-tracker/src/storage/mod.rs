@@ -114,6 +114,16 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[surreal(default)]
     pub segment_resolutions: Vec<SegmentResolution>,
+    /// Recognizer that produced the stored numbers. Empty on rows written
+    /// before the column existed; those read as `ocr-v1` at upload time.
+    #[serde(default)]
+    #[surreal(default)]
+    pub recognizer: String,
+    /// Flat or leftover row names the new reader was not sure about.
+    /// Uploads flatten this to the server's allowlist.
+    #[serde(default)]
+    #[surreal(default)]
+    pub suspect_fields: Vec<String>,
 }
 
 /// Identity and payload revision captured when a row was read for upload.
@@ -213,6 +223,11 @@ impl PersonalMatch {
     /// True when at least one field carries a manual correction.
     pub fn is_edited(&self) -> bool {
         !self.edited_fields.is_empty()
+    }
+
+    /// Id sent on upload. A missing column is `ocr-v1`.
+    pub fn stored_recognizer(&self) -> &str {
+        scuffed_types::effective_recognizer(&self.recognizer)
     }
 
     /// Server message for a quarantined row. Empty and missing both mean
@@ -372,6 +387,8 @@ impl LocalStore {
             DEFINE INDEX IF NOT EXISTS idx_last_capture ON match_session FIELDS last_capture_at;
             DEFINE TABLE IF NOT EXISTS deleted_session SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_deleted_sid ON deleted_session FIELDS session_id;
+            DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
+            DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
         ",
         )
         .await?;
@@ -947,6 +964,7 @@ impl LocalStore {
             .bind(("mode", mode.clone()))
             .bind(("sid", session_id.to_string()))
             .await?;
+        self.clear_session_suspects(session_id, "map_name").await?;
         let map = map.to_string();
         rewrite_match_log_session(
             &self.data_dir,
@@ -955,6 +973,7 @@ impl LocalStore {
                 m.map_name = map.clone();
                 m.game_mode = mode.clone();
                 m.upload_reject = None;
+                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
             }),
         );
         Ok(())
@@ -978,6 +997,7 @@ impl LocalStore {
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
+        self.clear_session_suspects(session_id, "outcome").await?;
         let outcome = outcome.to_string();
         rewrite_match_log_session(
             &self.data_dir,
@@ -985,8 +1005,32 @@ impl LocalStore {
             Some(&|m| {
                 m.outcome = outcome.clone();
                 m.upload_reject = None;
+                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "outcome");
             }),
         );
+        Ok(())
+    }
+
+    /// Drop one edited field's suspect names on every snapshot of a session.
+    async fn clear_session_suspects(
+        &self,
+        session_id: &str,
+        storage_field: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        for m in snaps {
+            let Some(id) = m.id.clone() else { continue };
+            let mut fields = m.suspect_fields.clone();
+            crate::reader_apply::clear_edited_suspects(&mut fields, storage_field);
+            if fields == m.suspect_fields {
+                continue;
+            }
+            self.db
+                .query("UPDATE $id SET suspect_fields = $sf")
+                .bind(("id", id))
+                .bind(("sf", fields))
+                .await?;
+        }
         Ok(())
     }
 
@@ -1017,6 +1061,7 @@ impl LocalStore {
                      corrected_elims = $ce, corrected_deaths = $cd, corrected_assists = $ca, \
                      corrected_damage = $cdmg, corrected_healing = $chl, \
                      corrected_mitigation = $cmit, edited_fields = $ef, edited_at = $ea, \
+                     suspect_fields = $sf, \
                      synced = false, upload_reject = '', sync_rev = (sync_rev ?? 0) + 1",
                 )
                 .bind(("id", id))
@@ -1032,6 +1077,7 @@ impl LocalStore {
                 .bind(("cmit", m.corrected_mitigation))
                 .bind(("ef", m.edited_fields.clone()))
                 .bind(("ea", m.edited_at))
+                .bind(("sf", m.suspect_fields.clone()))
                 .await?;
         }
         let edit = edit.clone();
@@ -1434,6 +1480,7 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
     if let Some(v) = &edit.hero {
         m.corrected_hero = Some(v.clone());
         mark_edited(&mut m.edited_fields, "hero");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "hero");
         changed = true;
     }
     if let Some(v) = &edit.role {
@@ -1444,41 +1491,49 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
     if let Some(v) = &edit.map_name {
         m.corrected_map_name = Some(v.clone());
         mark_edited(&mut m.edited_fields, "map_name");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
         changed = true;
     }
     if let Some(v) = &edit.outcome {
         m.corrected_outcome = Some(v.clone());
         mark_edited(&mut m.edited_fields, "outcome");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "outcome");
         changed = true;
     }
     if let Some(v) = edit.elims {
         m.corrected_elims = Some(v);
         mark_edited(&mut m.edited_fields, "elims");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "elims");
         changed = true;
     }
     if let Some(v) = edit.deaths {
         m.corrected_deaths = Some(v);
         mark_edited(&mut m.edited_fields, "deaths");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "deaths");
         changed = true;
     }
     if let Some(v) = edit.assists {
         m.corrected_assists = Some(v);
         mark_edited(&mut m.edited_fields, "assists");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "assists");
         changed = true;
     }
     if let Some(v) = edit.damage {
         m.corrected_damage = Some(v);
         mark_edited(&mut m.edited_fields, "damage");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "damage");
         changed = true;
     }
     if let Some(v) = edit.healing {
         m.corrected_healing = Some(v);
         mark_edited(&mut m.edited_fields, "healing");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "healing");
         changed = true;
     }
     if let Some(v) = edit.mitigation {
         m.corrected_mitigation = Some(v);
         mark_edited(&mut m.edited_fields, "mitigation");
+        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "mitigation");
         changed = true;
     }
     if changed {
@@ -1810,6 +1865,8 @@ mod tests {
             edited_at: None,
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+            suspect_fields: Vec::new(),
         }
     }
 
@@ -2744,9 +2801,89 @@ mod tests {
         let rows = store.get_unsynced().await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sync_rev, 0, "missing sync_rev reads as 0");
+        assert_eq!(
+            rows[0].stored_recognizer(),
+            scuffed_types::RECOGNIZER_OCR_V1,
+            "a row written before recognizer existed still uploads as ocr-v1"
+        );
+        assert!(rows[0].suspect_fields.is_empty());
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
         let after = store.get_all_matches().await.unwrap();
         assert!(after[0].synced);
+    }
+
+    #[tokio::test]
+    async fn recognizer_and_suspects_survive_reopen_and_an_edit_clears_one_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recognizer = crate::shadow::digits::RECOGNIZER_ID.to_string();
+        {
+            let store = LocalStore::open(dir.path()).await.unwrap();
+            let mut row = snap("kept", 4);
+            row.map_name = "Busan".into();
+            row.game_mode = "Control".into();
+            row.recognizer = recognizer.clone();
+            row.suspect_fields = vec!["r3.dmg".into(), "hero".into(), "e".into()];
+            store.insert_match(row).await.unwrap();
+        }
+        let store = reopen_store(dir.path()).await;
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows[0].recognizer, recognizer);
+        assert_eq!(
+            rows[0].suspect_fields,
+            vec!["r3.dmg".to_string(), "hero".into(), "e".into()]
+        );
+        let body = crate::sync::upload_request(&rows, &[]);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            !json.contains("r3.dmg"),
+            "an upload payload must not contain a dotted name: {json}"
+        );
+        assert!(json.contains(&format!("\"recognizer\":\"{recognizer}\"")));
+        assert_eq!(
+            body.matches[0].suspect_fields,
+            vec!["hero".to_string(), "e".into(), "dmg".into()]
+        );
+        store
+            .edit_match(
+                "kept",
+                &MatchEdit {
+                    damage: Some(10),
+                    ..MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        let edited = store.get_all_matches().await.unwrap();
+        assert_eq!(edited[0].recognizer, recognizer);
+        assert_eq!(
+            edited[0].suspect_fields,
+            vec!["hero".to_string(), "e".into()]
+        );
+        let again = crate::sync::upload_request(&edited, &[]);
+        let again_json = serde_json::to_string(&again).unwrap();
+        assert!(!again_json.contains("r3.dmg"), "{again_json}");
+        assert!(!again_json.contains("\"dmg\""));
+    }
+
+    #[test]
+    fn upload_of_an_ocr_v1_row_adds_only_the_recognizer_tag() {
+        let mut row = snap("plain", 1);
+        row.map_name = "Busan".into();
+        row.hero = "Ana".into();
+        row.recognizer = scuffed_types::RECOGNIZER_OCR_V1.to_string();
+        let body = crate::sync::upload_request(&[row], &[]);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"recognizer\":\"ocr-v1\""));
+        assert!(
+            !json.contains("suspect_fields"),
+            "an empty suspect list is omitted: {json}"
+        );
+        let mut blank = snap("blank", 1);
+        blank.hero = "Ana".into();
+        blank.map_name = "   ".into();
+        blank.game_mode = "Control".into();
+        let dropped = crate::sync::upload_request(&[blank], &[]);
+        assert!(dropped.matches.is_empty());
     }
 
     fn expect_busy<T>(result: Result<T, Box<dyn std::error::Error + Send + Sync>>, what: &str) {
