@@ -36,8 +36,12 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 
 /// Identifies this recognizer's output. Bump it whenever any value,
 /// confidence or suspect flag can change, so logged reads from different
-/// builds are never pooled by mistake. The `recognizer_snapshot_is_pinned`
-/// test fails until the bump is made.
+/// builds are never pooled by mistake. Every `shadow/digits.jsonl` line
+/// carries it. The `recognizer_snapshot_is_pinned` test fails until the bump
+/// is made when, on its synthetic fixtures, any value or suspect flag
+/// changes, any calibration constant changes, a pinned sample confidence
+/// moves more than 0.02, or a board's mean confidence moves more than 0.005.
+/// Float drift below those tolerances is accepted on purpose.
 ///
 /// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
 /// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
@@ -1442,6 +1446,27 @@ mod tests {
     const SNAP_LINE_GAP: f32 = 0.05;
     /// Tolerance for the pinned sample confidences.
     const SNAP_CONF_TOL: f32 = 0.02;
+    /// Tolerance for the pinned per-board mean confidence. Tight enough that
+    /// a confidence-only shift (every margin scaled by 1.5%) fails.
+    const SNAP_MEAN_TOL: f32 = 0.005;
+
+    /// Mean confidence over all cells of each fixture board, in fixture order.
+    fn snapshot_means(cells: &[(String, Option<u32>, f32, bool)]) -> Vec<(String, f32)> {
+        let mut out: Vec<(String, f32, usize)> = Vec::new();
+        for (key, _, conf, _) in cells {
+            let board = key.split(' ').next().unwrap_or_default();
+            match out.last_mut() {
+                Some(last) if last.0 == board => {
+                    last.1 += *conf;
+                    last.2 += 1;
+                }
+                _ => out.push((board.to_string(), *conf, 1)),
+            }
+        }
+        out.into_iter()
+            .map(|(b, sum, n)| (b, sum / n as f32))
+            .collect()
+    }
 
     /// (fixture/row/field key, value, confidence, suspect) for every cell.
     fn snapshot_cells() -> Vec<(String, Option<u32>, f32, bool)> {
@@ -1502,6 +1527,9 @@ mod tests {
         for (key, value, conf, suspect) in &cells {
             println!("SNAP {key} {value:?} {conf:.4} {suspect}");
         }
+        for (board, mean) in snapshot_means(&cells) {
+            println!("MEAN {board} {mean:.4}");
+        }
         let fp = snapshot_fingerprint(RECOGNIZER_ID, &calibration_params(), &cells);
         println!("FINGERPRINT {fp:#018x}");
     }
@@ -1529,6 +1557,17 @@ mod tests {
         ("small_touching r10 DMG", Some(11111), 0.111, true),
         ("tiny_noisy r0 DMG", Some(5480), 0.246, true),
         ("tiny_noisy r7 DMG", Some(22058), 0.275, true),
+    ];
+
+    /// Mean confidence per fixture board for the current id, checked within
+    /// `SNAP_MEAN_TOL`.
+    const SNAPSHOT_MEANS: &[(&str, f32)] = &[
+        ("clean", 0.9003),
+        ("touching", 0.9020),
+        ("noisy", 0.8726),
+        ("odd_noisy", 0.7939),
+        ("small_touching", 0.8336),
+        ("tiny_noisy", 0.7713),
     ];
 
     #[test]
@@ -1576,6 +1615,22 @@ mod tests {
                 (got.2 - conf).abs() <= SNAP_CONF_TOL,
                 "snapshot cell {key}: confidence {:.3}, pinned {conf} +- {SNAP_CONF_TOL}",
                 got.2
+            );
+        }
+        let means = snapshot_means(&cells);
+        assert_eq!(
+            means.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(),
+            SNAPSHOT_MEANS.iter().map(|m| m.0).collect::<Vec<_>>(),
+            "SNAPSHOT_MEANS must list every fixture board in order"
+        );
+        for ((board, got), (_, want)) in means.iter().zip(SNAPSHOT_MEANS) {
+            assert!(
+                (got - want).abs() <= SNAP_MEAN_TOL,
+                "fixture board {board}: mean confidence {got:.4}, pinned {want} +- \
+                 {SNAP_MEAN_TOL}. Confidences shifted without a RECOGNIZER_ID bump: bump the \
+                 id, append the new fingerprint to RECOGNIZER_HISTORY and refresh \
+                 SNAPSHOT_SAMPLE and SNAPSHOT_MEANS \
+                 (cargo test print_snapshot_reads -- --ignored --nocapture)"
             );
         }
     }
