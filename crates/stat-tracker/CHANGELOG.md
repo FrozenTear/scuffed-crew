@@ -65,62 +65,54 @@ share one font size and baseline. After each cell measures itself, the
 row's lower median height, and the median top of the cells that agree
 with it, is the reference. A cell whose own height is 2 px or more off
 that reference takes the row's text band before the split and the canvas
-scale. Templates, thresholds, and grammar are unchanged. On the labelled
+scale. A cell that is taller than the row is corrected the same way.
+Fewer than 4 segmented cells leaves each cell on its own measurement.
+Templates, thresholds, and grammar are unchanged. On the labelled
 sets the history Teams board goes from 287 of 288 cells to 288 of 288,
 and the pasted thin 4s go from 1120 of 1152 to 1152 of 1152. No new
 flags and no new errors. A wrong read is still not left unflagged.
 
 The old confidence was the raw gap between the best template and the
-runner-up, and that gap is not comparable across digits. A correct 3,
-whose runner-up is always an 8, typically clears by about 0.12 and can
-fall to 0.05, while a lone 1 sits near 0.43. One global cut at 0.06
+runner-up, and that gap is not the same size for every digit. A correct
+3, whose runner-up is always an 8, typically clears by about 0.12 and
+can fall to 0.05, while a lone 1 sits near 0.43. One global cut at 0.06
 kept flagging those right 3s and 8s. Each glyph's gap is now divided by
-the typical gap for that digit: the median gap of correct reads, measured
-with the embedded templates on the labelled 1440p and 1080p Tab sets (11
-numbers per template size). The cell score is the minimum over glyphs,
-also limited by the gap between the best reading and the best different
-reading, scaled by 0.2. A score of 1.0 means as clear as a usual correct
-read of that digit. The suspect line is a calibrated score below 0.35
-(it was a raw gap below 0.06). Width, grammar, digit count, rival group,
-and low score are unchanged. A separate 3-versus-8 check was not needed.
-Normalising alone puts the lowest correct 3 at 0.40.
+the typical gap for that class (digits 0 through 9, and the comma): the
+median best-minus-second-best of correct reads, measured with these
+templates on the labelled 1440p and 1080p Tab sets, 20 boards each. A
+per-match hold-out of those boards moves no flag decision. The cell
+score is the lowest glyph. It is also limited by how far the best
+reading beats the best different reading, using `2 * gap / 0.2`, so
+that limit sits on the same scale. A score of 1.0 means as clear as a
+typical correct read of that digit. The suspect line is a calibrated
+score below 0.35. Width, grammar, digit count, rival group, and low
+score are unchanged.
 
-Refitting those typical gaps with each of the three labelled matches
-left out changes no flag decision on the labelled sets. The largest
-shift is 10%. The out-of-sample boards and the degraded sets were not
-used to fit the gaps. On the real sets, correct reads flagged go from
-44 to 16, and correct reads that contain a 3 go from 32 flagged to 7.
-No wrong read moved from flagged to unflagged. Four moved the other
-way. Applied on the matcher from before the row-band fix, the live
-misread 16 scores 0.14, and 311 and 141 stay flagged. Separation of
-right versus wrong, on cells not already caught by the other rules,
-goes from 0.90 to 0.97. The wrong reads that remain unflagged are dim
-zeros read as 1 or 11 under heavy JPEG, with gaps of 0.2 to 0.3 both
-before and after. This calibration neither causes nor fixes them.
-Live capture is lossless.
+A right 3 or 8 whose raw gap is 0.049 still clears 0.35 after that
+division, on both template sizes. A 1 or a 7 at the same raw gap stays
+flagged. The live misread 16, whose raw gap on the 6 was 0.024, stays
+flagged too. On the labelled and stressed sets, the worst wrong read
+the old cut caught scores 0.29 after calibration, so the 0.35 line
+keeps every one of those errors flagged.
 
-Boards between or below the two template sizes (scales 0.625, 0.75,
-and 0.85) pick up more flags and no new misses. The typical gaps come
-from the streamer's 1440p Tab boards and the 1080p downscale of those
-same boards. Leaving a match out is stable. Another display could
-still shift the gaps. The 0.35 line sits just above the worst caught
-error, which scores 0.29. Logged scores now sit around 0.5 to 1,
-instead of 0.05 to 0.45. Lines carry a recognizer id so the two scales
-are not compared as if they were the same.
+Logged scores are clamped to the range 0 to 1. A NaN becomes 0, which
+is suspect, so it is not written out as a non-number.
 
 Every line in `shadow/digits.jsonl` now includes
-`"recognizer":"cv-v2"`. `cv-v1` is the 0.4.23 output. A line with no
-recognizer field is treated as `cv-v1`, so a log from before this
-release is never pooled with a log from after. Scores are clamped to
-the range 0 to 1, and a NaN is stored as 0, which is suspect. A
-snapshot test pins the id, the calibration constants (the suspect
-line, the 0.2 scale, and both typical-gap tables), and each fixture
-cell's value and suspect flag. Confidences are left out of that hash.
-Eight readable sample cells must each stay within 0.02, each fixture
-board's mean within 0.005, and every fixture cell at least 0.05 away
-from the 0.35 line. The fixtures are synthetic glyphs on a flat
-background, not captured boards: 6 boards, 432 cells, 3 of them
-suspect, using both template sizes.
+`"recognizer":"cv-v2"`. `cv-v1` is the 0.4.23 matcher (raw gaps, cut at
+0.06). A line with no recognizer field is read as `cv-v1`, so a log
+from before this release is never pooled with a log from after. Values
+and scores from two ids are not compared as if they were one scale.
+
+A snapshot test pins the id, the calibration constants (the 0.35 line,
+the 0.2 divisor, and both typical-gap tables), and each fixture cell's
+value and suspect flag. Scores are left out of that hash. Eight sample
+cells must each stay within 0.02, each of the six fixture boards must
+keep its mean within 0.005, and every fixture cell must sit at least
+0.05 away from the 0.35 line. The fixtures are synthetic glyphs on a
+flat background, resized and noised in a fixed way, at both template
+sizes. There are no captured boards. The `cv-v1` history entry is the
+0.4.23 matcher run on those same fixtures.
 
 ### Install
 
