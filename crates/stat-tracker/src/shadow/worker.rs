@@ -186,6 +186,7 @@ pub fn compare(
 ) -> ShadowRecord {
     let mut record = ShadowRecord {
         ts: job.captured_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        recognizer: digits::RECOGNIZER_ID,
         session: job.session.clone(),
         resolution: job.frame_height,
         team_size: job.team_size,
@@ -344,6 +345,7 @@ mod tests {
             elapsed_ms: 12,
         };
         let r = compare(&job("s1"), Ok(board), 3);
+        assert_eq!(r.recognizer, digits::RECOGNIZER_ID);
         assert_eq!((r.cells, r.agree), (6, 4));
         assert_eq!(r.dropped_since_last, 3);
         assert_eq!(r.elapsed_ms, Some(12));
@@ -354,6 +356,7 @@ mod tests {
 
         let err = compare(&job("s2"), Err(ShadowError::OverBudget), 0);
         assert_eq!(err.error.as_deref(), Some("over budget"));
+        assert_eq!(err.recognizer, digits::RECOGNIZER_ID);
         assert_eq!((err.cells, err.agree), (0, 0));
     }
 
