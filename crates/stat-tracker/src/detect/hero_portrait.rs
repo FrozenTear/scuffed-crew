@@ -420,18 +420,20 @@ impl RowScan {
 /// Row pitch (fraction of crop height) between the two layouts: 6v6 below,
 /// 5v5 at or above.
 ///
-/// `crop_player_row` slot height over crop height (`row_slot_pitch`):
+/// The bound is the gap in `crop_player_row` slot height over crop height,
+/// not a step above the measured 0.0794 boards.
 /// 1080p crop 756 is 6v6 58/756 = 0.076720 and 5v5 68/756 = 0.089947.
 /// 1440p crop 1007 is 6v6 77/1007 = 0.076465 and 5v5 90/1007 = 0.089374.
 /// 4K crop 1512 matches 1080p (116/1512 and 136/1512).
 /// The closest pair is 6v6 at 0.076720 and 5v5 at 0.089374. Their midpoint
-/// is 0.083047. The split is 0.083, so the margin is 0.006280 above the
-/// highest 6v6 slot and 0.006374 below the lowest 5v5 slot.
+/// is 0.083047. The split is 0.083, strictly between them: 0.006280 above
+/// the highest 6v6 slot and 0.006374 below the lowest 5v5 slot.
 ///
 /// Native 1080p 6v6 boards measure about 0.0794 (60/756). That is above the
 /// old 0.079 split, so a dip at 0.0788 and a spectral peak at 0.0794 landed
 /// on opposite sides and the capture was rejected as uncertain. 0.0794 is
-/// 0.0036 below this split, on the 6v6 side. A pitch of 0.083 stays 5v5.
+/// still below this split, on the 6v6 side of the layout gap. A pitch of
+/// 0.083 stays 5v5.
 const TEAM_SIZE_PITCH_SPLIT: f64 = 0.083;
 
 /// Row pitches that can be a real 6v6 (about 0.074 to 0.0794) or 5v5
@@ -1140,60 +1142,73 @@ mod team_size_tests {
         assert_eq!(scan(2, Some(0.12), None).checked_team_size(), None);
     }
 
-    #[test]
-    fn native_1080_six_v_six_pitch_is_six_and_layout_five_stays_five() {
-        // Both reads at the measured 1080p 6v6 pitch. The old 0.079 split
-        // classified 0.0794 as 5v5, and a dip of 0.0788 beside it as 6v6,
-        // so checked_team_size returned None and the capture was rejected.
-        let measured = scan(6, Some(0.0794), Some(0.0794));
-        assert_eq!(measured.checked_team_size(), Some(6));
-        assert_eq!(measured.team_size(), 6);
-        let straddle = scan(6, Some(0.0788), Some(0.0794));
-        assert_eq!(straddle.checked_team_size(), Some(6));
-        assert_eq!(straddle.team_size(), 6);
+    /// Slot height over crop height for one team size, from the same integer
+    /// layout `crop_player_row` uses.
+    fn layout_pitch(frame_w: u32, frame_h: u32, team_size: usize) -> (u32, u32, f64) {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(frame_w, frame_h));
+        let board = crate::ocr::preprocess::crop_scoreboard(&img);
+        let slot = crate::ocr::preprocess::row_slot_height(board.height(), team_size);
+        let pitch = slot as f64 / board.height() as f64;
+        (board.height(), slot, pitch)
+    }
 
-        let specs = [
-            (1920u32, 1080u32, "1080p"),
-            (2560, 1440, "1440p"),
-            (3840, 2160, "4k"),
-        ];
-        let mut max_six = 0.0_f64;
-        let mut min_five = f64::MAX;
-        for (w, h, label) in specs {
-            let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h));
-            let board = crate::ocr::preprocess::crop_scoreboard(&img);
-            let six = crate::ocr::preprocess::row_slot_height(board.height(), 6) as f64
-                / board.height() as f64;
-            let five = crate::ocr::preprocess::row_slot_height(board.height(), 5) as f64
-                / board.height() as f64;
-            assert!(
-                six < super::TEAM_SIZE_PITCH_SPLIT,
-                "{label} 6v6 {six} crop {}x{}",
-                board.width(),
-                board.height()
-            );
-            assert!(
-                five >= super::TEAM_SIZE_PITCH_SPLIT,
-                "{label} 5v5 {five} crop {}x{}",
-                board.width(),
-                board.height()
-            );
-            max_six = max_six.max(six);
-            min_five = min_five.min(five);
-            let as_six = scan(6, Some(six), Some(six));
-            assert_eq!(as_six.checked_team_size(), Some(6), "{label}");
-            let as_five = scan(5, Some(five), Some(five));
-            assert_eq!(as_five.checked_team_size(), Some(5), "{label}");
-        }
-        let below = super::TEAM_SIZE_PITCH_SPLIT - max_six;
-        let above = min_five - super::TEAM_SIZE_PITCH_SPLIT;
+    #[test]
+    fn pitch_split_sits_between_layout_five_and_six() {
+        let (h1080, six_px_1080, six_1080) = layout_pitch(1920, 1080, 6);
+        let (_, five_px_1080, five_1080) = layout_pitch(1920, 1080, 5);
+        let (h1440, six_px_1440, six_1440) = layout_pitch(2560, 1440, 6);
+        let (_, five_px_1440, five_1440) = layout_pitch(2560, 1440, 5);
+        let (h4k, six_px_4k, six_4k) = layout_pitch(3840, 2160, 6);
+        let (_, five_px_4k, five_4k) = layout_pitch(3840, 2160, 5);
+
+        assert_eq!((h1080, six_px_1080, five_px_1080), (756, 58, 68));
+        assert_eq!((h1440, six_px_1440, five_px_1440), (1007, 77, 90));
+        assert_eq!((h4k, six_px_4k, five_px_4k), (1512, 116, 136));
+
+        let split = super::TEAM_SIZE_PITCH_SPLIT;
+        let max_six = six_1080.max(six_1440).max(six_4k);
+        let min_five = five_1080.min(five_1440).min(five_4k);
+        assert!(
+            max_six < split && split < min_five,
+            "split {split} must sit between layout 6v6 {max_six} and layout 5v5 {min_five}"
+        );
+        let below = split - max_six;
+        let above = min_five - split;
         assert!(
             (below - 0.006280).abs() < 1e-6 && (above - 0.006374).abs() < 1e-6,
             "margin below {below}, above {above}, 6v6 {max_six}, 5v5 {min_five}"
         );
-        // The 5v5 value the capture check must keep: the closest layout slot.
-        let five = scan(5, Some(min_five), Some(min_five));
-        assert_eq!(five.checked_team_size(), Some(5));
-        assert_eq!(five.team_size(), 5);
+
+        // Real 5v5 slot at 1080p (68/756) and 1440p (90/1007), both pitches
+        // agreeing, the way the capture check reads a board.
+        let five_1080_board = scan(5, Some(five_1080), Some(five_1080));
+        assert_eq!(five_1080_board.checked_team_size(), Some(5));
+        assert_eq!(five_1080_board.team_size(), 5);
+        let five_1440_board = scan(5, Some(five_1440), Some(five_1440));
+        assert_eq!(five_1440_board.checked_team_size(), Some(5));
+        assert_eq!(five_1440_board.team_size(), 5);
+        let five_4k_board = scan(5, Some(five_4k), Some(five_4k));
+        assert_eq!(five_4k_board.checked_team_size(), Some(5));
+        assert_eq!(
+            scan(6, Some(six_1080), Some(six_1080)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(six_1440), Some(six_1440)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(six_4k), Some(six_4k)).checked_team_size(),
+            Some(6)
+        );
+
+        // Measured 1080p 6v6. The old 0.079 split put 0.0794 on the 5v5 side.
+        let measured = scan(6, Some(0.0794), Some(0.0794));
+        assert_eq!(measured.checked_team_size(), Some(6));
+        assert_eq!(measured.team_size(), 6);
+        assert!(0.0794 < split && 0.0794 > max_six);
+        let straddle = scan(6, Some(0.0788), Some(0.0794));
+        assert_eq!(straddle.checked_team_size(), Some(6));
+        assert_eq!(straddle.team_size(), 6);
     }
 }

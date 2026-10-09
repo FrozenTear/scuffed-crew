@@ -152,4 +152,19 @@ mod tests {
         assert!(games.iter().all(|game| game.session_id != "edited-to-dm"));
         assert_eq!(games.len(), tracked);
     }
+
+    #[test]
+    fn practice_range_is_left_out_of_history() {
+        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+        let tracked = games_from_snapshot(&snap).len();
+        let mut practice = snap.matches[0].clone();
+        practice.session_id = "practice-range".into();
+        practice.map_name = "Practice Range".into();
+        practice.game_mode = "Practice".into();
+        practice.outcome = "victory".into();
+        snap.matches.insert(0, practice);
+        let games = games_from_snapshot(&snap);
+        assert_eq!(games.len(), tracked);
+        assert!(games.iter().all(|game| game.session_id != "practice-range"));
+    }
 }
