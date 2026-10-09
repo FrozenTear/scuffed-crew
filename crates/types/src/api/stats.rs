@@ -106,13 +106,84 @@ pub fn resolve_recognizer(input: &RecognizerInput) -> Result<String, &'static st
     }
 }
 
+/// Names a tracker may mark as unsure on one player's own `personal_match`.
+///
+/// Each upload row is that player's row, so these are flat names. Row-indexed
+/// names such as `r3.dmg` are not in the set.
+pub const SUSPECT_FIELD_NAMES: &[&str] = &[
+    "map", "mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit",
+];
+
+/// Max entries accepted in one match's `suspect_fields` array.
+pub const SUSPECT_FIELDS_MAX_LEN: usize = 10;
+
+/// Returned with HTTP 400 when `suspect_fields` is present but not a usable list.
+pub const SUSPECT_FIELDS_ERROR: &str = "suspect_fields must be an array of at most 10 unique names from map, mode, result, hero, e, a, d, dmg, h, mit";
+
+const _: () = assert!(SUSPECT_FIELD_NAMES.len() == SUSPECT_FIELDS_MAX_LEN);
+
+/// How `suspect_fields` arrived on one match object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuspectFieldsInput {
+    /// JSON field omitted or `null`. Persist an empty list.
+    Absent,
+    /// A JSON array of strings. The upload route accepts it only when every
+    /// name is in [`SUSPECT_FIELD_NAMES`], with no duplicates, and length is
+    /// at most [`SUSPECT_FIELDS_MAX_LEN`].
+    Value(Vec<String>),
+    /// Present, but not an array (string, number, bool, object).
+    NotAnArray,
+    /// An array that contains a non-string element.
+    NonStringEntry,
+}
+
+fn valid_suspect_fields(names: &[String]) -> bool {
+    if names.len() > SUSPECT_FIELDS_MAX_LEN {
+        return false;
+    }
+    let mut seen = [false; SUSPECT_FIELDS_MAX_LEN];
+    for name in names {
+        let Some(idx) = SUSPECT_FIELD_NAMES
+            .iter()
+            .position(|allowed| *allowed == name.as_str())
+        else {
+            return false;
+        };
+        if seen[idx] {
+            return false;
+        }
+        seen[idx] = true;
+    }
+    true
+}
+
+/// Turn a decoded `suspect_fields` value into the list to store.
+///
+/// Omitted and `null` become `[]`. Any other shape, unknown name, duplicate,
+/// or over-long list is an error.
+pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>, &'static str> {
+    match input {
+        SuspectFieldsInput::Absent => Ok(Vec::new()),
+        SuspectFieldsInput::Value(names) if valid_suspect_fields(names) => Ok(names.clone()),
+        SuspectFieldsInput::Value(_)
+        | SuspectFieldsInput::NotAnArray
+        | SuspectFieldsInput::NonStringEntry => Err(SUSPECT_FIELDS_ERROR),
+    }
+}
+
 /// `POST /api/stats/upload` as the server reads it.
 ///
 /// [`StatsUploadRequest`] is the body the desktop tracker builds. That struct
-/// has no `recognizer` field, so current and 0.4.x clients keep emitting the
-/// same JSON. This type accepts that JSON plus an optional `recognizer` on
-/// each object in `matches`. The id is per match because one sync batch can
-/// carry games captured under different readers.
+/// has no `recognizer` or `suspect_fields` field, so current and 0.4.x clients
+/// keep emitting the same JSON. This type accepts that JSON plus an optional
+/// `recognizer` and `suspect_fields` on each object in `matches`. The values
+/// are per match because one sync batch can carry games captured under
+/// different readers.
+///
+/// A later upload of the same session replaces both fields. Omitting
+/// `suspect_fields`, or sending null, stores `[]`, the same way omitting
+/// `recognizer` stores `ocr-v1`. A correction that leaves the list out clears
+/// names stored by an earlier upload of that session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatsUploadBody {
     pub matches: Vec<StatsUploadMatch>,
@@ -121,30 +192,58 @@ pub struct StatsUploadBody {
     pub deleted_sessions: Vec<String>,
 }
 
-/// One match from [`StatsUploadBody`], plus the optional recognizer id.
+/// One match from [`StatsUploadBody`], plus optional recognizer and suspect fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_json::Value")]
 pub struct StatsUploadMatch {
     pub entry: StatsUploadEntry,
     pub recognizer: RecognizerInput,
+    pub suspect_fields: SuspectFieldsInput,
 }
 
 impl TryFrom<serde_json::Value> for StatsUploadMatch {
     type Error = String;
 
     fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
-        let recognizer = {
+        let (recognizer, suspect_fields) = {
             let Some(obj) = value.as_object_mut() else {
                 return Err("match entry must be a JSON object".into());
             };
-            match obj.remove("recognizer") {
+            let recognizer = match obj.remove("recognizer") {
                 None | Some(serde_json::Value::Null) => RecognizerInput::Absent,
                 Some(serde_json::Value::String(id)) => RecognizerInput::Value(id),
                 Some(_) => RecognizerInput::NotAString,
-            }
+            };
+            let suspect_fields = match obj.remove("suspect_fields") {
+                None | Some(serde_json::Value::Null) => SuspectFieldsInput::Absent,
+                Some(serde_json::Value::Array(items)) => {
+                    let mut names = Vec::with_capacity(items.len());
+                    let mut non_string = false;
+                    for item in items {
+                        match item {
+                            serde_json::Value::String(name) => names.push(name),
+                            _ => {
+                                non_string = true;
+                                break;
+                            }
+                        }
+                    }
+                    if non_string {
+                        SuspectFieldsInput::NonStringEntry
+                    } else {
+                        SuspectFieldsInput::Value(names)
+                    }
+                }
+                Some(_) => SuspectFieldsInput::NotAnArray,
+            };
+            (recognizer, suspect_fields)
         };
         let entry = serde_json::from_value(value).map_err(|err| err.to_string())?;
-        Ok(Self { entry, recognizer })
+        Ok(Self {
+            entry,
+            recognizer,
+            suspect_fields,
+        })
     }
 }
 
@@ -191,6 +290,14 @@ pub struct UpdateMemberSettingsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
+}
+
+/// `GET /api/stats/token-check` (daemon token auth).
+///
+/// Display name only. No ids, emails, or roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCheckResponse {
+    pub display_name: String,
 }
 
 /// Per-role aggregate for `GET /api/stats/me/roles` and
@@ -285,10 +392,18 @@ mod tests {
             !current.contains("recognizer"),
             "the tracker request type must not emit recognizer: {current}"
         );
+        assert!(
+            !current.contains("suspect_fields"),
+            "the tracker request type must not emit suspect_fields: {current}"
+        );
         let body: StatsUploadBody = serde_json::from_str(&current).unwrap();
         assert!(matches!(
             body.matches[0].recognizer,
             RecognizerInput::Absent
+        ));
+        assert!(matches!(
+            body.matches[0].suspect_fields,
+            SuspectFieldsInput::Absent
         ));
         assert_eq!(body.matches[0].entry.hero, "Ana");
         assert_eq!(body.matches[0].entry.elims, 4);
@@ -307,6 +422,10 @@ mod tests {
         }"#;
         let old: StatsUploadBody = serde_json::from_str(historical).unwrap();
         assert!(matches!(old.matches[0].recognizer, RecognizerInput::Absent));
+        assert!(matches!(
+            old.matches[0].suspect_fields,
+            SuspectFieldsInput::Absent
+        ));
         assert_eq!(old.matches[0].entry.session_id, "");
         assert_eq!(old.matches[0].entry.elims, 0);
         assert!(!old.matches[0].entry.edited);
@@ -316,6 +435,7 @@ mod tests {
         // client body remains readable by code that only knows the old type.
         let mut with_id: serde_json::Value = serde_json::from_str(&current).unwrap();
         with_id["matches"][0]["recognizer"] = serde_json::json!("cv-v1");
+        with_id["matches"][0]["suspect_fields"] = serde_json::json!(["hero", "dmg"]);
         with_id["matches"][0]["future_field"] = serde_json::json!(true);
         let as_old: StatsUploadRequest =
             serde_json::from_value(with_id.clone()).expect("old type ignores unknown fields");
@@ -324,6 +444,10 @@ mod tests {
         assert_eq!(
             as_new.matches[0].recognizer,
             RecognizerInput::Value("cv-v1".into())
+        );
+        assert_eq!(
+            as_new.matches[0].suspect_fields,
+            SuspectFieldsInput::Value(vec!["hero".into(), "dmg".into()])
         );
     }
 
@@ -362,6 +486,107 @@ mod tests {
         assert_eq!(
             number_body.matches[0].recognizer,
             RecognizerInput::NotAString
+        );
+    }
+
+    #[test]
+    fn resolve_suspect_fields_defaults_absent_and_keeps_valid_names() {
+        assert_eq!(
+            resolve_suspect_fields(&SuspectFieldsInput::Absent).unwrap(),
+            Vec::<String>::new()
+        );
+        let all: Vec<String> = SUSPECT_FIELD_NAMES
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect();
+        assert_eq!(
+            resolve_suspect_fields(&SuspectFieldsInput::Value(all.clone())).unwrap(),
+            all
+        );
+        assert_eq!(
+            resolve_suspect_fields(&SuspectFieldsInput::Value(vec!["mit".into(), "map".into()]))
+                .unwrap(),
+            vec!["mit".to_string(), "map".to_string()]
+        );
+        assert_eq!(
+            resolve_suspect_fields(&SuspectFieldsInput::Value(vec![])).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn resolve_suspect_fields_rejects_unknown_indexed_duplicate_and_overlong() {
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::Value(vec!["nope".into()])).is_err());
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::Value(vec!["r3.dmg".into()])).is_err());
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::Value(vec!["r01.e".into()])).is_err());
+        assert!(
+            resolve_suspect_fields(&SuspectFieldsInput::Value(vec!["e".into(), "e".into()]))
+                .is_err()
+        );
+        let mut too_many = vec!["map".to_string(); SUSPECT_FIELDS_MAX_LEN + 1];
+        too_many[0] = "hero".into();
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::Value(too_many)).is_err());
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::NotAnArray).is_err());
+        assert!(resolve_suspect_fields(&SuspectFieldsInput::NonStringEntry).is_err());
+    }
+
+    #[test]
+    fn suspect_fields_null_is_absent_and_wrong_types_are_flagged() {
+        let null_body: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "suspect_fields": null
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            null_body.matches[0].suspect_fields,
+            SuspectFieldsInput::Absent
+        );
+
+        let number_body: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "suspect_fields": "map"
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            number_body.matches[0].suspect_fields,
+            SuspectFieldsInput::NotAnArray
+        );
+
+        let mixed_body: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "suspect_fields": ["hero", 1]
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            mixed_body.matches[0].suspect_fields,
+            SuspectFieldsInput::NonStringEntry
         );
     }
 }

@@ -41,6 +41,13 @@ pub struct PersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     pub sync_rev: u64,
+    /// Server refused this row with HTTP 400 or 422. The row stays
+    /// `synced = false` and is left out of later uploads until a retry
+    /// clears it. The string is the server's error message. Missing on
+    /// rows written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub upload_reject: Option<String>,
     #[serde(default)]
     pub session_id: String,
 
@@ -146,6 +153,16 @@ impl SyncClaim {
             self.session_id.clone()
         }
     }
+
+    /// This claim is the uploaded row, or another snapshot of its session.
+    /// An empty `session_id` matches only the same store id.
+    pub fn covers_row(&self, row: &PersonalMatch) -> bool {
+        if row.session_id.is_empty() {
+            row.id.as_ref() == Some(&self.id)
+        } else {
+            self.session_id == row.session_id
+        }
+    }
 }
 
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).
@@ -196,6 +213,15 @@ impl PersonalMatch {
     /// True when at least one field carries a manual correction.
     pub fn is_edited(&self) -> bool {
         !self.edited_fields.is_empty()
+    }
+
+    /// Server message for a quarantined row. Empty and missing both mean
+    /// the row is still eligible for upload.
+    pub fn upload_rejection(&self) -> Option<&str> {
+        self.upload_reject
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
     }
 
     /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.
@@ -394,6 +420,9 @@ impl LocalStore {
     /// loads those rows so the caller can mark them synced with no request.
     /// A GUI `SetOutcome` writes a real outcome and `synced = false`, which
     /// releases the row here.
+    ///
+    /// Rows with [`PersonalMatch::upload_rejection`] set are quarantined.
+    /// They stay local until a retry clears the message.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
@@ -419,7 +448,73 @@ impl LocalStore {
         };
         let mut result = self.db.query(sql).await?;
         let matches: Vec<PersonalMatch> = result.take(0)?;
-        Ok(matches)
+        if unknown_only {
+            Ok(matches)
+        } else {
+            Ok(matches
+                .into_iter()
+                .filter(|row| row.upload_rejection().is_none())
+                .collect())
+        }
+    }
+
+    /// Remember that the server rejected these rows. `synced` stays false
+    /// so a later retry can upload them, and [`Self::get_unsynced`] skips
+    /// them until then. A row whose `sync_rev` changed during the upload
+    /// is left alone: the local edit is the payload that should be retried.
+    pub async fn quarantine_upload(
+        &self,
+        claims: &[SyncClaim],
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let message = clip_reject_message(message);
+        let mut touched = std::collections::HashSet::new();
+        for claim in claims {
+            let mut response = self
+                .db
+                .query(
+                    "UPDATE $id SET upload_reject = $msg \
+                     WHERE (sync_rev ?? 0) = $rev AND synced = false RETURN AFTER",
+                )
+                .bind(("id", claim.id.clone()))
+                .bind(("msg", message.clone()))
+                .bind(("rev", claim.sync_rev))
+                .await?;
+            let updated: Vec<PersonalMatch> = response.take(0)?;
+            if !updated.is_empty() && !claim.session_id.is_empty() {
+                touched.insert(claim.session_id.clone());
+            }
+        }
+        for session_id in touched {
+            let message = message.clone();
+            rewrite_match_log_session(
+                &self.data_dir,
+                &session_id,
+                Some(&move |row| {
+                    row.upload_reject = Some(message.clone());
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    /// Put a quarantined session back on the upload queue.
+    pub async fn clear_upload_reject(
+        &self,
+        session_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.db
+            .query("UPDATE personal_match SET upload_reject = '' WHERE session_id = $sid")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|row| {
+                row.upload_reject = None;
+            }),
+        );
+        Ok(())
     }
 
     /// Mark exactly these rows as synced — by identity, not queue position, so
@@ -649,6 +744,7 @@ impl LocalStore {
                 self.resolve_hero_segment(session_id, *segment, action)
                     .await
             }
+            StoreCommand::RetryUpload { session_id } => self.clear_upload_reject(session_id).await,
         }
     }
 
@@ -674,7 +770,7 @@ impl LocalStore {
             .query(
                 "UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid; \
                  UPDATE personal_match SET hero = $hero, role = $role, synced = false, \
-                 sync_rev = (sync_rev ?? 0) + 1 \
+                 upload_reject = '', sync_rev = (sync_rev ?? 0) + 1 \
                  WHERE session_id = $sid AND (hero != $hero OR role != $role)",
             )
             .bind(("hero", hero.to_string()))
@@ -692,6 +788,7 @@ impl LocalStore {
             Some(&|m| {
                 m.hero = hero.clone();
                 m.role = role.clone();
+                m.upload_reject = None;
             }),
         );
         Ok(())
@@ -748,7 +845,7 @@ impl LocalStore {
                 self.db
                     .query(
                         "UPDATE $id SET heroes_played = $hp, synced = false, \
-                         sync_rev = (sync_rev ?? 0) + 1",
+                         upload_reject = '', sync_rev = (sync_rev ?? 0) + 1",
                     )
                     .bind(("id", id))
                     .bind(("hp", segments.clone()))
@@ -843,7 +940,7 @@ impl LocalStore {
             .query(
                 "UPDATE match_session SET map_name = $map WHERE session_id = $sid; \
                  UPDATE personal_match SET map_name = $map, game_mode = $mode, synced = false, \
-                 sync_rev = (sync_rev ?? 0) + 1 \
+                 upload_reject = '', sync_rev = (sync_rev ?? 0) + 1 \
                  WHERE session_id = $sid AND (map_name != $map OR game_mode != $mode)",
             )
             .bind(("map", map.to_string()))
@@ -857,6 +954,7 @@ impl LocalStore {
             Some(&|m| {
                 m.map_name = map.clone();
                 m.game_mode = mode.clone();
+                m.upload_reject = None;
             }),
         );
         Ok(())
@@ -875,7 +973,7 @@ impl LocalStore {
             .query(
                 "UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; \
                  UPDATE personal_match SET outcome = $outcome, synced = false, \
-                 sync_rev = (sync_rev ?? 0) + 1 WHERE session_id = $sid",
+                 upload_reject = '', sync_rev = (sync_rev ?? 0) + 1 WHERE session_id = $sid",
             )
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
@@ -886,6 +984,7 @@ impl LocalStore {
             session_id,
             Some(&|m| {
                 m.outcome = outcome.clone();
+                m.upload_reject = None;
             }),
         );
         Ok(())
@@ -918,7 +1017,7 @@ impl LocalStore {
                      corrected_elims = $ce, corrected_deaths = $cd, corrected_assists = $ca, \
                      corrected_damage = $cdmg, corrected_healing = $chl, \
                      corrected_mitigation = $cmit, edited_fields = $ef, edited_at = $ea, \
-                     synced = false, sync_rev = (sync_rev ?? 0) + 1",
+                     synced = false, upload_reject = '', sync_rev = (sync_rev ?? 0) + 1",
                 )
                 .bind(("id", id))
                 .bind(("ch", m.corrected_hero.clone()))
@@ -940,7 +1039,9 @@ impl LocalStore {
             &self.data_dir,
             session_id,
             Some(&move |m| {
-                apply_match_edit(m, &edit, now);
+                if apply_match_edit(m, &edit, now) {
+                    m.upload_reject = None;
+                }
             }),
         );
         Ok(())
@@ -1156,6 +1257,40 @@ struct SessionStamp {
     last_capture_at: SurrealDatetime,
 }
 
+/// Drop a leading `matches[<n>]: ` from the server's batch error. The index
+/// is the position inside one HTTP body, which changes every time the batch
+/// is split, so it is not a stable description of the row.
+fn strip_match_index_prefix(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix("matches[") else {
+        return message;
+    };
+    let Some(end) = rest.find("]:") else {
+        return message;
+    };
+    let index = &rest[..end];
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return message;
+    }
+    rest[end + 2..].trim_start()
+}
+
+fn clip_reject_message(message: &str) -> String {
+    let message = strip_match_index_prefix(message.trim());
+    const MAX: usize = 400;
+    if message.is_empty() {
+        return "Upload rejected".to_string();
+    }
+    if message.chars().count() <= MAX {
+        return message.to_string();
+    }
+    let end = message
+        .char_indices()
+        .nth(MAX)
+        .map(|(index, _)| index)
+        .unwrap_or(message.len());
+    format!("{}...", &message[..end])
+}
+
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply
 /// `update` to each, or drop them entirely when `update` is `None`. The log is
 /// append-only at capture time, so without this back-fills and deletes never
@@ -1256,6 +1391,8 @@ pub enum StoreCommand {
         segment: u32,
         action: String,
     },
+    /// Clear a quarantined upload error and queue the session again.
+    RetryUpload { session_id: String },
 }
 
 /// A manual correction to a game's stats. Only `Some(_)` fields are applied;
@@ -1657,6 +1794,7 @@ mod tests {
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
             sync_rev: 0,
+            upload_reject: None,
             session_id: session_id.into(),
             corrected_hero: None,
             corrected_role: None,
@@ -2402,6 +2540,140 @@ mod tests {
         assert!(committed[0].synced);
         assert_eq!(committed[0].outcome, "defeat");
         assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn quarantined_row_stays_out_of_the_queue_until_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(snap("keep", 1)).await.unwrap();
+        store.insert_match(snap("bad", 2)).await.unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        let bad: Vec<_> = rows
+            .iter()
+            .filter(|row| row.session_id == "bad")
+            .cloned()
+            .collect();
+        store
+            .quarantine_upload(&SyncClaim::capture(&bad), "matches[0]: hero is not allowed")
+            .await
+            .unwrap();
+        let pending = store.get_unsynced().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id, "keep");
+        let stored = store.get_all_matches().await.unwrap();
+        let bad_row = stored.iter().find(|row| row.session_id == "bad").unwrap();
+        assert!(!bad_row.synced);
+        assert_eq!(bad_row.upload_rejection(), Some("hero is not allowed"));
+        store
+            .apply_command(&StoreCommand::RetryUpload {
+                session_id: "bad".into(),
+            })
+            .await
+            .unwrap();
+        let again = store.get_unsynced().await.unwrap();
+        assert_eq!(again.len(), 2);
+        assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+    }
+
+    #[tokio::test]
+    async fn editing_a_quarantined_row_queues_it_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(snap("bad", 2)).await.unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        store
+            .quarantine_upload(
+                &SyncClaim::capture(&rows),
+                "matches[0]: hero is not allowed",
+            )
+            .await
+            .unwrap();
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+        store
+            .edit_match(
+                "bad",
+                &MatchEdit {
+                    elims: Some(9),
+                    ..MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        let pending = store.get_unsynced().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].upload_rejection().is_none());
+        assert_eq!(pending[0].corrected_elims, Some(9));
+    }
+
+    #[tokio::test]
+    async fn reject_message_drops_the_batch_index() {
+        let cases = [
+            (
+                "a",
+                "matches[0]: hero is not allowed",
+                "hero is not allowed",
+            ),
+            ("b", "matches[12]: map is unknown", "map is unknown"),
+            ("c", "hero is not allowed", "hero is not allowed"),
+            ("d", "matches[0]: ", "Upload rejected"),
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        for (index, (sid, raw, _)) in cases.iter().enumerate() {
+            store.insert_match(snap(sid, index as u32)).await.unwrap();
+            let rows = store.get_unsynced().await.unwrap();
+            let row = rows
+                .into_iter()
+                .find(|row| row.session_id == *sid)
+                .expect("row");
+            store
+                .quarantine_upload(&SyncClaim::capture(std::slice::from_ref(&row)), raw)
+                .await
+                .unwrap();
+        }
+        let stored = store.get_all_matches().await.unwrap();
+        for (sid, _, expect) in cases {
+            let row = stored.iter().find(|row| row.session_id == sid).unwrap();
+            assert_eq!(row.upload_rejection(), Some(expect), "{sid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_reject_survives_store_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = LocalStore::open(dir.path()).await.unwrap();
+            store.insert_match(snap("bad", 2)).await.unwrap();
+            let rows = store.get_unsynced().await.unwrap();
+            store
+                .quarantine_upload(
+                    &SyncClaim::capture(&rows),
+                    "matches[3]: hero is not allowed",
+                )
+                .await
+                .unwrap();
+        }
+        let store = reopen_store(dir.path()).await;
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].synced);
+        assert_eq!(rows[0].upload_rejection(), Some("hero is not allowed"));
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    async fn reopen_store(path: &std::path::Path) -> LocalStore {
+        let mut last = None;
+        for _ in 0..20 {
+            match LocalStore::open(path).await {
+                Ok(store) => return store,
+                Err(err) => {
+                    last = Some(err.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        panic!("store did not reopen: {}", last.unwrap_or_default());
     }
 
     #[tokio::test]

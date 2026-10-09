@@ -7,7 +7,8 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
 use crate::model::{
-    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, display_hero_name, local_hm,
+    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, UPLOAD_REJECTED_LABEL,
+    display_hero_name, local_hm,
 };
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
@@ -271,10 +272,24 @@ pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
 
 pub fn toast_bar(msg: &str) -> Element<'static, Message> {
     container(
-        text(msg.to_string())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT),
+        row![
+            text(msg.to_string())
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT)
+                .width(Fill),
+            button(
+                text("Dismiss")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_2),
+            )
+            .padding(Padding::from([4, 10]))
+            .style(theme::ghost_btn())
+            .on_press(Message::DismissToast),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(12),
     )
     .padding(Padding::from([8, 14]))
     .width(Fill)
@@ -641,6 +656,10 @@ pub fn expanded_game_card<'a>(
     ]
     .spacing(10);
 
+    if let Some(message) = game.upload_reject.as_deref() {
+        body = body.push(upload_rejected_panel(game.session_id.clone(), message));
+    }
+
     let corr = game.corrections();
     if !corr.is_empty() {
         let mut block = column![label_text("Corrections")].spacing(4);
@@ -855,26 +874,53 @@ fn role_and_edited(game: &Game) -> Element<'static, Message> {
         .spacing(8)
         .align_y(Alignment::Center);
     if game.edited {
-        r = r.push(
-            container(
-                text("edited")
-                    .size(SIZE_LABEL)
-                    .font(FONT_BOLD)
-                    .color(theme::WARN),
-            )
-            .padding(Padding::from([2, 8]))
-            .style(|_t| container::Style {
-                background: Some(iced::Background::Color(theme::BG)),
-                border: iced::Border {
-                    color: theme::WARN,
-                    width: 1.0,
-                    radius: theme::RADIUS_CHIP.into(),
-                },
-                ..container::Style::default()
-            }),
-        );
+        r = r.push(status_chip("edited", theme::WARN));
+    }
+    if game.upload_reject.is_some() {
+        r = r.push(status_chip(UPLOAD_REJECTED_LABEL, theme::DANGER));
     }
     r.into()
+}
+
+fn status_chip(label: &'static str, color: iced::Color) -> Element<'static, Message> {
+    container(text(label).size(SIZE_LABEL).font(FONT_BOLD).color(color))
+        .padding(Padding::from([2, 8]))
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(theme::BG)),
+            border: iced::Border {
+                color,
+                width: 1.0,
+                radius: theme::RADIUS_CHIP.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn upload_rejected_panel(session_id: String, message: &str) -> Element<'static, Message> {
+    column![
+        text(UPLOAD_REJECTED_LABEL)
+            .size(SIZE_META)
+            .font(FONT_BOLD)
+            .color(theme::DANGER),
+        text(message.to_string())
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2)
+            .width(Fill),
+        button(
+            text("Retry")
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT),
+        )
+        .padding(Padding::from([6, 14]))
+        .style(theme::ghost_btn())
+        .on_press(Message::RetryUpload(session_id)),
+    ]
+    .spacing(6)
+    .width(Fill)
+    .into()
 }
 
 fn outcome_label(outcome: Outcome) -> Element<'static, Message> {
