@@ -7,9 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{
-    AttendanceStats, AttendanceStatus, AuditAction, AuditTargetType, EventAttendance,
-};
+use scuffed_db::{AttendanceStatus, AuditAction, AuditTargetType, EventAttendance};
+use scuffed_types::AttendanceStats;
 
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
@@ -135,7 +134,10 @@ pub async fn member_attendance(
         })
 }
 
-/// GET /api/members/:id/attendance/stats — member attendance stats (self or officer+)
+/// GET /api/members/:id/attendance/stats. Self or officer+.
+///
+/// JSON body is [`AttendanceStats`] (`member_id`, `attended`, `no_show`,
+/// `excused`, `total`). Counts are zero when the member has no rows.
 pub async fn member_attendance_stats(
     State(state): State<AppState>,
     caller: OrgMember,

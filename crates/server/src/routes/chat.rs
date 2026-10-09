@@ -540,6 +540,7 @@ mod tests {
             upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
             reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
             reports_enabled: true,
+            packs_dir: None,
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(

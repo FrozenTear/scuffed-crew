@@ -42,6 +42,7 @@ async fn test_state() -> AppState {
         upload_dir: std::path::PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: std::path::PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
+        packs_dir: None,
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"device-link-test-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),

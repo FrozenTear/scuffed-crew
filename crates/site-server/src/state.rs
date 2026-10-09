@@ -27,6 +27,11 @@ pub struct AppState {
     /// False when `REPORTS_DIR` is missing, not writable, or overlaps uploads
     /// or the web root. The rest of the site still starts.
     pub reports_enabled: bool,
+    /// `PACKS_DIR` when it is set and does not overlap uploads, reports, or the
+    /// web root. `None` leaves pack routes at 503. The process still starts.
+    /// Each request re-reads the directory, so a later permission fix does not
+    /// need a restart unless startup dropped the path.
+    pub packs_dir: Option<PathBuf>,
     /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
     pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.

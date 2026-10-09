@@ -14,6 +14,7 @@
 #   assets/scuffed-stat-tracker-session.service
 #   import-session-env.sh   (reads compositor environ; installed under PREFIX)
 #   systemd-unit.sh         (sourced; rewrites ExecStart to $PREFIX/bin)
+#   install-paths.sh        (sourced; the only list of install paths)
 #   install.sh   (this file)
 #   VERSION      (optional)
 #
@@ -23,11 +24,9 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=install-paths.sh
+source "$PKG_ROOT/install-paths.sh"
 PREFIX="${PREFIX:-$HOME/.local}"
-BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
-LIB_DIR="${LIB_DIR:-$PREFIX/lib}"
-DESKTOP_DIR="${DESKTOP_DIR:-$HOME/.local/share/applications}"
-SYSTEMD_DIR="${SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 ASSETS_DIR="$PKG_ROOT/assets"
 DAEMON_BIN="$PKG_ROOT/bin/scuffed-stat-tracker"
 GUI_BIN="$PKG_ROOT/bin/stat-tracker-gui"
@@ -46,6 +45,21 @@ NC='\033[0m'
 info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+
+# Destinations come from install-paths.sh so uninstall cannot drift.
+_path_or_die() {
+    install_path_named "$HOME" "$PREFIX" "$1" "$2" || {
+        error "install path list has no $1 $2"
+        exit 1
+    }
+}
+BIN_DIR="${BIN_DIR:-$(dirname "$(_path_or_die bin scuffed-stat-tracker)")}"
+LIB_DIR="${LIB_DIR:-$(dirname "$(_path_or_die libdir scuffed-stat-tracker)")}"
+DESKTOP_DIR="${DESKTOP_DIR:-$(dirname "$(_path_or_die desktop scuffed-stat-tracker.desktop)")}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-$(dirname "$(_path_or_die unit scuffed-stat-tracker.service)")}"
+MANIFEST="$(_path_or_die manifest install-manifest.txt)"
+MANIFEST_DIR="$(dirname "$MANIFEST")"
+DATA_ROOT="$(_path_or_die data scuffed-stat-tracker)"
 
 # >>> atomic_install
 # Write to a temp file in the destination directory, then rename over the
@@ -242,6 +256,14 @@ if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
     info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
 fi
 
+# The installed uninstaller sources this from lib/scuffed-stat-tracker
+# when it is not sitting next to the script (the $PREFIX/bin copy).
+if [[ -f "$PKG_ROOT/install-paths.sh" ]]; then
+    LIST_DEST="$(_path_or_die list install-paths.sh)"
+    atomic_install "$PKG_ROOT/install-paths.sh" "$LIST_DEST" 644
+    MANIFEST_ENTRIES+=("$LIST_DEST")
+fi
+
 # Bundled native libs (portable releases). Never dump into $PREFIX/lib itself:
 # v0.4.0 put Ubuntu 22.04 libcrypto.so.3 there, and both binaries' RUNPATH
 # ($ORIGIN/../lib) made that copy win over /usr/lib — OPENSSL_3.2.0 not found
@@ -307,8 +329,6 @@ fi
 # Upgrade cleanup: v0.4.0 wrote sonames into $PREFIX/lib (the GUI RUNPATH).
 # Delete those leftover files if our previous manifest listed them, especially
 # libcrypto/libssl which break hosts with a newer system OpenSSL.
-MANIFEST_DIR="$PREFIX/share/scuffed-stat-tracker"
-MANIFEST="$MANIFEST_DIR/install-manifest.txt"
 if [[ -f "$MANIFEST" ]]; then
     while IFS= read -r line; do
         [[ "$line" == /* ]] || continue
@@ -332,7 +352,7 @@ fi
 # no distro tessdata package needed). Never clobber a user's own eng model
 # (e.g. a tuned koverwatch or hand-placed eng.traineddata).
 BUNDLED_ENG="$PKG_ROOT/tessdata/eng.traineddata"
-USER_TESSDATA_DIR="$HOME/.local/share/scuffed-stat-tracker/tessdata"
+USER_TESSDATA_DIR="$DATA_ROOT/tessdata"
 USER_ENG="$USER_TESSDATA_DIR/eng.traineddata"
 if [[ -f "$BUNDLED_ENG" ]]; then
     if [[ -f "$USER_ENG" ]]; then
@@ -340,6 +360,7 @@ if [[ -f "$BUNDLED_ENG" ]]; then
     else
         mkdir -p "$USER_TESSDATA_DIR"
         install -m644 "$BUNDLED_ENG" "$USER_ENG"
+        MANIFEST_ENTRIES+=("$USER_ENG")
         info "Installed bundled eng.traineddata → $USER_ENG"
     fi
 fi
@@ -360,6 +381,7 @@ if [[ -f "$BUNDLED_KOV" ]]; then
             info "Existing koverwatch.traineddata backed up → $USER_KOV.bak"
         fi
         install -m644 "$BUNDLED_KOV" "$USER_KOV"
+        MANIFEST_ENTRIES+=("$USER_KOV")
         info "Installed bundled koverwatch.traineddata → $USER_KOV"
     fi
 fi
@@ -423,11 +445,13 @@ else
 fi
 
 # ── Install manifest ──────────────────────────────────────────────────────────
+# One absolute path per line. uninstall.sh removes exactly these entries.
+# The manifest path is itself an entry so it does not linger. config.toml
+# is not an installed file and is never recorded here.
 # Union with any previous manifest so an upgrade that drops a file still
 # leaves the old copy removable by the uninstaller.
 
-MANIFEST_DIR="$PREFIX/share/scuffed-stat-tracker"
-MANIFEST="$MANIFEST_DIR/install-manifest.txt"
+MANIFEST_ENTRIES+=("$MANIFEST")
 mkdir -p "$MANIFEST_DIR"
 {
     if [[ -f "$MANIFEST" ]]; then

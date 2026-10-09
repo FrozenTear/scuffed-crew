@@ -118,6 +118,11 @@ async fn main() {
     let reports_configured = scuffed_site_server::stat_reports::reports_dir_from_env();
     let (reports_dir, reports_enabled) =
         scuffed_site_server::stat_reports::open_reports_dir(&reports_configured, &upload_dir).await;
+    let packs_dir = scuffed_site_server::packs::open_packs_dir(
+        scuffed_site_server::packs::packs_dir_from_env().as_deref(),
+        &upload_dir,
+        &reports_dir,
+    );
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -174,6 +179,7 @@ async fn main() {
         upload_dir,
         reports_dir: reports_dir.clone(),
         reports_enabled,
+        packs_dir,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -314,6 +320,7 @@ mod compression_shell {
             upload_dir: root.join("uploads"),
             reports_dir: root.join("reports"),
             reports_enabled: true,
+            packs_dir: None,
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(

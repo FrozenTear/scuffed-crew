@@ -37,6 +37,14 @@
 #                       test hook (URL dest). Unsupported for real installs.
 #   STAT_TRACKER_BOOTSTRAP_LIB_ONLY
 #                       source this file to load functions and return.
+#
+# Uninstall a user-level bootstrap install. install.sh writes
+# install-manifest.txt. uninstall.sh removes exactly those paths.
+#   bash bootstrap.sh --uninstall
+#   bash bootstrap.sh --uninstall --purge
+# A pacman/AUR or apt/dpkg owner of the GUI binary is left in place.
+# The script prints `sudo pacman -R <pkg>` or `sudo apt remove <pkg>`.
+# An AppImage is a script install, not a package.
 set -euo pipefail
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
@@ -562,6 +570,17 @@ if [[ "${STAT_TRACKER_BOOTSTRAP_LIB_ONLY:-}" == 1 ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
+if [[ "${1:-}" == "--uninstall" ]]; then
+    shift
+    _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ ! -f "$_here/uninstall.sh" || ! -f "$_here/install-paths.sh" ]]; then
+        error "uninstall.sh and install-paths.sh must sit next to bootstrap.sh"
+        exit 1
+    fi
+    export PREFIX="${STAT_TRACKER_PREFIX:-${PREFIX:-$HOME/.local}}"
+    exec bash "$_here/uninstall.sh" "$@"
+fi
+
 CHANNEL="${STAT_TRACKER_CHANNEL:-}"
 case "$CHANNEL" in
     ""|stable|prerelease) ;;
@@ -627,5 +646,16 @@ info "Running in-tarball installer (PREFIX=$PREFIX)…"
 # Pass SKIP_INTEGRATION through so a throwaway-PREFIX smoke test can install
 # binaries only without polluting the real $HOME (desktop entry + systemd unit).
 PREFIX="$PREFIX" SKIP_INTEGRATION="${SKIP_INTEGRATION:-}" bash "$STAGE/install.sh"
+
+# install.sh records every file it wrote. Fail if that manifest is missing
+# so a later uninstall is not left guessing.
+# shellcheck source=install-paths.sh
+source "$STAGE/install-paths.sh"
+_manifest="$(install_path_named "$HOME" "$PREFIX" manifest install-manifest.txt || true)"
+if [[ -z "${_manifest}" || ! -f "$_manifest" ]]; then
+    error "install.sh did not write the install manifest"
+    exit 1
+fi
+info "Recorded install manifest → $_manifest"
 
 info "Done. Launch with: stat-tracker-gui"
