@@ -12,11 +12,11 @@ use scuffed_db::{
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SUSPECT_FIELDS_ERROR,
-    SeasonQuery, StatsUploadBody, StatsUploadResponse, UpdateMemberSettingsRequest,
-    resolve_recognizer, resolve_suspect_fields,
+    SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
+    UpdateMemberSettingsRequest, resolve_recognizer, resolve_suspect_fields,
 };
 
-use crate::extractors::{DaemonUser, OrgMember};
+use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -523,6 +523,20 @@ pub async fn update_member_settings(
     Ok(Json(MemberSettingsResponse {
         player_name: settings.player_name,
     }))
+}
+
+/// GET /api/stats/token-check
+///
+/// Same daemon token auth as `POST /api/stats/upload`. Returns the member
+/// display name only. Missing, bad, revoked, and expired tokens share one
+/// 401 body.
+///
+/// `validate_daemon_token` already sets `last_used_at` on success (the upload
+/// path does this). This handler does not write.
+pub async fn token_check(daemon: OpaqueDaemonUser) -> Json<TokenCheckResponse> {
+    Json(TokenCheckResponse {
+        display_name: daemon.member.display_name,
+    })
 }
 
 /// GET /api/stats/daemon-config — fetch config for daemon (token auth)
