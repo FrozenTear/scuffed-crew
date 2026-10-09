@@ -1905,9 +1905,7 @@ mod tests {
         assert_eq!(guide.flow.current(), GuideStep::Sync);
         assert!(guide.continue_step().is_none());
         assert_eq!(guide.flow.current(), GuideStep::ReaderPack);
-        let done = guide
-            .continue_step()
-            .expect("reader pack is the last step");
+        let done = guide.continue_step().expect("reader pack is the last step");
         assert!(!guide.open);
         assert_eq!(done.setup_completed, Some(true));
     }
