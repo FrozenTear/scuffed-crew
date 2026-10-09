@@ -10,10 +10,10 @@ use crate::layouts::{focus_element, use_document_keydown};
 use crate::state::use_auth;
 
 use super::stat_reports::{
-    CONFIRM_DIALOG_ID, COPY_DELETED, COPY_WITHDRAWN, ConfirmGate, MyReportsBody, PreparedRows,
-    ReportIntent, StatReportList, StatReportWithdrawn, WithdrawTrainingBody, apply_own_filter,
-    apply_reports_switch, confirm_escape_closes, is_reports_disabled, member_screen,
-    mutation_failure_copy, prepare_member_rows, without_expired,
+    CONFIRM_DIALOG_ID, COPY_DELETED, COPY_WITHDRAWN, ConfirmGate, ListedError, MyReportsBody,
+    PreparedRows, ReportIntent, StatReportList, StatReportWithdrawn, WithdrawTrainingBody,
+    apply_own_filter, apply_reports_switch, confirm_escape_closes, is_reports_disabled,
+    member_screen, mutation_failure_copy, prepare_member_rows, without_expired,
 };
 
 #[component]
@@ -44,18 +44,10 @@ pub fn MyReports() -> Element {
     let mut switched_off = use_signal(|| false);
 
     let auth_now = auth();
-    let (error_detail, error_body, retry_after_seconds) = {
+    let failure = {
         let current = list_error.read();
-        match current.as_ref() {
-            Some(err) => (
-                err.to_string(),
-                err.http_body().unwrap_or("").to_string(),
-                err.retry_after_header(),
-            ),
-            None => (String::new(), String::new(), None),
-        }
+        current.as_ref().map(ListedError::from_client)
     };
-    let error = (!error_detail.is_empty()).then(|| error_detail.clone());
     let list = reports.read().clone().flatten();
     let (me_settled, member_id) = {
         let me_data = me.read();
@@ -77,7 +69,7 @@ pub fn MyReports() -> Element {
     let row_count = list.as_ref().map(|list| list.reports.len());
     let screen = apply_reports_switch(
         apply_own_filter(
-            member_screen(&auth_now, error.as_deref(), row_count),
+            member_screen(&auth_now, failure.as_ref(), row_count),
             &prepared,
             me_settled,
         ),
@@ -175,14 +167,14 @@ pub fn MyReports() -> Element {
                     refresh += 1;
                 }
                 Err(err) => {
-                    let text = err.to_string();
-                    if is_reports_disabled(&text) {
+                    let body = err.http_body().unwrap_or("");
+                    if is_reports_disabled(err.http_status(), body) {
                         switched_off.set(true);
                     } else {
                         toast.show(Toast::error(mutation_failure_copy(
                             mutation.intent,
-                            &text,
-                            err.http_body().unwrap_or(""),
+                            err.http_status(),
+                            body,
                             err.retry_after_header(),
                         )));
                     }
@@ -197,9 +189,12 @@ pub fn MyReports() -> Element {
     rsx! {
         MyReportsBody {
             screen,
-            error_detail: error.unwrap_or_default(),
-            error_body,
-            retry_after_seconds,
+            http_status: failure.as_ref().and_then(|err| err.status),
+            error_body: failure
+                .as_ref()
+                .map(|err| err.body.clone())
+                .unwrap_or_default(),
+            retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
             rows,
             pending,
             busy: busy(),

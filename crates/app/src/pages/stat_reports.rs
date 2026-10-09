@@ -1,10 +1,8 @@
 //! Member and officer views for tracker bug reports.
 //!
-//! List and withdraw shapes are copied from PR 189 (`scuffed_types` on
-//! `cursor/member-bug-report-bundles-73cb`). That branch is not on main, so
-//! this crate cannot depend on it. When PR 189 lands, replace these mirrors
-//! with the shared types. Officer-only JSON keys are omitted for a member, so
-//! the mirrors default those fields when they are absent.
+//! List and withdraw shapes are the shared types from PR 198. The withdraw
+//! request body is not in those types, so it stays here. Officer-only JSON
+//! keys are omitted for a member. `Option` fields accept that omission.
 //!
 //! The page never renders report contents (reason text, manifest, images, or
 //! the zip). The member column on the officer list is the member id from the
@@ -12,44 +10,16 @@
 
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::components::{AccessDenied, is_http_status};
+use scuffed_api_client::ClientError;
+
+use crate::components::AccessDenied;
 use crate::state::auth::AuthState;
 
 use super::login::remember_login_return;
 
-/// `GET /api/stat-reports` body.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct StatReportList {
-    pub reports: Vec<StatReportListItem>,
-}
-
-/// One row from `GET /api/stat-reports`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct StatReportListItem {
-    pub id: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub training_consent: bool,
-    pub own_name_included: bool,
-    pub glyphs_included: bool,
-    pub size_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason_category: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recognizer_matcher: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recognizer_ocr: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zip_sha256: Option<String>,
-}
+pub(crate) use scuffed_types::{StatReportList, StatReportListItem, StatReportWithdrawn};
 
 /// `POST /api/stat-reports/{id}/withdraw` body. The server accepts this object
 /// and nothing else.
@@ -62,15 +32,6 @@ impl WithdrawTrainingBody {
     pub(crate) fn clear() -> Self {
         Self { training: false }
     }
-}
-
-/// `POST /api/stat-reports/{id}/withdraw` response.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub(crate) struct StatReportWithdrawn {
-    pub id: String,
-    pub deleted: bool,
-    pub training: bool,
-    pub expires_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) const COPY_LOADING_MINE: &str = "Loading your reports.";
@@ -98,7 +59,7 @@ pub(crate) const COPY_NO_DELETION: &str = "No deletion date";
 pub(crate) const COPY_DELETION_MISSING: &str = "Deletion date missing";
 pub(crate) const COPY_UNUSABLE: &str = "This report cannot be changed from this page.";
 pub(crate) const COPY_DISABLED: &str = "Reports are off right now.";
-pub(crate) const COPY_RATE_LIMIT_WAIT: &str = "Too many requests. Try again in a moment.";
+pub(crate) const COPY_RATE_LIMIT_WAIT: &str = scuffed_types::TRY_AGAIN_LATER;
 pub(crate) const COPY_OFFICER_SIGN_IN: &str = "Sign in to view reports.";
 pub(crate) const OFFICER_REPORTS_PATH: &str = "/admin/reports";
 
@@ -233,7 +194,7 @@ impl ConfirmGate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum PreparedRows {
     PendingMember,
     Rows(Vec<StatReportListItem>),
@@ -360,13 +321,38 @@ pub(crate) fn confirm_copy(intent: ReportIntent) -> (&'static str, &'static str,
     }
 }
 
+/// HTTP failure kept as a status code plus the body. Display text is not used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListedError {
+    pub status: Option<u16>,
+    pub body: String,
+    pub header_seconds: Option<u64>,
+}
+
+impl ListedError {
+    pub(crate) fn from_client(err: &ClientError) -> Self {
+        Self {
+            status: err.http_status(),
+            body: err.http_body().unwrap_or("").to_string(),
+            header_seconds: err.retry_after_header(),
+        }
+    }
+}
+
 /// `503` whose JSON body is `{"error":"reports_disabled"}`.
-///
-/// `ClientError` displays that response as `HTTP error 503: reports_disabled`.
-pub(crate) fn is_reports_disabled(error: &str) -> bool {
-    error
-        .split_once("HTTP error 503:")
-        .is_some_and(|(_, message)| message.trim() == "reports_disabled")
+pub(crate) fn is_reports_disabled(status: Option<u16>, body: &str) -> bool {
+    if status != Some(503) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.as_str())
+                .map(str::to_owned)
+        })
+        .is_some_and(|message| message == "reports_disabled")
 }
 
 /// Training consent does not expire. Any other report whose `expires_at` is
@@ -389,28 +375,14 @@ pub(crate) fn without_expired(
 
 /// Seconds to wait on a 429. JSON `retry_after` wins. The header is the fallback.
 /// A plain-text body with no usable wait returns `None`.
+/// [`scuffed_types::json_retry_after`] drops waits outside `1..=3600`, arrays, and null.
 pub(crate) fn retry_after_seconds(body: &str, header_seconds: Option<u64>) -> Option<u64> {
-    json_retry_after(body).or_else(|| header_seconds.filter(|seconds| *seconds >= 1))
-}
-
-fn json_retry_after(body: &str) -> Option<u64> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("error").and_then(|error| error.as_str()) != Some("rate_limited") {
-        return None;
-    }
-    match value.get("retry_after")? {
-        serde_json::Value::Number(number) => number.as_u64().filter(|seconds| *seconds >= 1),
-        serde_json::Value::String(text) => text
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| *seconds >= 1),
-        _ => None,
-    }
+    scuffed_types::json_retry_after(body).or_else(|| header_seconds.filter(|seconds| *seconds >= 1))
 }
 
 pub(crate) fn rate_limit_sentence(seconds: Option<u64>) -> String {
     match seconds {
+        Some(1) => "Too many requests. Try again in 1 second.".to_string(),
         Some(seconds) => format!("Too many requests. Try again in {seconds} seconds."),
         None => COPY_RATE_LIMIT_WAIT.to_string(),
     }
@@ -419,11 +391,11 @@ pub(crate) fn rate_limit_sentence(seconds: Option<u64>) -> String {
 /// Load failures stay in plain words. The raw client string is not shown.
 pub(crate) fn visible_load_error(
     fallback: &str,
-    detail: &str,
+    status: Option<u16>,
     body: &str,
     header_seconds: Option<u64>,
 ) -> String {
-    if is_http_status(detail, 429) {
+    if status == Some(429) {
         rate_limit_sentence(retry_after_seconds(body, header_seconds))
     } else {
         fallback.to_string()
@@ -432,11 +404,11 @@ pub(crate) fn visible_load_error(
 
 pub(crate) fn mutation_failure_copy(
     intent: ReportIntent,
-    detail: &str,
+    status: Option<u16>,
     body: &str,
     header_seconds: Option<u64>,
 ) -> String {
-    if is_http_status(detail, 429) {
+    if status == Some(429) {
         rate_limit_sentence(retry_after_seconds(body, header_seconds))
     } else {
         match intent {
@@ -448,7 +420,7 @@ pub(crate) fn mutation_failure_copy(
 
 pub(crate) fn member_screen(
     auth: &AuthState,
-    error: Option<&str>,
+    error: Option<&ListedError>,
     row_count: Option<usize>,
 ) -> MemberScreen {
     if auth.loading {
@@ -461,17 +433,17 @@ pub(crate) fn member_screen(
         return MemberScreen::Membership;
     }
     if let Some(err) = error {
-        if is_http_status(err, 401) {
+        if err.status == Some(401) {
             return MemberScreen::SignIn;
         }
-        if is_http_status(err, 403) {
+        if err.status == Some(403) {
             return if auth.is_org_member() {
                 MemberScreen::Inactive
             } else {
                 MemberScreen::Membership
             };
         }
-        if is_reports_disabled(err) {
+        if is_reports_disabled(err.status, &err.body) {
             return MemberScreen::Disabled;
         }
         return MemberScreen::Error;
@@ -504,17 +476,17 @@ pub(crate) fn apply_reports_switch(screen: MemberScreen, switched_off: bool) -> 
 
 pub(crate) fn officer_screen(
     auth: &AuthState,
-    error: Option<&str>,
+    error: Option<&ListedError>,
     row_count: Option<usize>,
 ) -> OfficerScreen {
     if auth.loading {
         return OfficerScreen::Checking;
     }
     if let Some(err) = error {
-        if is_http_status(err, 401) {
+        if err.status == Some(401) {
             return OfficerScreen::SignIn;
         }
-        if is_http_status(err, 403) {
+        if err.status == Some(403) {
             return OfficerScreen::Forbidden;
         }
     }
@@ -522,7 +494,7 @@ pub(crate) fn officer_screen(
         return OfficerScreen::Forbidden;
     }
     if let Some(err) = error {
-        if is_reports_disabled(err) {
+        if is_reports_disabled(err.status, &err.body) {
             return OfficerScreen::Disabled;
         }
         return OfficerScreen::Error;
@@ -599,6 +571,7 @@ fn static_copy() -> &'static [&'static str] {
         COPY_RATE_LIMIT_WAIT,
         COPY_OFFICER_SIGN_IN,
         "Too many requests. Try again in 12 seconds.",
+        "Too many requests. Try again in 1 second.",
         "My reports",
         "Reports",
         "Kept for training",
@@ -638,7 +611,7 @@ fn labeled_control(id: &str, label: &str, button: Element) -> Element {
 #[component]
 pub(crate) fn MyReportsBody(
     screen: MemberScreen,
-    error_detail: String,
+    #[props(default)] http_status: Option<u16>,
     #[props(default)] error_body: String,
     #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
@@ -670,7 +643,7 @@ pub(crate) fn MyReportsBody(
                 },
                 MemberScreen::Inactive => rsx! { p { class: "reports-status", "{COPY_INACTIVE}" } },
                 MemberScreen::Error => rsx! {
-                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_MINE, &error_detail, &error_body, retry_after_seconds)}" }
+                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_MINE, http_status, &error_body, retry_after_seconds)}" }
                     {retry_button(MY_REPORTS_RETRY_ID, on_retry)}
                 },
                 MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
@@ -849,7 +822,7 @@ fn retry_button(id: &'static str, on_retry: EventHandler<()>) -> Element {
 #[component]
 pub(crate) fn OfficerReportsBody(
     screen: OfficerScreen,
-    error_detail: String,
+    #[props(default)] http_status: Option<u16>,
     #[props(default)] error_body: String,
     #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
@@ -872,7 +845,7 @@ pub(crate) fn OfficerReportsBody(
                 div { class: "reports-page",
                     h1 { "Reports" }
                     p { class: "reports-intro", "{COPY_INTRO_ALL}" }
-                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_ALL, &error_detail, &error_body, retry_after_seconds)}" }
+                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_ALL, http_status, &error_body, retry_after_seconds)}" }
                     {retry_button(OFFICER_REPORTS_RETRY_ID, on_retry)}
                 }
             },
@@ -1001,6 +974,14 @@ mod tests {
         Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap()
     }
 
+    fn listed(status: u16, body: &str) -> ListedError {
+        ListedError {
+            status: Some(status),
+            body: body.to_string(),
+            header_seconds: None,
+        }
+    }
+
     fn row(id: &str, training: bool, expires: Option<DateTime<Utc>>) -> StatReportListItem {
         StatReportListItem {
             id: id.into(),
@@ -1100,7 +1081,7 @@ mod tests {
         assert_eq!(
             officer_screen(
                 &auth(Some(OrgRole::Officer), false),
-                Some("HTTP error 500: Internal error"),
+                Some(&listed(500, "HTTP error 500: Internal error")),
                 None
             ),
             OfficerScreen::Error
@@ -1146,15 +1127,23 @@ mod tests {
         }
         let member = auth(Some(OrgRole::Member), false);
         assert_eq!(
-            member_screen(&member, Some("HTTP error 401: Unauthorized"), None),
+            member_screen(
+                &member,
+                Some(&listed(401, "HTTP error 401: Unauthorized")),
+                None
+            ),
             MemberScreen::SignIn
         );
         assert_eq!(
-            member_screen(&member, Some("HTTP error 403: Forbidden"), None),
+            member_screen(&member, Some(&listed(403, "Forbidden")), None),
             MemberScreen::Inactive
         );
         assert_eq!(
-            member_screen(&member, Some("HTTP error 500: Internal error"), None),
+            member_screen(
+                &member,
+                Some(&listed(500, "HTTP error 500: Internal error")),
+                None
+            ),
             MemberScreen::Error
         );
         assert_eq!(member_screen(&member, None, None), MemberScreen::Loading);
@@ -1296,7 +1285,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![row(REPORT_A, true, Some(at(2026, 11, 8, 15, 30)))],
                     pending: None,
                     busy: false,
@@ -1326,7 +1314,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![item],
                     pending: None,
                     busy: false,
@@ -1350,7 +1337,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![row(REPORT_A, false, Some(at(2026, 11, 8, 15, 30)))],
                     pending: Some(PendingReportAction {
                         intent: ReportIntent::Delete,
@@ -1383,7 +1369,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Loading,
-                    error_detail: String::new(),
                     rows: Vec::new(),
                     pending: None,
                     busy: false,
@@ -1394,7 +1379,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Empty,
-                    error_detail: String::new(),
                     rows: Vec::new(),
                     pending: None,
                     busy: false,
@@ -1405,7 +1389,7 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Error,
-                    error_detail: String::from("HTTP error 500: Internal error"),
+                    http_status: Some(500),
                     rows: Vec::new(),
                     pending: None,
                     busy: false,
@@ -1416,7 +1400,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::SignIn,
-                    error_detail: String::new(),
                     rows: Vec::new(),
                     pending: None,
                     busy: false,
@@ -1459,7 +1442,6 @@ mod tests {
             rsx! {
                 OfficerReportsBody {
                     screen: OfficerScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![item],
                 }
             }
@@ -1488,39 +1470,68 @@ mod tests {
     #[test]
     fn load_errors_stay_plain_and_rate_limits_name_the_wait() {
         let raw = "HTTP error 500: Internal error";
-        let mine = visible_load_error(COPY_ERROR_MINE, raw, "", None);
+        let mine = visible_load_error(COPY_ERROR_MINE, Some(500), raw, None);
         assert_eq!(mine, COPY_ERROR_MINE);
         assert!(!mine.contains("HTTP error"));
         assert!(!mine.contains("Internal error"));
-        let officer = visible_load_error(COPY_ERROR_ALL, raw, r#"{"error":"boom"}"#, None);
+        let officer = visible_load_error(COPY_ERROR_ALL, Some(500), r#"{"error":"boom"}"#, None);
         assert_eq!(officer, COPY_ERROR_ALL);
         assert!(!officer.contains("boom"));
 
         let json = r#"{"error":"rate_limited","retry_after":12}"#;
+        let limited = ClientError::http(429, json, Some("99"));
+        assert_eq!(limited.http_status(), Some(429));
+        assert_eq!(limited.to_string(), "Try again in 12 s");
+        assert!(!limited.to_string().contains("HTTP error"));
         let from_json = visible_load_error(
             COPY_ERROR_MINE,
-            "HTTP error 429: rate_limited",
-            json,
-            Some(99),
+            limited.http_status(),
+            limited.http_body().unwrap_or(""),
+            limited.retry_after_header(),
         );
         assert_eq!(from_json, "Too many requests. Try again in 12 seconds.");
-        let from_header = visible_load_error(
-            COPY_ERROR_ALL,
-            "HTTP error 429: rate_limited",
-            "slow down",
-            Some(8),
-        );
+        let from_header = visible_load_error(COPY_ERROR_ALL, Some(429), "slow down", Some(8));
         assert_eq!(from_header, "Too many requests. Try again in 8 seconds.");
         assert!(!from_header.contains("slow down"));
-        let missing = visible_load_error(
-            COPY_ERROR_MINE,
-            "HTTP error 429: rate_limited",
-            "slow down",
-            None,
-        );
+        let missing = visible_load_error(COPY_ERROR_MINE, Some(429), "slow down", None);
+        assert_eq!(missing, "Too many requests. Try again later.");
         assert_eq!(missing, COPY_RATE_LIMIT_WAIT);
         assert!(!missing.contains("slow down"));
         assert!(!missing.contains("HTTP error"));
+        let one = visible_load_error(
+            COPY_ERROR_MINE,
+            Some(429),
+            r#"{"error":"rate_limited","retry_after":"1"}"#,
+            Some(99),
+        );
+        assert_eq!(one, "Too many requests. Try again in 1 second.");
+        assert_eq!(
+            scuffed_types::json_retry_after(r#"{"error":"rate_limited","retry_after":3601}"#),
+            None
+        );
+        assert_eq!(
+            scuffed_types::json_retry_after(r#"{"error":"rate_limited","retry_after":-3}"#),
+            None
+        );
+        assert_eq!(
+            scuffed_types::json_retry_after(r#"{"error":"rate_limited","retry_after":[]}"#),
+            None
+        );
+        assert_eq!(
+            scuffed_types::json_retry_after(r#"{"error":"rate_limited","retry_after":null}"#),
+            None
+        );
+        assert_eq!(
+            retry_after_seconds(r#"{"error":"rate_limited","retry_after":3601}"#, Some(9)),
+            Some(9)
+        );
+        let over_hour = visible_load_error(
+            COPY_ERROR_MINE,
+            Some(429),
+            r#"{"error":"rate_limited","retry_after":3601}"#,
+            None,
+        );
+        assert_eq!(over_hour, COPY_RATE_LIMIT_WAIT);
         let header_only = retry_after_seconds("not json", Some(4));
         assert_eq!(header_only, Some(4));
         assert_eq!(
@@ -1530,19 +1541,14 @@ mod tests {
         assert_eq!(
             mutation_failure_copy(
                 ReportIntent::Delete,
-                "HTTP error 500: Internal error",
+                Some(500),
                 r#"{"error":"Internal error"}"#,
                 None
             ),
             COPY_DELETE_FAILED
         );
         assert_eq!(
-            mutation_failure_copy(
-                ReportIntent::Withdraw,
-                "HTTP error 429: rate_limited",
-                json,
-                None
-            ),
+            mutation_failure_copy(ReportIntent::Withdraw, Some(429), json, None),
             "Too many requests. Try again in 12 seconds."
         );
         assert_plain(&from_json);
@@ -1552,7 +1558,7 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Error,
-                    error_detail: String::from("HTTP error 429: rate_limited"),
+                    http_status: Some(429),
                     error_body: String::from(r#"{"error":"rate_limited","retry_after":12}"#),
                     retry_after_seconds: Some(99),
                     rows: vec![row(REPORT_A, false, None)],
@@ -1576,18 +1582,18 @@ mod tests {
     #[test]
     fn officer_401_goes_to_sign_in_and_403_is_no_access() {
         let officer = auth(Some(OrgRole::Officer), false);
-        let expired = "HTTP error 401: Unauthorized";
-        let denied = "HTTP error 403: Forbidden";
+        let expired = listed(401, "HTTP error 401: Unauthorized");
+        let denied = listed(403, "HTTP error 403: Forbidden");
         assert_eq!(
-            officer_screen(&officer, Some(expired), Some(2)),
+            officer_screen(&officer, Some(&expired), Some(2)),
             OfficerScreen::SignIn
         );
         assert_eq!(
-            officer_screen(&officer, Some(denied), Some(0)),
+            officer_screen(&officer, Some(&denied), Some(0)),
             OfficerScreen::Forbidden
         );
         assert_eq!(
-            officer_screen(&auth(Some(OrgRole::Member), false), Some(denied), Some(1)),
+            officer_screen(&auth(Some(OrgRole::Member), false), Some(&denied), Some(1)),
             OfficerScreen::Forbidden
         );
         assert_eq!(
@@ -1622,7 +1628,7 @@ mod tests {
             rsx! {
                 OfficerReportsBody {
                     screen: OfficerScreen::SignIn,
-                    error_detail: String::from("HTTP error 401: Unauthorized"),
+                    http_status: Some(401),
                     rows: vec![row(REPORT_A, false, None)],
                 }
             }
@@ -1673,7 +1679,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![row(REPORT_A, true, None)],
                     pending: Some(PendingReportAction {
                         intent: ReportIntent::Delete,
@@ -1694,41 +1699,51 @@ mod tests {
         assert_plain(&html);
     }
 
-    fn reports_disabled_text() -> String {
-        ClientError::http(503, r#"{"error":"reports_disabled"}"#, None).to_string()
+    fn reports_disabled_error() -> ListedError {
+        ListedError::from_client(&ClientError::http(
+            503,
+            r#"{"error":"reports_disabled"}"#,
+            None,
+        ))
     }
 
     #[test]
     fn reports_disabled_replaces_the_list_and_the_empty_state() {
         assert_eq!(COPY_DISABLED, "Reports are off right now.");
-        let text = reports_disabled_text();
-        assert_eq!(text, "HTTP error 503: reports_disabled");
-        assert!(is_reports_disabled(&text));
+        let off = reports_disabled_error();
+        assert_eq!(off.status, Some(503));
+        assert!(is_reports_disabled(off.status, &off.body));
+        let wrong_status = ClientError::http(500, r#"{"error":"reports_disabled"}"#, None);
         assert!(!is_reports_disabled(
-            &ClientError::http(500, r#"{"error":"reports_disabled"}"#, None).to_string()
+            wrong_status.http_status(),
+            wrong_status.http_body().unwrap_or("")
         ));
+        let other = ClientError::http(503, r#"{"error":"unavailable"}"#, None);
         assert!(!is_reports_disabled(
-            &ClientError::http(503, r#"{"error":"unavailable"}"#, None).to_string()
+            other.http_status(),
+            other.http_body().unwrap_or("")
         ));
+        let plain = ClientError::http(503, "offline", None);
         assert!(!is_reports_disabled(
-            &ClientError::http(503, "offline", None).to_string()
+            plain.http_status(),
+            plain.http_body().unwrap_or("")
         ));
 
         let member = auth(Some(OrgRole::Member), false);
         assert_eq!(
-            member_screen(&member, Some(&text), Some(0)),
+            member_screen(&member, Some(&off), Some(0)),
             MemberScreen::Disabled
         );
         assert_eq!(
-            member_screen(&member, Some(&text), Some(3)),
+            member_screen(&member, Some(&off), Some(3)),
             MemberScreen::Disabled
         );
         assert_eq!(
-            member_screen(&member, Some(&text), None),
+            member_screen(&member, Some(&off), None),
             MemberScreen::Disabled
         );
         assert_eq!(
-            member_screen(&auth(None, false), Some(&text), Some(0)),
+            member_screen(&auth(None, false), Some(&off), Some(0)),
             MemberScreen::SignIn
         );
         let signed_out = AuthState {
@@ -1741,25 +1756,25 @@ mod tests {
             loading: false,
         };
         assert_eq!(
-            member_screen(&signed_out, Some(&text), Some(1)),
+            member_screen(&signed_out, Some(&off), Some(1)),
             MemberScreen::Membership
         );
 
         let officer = auth(Some(OrgRole::Officer), false);
         assert_eq!(
-            officer_screen(&officer, Some(&text), Some(0)),
+            officer_screen(&officer, Some(&off), Some(0)),
             OfficerScreen::Disabled
         );
         assert_eq!(
-            officer_screen(&officer, Some(&text), Some(4)),
+            officer_screen(&officer, Some(&off), Some(4)),
             OfficerScreen::Disabled
         );
         assert_eq!(
-            officer_screen(&auth(Some(OrgRole::Member), false), Some(&text), Some(2)),
+            officer_screen(&auth(Some(OrgRole::Member), false), Some(&off), Some(2)),
             OfficerScreen::Forbidden
         );
         assert_eq!(
-            officer_screen(&auth(Some(OrgRole::Admin), true), Some(&text), Some(1)),
+            officer_screen(&auth(Some(OrgRole::Admin), true), Some(&off), Some(1)),
             OfficerScreen::Checking
         );
 
@@ -1788,7 +1803,7 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Disabled,
-                    error_detail: String::from("HTTP error 503: reports_disabled"),
+                    http_status: Some(503),
                     rows: vec![row(REPORT_A, false, Some(at(2026, 11, 8, 15, 30)))],
                     pending: None,
                     busy: false,
@@ -1810,7 +1825,7 @@ mod tests {
             rsx! {
                 OfficerReportsBody {
                     screen: OfficerScreen::Disabled,
-                    error_detail: String::from("HTTP error 503: reports_disabled"),
+                    http_status: Some(503),
                     rows: vec![item],
                 }
             }
@@ -1940,7 +1955,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![row(REPORT_A, true, None)],
                     pending: None,
                     busy: false,
@@ -1960,7 +1974,6 @@ mod tests {
             rsx! {
                 MyReportsBody {
                     screen: MemberScreen::Ready,
-                    error_detail: String::new(),
                     rows: vec![row(REPORT_A, true, None)],
                     pending: Some(PendingReportAction {
                         intent: ReportIntent::Withdraw,

@@ -11,7 +11,7 @@ use scuffed_api_client::{ApiClient, ClientError};
 use crate::state::use_auth;
 
 use super::super::stat_reports::{
-    OfficerReportsBody, StatReportList, officer_screen, without_expired,
+    ListedError, OfficerReportsBody, StatReportList, officer_screen, without_expired,
 };
 
 #[component]
@@ -36,32 +36,27 @@ pub fn AdminReports() -> Element {
         }
     });
     let auth_now = auth();
-    let (error_detail, error_body, retry_after_seconds) = {
+    let failure = {
         let current = list_error.read();
-        match current.as_ref() {
-            Some(err) => (
-                err.to_string(),
-                err.http_body().unwrap_or("").to_string(),
-                err.retry_after_header(),
-            ),
-            None => (String::new(), String::new(), None),
-        }
+        current.as_ref().map(ListedError::from_client)
     };
-    let error = (!error_detail.is_empty()).then(|| error_detail.clone());
     let list = reports.read().clone().flatten();
     let rows = list
         .as_ref()
         .map(|list| without_expired(list.reports.clone(), Utc::now()))
         .unwrap_or_default();
     let row_count = list.as_ref().map(|_| rows.len());
-    let screen = officer_screen(&auth_now, error.as_deref(), row_count);
+    let screen = officer_screen(&auth_now, failure.as_ref(), row_count);
 
     rsx! {
         OfficerReportsBody {
             screen,
-            error_detail,
-            error_body,
-            retry_after_seconds,
+            http_status: failure.as_ref().and_then(|err| err.status),
+            error_body: failure
+                .as_ref()
+                .map(|err| err.body.clone())
+                .unwrap_or_default(),
+            retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
             rows,
             on_retry: move |_| {
                 refresh += 1;
