@@ -96,23 +96,21 @@ fn ttl_literal() -> String {
     format!("{DEVICE_LINK_TTL_SECS}s")
 }
 
-fn poll_interval_ok_sql() -> String {
-    // Same rule: the duration is the compile-time interval, never a request field.
-    format!("(last_poll_at = NONE OR last_poll_at <= time::now() - {DEVICE_LINK_INTERVAL_SECS}s)")
-}
-
-fn is_expired(expires_at: &SurrealDatetime) -> bool {
+fn is_expired(expires_at: &SurrealDatetime, now: DateTime<Utc>) -> bool {
     let expires: DateTime<Utc> = (*expires_at).into();
-    expires <= Utc::now()
+    expires <= now
 }
 
-fn polled_too_fast(last_poll_at: &Option<SurrealDatetime>) -> bool {
+fn polled_too_fast(last_poll_at: &Option<SurrealDatetime>, now: DateTime<Utc>) -> bool {
     let Some(last) = last_poll_at else {
         return false;
     };
     let last: DateTime<Utc> = (*last).into();
-    Utc::now().signed_duration_since(last)
-        < chrono::Duration::seconds(DEVICE_LINK_INTERVAL_SECS as i64)
+    now.signed_duration_since(last) < chrono::Duration::seconds(DEVICE_LINK_INTERVAL_SECS as i64)
+}
+
+fn surreal_at(now: DateTime<Utc>) -> SurrealDatetime {
+    SurrealDatetime::from(now)
 }
 
 impl Database {
@@ -259,21 +257,33 @@ impl Database {
         Ok(won)
     }
 
-    /// Kill a live pending or approved code. The secret on the previous row is wiped
-    /// in memory and in the update. Returns `None` when there was nothing to deny.
-    pub async fn deny_device_link(&self, user_code: &str) -> DbResult<Option<DeviceLinkDenial>> {
+    /// Kill a live code.
+    ///
+    /// A pending code can be denied by any member. An approved code that has
+    /// not been collected yet can be denied only by `member_id`, the member
+    /// who approved it. The caller revokes `daemon_token_id` when it is set.
+    /// The secret on the previous row is wiped in memory and in the update.
+    /// Returns `None` when there was nothing this member can deny.
+    pub async fn deny_device_link(
+        &self,
+        user_code: &str,
+        member_id: &str,
+    ) -> DbResult<Option<DeviceLinkDenial>> {
         let user_code_hash = hash_session_token(user_code);
         with_timeout(async {
             let mut result = self
                 .client
                 .query(
                     "UPDATE device_link SET status = $denied, handover_token = NONE
-                     WHERE user_code_hash = $h AND status IN $open AND expires_at > time::now()
+                     WHERE user_code_hash = $h AND expires_at > time::now()
+                     AND (status = $pending OR (status = $approved AND member_id = $mid))
                      RETURN BEFORE",
                 )
                 .bind(("denied", DENIED.to_string()))
                 .bind(("h", user_code_hash))
-                .bind(("open", vec![PENDING.to_string(), APPROVED.to_string()]))
+                .bind(("pending", PENDING.to_string()))
+                .bind(("approved", APPROVED.to_string()))
+                .bind(("mid", member_id.to_string()))
                 .await?
                 .check()?;
             let rows: Vec<DbDeviceLink> = result.take(0)?;
@@ -291,7 +301,15 @@ impl Database {
     }
 
     /// Advance a device poll. The secret is returned at most once.
-    pub async fn poll_device_link(&self, device_code: &str) -> DbResult<DeviceLinkPoll> {
+    ///
+    /// `now` is the caller's clock. Production passes wall time. Tests pass a
+    /// manual clock so a device can poll on the 5 second interval for the
+    /// whole 10 minute lifetime without sleeping.
+    pub async fn poll_device_link(
+        &self,
+        device_code: &str,
+        now: DateTime<Utc>,
+    ) -> DbResult<DeviceLinkPoll> {
         let device_code_hash = hash_session_token(device_code);
         with_timeout(async {
             for _ in 0..2 {
@@ -300,23 +318,23 @@ impl Database {
                 };
                 // The secret is returned only from the consume write, not this read.
                 wipe_handover(&mut row);
-                if is_expired(&row.expires_at) || row.status == CONSUMED {
+                if is_expired(&row.expires_at, now) || row.status == CONSUMED {
                     return Ok(DeviceLinkPoll::Expired);
                 }
-                if polled_too_fast(&row.last_poll_at) {
+                if polled_too_fast(&row.last_poll_at, now) {
                     return Ok(DeviceLinkPoll::SlowDown);
                 }
                 match row.status.as_str() {
                     PENDING => {
-                        if self.touch_poll(&device_code_hash, PENDING).await? {
+                        if self.touch_poll(&device_code_hash, PENDING, now).await? {
                             return Ok(DeviceLinkPoll::Pending);
                         }
                     }
                     DENIED => {
-                        let _ = self.touch_poll(&device_code_hash, DENIED).await?;
+                        let _ = self.touch_poll(&device_code_hash, DENIED, now).await?;
                         return Ok(DeviceLinkPoll::Denied);
                     }
-                    APPROVED => match self.consume_approved(&device_code_hash).await? {
+                    APPROVED => match self.consume_approved(&device_code_hash, now).await? {
                         Consume::Token(token) => return Ok(DeviceLinkPoll::Approved(token)),
                         Consume::Empty => return Ok(DeviceLinkPoll::Expired),
                         Consume::Lost => {}
@@ -329,12 +347,46 @@ impl Database {
         .await
     }
 
-    /// Delete codes whose `expires_at` has passed, including any unclaimed secret.
+    /// Delete codes whose `expires_at` has passed.
+    ///
+    /// An approved code that expired before the device collected the token is
+    /// revoked first. The delete runs only after those revokes succeed, so a
+    /// failed revoke leaves the row for the next pass. A token that was already
+    /// handed over stays active.
     pub async fn cleanup_expired_device_links(&self) -> DbResult<u64> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
+            }
+            #[derive(Deserialize, SurrealValue)]
+            struct Uncollected {
+                member_id: Option<String>,
+                daemon_token_id: Option<String>,
+            }
+
+            let mut listed = self
+                .client
+                .query(
+                    "SELECT member_id, daemon_token_id FROM device_link
+                     WHERE expires_at <= time::now() AND status = $approved
+                     AND member_id IS NOT NONE AND daemon_token_id IS NOT NONE",
+                )
+                .bind(("approved", APPROVED.to_string()))
+                .await?
+                .check()?;
+            let rows: Vec<Uncollected> = listed.take(0)?;
+            for row in rows {
+                let (Some(member_id), Some(token_id)) = (row.member_id, row.daemon_token_id) else {
+                    return Err(crate::DbError::Conflict(
+                        "device link cleanup missing token owner".into(),
+                    ));
+                };
+                match self.revoke_daemon_token(&token_id, &member_id).await {
+                    Ok(()) => {}
+                    Err(crate::DbError::NotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
             }
 
             let mut result = self
@@ -365,19 +417,25 @@ impl Database {
         Ok(rows.into_iter().next())
     }
 
-    async fn touch_poll(&self, device_code_hash: &str, status: &str) -> DbResult<bool> {
-        let interval = poll_interval_ok_sql();
-        let sql = format!(
-            "UPDATE device_link SET last_poll_at = time::now()
-             WHERE device_code_hash = $h AND status = $status AND expires_at > time::now()
-             AND {interval}
-             RETURN AFTER"
-        );
+    async fn touch_poll(
+        &self,
+        device_code_hash: &str,
+        status: &str,
+        now: DateTime<Utc>,
+    ) -> DbResult<bool> {
+        let cutoff = now - chrono::Duration::seconds(DEVICE_LINK_INTERVAL_SECS as i64);
         let mut result = self
             .client
-            .query(&sql)
+            .query(
+                "UPDATE device_link SET last_poll_at = $now
+                 WHERE device_code_hash = $h AND status = $status AND expires_at > $now
+                 AND (last_poll_at = NONE OR last_poll_at <= $cutoff)
+                 RETURN AFTER",
+            )
             .bind(("h", device_code_hash.to_string()))
             .bind(("status", status.to_string()))
+            .bind(("now", surreal_at(now)))
+            .bind(("cutoff", surreal_at(cutoff)))
             .await?
             .check()?;
         let mut rows: Vec<DbDeviceLink> = result.take(0)?;
@@ -390,21 +448,28 @@ impl Database {
 
     /// One statement claims the secret. The `status = approved` predicate is the
     /// compare-and-swap: a second poll matches no row and gets [`Consume::Lost`].
-    async fn consume_approved(&self, device_code_hash: &str) -> DbResult<Consume> {
-        let interval = poll_interval_ok_sql();
-        let sql = format!(
-            "UPDATE device_link SET
-                status = '{CONSUMED}',
-                handover_token = NONE,
-                last_poll_at = time::now()
-             WHERE device_code_hash = $h AND status = '{APPROVED}' AND expires_at > time::now()
-             AND {interval}
-             RETURN BEFORE"
-        );
+    async fn consume_approved(
+        &self,
+        device_code_hash: &str,
+        now: DateTime<Utc>,
+    ) -> DbResult<Consume> {
+        let cutoff = now - chrono::Duration::seconds(DEVICE_LINK_INTERVAL_SECS as i64);
         let mut result = self
             .client
-            .query(&sql)
+            .query(
+                "UPDATE device_link SET
+                    status = $consumed,
+                    handover_token = NONE,
+                    last_poll_at = $now
+                 WHERE device_code_hash = $h AND status = $approved AND expires_at > $now
+                 AND (last_poll_at = NONE OR last_poll_at <= $cutoff)
+                 RETURN BEFORE",
+            )
+            .bind(("consumed", CONSUMED.to_string()))
+            .bind(("approved", APPROVED.to_string()))
             .bind(("h", device_code_hash.to_string()))
+            .bind(("now", surreal_at(now)))
+            .bind(("cutoff", surreal_at(cutoff)))
             .await?
             .check()?;
         let rows: Vec<DbDeviceLink> = result.take(0)?;
@@ -504,13 +569,13 @@ mod tests {
             "a second approve loses the compare-and-swap"
         );
 
-        match db.poll_device_link(&device_code).await.unwrap() {
+        match db.poll_device_link(&device_code, Utc::now()).await.unwrap() {
             DeviceLinkPoll::Approved(got) => assert_eq!(got, secret),
             other => panic!("expected the secret once, got {other:?}"),
         }
         assert!(
             matches!(
-                db.poll_device_link(&device_code).await.unwrap(),
+                db.poll_device_link(&device_code, Utc::now()).await.unwrap(),
                 DeviceLinkPoll::Expired
             ),
             "the code is dead after the secret is handed over"
@@ -529,11 +594,15 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            db.poll_device_link(&"11".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"11".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::Pending
         ));
         assert!(matches!(
-            db.poll_device_link(&"11".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"11".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::SlowDown
         ));
         db.client
@@ -541,24 +610,38 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            db.poll_device_link(&"11".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"11".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::Pending
         ));
 
-        assert!(db.deny_device_link("ZZZZ2345").await.unwrap().is_some());
+        assert!(db
+            .deny_device_link("ZZZZ2345", "linkmember")
+            .await
+            .unwrap()
+            .is_some());
         db.client
             .query("UPDATE device_link SET last_poll_at = time::now() - 1h")
             .await
             .unwrap();
         assert!(matches!(
-            db.poll_device_link(&"11".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"11".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::Denied
         ));
         assert!(db.lookup_device_link("ZZZZ2345").await.unwrap().is_none());
-        assert!(db.deny_device_link("ZZZZ2345").await.unwrap().is_none());
+        assert!(db
+            .deny_device_link("ZZZZ2345", "linkmember")
+            .await
+            .unwrap()
+            .is_none());
         assert!(db.lookup_device_link("NOPE2345").await.unwrap().is_none());
         assert!(matches!(
-            db.poll_device_link(&"22".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"22".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::Expired
         ));
 
@@ -573,7 +656,9 @@ mod tests {
             .unwrap();
         assert!(db.lookup_device_link("ABCD6789").await.unwrap().is_none());
         assert!(matches!(
-            db.poll_device_link(&"33".repeat(32)).await.unwrap(),
+            db.poll_device_link(&"33".repeat(32), Utc::now())
+                .await
+                .unwrap(),
             DeviceLinkPoll::Expired
         ));
         let removed = db.cleanup_expired_device_links().await.unwrap();
@@ -610,8 +695,8 @@ mod tests {
             .unwrap());
 
         let (left, right) = tokio::join!(
-            db.poll_device_link(&device_code),
-            db.poll_device_link(&device_code),
+            db.poll_device_link(&device_code, Utc::now()),
+            db.poll_device_link(&device_code, Utc::now()),
         );
         let outcomes = [left.unwrap(), right.unwrap()];
         let tokens: Vec<&str> = outcomes
@@ -629,6 +714,77 @@ mod tests {
                 .count(),
             1,
             "{outcomes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_revokes_uncollected_tokens_and_keeps_collected_ones() {
+        let db = test_db().await;
+        seed_member(&db).await;
+        let uncollected = "aa".repeat(32);
+        let collected = "bb".repeat(32);
+        db.insert_device_link("AAAA2345", &"11".repeat(32), "Uncollected", "1.0.0")
+            .await
+            .unwrap();
+        db.insert_device_link("BBBB2345", &"22".repeat(32), "Collected", "1.0.0")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &uncollected, "Uncollected")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &collected, "Collected")
+            .await
+            .unwrap();
+        let tokens = db.list_daemon_tokens("linkmember").await.unwrap();
+        let uncollected_id = tokens
+            .iter()
+            .find(|token| token.label == "Uncollected")
+            .unwrap()
+            .id
+            .clone();
+        let collected_id = tokens
+            .iter()
+            .find(|token| token.label == "Collected")
+            .unwrap()
+            .id
+            .clone();
+        assert!(db
+            .approve_device_link("AAAA2345", "linkmember", &uncollected_id, &uncollected)
+            .await
+            .unwrap());
+        assert!(db
+            .approve_device_link("BBBB2345", "linkmember", &collected_id, &collected)
+            .await
+            .unwrap());
+        match db
+            .poll_device_link(&"22".repeat(32), Utc::now())
+            .await
+            .unwrap()
+        {
+            DeviceLinkPoll::Approved(got) => assert_eq!(got, collected),
+            other => panic!("expected the collected secret, got {other:?}"),
+        }
+        db.client
+            .query("UPDATE device_link SET expires_at = time::now() - 1s")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let removed = db.cleanup_expired_device_links().await.unwrap();
+        assert!(removed >= 2, "removed {removed}");
+        let left = db.list_daemon_tokens("linkmember").await.unwrap();
+        let uncollected_row = left
+            .iter()
+            .find(|token| token.id == uncollected_id)
+            .unwrap();
+        let collected_row = left.iter().find(|token| token.id == collected_id).unwrap();
+        assert!(
+            !uncollected_row.is_active,
+            "an expired code that was never collected revokes its token"
+        );
+        assert!(
+            collected_row.is_active,
+            "a token the device already collected stays active"
         );
     }
 }

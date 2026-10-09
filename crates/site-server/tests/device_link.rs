@@ -48,6 +48,7 @@ async fn test_state() -> AppState {
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
         login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
         link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
+        link_poll: scuffed_site_server::link_poll::LinkPollGate::system(),
         crypto: None,
         relay_url: None,
         dm_events: None,
@@ -102,6 +103,78 @@ async fn seed_member(db: &Database) {
         .bind(("tok", token_hash))
         .await
         .expect("seed session");
+}
+
+async fn seed_named_session(
+    db: &Database,
+    user_key: &str,
+    token: &str,
+    member_key: Option<&str>,
+    display: &str,
+) {
+    assert!(
+        user_key.chars().all(|c| c.is_ascii_alphanumeric()),
+        "test user keys stay alphanumeric"
+    );
+    if let Some(member_key) = member_key {
+        assert!(member_key.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+    let token_hash = hash_session_token(token);
+    let pid_hash = hash_session_token(user_key);
+    db.client
+        .query(format!(
+            "CREATE user:{user_key} SET
+                provider = 'discord',
+                username = '{user_key}',
+                avatar_url = NONE,
+                provider_id = '{user_key}-pid',
+                provider_id_hash = $pidh,
+                provider_id_encrypted = NONE,
+                created_at = time::now()"
+        ))
+        .bind(("pidh", pid_hash))
+        .await
+        .expect("seed user");
+    if let Some(member_key) = member_key {
+        db.client
+            .query(format!(
+                "CREATE member:{member_key} SET
+                    user_id = '{user_key}',
+                    org_role = 'member',
+                    display_name = $display,
+                    bio = NONE,
+                    avatar_url = NONE,
+                    timezone = NONE,
+                    pronouns = NONE,
+                    availability_status = NONE,
+                    joined_at = time::now(),
+                    is_active = true"
+            ))
+            .bind(("display", display.to_string()))
+            .await
+            .expect("seed member");
+    }
+    db.client
+        .query(format!(
+            "CREATE session:sess_{user_key} SET
+                user_id = '{user_key}',
+                token = $tok,
+                expires_at = time::now() + 365d,
+                created_at = time::now()"
+        ))
+        .bind(("tok", token_hash))
+        .await
+        .expect("seed session");
+}
+
+fn assert_no_store(headers: &axum::http::HeaderMap, body: &str) {
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store"),
+        "{body}"
+    );
 }
 
 fn req(
@@ -1422,4 +1495,358 @@ async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
         .parse()
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry_after:?} body {body}"));
     assert!(wait >= 1, "Retry-After={retry_after} body {body}");
+    assert_no_store(&headers, &body);
+}
+
+#[tokio::test]
+async fn link_responses_are_not_stored() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let ip = "203.0.113.121";
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/start",
+            Some(json!({"device_label": "", "app_version": "1.0.0"})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_no_store(&headers, &body);
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/start",
+            Some(json!({"device_label": "Living Room PC", "app_version": "0.4.2"})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_store(&headers, &body);
+    let started = json_of(&body);
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"status":"pending"}"#);
+    assert_no_store(&headers, &body);
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/lookup",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_store(&headers, &body);
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_store(&headers, &body);
+}
+
+#[tokio::test]
+async fn poll_at_the_interval_for_ten_minutes_is_not_limited() {
+    let clock = scuffed_site_server::link_poll::LinkClock::manual(chrono::Utc::now());
+    let mut state = test_state().await;
+    state.link_poll = scuffed_site_server::link_poll::LinkPollGate::with_clock(clock.clone());
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    assert_eq!(started["interval"], DEVICE_LINK_INTERVAL_SECS);
+    assert_eq!(DEVICE_LINK_INTERVAL_SECS, 5);
+    assert_eq!(DEVICE_LINK_TTL_SECS, 600);
+    let device_code = started["device_code"].as_str().unwrap();
+    let polls = DEVICE_LINK_TTL_SECS / DEVICE_LINK_INTERVAL_SECS;
+    for tick in 0..polls {
+        if tick > 0 {
+            clock.advance(chrono::Duration::seconds(DEVICE_LINK_INTERVAL_SECS as i64));
+        }
+        let (status, body) = send(
+            &app,
+            trusted(
+                Method::POST,
+                "/api/link/poll",
+                Some(json!({"device_code": device_code})),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "tick {tick}: {body}");
+        assert_eq!(json_of(&body)["status"], "pending", "tick {tick}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn deny_before_handover_revokes_the_token() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)[0]["is_active"], true, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/deny",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"ok":true}"#);
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)[0]["is_active"], false, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"status":"denied"}"#);
+}
+
+const OTHER_SESSION: &str = "link-other-session";
+const OUTSIDER_SESSION: &str = "link-outsider-session";
+
+#[tokio::test]
+async fn another_member_cannot_approve_or_deny_a_code_already_approved() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    seed_named_session(
+        &state.db,
+        "otheruser",
+        OTHER_SESSION,
+        Some("othermember"),
+        "Other Member",
+    )
+    .await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(OTHER_SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, INVALID);
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/deny",
+            Some(json!({"user_code": user_code})),
+            Some(OTHER_SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, INVALID);
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)[0]["is_active"], true, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)["status"], "approved", "{body}");
+}
+
+#[tokio::test]
+async fn signed_in_non_member_cannot_lookup_or_approve() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    seed_named_session(&state.db, "outsider", OUTSIDER_SESSION, None, "Outsider").await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+
+    for path in ["/api/link/lookup", "/api/link/approve"] {
+        let (status, body) = send(
+            &app,
+            trusted(
+                Method::POST,
+                path,
+                Some(json!({"user_code": user_code})),
+                Some(OUTSIDER_SESSION),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body}");
+        assert_eq!(body, r#"{"error":"Not an org member"}"#);
+        assert!(!body.contains(user_code), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn null_and_lookalike_origins_are_rejected() {
+    let mut state = test_state().await;
+    let site = "https://ow.scuffedcrew.no";
+    state.oauth_config.redirect_base_url = site.into();
+    state.oauth_config.allowed_origins = vec![site.into()];
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap().to_string();
+
+    let rejected = [
+        "null",
+        "https://ow.scuffedcrew.no.evil.com",
+        "http://ow.scuffedcrew.no",
+    ];
+    for origin in rejected {
+        let (status, body) = send(
+            &app,
+            req(
+                Method::POST,
+                "/api/link/lookup",
+                Some(json!({"user_code": user_code})),
+                Some(SESSION),
+                [127, 0, 0, 1],
+                "203.0.113.130",
+                Some(origin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{origin} {body}");
+        assert_eq!(body, BAD_ORIGIN, "{origin}");
+    }
+
+    // A present Origin of null still fails when Sec-Fetch-Site says same-origin.
+    let (status, body) = send(
+        &app,
+        with_fetch_site(
+            req(
+                Method::POST,
+                "/api/link/lookup",
+                Some(json!({"user_code": user_code})),
+                Some(SESSION),
+                [127, 0, 0, 1],
+                "203.0.113.131",
+                Some("null"),
+            ),
+            "same-origin",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, BAD_ORIGIN);
+
+    let (status, body) = send(
+        &app,
+        req(
+            Method::POST,
+            "/api/link/lookup",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+            [127, 0, 0, 1],
+            "203.0.113.132",
+            Some(site),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

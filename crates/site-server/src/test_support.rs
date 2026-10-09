@@ -54,6 +54,7 @@ pub(crate) async fn test_state() -> AppState {
         nostr_rate_limiter: crate::nostr_rate_limit::NostrRateLimiter::new(),
         login_lockout: crate::login_lockout::LoginLockout::new(),
         link_code_attempts: crate::link_attempts::LinkCodeAttempts::new(),
+        link_poll: crate::link_poll::LinkPollGate::system(),
         crypto: None,
         relay_url: None,
         dm_events: None,

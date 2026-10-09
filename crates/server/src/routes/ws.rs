@@ -866,6 +866,7 @@ mod strategies_gate_tests {
             nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
             login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
             link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
+            link_poll: scuffed_site_server::link_poll::LinkPollGate::system(),
             crypto: None,
             relay_url: None,
             dm_events: None,
