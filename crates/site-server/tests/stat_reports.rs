@@ -1478,6 +1478,7 @@ async fn download_sets_attachment_and_nosniff_headers() {
         .get(header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    assert!(disposition.starts_with("attachment;"), "{disposition}");
     assert!(
         disposition.contains(&format!("filename=\"stat-report-{id}.zip\"")),
         "{disposition}"
@@ -1731,6 +1732,19 @@ async fn reports_disable_when_the_directory_cannot_be_opened() {
             "{method} {path}"
         );
     }
+    assert!(
+        h.state.db.list_stat_reports().await.unwrap().is_empty(),
+        "a disabled upload must not insert a row"
+    );
+    let stored: Vec<_> = std::fs::read_dir(&h.reports_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(
+        stored.is_empty(),
+        "a disabled upload must not write a file: {stored:?}"
+    );
 
     let root = std::env::temp_dir().join(format!("scuffed-reports-open-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
