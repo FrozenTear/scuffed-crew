@@ -11,8 +11,9 @@ use scuffed_db::{
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
-    MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SeasonQuery, StatsUploadBody,
-    StatsUploadResponse, UpdateMemberSettingsRequest, resolve_recognizer,
+    MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SUSPECT_FIELDS_ERROR,
+    SeasonQuery, StatsUploadBody, StatsUploadResponse, UpdateMemberSettingsRequest,
+    resolve_recognizer, resolve_suspect_fields,
 };
 
 use crate::extractors::{DaemonUser, OrgMember};
@@ -34,9 +35,11 @@ pub async fn upload_stats(
         }));
     }
 
-    // Reject the whole batch before any write. A bad id must not be stored,
-    // and a later entry must not leave the earlier ones committed.
+    // Reject the whole batch before any write. A bad recognizer id or a bad
+    // suspect_fields list must not be stored, and a later entry must not leave
+    // the earlier ones committed. deleted_sessions is not applied either.
     let mut recognizers = Vec::with_capacity(body.matches.len());
+    let mut suspect_lists = Vec::with_capacity(body.matches.len());
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
             Ok(id) => recognizers.push(id),
@@ -45,6 +48,17 @@ pub async fn upload_stats(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: format!("matches[{i}]: {RECOGNIZER_ID_ERROR}"),
+                    }),
+                ));
+            }
+        }
+        match resolve_suspect_fields(&entry.suspect_fields) {
+            Ok(names) => suspect_lists.push(names),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("matches[{i}]: {SUSPECT_FIELDS_ERROR}"),
                     }),
                 ));
             }
@@ -60,9 +74,9 @@ pub async fn upload_stats(
     let stub_matches: Vec<PersonalMatch> = body
         .matches
         .into_iter()
-        .zip(recognizers)
+        .zip(recognizers.into_iter().zip(suspect_lists))
         .filter(|(e, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|(e, recognizer)| {
+        .map(|(e, (recognizer, suspect_fields))| {
             let e = e.entry;
             PersonalMatch {
                 id: String::new(),
@@ -83,6 +97,7 @@ pub async fn upload_stats(
                 uploaded_at: chrono::Utc::now(),
                 edited: e.edited,
                 recognizer,
+                suspect_fields,
             }
         })
         .collect();
@@ -748,6 +763,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert!(rows[0].suspect_fields.is_empty());
         assert_eq!(rows[0].elims, 4);
         let stats = state.db.get_personal_stats(&member_id).await.unwrap();
         assert_eq!(stats.wins, 1);
@@ -888,6 +904,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert!(rows[0].suspect_fields.is_empty());
         assert_eq!(rows[0].elims, 0);
         assert!(!rows[0].edited);
     }
@@ -1030,5 +1047,300 @@ mod tests {
             .expect("match from the batch was not removed");
         assert_eq!(edited.elims, 5, "match from the batch was not updated");
         assert_eq!(edited.recognizer, "ocr-v1");
+    }
+
+    async fn member_reader() -> (crate::state::AppState, String, String, String) {
+        let state = test_state().await;
+        crate::test_support::seed_user(&state, "susplayer", "susplayer").await;
+        let member = state
+            .db
+            .create_member("susplayer", "susplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        let daemon_token = "sus-daemon-token".to_string();
+        state
+            .db
+            .create_daemon_token(&member.id, &daemon_token, "tracker")
+            .await
+            .unwrap();
+        let session_token = "sus-session-token".to_string();
+        state
+            .db
+            .create_session("susplayer", &session_token, 24)
+            .await
+            .unwrap();
+        (state, member.id, daemon_token, session_token)
+    }
+
+    async fn get_my_matches(app: axum::Router, token: &str) -> serde_json::Value {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/stats/me/matches?limit=20")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn row_by_session<'a>(page: &'a serde_json::Value, session_id: &str) -> &'a serde_json::Value {
+        page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == session_id)
+            .unwrap_or_else(|| panic!("missing session {session_id} in {page}"))
+    }
+
+    #[tokio::test]
+    async fn upload_suspect_fields_valid_lists_are_returned_on_me_matches() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let all = [
+            "map", "mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit",
+        ];
+        let mut full = match_object("sess-all", 4);
+        full["suspect_fields"] = serde_json::json!(all);
+        full["recognizer"] = serde_json::json!("cv-v1");
+        let mut ordered = match_object("sess-order", 5);
+        ordered["suspect_fields"] = serde_json::json!(["mit", "map"]);
+        let mut empty = match_object("sess-empty-list", 6);
+        empty["suspect_fields"] = serde_json::json!([]);
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [full, ordered, empty] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 3);
+        assert_eq!(parsed["deleted"], 0);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let full_row = row_by_session(&page, "sess-all");
+        assert_eq!(full_row["recognizer"], "cv-v1");
+        assert_eq!(full_row["suspect_fields"], serde_json::json!(all));
+        let ordered_row = row_by_session(&page, "sess-order");
+        assert_eq!(ordered_row["recognizer"], "ocr-v1");
+        assert_eq!(
+            ordered_row["suspect_fields"],
+            serde_json::json!(["mit", "map"])
+        );
+        let empty_row = row_by_session(&page, "sess-empty-list");
+        assert_eq!(empty_row["suspect_fields"], serde_json::json!([]));
+
+        let stats = state.db.get_personal_stats(&member_id).await.unwrap();
+        assert_eq!(stats.wins, 3);
+    }
+
+    #[tokio::test]
+    async fn upload_missing_and_null_suspect_fields_store_empty() {
+        let (state, member_id, token) = daemon().await;
+        let missing = match_object("sess-miss", 2);
+        let mut null_fields = match_object("sess-null-fields", 3);
+        null_fields["suspect_fields"] = serde_json::Value::Null;
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [missing, null_fields] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 2);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert!(
+                row.suspect_fields.is_empty(),
+                "{} stored {:?}",
+                row.session_id,
+                row.suspect_fields
+            );
+            assert_eq!(row.recognizer, "ocr-v1");
+        }
+    }
+
+    async fn assert_suspect_fields_rejected(
+        state: &crate::state::AppState,
+        token: &str,
+        matches: serde_json::Value,
+        index: usize,
+    ) {
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            token,
+            serde_json::json!({ "matches": matches }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        assert_eq!(
+            parsed["error"],
+            format!(
+                "matches[{index}]: {}",
+                scuffed_types::api::SUSPECT_FIELDS_ERROR
+            ),
+            "{parsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_invalid_suspect_fields_is_400_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let cases: Vec<serde_json::Value> = vec![
+            serde_json::json!(["nope"]),
+            serde_json::json!(["r3.dmg"]),
+            serde_json::json!(["r01.e"]),
+            serde_json::json!(["r12.mit"]),
+            serde_json::json!(["e", "e"]),
+            serde_json::json!([
+                "map", "mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit", "map"
+            ]),
+            serde_json::json!(["map", 1]),
+            serde_json::json!([null]),
+            serde_json::json!("map"),
+            serde_json::json!(5),
+            serde_json::json!({ "hero": true }),
+        ];
+        for fields in cases {
+            let mut bad = match_object("sess-keep", 99);
+            bad["suspect_fields"] = fields.clone();
+            let mut sibling = match_object("sess-new", 1);
+            sibling["suspect_fields"] = serde_json::json!(["hero"]);
+            assert_suspect_fields_rejected(&state, &token, serde_json::json!([sibling, bad]), 1)
+                .await;
+
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "rejected batch must not insert or update: {fields}"
+            );
+            assert_eq!(rows[0].session_id, "sess-keep");
+            assert_eq!(rows[0].elims, 4);
+            assert!(rows[0].suspect_fields.is_empty());
+            assert_eq!(rows[0].recognizer, "ocr-v1");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_bad_suspect_fields_with_deleted_sessions_returns_400_and_keeps_rows() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-tomb", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-edit", 5)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut bad = match_object("sess-edit", 99);
+        bad["suspect_fields"] = serde_json::json!(["r3.dmg"]);
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [bad],
+                "deleted_sessions": ["sess-tomb"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parsed["error"],
+            format!("matches[0]: {}", scuffed_types::api::SUSPECT_FIELDS_ERROR),
+            "{parsed}"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "rejected batch must not delete or update");
+        let tomb = rows
+            .iter()
+            .find(|r| r.session_id == "sess-tomb")
+            .expect("tombstoned row still exists");
+        assert_eq!(tomb.elims, 4);
+        assert!(tomb.suspect_fields.is_empty());
+        let edited = rows
+            .iter()
+            .find(|r| r.session_id == "sess-edit")
+            .expect("match from the batch was not removed");
+        assert_eq!(edited.elims, 5, "match from the batch was not updated");
+        assert!(edited.suspect_fields.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_personal_match_reads_recognizer_ocr_v1_and_empty_suspect_fields() {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        state
+            .db
+            .client
+            .query(
+                r#"REMOVE FIELD IF EXISTS recognizer ON personal_match;
+                   REMOVE FIELD IF EXISTS suspect_fields ON personal_match;
+                   CREATE personal_match SET
+                       member_id = $mid,
+                       session_id = 'legacy-row',
+                       hero = 'Ana',
+                       map_name = 'Oasis',
+                       game_mode = 'control',
+                       role = 'Support',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 1,
+                       assists = 1,
+                       damage = 1,
+                       healing = 1,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
+                   DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];"#,
+            )
+            .bind(("mid", member_id))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let page = get_my_matches(create_router(state), &session_token).await;
+        let row = row_by_session(&page, "legacy-row");
+        assert_eq!(row["recognizer"], "ocr-v1");
+        assert_eq!(row["suspect_fields"], serde_json::json!([]));
+        assert_eq!(row["elims"], 7);
     }
 }

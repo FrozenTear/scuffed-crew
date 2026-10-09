@@ -493,6 +493,7 @@ async fn seed_personal_matches(
                 uploaded_at: now,
                 edited: false,
                 recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+                suspect_fields: Vec::new(),
             }
         })
         .collect();
