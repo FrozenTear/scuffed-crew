@@ -18,8 +18,9 @@ summary, then the highlights, and tucks the remaining text under Details.
 ## 0.4.24
 
 Release notes now show inside the desktop app. The extra number reader,
-still off unless you turn it on, reads a lone thin 4 correctly and stops
-marking a right 3 or 8 as unsure. It never changes saved games or uploads.
+still off unless you turn it on, reads a lone thin 4 correctly and marks
+a right 3 or 8 as unsure much less often. It never changes saved games or
+uploads.
 
 ### Highlights
 
