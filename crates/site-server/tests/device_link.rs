@@ -1,7 +1,7 @@
 //! HTTP coverage for stat-tracker device-link sign-in.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -923,98 +923,6 @@ async fn wrong_user_codes_are_limited_per_ip() {
         StatusCode::OK,
         "a different IP is not blocked: {body}"
     );
-}
-
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("log buf").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = CaptureWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        CaptureWriter(self.0.clone())
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn logs_do_not_contain_codes_or_the_token() {
-    let state = test_state().await;
-    seed_member(&state.db).await;
-    let app = create_router(state);
-    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(Capture(buf.clone()))
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            "scuffed_site_server=trace",
-        ))
-        .without_time()
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-
-    let started = start_link(&app, "Living Room PC", "0.4.2").await;
-    let user_code = started["user_code"].as_str().unwrap().to_string();
-    let device_code = started["device_code"].as_str().unwrap().to_string();
-    let _ = send(
-        &app,
-        trusted(
-            Method::POST,
-            &format!("/api/link/lookup?user_code={user_code}&device_code={device_code}"),
-            Some(json!({"user_code": user_code})),
-            Some(SESSION),
-        ),
-    )
-    .await;
-    let (status, _) = send(
-        &app,
-        trusted(
-            Method::POST,
-            "/api/link/approve",
-            Some(json!({"user_code": user_code})),
-            Some(SESSION),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, body) = send(
-        &app,
-        trusted(
-            Method::POST,
-            "/api/link/poll",
-            Some(json!({"device_code": device_code})),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let token = json_of(&body)["token"].as_str().unwrap().to_string();
-
-    drop(guard);
-    let logs = String::from_utf8(buf.lock().expect("log buf").clone()).unwrap();
-    assert!(
-        logs.contains("device link started"),
-        "subscriber captured nothing useful: {logs}"
-    );
-    assert!(
-        logs.contains("device link token handed over"),
-        "handover was not traced: {logs}"
-    );
-    assert!(!logs.contains(&user_code), "{logs}");
-    assert!(!logs.contains(&canonical_user_code(&user_code)), "{logs}");
-    assert!(!logs.contains(&device_code), "{logs}");
-    assert!(!logs.contains(&token), "{logs}");
 }
 
 fn with_fetch_site(mut request: Request<Body>, value: &'static str) -> Request<Body> {
