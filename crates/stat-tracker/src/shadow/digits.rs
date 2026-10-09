@@ -28,6 +28,13 @@
 //! two templates differ, and the flag is cleared only when that check agrees
 //! with the top read (see [`pair_margin`]).
 //!
+//! Slanted cuts: inside a run of touching glyphs a vertical cut can slice a
+//! glyph (an overhanging 7 top bar above a 4's diagonal). Cut lines leaning
+//! like the font's diagonals ('/') are added where they cross less ink than
+//! the vertical cut at the same place; pieces between such lines are masked
+//! to their side of the line (see [`add_slanted_pieces`]). The font itself is
+//! upright: a shear search over real boards peaks at zero slant.
+//!
 //! Resampling reproduces Pillow's float bilinear resize so canvases match the
 //! ones the templates were built from.
 
@@ -55,7 +62,8 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 ///   1920x1080 captures added to the downscaled 1440p set; cells with too
 ///   little ink for the digits read are flagged.
 /// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
-///   margin that sits below the suspect line.
+///   margin that sits below the suspect line; touching glyphs can also be
+///   split along slanted cut lines.
 pub const RECOGNIZER_ID: &str = "cv-v4";
 
 /// Flag a cell when its calibrated confidence is below this.
@@ -160,6 +168,16 @@ const MAX_GLYPH: f64 = 1.10;
 const SPLIT_PEN: f64 = 0.04;
 /// Canvas covers [top, top + DESC * dh) so the comma tail fits.
 const DESC: f64 = 1.35;
+/// Slopes (px per row, negative leans like '/') of the extra cut lines tried
+/// inside runs of touching glyphs. The diagonals of 7, 4 and 2 measure about
+/// -0.65 at 1080p.
+const SLANTS: [f64; 2] = [-0.35, -0.7];
+/// A slanted cut is kept only where it crosses at most this many ink pixels
+/// (and fewer than the vertical cut through the same point).
+const SLANT_MAX_INK: usize = 1;
+/// A slanted piece's column extent covers pixels with at least this much ink,
+/// so a glyph keeps its anti-aliased edge like an isolated glyph does.
+const SLANT_EXTENT_INK: f32 = 0.15;
 /// A cell whose own text height is this many px off its row's median takes
 /// the row's text band instead (see [`row_text_band`]).
 const BAND_TOL: usize = 2;
@@ -724,8 +742,16 @@ fn partitions(s: usize, e: usize, cuts: &[usize]) -> Vec<Vec<(usize, usize)>> {
 enum RunKind {
     /// Explicit partitions, as lists of piece ids.
     Enum(Vec<Vec<usize>>),
-    /// Touching glyphs: for each end x1 (ascending), the pieces (id, x0) ending there.
+    /// Touching glyphs: for each end cut (ascending [`cut_key`]), the pieces
+    /// (id, start cut key) ending there.
     Dp(Vec<(usize, Vec<(usize, usize)>)>),
+}
+
+/// DP node key of a cut line through column boundary `x` (at the text band's
+/// middle row): `kind` 0 is vertical, `k > 0` uses slope `SLANTS[k - 1]`.
+/// Keys sort by `x` first.
+fn cut_key(x: usize, kind: usize) -> usize {
+    x * (SLANTS.len() + 1) + kind
 }
 
 struct Run {
@@ -743,6 +769,8 @@ struct Cell {
     sc: f64,
     /// Binarised ink pixels per cell column.
     colsum: Vec<u32>,
+    /// Piece `p` was cut along a slanted line (masked; `pieces[p]` is its ink extent).
+    slanted: Vec<bool>,
     /// Normalised piece canvases, `CANVAS` floats per piece.
     v: Vec<f32>,
     mass: Vec<f64>,
@@ -837,9 +865,9 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
                 let starts: Vec<(usize, usize)> = (rs.max(x1.saturating_sub(maxw))
                     ..x1.saturating_sub(1))
                     .filter(|&x0| x0 == rs || x0 >= rs + 2)
-                    .map(|x0| (pid(x0, x1), x0))
+                    .map(|x0| (pid(x0, x1), cut_key(x0, 0)))
                     .collect();
-                ends.push((x1, starts));
+                ends.push((cut_key(x1, 0), starts));
             }
             runs.push(Run {
                 s: rs,
@@ -869,18 +897,36 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
     for x in 0..w {
         cb[x + 1] = cb[x] + colsum[x] as u64;
     }
-    let mass = pieces
+    let mass: Vec<f64> = pieces
         .iter()
         .map(|&(a, b)| (cb[b] - cb[a]) as f64)
         .collect();
-    let ar = pieces
+    let ar: Vec<f64> = pieces
         .iter()
         .map(|&(a, b)| (b - a) as f64 / dh as f64)
         .collect();
     let total_mass = seg.runs.iter().map(|&(a, e)| (cb[e] - cb[a]) as f64).sum();
+    let mut set = PieceSet {
+        slanted: vec![false; pieces.len()],
+        pieces,
+        v,
+        mass,
+        ar,
+    };
+    for run in runs.iter_mut() {
+        add_slanted_pieces(&seg, run, &mut set);
+    }
+    let PieceSet {
+        pieces,
+        slanted,
+        v,
+        mass,
+        ar,
+    } = set;
     Some(Cell {
         runs,
         pieces,
+        slanted,
         strip,
         sc,
         colsum,
@@ -892,6 +938,145 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
         rival: seg.rival,
         peak: seg.peak,
     })
+}
+
+/// Piece list under construction: ranges, canvases, ink and width ratios.
+struct PieceSet {
+    pieces: Vec<(usize, usize)>,
+    slanted: Vec<bool>,
+    v: Vec<f32>,
+    mass: Vec<f64>,
+    ar: Vec<f64>,
+}
+
+/// Add slanted cuts to a touching-glyph run (`RunKind::Dp`).
+///
+/// A cut through `x` with slope `m` runs along `x + m * (y + 0.5 - mid)`;
+/// pixel `(px, y)` is left of it when `px + 0.5` is. Only cuts that cross at
+/// most `SLANT_MAX_INK` ink pixels, and fewer than the vertical cut through
+/// the same point, are added. Every piece between two cuts where at least one
+/// is slanted holds only the ink between the lines; its canvas is cut from a
+/// strip of that masked ink over its own ink extent, like an isolated glyph.
+/// A masked piece that holds the same ink as a vertical piece reuses it.
+fn add_slanted_pieces(seg: &Segment, run: &mut Run, set: &mut PieceSet) {
+    let RunKind::Dp(ends) = &mut run.kind else {
+        return;
+    };
+    let (rs, re, dh, w) = (run.s, run.e, seg.dh, seg.ink.w);
+    let maxw = (MAX_GLYPH * dh as f64).ceil() as usize;
+    let mid = seg.top as f64 + dh as f64 / 2.0;
+    let line = |x: usize, kind: usize, y: usize| {
+        let m = if kind == 0 { 0.0 } else { SLANTS[kind - 1] };
+        x as f64 + m * (y as f64 + 0.5 - mid)
+    };
+    let rows: Vec<usize> = (0..seg.ink.h)
+        .filter(|&y| (rs..re).any(|x| seg.b[y * w + x]))
+        .collect();
+    let crossed = |x: usize, kind: usize| {
+        rows.iter()
+            .filter(|&&y| {
+                let c = line(x, kind, y).floor();
+                c >= rs as f64 && c < re as f64 && seg.b[y * w + c as usize]
+            })
+            .count()
+    };
+    let mut cuts: Vec<(usize, usize)> = vec![(rs, 0), (re, 0)];
+    cuts.extend((rs + 2..=re.saturating_sub(2)).map(|x| (x, 0)));
+    let mut any = false;
+    for x in rs + 2..re.saturating_sub(1) {
+        let vertical = crossed(x, 0);
+        for kind in 1..=SLANTS.len() {
+            let c = crossed(x, kind);
+            if c < vertical && c <= SLANT_MAX_INK {
+                cuts.push((x, kind));
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+    let mut seen: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+    let mut extra: std::collections::BTreeMap<usize, Vec<(usize, usize)>> = Default::default();
+    for &(xb, kb) in &cuts {
+        for &(xa, ka) in &cuts {
+            if (ka == 0 && kb == 0) || xa >= xb || xb == rs || xa == re {
+                continue;
+            }
+            let narrowest = rows
+                .iter()
+                .map(|&y| line(xb, kb, y) - line(xa, ka, y))
+                .fold(f64::INFINITY, f64::min);
+            if narrowest < 2.0 {
+                continue;
+            }
+            let inside = |x: usize, y: usize| {
+                let px = x as f64 + 0.5;
+                px >= line(xa, ka, y) && px < line(xb, kb, y)
+            };
+            let mut masked = Plane::zeros(w, seg.ink.h);
+            let (mut e0, mut e1, mut ink) = (usize::MAX, 0, 0usize);
+            for y in 0..seg.ink.h {
+                for x in rs..re {
+                    if !inside(x, y) {
+                        continue;
+                    }
+                    let v = seg.ink.at(x, y);
+                    masked.d[y * w + x] = v;
+                    ink += seg.b[y * w + x] as usize;
+                    if v > SLANT_EXTENT_INK {
+                        e0 = e0.min(x);
+                        e1 = e1.max(x + 1);
+                    }
+                }
+            }
+            if ink == 0 || e1 <= e0 + 1 || e1 - e0 > maxw {
+                continue;
+            }
+            // same ink as the vertical piece over its extent: reuse that piece
+            let uncut =
+                (e0..e1).all(|x| (0..seg.ink.h).all(|y| inside(x, y) || seg.ink.at(x, y) <= 0.0));
+            let vertical = uncut
+                .then(|| {
+                    set.pieces
+                        .iter()
+                        .zip(&set.slanted)
+                        .position(|(&p, &sl)| !sl && p == (e0, e1))
+                })
+                .flatten();
+            let sig: Vec<u32> = (0..seg.ink.h)
+                .flat_map(|y| (e0..e1).map(move |x| (x, y)))
+                .map(|(x, y)| masked.d[y * w + x].to_bits())
+                .chain([e0 as u32, e1 as u32])
+                .collect();
+            let id = match vertical.or_else(|| seen.get(&sig).copied()) {
+                Some(id) => id,
+                None => {
+                    let (strip, sc) = scaled_strip(&masked, seg.top, dh);
+                    let mut c = piece_canvas(&strip, sc, e0, e1);
+                    normalise(&mut c);
+                    set.v.extend_from_slice(&c);
+                    set.pieces.push((e0, e1));
+                    set.slanted.push(true);
+                    set.mass.push(ink as f64);
+                    set.ar.push((e1 - e0) as f64 / dh as f64);
+                    seen.insert(sig, set.pieces.len() - 1);
+                    set.pieces.len() - 1
+                }
+            };
+            extra
+                .entry(cut_key(xb, kb))
+                .or_default()
+                .push((id, cut_key(xa, ka)));
+        }
+    }
+    for (key, starts) in extra {
+        match ends.iter_mut().find(|e| e.0 == key) {
+            Some(e) => e.1.extend(starts),
+            None => ends.push((key, starts)),
+        }
+    }
+    ends.sort_by_key(|e| e.0);
 }
 
 type Scored = (f64, Vec<usize>);
@@ -921,7 +1106,7 @@ fn kbest_run(run: &Run, piece_score: &[f64], k: usize) -> Vec<Scored> {
         RunKind::Dp(ends) => {
             let mut best: std::collections::HashMap<usize, Vec<Scored>> =
                 std::collections::HashMap::new();
-            best.insert(run.s, vec![(0.0, Vec::new())]);
+            best.insert(cut_key(run.s, 0), vec![(0.0, Vec::new())]);
             for (x1, starts) in ends {
                 let mut cand: Vec<Scored> = Vec::new();
                 for &(p, x0) in starts {
@@ -935,11 +1120,14 @@ fn kbest_run(run: &Run, piece_score: &[f64], k: usize) -> Vec<Scored> {
                 }
                 if !cand.is_empty() {
                     sort_desc(&mut cand);
+                    // slanted and vertical cuts can reach the same pieces
+                    let mut seen = std::collections::HashSet::new();
+                    cand.retain(|c| seen.insert(c.1.clone()));
                     cand.truncate(k);
                     best.insert(*x1, cand);
                 }
             }
-            best.remove(&run.e).unwrap_or_default()
+            best.remove(&cut_key(run.e, 0)).unwrap_or_default()
         }
     }
 }
@@ -978,6 +1166,12 @@ fn grammar_ok(t: &str, k: usize) -> bool {
 /// glyph off centre. Only the pair checks use this; matching keeps the
 /// canvases the templates were built from.
 fn recentred_canvas(cell: &Cell, p: usize) -> [f32; CANVAS] {
+    if cell.slanted[p] {
+        // already cut to its own ink extent
+        let mut c = [0f32; CANVAS];
+        c.copy_from_slice(&cell.v[p * CANVAS..(p + 1) * CANVAS]);
+        return c;
+    }
     let (mut x0, mut x1) = cell.pieces[p];
     while x1 - x0 > 2 && cell.colsum[x0] <= 1 {
         x0 += 1;
@@ -1665,6 +1859,59 @@ mod tests {
         assert!(corr_plain < corr);
     }
 
+    /// Ink plane holding template glyphs `a` then `b` (1440 means), with
+    /// `b`'s ink columns starting `overlap` columns before `a`'s end
+    /// (negative: a gap).
+    fn pair_ink(a: usize, b: usize, overlap: isize) -> Plane {
+        let g = glyph_means();
+        let ((a0, a1), (b0, b1)) = (ink_cols(&g[a]), ink_cols(&g[b]));
+        let w = 12 + (a1 - a0) + (b1 - b0);
+        let mut ink = Plane::zeros(w, CH + 8);
+        let xb = (4 + (a1 - a0)) as isize - overlap;
+        let xb = xb as usize;
+        for y in 0..CH {
+            for x in a0..a1 {
+                ink.d[(y + 2) * w + 4 + x - a0] = g[a].at(x, y);
+            }
+            for x in b0..b1 {
+                let i = (y + 2) * w + xb + x - b0;
+                ink.d[i] = ink.d[i].max(g[b].at(x, y));
+            }
+        }
+        ink
+    }
+
+    #[test]
+    fn cut_keys_sort_by_column_then_kind() {
+        assert!(cut_key(10, SLANTS.len()) < cut_key(11, 0));
+        assert!(cut_key(10, 0) < cut_key(10, 1));
+        assert_eq!(cut_key(0, 0), 0);
+    }
+
+    #[test]
+    fn slanted_cut_separates_a_seven_overhanging_a_four() {
+        let tpl = templates_for(REF_H_1440);
+        let cell = prepare_cell(segment(pair_ink(7, 4, 3), 200.0).unwrap()).unwrap();
+        assert_eq!(cell.runs.len(), 1, "one run of touching glyphs");
+        assert!(matches!(cell.runs[0].kind, RunKind::Dp(_)));
+        assert!(cell.slanted.iter().any(|&s| s), "a slanted cut was added");
+        let r = read_cell(Some(&cell), tpl, 3, false);
+        assert_eq!(r.value, Some(74));
+        // masked pieces carry only their own ink
+        for p in (0..cell.slanted.len()).filter(|&p| cell.slanted[p]) {
+            let (a, b) = cell.pieces[p];
+            assert!(cell.mass[p] > 0.0 && b > a + 1);
+        }
+    }
+
+    #[test]
+    fn separate_glyphs_get_no_slanted_cuts() {
+        // a two-column gap: two runs, no touching-glyph split at all
+        let cell = prepare_cell(segment(pair_ink(7, 4, -2), 200.0).unwrap()).unwrap();
+        assert_eq!(cell.runs.len(), 2);
+        assert!(cell.slanted.iter().all(|&s| !s));
+    }
+
     #[test]
     fn bright_peak_is_the_upper_decile_of_cell_peaks() {
         let seg = |peak: f64| {
@@ -1695,6 +1942,7 @@ mod tests {
                 kind: RunKind::Enum(vec![vec![0]]),
             }],
             pieces: vec![(0, 1)],
+            slanted: vec![false],
             strip: Plane::zeros(1, CH),
             sc: 1.0,
             colsum: vec![0],
@@ -1855,7 +2103,10 @@ mod tests {
             PAIR_FLOOR,
             PAIR_MASK,
             DIM_RATIO,
+            SLANT_MAX_INK as f64,
+            SLANT_EXTENT_INK as f64,
         ];
+        p.extend_from_slice(&SLANTS);
         p.extend_from_slice(&TYP_1440);
         p.extend_from_slice(&TYP_1080);
         p
@@ -1910,7 +2161,7 @@ mod tests {
         ("cv-v1", 0xa20c_600c_992e_6cd5),
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
         ("cv-v3", 0xac0e_b782_9e66_c19a),
-        ("cv-v4", 0x6ebe_8fa5_d54e_b08e),
+        ("cv-v4", 0xb51b_4c1f_19e1_1c65),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
@@ -1933,7 +2184,7 @@ mod tests {
         ("touching", 0.9020),
         ("noisy", 0.8726),
         ("odd_noisy", 0.8024),
-        ("small_touching", 0.8350),
+        ("small_touching", 0.8382),
         ("tiny_noisy", 0.7728),
     ];
 
