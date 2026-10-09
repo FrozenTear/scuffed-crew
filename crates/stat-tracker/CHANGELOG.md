@@ -118,11 +118,10 @@ sizes. There are no captured boards. The `cv-v1` history entry is the
 ### Install
 
 ```sh
-curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.4.24/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.4.24 bash
 ```
 
-Or extract the tarball and run `./install.sh`. Pin with
-`STAT_TRACKER_TAG=stat-tracker-v0.4.24`.
+Or extract the tarball and run `./install.sh`.
 
 ## 0.4.23
 
