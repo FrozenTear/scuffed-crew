@@ -9,9 +9,11 @@ use std::cell::Cell;
 
 use dioxus::prelude::*;
 
+use scuffed_types::DeviceLinkLookupResponse;
+
 use crate::routes::Route;
 use crate::state::use_auth;
-use api::{LinkCallError, PendingDeviceCode};
+use api::LinkCallError;
 
 /// Shown for a wrong, expired, or already-used code. Those cases stay identical.
 pub const CODE_DIDNT_WORK: &str = "That code didn't work. Check the app and try again.";
@@ -20,6 +22,9 @@ pub const CODE_DIDNT_WORK: &str = "That code didn't work. Check the app and try 
 pub const RATE_LIMITED: &str = "Too many tries. Wait a moment and try again.";
 
 pub const NOT_A_MEMBER: &str = "You need to be an org member to link a device.";
+
+pub const ORIGIN_UNCONFIRMED: &str =
+    "This page couldn't confirm the sign-in. Reload and try again.";
 
 pub const SOMETHING_WENT_WRONG: &str = "Something went wrong. Try again.";
 
@@ -144,7 +149,10 @@ fn is_rejected_code(status: u16) -> bool {
     matches!(status, 400 | 404 | 409 | 410)
 }
 
-/// Seconds from a `Retry-After` delay or HTTP-date. The body is not read.
+/// Seconds from a `Retry-After` delay or HTTP-date.
+///
+/// `scuffed_types` has no `json_retry_after` on this branch, so the wrong-code
+/// 429 is read from this header. The JSON body is not parsed for a wait.
 pub fn retry_after_seconds(
     header: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
@@ -164,21 +172,29 @@ pub fn retry_after_seconds(
 
 pub fn rate_limit_message_at(header: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
     match retry_after_seconds(header, now) {
-        Some(1) => "Too many tries. Wait 1 second and try again.".to_string(),
-        Some(secs) => format!("Too many tries. Wait {secs} seconds and try again."),
+        Some(secs) => format!("Too many tries. Try again in {secs} seconds."),
         None => RATE_LIMITED.to_string(),
     }
+}
+
+fn json_error_is(body: &str, code: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .is_some_and(|found| found == code)
 }
 
 pub fn rate_limit_message(header: Option<&str>) -> String {
     rate_limit_message_at(header, chrono::Utc::now())
 }
 
-/// `body` is accepted and ignored. A 429 uses `retry_after`, not the payload.
+/// A 403 `bad_origin` is its own sentence. A 429 uses `retry_after`, not the payload.
 pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -> UserNotice {
-    let _ignored = body;
     match status {
         Some(401) => UserNotice::SignIn,
+        Some(403) if json_error_is(body, "bad_origin") => {
+            UserNotice::Text(ORIGIN_UNCONFIRMED.to_string())
+        }
         Some(403) => UserNotice::Text(NOT_A_MEMBER.to_string()),
         Some(429) => UserNotice::Text(rate_limit_message(retry_after)),
         Some(status) if is_rejected_code(status) => {
@@ -418,7 +434,7 @@ pub fn LinkDevice() -> Element {
         code_seed_from_search(&search)
     });
     let mut step = use_signal(|| LinkStep::Enter);
-    let mut pending = use_signal(|| None::<PendingDeviceCode>);
+    let mut pending = use_signal(|| None::<DeviceLinkLookupResponse>);
     let mut notice: Signal<Option<String>> = use_signal(|| None);
     let mut busy = use_signal(|| false);
 
@@ -617,8 +633,8 @@ fn apply_client_error(
 
 #[cfg(test)]
 mod tests {
-    use super::api::UserCodeRequest;
     use super::*;
+    use scuffed_types::{DeviceLinkLookupResponse, DeviceLinkUserCodeRequest};
     use std::str::FromStr;
 
     #[test]
@@ -719,7 +735,11 @@ mod tests {
             "server wording leaked"
         );
         assert_eq!(
-            user_notice(Some(429), r#"{"error":"too many invalid codes"}"#, None),
+            user_notice(
+                Some(429),
+                r#"{"error":"rate_limited","retry_after":90}"#,
+                None
+            ),
             UserNotice::Text(RATE_LIMITED.to_string())
         );
         assert_eq!(RATE_LIMITED, "Too many tries. Wait a moment and try again.");
@@ -734,24 +754,24 @@ mod tests {
     fn rate_limit_uses_retry_after_and_ignores_the_body() {
         let header = user_notice(
             Some(429),
-            r#"{"error":"too many invalid codes"}"#,
+            r#"{"error":"rate_limited","retry_after":9}"#,
             Some("90"),
         );
         assert_eq!(
             header,
-            UserNotice::Text("Too many tries. Wait 90 seconds and try again.".to_string())
+            UserNotice::Text("Too many tries. Try again in 90 seconds.".to_string())
         );
         let shown = match header {
             UserNotice::Text(text) => text,
             UserNotice::SignIn => panic!("429 is not a sign-in"),
         };
-        assert!(!shown.to_lowercase().contains("invalid"));
-        assert!(!shown.contains("too many invalid"));
+        assert!(!shown.contains("rate_limited"));
+        assert!(!shown.contains("retry_after"));
 
         let governor = user_notice(Some(429), "Too Many Requests! Wait for 9s", Some("2"));
         assert_eq!(
             governor,
-            UserNotice::Text("Too many tries. Wait 2 seconds and try again.".to_string())
+            UserNotice::Text("Too many tries. Try again in 2 seconds.".to_string())
         );
         let governor_text = match governor {
             UserNotice::Text(text) => text,
@@ -767,11 +787,11 @@ mod tests {
         assert_eq!(retry_after_seconds(Some("0"), chrono::Utc::now()), Some(1));
         assert_eq!(
             rate_limit_message(Some("  45  ")),
-            "Too many tries. Wait 45 seconds and try again."
+            "Too many tries. Try again in 45 seconds."
         );
         assert_eq!(
             rate_limit_message(Some("1")),
-            "Too many tries. Wait 1 second and try again."
+            "Too many tries. Try again in 1 seconds."
         );
 
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-09T13:00:00Z")
@@ -781,7 +801,7 @@ mod tests {
         assert_eq!(retry_after_seconds(Some(when), now), Some(30));
         assert_eq!(
             rate_limit_message_at(Some(when), now),
-            "Too many tries. Wait 30 seconds and try again."
+            "Too many tries. Try again in 30 seconds."
         );
     }
 
@@ -797,6 +817,21 @@ mod tests {
         };
         assert!(!member.contains("Not an org member"));
         assert_ne!(member, CODE_DIDNT_WORK);
+
+        assert_eq!(
+            user_notice(Some(403), r#"{"error":"bad_origin"}"#, None),
+            UserNotice::Text(ORIGIN_UNCONFIRMED.to_string())
+        );
+        let origin = match user_notice(Some(403), r#"{"error":"bad_origin"}"#, None) {
+            UserNotice::Text(text) => text,
+            UserNotice::SignIn => panic!("403 is not a sign-in"),
+        };
+        assert_eq!(
+            origin,
+            "This page couldn't confirm the sign-in. Reload and try again."
+        );
+        assert!(!origin.contains("bad_origin"));
+        assert_ne!(origin, NOT_A_MEMBER);
 
         assert_eq!(
             user_notice(Some(500), r#"{"error":"Internal error"}"#, None),
@@ -823,7 +858,9 @@ mod tests {
         assert_eq!(normalize_user_code("a\u{00a0}b"), "AB");
         assert_eq!(normalize_user_code("   "), "");
 
-        let body = UserCodeRequest::from_raw("  wdjb mjht ");
+        let body = DeviceLinkUserCodeRequest {
+            user_code: normalize_user_code("  wdjb mjht "),
+        };
         assert_eq!(body.user_code, "WDJBMJHT");
         let json = serde_json::to_value(&body).expect("json");
         assert_eq!(json, serde_json::json!({ "user_code": "WDJBMJHT" }));
@@ -831,7 +868,7 @@ mod tests {
 
     #[test]
     fn pending_lookup_fields_and_outcome_copy() {
-        let parsed: PendingDeviceCode = serde_json::from_str(
+        let parsed: DeviceLinkLookupResponse = serde_json::from_str(
             r#"{"device_label":"Kitchen PC","app_version":"1.2.3","created_at":"2026-10-09T13:18:00Z"}"#,
         )
         .expect("pending device");
@@ -848,12 +885,13 @@ mod tests {
             CODE_DIDNT_WORK,
             RATE_LIMITED,
             NOT_A_MEMBER,
+            ORIGIN_UNCONFIRMED,
             SOMETHING_WENT_WRONG,
             COULD_NOT_REACH,
             APPROVED_COPY,
             DENIED_COPY,
-            "Too many tries. Wait 90 seconds and try again.",
-            "Too many tries. Wait 1 second and try again.",
+            "Too many tries. Try again in 90 seconds.",
+            "Too many tries. Try again in 1 seconds.",
             "Enter the code from the app.",
         ] {
             assert!(!text.contains('\u{2014}'), "{text}");

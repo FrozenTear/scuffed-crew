@@ -1,21 +1,15 @@
 //! Device-code calls for stat-tracker sign-in.
 //!
 //! Matches the link routes: `POST /api/link/lookup`, `/approve`, and `/deny`.
-//! Each posts JSON `{ "user_code": "..." }`. Lookup returns `device_label`,
-//! `app_version`, and `created_at`. Approve and deny return `{ "ok": true }`.
-//!
-//! Those JSON shapes are private to the server crate. Nothing was added to
-//! `scuffed_types`, so the structs below mirror the wire format.
+//! Request and response bodies are the shared types in `scuffed_types`.
 //!
 //! Session POSTs go through [`scuffed_api_client::ApiClient::web`], which sets
-//! same-origin mode and same-origin credentials (the session cookie). The link
-//! routes do not check a CSRF header, and this module does not add one.
+//! same-origin mode and same-origin credentials (the session cookie). The
+//! browser sends `Origin` on that POST. This module adds no CSRF header.
 //! [`EXTRA_LINK_HEADERS`] is the extra header list. It stays empty.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use scuffed_api_client::{ApiClient, ObservedError};
+use scuffed_types::{DeviceLinkLookupResponse, DeviceLinkOkResponse, DeviceLinkUserCodeRequest};
 
 use super::normalize_user_code;
 
@@ -24,34 +18,13 @@ pub const APPROVE_PATH: &str = "/api/link/approve";
 pub const DENY_PATH: &str = "/api/link/deny";
 
 /// Headers this module adds on top of the shared same-origin session POST.
-/// Empty: there is no CSRF token to send.
+/// Empty: the browser already sends `Origin`, and there is no CSRF token.
 pub const EXTRA_LINK_HEADERS: &[(&str, &str)] = &[];
 
-/// Body for lookup, approve, and deny.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct UserCodeRequest {
-    pub user_code: String,
-}
-
-impl UserCodeRequest {
-    pub fn from_raw(raw: &str) -> Self {
-        Self {
-            user_code: normalize_user_code(raw),
-        }
+fn user_code_request(raw: &str) -> DeviceLinkUserCodeRequest {
+    DeviceLinkUserCodeRequest {
+        user_code: normalize_user_code(raw),
     }
-}
-
-/// A pending tracker sign-in waiting for this member.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct PendingDeviceCode {
-    pub device_label: String,
-    pub app_version: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct LinkOk {
-    pub ok: bool,
 }
 
 /// Failure from a link POST. `retry_after` is the raw `Retry-After` header.
@@ -85,7 +58,7 @@ impl LinkCallError {
 
 async fn post_link<T: serde::de::DeserializeOwned>(
     path: &str,
-    body: &UserCodeRequest,
+    body: &DeviceLinkUserCodeRequest,
 ) -> Result<T, LinkCallError> {
     debug_assert!(
         EXTRA_LINK_HEADERS
@@ -98,12 +71,15 @@ async fn post_link<T: serde::de::DeserializeOwned>(
         .map_err(LinkCallError::from_observed)
 }
 
-pub async fn lookup_pending_code(raw_code: &str) -> Result<PendingDeviceCode, LinkCallError> {
-    post_link(LOOKUP_PATH, &UserCodeRequest::from_raw(raw_code)).await
+pub async fn lookup_pending_code(
+    raw_code: &str,
+) -> Result<DeviceLinkLookupResponse, LinkCallError> {
+    post_link(LOOKUP_PATH, &user_code_request(raw_code)).await
 }
 
 pub async fn approve_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
-    let response: LinkOk = post_link(APPROVE_PATH, &UserCodeRequest::from_raw(raw_code)).await?;
+    let response: DeviceLinkOkResponse =
+        post_link(APPROVE_PATH, &user_code_request(raw_code)).await?;
     if response.ok {
         Ok(())
     } else {
@@ -116,7 +92,7 @@ pub async fn approve_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
 }
 
 pub async fn deny_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
-    let response: LinkOk = post_link(DENY_PATH, &UserCodeRequest::from_raw(raw_code)).await?;
+    let response: DeviceLinkOkResponse = post_link(DENY_PATH, &user_code_request(raw_code)).await?;
     if response.ok {
         Ok(())
     } else {
@@ -144,7 +120,7 @@ mod tests {
 
     #[test]
     fn approve_response_is_ok_true() {
-        let parsed: LinkOk = serde_json::from_str(r#"{"ok":true}"#).expect("ok body");
+        let parsed: DeviceLinkOkResponse = serde_json::from_str(r#"{"ok":true}"#).expect("ok body");
         assert!(parsed.ok);
     }
 }
