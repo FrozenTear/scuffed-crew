@@ -211,15 +211,7 @@ impl Config {
 
         let config_path = config_dir.join("config.toml");
 
-        let mut config = if config_path.exists() {
-            // The file carries the sync bearer token — tighten permissions on
-            // files written before saves enforced 0600.
-            Self::restrict_permissions(&config_path);
-            let content = std::fs::read_to_string(&config_path)?;
-            toml::from_str::<Config>(&content)?
-        } else {
-            Config::default()
-        };
+        let mut config = Self::read_stored_at(&config_path)?;
 
         // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER
         let cli_token = Self::arg_value("--token").or_else(|| std::env::var("SCUFFED_TOKEN").ok());
@@ -282,6 +274,34 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Parse `config.toml` text the way [`Self::load`] reads the file.
+    ///
+    /// No CLI or env overlay. A missing `shadow_recognizer` stays off.
+    pub fn parse_file_contents(
+        content: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(toml::from_str(content)?)
+    }
+
+    /// Read the on-disk file [`Self::load`] starts from, without env overlays.
+    pub fn read_stored() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::read_stored_at(&Self::config_path()?)
+    }
+
+    fn read_stored_at(
+        config_path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if config_path.exists() {
+            // The file carries the sync bearer token. Tighten permissions on
+            // files written before saves enforced 0600.
+            Self::restrict_permissions(config_path);
+            let content = std::fs::read_to_string(config_path)?;
+            Self::parse_file_contents(&content)
+        } else {
+            Ok(Self::default())
+        }
     }
 
     /// Path of the user config file (`~/.config/scuffed-stat-tracker/config.toml`).
@@ -445,9 +465,11 @@ fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
 
 /// Change `shadow_recognizer` and nothing else.
 ///
-/// `toml_edit` locates the boolean. The new token is spliced into the
-/// original text, so comments, order, spacing, and every other key stay
-/// byte for byte.
+/// A root boolean is spliced in place, so comments, order, spacing, and
+/// every other key stay byte for byte. A missing root key is inserted on
+/// the root table, before the first `[table]` header (or at the end when
+/// the file has no tables). A copy of the key inside a table is left
+/// alone, and the root key is never inserted twice.
 fn patch_shadow_recognizer(
     existing: &str,
     on: bool,
@@ -457,6 +479,17 @@ fn patch_shadow_recognizer(
             "config.toml could not be parsed, so it was not replaced: {err}"
         ))
     })?;
+    if doc.get("shadow_recognizer").is_some() {
+        return splice_root_shadow_bool(existing, &doc, on);
+    }
+    insert_root_shadow_recognizer(existing, on)
+}
+
+fn splice_root_shadow_bool(
+    existing: &str,
+    doc: &toml_edit::Document<&str>,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let wanted = if on { "true" } else { "false" };
     if let Some(item) = doc.get("shadow_recognizer")
         && let Some(value) = item.as_value()
@@ -474,19 +507,34 @@ fn patch_shadow_recognizer(
             return Ok(out);
         }
     }
-    if doc.get("shadow_recognizer").is_none() {
-        let mut out = existing.to_string();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("shadow_recognizer = ");
-        out.push_str(wanted);
-        out.push('\n');
-        return Ok(out);
-    }
+    // The root key is already there. Inserting another would be a duplicate.
     Err(unreadable_config(
         "config.toml could not be updated in place, so it was not replaced".to_string(),
     ))
+}
+
+/// Insert `shadow_recognizer` on the document root.
+///
+/// `toml_edit` emits root values before standard tables, so the new key
+/// stays at the top level instead of falling into the last `[table]`.
+fn insert_root_shadow_recognizer(
+    existing: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("shadow_recognizer").is_some() {
+        return Err(unreadable_config(
+            "config.toml already has shadow_recognizer at the root, so it was not replaced"
+                .to_string(),
+        ));
+    }
+    doc.as_table_mut()
+        .insert("shadow_recognizer", toml_edit::value(on));
+    Ok(doc.to_string())
 }
 
 /// Write `bytes` by creating a 0600 temp file in the same directory, fsyncing
@@ -991,6 +1039,145 @@ token = \"secret-token-must-stay\"
             names,
             vec![std::ffi::OsString::from("config.toml")],
             "the temp file must be renamed, not left behind"
+        );
+    }
+
+    /// Shape Settings writes: top-level keys, then `[auto_detect]` and `[sync]`.
+    fn settings_shaped_without_shadow() -> String {
+        "\
+data_dir = \"/tmp/sst-settings-shape\"
+capture_output = \"DP-1\"
+player_name = \"the streamer\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+"
+        .to_string()
+    }
+
+    fn table_block(text: &str) -> &str {
+        text.find("[auto_detect]")
+            .map(|index| &text[index..])
+            .unwrap_or(text)
+    }
+
+    fn assert_root_shadow(text: &str, on: bool) {
+        let parsed = toml_edit::Document::parse(text).expect("edited file must parse");
+        let root = parsed
+            .get("shadow_recognizer")
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_bool());
+        assert_eq!(
+            root,
+            Some(on),
+            "exactly one root shadow_recognizer:\n{text}"
+        );
+        let loaded = Config::parse_file_contents(text).expect("Config::load parse");
+        assert_eq!(
+            loaded.shadow_recognizer, on,
+            "Config::load must read the root value"
+        );
+        let header = text
+            .find("\n[")
+            .map(|index| index + 1)
+            .or_else(|| text.starts_with('[').then_some(0))
+            .expect("table header");
+        assert!(
+            text[..header].contains("shadow_recognizer"),
+            "the root key must sit before the first table:\n{text}"
+        );
+        assert_eq!(
+            text[..header].matches("shadow_recognizer").count(),
+            1,
+            "the root key must not be duplicated:\n{text}"
+        );
+    }
+
+    #[test]
+    fn missing_shadow_recognizer_toggles_stay_on_the_root() {
+        let original = settings_shaped_without_shadow();
+        let tables = table_block(&original).to_string();
+        assert!(!original.contains("shadow_recognizer"));
+        let mut current = Config::parse_file_contents(&original).expect("seed parses");
+        assert!(!current.shadow_recognizer);
+
+        let mut text = original.clone();
+        for on in [true, false, true] {
+            current.shadow_recognizer = on;
+            text = Config::text_for_save(Some(&text), &current).expect("toggle");
+            assert_root_shadow(&text, on);
+            assert_eq!(
+                table_block(&text),
+                tables,
+                "tables must stay byte for byte on toggle {on}:\n{text}"
+            );
+            current = Config::parse_file_contents(&text).expect("reload");
+        }
+    }
+
+    #[test]
+    fn nested_shadow_recognizer_is_left_alone_and_root_is_inserted_once() {
+        let original = "\
+data_dir = \"/tmp/sst-nested-shadow\"
+player_name = \"the streamer\"
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+shadow_recognizer = true
+";
+        let mut next = Config::parse_file_contents(original).expect("nested key is not the root");
+        assert!(!next.shadow_recognizer);
+        next.shadow_recognizer = true;
+        let saved = Config::text_for_save(Some(original), &next).expect("insert root");
+        assert_root_shadow(&saved, true);
+        let doc = toml_edit::Document::parse(&saved).expect("parse");
+        let nested = doc
+            .get("sync")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("shadow_recognizer"))
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_bool());
+        assert_eq!(nested, Some(true), "the mistaken table key stays:\n{saved}");
+        let again = Config::text_for_save(Some(&saved), &next).expect("second toggle");
+        assert_eq!(again, saved, "a second on must not add another key");
+        assert_root_shadow(&again, true);
+    }
+
+    #[test]
+    fn missing_shadow_recognizer_without_tables_is_appended_at_the_end() {
+        let original = "\
+data_dir = \"/tmp/sst-no-tables\"
+player_name = \"the streamer\"
+";
+        let mut next = Config::parse_file_contents(original).expect("parse");
+        next.shadow_recognizer = true;
+        let saved = Config::text_for_save(Some(original), &next).expect("insert");
+        let doc = toml_edit::Document::parse(&saved).expect("parse");
+        assert_eq!(
+            doc.get("shadow_recognizer")
+                .and_then(|item| item.as_value())
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            !saved.contains('['),
+            "a file with no tables stays free of headers:\n{saved}"
+        );
+        assert!(
+            Config::parse_file_contents(&saved)
+                .expect("load")
+                .shadow_recognizer
         );
     }
 }

@@ -1608,4 +1608,54 @@ custom_note = \"leave this line alone\"
             "the toggle must not add default keys: {saved}"
         );
     }
+
+    #[test]
+    fn toggling_a_missing_shadow_key_stays_on_the_root() {
+        let original = "\
+data_dir = \"/tmp/sst-settings-shape\"
+capture_output = \"DP-1\"
+player_name = \"the streamer\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+";
+        let tables = &original[original.find("[auto_detect]").expect("tables")..];
+        let mut text = original.to_string();
+        for on in [true, false, true] {
+            let loaded = Config::parse_file_contents(&text).expect("parse");
+            let mut form = SettingsForm::from_config_and_shadow(
+                &loaded,
+                Config::shadow_control(loaded.shadow_recognizer, None),
+            );
+            form.set_toggle(SettingsToggle::ShadowRecognizer, on);
+            text = Config::text_for_save(Some(&text), &form.to_config(&loaded)).expect("toggle");
+            let read = Config::parse_file_contents(&text).expect("load");
+            assert_eq!(read.shadow_recognizer, on);
+            assert_eq!(
+                &text[text.find("[auto_detect]").expect("tables")..],
+                tables,
+                "tables changed while toggling {on}:\n{text}"
+            );
+            let header = text.find("[auto_detect]").expect("tables");
+            assert_eq!(
+                text[..header].matches("shadow_recognizer").count(),
+                1,
+                "one root key before the tables:\n{text}"
+            );
+            assert!(
+                text[..header].contains(&format!("shadow_recognizer = {on}")),
+                "{text}"
+            );
+        }
+    }
 }

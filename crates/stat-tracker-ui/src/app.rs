@@ -33,8 +33,42 @@ const SETTINGS_SAVED_RESTART: &str =
 const SETTINGS_SAVE_REFUSED: &str =
     "Could not read config.toml, so settings were not saved. Fix that file, then try again.";
 
+/// How long the unreadable-config toast stays up before it clears itself.
+const REFUSED_TOAST_TIMEOUT: Duration = Duration::from_secs(8);
+
 fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
+}
+
+/// A file that failed to parse at startup can be fixed without restarting.
+/// Save proceeds once the file parses again. Until then the refused toast is shown.
+fn gate_unreadable_save(flagged: bool, file_parses_now: bool) -> bool {
+    flagged && !file_parses_now
+}
+
+fn toast_after_successful_save(daemon_up: bool) -> &'static str {
+    if daemon_up {
+        SETTINGS_SAVED_RESTART
+    } else {
+        "Settings saved"
+    }
+}
+
+/// Dismiss clears the toast, including the unreadable-config error.
+fn toast_after_dismiss() -> Option<String> {
+    None
+}
+
+fn refused_toast_expired(
+    message: Option<&str>,
+    shown_at: Option<SystemTime>,
+    now: SystemTime,
+) -> bool {
+    message == Some(SETTINGS_SAVE_REFUSED)
+        && shown_at.is_some_and(|start| {
+            now.duration_since(start)
+                .is_ok_and(|elapsed| elapsed >= REFUSED_TOAST_TIMEOUT)
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +127,7 @@ pub enum Message {
     ToggleOverlay,
     OpenAbout,
     DismissNotes,
+    DismissToast,
     OpenNotesLink(String),
     ToggleUpdateNotes,
     ToggleReleaseDetails {
@@ -174,6 +209,8 @@ pub struct TrackerApp {
     pub filter_map: Option<String>,
     pub filter_outcome: Option<Outcome>,
     pub toast: Option<String>,
+    /// When the unreadable-config toast was shown. Cleared with the toast.
+    toast_shown_at: Option<SystemTime>,
     pub settings: SettingsForm,
     pub saved_config: Config,
     /// The on-disk config.toml did not parse. Save must not overwrite it.
@@ -333,6 +370,7 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             toast: None,
+            toast_shown_at: None,
             settings,
             saved_config,
             config_unreadable,
@@ -662,9 +700,16 @@ impl TrackerApp {
                 if self.fixture.is_some() {
                     return Task::none();
                 }
-                if let Some(toast) = toast_if_config_unreadable(self.config_unreadable) {
-                    self.toast = Some(toast.to_string());
-                    return Task::none();
+                if self.config_unreadable {
+                    let stored = Config::read_stored();
+                    if gate_unreadable_save(true, stored.is_ok()) {
+                        self.show_refused_toast();
+                        return Task::none();
+                    }
+                    if let Ok(config) = stored {
+                        self.reload_settings_from_stored(config);
+                    }
+                    self.config_unreadable = false;
                 }
                 // Block the whole save. Writing the form would either store
                 // the cleartext URL or drop the sync block; the file on disk
@@ -696,11 +741,8 @@ impl TrackerApp {
                                 self.settings = SettingsForm::from_config(&self.saved_config);
                                 self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                                 self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                                self.toast = Some(if daemon_up {
-                                    SETTINGS_SAVED_RESTART.into()
-                                } else {
-                                    "Settings saved".into()
-                                });
+                                self.toast = Some(toast_after_successful_save(daemon_up).into());
+                                self.toast_shown_at = None;
                             }
                             Err(e) => {
                                 self.toast = Some(format!("Could not save settings: {e}"));
@@ -897,6 +939,11 @@ impl TrackerApp {
                 });
                 Task::none()
             }
+            Message::DismissToast => {
+                self.toast = toast_after_dismiss();
+                self.toast_shown_at = None;
+                Task::none()
+            }
             Message::DismissNotes => {
                 if let Some(version) = self
                     .notes_dialog
@@ -1021,7 +1068,38 @@ impl TrackerApp {
         }
     }
 
+    fn show_refused_toast(&mut self) {
+        self.toast = Some(
+            toast_if_config_unreadable(true)
+                .unwrap_or(SETTINGS_SAVE_REFUSED)
+                .to_string(),
+        );
+        self.toast_shown_at = Some(SystemTime::now());
+    }
+
+    fn reload_settings_from_stored(&mut self, config: Config) {
+        let hotkey = self.settings.overlay_hotkey.clone();
+        let hotkey_enabled = self.settings.overlay_hotkey_enabled;
+        self.saved_config = config;
+        self.settings = SettingsForm::from_config(&self.saved_config);
+        self.settings.overlay_hotkey = hotkey;
+        self.settings.overlay_hotkey_enabled = hotkey_enabled;
+        self.health_status = self.health_now();
+    }
+
+    fn expire_refused_toast(&mut self) {
+        if refused_toast_expired(
+            self.toast.as_deref(),
+            self.toast_shown_at,
+            SystemTime::now(),
+        ) {
+            self.toast = None;
+            self.toast_shown_at = None;
+        }
+    }
+
     fn on_tick(&mut self) -> Task<Message> {
+        self.expire_refused_toast();
         if self.fixture.is_none() {
             let mtime = snapshot::snapshot_mtime(&self.data_dir);
             if mtime != self.snapshot_mtime {
@@ -1372,6 +1450,44 @@ mod tests {
         assert!(super::SETTINGS_SAVE_REFUSED.contains("not saved"));
         assert!(super::toast_if_config_unreadable(false).is_none());
         assert!(super::SETTINGS_SAVED_RESTART.contains("Restart the tracker"));
+    }
+
+    #[test]
+    fn refused_toast_clears_without_a_restart() {
+        let refused = super::SETTINGS_SAVE_REFUSED;
+        assert!(super::gate_unreadable_save(true, false));
+        assert!(
+            !super::gate_unreadable_save(true, true),
+            "a fixed file must allow the next save"
+        );
+        assert!(!super::gate_unreadable_save(false, false));
+
+        let success = super::toast_after_successful_save(true);
+        assert_ne!(success, refused);
+        assert!(!success.contains("Fix that file"));
+        assert_eq!(super::toast_after_successful_save(false), "Settings saved");
+
+        assert!(super::toast_after_dismiss().is_none());
+
+        let shown = std::time::SystemTime::UNIX_EPOCH;
+        let almost = shown + super::REFUSED_TOAST_TIMEOUT - std::time::Duration::from_secs(1);
+        let due = shown + super::REFUSED_TOAST_TIMEOUT;
+        assert!(!super::refused_toast_expired(
+            Some(refused),
+            Some(shown),
+            almost
+        ));
+        assert!(super::refused_toast_expired(
+            Some(refused),
+            Some(shown),
+            due
+        ));
+        assert!(!super::refused_toast_expired(
+            Some("Settings saved"),
+            Some(shown),
+            due
+        ));
+        assert!(!super::refused_toast_expired(Some(refused), None, due));
     }
 
     #[test]
