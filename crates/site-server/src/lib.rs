@@ -4,6 +4,7 @@ pub mod dm_subscriber;
 pub mod extractors;
 pub mod leaderboard_cache;
 pub mod link_attempts;
+pub mod link_cleanup;
 pub mod link_poll;
 pub mod login_lockout;
 pub mod membership_policy;

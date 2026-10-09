@@ -1502,6 +1502,7 @@ async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
 async fn link_responses_are_not_stored() {
     let state = test_state().await;
     seed_member(&state.db).await;
+    seed_named_session(&state.db, "outsider", OUTSIDER_SESSION, None, "Outsider").await;
     let app = create_router(state);
     let ip = "203.0.113.121";
 
@@ -1577,6 +1578,151 @@ async fn link_responses_are_not_stored() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_no_store(&headers, &body);
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/deny",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"ok":true}"#);
+    assert_no_store(&headers, &body);
+
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let (status, headers, body) = send_full(
+            &app,
+            from_xff(
+                "203.0.113.122",
+                Method::POST,
+                path,
+                Some(json!({"user_code": "ABCD-2345"})),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} {body}");
+        assert_no_store(&headers, &body);
+    }
+
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let (status, headers, body) = send_full(
+            &app,
+            req(
+                Method::POST,
+                path,
+                Some(json!({"user_code": "ABCD-2345"})),
+                Some(SESSION),
+                [127, 0, 0, 1],
+                "203.0.113.123",
+                Some(FOREIGN_ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body}");
+        assert_eq!(body, BAD_ORIGIN, "{path}");
+        assert_no_store(&headers, &body);
+    }
+
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let (status, headers, body) = send_full(
+            &app,
+            from_xff(
+                "203.0.113.124",
+                Method::POST,
+                path,
+                Some(json!({"user_code": "ABCD-2345"})),
+                Some(OUTSIDER_SESSION),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body}");
+        assert_eq!(body, r#"{"error":"Not an org member"}"#, "{path}");
+        assert_no_store(&headers, &body);
+    }
+
+    let start_body = json!({"device_label": "Desk", "app_version": "1.0.0"});
+    for i in 0..LINK_START_BURST {
+        let (status, headers, body) = send_full(
+            &app,
+            from_xff(
+                "203.0.113.125",
+                Method::POST,
+                "/api/link/start",
+                Some(start_body.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "start {i}: {body}");
+        assert_no_store(&headers, &body);
+    }
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            "203.0.113.125",
+            Method::POST,
+            "/api/link/start",
+            Some(start_body),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_no_store(&headers, &body);
+
+    let pending = send(
+        &app,
+        from_xff(
+            "203.0.113.126",
+            Method::POST,
+            "/api/link/start",
+            Some(json!({"device_label": "Lookup PC", "app_version": "1.0.0"})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(pending.0, StatusCode::OK, "{}", pending.1);
+    let pending_code = json_of(&pending.1)["user_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for i in 0..LINK_USER_BURST {
+        let (status, headers, body) = send_full(
+            &app,
+            from_xff(
+                "203.0.113.127",
+                Method::POST,
+                "/api/link/lookup",
+                Some(json!({"user_code": pending_code})),
+                Some(SESSION),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "lookup {i}: {body}");
+        assert_no_store(&headers, &body);
+    }
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            "203.0.113.127",
+            Method::POST,
+            "/api/link/lookup",
+            Some(json!({"user_code": pending_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("Too Many Requests"), "{body}");
+    assert!(!body.contains("rate_limited"), "{body}");
     assert_no_store(&headers, &body);
 }
 
@@ -1675,6 +1821,149 @@ async fn deny_before_handover_revokes_the_token() {
     assert_eq!(body, r#"{"status":"denied"}"#);
 }
 
+#[tokio::test]
+async fn expired_uncollected_code_is_revoked_without_a_new_link() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let db = state.db.clone();
+    let app = create_router(state);
+    assert_eq!(
+        scuffed_site_server::link_cleanup::DEVICE_LINK_CLEANUP_INTERVAL,
+        std::time::Duration::from_secs(60)
+    );
+
+    let started = start_link(&app, "Timer PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    db.client
+        .query(
+            "UPDATE device_link SET expires_at = time::now() - 1s WHERE device_label = 'Timer PC'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        json_of(&body)[0]["is_active"],
+        true,
+        "backdating expiry does not itself revoke: {body}"
+    );
+
+    // The timer's first tick is immediate. This test does not call start again
+    // and does not call cleanup_expired_device_links directly.
+    scuffed_site_server::link_cleanup::spawn_device_link_cleanup(db.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut revoked = false;
+    let mut cleared = false;
+    while std::time::Instant::now() < deadline {
+        let (status, body) = send(
+            &app,
+            trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        revoked = json_of(&body)[0]["is_active"] == false;
+        let mut stored = db
+            .client
+            .query("SELECT handover_token FROM device_link WHERE device_label = 'Timer PC'")
+            .await
+            .unwrap();
+        let rows: Vec<serde_json::Value> = stored.take(0).unwrap();
+        cleared = rows.is_empty();
+        if revoked && cleared {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        revoked,
+        "the 60s timer revokes an expired uncollected token without a new start"
+    );
+    assert!(
+        cleared,
+        "the 60s timer clears handover_token without a new start"
+    );
+}
+
+#[tokio::test]
+async fn deny_returns_an_error_when_revoke_fails() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let db = state.db.clone();
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    db.client
+        .query(
+            "UPDATE daemon_token SET member_id = 'not-the-member' WHERE label = 'Living Room PC'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (status, headers, body) = send_full(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/deny",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body, r#"{"error":"Internal error"}"#);
+    assert_ne!(body, r#"{"ok":true}"#);
+    assert_no_store(&headers, &body);
+
+    // The token was moved off the approving member, so it no longer shows in
+    // that member's token list. Read the row itself.
+    let mut stored = db
+        .client
+        .query("SELECT is_active, member_id FROM daemon_token WHERE label = 'Living Room PC'")
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = stored.take(0).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["member_id"], "not-the-member");
+    assert_eq!(
+        rows[0]["is_active"], true,
+        "a failed revoke leaves the token active: {rows:?}"
+    );
+}
+
 const OTHER_SESSION: &str = "link-other-session";
 const OUTSIDER_SESSION: &str = "link-outsider-session";
 
@@ -1764,8 +2053,8 @@ async fn signed_in_non_member_cannot_lookup_or_approve() {
     let started = start_link(&app, "Living Room PC", "0.4.2").await;
     let user_code = started["user_code"].as_str().unwrap();
 
-    for path in ["/api/link/lookup", "/api/link/approve"] {
-        let (status, body) = send(
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let (status, headers, body) = send_full(
             &app,
             trusted(
                 Method::POST,
@@ -1778,6 +2067,7 @@ async fn signed_in_non_member_cannot_lookup_or_approve() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body}");
         assert_eq!(body, r#"{"error":"Not an org member"}"#);
         assert!(!body.contains(user_code), "{body}");
+        assert_no_store(&headers, &body);
     }
 }
 
@@ -1797,56 +2087,82 @@ async fn null_and_lookalike_origins_are_rejected() {
         "https://ow.scuffedcrew.no.evil.com",
         "http://ow.scuffedcrew.no",
     ];
-    for origin in rejected {
-        let (status, body) = send(
+    // Distinct buckets so lookup, approve, and deny each stay under the burst.
+    let routes = [
+        (
+            "/api/link/lookup",
+            "203.0.113.130",
+            "203.0.113.131",
+            "203.0.113.132",
+        ),
+        (
+            "/api/link/approve",
+            "203.0.113.140",
+            "203.0.113.141",
+            "203.0.113.142",
+        ),
+        (
+            "/api/link/deny",
+            "203.0.113.150",
+            "203.0.113.151",
+            "203.0.113.152",
+        ),
+    ];
+    for (path, reject_ip, null_ip, ok_ip) in routes {
+        for origin in rejected {
+            let (status, headers, body) = send_full(
+                &app,
+                req(
+                    Method::POST,
+                    path,
+                    Some(json!({"user_code": user_code})),
+                    Some(SESSION),
+                    [127, 0, 0, 1],
+                    reject_ip,
+                    Some(origin),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} {origin} {body}");
+            assert_eq!(body, BAD_ORIGIN, "{path} {origin}");
+            assert_no_store(&headers, &body);
+        }
+
+        // A present Origin of null still fails when Sec-Fetch-Site says same-origin.
+        let (status, headers, body) = send_full(
             &app,
-            req(
-                Method::POST,
-                "/api/link/lookup",
-                Some(json!({"user_code": user_code})),
-                Some(SESSION),
-                [127, 0, 0, 1],
-                "203.0.113.130",
-                Some(origin),
+            with_fetch_site(
+                req(
+                    Method::POST,
+                    path,
+                    Some(json!({"user_code": user_code})),
+                    Some(SESSION),
+                    [127, 0, 0, 1],
+                    null_ip,
+                    Some("null"),
+                ),
+                "same-origin",
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{origin} {body}");
-        assert_eq!(body, BAD_ORIGIN, "{origin}");
-    }
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body}");
+        assert_eq!(body, BAD_ORIGIN, "{path}");
+        assert_no_store(&headers, &body);
 
-    // A present Origin of null still fails when Sec-Fetch-Site says same-origin.
-    let (status, body) = send(
-        &app,
-        with_fetch_site(
+        let (status, headers, body) = send_full(
+            &app,
             req(
                 Method::POST,
-                "/api/link/lookup",
+                path,
                 Some(json!({"user_code": user_code})),
                 Some(SESSION),
                 [127, 0, 0, 1],
-                "203.0.113.131",
-                Some("null"),
+                ok_ip,
+                Some(site),
             ),
-            "same-origin",
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body, BAD_ORIGIN);
-
-    let (status, body) = send(
-        &app,
-        req(
-            Method::POST,
-            "/api/link/lookup",
-            Some(json!({"user_code": user_code})),
-            Some(SESSION),
-            [127, 0, 0, 1],
-            "203.0.113.132",
-            Some(site),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+        assert_no_store(&headers, &body);
+    }
 }
