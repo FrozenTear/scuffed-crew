@@ -6,6 +6,7 @@ pub mod detect;
 pub mod fs_mode;
 pub mod hero_auth;
 pub mod ocr;
+pub mod packs;
 pub mod parse;
 pub mod proc_id;
 pub mod reader_apply;
