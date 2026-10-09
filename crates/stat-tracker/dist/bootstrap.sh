@@ -38,6 +38,12 @@
 #                       test hook (URL dest). Unsupported for real installs.
 #   STAT_TRACKER_BOOTSTRAP_LIB_ONLY
 #                       source this file to load functions and return.
+#
+# Uninstall a user-level bootstrap install (same path list as install.sh):
+#   bash bootstrap.sh --uninstall
+#   bash bootstrap.sh --uninstall --purge
+# pacman/AUR, apt/dpkg, and paths under /usr are left in place. The
+# script prints `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` instead.
 set -euo pipefail
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
@@ -500,6 +506,17 @@ PY
 
 if [[ "${STAT_TRACKER_BOOTSTRAP_LIB_ONLY:-}" == 1 ]]; then
     return 0 2>/dev/null || exit 0
+fi
+
+if [[ "${1:-}" == "--uninstall" ]]; then
+    shift
+    _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ ! -f "$_here/uninstall.sh" || ! -f "$_here/install-paths.sh" ]]; then
+        error "uninstall.sh and install-paths.sh must sit next to bootstrap.sh"
+        exit 1
+    fi
+    export PREFIX="${STAT_TRACKER_PREFIX:-${PREFIX:-$HOME/.local}}"
+    exec bash "$_here/uninstall.sh" "$@"
 fi
 
 CHANNEL="${STAT_TRACKER_CHANNEL:-}"

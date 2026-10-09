@@ -82,6 +82,18 @@ pub fn sidebar(current: Screen) -> Element<'static, Message> {
     }
     col = col.push(space().height(Fill)).push(
         button(
+            text("Uninstall")
+                .size(SIZE_BODY)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_2),
+        )
+        .padding(Padding::from([10, 14]))
+        .width(Fill)
+        .style(theme::nav_btn(false))
+        .on_press(Message::OpenUninstall),
+    );
+    col = col.push(
+        button(
             text("About")
                 .size(SIZE_BODY)
                 .font(FONT_SEMIBOLD)

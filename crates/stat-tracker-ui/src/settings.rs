@@ -409,7 +409,8 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col = col
         .push(section_columns(columns))
         .push(section_card(SPANNING_SECTION, app, demo))
-        .push(save_footer(demo));
+        .push(save_footer(demo))
+        .push(uninstall_row());
 
     col.into()
 }
@@ -936,6 +937,31 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .spacing(GRID_GAP)
         .width(Fill);
     settings_card("Stored data", body.into())
+}
+
+fn uninstall_row() -> Element<'static, Message> {
+    settings_card(
+        "Uninstall",
+        row![
+            text("Removes a bootstrap.sh install. Sits with About in the sidebar.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3)
+                .width(Fill),
+            button(
+                text("Uninstall")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(theme::DANGER),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::danger_btn(false))
+            .on_press(Message::OpenUninstall),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(GRID_GAP)
+        .into(),
+    )
 }
 
 fn save_footer(demo: bool) -> Element<'static, Message> {

@@ -36,6 +36,7 @@ pub mod settings;
 pub mod snapshot;
 pub mod theme;
 pub mod tray;
+pub mod uninstall;
 pub mod update;
 pub mod widgets;
 

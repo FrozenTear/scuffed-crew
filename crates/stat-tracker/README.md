@@ -109,15 +109,19 @@ the tarball root by the release workflow). Source checkouts still use
 **Uninstall:**
 
 ```sh
-scuffed-stat-tracker-uninstall            # keeps match log + config for reinstalls
-scuffed-stat-tracker-uninstall --purge    # also deletes app data and config
+bash bootstrap.sh --uninstall            # keeps local data and config
+bash bootstrap.sh --uninstall --purge    # also deletes local data and config
+scuffed-stat-tracker-uninstall           # same as bootstrap.sh --uninstall
 ```
 
-`install.sh` records everything it installs in
-`$PREFIX/share/scuffed-stat-tracker/install-manifest.txt`; the uninstaller
-removes exactly those files (plus stopping/disabling the systemd unit). For
-installs made before the manifest existed it falls back to the known default
-paths and prints how to identify the bundled libs from the tarball.
+The desktop app has Uninstall in the sidebar, next to About. It asks before
+removing anything. Local data (games database, debug crops, shadow logs,
+and config including the sync token) stays unless that box is checked.
+
+`dist/install-paths.sh` is the only list of paths. `install.sh` and both
+uninstall entry points read it. A pacman/AUR or apt/dpkg install, and any
+copy under `/usr`, is left on disk. The app shows `sudo pacman -R <pkg>`
+or `sudo apt remove <pkg>` instead, with a button that copies the command.
 
 ## Running
 

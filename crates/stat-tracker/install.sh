@@ -5,13 +5,18 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Honor PREFIX the same way the tarball installer does. The systemd unit's
 # ExecStart is rewritten to this path; the template's %h/.local/bin is only
 # the default.
-PREFIX="${PREFIX:-$HOME/.local}"
-BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
-LIB_DIR="${LIB_DIR:-$PREFIX/lib}"
-DESKTOP_DIR="$HOME/.local/share/applications"
-SYSTEMD_DIR="$HOME/.config/systemd/user"
 ASSETS="$REPO_ROOT/crates/stat-tracker/assets"
 DIST="$REPO_ROOT/crates/stat-tracker/dist"
+# shellcheck source=dist/install-paths.sh
+source "$DIST/install-paths.sh"
+PREFIX="${PREFIX:-$HOME/.local}"
+_named() {
+    install_path_named "$HOME" "$PREFIX" "$1" "$2"
+}
+BIN_DIR="${BIN_DIR:-$(dirname "$(_named bin scuffed-stat-tracker)")}"
+LIB_DIR="${LIB_DIR:-$(dirname "$(_named libdir scuffed-stat-tracker)")}"
+DESKTOP_DIR="$(dirname "$(_named desktop scuffed-stat-tracker.desktop)")"
+SYSTEMD_DIR="$(dirname "$(_named unit scuffed-stat-tracker.service)")"
 
 RED='\033[0;31m'
 YLW='\033[1;33m'

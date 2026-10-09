@@ -183,6 +183,12 @@ pub enum Message {
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
+    OpenUninstall,
+    DismissUninstall,
+    ToggleUninstallData(bool),
+    ConfirmUninstall,
+    UninstallFinished(Result<crate::uninstall::UninstallReport, String>),
+    CopyUninstallCmd,
     RunUpdate,
     UpdateFinished(Result<String, String>),
     WindowOpened(window::Id),
@@ -298,6 +304,8 @@ pub struct TrackerApp {
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
     notes_seen: NotesSeen,
+    uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
+    uninstall_busy: bool,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -460,6 +468,8 @@ impl TrackerApp {
             dialog_show_older: false,
             notes_dialog,
             notes_seen,
+            uninstall_dialog: None,
+            uninstall_busy: false,
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -523,7 +533,9 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.notes_dialog.is_some() {
+        if self.uninstall_dialog.is_some() {
+            subs.push(iced::event::listen_with(uninstall_dialog_escape));
+        } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
         }
         Subscription::batch(subs)
@@ -1085,6 +1097,100 @@ impl TrackerApp {
                 update::open_release_page(&url);
                 Task::none()
             }
+            Message::OpenUninstall => {
+                let exe = std::env::current_exe().unwrap_or_default();
+                let home = dirs::home_dir().unwrap_or_default();
+                let owner = crate::uninstall::probe_package_owner(&exe);
+                self.uninstall_dialog = Some(crate::uninstall::open_dialog(&exe, &home, owner));
+                self.uninstall_busy = false;
+                Task::none()
+            }
+            Message::DismissUninstall => {
+                if !self.uninstall_busy {
+                    self.uninstall_dialog = None;
+                }
+                Task::none()
+            }
+            Message::ToggleUninstallData(delete_data) => {
+                if let Some(crate::uninstall::UninstallDialog::Confirm {
+                    delete_data: slot, ..
+                }) = &mut self.uninstall_dialog
+                {
+                    *slot = delete_data;
+                }
+                Task::none()
+            }
+            Message::ConfirmUninstall => {
+                let Some(crate::uninstall::UninstallDialog::Confirm {
+                    home,
+                    prefix,
+                    delete_data,
+                }) = self.uninstall_dialog.clone()
+                else {
+                    return Task::none();
+                };
+                if self.uninstall_busy {
+                    return Task::none();
+                }
+                self.uninstall_busy = true;
+                let data_dir = self.data_dir.clone();
+                let req = crate::uninstall::UninstallRequest {
+                    home: home.clone(),
+                    prefix: prefix.clone(),
+                    delete_data,
+                    origin: crate::uninstall::InstallOrigin::Bootstrap { prefix },
+                    systemctl: PathBuf::from("systemctl"),
+                };
+                Task::perform(
+                    uninstall_from_app(req, data_dir),
+                    Message::UninstallFinished,
+                )
+            }
+            Message::UninstallFinished(result) => {
+                self.uninstall_busy = false;
+                match result {
+                    Ok(report) if report.skipped => {
+                        self.toast = Some("Nothing was removed.".into());
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                    Ok(_) => {
+                        overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
+                        iced::exit()
+                    }
+                    Err(err) => {
+                        self.toast = Some(err);
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                }
+            }
+            Message::CopyUninstallCmd => {
+                let command = match &self.uninstall_dialog {
+                    Some(crate::uninstall::UninstallDialog::Manual {
+                        command: Some(command),
+                        ..
+                    }) => command.clone(),
+                    _ => return Task::none(),
+                };
+                match crate::clipboard::copy_text(&command) {
+                    Ok(backend) => {
+                        self.toast = Some(format!(
+                            "Copied the uninstall command via {}.",
+                            backend.label()
+                        ));
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.toast = Some(format!(
+                            "Copied via the app clipboard. If paste is empty, {e}"
+                        ));
+                        self.toast_shown_at = Some(SystemTime::now());
+                        iced::clipboard::write(command)
+                    }
+                }
+            }
             Message::CopyUpdateCmd => {
                 let cmd = update::install_command_for(
                     self.update.as_ref().map(|i| i.latest.as_str()),
@@ -1372,7 +1478,12 @@ impl TrackerApp {
             .height(Fill)
             .style(theme::page_background);
 
-        if let Some(dialog) = &self.notes_dialog {
+        if let Some(dialog) = &self.uninstall_dialog {
+            stack![page, crate::uninstall::view(dialog, self.uninstall_busy)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else if let Some(dialog) = &self.notes_dialog {
             // `notes::dialog` includes the backdrop and is opaque, so a press
             // on the scrim or the card does not reach Update now underneath.
             stack![
@@ -1433,6 +1544,25 @@ fn live_status_for(games: &[Game]) -> String {
     } else {
         "Waiting for a capture".into()
     }
+}
+
+fn uninstall_dialog_escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
+}
+
+async fn uninstall_from_app(
+    req: crate::uninstall::UninstallRequest,
+    data_dir: PathBuf,
+) -> Result<crate::uninstall::UninstallReport, String> {
+    let _ = daemon::stop_daemon(&data_dir).await;
+    crate::uninstall::apply(&req)
 }
 
 fn notes_dialog_escape(
