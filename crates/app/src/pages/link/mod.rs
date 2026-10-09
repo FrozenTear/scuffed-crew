@@ -143,6 +143,40 @@ pub fn step_after_lookup(step: &LinkStep, code: &str) -> LinkStep {
     }
 }
 
+/// Code step after the confirm screen is left.
+struct CodeStepReset {
+    step: LinkStep,
+    code: String,
+    notice: Option<String>,
+    device: Option<DeviceLinkLookupResponse>,
+}
+
+/// Approve or deny answered 400, 404, 409, or 410.
+fn confirm_code_was_rejected(status: Option<u16>) -> bool {
+    status.is_some_and(is_rejected_code)
+}
+
+/// The code expired or was used after lookup. Drop the device and show the
+/// shared sentence on the code step. The typed code stays so it can be checked.
+fn return_to_code_after_rejection(typed: &str) -> CodeStepReset {
+    CodeStepReset {
+        step: LinkStep::Enter,
+        code: typed.to_string(),
+        notice: Some(CODE_DIDNT_WORK.to_string()),
+        device: None,
+    }
+}
+
+/// Confirm "Start over" returns an empty code step.
+fn start_over_code_step() -> CodeStepReset {
+    CodeStepReset {
+        step: LinkStep::Enter,
+        code: String::new(),
+        notice: None,
+        device: None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserNotice {
     Text(String),
@@ -582,7 +616,17 @@ pub fn LinkDevice() -> Element {
         spawn(async move {
             match api::approve_pending_code(&code).await {
                 Ok(()) => step.set(LinkStep::Approved),
-                Err(err) => apply_client_error(&mut notice, &nav, err),
+                Err(err) => {
+                    if !leave_confirm_if_code_rejected(
+                        &err,
+                        &code,
+                        &mut step,
+                        &mut pending,
+                        &mut notice,
+                    ) {
+                        apply_client_error(&mut notice, &nav, err);
+                    }
+                }
             }
             busy.set(false);
         });
@@ -601,10 +645,31 @@ pub fn LinkDevice() -> Element {
         spawn(async move {
             match api::deny_pending_code(&code).await {
                 Ok(()) => step.set(LinkStep::Denied),
-                Err(err) => apply_client_error(&mut notice, &nav, err),
+                Err(err) => {
+                    if !leave_confirm_if_code_rejected(
+                        &err,
+                        &code,
+                        &mut step,
+                        &mut pending,
+                        &mut notice,
+                    ) {
+                        apply_client_error(&mut notice, &nav, err);
+                    }
+                }
             }
             busy.set(false);
         });
+    };
+
+    let on_start_over = move |_| {
+        if !matches!(step(), LinkStep::Confirm { .. }) || busy() {
+            return;
+        }
+        let reset = start_over_code_step();
+        pending.set(reset.device);
+        code.set(reset.code);
+        notice.set(reset.notice);
+        step.set(reset.step);
     };
 
     rsx! {
@@ -652,21 +717,11 @@ pub fn LinkDevice() -> Element {
                         if let Some(text) = notice() {
                             p { class: "link-error", role: "alert", "{text}" }
                         }
-                        div { class: "link-actions",
-                            button {
-                                class: "ui-btn ui-btn--primary ui-btn--md",
-                                r#type: "button",
-                                disabled: busy(),
-                                onclick: on_approve,
-                                "Approve"
-                            }
-                            button {
-                                class: "ui-btn ui-btn--ghost ui-btn--md",
-                                r#type: "button",
-                                disabled: busy(),
-                                onclick: on_deny,
-                                "Deny"
-                            }
+                        LinkConfirmActions {
+                            busy: busy(),
+                            on_approve: on_approve,
+                            on_deny: on_deny,
+                            on_start_over: on_start_over,
                         }
                     },
                     LinkStep::Approved => rsx! {
@@ -745,6 +800,57 @@ fn LinkCodeEntry(
                 r#type: "submit",
                 disabled: busy,
                 if busy { "Checking the code." } else { "Continue" }
+            }
+        }
+    }
+}
+
+fn leave_confirm_if_code_rejected(
+    err: &LinkCallError,
+    typed: &str,
+    step: &mut Signal<LinkStep>,
+    pending: &mut Signal<Option<DeviceLinkLookupResponse>>,
+    notice: &mut Signal<Option<String>>,
+) -> bool {
+    if !confirm_code_was_rejected(err.status) {
+        return false;
+    }
+    let reset = return_to_code_after_rejection(typed);
+    pending.set(reset.device);
+    notice.set(reset.notice);
+    step.set(reset.step);
+    true
+}
+
+#[component]
+fn LinkConfirmActions(
+    busy: bool,
+    on_approve: EventHandler<MouseEvent>,
+    on_deny: EventHandler<MouseEvent>,
+    on_start_over: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        div { class: "link-actions",
+            button {
+                class: "ui-btn ui-btn--primary ui-btn--md",
+                r#type: "button",
+                disabled: busy,
+                onclick: move |evt| on_approve.call(evt),
+                "Approve"
+            }
+            button {
+                class: "ui-btn ui-btn--ghost ui-btn--md",
+                r#type: "button",
+                disabled: busy,
+                onclick: move |evt| on_deny.call(evt),
+                "Deny"
+            }
+            button {
+                class: "ui-btn ui-btn--ghost ui-btn--md",
+                r#type: "button",
+                disabled: busy,
+                onclick: move |evt| on_start_over.call(evt),
+                "Start over"
             }
         }
     }
@@ -1045,6 +1151,108 @@ mod tests {
         assert!(html.contains("id=\"link-code\""), "{html}");
     }
 
+    fn rejected_code_entry() -> Element {
+        let reset = return_to_code_after_rejection("ABCD");
+        rsx! {
+            LinkCodeEntry {
+                code: reset.code,
+                notice: reset.notice,
+                busy: false,
+                on_lookup: |_| {},
+                on_code: |_| {},
+            }
+        }
+    }
+
+    fn started_over_entry() -> Element {
+        let reset = start_over_code_step();
+        rsx! {
+            LinkCodeEntry {
+                code: reset.code,
+                notice: reset.notice,
+                busy: false,
+                on_lookup: |_| {},
+                on_code: |_| {},
+            }
+        }
+    }
+
+    fn confirm_actions() -> Element {
+        rsx! {
+            LinkConfirmActions {
+                busy: false,
+                on_approve: |_| {},
+                on_deny: |_| {},
+                on_start_over: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_approve_returns_to_the_code_step() {
+        for status in [400_u16, 404, 409, 410] {
+            assert!(confirm_code_was_rejected(Some(status)));
+        }
+        for status in [None, Some(401), Some(403), Some(429), Some(500)] {
+            assert!(
+                !confirm_code_was_rejected(status),
+                "{status:?} stays on confirm"
+            );
+        }
+
+        let reset = return_to_code_after_rejection("WDJB-MJHT");
+        assert_eq!(reset.step, LinkStep::Enter);
+        assert_eq!(reset.code, "WDJB-MJHT");
+        assert_eq!(reset.notice.as_deref(), Some(CODE_DIDNT_WORK));
+        assert!(reset.device.is_none());
+        assert_eq!(step_focus_id(&reset.step), LINK_STEP_ENTER);
+
+        let html = render_entry(rejected_code_entry);
+        assert!(html.contains("id=\"link-step-enter\""), "{html}");
+        assert!(html.contains("role=\"alert\""), "{html}");
+        assert!(
+            html.contains("That code didn") && html.contains("Check the app and try again."),
+            "{html}"
+        );
+        let input = html
+            .split("<input")
+            .nth(1)
+            .expect("code input")
+            .split('>')
+            .next()
+            .expect("input tag");
+        assert!(
+            input.contains("aria-invalid=\"true\""),
+            "the returned code field is invalid: {input}"
+        );
+        assert!(
+            input.contains("aria-describedby=\"link-code-error\""),
+            "the returned code field points at the error: {input}"
+        );
+    }
+
+    #[test]
+    fn start_over_returns_an_empty_code_step() {
+        let reset = start_over_code_step();
+        assert_eq!(reset.step, LinkStep::Enter);
+        assert_eq!(reset.code, "");
+        assert!(reset.notice.is_none());
+        assert!(reset.device.is_none());
+        assert_eq!(step_focus_id(&reset.step), LINK_STEP_ENTER);
+        assert_eq!(code_field_aria(reset.notice.is_some()), (None, None));
+
+        let html = render_entry(started_over_entry);
+        assert!(html.contains("id=\"link-step-enter\""), "{html}");
+        assert!(!html.contains("role=\"alert\""), "{html}");
+        assert!(!html.contains("aria-invalid"), "{html}");
+        assert!(html.contains("value=\"\""), "{html}");
+
+        let actions = render_entry(confirm_actions);
+        assert!(actions.contains(">Start over<"), "{actions}");
+        assert!(actions.contains(">Approve<"), "{actions}");
+        assert!(actions.contains(">Deny<"), "{actions}");
+    }
+
     #[test]
     fn steps_take_focus_on_their_heading() {
         assert_eq!(step_focus_id(&LinkStep::Enter), LINK_STEP_ENTER);
@@ -1148,6 +1356,7 @@ mod tests {
             "Try again in 1 second.",
             "Try again in 3600 seconds.",
             "Enter the code from the app.",
+            "Start over",
         ] {
             assert!(!text.contains('\u{2014}'), "{text}");
             assert!(!text.contains('\u{2013}'), "{text}");
