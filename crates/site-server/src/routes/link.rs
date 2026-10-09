@@ -22,7 +22,9 @@
 //! before the device collects the token, only that member can deny the code.
 //! That deny revokes the daemon token. Another member's approve or deny is the
 //! same `invalid code` error, and the token stays active. If the code expires
-//! first, cleanup revokes the uncollected token.
+//! first, cleanup revokes the uncollected token and clears its handover secret.
+//! That pass runs about every 60 seconds from server start, and also when a
+//! device calls start.
 //!
 //! Codes are read from the JSON body only. A query string that carries one is
 //! stripped before the trace layer logs the URI, and the request is rejected.
@@ -546,8 +548,9 @@ pub async fn approve(
 ///
 /// Pending codes are open to any signed-in member. An approved code that the
 /// device has not collected yet can be denied only by the member who approved
-/// it, and that deny revokes the daemon token. Any other member gets
-/// `invalid code` and the token stays active.
+/// it, and that deny revokes the daemon token. If the revoke fails, the
+/// response is an error, not `ok: true`. Any other member gets `invalid code`
+/// and the token stays active.
 pub async fn deny(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -574,6 +577,7 @@ pub async fn deny(
             if let (Some(token_id), Some(member_id)) = (denied.daemon_token_id, denied.member_id) {
                 if let Err(_error) = state.db.revoke_daemon_token(&token_id, &member_id).await {
                     tracing::error!("device link deny could not revoke daemon token");
+                    return internal().into_response();
                 }
                 audit(
                     &state.db,

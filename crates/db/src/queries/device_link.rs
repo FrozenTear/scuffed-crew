@@ -347,13 +347,23 @@ impl Database {
         .await
     }
 
-    /// Delete codes whose `expires_at` has passed.
+    /// Delete codes whose `expires_at` is at or before now.
     ///
     /// An approved code that expired before the device collected the token is
-    /// revoked first. The delete runs only after those revokes succeed, so a
-    /// failed revoke leaves the row for the next pass. A token that was already
-    /// handed over stays active.
+    /// revoked first, and its handover secret is cleared. The delete runs only
+    /// after those revokes succeed, so a failed revoke leaves the row for the
+    /// next pass. A token that was already handed over stays active.
     pub async fn cleanup_expired_device_links(&self) -> DbResult<u64> {
+        self.cleanup_expired_device_links_before(Utc::now()).await
+    }
+
+    /// Revoke and delete codes with `expires_at <= cutoff`.
+    ///
+    /// `cutoff` is taken once and bound into the revoke select, the handover
+    /// clear, and the delete. A code that expires while this pass is running
+    /// stays until the next pass, instead of being deleted with its token
+    /// still active.
+    async fn cleanup_expired_device_links_before(&self, cutoff: DateTime<Utc>) -> DbResult<u64> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct CountResult {
@@ -365,13 +375,15 @@ impl Database {
                 daemon_token_id: Option<String>,
             }
 
+            let cutoff_at = surreal_at(cutoff);
             let mut listed = self
                 .client
                 .query(
                     "SELECT member_id, daemon_token_id FROM device_link
-                     WHERE expires_at <= time::now() AND status = $approved
+                     WHERE expires_at <= $cutoff AND status = $approved
                      AND member_id IS NOT NONE AND daemon_token_id IS NOT NONE",
                 )
+                .bind(("cutoff", cutoff_at))
                 .bind(("approved", APPROVED.to_string()))
                 .await?
                 .check()?;
@@ -389,16 +401,25 @@ impl Database {
                 }
             }
 
+            self.client
+                .query("UPDATE device_link SET handover_token = NONE WHERE expires_at <= $cutoff")
+                .bind(("cutoff", cutoff_at))
+                .await?
+                .check()?;
+
             let mut result = self
                 .client
-                .query("SELECT count() FROM device_link WHERE expires_at <= time::now() GROUP ALL")
+                .query("SELECT count() FROM device_link WHERE expires_at <= $cutoff GROUP ALL")
+                .bind(("cutoff", cutoff_at))
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
             let count = counts.first().map(|c| c.count).unwrap_or(0);
             if count > 0 {
                 self.client
-                    .query("DELETE FROM device_link WHERE expires_at <= time::now()")
-                    .await?;
+                    .query("DELETE FROM device_link WHERE expires_at <= $cutoff")
+                    .bind(("cutoff", cutoff_at))
+                    .await?
+                    .check()?;
                 tracing::info!(removed = count, "cleaned up expired device links");
             }
             Ok(count)
@@ -785,6 +806,101 @@ mod tests {
         assert!(
             collected_row.is_active,
             "a token the device already collected stays active"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_revoke_and_delete_share_one_cutoff() {
+        let db = test_db().await;
+        seed_member(&db).await;
+        let early_secret = "aa".repeat(32);
+        let late_secret = "bb".repeat(32);
+        db.insert_device_link("EARLY234", &"11".repeat(32), "Early", "1.0.0")
+            .await
+            .unwrap();
+        db.insert_device_link("LATE2345", &"22".repeat(32), "Late", "1.0.0")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &early_secret, "Early")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &late_secret, "Late")
+            .await
+            .unwrap();
+        let tokens = db.list_daemon_tokens("linkmember").await.unwrap();
+        let early_id = tokens
+            .iter()
+            .find(|token| token.label == "Early")
+            .unwrap()
+            .id
+            .clone();
+        let late_id = tokens
+            .iter()
+            .find(|token| token.label == "Late")
+            .unwrap()
+            .id
+            .clone();
+        assert!(db
+            .approve_device_link("EARLY234", "linkmember", &early_id, &early_secret)
+            .await
+            .unwrap());
+        assert!(db
+            .approve_device_link("LATE2345", "linkmember", &late_id, &late_secret)
+            .await
+            .unwrap());
+
+        // Both codes are still inside their wall-clock TTL. The cutoff is an
+        // hour ahead, so only Early (15 minutes out) is in this pass. A delete
+        // that called time::now() would remove nothing. A delete that used the
+        // cutoff while the revoke select used time::now() would drop Early
+        // and leave its token active.
+        let now = Utc::now();
+        db.client
+            .query("UPDATE device_link SET expires_at = $at WHERE device_label = 'Early'")
+            .bind(("at", surreal_at(now + chrono::Duration::minutes(15))))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.client
+            .query("UPDATE device_link SET expires_at = $at WHERE device_label = 'Late'")
+            .bind(("at", surreal_at(now + chrono::Duration::hours(3))))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let removed = db
+            .cleanup_expired_device_links_before(now + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(removed, 1, "only the code inside the cutoff is deleted");
+
+        let left = db.list_daemon_tokens("linkmember").await.unwrap();
+        let early_row = left.iter().find(|token| token.id == early_id).unwrap();
+        let late_row = left.iter().find(|token| token.id == late_id).unwrap();
+        assert!(
+            !early_row.is_active,
+            "the code inside the cutoff is revoked before it is deleted"
+        );
+        assert!(late_row.is_active, "a code past the cutoff keeps its token");
+
+        let mut stored = db.client.query("SELECT * FROM device_link").await.unwrap();
+        let rows: Vec<DbDeviceLink> = stored.take(0).unwrap();
+        assert!(
+            rows.iter().all(|row| row.device_label != "Early"),
+            "Early is deleted, so its handover secret is gone"
+        );
+        let late = rows.iter().find(|row| row.device_label == "Late").unwrap();
+        assert!(
+            late.handover_token.is_some(),
+            "Late is outside the cutoff and still holds its handover secret"
+        );
+
+        let removed_now = db.cleanup_expired_device_links().await.unwrap();
+        assert_eq!(
+            removed_now, 0,
+            "wall-clock cleanup does not touch a code that expires later"
         );
     }
 }

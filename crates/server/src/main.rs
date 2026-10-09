@@ -209,7 +209,8 @@ async fn main() {
         join_timeout: routes::ws::WS_JOIN_TIMEOUT,
     };
 
-    // Spawn hourly session cleanup task
+    // Hourly session cleanup. Device-link codes have their own 60 second timer
+    // below, and POST /api/link/start runs a pass as well.
     let cleanup_db = db.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -218,11 +219,9 @@ async fn main() {
             if let Err(e) = cleanup_db.cleanup_expired_sessions().await {
                 tracing::error!("Session cleanup failed: {e}");
             }
-            if let Err(e) = cleanup_db.cleanup_expired_device_links().await {
-                tracing::error!("device link cleanup failed: {e}");
-            }
         }
     });
+    scuffed_site_server::link_cleanup::spawn_device_link_cleanup(db.clone());
 
     if reports_enabled {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
