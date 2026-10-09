@@ -101,7 +101,32 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 - `role`: `log`, `crop`, `own_name`, or `glyph`.
 - `screen_class`: the screen class from section 4 for a `crop`, otherwise `null`.
 
-There is exactly one `log` entry, and its path is `log.txt`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters drawn at random for that file, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The manifest has no glyph index, no name id, and no field that groups glyphs. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
+There is exactly one `log` entry, and its path is `log.txt`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters drawn at random for that file, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
+
+A glyph entry has the file fields above, with `role` set to `glyph` and `screen_class` set to `null`. The only per-letter labels on that entry are:
+
+- `id`: the same random id as in the filename.
+- `reader_guess`: one character, what the reader produced for that glyph.
+- `confidence`: a number from 0 to 1.
+- `correct_char`: one character, present only when the member knows the right letter. Omit the key when they do not.
+
+No other letter field is allowed. There is no name, no name group, no index, and no position.
+
+```json
+{
+  "path": "crops/glyph-a1b2c3d4.png",
+  "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "bytes": 800,
+  "role": "glyph",
+  "screen_class": null,
+  "id": "a1b2c3d4",
+  "reader_guess": "O",
+  "confidence": 0.31,
+  "correct_char": "0"
+}
+```
+
+Leave `correct_char` out of the object when the member does not know the letter. The hash above is only the right width.
 
 The manifest does not list a hash of itself. Unknown keys are invalid. The schema test and the API both reject them.
 
@@ -274,6 +299,8 @@ A report sends at most 2 glyphs from any one name. The cap is for the whole zip,
 
 Those chosen glyphs, from every name, go into one pool. The app shuffles that pool across the whole bundle. Zip entry order and the manifest `files` order follow the shuffle. They are not sorted by name, by character position, or by a counter. Two glyphs from the same name are not grouped, and nothing in the manifest or the filenames says they belong together. Each file uses its own random id, as in section 2. The bundle keeps no ordering, no index, and no name grouping for glyphs.
 
+Each glyph entry in the manifest carries only these per-letter labels: the random `id`, `reader_guess`, `confidence`, and `correct_char`. `correct_char` is optional and is filled only when the member knows that letter. The entry does not say which name the letter came from, or where it sat in that name.
+
 Both boxes can be off. That is the default. The zip then has blanked crops and the scrubbed log only.
 
 ## 6. Log scrub
@@ -371,8 +398,9 @@ Glyph fixture: with the glyph box on, each glyph image holds one character and n
 Name rebuild fixture, required: seed at least three fake names. Each name is at least four characters, the names are distinct, and none is a prefix of another. Mark every character as a wrong glyph. Build one bundle with the glyph box on. From the zip alone, none of the seeded names can be rebuilt. In particular:
 
 - Each seeded name contributes at most 2 glyph images.
+- Each glyph entry has only the file fields plus `id`, `reader_guess`, `confidence`, and `correct_char` when the test filled it. It has no name, index, or position.
 - No filename, manifest field, zip order, or `files` order groups those glyphs by name or by their place in the name.
-- Reading the glyph characters in filename order, manifest order, or zip order does not spell a seeded name.
+- Reading `reader_guess` or `correct_char` in filename order, manifest order, or zip order does not spell a seeded name.
 - No pair of glyphs that the bundle ties together spells a seeded name, because the bundle does not tie them together.
 
 ## 10. Out of scope and open questions
