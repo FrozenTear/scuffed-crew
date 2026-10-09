@@ -12,7 +12,7 @@ fn init_opts(method: &str) -> RequestInit {
     opts
 }
 
-async fn do_fetch(request: &Request) -> Result<(u16, String), ClientError> {
+async fn do_fetch(request: &Request) -> Result<(u16, String, Option<String>), ClientError> {
     let window = web_sys::window().ok_or_else(|| ClientError::Network("No window".into()))?;
     let resp_value = JsFuture::from(window.fetch_with_request(request))
         .await
@@ -23,6 +23,13 @@ async fn do_fetch(request: &Request) -> Result<(u16, String), ClientError> {
         .map_err(|_| ClientError::Network("Response cast failed".into()))?;
 
     let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let text = JsFuture::from(
         resp.text()
             .map_err(|e| ClientError::Network(format!("{e:?}")))?,
@@ -32,7 +39,7 @@ async fn do_fetch(request: &Request) -> Result<(u16, String), ClientError> {
     .as_string()
     .unwrap_or_default();
 
-    Ok((status, text))
+    Ok((status, text, retry_after))
 }
 
 fn build_json_request(method: &str, url: &str, json_body: &str) -> Result<Request, ClientError> {
@@ -61,7 +68,7 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         serde_json::to_string(body).map_err(|e| ClientError::Network(format!("Serialize: {e}")))?;
 
     let request = build_json_request(method, &url, &json_body)?;
-    let (status, text) = do_fetch(&request).await?;
+    let (status, text, _) = do_fetch(&request).await?;
 
     if status >= 400 {
         return Err(ClientError::Http { status, body: text });
@@ -80,7 +87,7 @@ pub async fn get<T: serde::de::DeserializeOwned>(
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text) = do_fetch(&request).await?;
+    let (status, text, _) = do_fetch(&request).await?;
 
     if status >= 400 {
         return Err(ClientError::Http { status, body: text });
@@ -96,7 +103,7 @@ pub async fn post_empty(base_url: &str, path: &str) -> Result<(), ClientError> {
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text) = do_fetch(&request).await?;
+    let (status, text, _) = do_fetch(&request).await?;
 
     if status >= 400 {
         return Err(ClientError::Http { status, body: text });
@@ -111,6 +118,29 @@ pub async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     body: &B,
 ) -> Result<T, ClientError> {
     json_request("POST", base_url, path, body).await
+}
+
+pub async fn post_json_observed<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, crate::ObservedError> {
+    let url = format!("{base_url}{path}");
+    let json_body = serde_json::to_string(body)
+        .map_err(|e| crate::ObservedError::Network(format!("Serialize: {e}")))?;
+    let request = build_json_request("POST", &url, &json_body)
+        .map_err(|err| crate::ObservedError::from_client(err, None))?;
+    let (status, text, retry_after) = do_fetch(&request)
+        .await
+        .map_err(|err| crate::ObservedError::from_client(err, None))?;
+    if status >= 400 {
+        return Err(crate::ObservedError::Http {
+            status,
+            body: text,
+            retry_after,
+        });
+    }
+    crate::decode_body(&text).map_err(|err| crate::ObservedError::from_client(err, None))
 }
 
 pub async fn put_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
@@ -136,7 +166,7 @@ pub async fn delete(base_url: &str, path: &str) -> Result<(), ClientError> {
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text) = do_fetch(&request).await?;
+    let (status, text, _) = do_fetch(&request).await?;
 
     if status >= 400 {
         return Err(ClientError::Http { status, body: text });

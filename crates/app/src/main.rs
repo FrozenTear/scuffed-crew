@@ -60,6 +60,14 @@ fn App() -> Element {
     use_context_provider(|| auth);
     state::auth::use_auth_init();
 
+    // `/link` arms a return flag before sending a signed-out member to login.
+    // OAuth comes back on `/`, so follow that flag once the session exists.
+    // The flag is only the path `/link`. It never carries a device code.
+    use_effect(move || {
+        let state = auth();
+        pages::redirect_after_login_if_needed(state.loading, state.is_logged_in());
+    });
+
     // Redirect to first-boot setup when no admin exists yet.
     use_future(|| async move {
         use scuffed_api_client::ApiClient;
