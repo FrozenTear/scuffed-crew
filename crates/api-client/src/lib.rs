@@ -5,7 +5,13 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("{}", format_http_error(*status, body))]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        /// `Retry-After` delay-seconds when the header was a positive integer.
+        /// An HTTP-date or a missing header is `None`. The JSON body is separate.
+        retry_after: Option<u64>,
+    },
     #[error("Network error: {0}")]
     Network(String),
     #[error("Deserialization error: {0}")]
@@ -13,10 +19,33 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    pub fn http(status: u16, body: impl Into<String>, retry_after_header: Option<&str>) -> Self {
+        Self::Http {
+            status,
+            body: body.into(),
+            retry_after: parse_retry_after_header(retry_after_header),
+        }
+    }
+
     /// HTTP status when the server answered; `None` for network/parse failures.
     pub fn http_status(&self) -> Option<u16> {
         match self {
             Self::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn http_body(&self) -> Option<&str> {
+        match self {
+            Self::Http { body, .. } => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Seconds from a `Retry-After` delay-seconds header. Not the JSON body.
+    pub fn retry_after_header(&self) -> Option<u64> {
+        match self {
+            Self::Http { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -29,6 +58,15 @@ impl ClientError {
 
 /// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
 /// toasts explain the failure instead of only showing the status code.
+/// `Retry-After` delay-seconds. HTTP-dates and non-positive values are ignored.
+pub(crate) fn parse_retry_after_header(header: Option<&str>) -> Option<u64> {
+    let raw = header?.trim();
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse::<u64>().ok().filter(|seconds| *seconds >= 1)
+}
+
 fn format_http_error(status: u16, body: &str) -> String {
     if let Some(msg) = scuffed_types::too_many_requests_message(status, body) {
         return msg;
@@ -243,7 +281,7 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_body, format_http_error};
+    use super::{ClientError, decode_body, format_http_error};
 
     #[test]
     fn empty_success_body_decodes_as_null() {
@@ -331,6 +369,7 @@ mod tests {
             ClientError::Http {
                 status: 429,
                 body: String::new(),
+                retry_after: None,
             }
             .http_status(),
             Some(429)
@@ -344,29 +383,32 @@ mod tests {
 
     #[test]
     fn forbidden_is_http_403_only() {
-        use super::ClientError;
         assert!(
-            ClientError::Http {
-                status: 403,
-                body: r#"{"error":"Officer access required"}"#.into(),
-            }
-            .is_forbidden()
+            ClientError::http(403, r#"{"error":"Officer access required"}"#, None).is_forbidden()
         );
-        assert!(
-            !ClientError::Http {
-                status: 401,
-                body: String::new(),
-            }
-            .is_forbidden()
-        );
+        assert!(!ClientError::http(401, "", None).is_forbidden());
         assert!(!ClientError::Network("offline".into()).is_forbidden());
+        assert_eq!(ClientError::http(403, "", None).http_status(), Some(403));
+    }
+
+    #[test]
+    fn retry_after_header_keeps_delay_seconds() {
         assert_eq!(
-            ClientError::Http {
-                status: 403,
-                body: String::new(),
-            }
-            .http_status(),
-            Some(403)
+            ClientError::http(429, "slow down", Some("12")).retry_after_header(),
+            Some(12)
         );
+        assert_eq!(
+            ClientError::http(429, "slow down", Some("  4")).retry_after_header(),
+            Some(4)
+        );
+        assert_eq!(
+            ClientError::http(429, "x", Some("0")).retry_after_header(),
+            None
+        );
+        assert_eq!(
+            ClientError::http(429, "x", Some("Thu, 24 Sep 2026 08:02:00 GMT")).retry_after_header(),
+            None
+        );
+        assert_eq!(ClientError::http(429, "x", None).retry_after_header(), None);
     }
 }

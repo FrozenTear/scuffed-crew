@@ -34,6 +34,8 @@ pub enum Route {
         IdentitySettings {},
         #[route("/profile/edit")]
         ProfileSettings {},
+        #[route("/reports")]
+        MyReports {},
         #[route("/dm")]
         DmInbox {},
         #[route("/dm/:peer_pubkey")]
@@ -108,6 +110,8 @@ pub enum Route {
         AdminAuditLog {},
         #[route("/admin/moderation")]
         AdminModeration {},
+        #[route("/admin/reports")]
+        AdminReports {},
         #[route("/admin/relay")]
         AdminRelay {},
         #[route("/admin/settings")]
@@ -162,5 +166,16 @@ mod tests {
     fn public_patch_notes_is_not_under_strategy_layout_path() {
         assert_eq!(Route::PatchNotes {}.to_string(), "/patch-notes");
         assert!(!Route::PatchNotes {}.to_string().starts_with("/strategy"));
+    }
+
+    #[test]
+    fn report_routes_parse() {
+        assert_eq!(Route::from_str("/reports").unwrap(), Route::MyReports {});
+        assert_eq!(Route::MyReports {}.to_string(), "/reports");
+        assert_eq!(
+            Route::from_str("/admin/reports").unwrap(),
+            Route::AdminReports {}
+        );
+        assert_eq!(Route::AdminReports {}.to_string(), "/admin/reports");
     }
 }

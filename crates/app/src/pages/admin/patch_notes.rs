@@ -861,10 +861,7 @@ mod tests {
     }
 
     fn http(status: u16, error: &str) -> ClientError {
-        ClientError::Http {
-            status,
-            body: format!(r#"{{"error":"{error}"}}"#),
-        }
+        ClientError::http(status, format!(r#"{{"error":"{error}"}}"#), None)
     }
 
     #[test]

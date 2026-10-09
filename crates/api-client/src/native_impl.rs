@@ -2,6 +2,13 @@ use crate::ClientError;
 
 use std::time::Duration;
 
+fn retry_after_header(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -30,9 +37,10 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         .map_err(|e| ClientError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
+    let retry_after = retry_after_header(&resp);
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ClientError::Http { status, body });
+        return Err(ClientError::http(status, body, retry_after.as_deref()));
     }
 
     let text = resp
@@ -61,9 +69,10 @@ pub async fn get<T: serde::de::DeserializeOwned>(
         .map_err(|e| ClientError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
+    let retry_after = retry_after_header(&resp);
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ClientError::Http { status, body });
+        return Err(ClientError::http(status, body, retry_after.as_deref()));
     }
 
     let text = resp
@@ -92,9 +101,10 @@ pub async fn post_empty(
         .map_err(|e| ClientError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
+    let retry_after = retry_after_header(&resp);
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ClientError::Http { status, body });
+        return Err(ClientError::http(status, body, retry_after.as_deref()));
     }
 
     Ok(())
@@ -142,9 +152,10 @@ pub async fn delete(base_url: &str, path: &str, token: Option<&str>) -> Result<(
         .map_err(|e| ClientError::Network(e.to_string()))?;
 
     let status = resp.status().as_u16();
+    let retry_after = retry_after_header(&resp);
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ClientError::Http { status, body });
+        return Err(ClientError::http(status, body, retry_after.as_deref()));
     }
 
     Ok(())
@@ -200,6 +211,7 @@ mod tests {
             ClientError::Http {
                 status: got,
                 body: text,
+                retry_after: _,
             } => {
                 assert_eq!(got, status);
                 assert!(text.contains(needle), "{text}");
