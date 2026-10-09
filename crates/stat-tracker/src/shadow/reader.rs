@@ -690,39 +690,95 @@ mod tests {
     const CROP_W: u32 = 1664;
     const CROP_H: u32 = 1007;
 
+    /// Where `crop_scoreboard` cuts the board out of a `w`x`h` frame, as
+    /// (x, y, width, height). Checked against the real crop in
+    /// [`crop_rect_matches_crop_scoreboard`].
+    fn crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
+        let x = gx + (gw as f64 * 0.175) as u32;
+        let y = gy + (gh as f64 * 0.15) as u32;
+        let cw = ((gw as f64 * 0.65) as u32).min(w - x);
+        let ch = ((gh as f64 * 0.70) as u32).min(h - y);
+        (x, y, cw, ch)
+    }
+
+    /// Crop px at the 1440p reference board (1007 px high) scaled to `ch`.
+    fn at_scale(px: f64, ch: u32) -> f64 {
+        px * ch as f64 / CROP_H as f64
+    }
+
+    /// Six dark stat labels on a bright strip, 26 reference px high, at
+    /// crop row `top`: where a Tab board has E A D DMG H MIT.
+    fn paint_header(img: &mut image::RgbImage, frame_w: u32, frame_h: u32, top: u32) {
+        let (cx, cy, cw, ch) = crop_rect(frame_w, frame_h);
+        let strip = at_scale(26.0, ch).round() as u32;
+        let half = at_scale(6.0, ch);
+        for dy in 0..strip {
+            for x in 0..cw {
+                let label = (0..6)
+                    .any(|i| (x as f64 - at_scale(960.0 + i as f64 * 100.0, ch)).abs() < half);
+                let v = if label { 30 } else { 225 };
+                img.put_pixel(cx + x, cy + top + dy, image::Rgb([v, v, v]));
+            }
+        }
+    }
+
     /// Synthetic stand-in for a frame that is not a Tab board but passes the
     /// row-dip preflight: saturated background with grey bands across the
     /// crop's name strip every `pitch` of crop height, from the top down to
     /// `rows_to` of the crop height. `header_at` paints six dark stat labels
-    /// on a bright strip at that crop row (0 = the Tab header strip).
-    /// Built from the measured signals only (dip count, pitch, header labels),
-    /// no captured pixels.
-    fn stand_in(pitch: f64, rows_to: f64, header_at: Option<u32>) -> DynamicImage {
-        let mut img = image::RgbImage::from_pixel(2560, 1440, image::Rgb([40, 90, 160]));
-        let p = pitch * CROP_H as f64;
+    /// on a bright strip at that crop row (0 = the Tab header strip, in
+    /// 1440p reference px). Built from the measured signals only (frame
+    /// size, dip count, pitch, header labels), no captured pixels.
+    fn stand_in_at(
+        frame_w: u32,
+        frame_h: u32,
+        pitch: f64,
+        rows_to: f64,
+        header_at: Option<u32>,
+    ) -> DynamicImage {
+        let (cx, cy, cw, ch) = crop_rect(frame_w, frame_h);
+        let mut img = image::RgbImage::from_pixel(frame_w, frame_h, image::Rgb([40, 90, 160]));
+        let band = at_scale(12.0, ch).round().max(2.0) as u32;
+        let p = pitch * ch as f64;
         let mut y = p / 2.0;
-        while y < rows_to * CROP_H as f64 {
-            for dy in 0..12 {
-                for x in 0..CROP_W {
-                    img.put_pixel(
-                        CROP_X + x,
-                        CROP_Y + y as u32 + dy,
-                        image::Rgb([150, 150, 150]),
-                    );
+        while y < rows_to * ch as f64 {
+            for dy in 0..band {
+                for x in 0..cw {
+                    img.put_pixel(cx + x, cy + y as u32 + dy, image::Rgb([150, 150, 150]));
                 }
             }
             y += p;
         }
         if let Some(top) = header_at {
-            for dy in 0..26 {
-                for x in 0..CROP_W {
-                    let label = (0..6).any(|i| (x as i64 - (960 + i * 100)).abs() < 6);
-                    let v = if label { 30 } else { 225 };
-                    img.put_pixel(CROP_X + x, CROP_Y + top + dy, image::Rgb([v, v, v]));
-                }
-            }
+            paint_header(&mut img, frame_w, frame_h, at_scale(top as f64, ch) as u32);
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    fn stand_in(pitch: f64, rows_to: f64, header_at: Option<u32>) -> DynamicImage {
+        stand_in_at(2560, 1440, pitch, rows_to, header_at)
+    }
+
+    #[test]
+    fn crop_rect_matches_crop_scoreboard() {
+        assert_eq!(crop_rect(2560, 1440), (CROP_X, CROP_Y, CROP_W, CROP_H));
+        for (w, h) in [
+            (2560, 1440),
+            (1920, 1080),
+            (2048, 1152),
+            (3840, 2160),
+            (2560, 1437),
+        ] {
+            let (x, y, cw, ch) = crop_rect(w, h);
+            let mut m = image::RgbImage::new(w, h);
+            m.put_pixel(x, y, image::Rgb([255, 0, 0]));
+            m.put_pixel(x + cw - 1, y + ch - 1, image::Rgb([0, 255, 0]));
+            let c = crate::ocr::preprocess::crop_scoreboard(&DynamicImage::ImageRgb8(m)).to_rgb8();
+            assert_eq!(c.dimensions(), (cw, ch), "{w}x{h}");
+            assert_eq!(c.get_pixel(0, 0).0, [255, 0, 0], "{w}x{h}");
+            assert_eq!(c.get_pixel(cw - 1, ch - 1).0, [0, 255, 0], "{w}x{h}");
+        }
     }
 
     #[test]
@@ -772,6 +828,271 @@ mod tests {
         assert!(cols(&stand_in(0.0904, 0.45, Some(0))));
         assert!(!cols(&stand_in(0.0844, 0.45, Some(150))));
         assert!(!cols(&stand_in(0.0904, 0.45, None)));
+    }
+
+    /// Name, frame width and height, dip pitch, spectral pitch, and the
+    /// layout the pitch rule gives on those two pitches.
+    type FalseBoard = (
+        &'static str,
+        u32,
+        u32,
+        f64,
+        Option<f64>,
+        Result<usize, BoardStatus>,
+    );
+
+    /// Tracker's 10 false boards from public X posts (#206): frame size,
+    /// measured dip and spectral pitch, and what the pitch rule alone says.
+    /// None of them is a Tab board, and none has the six stat labels in the
+    /// Tab header strip (0 to 2 label groups each).
+    const X_FALSE_BOARDS: [FalseBoard; 10] = [
+        ("PotG a", 1920, 1080, 0.0833, Some(0.1005), Ok(5)),
+        ("PotG b", 1920, 1080, 0.0833, Some(0.1005), Ok(5)),
+        (
+            "PotG 2048",
+            2048,
+            1152,
+            0.1079,
+            None,
+            Err(BoardStatus::TeamSizeUnknown),
+        ),
+        ("video thumbnail", 1920, 1080, 0.0926, None, Ok(5)),
+        ("Top 500", 1920, 1080, 0.0926, Some(0.0992), Ok(5)),
+        ("match history", 1920, 1080, 0.0913, Some(0.0860), Ok(5)),
+        ("graphic 1080", 1920, 1080, 0.0952, Some(0.0847), Ok(5)),
+        (
+            "graphic 4K",
+            3840,
+            2160,
+            0.1085,
+            None,
+            Err(BoardStatus::TeamSizeUnknown),
+        ),
+        // the old rule (spectral first) gave 6
+        (
+            "hero menu",
+            1920,
+            1080,
+            0.0886,
+            Some(0.0714),
+            Err(BoardStatus::TeamSizeUnknown),
+        ),
+        ("graphic 2048", 2048, 1152, 0.1104, Some(0.0782), Ok(6)),
+    ];
+
+    /// The pitch that decides the size under the pitch rule (the plausible
+    /// one), else the dip pitch.
+    fn deciding_pitch(dip: f64, spectral: Option<f64>) -> f64 {
+        let ok = |p: f64| (0.062..=0.095).contains(&p);
+        if ok(dip) {
+            dip
+        } else {
+            spectral.filter(|&p| ok(p)).unwrap_or(dip)
+        }
+    }
+
+    #[test]
+    fn x_false_board_stand_ins_are_not_found() {
+        let reader = Reader::load(&ReaderConfig::default());
+        for (what, w, h, dip, spectral, rule) in X_FALSE_BOARDS {
+            // the pitch rule alone, on the measured values
+            let measured = scan(4, Some(dip), spectral);
+            assert!(measured.looks_like_scoreboard(), "{what}");
+            assert_eq!(layout_from_scan(&measured, 0), rule, "{what}");
+
+            // a stand-in at the same frame size with rows at the pitch that
+            // decided the size, no stat labels in the header strip
+            let pitch = deciding_pitch(dip, spectral);
+            let frame = stand_in_at(w, h, pitch, 0.45, None);
+            let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
+            assert!(scan.looks_like_scoreboard(), "{what}: {scan:?}");
+            let got = scan.median_pitch.unwrap();
+            assert!(
+                (got - pitch).abs() < 0.004,
+                "{what}: pitch {got} vs {pitch}"
+            );
+            if let Ok(n) = rule {
+                assert_eq!(layout_from_scan(&scan, labels), Ok(n), "{what}: {scan:?}");
+            }
+            assert!(!digits::stat_columns_found(&crop), "{what}");
+
+            let b = reader.read_board(&frame);
+            assert_eq!(b.status, BoardStatus::NotFound, "{what}");
+            assert_eq!(b.team_size, None, "{what}");
+            let names: Vec<&str> = b.fields.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, MATCH_FIELDS, "{what}");
+        }
+    }
+
+    /// Stat values for a synthetic board, two teams of up to 6 rows. Row 1
+    /// is a fresh 0 row, the others carry 1 to 6 digits and commas.
+    const STAND_IN_STATS: [[u32; 6]; 12] = [
+        [12, 3, 3, 5480, 950, 2347],
+        [0, 0, 0, 0, 0, 0],
+        [27, 14, 9, 18744, 1203, 87],
+        [5, 10, 1, 101, 23456, 0],
+        [8, 2, 4, 9876, 33, 104512],
+        [41, 6, 7, 765, 4321, 11],
+        [1, 11, 2, 3300, 7, 1000],
+        [16, 5, 0, 22058, 619, 4096],
+        [3, 19, 8, 47, 15998, 2],
+        [9, 4, 6, 6140, 280, 39017],
+        [22, 7, 5, 11111, 0, 765],
+        [6, 1, 3, 8023, 1450, 333],
+    ];
+
+    /// Blue and red, the default team colours.
+    const BLUE_RED: [[u8; 3]; 2] = [[40, 110, 220], [200, 50, 50]];
+
+    /// Synthetic stand-in shaped like a Tab board: per team, `team` rows at
+    /// `pitch` of crop height, each a team-coloured bar across the name
+    /// strip with a white name block, and the stat values in neutral grey
+    /// under the six header labels (team 2 starts at 0.565 of the crop, as
+    /// on the real board). `header` false leaves the Tab header strip out,
+    /// as on the old Overwatch 1 scoreboard. No names, portraits or
+    /// captured pixels; the digits are the embedded 1440p templates.
+    fn tab_stand_in(
+        frame_w: u32,
+        frame_h: u32,
+        team: usize,
+        pitch: f64,
+        colours: [[u8; 3]; 2],
+        header: bool,
+    ) -> DynamicImage {
+        let (cx, cy, cw, ch) = crop_rect(frame_w, frame_h);
+        let mut img = image::RgbImage::from_pixel(frame_w, frame_h, image::Rgb([20, 22, 30]));
+        for y in 0..ch {
+            for x in 0..cw {
+                img.put_pixel(cx + x, cy + y, image::Rgb([18, 20, 32]));
+            }
+        }
+        if header {
+            paint_header(&mut img, frame_w, frame_h, 0);
+        }
+        let (chf, cwf) = (ch as f64, cw as f64);
+        let p = pitch * chf;
+        let gap = at_scale(3.0, ch).round().max(1.0) as u32;
+        let mut board = image::RgbImage::new(cw, ch);
+        for r in 0..2 * team {
+            let base = if r < team { 0.025 } else { 0.565 } * chf;
+            let top = base + (r % team) as f64 * p;
+            let ctr = top + p / 2.0;
+            let colour = image::Rgb(colours[r / team]);
+            for y in top as u32..(top + p) as u32 - gap {
+                for x in (0.04 * cwf) as u32..(0.56 * cwf) as u32 {
+                    img.put_pixel(cx + x, cy + y, colour);
+                }
+            }
+            for y in (ctr - 0.15 * p) as u32..(ctr + 0.15 * p) as u32 {
+                for x in (0.10 * cwf) as u32..(0.30 * cwf) as u32 {
+                    img.put_pixel(cx + x, cy + y, image::Rgb([235, 235, 235]));
+                }
+            }
+            for (k, &v) in STAND_IN_STATS[r].iter().enumerate() {
+                let col = at_scale(960.0 + k as f64 * 100.0, ch) as usize;
+                digits::test_glyphs::draw_stat(&mut board, v, k, col, ctr as usize - 10);
+            }
+        }
+        for (x, y, px) in board.enumerate_pixels() {
+            if px.0[0] > 0 {
+                img.put_pixel(cx + x, cy + y, *px);
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// Real row pitches (fraction of crop height) of 5v5 and 6v6 Tab boards.
+    const PITCH_5V5: f64 = 0.0873;
+    const PITCH_6V6: f64 = 0.0754;
+
+    fn assert_stand_in_read(b: &BoardRead, team: usize, what: &str) {
+        assert_eq!(b.status, BoardStatus::Read, "{what}");
+        assert_eq!(b.team_size, Some(team), "{what}");
+        for (r, row) in STAND_IN_STATS.iter().take(2 * team).enumerate() {
+            for (k, &v) in row.iter().enumerate() {
+                let name = format!("r{r}.{}", STAT_FIELDS[k]);
+                assert_eq!(
+                    b.get(&name).and_then(|f| f.value.clone()),
+                    Some(Value::Int(v)),
+                    "{what} {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_stand_ins_read_with_their_team_size() {
+        let reader = Reader::load(&ReaderConfig::default());
+        for (team, pitch) in [(5, PITCH_5V5), (6, PITCH_6V6)] {
+            let frame = tab_stand_in(2560, 1440, team, pitch, BLUE_RED, true);
+            let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let got = scan.median_pitch.unwrap();
+            assert!((got - pitch).abs() < 0.004, "{team}v{team}: {scan:?}");
+            let b = reader.read_board(&frame);
+            assert_stand_in_read(&b, team, &format!("{team}v{team}"));
+        }
+    }
+
+    /// Team colours never decide anything: rows, teams and the size come
+    /// from the layout (row pitch, team 2 at 0.565 of the crop) and from
+    /// brightness. Swapped, purple/yellow and yellow/purple teams read the
+    /// same as blue/red.
+    #[test]
+    fn recoloured_tab_stand_ins_read_the_same() {
+        let reader = Reader::load(&ReaderConfig::default());
+        let purple = [140, 60, 200];
+        let yellow = [230, 200, 40];
+        for (team, pitch) in [(5, PITCH_5V5), (6, PITCH_6V6)] {
+            let mut base =
+                reader.read_board(&tab_stand_in(2560, 1440, team, pitch, BLUE_RED, true));
+            base.elapsed_ms = 0;
+            for (what, colours) in [
+                ("red/blue", [BLUE_RED[1], BLUE_RED[0]]),
+                ("purple/yellow", [purple, yellow]),
+                ("yellow/purple", [yellow, purple]),
+            ] {
+                let what = format!("{team}v{team} {what}");
+                let mut b =
+                    reader.read_board(&tab_stand_in(2560, 1440, team, pitch, colours, true));
+                assert_stand_in_read(&b, team, &what);
+                b.elapsed_ms = 0;
+                assert_eq!(b, base, "{what}");
+            }
+        }
+    }
+
+    /// The two old Overwatch 1 scoreboards from X (#206): rows and stat
+    /// digits, but no stat labels in the Tab header strip. The pitch rule
+    /// alone gives 6 (1920x1080) and 5 (2560x1437).
+    #[test]
+    fn ow1_scoreboard_stand_ins_are_not_found() {
+        let reader = Reader::load(&ReaderConfig::default());
+        for (what, w, h, team, dip, spectral) in [
+            ("OW1 1080", 1920, 1080, 6, 0.0754, 0.0767),
+            ("OW1 2560x1437", 2560, 1437, 5, 0.0826, 0.0806),
+        ] {
+            assert_eq!(
+                layout_from_scan(&scan(4, Some(dip), Some(spectral)), 0),
+                Ok(team),
+                "{what}"
+            );
+            let frame = tab_stand_in(w, h, team, dip, BLUE_RED, false);
+            let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
+            assert_eq!(
+                layout_from_scan(&scan, labels),
+                Ok(team),
+                "{what}: {scan:?}"
+            );
+            assert!(!digits::stat_columns_found(&crop), "{what}");
+            let b = reader.read_board(&frame);
+            assert_eq!(b.status, BoardStatus::NotFound, "{what}");
+            assert_eq!(b.team_size, None, "{what}");
+        }
     }
 
     fn scan(dips: usize, dip: Option<f64>, spectral: Option<f64>) -> RowScan {
