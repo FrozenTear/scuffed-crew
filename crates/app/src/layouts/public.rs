@@ -649,6 +649,11 @@ pub fn PublicLayout() -> Element {
                                 "Settings"
                             }
                             Link {
+                                to: Route::MyReports {},
+                                onclick: move |_| account_open.set(false),
+                                "My reports"
+                            }
+                            Link {
                                 to: Route::DmInbox {},
                                 onclick: move |_| account_open.set(false),
                                 "DMs"
@@ -788,6 +793,11 @@ pub fn PublicLayout() -> Element {
                     "Settings"
                 }
                 Link {
+                    to: Route::MyReports {},
+                    onclick: move |_| mobile_open.set(false),
+                    "My reports"
+                }
+                Link {
                     to: Route::DmInbox {},
                     onclick: move |_| mobile_open.set(false),
                     "DMs"
@@ -872,6 +882,15 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[test]
+    fn account_menu_links_my_reports() {
+        let src = include_str!("public.rs");
+        assert!(
+            src.matches("Route::MyReports").count() >= 2,
+            "desktop and mobile account menus should link My reports"
+        );
     }
 
     #[test]

@@ -319,6 +319,7 @@ pub fn AdminLayout() -> Element {
                     // Moderation is OfficerUser-gated server-side (list/create), so it is
                     // visible to every officer+ — matching the AdminLayout access tier.
                     Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
+                    Link { to: Route::AdminReports {}, onclick: close_nav, "Reports" }
                     if is_admin {
                         Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
                         Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
