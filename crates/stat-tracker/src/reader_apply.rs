@@ -183,6 +183,8 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         damage: numbers[3],
         healing: numbers[4],
         mitigation: numbers[5],
+        // One tag for the whole row. cv-v5 when any stored field came from
+        // this reader. ocr-v1 only when every field fell back.
         recognizer: if used_cv {
             RECOGNIZER_ID
         } else {

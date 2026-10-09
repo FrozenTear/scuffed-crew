@@ -949,6 +949,128 @@ mod tests {
     }
 
     #[test]
+    fn mixed_row_uploads_cv_v5_when_any_stat_came_from_the_new_reader() {
+        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::shadow::digits::RECOGNIZER_ID;
+        use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
+
+        fn snap() -> OcrSnapshot {
+            OcrSnapshot {
+                map: "Busan".into(),
+                mode: "Control".into(),
+                result: "victory".into(),
+                hero: "Ana".into(),
+                elims: 10,
+                assists: 4,
+                deaths: 2,
+                damage: 4000,
+                healing: 8000,
+                mitigation: 100,
+            }
+        }
+
+        fn text(name: &str, value: &str, suspect: bool) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Text(value.into())),
+                confidence: if suspect { 0.2 } else { 0.95 },
+                suspect,
+            }
+        }
+
+        fn number(name: &str, value: u32, suspect: bool) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Int(value)),
+                confidence: if suspect { 0.2 } else { 0.95 },
+                suspect,
+            }
+        }
+
+        fn board(elims_suspect: bool) -> BoardRead {
+            BoardRead {
+                status: BoardStatus::Read,
+                team_size: Some(6),
+                elapsed_ms: 1,
+                fields: vec![
+                    text("map", "Busan", false),
+                    text("mode", "Control", false),
+                    text("result", "defeat", true),
+                    text("r0.hero", "tracer", true),
+                    number("r0.e", 21, elims_suspect),
+                    number("r0.a", 1, true),
+                    number("r0.d", 99, true),
+                    number("r0.dmg", 1, true),
+                    number("r0.h", 1, true),
+                    number("r0.mit", 1, true),
+                ],
+            }
+        }
+
+        let own = OwnRow::Identified {
+            index: 0,
+            team_size: 6,
+        };
+        let policy = snap();
+        let mixed = merge_saved(&policy, own, Some(&board(false)));
+        assert_eq!(
+            mixed.elims, 21,
+            "the confident elim came from the new reader"
+        );
+        assert_eq!(
+            mixed.deaths, policy.deaths,
+            "a suspect death stays on ocr-v1"
+        );
+        assert_eq!(mixed.hero, policy.hero);
+        assert_eq!(mixed.result, policy.result);
+        assert_eq!(mixed.recognizer, RECOGNIZER_ID);
+        assert!(mixed.suspect_fields.iter().any(|name| name == "d"));
+        assert!(!mixed.suspect_fields.iter().any(|name| name == "e"));
+
+        let all_fallback = merge_saved(&policy, own, Some(&board(true)));
+        assert_eq!(all_fallback.elims, policy.elims);
+        assert_eq!(all_fallback.deaths, policy.deaths);
+        assert_eq!(all_fallback.hero, policy.hero);
+        assert_eq!(all_fallback.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert!(all_fallback.suspect_fields.iter().any(|name| name == "e"));
+
+        let mut rows = Vec::new();
+        for (session, saved) in [("sess-mixed", &mixed), ("sess-fallback", &all_fallback)] {
+            let mut match_row = row(&saved.hero, &saved.map, &saved.mode);
+            match_row.session_id = session.into();
+            match_row.outcome = saved.result.clone();
+            match_row.elims = saved.elims;
+            match_row.assists = saved.assists;
+            match_row.deaths = saved.deaths;
+            match_row.damage = saved.damage;
+            match_row.healing = saved.healing;
+            match_row.mitigation = saved.mitigation;
+            match_row.recognizer = saved.recognizer.to_string();
+            match_row.suspect_fields = saved.suspect_fields.clone();
+            rows.push(match_row);
+        }
+
+        let request = upload_request(&rows, &[]);
+        let json = serde_json::to_value(&request).unwrap();
+        let matches = json["matches"].as_array().expect("matches array");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0]["recognizer"], "cv-v5");
+        assert_eq!(matches[0]["elims"], 21);
+        assert_eq!(matches[0]["deaths"], policy.deaths);
+        assert_eq!(matches[0]["hero"], "Ana");
+        let suspects = matches[0]["suspect_fields"]
+            .as_array()
+            .expect("mixed row sends suspect_fields");
+        assert!(suspects.iter().any(|name| name == "d"));
+        assert!(suspects.iter().all(|name| name != "e"));
+        assert_eq!(matches[1]["recognizer"], "ocr-v1");
+        assert_eq!(matches[1]["elims"], policy.elims);
+        assert_eq!(matches[1]["deaths"], policy.deaths);
+        assert!(matches[1]["recognizer"].is_string());
+        assert!(matches[0]["recognizer"].is_string());
+    }
+
+    #[test]
     fn try_new_rejects_cleartext_non_loopback_and_allows_https_and_loopback() {
         assert!(
             SyncClient::try_new(SyncConfig {
