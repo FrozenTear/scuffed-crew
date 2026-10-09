@@ -5,9 +5,11 @@
 //! Zip bytes, PNG chunks, and storage live in the site server.
 
 use chrono::{DateTime, Utc};
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 /// Spec bundle version. Any other value is rejected.
 pub const BUNDLE_VERSION: u64 = 1;
@@ -249,7 +251,7 @@ pub fn parse_bundle_manifest(bytes: &[u8]) -> Result<CheckedManifest, String> {
         return Err("manifest has a byte order mark".into());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "manifest is not utf-8".to_string())?;
-    let value: Value = serde_json::from_str(text).map_err(schema_err)?;
+    let value = parse_json_no_duplicate_keys(text)?;
     if !value.is_object() {
         return Err("manifest must be a json object".into());
     }
@@ -259,7 +261,89 @@ pub fn parse_bundle_manifest(bytes: &[u8]) -> Result<CheckedManifest, String> {
 
 fn schema_err(err: serde_json::Error) -> String {
     let msg: String = err.to_string().chars().take(180).collect();
+    if msg.contains("duplicate json key") {
+        return "manifest has a duplicate json key".into();
+    }
     format!("manifest does not match the schema: {msg}")
+}
+
+/// Parse JSON and reject a repeated key in any object, including nested ones
+/// and objects inside arrays. `serde_json::Value` would keep the last value.
+fn parse_json_no_duplicate_keys(text: &str) -> Result<Value, String> {
+    let mut de = serde_json::Deserializer::from_str(text);
+    let value = JsonSeed.deserialize(&mut de).map_err(schema_err)?;
+    de.end().map_err(schema_err)?;
+    Ok(value)
+}
+
+struct JsonSeed;
+
+impl<'de> DeserializeSeed<'de> for JsonSeed {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(JsonVisitor)
+    }
+}
+
+struct JsonVisitor;
+
+impl<'de> Visitor<'de> for JsonVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("json")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+        let number = serde_json::Number::from_f64(value)
+            .ok_or_else(|| de::Error::custom("manifest number is not finite"))?;
+        Ok(Value::Number(number))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(item) = seq.next_element_seed(JsonSeed)? {
+            out.push(item);
+        }
+        Ok(Value::Array(out))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if out.contains_key(&key) {
+                return Err(de::Error::custom("manifest has a duplicate json key"));
+            }
+            let value = map.next_value_seed(JsonSeed)?;
+            out.insert(key, value);
+        }
+        Ok(Value::Object(out))
+    }
 }
 
 fn check_manifest(raw: RawManifest, value: Value) -> Result<CheckedManifest, String> {
@@ -701,5 +785,25 @@ mod tests {
         v["files"][1]["path"] = serde_json::json!("crops/../../secret.png");
         let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
         assert!(err.contains("path"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_key_is_rejected_at_every_level() {
+        let top = br#"{"bundle_version":1,"bundle_version":1}"#;
+        let err = parse_bundle_manifest(top).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+
+        let nested = br#"{"game":{"map":"Busan","map":"Ilios"}}"#;
+        let err = parse_bundle_manifest(nested).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+
+        let in_array = br#"{"files":[{"path":"log.txt","path":"other.txt"}]}"#;
+        let err = parse_bundle_manifest(in_array).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+
+        // Escapes decode before the key check, so these are the same key.
+        let escaped = br#"{"a":1,"\u0061":2}"#;
+        let err = parse_bundle_manifest(escaped).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
     }
 }

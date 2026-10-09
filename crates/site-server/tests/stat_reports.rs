@@ -454,6 +454,100 @@ fn deflated_log_bomb() -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
+/// Two deflated entries. Each uncompressed size is under the cap. Together they are not.
+fn deflated_total_bomb() -> Vec<u8> {
+    let half = (MAX_BUNDLE_BYTES as usize) / 2 + 1;
+    let log = vec![b'a'; half];
+    let png = vec![0u8; half];
+    let manifest = json!({
+        "bundle_version": 1,
+        "app_version": "0.0.0",
+        "recognizers": { "matcher": "cv-v3", "ocr": "ocr-v1" },
+        "resolution": { "width": 1920, "height": 1080 },
+        "ui_scale": null,
+        "reason": { "category": "other", "text": "" },
+        "session_id": "sess-example",
+        "game": {
+            "map": null, "mode": null, "result": null, "team_size": 5,
+            "captured_at": "2026-10-09T12:00:00Z"
+        },
+        "reads": read_block(),
+        "corrections": {},
+        "consent": { "training": false, "own_name_included": false, "glyphs_included": false },
+        "files": [
+            {
+                "path": "log.txt",
+                "sha256": sha256_hex(&log),
+                "bytes": log.len(),
+                "role": "log",
+                "screen_class": null
+            },
+            {
+                "path": "crops/scoreboard.png",
+                "sha256": sha256_hex(&png),
+                "bytes": png.len(),
+                "role": "crop",
+                "screen_class": "scoreboard"
+            }
+        ]
+    });
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("manifest.json", opts).unwrap();
+    writer
+        .write_all(&serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    writer
+        .start_file(
+            "log.txt",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+    writer.write_all(&log).unwrap();
+    writer
+        .start_file(
+            "crops/scoreboard.png",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+    writer.write_all(&png).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+fn bundle_with_duplicate_nested_key() -> Vec<u8> {
+    let built = valid_bundle(false);
+    let mut archive = zip::ZipArchive::new(Cursor::new(built.bytes)).unwrap();
+    let mut manifest = String::new();
+    archive
+        .by_name("manifest.json")
+        .unwrap()
+        .read_to_string(&mut manifest)
+        .unwrap();
+    let manifest = manifest.replacen("\"team_size\"", "\"team_size\":5,\"team_size\"", 1);
+    assert_ne!(
+        manifest.matches("\"team_size\"").count(),
+        1,
+        "fixture must repeat a nested key"
+    );
+    let mut log = Vec::new();
+    archive
+        .by_name("log.txt")
+        .unwrap()
+        .read_to_end(&mut log)
+        .unwrap();
+    let mut png = Vec::new();
+    archive
+        .by_name("crops/scoreboard.png")
+        .unwrap()
+        .read_to_end(&mut png)
+        .unwrap();
+    zip_stored(&[
+        ("manifest.json".to_string(), manifest.into_bytes()),
+        ("log.txt".to_string(), log),
+        ("crops/scoreboard.png".to_string(), png),
+    ])
+}
+
 async fn send(
     app: &axum::Router,
     method: Method,
@@ -564,6 +658,37 @@ async fn rejects_oversize_body_and_uncompressed_bomb() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(zip_count(&h.reports_dir), 0);
+
+    let total = deflated_total_bomb();
+    assert!(
+        total.len() as u64 <= MAX_BUNDLE_BYTES,
+        "fixture should compress under the cap"
+    );
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(total),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn rejects_duplicate_json_keys() {
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(bundle_with_duplicate_nested_key()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(zip_count(&h.reports_dir), 0);
 }
 
