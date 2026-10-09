@@ -162,6 +162,48 @@ fn body_error_or(body: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// `Try again in N s` when the body is governor JSON. Other 429s return `None`.
+fn client_rate_limit_message(err: &scuffed_api_client::ClientError) -> Option<String> {
+    let scuffed_api_client::ClientError::Http { status, body } = err else {
+        return None;
+    };
+    scuffed_types::rate_limited_retry_message(*status, body)
+}
+
+/// Password login. Lockout and plain-text 429s stay on the generic failure.
+fn login_failure_message(err: &scuffed_api_client::ClientError) -> String {
+    client_rate_limit_message(err).unwrap_or_else(|| "Invalid username or password".into())
+}
+
+/// Local register. 409, 400, and 403 keep their own copy. A governor 429
+/// names the wait. A plain-text 429 stays on the generic failure.
+fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
+    match err {
+        scuffed_api_client::ClientError::Http { status: 409, .. } => {
+            "Could not create account. Try a different username.".into()
+        }
+        scuffed_api_client::ClientError::Http { status: 400, body } => {
+            body_error_or(body, "Check your input")
+        }
+        scuffed_api_client::ClientError::Http { status: 403, .. } => {
+            "Registration is currently closed".into()
+        }
+        other => client_rate_limit_message(other)
+            .unwrap_or_else(|| "Registration failed — try again".into()),
+    }
+}
+
+/// NIP-07 verify. Closed registration stays 403 copy. A governor 429 names the wait.
+fn nostr_verify_failure_message(err: &scuffed_api_client::ClientError) -> String {
+    match err {
+        scuffed_api_client::ClientError::Http { status: 403, .. } => {
+            "Registration is currently closed".to_string()
+        }
+        other => client_rate_limit_message(other)
+            .unwrap_or_else(|| format!("Verification failed: {other}")),
+    }
+}
+
 /// Shown when OAuth sends a brand-new account to `/login?error=registration_closed`.
 const REGISTRATION_CLOSED_BANNER: &str =
     "The crew isn't taking new sign-ups right now. Existing members can still sign in.";
@@ -376,8 +418,8 @@ pub fn Login() -> Element {
                         }
                     }
                 }
-                Err(_) => {
-                    error.set(Some("Invalid username or password".into()));
+                Err(e) => {
+                    error.set(Some(login_failure_message(&e)));
                     submitting.set(false);
                 }
             }
@@ -424,20 +466,7 @@ pub fn Login() -> Element {
                     nav.replace(Route::Apply {});
                 }
                 Err(e) => {
-                    error.set(Some(match e {
-                        // 409 is a conflict (including a taken name). The copy
-                        // does not say the name is already taken.
-                        scuffed_api_client::ClientError::Http { status: 409, .. } => {
-                            "Could not create account. Try a different username.".into()
-                        }
-                        scuffed_api_client::ClientError::Http { status: 400, body } => {
-                            body_error_or(&body, "Check your input")
-                        }
-                        scuffed_api_client::ClientError::Http { status: 403, .. } => {
-                            "Registration is currently closed".into()
-                        }
-                        _ => "Registration failed — try again".into(),
-                    }));
+                    error.set(Some(register_failure_message(&e)));
                     submitting.set(false);
                 }
             }
@@ -664,7 +693,10 @@ async fn nostr_login_flow() -> Result<(), String> {
     let ch = client
         .fetch::<NostrLoginChallenge>("/api/auth/nostr/challenge")
         .await
-        .map_err(|e| format!("Challenge request failed: {e}"))?;
+        .map_err(|e| {
+            client_rate_limit_message(&e)
+                .unwrap_or_else(|| format!("Challenge request failed: {e}"))
+        })?;
 
     let window = web_sys::window().ok_or("No window")?;
     let nostr = js_sys::Reflect::get(&window, &JsValue::from_str("nostr"))
@@ -722,12 +754,7 @@ async fn nostr_login_flow() -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| match e {
-            scuffed_api_client::ClientError::Http { status: 403, .. } => {
-                "Registration is currently closed".to_string()
-            }
-            other => format!("Verification failed: {other}"),
-        })?;
+        .map_err(|e| nostr_verify_failure_message(&e))?;
     Ok(())
 }
 
@@ -735,6 +762,80 @@ async fn nostr_login_flow() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    fn http(status: u16, body: &str) -> scuffed_api_client::ClientError {
+        scuffed_api_client::ClientError::Http {
+            status,
+            body: body.to_string(),
+        }
+    }
+
+    /// Governor JSON, plain text, and password lockout. Forum posts, tokens,
+    /// and every other `ClientError` toast use `Display`. Login, register,
+    /// and Nostr verify map the same bodies themselves.
+    #[test]
+    fn rate_limit_json_names_the_wait_and_other_429_bodies_stay() {
+        let json = r#"{"error":"rate_limited","retry_after":9}"#;
+        let plain = "Too Many Requests! Wait for 9s";
+        let lockout = r#"{"error":"too many login attempts"}"#;
+        let json_err = http(429, json);
+        let plain_err = http(429, plain);
+        let lockout_err = http(429, lockout);
+
+        assert_eq!(json_err.to_string(), "Try again in 9 s");
+        assert_eq!(plain_err.to_string(), "HTTP error: 429");
+        assert_eq!(
+            lockout_err.to_string(),
+            "HTTP error 429: too many login attempts"
+        );
+
+        assert_eq!(login_failure_message(&json_err), "Try again in 9 s");
+        assert_eq!(
+            login_failure_message(&plain_err),
+            "Invalid username or password"
+        );
+        assert_eq!(
+            login_failure_message(&lockout_err),
+            "Invalid username or password"
+        );
+
+        assert_eq!(register_failure_message(&json_err), "Try again in 9 s");
+        assert_eq!(
+            register_failure_message(&plain_err),
+            "Registration failed — try again"
+        );
+        assert_eq!(
+            register_failure_message(&lockout_err),
+            "Registration failed — try again"
+        );
+        assert_eq!(
+            register_failure_message(&http(409, json)),
+            "Could not create account. Try a different username."
+        );
+
+        assert_eq!(nostr_verify_failure_message(&json_err), "Try again in 9 s");
+        assert_eq!(
+            nostr_verify_failure_message(&plain_err),
+            "Verification failed: HTTP error: 429"
+        );
+        assert_eq!(
+            nostr_verify_failure_message(&http(403, json)),
+            "Registration is currently closed"
+        );
+
+        assert_eq!(
+            scuffed_types::chat_api_error_copy(429, json),
+            "Try again in 9 s"
+        );
+        assert_eq!(
+            scuffed_types::chat_api_error_copy(429, plain),
+            "Chat request failed (HTTP 429)"
+        );
+        assert_eq!(
+            scuffed_types::chat_api_error_copy(429, lockout),
+            "too many login attempts"
+        );
+    }
 
     #[test]
     fn registration_closed_maps_to_the_login_banner() {

@@ -117,10 +117,12 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
         422 => "No officer or admin on the roster has a Nostr key yet.".into(),
         502 => "The relay rejected the encrypted message.".into(),
         503 => "Can't reach the chat relay.".into(),
-        _ => serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
-            .unwrap_or_else(|| format!("Chat request failed (HTTP {status})")),
+        _ => super::rate_limited_retry_message(status, body).unwrap_or_else(|| {
+            serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| format!("Chat request failed (HTTP {status})"))
+        }),
     }
 }
 
@@ -202,6 +204,25 @@ mod tests {
         assert_eq!(
             chat_api_error_copy(409, r#"{"error":"duplicate"}"#),
             "duplicate"
+        );
+    }
+
+    #[test]
+    fn chat_429_uses_retry_after_only_for_governor_json() {
+        assert_eq!(
+            chat_api_error_copy(429, r#"{"error":"rate_limited","retry_after":4}"#),
+            "Try again in 4 s"
+        );
+        assert_eq!(
+            chat_api_error_copy(429, "Too Many Requests! Wait for 4s"),
+            "Chat request failed (HTTP 429)"
+        );
+        assert_eq!(
+            chat_api_error_copy(
+                429,
+                r#"{"error":"Too many Nostr key/message operations — please slow down and retry shortly."}"#
+            ),
+            "Too many Nostr key/message operations — please slow down and retry shortly."
         );
     }
 }

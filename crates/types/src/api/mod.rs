@@ -37,6 +37,24 @@ pub struct ApiError {
     pub details: Option<String>,
 }
 
+/// Member copy for a tower-governor 429.
+///
+/// The body `{"error":"rate_limited","retry_after":N}` becomes
+/// `Try again in N s`. Any other body returns `None`, including plain text
+/// (`Too Many Requests! Wait for Ns`) and password-lockout JSON
+/// (`{"error":"too many login attempts"}`), so callers keep their existing copy.
+pub fn rate_limited_retry_message(status: u16, body: &str) -> Option<String> {
+    if status != 429 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error")?.as_str()? != "rate_limited" {
+        return None;
+    }
+    let secs = value.get("retry_after")?.as_u64()?;
+    Some(format!("Try again in {secs} s"))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiSuccess<T> {
     pub data: T,
@@ -108,4 +126,43 @@ fn encode_cursor(offset: u32) -> String {
 
 fn decode_cursor(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rate_limited_retry_message;
+
+    #[test]
+    fn governor_json_429_uses_retry_after() {
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited","retry_after":9}"#)
+                .as_deref(),
+            Some("Try again in 9 s")
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited","retry_after":1}"#)
+                .as_deref(),
+            Some("Try again in 1 s")
+        );
+    }
+
+    #[test]
+    fn plain_text_and_lockout_429_are_not_governor_json() {
+        assert_eq!(
+            rate_limited_retry_message(429, "Too Many Requests! Wait for 9s"),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"too many login attempts"}"#),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(400, r#"{"error":"rate_limited","retry_after":9}"#),
+            None
+        );
+        assert_eq!(
+            rate_limited_retry_message(429, r#"{"error":"rate_limited"}"#),
+            None
+        );
+    }
 }
