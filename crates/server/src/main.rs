@@ -215,7 +215,7 @@ async fn main() {
 
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
-    // CSP is report-only unless CSP_ENFORCE=1. See `security`.
+    // Site CSP is enforcing. See `security`.
     let csp = security::SecurityPolicy::from_env();
     let app = create_router(state.clone())
         .merge(routes::strategy_routes(state.clone()))

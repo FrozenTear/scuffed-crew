@@ -240,11 +240,10 @@ A missing file under `/assets/`, or a missing top-level file whose extension is 
 
 Unmatched `/api` and `/api/*` requests return `404` with `Content-Type: application/json`, body `{"error":"Not found"}`, and `Cache-Control: no-store` (HEAD gets the same status and headers with no body; OPTIONS is answered by the CORS layer). A wrong method other than OPTIONS on a known API path stays `405`. OPTIONS on a route registered inside `create_router` is answered by the CORS layer with `200`. `scuffed-server` adds the strategy routes (`/api/strategy/strategies`, `/api/strategy/strategies/mine`, `/api/strategy/strategies/{id}`, `/api/strategy/heroes`, `/api/strategy/meta`, `/api/strategy/patch-notes`, `/api/strategy/patch-notes/{version}`), the chat routes (`/api/chat/auth-token`, `/api/chat/send-encrypted`, `/api/chat/decrypt`), and the websocket route (`/api/strategy/ws`) after `create_router`. OPTIONS on those still returns `405`. `/apiary` and `/api-docs` are client routes.
 
-The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
+The app sets enforcing `Content-Security-Policy` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
-sockets). Leave CSP off the Caddy block so the two policies do not intersect.
-Set `CSP_ENFORCE=1` in `data/secrets.env` and recreate the app container to
-send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
+sockets). `script-src` does not allow `'unsafe-eval'`. Leave CSP off the Caddy
+block so a second policy does not intersect. `CSP_EXTRA_CONNECT_SRC` and
 `CSP_IMG_SRC` add relay or image origins without a code change.
 
 > **Optional: cache the ICS feeds at the edge.** `/api/calendar/all.ics` and

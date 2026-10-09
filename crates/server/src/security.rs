@@ -1,12 +1,12 @@
 //! Security response headers, including the site Content-Security-Policy.
 //!
-//! The policy ships as `Content-Security-Policy-Report-Only` until an operator
-//! sets `CSP_ENFORCE=1` (no rebuild). Report-only still shows violations in the
-//! browser console, which is the rollout check.
+//! The site policy is enforcing (`Content-Security-Policy`). `script-src`
+//! allows `'self'`, `'wasm-unsafe-eval'`, and hashes of inline boot scripts.
+//! It does not allow `'unsafe-eval'`. The desktop canvas bridge is not served
+//! by this process.
 //!
 //! `frame-ancestors`, `object-src`, `base-uri`, and `form-action` are always
-//! present. Clickjacking stays enforced by `X-Frame-Options: DENY` even while
-//! the CSP itself is report-only.
+//! present. `X-Frame-Options: DENY` is sent as well.
 
 use axum::http::{HeaderName, HeaderValue, header};
 use base64::Engine;
@@ -22,7 +22,9 @@ const CSP_REPORT_ONLY_HEADER: HeaderName =
 /// tests can cover the operator knobs without mutating process environment.
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    /// `CSP_ENFORCE=1` (also `true` / `yes` / `on`). Anything else is report-only.
+    /// When true, responses send `Content-Security-Policy`. When false, they
+    /// send `Content-Security-Policy-Report-Only`. [`SecurityPolicy::from_env`]
+    /// always sets this true.
     pub enforce: bool,
     /// `NOSTR_RELAY_URL`. Browser chat opens a WebSocket to this origin when
     /// the team channel URL is `ws://` or `wss://`.
@@ -55,7 +57,7 @@ impl SecurityPolicy {
     /// when the process is serving a built bundle).
     pub fn from_env() -> Self {
         Self::from_config(SecurityConfig {
-            enforce: env_flag("CSP_ENFORCE"),
+            enforce: true,
             nostr_relay_url: std::env::var("NOSTR_RELAY_URL").ok(),
             extra_connect_src: std::env::var("CSP_EXTRA_CONNECT_SRC").ok(),
             extra_img_src: std::env::var("CSP_IMG_SRC").ok(),
@@ -216,18 +218,6 @@ pub async fn apply(
     }
 
     response
-}
-
-fn env_flag(name: &str) -> bool {
-    matches!(
-        std::env::var(name)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
 }
 
 /// Inline-script hashes from the source shell plus the built `dist/index.html`
@@ -464,6 +454,42 @@ mod tests {
             .unwrap_or_else(|| panic!("missing directive {name} in {policy}"))
     }
 
+    fn csp_source_tokens(policy: &str) -> Vec<&str> {
+        policy
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .filter(|token| !token.is_empty())
+            .collect()
+    }
+
+    /// Enforcing `Content-Security-Policy` is present. `'unsafe-eval'` is not a
+    /// source. `'wasm-unsafe-eval'` is a different source and stays.
+    fn assert_enforced_csp_has_no_string_eval(headers: &axum::http::HeaderMap) {
+        let values: Vec<_> = headers
+            .get_all(CSP_ENFORCE_HEADER)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "enforcing Content-Security-Policy must appear once, got {values:?}"
+        );
+        assert!(
+            headers.get(CSP_REPORT_ONLY_HEADER).is_none(),
+            "enforcing responses must not also send the report-only header"
+        );
+        let policy = values[0];
+        let tokens = csp_source_tokens(policy);
+        assert!(
+            !tokens.contains(&"'unsafe-eval'"),
+            "site CSP must not allow string eval: {policy}"
+        );
+        assert!(
+            tokens.contains(&"'wasm-unsafe-eval'"),
+            "wasm compile source stays: {policy}"
+        );
+    }
+
     fn test_policy(enforce: bool) -> SecurityPolicy {
         SecurityPolicy::from_config(SecurityConfig {
             enforce,
@@ -569,6 +595,10 @@ mod tests {
             "rejected extra source leaked: {connect}"
         );
         assert!(!policy.contains("default-src *"), "{policy}");
+        assert!(
+            !csp_source_tokens(&policy).contains(&"'unsafe-eval'"),
+            "script-src must not allow string eval: {policy}"
+        );
     }
 
     #[test]
@@ -745,13 +775,13 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_enforced_csp_has_no_string_eval(health.headers());
         let enforced = health
             .headers()
             .get(CSP_ENFORCE_HEADER)
             .and_then(|v| v.to_str().ok())
             .expect("enforcing CSP");
         assert!(enforced.contains("frame-ancestors 'none'"), "{enforced}");
-        assert!(health.headers().get(CSP_REPORT_ONLY_HEADER).is_none());
 
         let html = app
             .oneshot(
@@ -770,6 +800,30 @@ mod tests {
             "enforcing page CSP must not replace the upload sandbox"
         );
         assert!(html.headers().get(CSP_REPORT_ONLY_HEADER).is_none());
+    }
+
+    #[tokio::test]
+    async fn site_csp_header_is_enforced_and_has_no_unsafe_eval() {
+        let policy = SecurityPolicy::from_env();
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let policy = policy.clone();
+                async move { apply(req, next, policy).await }
+            }));
+
+        let health = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "localhost:3030")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_enforced_csp_has_no_string_eval(health.headers());
     }
 
     #[tokio::test]

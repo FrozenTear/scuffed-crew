@@ -86,9 +86,9 @@ fn App() -> Element {
     // On web, `Document::set_title` writes that element. `document::Title`
     // goes through Dioxus `WebDocument::set_title`, which runs
     // `document.title = ...` via `js_sys::Function::new_with_args`
-    // (`new Function`). That is the string-as-JavaScript the report-only
-    // CSP attributes to the scuffed-app bundle on home and /leaderboards.
-    // Desktop keeps `document::Title` for the window title (no page CSP).
+    // (`new Function`). String eval is not allowed by the site CSP.
+    // Desktop keeps `document::Title` for the window title. That build is
+    // not served by site-server.
     let site_settings = state::provide_site_settings();
     let resolved = site_settings.resolved.read();
     let loaded_settings = state::loaded_site_settings(resolved.as_ref());

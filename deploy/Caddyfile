@@ -11,9 +11,9 @@ ow.scuffedcrew.no {
 	# second Cache-Control header here — it would duplicate the origin policy
 	# and freeze unhashed .js/.css/.wasm plus the HTML shell for a year.
 
-	# Security headers. CSP is set by scuffed-server
-	# (Content-Security-Policy-Report-Only, or Content-Security-Policy when
-	# CSP_ENFORCE=1). Do not add a second CSP here — two policies intersect.
+	# Security headers. CSP is set by scuffed-server as enforcing
+	# Content-Security-Policy. Do not add a second CSP here. Two policies
+	# intersect.
 	header X-Content-Type-Options "nosniff"
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
