@@ -546,7 +546,9 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.notes_dialog.is_some() {
+        if self.setup.open {
+            subs.push(iced::event::listen_with(setup_guide_keys));
+        } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
         }
         Subscription::batch(subs)
@@ -1219,6 +1221,12 @@ impl TrackerApp {
                 self.persist_setup_patch(patch);
                 Task::none()
             }
+            Step::SkipStep => {
+                if let Some(patch) = self.setup.skip_step() {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
             Step::Back => {
                 self.setup.back();
                 Task::none()
@@ -1672,7 +1680,35 @@ fn notes_dialog_escape(
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
-    notes::escape_closes_notes(&key).then_some(Message::DismissNotes)
+    foreground_key_message(false, true, &key)
+}
+
+fn setup_guide_keys(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    // The guide is open, so Escape must not dismiss notes underneath it.
+    foreground_key_message(true, true, &key)
+}
+
+/// While the setup guide is open it owns Escape and Enter.
+pub fn foreground_key_message(
+    guide_open: bool,
+    notes_open: bool,
+    key: &iced::keyboard::Key,
+) -> Option<Message> {
+    if guide_open {
+        return crate::setup_guide::guide_key_action(key).map(Message::Setup);
+    }
+    if notes_open && notes::escape_closes_notes(key) {
+        Some(Message::DismissNotes)
+    } else {
+        None
+    }
 }
 
 fn notes_dialog_for(
@@ -1749,6 +1785,28 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn setup_guide_keys_do_not_dismiss_notes_underneath() {
+        use iced::keyboard::Key;
+        use iced::keyboard::key::Named;
+
+        let escape = Key::Named(Named::Escape);
+        let enter = Key::Named(Named::Enter);
+        match super::foreground_key_message(true, true, &escape) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Skip)) => {}
+            other => panic!("escape should skip the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(true, true, &enter) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
+            other => panic!("enter should continue the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(false, true, &escape) {
+            Some(super::Message::DismissNotes) => {}
+            other => panic!("escape should close notes when the guide is closed, got {other:?}"),
+        }
+        assert!(super::foreground_key_message(false, true, &enter).is_none());
+    }
 
     #[test]
     fn save_toasts_have_no_em_or_en_dash() {

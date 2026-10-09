@@ -56,7 +56,7 @@ use crate::theme::{
 pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
 pub const REACH_SITE: &str = "Could not reach the site. Check the address and try again.";
-pub const TOKEN_REJECTED: &str = "That token wasn't accepted, check it and try again";
+pub const TOKEN_REJECTED: &str = "That token wasn't accepted. Check it and try again.";
 pub const TOKEN_UNCHECKED: &str =
     "The token is saved. This server doesn't support a token check yet.";
 pub const LINK_UNSUPPORTED: &str =
@@ -74,9 +74,21 @@ pub const OW_INTRO: &str = "\
 Open Overwatch and press Tab once so the scoreboard is on screen. \
 Then capture that screen. The picture stays in memory and is not saved.";
 pub const OW_SCALE: &str = "Unsupported UI scale and colorblind filters may hurt reads.";
-pub const OW_COLOUR: &str = "\
-Victory and Defeat detection does not depend on colour. \
-Members use custom colour schemes.";
+pub const OW_COLOUR: &str =
+    "Win and loss detection does not rely on colour, so custom colour schemes are fine.";
+pub const CAPTURE_CONTINUE_WARN: &str =
+    "Screen capture did not work. You can continue and still sign in.";
+pub const OW_SKIP_WARN: &str =
+    "You can skip this step if Overwatch is not running. Sign in is still available.";
+pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
+pub const SITE_TRY_AGAIN: &str = "The site could not finish sign-in. Try again in a moment.";
+pub const SITE_BAD_LABEL: &str = "The tracker could not start sign-in. Try again.";
+pub const SITE_BAD_VERSION: &str =
+    "This app version was not accepted. Update the tracker and try again.";
+pub const SITE_INVALID_CODE: &str = "That sign-in code was not accepted. Start again.";
+pub const SITE_BODY_REQUIRED: &str = "The site could not read the sign-in request. Try again.";
+pub const SITE_BAD_ORIGIN: &str = "The site refused this sign-in request. Try again.";
+pub const SITE_INTERNAL: &str = "The site had a problem. Try again in a moment.";
 pub const PACK_INTRO: &str = "\
 A reader template pack is available. Download it if you want the extra templates. \
 You can finish without it.";
@@ -101,13 +113,26 @@ pub fn connected_as(display_name: &str) -> String {
 /// Used when a 429 has no `Retry-After` seconds.
 pub const RATE_LIMIT_FALLBACK_SECS: u64 = 10;
 
+/// `Retry-After` waits are kept inside this range before they are added to a clock.
+pub const RETRY_AFTER_MIN_SECS: u64 = 1;
+pub const RETRY_AFTER_MAX_SECS: u64 = 3600;
+
+/// Largest reader pack the guide will save.
+pub const READER_PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Added to the poll interval on each `slow_down`. It stays raised for
 /// the rest of that device code. A 429 does not use this step.
 pub const SLOW_DOWN_STEP_SECS: u64 = 5;
 
 /// Header seconds when present, otherwise [`RATE_LIMIT_FALLBACK_SECS`].
+/// The result is always inside [`RETRY_AFTER_MIN_SECS`]..=[`RETRY_AFTER_MAX_SECS`].
 pub fn rate_limit_seconds(retry_after: Option<u64>) -> u64 {
-    retry_after.unwrap_or(RATE_LIMIT_FALLBACK_SECS)
+    clamp_retry_after(retry_after.unwrap_or(RATE_LIMIT_FALLBACK_SECS))
+}
+
+/// A huge `Retry-After` must not be added to [`Instant::now`].
+pub fn clamp_retry_after(seconds: u64) -> u64 {
+    seconds.clamp(RETRY_AFTER_MIN_SECS, RETRY_AFTER_MAX_SECS)
 }
 
 pub fn rate_limit_message(seconds: u64) -> String {
@@ -121,6 +146,17 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         REACH_SITE,
         TOKEN_REJECTED,
         TOKEN_UNCHECKED,
+        CAPTURE_CONTINUE_WARN,
+        OW_SKIP_WARN,
+        PACK_TOO_BIG,
+        SITE_TRY_AGAIN,
+        SITE_BAD_LABEL,
+        SITE_BAD_VERSION,
+        SITE_INVALID_CODE,
+        SITE_BODY_REQUIRED,
+        SITE_BAD_ORIGIN,
+        SITE_INTERNAL,
+        "Skip this step",
         LINK_UNSUPPORTED,
         SIGNED_IN,
         LINK_DENIED,
@@ -379,13 +415,25 @@ pub fn log_link_status(status: &'static str) {
     tracing::info!(status, "site link update");
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PollOutcome {
     Pending,
     SlowDown,
     Denied,
     Expired,
     Approved { token: String },
+}
+
+impl std::fmt::Debug for PollOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => f.write_str("Pending"),
+            Self::SlowDown => f.write_str("SlowDown"),
+            Self::Denied => f.write_str("Denied"),
+            Self::Expired => f.write_str("Expired"),
+            Self::Approved { .. } => f.write_str("Approved { token: [redacted] }"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,16 +644,112 @@ pub fn parse_start_body(body: &str) -> Result<DeviceLinkStartResponse, String> {
     Ok(started)
 }
 
-fn site_error_message(body: &str, fallback: String) -> String {
+fn site_error_message(body: &str, fallback: &'static str) -> &'static str {
+    let logged = redact_logged_body(body);
+    tracing::warn!(error = %logged, "site sign-in response");
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
         && let Some(message) = value.get("error").and_then(|item| item.as_str())
     {
         let message = message.trim();
         if !message.is_empty() {
-            return message.to_string();
+            return mapped_site_error(message);
         }
     }
     fallback
+}
+
+fn mapped_site_error(raw: &str) -> &'static str {
+    match raw {
+        "device_label must be 1-64 characters without control characters" => SITE_BAD_LABEL,
+        "app_version must be 1-32 characters from [A-Za-z0-9._+-] and include a letter or digit" => {
+            SITE_BAD_VERSION
+        }
+        "invalid code" => SITE_INVALID_CODE,
+        "codes must be sent in the request body" => SITE_BODY_REQUIRED,
+        "bad_origin" | "origin not allowed" => SITE_BAD_ORIGIN,
+        "Internal error" => SITE_INTERNAL,
+        _ => SITE_TRY_AGAIN,
+    }
+}
+
+/// Log text must not keep device codes or token values.
+fn redact_logged_body(raw: &str) -> String {
+    redact_hex_runs(&redact_json_string_field(
+        &redact_json_string_field(raw, "token"),
+        "device_code",
+    ))
+}
+
+fn redact_json_string_field(raw: &str, field: &str) -> String {
+    let key = format!("\"{field}\"");
+    let mut rest = raw;
+    let mut out = String::new();
+    while let Some(pos) = rest.find(&key) {
+        out.push_str(&rest[..pos]);
+        out.push_str(&key);
+        let after_key = &rest[pos + key.len()..];
+        let trimmed = after_key.trim_start();
+        out.push_str(&after_key[..after_key.len() - trimmed.len()]);
+        let Some(after_colon_ws) = trimmed.strip_prefix(':') else {
+            rest = after_key;
+            continue;
+        };
+        out.push(':');
+        let value_zone = after_colon_ws.trim_start();
+        out.push_str(&after_colon_ws[..after_colon_ws.len() - value_zone.len()]);
+        let Some(value) = value_zone.strip_prefix('"') else {
+            rest = value_zone;
+            continue;
+        };
+        out.push('"');
+        let mut end = value.len();
+        let mut escaped = false;
+        for (index, ch) in value.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                end = index;
+                break;
+            }
+        }
+        out.push_str("[redacted]");
+        out.push('"');
+        rest = &value[end..];
+        if rest.starts_with('"') {
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn redact_hex_runs(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 32 {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for ch in raw.chars() {
+        if ch.is_ascii_hexdigit() {
+            run.push(ch);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 pub fn parse_poll_body(body: &str) -> Result<PollOutcome, String> {
@@ -762,10 +906,7 @@ pub async fn start_link(
         return Ok(LinkStartOutcome::Unsupported);
     }
     if !status.is_success() {
-        return Err(site_error_message(
-            &text,
-            format!("The site could not start sign-in ({}).", status.as_u16()),
-        ));
+        return Err(site_error_message(&text, SITE_TRY_AGAIN).to_string());
     }
     let started = parse_start_body(&text)?;
     log_link_status("started");
@@ -809,13 +950,7 @@ pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, 
     let text = response.text().await.unwrap_or_default();
     let text = redact_secret(&text, &device_code);
     if !status.is_success() {
-        return Err(redact_secret(
-            &site_error_message(
-                &text,
-                format!("The site could not continue sign-in ({}).", status.as_u16()),
-            ),
-            &device_code,
-        ));
+        return Err(site_error_message(&text, SITE_TRY_AGAIN).to_string());
     }
     parse_poll_body(&text)
         .map(PollUpdate::Outcome)
@@ -844,6 +979,14 @@ pub async fn check_token(base: String, token: String) -> Result<TokenCheckResult
 }
 
 pub async fn download_reader_pack(url: String, dest_dir: PathBuf) -> Result<String, String> {
+    download_reader_pack_limited(url, dest_dir, READER_PACK_MAX_BYTES).await
+}
+
+async fn download_reader_pack_limited(
+    url: String,
+    dest_dir: PathBuf,
+    max_bytes: u64,
+) -> Result<String, String> {
     let url = normalize_base(&url)?;
     let client = http_client()?;
     let response = client.get(&url).send().await.map_err(|_| {
@@ -860,24 +1003,59 @@ pub async fn download_reader_pack(url: String, dest_dir: PathBuf) -> Result<Stri
             status.as_u16()
         ));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "The reader pack download stopped before it finished.".to_string())?;
-    if bytes.is_empty() {
-        return Err("The reader pack download was empty.".into());
+    if response.content_length().is_some_and(|len| len > max_bytes) {
+        return Err(PACK_TOO_BIG.to_string());
     }
     let dir = dest_dir.join("reader-pack");
     std::fs::create_dir_all(&dir).map_err(|_| "Could not save the reader pack.".to_string())?;
-    let path = dir.join(pack_filename(&url));
-    std::fs::write(&path, &bytes).map_err(|_| "Could not save the reader pack.".to_string())?;
+    let name = pack_filename(&url);
+    let path = dir.join(&name);
+    let tmp = dir.join(format!(".{name}.download"));
+    let saved = write_capped_download(&tmp, response, max_bytes).await;
+    if let Err(error) = saved {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    std::fs::rename(&tmp, &path).map_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+        "Could not save the reader pack.".to_string()
+    })?;
     Ok(PACK_SAVED.to_string())
 }
 
-#[derive(Debug, Clone)]
+async fn write_capped_download(
+    tmp: &Path,
+    mut response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let mut file =
+        std::fs::File::create(tmp).map_err(|_| "Could not save the reader pack.".to_string())?;
+    let mut total = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "The reader pack download stopped before it finished.".to_string())?
+    {
+        total = total.saturating_add(chunk.len() as u64);
+        if total > max_bytes {
+            return Err(PACK_TOO_BIG.to_string());
+        }
+        std::io::Write::write_all(&mut file, &chunk)
+            .map_err(|_| "Could not save the reader pack.".to_string())?;
+    }
+    if total == 0 {
+        return Err("The reader pack download was empty.".into());
+    }
+    file.sync_all()
+        .map_err(|_| "Could not save the reader pack.".to_string())?;
+    Ok(())
+}
+
+#[derive(Clone)]
 pub enum SetupMessage {
     Open,
     Skip,
+    SkipStep,
     Back,
     Next,
     SyncUrl(String),
@@ -896,6 +1074,49 @@ pub enum SetupMessage {
     OpenSite,
     DownloadPack,
     PackReady(Result<String, String>),
+}
+
+impl std::fmt::Debug for SetupMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => f.write_str("Open"),
+            Self::Skip => f.write_str("Skip"),
+            Self::SkipStep => f.write_str("SkipStep"),
+            Self::Back => f.write_str("Back"),
+            Self::Next => f.write_str("Next"),
+            Self::SyncUrl(url) => f.debug_tuple("SyncUrl").field(url).finish(),
+            Self::PasteToken(_) => f.write_str("PasteToken([redacted])"),
+            Self::TogglePaste => f.write_str("TogglePaste"),
+            Self::RequestCapture => f.write_str("RequestCapture"),
+            Self::CaptureReady(Ok(_)) => f.write_str("CaptureReady(Ok([frame]))"),
+            Self::CaptureReady(Err(_)) => f.write_str("CaptureReady(Err([redacted]))"),
+            Self::RequestTab => f.write_str("RequestTab"),
+            Self::TabReady(Ok(_)) => f.write_str("TabReady(Ok([frame]))"),
+            Self::TabReady(Err(_)) => f.write_str("TabReady(Err([redacted]))"),
+            Self::ConfirmScoreboard => f.write_str("ConfirmScoreboard"),
+            Self::SignIn => f.write_str("SignIn"),
+            Self::LinkStarted(Ok(outcome)) => f.debug_tuple("LinkStarted").field(outcome).finish(),
+            Self::LinkStarted(Err(_)) => f.write_str("LinkStarted(Err([redacted]))"),
+            Self::PollReady(Ok(update)) => f.debug_tuple("PollReady").field(update).finish(),
+            Self::PollReady(Err(_)) => f.write_str("PollReady(Err([redacted]))"),
+            Self::CheckToken => f.write_str("CheckToken"),
+            Self::TokenChecked(Ok(result)) => f.debug_tuple("TokenChecked").field(result).finish(),
+            Self::TokenChecked(Err(_)) => f.write_str("TokenChecked(Err([redacted]))"),
+            Self::OpenSite => f.write_str("OpenSite"),
+            Self::DownloadPack => f.write_str("DownloadPack"),
+            Self::PackReady(Ok(message)) => f.debug_tuple("PackReady").field(message).finish(),
+            Self::PackReady(Err(_)) => f.write_str("PackReady(Err([redacted]))"),
+        }
+    }
+}
+
+/// Escape skips the guide. Enter continues. Other keys are ignored.
+pub fn guide_key_action(key: &iced::keyboard::Key) -> Option<SetupMessage> {
+    match key {
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(SetupMessage::Skip),
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) => Some(SetupMessage::Next),
+        _ => None,
+    }
 }
 
 pub struct GuideUi {
@@ -1005,10 +1226,45 @@ impl GuideUi {
 
     pub fn can_continue(&self) -> bool {
         match self.flow.current() {
-            GuideStep::Capture => self.test_frame.is_some() && !self.capture_busy,
-            GuideStep::Overwatch => self.scoreboard_confirmed && !self.tab_busy,
+            GuideStep::Capture => {
+                !self.capture_busy && (self.test_frame.is_some() || self.capture_error.is_some())
+            }
+            GuideStep::Overwatch => {
+                !self.tab_busy && (self.scoreboard_confirmed || self.tab_error.is_some())
+            }
             GuideStep::Sync => !self.link_busy && !self.check_inflight,
             GuideStep::ReaderPack => !self.pack_busy,
+        }
+    }
+
+    /// Advance Capture or Overwatch without a successful check.
+    pub fn skip_step(&mut self) -> Option<SetupDiskPatch> {
+        match self.flow.current() {
+            GuideStep::Capture if self.capture_busy => return None,
+            GuideStep::Overwatch if self.tab_busy => return None,
+            GuideStep::Sync | GuideStep::ReaderPack => return self.continue_step(),
+            GuideStep::Capture | GuideStep::Overwatch => {}
+        }
+        match self.flow.advance() {
+            Advance::Finished => {
+                self.close();
+                Some(SetupDiskPatch {
+                    setup_completed: Some(true),
+                    sync: None,
+                })
+            }
+            Advance::Step(_) => None,
+        }
+    }
+
+    pub fn capture_warning(&self) -> Option<&'static str> {
+        if self.flow.current() == GuideStep::Capture
+            && self.capture_error.is_some()
+            && self.test_frame.is_none()
+        {
+            Some(CAPTURE_CONTINUE_WARN)
+        } else {
+            None
         }
     }
 
@@ -1160,6 +1416,7 @@ impl GuideUi {
             Ok(PollUpdate::RateLimited { seconds }) => {
                 // A 429 waits out Retry-After (or the 10 second fallback).
                 // It does not change the interval slow_down may have raised.
+                let seconds = clamp_retry_after(seconds);
                 self.link_message = Some(rate_limit_message(seconds));
                 if machine.is_polling() {
                     self.next_poll_at = Some(Instant::now() + Duration::from_secs(seconds));
@@ -1351,6 +1608,18 @@ pub fn view(guide: &GuideUi) -> Element<'_, Message> {
         false,
         Some(Message::Setup(SetupMessage::Skip)),
     ));
+    if matches!(step, GuideStep::Capture | GuideStep::Overwatch) {
+        let busy = match step {
+            GuideStep::Capture => guide.capture_busy,
+            GuideStep::Overwatch => guide.tab_busy,
+            _ => false,
+        };
+        footer = footer.push(guide_button(
+            "Skip this step",
+            false,
+            (!busy).then_some(Message::Setup(SetupMessage::SkipStep)),
+        ));
+    }
     footer = footer.push(space().width(Fill));
     let forward = if guide.flow.is_last() {
         "Finish"
@@ -1397,6 +1666,9 @@ fn capture_body(guide: &GuideUi) -> Element<'_, Message> {
     if let Some(err) = &guide.capture_error {
         col = col.push(error_text(err));
     }
+    if let Some(warning) = guide.capture_warning() {
+        col = col.push(warn_text(warning));
+    }
     if let Some(frame) = &guide.test_frame {
         col = col.push(body_text(CAPTURE_OK));
         col = col.push(frame_view(frame));
@@ -1415,6 +1687,7 @@ fn overwatch_body(guide: &GuideUi) -> Element<'_, Message> {
         body_text(OW_INTRO),
         body_text(OW_SCALE),
         body_text(OW_COLOUR),
+        body_text(OW_SKIP_WARN),
     ]
     .spacing(8)
     .width(Fill);
@@ -1929,9 +2202,9 @@ mod tests {
         assert_eq!(
             site_error_message(
                 r#"{"error":"device_label must be 1-64 characters without control characters"}"#,
-                "fallback".into(),
+                SITE_TRY_AGAIN,
             ),
-            "device_label must be 1-64 characters without control characters"
+            SITE_BAD_LABEL
         );
     }
 
@@ -2625,5 +2898,170 @@ mod tests {
             600,
         );
         assert_eq!(fresh.interval_secs(), 5);
+    }
+
+    #[test]
+    fn retry_after_is_clamped_before_it_is_added_to_the_clock() {
+        assert_eq!(clamp_retry_after(0), 1);
+        assert_eq!(clamp_retry_after(3601), 3600);
+        assert_eq!(clamp_retry_after(u64::MAX), 3600);
+        assert_eq!(rate_limit_seconds(Some(0)), 1);
+        assert_eq!(rate_limit_seconds(Some(3601)), 3600);
+        assert_eq!(rate_limit_seconds(Some(u64::MAX)), 3600);
+
+        let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
+        guide.link = Some(LinkMachine::start(
+            "dc-SECRET-9f3a-not-for-disk".into(),
+            "ABCD-EFGH".into(),
+            "http://127.0.0.1:9".into(),
+            5,
+            600,
+        ));
+        for (raw, expected) in [(0u64, 1u64), (3601, 3600), (u64::MAX, 3600)] {
+            let before = Instant::now();
+            assert!(
+                guide
+                    .poll_ready(Ok(PollUpdate::RateLimited { seconds: raw }))
+                    .is_none()
+            );
+            let wait = guide
+                .next_poll_at
+                .expect("next poll")
+                .saturating_duration_since(before);
+            assert!(wait >= Duration::from_secs(expected), "{raw} {wait:?}");
+            assert!(wait < Duration::from_secs(expected + 1), "{raw} {wait:?}");
+            assert_eq!(
+                guide.link_message.as_deref(),
+                Some(rate_limit_message(expected).as_str())
+            );
+            assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 5);
+        }
+    }
+
+    #[test]
+    fn sign_in_is_reachable_after_a_capture_failure() {
+        let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
+        assert!(!guide.can_continue());
+        guide.capture_ready(Err(CAPTURE_FAILED.into()));
+        assert!(guide.can_continue());
+        assert_eq!(guide.capture_warning(), Some(CAPTURE_CONTINUE_WARN));
+        assert!(guide.continue_step().is_none());
+        assert_eq!(guide.flow.current(), GuideStep::Overwatch);
+        assert!(guide.skip_step().is_none());
+        assert_eq!(guide.flow.current(), GuideStep::Sync);
+        assert!(sign_in_offered(&guide));
+        guide.sync_url = "http://127.0.0.1:9".into();
+        assert!(guide.begin_sign_in().is_some());
+    }
+
+    #[test]
+    fn guide_keys_skip_on_escape_and_continue_on_enter() {
+        use iced::keyboard::Key;
+        use iced::keyboard::key::Named;
+        assert!(matches!(
+            guide_key_action(&Key::Named(Named::Escape)),
+            Some(SetupMessage::Skip)
+        ));
+        assert!(matches!(
+            guide_key_action(&Key::Named(Named::Enter)),
+            Some(SetupMessage::Next)
+        ));
+        assert!(guide_key_action(&Key::Named(Named::Tab)).is_none());
+    }
+
+    #[test]
+    fn server_errors_shown_to_members_are_plain_sentences() {
+        let secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token = "tok-SECRET-value";
+        let body =
+            format!(r#"{{"error":"invalid code","device_code":"{secret}","token":"{token}"}}"#);
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer_buf = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || SharedWriter(writer_buf.clone()))
+            .finish();
+        let shown = tracing::subscriber::with_default(subscriber, || {
+            site_error_message(&body, SITE_TRY_AGAIN)
+        });
+        assert_eq!(shown, SITE_INVALID_CODE);
+        assert!(!shown.contains(secret));
+        assert!(!shown.contains(token));
+        assert!(!shown.contains("invalid code"));
+        let logs = String::from_utf8(buf.lock().expect("log").clone()).expect("utf8");
+        assert!(logs.contains("invalid code"), "{logs}");
+        assert!(!logs.contains(secret), "{logs}");
+        assert!(!logs.contains(token), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn reader_pack_caps_the_download_and_renames_a_temp_file() {
+        let big = spawn_mock(|_head, _body| (200, vec![], "abcdefghijklmnopqrstuvwxyz".into()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err =
+            download_reader_pack_limited(format!("{big}/pack.bin"), dir.path().to_path_buf(), 8)
+                .await
+                .expect_err("over the cap");
+        assert_eq!(err, PACK_TOO_BIG);
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "a capped download must not leave a file"
+        );
+
+        let small = spawn_mock(|_head, _body| (200, vec![], "pack-bytes".into()));
+        let saved =
+            download_reader_pack_limited(format!("{small}/pack.bin"), dir.path().to_path_buf(), 64)
+                .await
+                .expect("under the cap");
+        assert_eq!(saved, PACK_SAVED);
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("reader-pack"))
+            .expect("pack dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["pack.bin".to_string()]);
+        assert!(!names.iter().any(|name| name.contains("download")));
+        assert_eq!(
+            std::fs::read(dir.path().join("reader-pack/pack.bin")).expect("bytes"),
+            b"pack-bytes"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_tokens_and_device_codes() {
+        let token = "tok-SECRET-value";
+        let secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let outcome = PollOutcome::Approved {
+            token: token.into(),
+        };
+        let outcome_debug = format!("{outcome:?}");
+        assert!(!outcome_debug.contains(token));
+        assert!(outcome_debug.contains("[redacted]"));
+
+        let paste = SetupMessage::PasteToken(token.into());
+        assert!(!format!("{paste:?}").contains(token));
+
+        let poll = SetupMessage::PollReady(Ok(PollUpdate::Outcome(PollOutcome::Approved {
+            token: token.into(),
+        })));
+        assert!(!format!("{poll:?}").contains(token));
+
+        let machine = LinkMachine::start(
+            secret.into(),
+            "ABCD-EFGH".into(),
+            "http://127.0.0.1".into(),
+            5,
+            60,
+        );
+        let started = SetupMessage::LinkStarted(Ok(LinkStartOutcome::Ready(LinkStart { machine })));
+        let started_debug = format!("{started:?}");
+        assert!(!started_debug.contains(secret), "{started_debug}");
+        assert!(started_debug.contains("[redacted]"), "{started_debug}");
     }
 }
