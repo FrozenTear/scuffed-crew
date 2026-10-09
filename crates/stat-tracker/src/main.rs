@@ -3751,12 +3751,13 @@ async fn store_held_board(
         }
     }
     let played_at = SurrealDatetime::from(played_at);
+    let hero = parse::canonical_hero(hero);
     let row = storage::PersonalMatch {
         id: None,
-        hero: hero.to_string(),
+        hero: hero.clone(),
         map_name: map_name.to_string(),
         game_mode: parse::stored_game_mode(map_name),
-        role: parse::guess_role_public(hero),
+        role: parse::guess_role_public(&hero),
         outcome: outcome.to_string(),
         elims: counters.elims,
         deaths: counters.deaths,
@@ -4174,13 +4175,11 @@ async fn apply_new_reader(
         mitigation: parsed.mitigation,
     };
     let saved = reader_apply::merge_saved(&ocr, own, Some(&board));
-    if parsed.hero != saved.hero {
-        parsed.role = parse::guess_role_public(&saved.hero);
-    }
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
     parsed.hero = saved.hero;
+    parsed.role = parse::guess_role_public(&parsed.hero);
     parsed.elims = saved.elims;
     parsed.assists = saved.assists;
     parsed.deaths = saved.deaths;

@@ -11,7 +11,8 @@ pub mod strategy;
 pub use api::*;
 pub use auth::*;
 pub use heroes::{
-    HEROES, canonical_hero, find_hero, match_hero_in_text, resolve_hero_query, role_for_hero_name,
+    HEROES, canonical_hero, find_hero, hero_key_to_name, match_hero_in_text, resolve_hero_query,
+    role_for_hero_name,
 };
 pub use nostr::*;
 pub use org::*;

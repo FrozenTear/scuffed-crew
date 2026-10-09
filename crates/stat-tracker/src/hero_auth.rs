@@ -61,7 +61,7 @@ pub fn resolve_hero(
     let mut next = state.clone();
 
     if let Some(hero) = career {
-        let hero = hero.to_string();
+        let hero = canonicalize(hero);
         next.career_ever_ok = true;
         next.accepted_hero = Some(hero.clone());
         next.portrait_pending = None;
@@ -101,7 +101,7 @@ pub fn resolve_hero(
 
         // No accepted hero yet and streak not met — do not write a one-off
         // portrait (would open a fake segment). Prefer OCR text if known.
-        let ocr = ocr_text.to_string();
+        let ocr = canonicalize(ocr_text);
         if !ocr.is_empty() && ocr != "Unknown" {
             return (ocr, HeroSource::OcrText, next);
         }
@@ -112,9 +112,11 @@ pub fn resolve_hero(
     next.portrait_pending = None;
     if let Some(prev) = next.accepted_hero.clone() {
         // Prefer held authority over thrashing OCR after career/portrait established.
+        let prev = canonicalize(&prev);
+        next.accepted_hero = Some(prev.clone());
         return (prev, HeroSource::Held, next);
     }
-    (ocr_text.to_string(), HeroSource::OcrText, next)
+    (canonicalize(ocr_text), HeroSource::OcrText, next)
 }
 
 #[cfg(test)]

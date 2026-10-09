@@ -200,13 +200,45 @@ fn fuzzy_match_hero(text: &str) -> Option<String> {
     best_hero.map(|h| h.to_string())
 }
 
-/// Canonicalize a hero identifier to its display name — e.g. a portrait file
-/// stem like "wrecking_ball" or "illari" becomes "Wrecking Ball" / "Illari".
-/// Returns the input (underscores spaced) when nothing matches, so unknown
-/// names still round-trip.
+/// Map a reader pack key, portrait stem, or alias to the canonical display name.
+///
+/// Pack files are kebab-case (`wrecking-ball`, `soldier-76`, `dva`). Portrait
+/// stems use underscores. Dots and accents fold, so `D.Va`, `Lúcio`,
+/// `Torbjörn`, and `Soldier: 76` are the stored names. `None` when the key
+/// is not a known hero.
+pub fn hero_key_to_name(raw: &str) -> Option<&'static str> {
+    let key = fold_hero_key(raw);
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(hero) = catalog_hero(&key) {
+        return Some(hero.display_name());
+    }
+    match key.as_str() {
+        "dmon" => Some("D.Mon"),
+        "shion" => Some("Shion"),
+        "jetpackcat" => Some("Jetpack Cat"),
+        _ => None,
+    }
+}
+
+/// Canonicalize a hero identifier to its display name.
+///
+/// A pack key (`wrecking-ball`), a portrait stem (`wrecking_ball`), and the
+/// display name itself all become `Wrecking Ball`. `Lúcio` and `Torbjörn`
+/// keep their accents. An unknown string is returned with `_` and `-` turned
+/// into spaces, so it still round-trips.
 pub fn canonical_hero(name: &str) -> String {
-    let cleaned = name.replace('_', " ");
-    match_hero_in_text(&cleaned).unwrap_or(cleaned)
+    if let Some(display) = hero_key_to_name(name) {
+        return display.to_string();
+    }
+    let cleaned = name.replace(['_', '-'], " ");
+    match match_hero_in_text(&cleaned) {
+        Some(found) => hero_key_to_name(&found)
+            .unwrap_or(found.as_str())
+            .to_string(),
+        None => cleaned,
+    }
 }
 
 /// Match a hero name from arbitrary OCR text (e.g. the career-panel title).
@@ -341,6 +373,47 @@ mod tests {
     fn canonical_hero_underscores() {
         assert_eq!(canonical_hero("wrecking_ball"), "Wrecking Ball");
         assert_eq!(canonical_hero("illari"), "Illari");
+    }
+
+    /// Every hero template stem in the pack, plus the dotted and accented
+    /// display names, stores one canonical name.
+    #[test]
+    fn every_pack_key_maps_to_the_canonical_display_name() {
+        fn pack_stem(display: &str) -> String {
+            display
+                .to_lowercase()
+                .replace('.', "")
+                .replace(": ", "-")
+                .replace(' ', "-")
+                .replace('ö', "o")
+                .replace('ú', "u")
+        }
+
+        for name in HEROES {
+            let display = hero_key_to_name(name).unwrap_or_else(|| panic!("{name} has no display"));
+            let stem = pack_stem(display);
+            assert_eq!(hero_key_to_name(&stem), Some(display), "{stem}");
+            assert_eq!(
+                hero_key_to_name(&stem.replace('-', "_")),
+                Some(display),
+                "{stem} underscore"
+            );
+            assert_eq!(hero_key_to_name(display), Some(display), "{display}");
+            assert_eq!(canonical_hero(&stem), display, "{stem}");
+        }
+
+        assert_eq!(hero_key_to_name("dva"), Some("D.Va"));
+        assert_eq!(hero_key_to_name("d.va"), Some("D.Va"));
+        assert_eq!(hero_key_to_name("lucio"), Some("Lúcio"));
+        assert_eq!(hero_key_to_name("Lúcio"), Some("Lúcio"));
+        assert_eq!(hero_key_to_name("torbjorn"), Some("Torbjörn"));
+        assert_eq!(hero_key_to_name("Torbjörn"), Some("Torbjörn"));
+        assert_eq!(hero_key_to_name("soldier-76"), Some("Soldier: 76"));
+        assert_eq!(hero_key_to_name("soldier_76"), Some("Soldier: 76"));
+        assert_eq!(hero_key_to_name("wrecking-ball"), Some("Wrecking Ball"));
+        assert_eq!(canonical_hero("wrecking-ball"), "Wrecking Ball");
+        assert_eq!(role_for_hero_name("Wrecking Ball"), Some(HeroRole::Tank));
+        assert_eq!(role_for_hero_name("wrecking-ball"), Some(HeroRole::Tank));
     }
 
     /// D.Mon (added 2026-08-18, WL-5): the career panel prints "D.MON", the

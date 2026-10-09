@@ -104,7 +104,7 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         map: ocr.map.clone(),
         mode: ocr.mode.clone(),
         result: ocr.result.clone(),
-        hero: ocr.hero.clone(),
+        hero: canonical_board_hero(&ocr.hero),
         elims: ocr.elims,
         assists: ocr.assists,
         deaths: ocr.deaths,
@@ -150,7 +150,7 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
             used_cv = true;
             canonical_board_hero(&value)
         }
-        None => ocr.hero.clone(),
+        None => canonical_board_hero(&ocr.hero),
     };
     let stats = [
         ("e", ocr.elims),
@@ -272,8 +272,7 @@ fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> 
 /// row made cv-v5 saves and later ocr-v1 saves look like two heroes, and a
 /// raw string compare is not a reason to drop the board.
 fn canonical_board_hero(raw: &str) -> String {
-    let spaced = raw.replace(['_', '-'], " ");
-    crate::parse::canonical_hero(&spaced)
+    crate::parse::canonical_hero(raw)
 }
 
 fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
@@ -818,6 +817,7 @@ mod tests {
         assert_eq!(saved.map, "", "a blank policy map stays");
         assert_eq!(saved.mode, "");
         assert_eq!(saved.hero, "Wrecking Ball");
+        assert_eq!(crate::parse::guess_role_public(&saved.hero), "Tank");
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.damage, 9100);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
@@ -839,6 +839,16 @@ mod tests {
         assert_eq!(quiet.elims, 21);
         assert_eq!(quiet.recognizer, RECOGNIZER_ID);
         assert!(quiet.suspect_fields.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_board_still_stores_the_pack_key_as_the_display_name() {
+        let mut snap = ocr();
+        snap.hero = "wrecking-ball".into();
+        let saved = merge_saved(&snap, OwnRow::Uncertain, Some(&confident_board(5, 0)));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_eq!(crate::parse::guess_role_public(&saved.hero), "Tank");
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
     }
 
     #[test]
