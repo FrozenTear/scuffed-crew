@@ -143,6 +143,10 @@ pub(super) const MIN_GAMES: u32 = 3;
 /// Caption shown wherever the min-games gate/muting applies.
 pub(super) const MIN_GAMES_NOTE: &str = "min 3 games — smaller samples muted";
 
+/// Platform line on `/stats`. Linux supports Wayland and X11. No other OS builds.
+const TRACKER_PLATFORM_COPY: &str =
+    "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
+
 fn format_date(dt: &DateTime<Utc>) -> String {
     let now = Utc::now();
     let secs = now.signed_duration_since(*dt).num_seconds().max(0);
@@ -1165,7 +1169,7 @@ pub fn Stats() -> Element {
                     }
                     p {
                         "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
-                        "It runs on Linux / Wayland only — there is no Windows or macOS build."
+                        {TRACKER_PLATFORM_COPY}
                     }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
@@ -1435,6 +1439,57 @@ mod header_layout_tests {
         assert!(
             flagged_head.contains("white-space: nowrap"),
             "{flagged_head}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tracker_platform_copy_tests {
+    use super::TRACKER_PLATFORM_COPY;
+
+    /// The install blurb on `/stats`, from the heading through the curl command.
+    fn tracker_download_blurb(src: &str) -> &str {
+        let start = src
+            .find("Get the Stat Tracker")
+            .expect("stats page heading");
+        let rest = &src[start..];
+        let end = rest.find("tracker-install").expect("install command");
+        &rest[..end]
+    }
+
+    #[test]
+    fn stats_page_names_wayland_and_x11_without_an_em_dash() {
+        assert_eq!(
+            TRACKER_PLATFORM_COPY,
+            "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build."
+        );
+        assert!(TRACKER_PLATFORM_COPY.contains("Wayland"));
+        assert!(TRACKER_PLATFORM_COPY.contains("X11"));
+        assert!(
+            !TRACKER_PLATFORM_COPY.contains('—'),
+            "{TRACKER_PLATFORM_COPY}"
+        );
+        assert!(
+            !TRACKER_PLATFORM_COPY.contains('–'),
+            "{TRACKER_PLATFORM_COPY}"
+        );
+
+        let src = include_str!("mod.rs");
+        let blurb = tracker_download_blurb(src);
+        assert!(
+            blurb.contains("TRACKER_PLATFORM_COPY"),
+            "the /stats install blurb must render the platform line: {blurb}"
+        );
+        // Built at runtime so this test file does not itself contain the old phrase.
+        let wayland_only = ["Wayland", "only"].join(" ");
+        assert!(
+            !blurb.contains(&wayland_only),
+            "the /stats install blurb still limits the tracker to one display server: {blurb}"
+        );
+        assert!(!blurb.contains('—'), "{blurb}");
+        assert!(
+            !src.contains(&wayland_only),
+            "crates/app stats page still limits the tracker to one display server"
         );
     }
 }
