@@ -4060,6 +4060,48 @@ async fn commit_capture_rows(
     Ok(created)
 }
 
+/// A gate drop or a single-field jump keeps the old number and names the field.
+///
+/// The new reader may replace that number with its own read. The name is
+/// added only when the stored value is still the one the gate kept.
+fn note_gate_suspects(
+    parsed: &mut storage::PersonalMatch,
+    held: capture_gate::Counters,
+    holds: &[capture_gate::Hold],
+) {
+    let stored = [
+        parsed.elims,
+        parsed.assists,
+        parsed.deaths,
+        parsed.damage,
+        parsed.healing,
+        parsed.mitigation,
+    ];
+    let kept = [
+        held.elims,
+        held.assists,
+        held.deaths,
+        held.damage,
+        held.healing,
+        held.mitigation,
+    ];
+    for name in capture_gate::unsure_fields(holds) {
+        let Some(col) = capture_gate::COL_FIELD
+            .iter()
+            .position(|field| *field == name)
+        else {
+            continue;
+        };
+        if stored[col] != kept[col] {
+            continue;
+        }
+        if !parsed.suspect_fields.iter().any(|field| field == name) {
+            parsed.suspect_fields.push(name.to_string());
+        }
+    }
+    parsed.suspect_fields = reader_apply::upload_suspect_fields(&parsed.suspect_fields);
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Replace stored fields from the new reader when the member's own row agrees.
 ///
@@ -4569,12 +4611,14 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     "stored capture is low-trust"
                 );
             }
-            parsed.elims = gate.accepted.elims;
-            parsed.assists = gate.accepted.assists;
-            parsed.deaths = gate.accepted.deaths;
-            parsed.damage = gate.accepted.damage;
-            parsed.healing = gate.accepted.healing;
-            parsed.mitigation = gate.accepted.mitigation;
+            let held_stats = gate.accepted;
+            let held_cells = gate.holds.clone();
+            parsed.elims = held_stats.elims;
+            parsed.assists = held_stats.assists;
+            parsed.deaths = held_stats.deaths;
+            parsed.damage = held_stats.damage;
+            parsed.healing = held_stats.healing;
+            parsed.mitigation = held_stats.mitigation;
             parsed.map_name = staged.map_name.clone();
 
             // Untrusted Deathmatch falls back to the open map. A split stays
@@ -4609,6 +4653,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 )
                 .await;
             }
+            note_gate_suspects(&mut parsed, held_stats, &held_cells);
             let created_this_capture =
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
 

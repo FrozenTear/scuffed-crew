@@ -2219,6 +2219,64 @@ mod tests {
     }
 
     #[test]
+    fn quarter_drop_on_two_boards_splits_and_does_not_hold_the_old_game() {
+        // Deaths and damage at about a quarter, with the rest of the board,
+        // is a new game. The first such board is not written onto the old
+        // session. The second closes it. The new counters are stored as read.
+        // The capture gate must not hold them back onto the old totals.
+        let now = t0();
+        let mut m = Machine::new("Ilios");
+        m.capture(counters(20, 8, 8, 8000, 4000, 2000), now);
+        let low = counters(2, 1, 2, 1500, 400, 200);
+        let first_at = now + Duration::from_secs(50);
+        m.capture(low, first_at);
+        assert!(
+            m.closed.is_empty(),
+            "one reset board does not close the game"
+        );
+        assert_eq!(m.active().state.gate.unwrap().accepted.deaths, 8);
+        assert_eq!(m.active().state.gate.unwrap().accepted.damage, 8000);
+        assert_eq!(m.active().state.reset_streak, 1);
+        assert!(m.active().state.deferred.is_some());
+        let held = apply_gate(
+            Some((m.active().state.gate.unwrap(), Duration::from_secs(50))),
+            low,
+            CLEAN,
+            false,
+        );
+        assert_eq!(held.accepted.deaths, 8, "without a split the drop is held");
+        assert_eq!(held.accepted.damage, 8000);
+        assert!(!held.holds.is_empty());
+        m.capture(
+            counters(3, 1, 2, 1600, 500, 250),
+            now + Duration::from_secs(110),
+        );
+        assert_eq!(m.closed.len(), 1);
+        assert_eq!(m.closed[0].reason, CloseReason::StatReset);
+        assert_eq!(m.closed[0].sess.state.gate.unwrap().accepted.damage, 8000);
+        let opened = m
+            .active()
+            .opened_with
+            .expect("new game stores the low board");
+        assert_eq!(opened.deaths, 2);
+        assert_eq!(opened.damage, 1500);
+        assert_eq!(m.active().state.gate.unwrap().accepted.deaths, 2);
+        assert_eq!(m.active().state.gate.unwrap().accepted.damage, 1600);
+        let fresh = apply_gate(
+            Some((
+                m.closed[0].sess.state.gate.unwrap(),
+                Duration::from_secs(60),
+            )),
+            counters(3, 1, 2, 1600, 500, 250),
+            CLEAN,
+            true,
+        );
+        assert!(fresh.holds.is_empty(), "a split does not hold the new game");
+        assert_eq!(fresh.accepted.deaths, 2);
+        assert_eq!(fresh.accepted.damage, 1600);
+    }
+
+    #[test]
     fn post_result_reset_is_several_columns_and_ignores_the_mid_match_gap() {
         let prev = gate(counters(18, 7, 9, 6400, 11000, 800));
         let cur = counters(1, 3, 0, 220, 80, 400);
