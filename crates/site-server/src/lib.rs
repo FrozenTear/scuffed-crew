@@ -110,9 +110,13 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid upload governor config"),
     );
+    // Token-check is a read, but it accepts the same bearer secret as stats
+    // upload. It shares this governor so guesses do not get a second budget.
+    // POST /api/stats/upload itself is not on a governor.
     let upload_routes = Router::new()
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
         .route("/api/upload/image", post(routes::uploads::upload_image))
+        .route("/api/stats/token-check", get(routes::stats::token_check))
         .layer(
             GovernorLayer::new(upload_governor_config)
                 .error_handler(rate_limit::governor_error_response),

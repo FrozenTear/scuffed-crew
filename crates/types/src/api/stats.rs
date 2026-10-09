@@ -292,6 +292,14 @@ pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
 }
 
+/// `GET /api/stats/token-check` (daemon token auth).
+///
+/// Display name only. No ids, emails, or roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCheckResponse {
+    pub display_name: String,
+}
+
 /// Per-role aggregate for `GET /api/stats/me/roles` and
 /// `GET /api/stats/member/{id}/roles`.
 ///
