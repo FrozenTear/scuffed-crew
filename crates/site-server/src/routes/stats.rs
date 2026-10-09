@@ -1172,6 +1172,58 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reupload_without_suspect_fields_resets_to_empty_like_recognizer() {
+        let (state, member_id, token) = daemon().await;
+        let mut first = match_object("sess-reset", 4);
+        first["recognizer"] = serde_json::json!("cv-v1");
+        first["suspect_fields"] = serde_json::json!(["hero", "dmg"]);
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [first] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 1);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recognizer, "cv-v1");
+        assert_eq!(
+            rows[0].suspect_fields,
+            vec!["hero".to_string(), "dmg".to_string()]
+        );
+
+        // Same session, neither optional field present. Both fall back.
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-reset", 9)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 1);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-upload updates the same session");
+        assert_eq!(rows[0].elims, 9);
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert!(
+            rows[0].suspect_fields.is_empty(),
+            "omitting suspect_fields clears the stored list, got {:?}",
+            rows[0].suspect_fields
+        );
+    }
+
     async fn assert_suspect_fields_rejected(
         state: &crate::state::AppState,
         token: &str,
@@ -1212,9 +1264,14 @@ mod tests {
             serde_json::json!(["r01.e"]),
             serde_json::json!(["r12.mit"]),
             serde_json::json!(["e", "e"]),
+            // The allowlist has 10 names, so an 11-entry list can only reach
+            // the length cap by repeating one of them.
             serde_json::json!([
                 "map", "mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit", "map"
             ]),
+            serde_json::json!(["Map"]),
+            serde_json::json!([" map"]),
+            serde_json::json!([""]),
             serde_json::json!(["map", 1]),
             serde_json::json!([null]),
             serde_json::json!("map"),
