@@ -15,6 +15,115 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.4.24
+
+Release notes now show inside the desktop app. The extra number reader,
+still off unless you turn it on, reads a lone thin 4 correctly and marks
+a right 3 or 8 as unsure much less often. It never changes saved games or
+uploads.
+
+### Highlights
+
+- The notes sit in a collapsed update banner, open once after each update, and stay available from About.
+- A cell shorter than the rest of its row takes that row's text band before the digit is split.
+- Confidence is divided by that digit's usual margin, and every shadow log line includes "recognizer":"cv-v2".
+
+The desktop app compiles this changelog into the binary, so the notes
+work with no network. An update check leaves the banner collapsed: one
+line with the new version, the first sentence of the newest summary, and
+the same update actions as before. A What's new button expands the cards
+for the offered version and any versions in between. The collapsed state
+is the default whenever that banner is shown.
+
+The notes also open on launch when the running version is not the one
+last closed. That covers a tarball install, the AUR package, a .deb, and
+an AppImage, because the check uses the version the GUI resolves at
+runtime. Closing the dialog, or pressing Escape, stores the version in
+the GUI state file so it does not open again until the version changes.
+About in the sidebar opens the same dialog for every bundled release.
+Each release is its own card: the version, the GitHub date when an
+update check has one, and a badge when one applies (New, Installed, or
+Update available). Only the latest three cards show until Show older
+releases. The rest of a section, after the summary and the short list
+above, stays behind Details and starts closed. Install steps stay on
+the GitHub page. Links in the notes open in the browser for http and
+https only.
+
+The extra reader is still opt-in and log-only. It runs only with
+`shadow_recognizer = true` in config.toml, or with
+`SCUFFED_SHADOW_RECOGNIZER=1` for a single run. Settings does not save
+that environment override into the file. A background thread reads each
+accepted scoreboard and appends one line to
+`<data dir>/shadow/digits.jsonl`. Stored stats, the capture gate, and
+uploads are the same as with the reader off.
+
+A lone thin 4 was measured too short. The stem is about 2 px wide and
+the crossbar about 10 px, so the stem rows fall under the 25% ink cut
+and are dropped. The glyph was then about 9 or 10 px tall instead of
+13, wide enough to be split as touching digits. Live boards came back
+as 16 and 311, and one history cell came back as 141. Cells in a row
+share one font size and baseline. After each cell measures itself, the
+row's lower median height, and the median top of the cells that agree
+with it, is the reference. A cell whose own height is 2 px or more off
+that reference takes the row's text band before the split and the canvas
+scale. A cell that is taller than the row is corrected the same way.
+Fewer than 4 segmented cells leaves each cell on its own measurement.
+Templates, thresholds, and grammar are unchanged. On the labelled
+sets the history Teams board goes from 287 of 288 cells to 288 of 288,
+and the pasted thin 4s go from 1120 of 1152 to 1152 of 1152. No new
+flags and no new errors. A wrong read is still not left unflagged.
+
+The old confidence was the raw gap between the best template and the
+runner-up, and that gap is not the same size for every digit. A correct
+3, whose runner-up is always an 8, typically clears by about 0.12 and
+can fall to 0.05, while a lone 1 sits near 0.43. One global cut at 0.06
+kept flagging those right 3s and 8s. Each glyph's gap is now divided by
+the typical gap for that class (digits 0 through 9, and the comma): the
+median best-minus-second-best of correct reads, measured with these
+templates on the labelled 1440p and 1080p Tab sets, 20 boards each. A
+per-match hold-out of those boards moves no flag decision. The cell
+score is the lowest glyph. It is also limited by how far the best
+reading beats the best different reading, using `2 * gap / 0.2`, so
+that limit sits on the same scale. A score of 1.0 means as clear as a
+typical correct read of that digit. The suspect line is a calibrated
+score below 0.35. Width, grammar, digit count, rival group, and low
+score are unchanged.
+
+A right 3 or 8 whose raw gap is 0.049 still clears 0.35 after that
+division, on both template sizes. A 1 or a 7 at the same raw gap stays
+flagged. The live misread 16, whose raw gap on the 6 was 0.024, stays
+flagged too. On the labelled and stressed sets, the worst wrong read
+the old cut caught scores 0.29 after calibration, so the 0.35 line
+keeps every one of those errors flagged.
+
+Logged scores are clamped to the range 0 to 1. A NaN becomes 0, which
+is suspect, so it is not written out as a non-number.
+
+Every line in `shadow/digits.jsonl` now includes
+`"recognizer":"cv-v2"`. `cv-v1` is the 0.4.23 matcher (raw gaps, cut at
+0.06). A line with no recognizer field is read as `cv-v1`, so a log
+from before this release is never pooled with a log from after. Values
+and scores from two ids are not compared as if they were one scale.
+
+A snapshot test pins the id, the calibration constants (the 0.35 line,
+the 0.2 divisor, and both typical-gap tables), and each fixture cell's
+value and suspect flag. Scores are left out of that hash. Eight sample
+cells must each stay within 0.02, each of the six fixture boards must
+keep its mean within 0.005, and every fixture cell must sit at least
+0.05 away from the 0.35 line. The fixtures are synthetic glyphs on a
+flat background, resized and noised in a fixed way, at both template
+sizes. There are no captured boards. The `cv-v1` history entry is the
+0.4.23 matcher run on those same fixtures.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.24`.
+
 ## 0.4.23
 
 You can turn on an extra number reader that only writes a private log on
