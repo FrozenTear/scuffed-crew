@@ -141,7 +141,7 @@ pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
 pub(super) const MIN_GAMES: u32 = 3;
 
 /// Caption shown wherever the min-games gate/muting applies.
-pub(super) const MIN_GAMES_NOTE: &str = "min 3 games — smaller samples muted";
+pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -1465,5 +1465,19 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::MIN_GAMES_NOTE;
+
+    #[test]
+    fn min_games_note_has_no_em_or_en_dash() {
+        assert!(
+            !MIN_GAMES_NOTE.contains('\u{2014}') && !MIN_GAMES_NOTE.contains('\u{2013}'),
+            "{MIN_GAMES_NOTE}"
+        );
+        assert_eq!(MIN_GAMES_NOTE, "min 3 games. Smaller samples muted.");
     }
 }

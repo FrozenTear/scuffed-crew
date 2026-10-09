@@ -335,6 +335,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn string_eval_scan_catches_bare_eval_raw_strings_and_new_no_args() {
+        let bare = format!("{}{}", "ev", "al(\"x\")");
+        assert!(line_has_string_eval(&bare), "{bare}");
+        let raw = format!("let code = r#\"{}{}1)\"#;", "ev", "al(");
+        assert!(line_has_string_eval(&raw), "{raw}");
+        let hashed = format!("let code = r##\"{}{}1)\"##;", "ev", "al(");
+        assert!(line_has_string_eval(&hashed), "{hashed}");
+        let quoted = format!("let code = \"{}{}1)\";", "ev", "al(");
+        assert!(
+            !line_has_string_eval(&quoted),
+            "a normal string mention is not a call: {quoted}"
+        );
+        let ctor = format!("js_sys::{}{}", "Function::new_", "no_args(\"return 1\")");
+        assert!(line_has_string_eval(&ctor), "{ctor}");
+        let ctor_raw = format!("let code = r#\"{ctor}\"#;");
+        assert!(line_has_string_eval(&ctor_raw), "{ctor_raw}");
+        assert!(!line_has_string_eval("collect_string_eval(&root)"));
+        assert!(!line_has_string_eval("// eval(\"hidden\")"));
+    }
+
     fn collect_string_eval(
         crate_src: &std::path::Path,
         dir: &std::path::Path,
@@ -369,51 +390,98 @@ mod tests {
                 {
                     continue;
                 }
-                let code = strip_rust_strings(line);
-                let is_eval = code.contains("document::eval")
-                    || code.contains("js_sys::eval")
-                    || code.contains("Function::new_with_args")
-                    || code.contains("Function::new(");
-                if is_eval {
+                if line_has_string_eval(line) {
                     hits.push((rel.clone(), idx + 1, line.trim().to_string()));
                 }
             }
         }
     }
 
-    fn strip_rust_strings(line: &str) -> String {
+    fn line_has_string_eval(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("*/")
+        {
+            return false;
+        }
+        let code = code_keeping_raw_strings(line);
+        if code.contains("document::eval")
+            || code.contains("js_sys::eval")
+            || code.contains("Function::new_with_args")
+            || code.contains("Function::new_no_args")
+            || code.contains("Function::new(")
+        {
+            return true;
+        }
+        bare_eval_call(&code)
+    }
+
+    /// `eval(` that is not the tail of an identifier or a path (`::eval`,
+    /// `string_eval`). Raw-string bodies stay in `code`, so `r#"eval("#` counts.
+    fn bare_eval_call(code: &str) -> bool {
+        let mut rest = code;
+        while let Some(at) = rest.find("eval(") {
+            let bare = at == 0
+                || rest[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'));
+            if bare {
+                return true;
+            }
+            rest = &rest[at + 4..];
+        }
+        false
+    }
+
+    /// Drop normal `"..."` strings. Keep `r"..."` and `r#"..."#` bodies so an
+    /// eval hidden in a raw string is still visible to the scan.
+    fn code_keeping_raw_strings(line: &str) -> String {
         let mut out = String::with_capacity(line.len());
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch == 'r' && matches!(chars.peek(), Some('"' | '#')) {
+                out.push('r');
                 let mut hashes = 0usize;
                 while chars.peek() == Some(&'#') {
                     hashes += 1;
+                    out.push('#');
                     chars.next();
                 }
                 if chars.peek() == Some(&'"') {
+                    out.push('"');
                     chars.next();
-                    let mut matched = 0usize;
-                    for next in chars.by_ref() {
-                        if next == '"' {
-                            matched = 0;
+                    while let Some(next) = chars.next() {
+                        out.push(next);
+                        if next != '"' {
                             continue;
                         }
-                        if next == '#' && matched < hashes {
-                            matched += 1;
-                            if matched == hashes {
-                                break;
+                        let mut seen = 0usize;
+                        let mut extra = String::new();
+                        let mut matched = true;
+                        while seen < hashes {
+                            match chars.peek().copied() {
+                                Some('#') => {
+                                    chars.next();
+                                    extra.push('#');
+                                    seen += 1;
+                                }
+                                _ => {
+                                    matched = false;
+                                    break;
+                                }
                             }
-                            continue;
                         }
-                        matched = 0;
+                        out.push_str(&extra);
+                        if matched {
+                            break;
+                        }
                     }
-                    out.push(' ');
                     continue;
-                }
-                out.push('r');
-                for _ in 0..hashes {
-                    out.push('#');
                 }
                 continue;
             }

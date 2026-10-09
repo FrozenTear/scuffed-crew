@@ -32,15 +32,22 @@ fn disclosure_focus_id(mobile: bool, more: bool, account: bool) -> Option<&'stat
 /// Closed `#site-nav-menu` is `inert` and never `aria-hidden`.
 /// `aria-hidden` while a descendant still has focus is the console warning
 /// "Blocked aria-hidden on an element because its descendant retained focus".
+///
+/// `inert_attr` is `None` while open. Dioxus 0.7.9 web turns `inert: false`
+/// into the string `"false"`, and `inert` is not in the interpreter's boolean
+/// attribute list, so `inert="false"` stays on the element and blocks clicks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NavMenuA11y {
     inert: bool,
+    inert_attr: Option<&'static str>,
     aria_hidden: Option<bool>,
 }
 
 fn nav_menu_a11y(open: bool) -> NavMenuA11y {
+    let inert_attr = if open { None } else { Some("true") };
     NavMenuA11y {
-        inert: !open,
+        inert: inert_attr.is_some(),
+        inert_attr,
         aria_hidden: None,
     }
 }
@@ -575,6 +582,7 @@ pub fn PublicLayout() -> Element {
         menu_a11y.aria_hidden.is_none(),
         "site nav menu must not set aria-hidden"
     );
+    debug_assert_eq!(menu_a11y.inert, menu_a11y.inert_attr.is_some());
 
     rsx! {
         style { {NAV_CSS} }
@@ -771,7 +779,7 @@ pub fn PublicLayout() -> Element {
         div {
             class: overlay_class,
             id: NAV_MENU_ID,
-            inert: menu_a11y.inert,
+            inert: menu_a11y.inert_attr,
             button {
                 class: "nav-backdrop",
                 r#type: "button",
@@ -989,7 +997,7 @@ mod tests {
             div {
                 id: NAV_MENU_ID,
                 class: if open { "nav-overlay open" } else { "nav-overlay" },
-                inert: a11y.inert,
+                inert: a11y.inert_attr,
                 a { href: "/members", "Members" }
             }
         }
@@ -1032,6 +1040,8 @@ mod tests {
         );
         let open = nav_menu_a11y(true);
         assert!(!open.inert);
+        assert_eq!(open.inert_attr, None);
+        assert_eq!(closed.inert_attr, Some("true"));
         assert_eq!(open.aria_hidden, None);
         assert_eq!(mobile_menu_close_focus(true), Some(NAV_TOGGLE_ID));
         assert_eq!(mobile_menu_close_focus(false), None);
@@ -1052,6 +1062,11 @@ mod tests {
             "open menu must stay focusable: {open_tag}"
         );
         assert!(!open_tag.contains("aria-hidden"), "{open_tag}");
+        // SSR drops false boolean attributes, so the HTML check above cannot
+        // tell `inert: false` from a missing attribute. The web renderer writes
+        // Bool(false) as the string "false", and `inert` is not in its boolean
+        // list, so that string stays on the element.
+        assert_open_inert_is_removed_by_the_web_renderer();
 
         let shell = render(public_shell);
         let shell_tag = opening_tag_with_id(&shell, NAV_MENU_ID);
@@ -1084,6 +1099,65 @@ mod tests {
         assert!(
             focus_at < set_at,
             "focus the hamburger before the closed render sets inert: {body}"
+        );
+    }
+
+    /// Dioxus web `set_attribute` for 0.7.9: bools become the strings `"true"`
+    /// and `"false"`. `None` removes the attribute. `inert` is not in
+    /// `isBoolAttr` in dioxus-interpreter-js, so `"false"` is stored as
+    /// `inert="false"`, which HTML still treats as inert.
+    fn web_inert_attribute(value: &dioxus::dioxus_core::AttributeValue) -> Option<String> {
+        use dioxus::dioxus_core::AttributeValue;
+        match value {
+            AttributeValue::None => None,
+            AttributeValue::Bool(flag) => Some(flag.to_string()),
+            AttributeValue::Text(text) => Some(text.clone()),
+            other => panic!("unexpected inert attribute {other:?}"),
+        }
+    }
+
+    fn inert_mutation_values(root: fn() -> Element) -> Vec<dioxus::dioxus_core::AttributeValue> {
+        use dioxus::dioxus_core::{Mutation, Mutations};
+        let mut dom = VirtualDom::new(root);
+        let mut edits = Mutations::default();
+        dom.rebuild(&mut edits);
+        edits
+            .edits
+            .into_iter()
+            .filter_map(|edit| match edit {
+                Mutation::SetAttribute {
+                    name: "inert",
+                    value,
+                    ..
+                } => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_open_inert_is_removed_by_the_web_renderer() {
+        let values = inert_mutation_values(open_menu_probe);
+        assert!(
+            !values.is_empty(),
+            "open menu must emit an inert attribute write so the test can see None vs false"
+        );
+        for value in &values {
+            let written = web_inert_attribute(value);
+            assert_eq!(
+                written, None,
+                "open inert must be removed, not set to {written:?}; mutation was {value:?}"
+            );
+            assert!(
+                !matches!(value, dioxus::dioxus_core::AttributeValue::Bool(false)),
+                "Bool(false) is what the web renderer turns into inert=\"false\""
+            );
+        }
+        let closed = inert_mutation_values(closed_menu_probe);
+        assert!(
+            closed
+                .iter()
+                .any(|value| web_inert_attribute(value).as_deref() == Some("true")),
+            "closed menu must set inert to the string true, got {closed:?}"
         );
     }
 }
