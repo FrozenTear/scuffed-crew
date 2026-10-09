@@ -22,6 +22,11 @@ pub struct AppState {
     pub session_config: SessionConfig,
     pub oauth_config: OAuthConfig,
     pub upload_dir: PathBuf,
+    /// Private directory for tracker bug-report zips. Not served over HTTP.
+    pub reports_dir: PathBuf,
+    /// False when `REPORTS_DIR` is missing, not writable, or overlaps uploads
+    /// or the web root. The rest of the site still starts.
+    pub reports_enabled: bool,
     /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
     pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
