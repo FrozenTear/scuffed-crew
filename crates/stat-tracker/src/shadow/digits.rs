@@ -64,7 +64,10 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 /// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
 ///   margin that sits below the suspect line; touching glyphs can also be
 ///   split along slanted cut lines.
-pub const RECOGNIZER_ID: &str = "cv-v4";
+/// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
+///   ink) joins digit groups instead of splitting them; any ink left of the
+///   picked group inside the cell forces suspect.
+pub const RECOGNIZER_ID: &str = "cv-v5";
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
@@ -158,6 +161,10 @@ const CANVAS: usize = CH * CW;
 const INK_THR: f32 = 0.45;
 /// Max gap inside one number, in text heights ('11' is wide-set).
 const GAP_K: f64 = 0.9;
+/// Gaps wider than [`GAP_K`] but at most this many text heights are treated
+/// as a thousands separator: the groups join and a comma is inserted at the
+/// bridge. Fitted on the web hand-check MIT 1,148 cell (gap 10 px, hmax 11).
+const SEP_GAP_K: f64 = 1.35;
 /// Runs wider than this (in text heights) hold 2+ touching glyphs.
 const WIDE_RUN: f64 = 0.95;
 const BEAM: usize = 64;
@@ -531,6 +538,11 @@ struct Segment {
     rival: f64,
     /// Brightness peak of the cell before normalising (99.5th percentile).
     peak: f64,
+    /// Binarised ink exists in the cell to the left of the picked group.
+    ink_left: bool,
+    /// `sep_after[i]` is set when runs[i] and runs[i+1] were joined across a
+    /// thousands-separator gap (a comma is inserted there when reading).
+    sep_after: Vec<bool>,
 }
 
 fn percentile_sorted(v: &[f32], q: f64) -> f64 {
@@ -607,10 +619,16 @@ fn segment(ink: Plane, peak: f64) -> Option<Segment> {
     let hmax = runs.iter().map(run_h).max().unwrap_or(0);
     let gap_max = (GAP_K * hmax as f64).max(2.0);
     let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+    // Original run-index pairs joined only because of a thousands separator.
+    let mut sep_bridges: Vec<(usize, usize)> = Vec::new();
     for i in 1..runs.len() {
         let last = *groups.last().unwrap().last().unwrap();
-        if (runs[i].0 - runs[last].1) as f64 <= gap_max {
+        let gap = (runs[i].0 - runs[last].1) as f64;
+        if gap <= gap_max {
             groups.last_mut().unwrap().push(i);
+        } else if is_separator_gap(gap, hmax, &b, w, h, runs[last].1, runs[i].0) {
+            groups.last_mut().unwrap().push(i);
+            sep_bridges.push((last, i));
         } else {
             groups.push(vec![i]);
         }
@@ -642,16 +660,66 @@ fn segment(ink: Plane, peak: f64) -> Option<Segment> {
     } else {
         0.0
     };
-    let runs = g.iter().map(|&i| runs[i]).collect();
+    let ink_left = (0..gx0).any(|x| (0..h).any(|y| b[y * w + x]));
+    let picked: Vec<(usize, usize)> = g.iter().map(|&i| runs[i]).collect();
+    let mut sep_after = vec![false; picked.len().saturating_sub(1)];
+    for &(a, b_idx) in &sep_bridges {
+        if let (Some(ia), Some(ib)) = (
+            g.iter().position(|&x| x == a),
+            g.iter().position(|&x| x == b_idx),
+        ) && ib == ia + 1
+        {
+            sep_after[ia] = true;
+        }
+    }
     Some(Segment {
         ink,
         b,
         top,
         dh,
-        runs,
+        runs: picked,
         rival,
         peak,
+        ink_left,
+        sep_after,
     })
+}
+
+/// A gap wider than [`GAP_K`] that should still keep digit groups together.
+///
+/// True when the gap width is in the thousands-separator range
+/// (`gap_max`, [`SEP_GAP_K`] * hmax], or when the gap's binarised ink is
+/// bottom-heavy like a comma (more ink in the lower half than the upper).
+fn is_separator_gap(
+    gap: f64,
+    hmax: usize,
+    b: &[bool],
+    w: usize,
+    h: usize,
+    x0: usize,
+    x1: usize,
+) -> bool {
+    let sep_hi = (SEP_GAP_K * hmax as f64).max(2.0);
+    if gap <= sep_hi {
+        return true;
+    }
+    if x1 <= x0 || h < 2 {
+        return false;
+    }
+    let mid = h / 2;
+    let mut top = 0usize;
+    let mut bot = 0usize;
+    for y in 0..h {
+        let row = y * w;
+        let n = (x0..x1).filter(|&x| b[row + x]).count();
+        if y < mid {
+            top += n;
+        } else {
+            bot += n;
+        }
+    }
+    // Comma: some ink, mostly in the lower half, gap not enormous.
+    bot > 0 && bot >= top.saturating_mul(2) && gap <= (2.0 * hmax as f64).max(4.0)
 }
 
 /// Rows [top, top + DESC*dh) scaled so the strip is CH rows tall; same factor horizontally.
@@ -780,6 +848,11 @@ struct Cell {
     dh: usize,
     rival: f64,
     peak: f64,
+    ink_left: bool,
+    /// Run index of each piece (for inserting commas at separator bridges).
+    piece_run: Vec<usize>,
+    /// Copied from [`Segment::sep_after`].
+    sep_after: Vec<bool>,
 }
 
 /// Ink map and segmentation for one cell.
@@ -846,15 +919,17 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
         .map(|x| (0..seg.ink.h).filter(|&y| seg.b[y * w + x]).count() as u32)
         .collect();
     let mut pieces: Vec<(usize, usize)> = Vec::new();
+    let mut piece_run: Vec<usize> = Vec::new();
     let mut index = std::collections::HashMap::new();
-    let mut pid = |x0: usize, x1: usize| {
+    let mut pid = |x0: usize, x1: usize, run_i: usize, piece_run: &mut Vec<usize>| {
         *index.entry((x0, x1)).or_insert_with(|| {
             pieces.push((x0, x1));
+            piece_run.push(run_i);
             pieces.len() - 1
         })
     };
     let mut runs = Vec::new();
-    for &(rs, re) in &seg.runs {
+    for (run_i, &(rs, re)) in seg.runs.iter().enumerate() {
         if (re - rs) as f64 > WIDE_RUN * dh as f64 {
             let maxw = (MAX_GLYPH * dh as f64).ceil() as usize;
             let mut ends = Vec::new();
@@ -865,7 +940,7 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
                 let starts: Vec<(usize, usize)> = (rs.max(x1.saturating_sub(maxw))
                     ..x1.saturating_sub(1))
                     .filter(|&x0| x0 == rs || x0 >= rs + 2)
-                    .map(|x0| (pid(x0, x1), cut_key(x0, 0)))
+                    .map(|x0| (pid(x0, x1, run_i, &mut piece_run), cut_key(x0, 0)))
                     .collect();
                 ends.push((cut_key(x1, 0), starts));
             }
@@ -878,7 +953,11 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
             let cuts = candidate_cuts(&colsum, rs, re, dh);
             let parts = partitions(rs, re, &cuts)
                 .into_iter()
-                .map(|p| p.into_iter().map(|(a, b)| pid(a, b)).collect())
+                .map(|p| {
+                    p.into_iter()
+                        .map(|(a, b)| pid(a, b, run_i, &mut piece_run))
+                        .collect()
+                })
                 .collect();
             runs.push(Run {
                 s: rs,
@@ -909,15 +988,17 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
     let mut set = PieceSet {
         slanted: vec![false; pieces.len()],
         pieces,
+        piece_run,
         v,
         mass,
         ar,
     };
-    for run in runs.iter_mut() {
-        add_slanted_pieces(&seg, run, &mut set);
+    for (run_i, run) in runs.iter_mut().enumerate() {
+        add_slanted_pieces(&seg, run, &mut set, run_i);
     }
     let PieceSet {
         pieces,
+        piece_run,
         slanted,
         v,
         mass,
@@ -937,12 +1018,16 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
         dh,
         rival: seg.rival,
         peak: seg.peak,
+        ink_left: seg.ink_left,
+        piece_run,
+        sep_after: seg.sep_after,
     })
 }
 
 /// Piece list under construction: ranges, canvases, ink and width ratios.
 struct PieceSet {
     pieces: Vec<(usize, usize)>,
+    piece_run: Vec<usize>,
     slanted: Vec<bool>,
     v: Vec<f32>,
     mass: Vec<f64>,
@@ -958,7 +1043,7 @@ struct PieceSet {
 /// is slanted holds only the ink between the lines; its canvas is cut from a
 /// strip of that masked ink over its own ink extent, like an isolated glyph.
 /// A masked piece that holds the same ink as a vertical piece reuses it.
-fn add_slanted_pieces(seg: &Segment, run: &mut Run, set: &mut PieceSet) {
+fn add_slanted_pieces(seg: &Segment, run: &mut Run, set: &mut PieceSet, run_i: usize) {
     let RunKind::Dp(ends) = &mut run.kind else {
         return;
     };
@@ -1057,6 +1142,7 @@ fn add_slanted_pieces(seg: &Segment, run: &mut Run, set: &mut PieceSet) {
                     normalise(&mut c);
                     set.v.extend_from_slice(&c);
                     set.pieces.push((e0, e1));
+                    set.piece_run.push(run_i);
                     set.slanted.push(true);
                     set.mass.push(ink as f64);
                     set.ar.push((e1 - e0) as f64 / dh as f64);
@@ -1315,15 +1401,27 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize, dim: bool) -> Readi
         beam = next;
     }
     let text = |a: &[usize]| -> String {
-        a.iter()
-            .map(|&p| {
-                if best_c[p] == COMMA {
-                    ','
-                } else {
-                    char::from(b'0' + best_c[p] as u8)
+        let mut out = String::new();
+        let mut prev_run: Option<usize> = None;
+        for &p in a {
+            let r = cell.piece_run[p];
+            if let Some(pr) = prev_run
+                && r > pr
+            {
+                for br in pr..r {
+                    if cell.sep_after.get(br) == Some(&true) {
+                        out.push(',');
+                    }
                 }
-            })
-            .collect()
+            }
+            if best_c[p] == COMMA {
+                out.push(',');
+            } else {
+                out.push(char::from(b'0' + best_c[p] as u8));
+            }
+            prev_run = Some(r);
+        }
+        out
     };
     let good: Vec<&Scored> = beam
         .iter()
@@ -1375,6 +1473,7 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize, dim: bool) -> Readi
     }
     flagged |= s.starts_with(',') || s.ends_with(',');
     flagged |= cell.rival > 0.5;
+    flagged |= cell.ink_left;
     flagged |= obj < 0.55;
     // Too little ink for the digits read: a dim 0 half wiped out by
     // compression reads as a thin "1" with a clean margin.
@@ -1709,6 +1808,8 @@ mod tests {
             runs: vec![(1, 7)],
             rival: 0.0,
             peak: 255.0,
+            ink_left: false,
+            sep_after: vec![],
         }
     }
 
@@ -1953,6 +2054,9 @@ mod tests {
             dh,
             rival: 0.0,
             peak: 255.0,
+            ink_left: false,
+            piece_run: vec![0],
+            sep_after: vec![],
         }
     }
 
@@ -2105,6 +2209,7 @@ mod tests {
             DIM_RATIO,
             SLANT_MAX_INK as f64,
             SLANT_EXTENT_INK as f64,
+            SEP_GAP_K,
         ];
         p.extend_from_slice(&SLANTS);
         p.extend_from_slice(&TYP_1440);
@@ -2162,6 +2267,7 @@ mod tests {
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
         ("cv-v3", 0xac0e_b782_9e66_c19a),
         ("cv-v4", 0xb51b_4c1f_19e1_1c65),
+        ("cv-v5", 0xa751_b3dc_413b_764a),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
@@ -2265,6 +2371,100 @@ mod tests {
                 assert!((0.0..=1.0).contains(&c.confidence), "{c:?}");
             }
         }
+    }
+
+    /// Wide gap (just over GAP_K*hmax) between a leading 1 and "148" joins as a
+    /// thousands separator; ink left of a picked-only-"148" group forces suspect.
+    #[test]
+    fn separator_gap_joins_thousands_and_ink_left_flags() {
+        let hmax = 11usize;
+        let gap_max = (GAP_K * hmax as f64).max(2.0);
+        let gap = (gap_max + 0.5).ceil() as usize; // just over gap_max, under SEP_GAP_K
+        assert!(gap as f64 > gap_max && (gap as f64) <= SEP_GAP_K * hmax as f64);
+
+        // Cell: leading 1, separator gap, then 148. Digit band rows 2..13.
+        let (w, h) = (80usize, 16usize);
+        let mut ink = Plane::zeros(w, h);
+        let paint = |ink: &mut Plane, x0: usize, x1: usize| {
+            for y in 2..13 {
+                for x in x0..x1 {
+                    ink.d[y * w + x] = 0.9;
+                }
+            }
+        };
+        // leading 1 at x=10..14
+        paint(&mut ink, 10, 14);
+        let rest = 14 + gap;
+        // "148" blobs
+        paint(&mut ink, rest, rest + 4); // 1
+        paint(&mut ink, rest + 6, rest + 14); // 4
+        paint(&mut ink, rest + 15, rest + 23); // 8
+
+        let seg = segment(ink.clone(), 200.0).expect("segment");
+        assert!(
+            !seg.ink_left,
+            "joined group should include the leading 1, ink_left={}",
+            seg.ink_left
+        );
+        assert_eq!(seg.runs.len(), 4, "runs={:?}", seg.runs);
+        assert_eq!(seg.sep_after, vec![true, false, false]);
+
+        // Without joining: drop the leading 1 so only 148 remains, put noise left.
+        let mut split = Plane::zeros(w, h);
+        paint(&mut split, rest, rest + 4);
+        paint(&mut split, rest + 6, rest + 14);
+        paint(&mut split, rest + 15, rest + 23);
+        paint(&mut split, 10, 14); // left rival, gap still large
+        // Force a gap bigger than SEP_GAP_K*hmax so it will not join
+        let mut far = Plane::zeros(w, h);
+        paint(&mut far, 2, 6); // left ink
+        paint(&mut far, 50, 54);
+        paint(&mut far, 56, 64);
+        paint(&mut far, 65, 73);
+        let seg2 = segment(far, 200.0).expect("segment far");
+        assert!(seg2.ink_left, "left ink must force the guard");
+        assert!(seg2.sep_after.iter().all(|&x| !x));
+
+        // prepare keeps the bridge marks for the reader
+        let cell = prepare_cell(seg).expect("prepare");
+        assert!(!cell.ink_left);
+        assert_eq!(cell.sep_after, vec![true, false, false]);
+        assert_eq!(cell.piece_run.len(), cell.pieces.len());
+    }
+
+    #[test]
+    fn is_separator_gap_width_and_bottom_comma() {
+        let hmax = 10;
+        let gap_max = (GAP_K * hmax as f64).max(2.0);
+        // width path
+        assert!(is_separator_gap(gap_max + 1.0, hmax, &[], 1, 1, 0, 0));
+        assert!(!is_separator_gap(
+            SEP_GAP_K * hmax as f64 + 1.0,
+            hmax,
+            &[],
+            1,
+            1,
+            0,
+            0
+        ));
+        // bottom-heavy comma ink in a wider gap
+        let (w, h) = (20usize, 12usize);
+        let mut b = vec![false; w * h];
+        for y in 8..12 {
+            for x in 5..8 {
+                b[y * w + x] = true;
+            }
+        }
+        let wide = SEP_GAP_K * hmax as f64 + 3.0;
+        assert!(is_separator_gap(wide, hmax, &b, w, h, 5, 8));
+        // top-heavy is not a comma
+        let mut top = vec![false; w * h];
+        for y in 0..4 {
+            for x in 5..8 {
+                top[y * w + x] = true;
+            }
+        }
+        assert!(!is_separator_gap(wide, hmax, &top, w, h, 5, 8));
     }
 
     #[test]
