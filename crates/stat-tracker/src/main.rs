@@ -4060,10 +4060,39 @@ async fn commit_capture_rows(
     Ok(created)
 }
 
+/// Run the capture gate on the new reader's stats.
+///
+/// `apply_new_reader` overwrites the OCR numbers. A drop is clamped back
+/// and flagged. A single-field jump past the capture gate's limit waits
+/// until the next read matches. The returned gate is what the next capture
+/// compares against.
+fn hold_new_reader_stats(
+    parsed: &mut storage::PersonalMatch,
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    split: bool,
+) -> capture_gate::GateOutcome {
+    let read = capture_gate::Counters {
+        elims: parsed.elims,
+        assists: parsed.assists,
+        deaths: parsed.deaths,
+        damage: parsed.damage,
+        healing: parsed.healing,
+        mitigation: parsed.mitigation,
+    };
+    let held = capture_gate::apply_gate(prior, read, [false; capture_gate::GATE_COLS], split);
+    parsed.elims = held.accepted.elims;
+    parsed.assists = held.accepted.assists;
+    parsed.deaths = held.accepted.deaths;
+    parsed.damage = held.accepted.damage;
+    parsed.healing = held.accepted.healing;
+    parsed.mitigation = held.accepted.mitigation;
+    note_gate_suspects(parsed, held.accepted, &held.holds);
+    held
+}
+
 /// A gate drop or a single-field jump keeps the old number and names the field.
 ///
-/// The new reader may replace that number with its own read. The name is
-/// added only when the stored value is still the one the gate kept.
+/// The flag stays when the stored number is the one the gate kept.
 fn note_gate_suspects(
     parsed: &mut storage::PersonalMatch,
     held: capture_gate::Counters,
@@ -4652,6 +4681,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     team_size,
                 )
                 .await;
+                let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+                staged.gate = hold_new_reader_stats(&mut parsed, prior, split);
             }
             note_gate_suspects(&mut parsed, held_stats, &held_cells);
             let created_this_capture =
@@ -7801,6 +7832,65 @@ mod tests {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
         }
+    }
+
+    #[test]
+    fn new_reader_drop_from_11_to_1_stays_11_and_flags_elims() {
+        let mut parsed = test_match("s", "unknown");
+        parsed.recognizer = "cv-v5".into();
+        parsed.elims = 1;
+        parsed.assists = 4;
+        parsed.deaths = 2;
+        parsed.damage = 3100;
+        parsed.healing = 800;
+        parsed.mitigation = 400;
+        let prior = capture_gate::GateState {
+            accepted: capture_gate::Counters {
+                elims: 11,
+                assists: 4,
+                deaths: 2,
+                damage: 3000,
+                healing: 800,
+                mitigation: 400,
+            },
+            last_raw: capture_gate::Counters {
+                elims: 11,
+                assists: 4,
+                deaths: 2,
+                damage: 3000,
+                healing: 800,
+                mitigation: 400,
+            },
+            ..capture_gate::GateState::default()
+        };
+        let held =
+            hold_new_reader_stats(&mut parsed, Some((prior, Duration::from_secs(20))), false);
+        assert_eq!(
+            parsed.elims, 11,
+            "a new-reader 1 does not replace a held 11"
+        );
+        assert!(
+            parsed.suspect_fields.iter().any(|field| field == "e"),
+            "elims stays flagged: {:?}",
+            parsed.suspect_fields
+        );
+        assert_eq!(held.accepted.elims, 11);
+        // The same hold waits on a lone jump, then stores the matching second read.
+        parsed.elims = 18;
+        parsed.suspect_fields.clear();
+        let jumped =
+            hold_new_reader_stats(&mut parsed, Some((prior, Duration::from_secs(20))), false);
+        assert_eq!(parsed.elims, 11, "one 18 does not count");
+        assert!(parsed.suspect_fields.iter().any(|field| field == "e"));
+        parsed.elims = 18;
+        parsed.suspect_fields.clear();
+        let matched = hold_new_reader_stats(
+            &mut parsed,
+            Some((jumped.state, Duration::from_secs(20))),
+            false,
+        );
+        assert_eq!(matched.accepted.elims, 18, "the second 18 counts");
+        assert_eq!(parsed.elims, 18);
     }
 
     #[tokio::test]

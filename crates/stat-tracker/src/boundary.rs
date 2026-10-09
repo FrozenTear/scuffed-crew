@@ -2277,6 +2277,39 @@ mod tests {
     }
 
     #[test]
+    fn one_frame_near_zero_on_three_stats_does_not_split() {
+        // Two or three stats near zero is a bad read, not a new game. The
+        // old values stay, and those fields are flagged. A split needs the
+        // whole board, on two scoreboards.
+        let now = t0();
+        let mut m = Machine::new("Ilios");
+        let high = counters(20, 8, 8, 8000, 4000, 2000);
+        m.capture(high, now);
+        let dipped = counters(0, 1, 8, 8000, 0, 2000);
+        m.capture(dipped, now + Duration::from_secs(50));
+        assert!(
+            m.closed.is_empty(),
+            "one partial drop does not close the game"
+        );
+        let saved = m.active().state.gate.unwrap();
+        assert_eq!(saved.accepted.elims, 20);
+        assert_eq!(saved.accepted.assists, 8);
+        assert_eq!(saved.accepted.healing, 4000);
+        assert_eq!(saved.accepted.deaths, 8);
+        assert_eq!(saved.accepted.damage, 8000);
+        let held = apply_gate(
+            Some((gate(high), Duration::from_secs(50))),
+            dipped,
+            CLEAN,
+            false,
+        );
+        let flags = crate::capture_gate::unsure_fields(&held.holds);
+        assert!(flags.contains(&"e"), "{flags:?}");
+        assert!(flags.contains(&"a"), "{flags:?}");
+        assert!(flags.contains(&"h"), "{flags:?}");
+    }
+
+    #[test]
     fn post_result_reset_is_several_columns_and_ignores_the_mid_match_gap() {
         let prev = gate(counters(18, 7, 9, 6400, 11000, 800));
         let cur = counters(1, 3, 0, 220, 80, 400);

@@ -26,12 +26,19 @@
 //! ## No downward revision
 //!
 //! Elims, assists, deaths, damage, healing, and mitigation do not decrease
-//! inside one game. A lower read keeps the accepted value and names that
-//! field unsure (`e`, `a`, `d`, `dmg`, `h`, `mit`). A run of clean lower
-//! reads does not revise the value down: three OCR reads of 1 must not
-//! replace a held 11. A real new game is the whole-board reset in
-//! `boundary`, and the caller passes `split = true` so this gate stores the
-//! new counters instead of holding them.
+//! inside one game once the value has been confirmed. A lower read keeps
+//! the accepted value and names that field unsure (`e`, `a`, `d`, `dmg`,
+//! `h`, `mit`). Three OCR reads of 1 must not replace a held 11.
+//!
+//! Two cases may still store a lower number. An unconfirmed latch (a
+//! fallback or an implausible first read that never got a matching second
+//! read) can be replaced by one clean read. A high stored while another
+//! column was held down is a row shift, and a later read of the real row
+//! can replace it even after the shifted number repeated. A value confirmed
+//! by two matching reads, and not a row shift, cannot go down. A real new
+//! game is the whole-board reset in `boundary`, and the caller passes
+//! `split = true` so this gate stores the new counters instead of holding
+//! them.
 //!
 //! ## Single-field jump
 //!
@@ -203,6 +210,12 @@ pub struct GateState {
     /// real confirmed zero, so the flag is not the value.
     #[serde(default)]
     pub has_confirmed_floor: [bool; GATE_COLS],
+    /// The accepted value was stored while another column was held down, so
+    /// the capture was a different player's row. A later lower read may
+    /// replace it even after the shifted number repeated. Missing on an
+    /// older save means not a row shift.
+    #[serde(default)]
+    pub row_shift: [bool; GATE_COLS],
 }
 
 /// Why a cell was held, for per-capture observability logging.
@@ -307,8 +320,9 @@ const JUMP_MAX: [u32; GATE_COLS] = [4, 4, 2, 4000, 2500, 2500];
 /// A single-field jump is one misread cell. The check is absolute: assists
 /// up by 4, mitigation up by a few hundred, or a latched spike falling back
 /// all mean the rest of the board moved, and the rise is stored. Damage
-/// +100 between two tabs of the same fight stays quiet.
-const QUIET_RISE: [u32; GATE_COLS] = [1, 1, 0, 200, 200, 200];
+/// +100 between two tabs of the same fight stays quiet. Deaths treat a
+/// change of 1 as quiet, same as elims and assists.
+const QUIET_RISE: [u32; GATE_COLS] = [1, 1, 1, 200, 200, 200];
 
 /// Flat `suspect_fields` names, same order as [`Counters::to_array`].
 pub const COL_FIELD: [&str; GATE_COLS] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -545,6 +559,7 @@ pub fn apply_gate_with_trust(
     let mut unconfirmed = state.unconfirmed;
     let mut confirmed_floor = state.confirmed_floor;
     let mut has_confirmed_floor = state.has_confirmed_floor;
+    let mut row_shift = state.row_shift;
     let mut holds = Vec::new();
     let mut unlatches = Vec::new();
     // A fully clean per-cell read may replace unconfirmed columns. Confirmed
@@ -552,7 +567,10 @@ pub fn apply_gate_with_trust(
     let replacing = state.low_trust && trusted && !suspect.iter().any(|&s| s);
 
     for col in 0..GATE_COLS {
-        if cur[col] < prev_acc[col] && replacing && unconfirmed[col] {
+        // A confirmed value stays. An unconfirmed latch, or a row-shift high,
+        // may be replaced by this read.
+        let revise_down = (replacing && unconfirmed[col]) || row_shift[col];
+        if cur[col] < prev_acc[col] && revise_down {
             // Below the value a fallback moved off a confirmed column, or a
             // wide column that is just the latched number with its last
             // digit cut off. Both are clips. Fall through to the monotonic
@@ -635,6 +653,24 @@ pub fn apply_gate_with_trust(
         }
     }
 
+    // A kill column that rose past JUMP_MAX while another column was held
+    // down is a different player's row. Keep that tag while the drop is
+    // still held, so a later read of the real row can replace the high.
+    let decreased = holds.iter().any(|h| h.kind == HoldKind::Monotonic);
+    for col in 0..GATE_COLS {
+        let rose =
+            out[col] > prev_acc[col] && cur[col].saturating_sub(prev_acc[col]) > JUMP_MAX[col];
+        if decreased && is_kill_col(col) && rose {
+            row_shift[col] = true;
+        } else if out[col] < prev_acc[col] {
+            row_shift[col] = false;
+        } else if decreased && row_shift[col] && out[col] == prev_acc[col] {
+            row_shift[col] = true;
+        } else if !decreased {
+            row_shift[col] = false;
+        }
+    }
+
     let accepted = Counters::from_array(out);
     // Adopting a fallback number marks that column unconfirmed. If the
     // column was confirmed, keep that value as a floor so a later clip
@@ -688,6 +724,7 @@ pub fn apply_gate_with_trust(
             unconfirmed,
             confirmed_floor,
             has_confirmed_floor,
+            row_shift,
         },
         holds,
         unlatches,
@@ -1616,15 +1653,16 @@ mod tests {
     }
 
     #[test]
-    fn route66_row_shift_does_not_walk_assists_or_deaths_down() {
-        // The row-shift latches assists at 19 and deaths at 13. Later clean
-        // reads of the real row are lower. Those stay held. A confirmed
-        // counter does not decrease inside the game.
+    fn route66_row_shift_returns_to_the_real_assists_and_deaths() {
+        // The row-shift reads assists 19 and deaths 13 while elims are held
+        // down. That high is a different row, so the real row's 17 and 10
+        // replace it. A value confirmed by two matching reads, with no row
+        // shift, still cannot fall.
         let acc = replay_clips(ROUTE66, ROUTE66_CLIPS);
         let final_c = *acc.last().unwrap();
         assert_eq!(final_c.elims, 28, "elims unaffected by the row-shift");
-        assert_eq!(final_c.assists, 19, "assists stay at the latched high read");
-        assert_eq!(final_c.deaths, 13, "deaths stay at the latched high read");
+        assert_eq!(final_c.assists, 17, "assists return to the real row");
+        assert_eq!(final_c.deaths, 10, "deaths return to the real row");
     }
 
     // --- CG-2/CG-3 injection + latch + un-latch (the 2026-07-20 defect) ---
@@ -1795,6 +1833,119 @@ mod tests {
             false,
         );
         assert_eq!(matched.accepted.elims, 18, "a second matching 18 counts");
+    }
+
+    #[test]
+    fn each_stat_stores_at_the_jump_limit_and_waits_one_past() {
+        let base = [10u32, 10, 10, 8000, 8000, 8000];
+        for col in 0..GATE_COLS {
+            let mut at_limit = base;
+            at_limit[col] = base[col] + JUMP_MAX[col];
+            let stored = apply_gate(
+                Some((state(Counters::from_array(base)), secs(30))),
+                Counters::from_array(at_limit),
+                CLEAN,
+                false,
+            );
+            assert_eq!(
+                stored.accepted.to_array()[col],
+                at_limit[col],
+                "col {col} at JUMP_MAX stores"
+            );
+            assert!(
+                stored.holds.iter().all(|h| h.col != col),
+                "col {col} at the limit is not held: {:?}",
+                stored.holds
+            );
+
+            let mut one_past = base;
+            one_past[col] = base[col] + JUMP_MAX[col] + 1;
+            let waited = apply_gate(
+                Some((state(Counters::from_array(base)), secs(30))),
+                Counters::from_array(one_past),
+                CLEAN,
+                false,
+            );
+            assert_eq!(
+                waited.accepted.to_array()[col],
+                base[col],
+                "col {col} one past JUMP_MAX waits"
+            );
+            assert!(
+                waited
+                    .holds
+                    .iter()
+                    .any(|h| h.col == col && h.kind == HoldKind::Jump),
+                "col {col} one past is a jump hold: {:?}",
+                waited.holds
+            );
+        }
+    }
+
+    #[test]
+    fn damage_burst_of_3501_stores() {
+        // 6810 to 10311 is under the damage limit of 4000, so a clean burst
+        // stores on the first read.
+        let prev = state(c(11, 2, 4, 6810, 0, 2900));
+        let out = apply_gate(
+            Some((prev, secs(60))),
+            c(12, 2, 5, 10311, 0, 3400),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.damage, 10311);
+        assert!(
+            out.holds.iter().all(|h| h.col != 3),
+            "a +3501 damage burst is not held: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn a_row_shift_high_can_fall_and_a_matched_high_cannot() {
+        // Elims drop while assists jump past the limit: the assists came
+        // from another row. Two more reads of that high still do not lock
+        // it. The real assists replace it. A matched assists with no row
+        // shift stays.
+        let prev = state(c(15, 10, 7, 7000, 1500, 3000));
+        let shifted = apply_gate(
+            Some((prev, secs(30))),
+            c(9, 19, 13, 8000, 1600, 3200),
+            CLEAN,
+            false,
+        );
+        assert_eq!(shifted.accepted.elims, 15, "the dropped elims stay");
+        assert_eq!(shifted.accepted.assists, 19);
+        assert!(shifted.state.row_shift[1]);
+        let again = apply_gate(
+            Some((shifted.state, secs(10))),
+            c(9, 19, 13, 8100, 1600, 3200),
+            CLEAN,
+            false,
+        );
+        assert!(again.state.row_shift[1], "a repeated shift stays a shift");
+        let real = apply_gate(
+            Some((again.state, secs(20))),
+            c(16, 11, 7, 8200, 1700, 3300),
+            CLEAN,
+            false,
+        );
+        assert_eq!(real.accepted.assists, 11, "the real row replaces the shift");
+        assert_eq!(real.accepted.deaths, 7);
+        let matched = apply_gate(
+            Some((state(c(16, 11, 7, 8200, 1700, 3300)), secs(20))),
+            c(16, 11, 7, 8300, 1700, 3300),
+            CLEAN,
+            false,
+        );
+        let held = apply_gate(
+            Some((matched.state, secs(20))),
+            c(16, 8, 7, 8400, 1700, 3300),
+            CLEAN,
+            false,
+        );
+        assert_eq!(held.accepted.assists, 11, "two matching reads cannot fall");
+        assert!(unsure_fields(&held.holds).contains(&"a"));
     }
 
     #[test]
