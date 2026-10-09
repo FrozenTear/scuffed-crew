@@ -35,7 +35,7 @@
 //!   does not have those routes yet. The token is still saved, and site
 //!   sign-in is hidden in favour of pasting a token.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use iced::widget::image::Handle;
@@ -80,7 +80,7 @@ pub const CAPTURE_CONTINUE_WARN: &str =
     "Screen capture did not work. You can continue and still sign in.";
 pub const OW_SKIP_WARN: &str =
     "You can skip this step if Overwatch is not running. Sign in is still available.";
-pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
+pub use stat_tracker::packs::PACK_TOO_BIG;
 pub const SITE_TRY_AGAIN: &str = "The site could not finish sign-in. Try again in a moment.";
 pub const SITE_BAD_LABEL: &str = "The tracker could not start sign-in. Try again.";
 pub const SITE_BAD_VERSION: &str =
@@ -90,9 +90,9 @@ pub const SITE_BODY_REQUIRED: &str = "The site could not read the sign-in reques
 pub const SITE_BAD_ORIGIN: &str = "The site refused this sign-in request. Try again.";
 pub const SITE_INTERNAL: &str = "The site had a problem. Try again in a moment.";
 pub const PACK_INTRO: &str = "\
-A reader template pack is available. Download it if you want the extra templates. \
-You can finish without it.";
-pub const PACK_SAVED: &str = "Reader pack saved.";
+When you are signed in, the tracker can download a reader pack from the site. \
+It is saved with the hero templates. You can finish without it.";
+pub use stat_tracker::packs::PACK_SAVED;
 pub const DEVICE_LABEL: &str = "Scuffed Tracker";
 
 const USER_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -110,34 +110,14 @@ pub fn connected_as(display_name: &str) -> String {
     format!("Connected as {display_name}")
 }
 
-/// Used when a 429 has no `Retry-After` seconds.
-pub const RATE_LIMIT_FALLBACK_SECS: u64 = 10;
-
-/// `Retry-After` waits are kept inside this range before they are added to a clock.
-pub const RETRY_AFTER_MIN_SECS: u64 = 1;
-pub const RETRY_AFTER_MAX_SECS: u64 = 3600;
-
-/// Largest reader pack the guide will save.
-pub const READER_PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub use stat_tracker::packs::{
+    PACK_MAX_BYTES as READER_PACK_MAX_BYTES, RATE_LIMIT_FALLBACK_SECS, RETRY_AFTER_MAX_SECS,
+    RETRY_AFTER_MIN_SECS, clamp_retry_after, rate_limit_message, rate_limit_seconds,
+};
 
 /// Added to the poll interval on each `slow_down`. It stays raised for
 /// the rest of that device code. A 429 does not use this step.
 pub const SLOW_DOWN_STEP_SECS: u64 = 5;
-
-/// Header seconds when present, otherwise [`RATE_LIMIT_FALLBACK_SECS`].
-/// The result is always inside [`RETRY_AFTER_MIN_SECS`]..=[`RETRY_AFTER_MAX_SECS`].
-pub fn rate_limit_seconds(retry_after: Option<u64>) -> u64 {
-    clamp_retry_after(retry_after.unwrap_or(RATE_LIMIT_FALLBACK_SECS))
-}
-
-/// A huge `Retry-After` must not be added to [`Instant::now`].
-pub fn clamp_retry_after(seconds: u64) -> u64 {
-    seconds.clamp(RETRY_AFTER_MIN_SECS, RETRY_AFTER_MAX_SECS)
-}
-
-pub fn rate_limit_message(seconds: u64) -> String {
-    format!("Too many tries, wait {seconds} seconds and try again")
-}
 
 /// Static sentences the guide shows. Tests reject em and en dashes here.
 pub fn user_facing_copy() -> &'static [&'static str] {
@@ -149,6 +129,14 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         CAPTURE_CONTINUE_WARN,
         OW_SKIP_WARN,
         PACK_TOO_BIG,
+        stat_tracker::packs::PACK_CURRENT,
+        stat_tracker::packs::PACK_UNAVAILABLE,
+        stat_tracker::packs::PACK_UNSUPPORTED,
+        stat_tracker::packs::PACK_MISMATCH,
+        stat_tracker::packs::PACK_UNSAFE,
+        stat_tracker::packs::PACK_FAILED,
+        stat_tracker::packs::PACK_AUTH,
+        stat_tracker::packs::PACK_SIGN_IN,
         SITE_TRY_AGAIN,
         SITE_BAD_LABEL,
         SITE_BAD_VERSION,
@@ -831,20 +819,6 @@ pub fn site_link_url(server_url: &str) -> Result<String, String> {
     Ok(format!("{base}/link"))
 }
 
-pub fn pack_filename(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    let name = path.rsplit('/').next().unwrap_or("template-pack");
-    let cleaned: String = name
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-        .collect();
-    if cleaned.is_empty() || cleaned.starts_with('.') {
-        "template-pack.bin".to_string()
-    } else {
-        cleaned
-    }
-}
-
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -978,79 +952,6 @@ pub async fn check_token(base: String, token: String) -> Result<TokenCheckResult
     Ok(map_token_check(status, &body, retry))
 }
 
-pub async fn download_reader_pack(url: String, dest_dir: PathBuf) -> Result<String, String> {
-    download_reader_pack_limited(url, dest_dir, READER_PACK_MAX_BYTES).await
-}
-
-async fn download_reader_pack_limited(
-    url: String,
-    dest_dir: PathBuf,
-    max_bytes: u64,
-) -> Result<String, String> {
-    let url = normalize_base(&url)?;
-    let client = http_client()?;
-    let response = client.get(&url).send().await.map_err(|_| {
-        "Could not download the reader pack. Check the address and try again.".to_string()
-    })?;
-    let status = response.status();
-    let retry = retry_after_secs(response.headers());
-    if status.as_u16() == 429 {
-        return Err(rate_limit_message(rate_limit_seconds(retry)));
-    }
-    if !status.is_success() {
-        return Err(format!(
-            "The reader pack download failed ({}).",
-            status.as_u16()
-        ));
-    }
-    if response.content_length().is_some_and(|len| len > max_bytes) {
-        return Err(PACK_TOO_BIG.to_string());
-    }
-    let dir = dest_dir.join("reader-pack");
-    std::fs::create_dir_all(&dir).map_err(|_| "Could not save the reader pack.".to_string())?;
-    let name = pack_filename(&url);
-    let path = dir.join(&name);
-    let tmp = dir.join(format!(".{name}.download"));
-    let saved = write_capped_download(&tmp, response, max_bytes).await;
-    if let Err(error) = saved {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
-    std::fs::rename(&tmp, &path).map_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-        "Could not save the reader pack.".to_string()
-    })?;
-    Ok(PACK_SAVED.to_string())
-}
-
-async fn write_capped_download(
-    tmp: &Path,
-    mut response: reqwest::Response,
-    max_bytes: u64,
-) -> Result<(), String> {
-    let mut file =
-        std::fs::File::create(tmp).map_err(|_| "Could not save the reader pack.".to_string())?;
-    let mut total = 0u64;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "The reader pack download stopped before it finished.".to_string())?
-    {
-        total = total.saturating_add(chunk.len() as u64);
-        if total > max_bytes {
-            return Err(PACK_TOO_BIG.to_string());
-        }
-        std::io::Write::write_all(&mut file, &chunk)
-            .map_err(|_| "Could not save the reader pack.".to_string())?;
-    }
-    if total == 0 {
-        return Err("The reader pack download was empty.".into());
-    }
-    file.sync_all()
-        .map_err(|_| "Could not save the reader pack.".to_string())?;
-    Ok(())
-}
-
 #[derive(Clone)]
 pub enum SetupMessage {
     Open,
@@ -1143,14 +1044,13 @@ pub struct GuideUi {
     token_message: Option<String>,
     pack_busy: bool,
     pack_message: Option<String>,
-    reader_pack_url: Option<String>,
     app_version: String,
     saved_token: bool,
 }
 
 impl GuideUi {
     pub fn startup(open: bool, config: &Config, app_version: Option<&str>) -> Self {
-        let include_pack = reader_pack_configured(config.reader_pack_url.as_deref());
+        let include_pack = true;
         Self {
             open,
             flow: GuideFlow::new(include_pack),
@@ -1178,7 +1078,6 @@ impl GuideUi {
             token_message: None,
             pack_busy: false,
             pack_message: None,
-            reader_pack_url: config.reader_pack_url.clone(),
             app_version: app_version
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or("unknown")
@@ -1534,17 +1433,17 @@ impl GuideUi {
         }
     }
 
-    pub fn begin_download(&mut self, dest_dir: &Path) -> Option<(String, PathBuf)> {
+    pub fn begin_pack_fetch(&mut self) -> bool {
         if self.pack_busy {
-            return None;
+            return false;
         }
-        let url = self
-            .reader_pack_url
-            .clone()
-            .filter(|url| !url.trim().is_empty())?;
         self.pack_busy = true;
         self.pack_message = None;
-        Some((url, dest_dir.to_path_buf()))
+        true
+    }
+
+    pub fn pack_needs_sign_in(&mut self) {
+        self.pack_message = Some(stat_tracker::packs::PACK_SIGN_IN.to_string());
     }
 
     pub fn download_ready(&mut self, result: Result<String, String>) {
@@ -2004,9 +1903,9 @@ mod tests {
         guide.confirm_scoreboard();
         assert!(guide.continue_step().is_none());
         assert_eq!(guide.flow.current(), GuideStep::Sync);
-        let done = guide
-            .continue_step()
-            .expect("sync is the last step without a pack");
+        assert!(guide.continue_step().is_none());
+        assert_eq!(guide.flow.current(), GuideStep::ReaderPack);
+        let done = guide.continue_step().expect("reader pack is the last step");
         assert!(!guide.open);
         assert_eq!(done.setup_completed, Some(true));
     }
@@ -2993,44 +2892,6 @@ mod tests {
         assert!(logs.contains("invalid code"), "{logs}");
         assert!(!logs.contains(secret), "{logs}");
         assert!(!logs.contains(token), "{logs}");
-    }
-
-    #[tokio::test]
-    async fn reader_pack_caps_the_download_and_renames_a_temp_file() {
-        let big = spawn_mock(|_head, _body| (200, vec![], "abcdefghijklmnopqrstuvwxyz".into()));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let err =
-            download_reader_pack_limited(format!("{big}/pack.bin"), dir.path().to_path_buf(), 8)
-                .await
-                .expect_err("over the cap");
-        assert_eq!(err, PACK_TOO_BIG);
-        assert!(
-            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-            "a capped download must not leave a file"
-        );
-
-        let small = spawn_mock(|_head, _body| (200, vec![], "pack-bytes".into()));
-        let saved =
-            download_reader_pack_limited(format!("{small}/pack.bin"), dir.path().to_path_buf(), 64)
-                .await
-                .expect("under the cap");
-        assert_eq!(saved, PACK_SAVED);
-        let names: Vec<_> = std::fs::read_dir(dir.path().join("reader-pack"))
-            .expect("pack dir")
-            .map(|entry| {
-                entry
-                    .expect("entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(names, vec!["pack.bin".to_string()]);
-        assert!(!names.iter().any(|name| name.contains("download")));
-        assert_eq!(
-            std::fs::read(dir.path().join("reader-pack/pack.bin")).expect("bytes"),
-            b"pack-bytes"
-        );
     }
 
     #[test]
