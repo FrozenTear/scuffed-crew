@@ -465,6 +465,51 @@ const TEAM_SIZE_5V5_PITCH_MIN: f64 = 0.083;
 /// 0.102, the two misleading pitches measured so far, fall outside.
 const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 
+/// What the capture preflight decided, before any OCR.
+///
+/// [`ScoreboardPreflight::NotAScoreboard`] is decided before the 5v5-vs-6v6
+/// pitch check. A gameplay frame that happens to show a stray pitch is not
+/// reported as an uncertain team size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreboardPreflight {
+    /// No table, or a table with neither row dips nor header labels.
+    NotAScoreboard,
+    /// A table is present and the row or header signal passed, but the pitch
+    /// does not settle 5v5 or 6v6.
+    TeamSizeUncertain,
+    /// Row pitch settled on this team size (5 or 6).
+    Ready(usize),
+}
+
+/// Table structure first, then the existing row-dip / header-label gate, then
+/// the pitch. `table_present` comes from
+/// [`crate::ocr::preprocess::scoreboard_table_present`] and does not use team
+/// colour. `header_labels` is the count from
+/// [`crate::ocr::preprocess::header_label_groups`].
+pub fn classify_scoreboard_preflight(
+    scan: &RowScan,
+    header_labels: usize,
+    table_present: bool,
+) -> ScoreboardPreflight {
+    let rows = scan.looks_like_scoreboard();
+    let header = (3..=10).contains(&header_labels);
+    if !table_present || (!rows && !header) {
+        return ScoreboardPreflight::NotAScoreboard;
+    }
+    match scan.checked_team_size() {
+        Some(n) => ScoreboardPreflight::Ready(n),
+        None => ScoreboardPreflight::TeamSizeUncertain,
+    }
+}
+
+/// Run the capture preflight on one scoreboard crop.
+pub fn preflight_scoreboard(board: &DynamicImage) -> (ScoreboardPreflight, RowScan) {
+    let scan = scan_rows(board);
+    let labels = crate::ocr::preprocess::header_label_groups(board).len();
+    let table = crate::ocr::preprocess::scoreboard_table_present(board);
+    (classify_scoreboard_preflight(&scan, labels, table), scan)
+}
+
 /// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
 ///
 /// Counting hero portraits fails when rows are empty ("WAITING FOR PLAYER") or
@@ -1158,6 +1203,37 @@ mod team_size_tests {
         let s = scan(5, Some(0.074), Some(0.084));
         assert_eq!(s.checked_team_size(), None);
         assert_eq!(s.team_size(), 5);
+    }
+
+    #[test]
+    fn death_screen_pitch_without_a_table_is_not_a_scoreboard() {
+        // Death screen with killfeed and HUD. The row scan logged
+        // dip_count=2, dip_pitch=0.0586, spectral_pitch=0.0963. Header
+        // labels in the 3..=10 band used to skip the "not a scoreboard"
+        // path and reject it as an unsettled 5v5-vs-6v6 pitch.
+        let death = scan(2, Some(0.0586), Some(0.0963));
+        assert!(!death.looks_like_scoreboard());
+        assert_eq!(death.checked_team_size(), None);
+        assert_eq!(
+            super::classify_scoreboard_preflight(&death, 6, false),
+            super::ScoreboardPreflight::NotAScoreboard
+        );
+        // Same pitches on a real table stay a team-size reject.
+        assert_eq!(
+            super::classify_scoreboard_preflight(&death, 6, true),
+            super::ScoreboardPreflight::TeamSizeUncertain
+        );
+        // A settled board is read only when the table is present. Colour
+        // is not an input here.
+        let board = scan(6, Some(0.074), Some(0.0742));
+        assert_eq!(
+            super::classify_scoreboard_preflight(&board, 0, true),
+            super::ScoreboardPreflight::Ready(6)
+        );
+        assert_eq!(
+            super::classify_scoreboard_preflight(&board, 6, false),
+            super::ScoreboardPreflight::NotAScoreboard
+        );
     }
 
     #[test]

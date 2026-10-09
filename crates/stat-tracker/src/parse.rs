@@ -808,9 +808,77 @@ pub fn canonical_map(name: &str) -> Option<String> {
     match_map_in_text(name)
 }
 
+/// Mode word printed on the Tab banner, before the `|` and the map name.
+/// None of these is a map key. A longer banner phrase still starts with one
+/// of them (`PAYLOAD RACE`, `CAPTURE THE FLAG`).
+const BANNER_MODE_WORDS: &[&str] = &[
+    "CONTROL",
+    "ESCORT",
+    "HYBRID",
+    "PUSH",
+    "FLASHPOINT",
+    "CLASH",
+    "ASSAULT",
+    "ELIMINATION",
+    "DEATHMATCH",
+    "PAYLOAD",
+    "CAPTURE",
+];
+
+/// Map text from a Tab banner read.
+///
+/// The banner is `icon MODE | MAP TIME`. The map is the text after the first
+/// `|`. Icon junk and the mode word are on the left and are not matched.
+/// This split happens before glyph folding, which would turn `|` into `i`
+/// and glue it onto the map (`|ILIOS` becomes a word the matcher misses).
+/// With no bar, a mode word in the first few tokens is skipped the same way,
+/// and so is the junk in front of it.
+fn tab_banner_map_text(text: &str) -> &str {
+    let text = text.trim();
+    if let Some((_, right)) = text.split_once('|') {
+        return right.trim();
+    }
+    strip_icon_and_mode(text)
+}
+
+fn mode_token(tok: &str) -> bool {
+    let bare = tok.trim_matches(|c: char| !c.is_ascii_alphabetic());
+    BANNER_MODE_WORDS
+        .iter()
+        .any(|word| bare.eq_ignore_ascii_case(word))
+}
+
+/// Drop icon junk and a following mode word. The map name is what remains.
+/// A string with no mode word is returned unchanged, so `King's Row` is kept.
+fn strip_icon_and_mode(text: &str) -> &str {
+    let mut offset = 0usize;
+    for (seen, tok) in text.split_whitespace().enumerate() {
+        if seen >= 4 {
+            break;
+        }
+        let Some(rel) = text[offset..].find(tok) else {
+            break;
+        };
+        let start = offset + rel;
+        if mode_token(tok) {
+            let after = text[start + tok.len()..].trim_start();
+            if !after.is_empty() {
+                return after;
+            }
+            break;
+        }
+        offset = start + tok.len();
+    }
+    text
+}
+
 /// Match a map name from arbitrary OCR text (e.g. the top-bar map label).
+///
+/// See [`tab_banner_map_text`]: only the map side of a Tab banner is matched,
+/// case-insensitively, against the known map list.
 pub fn match_map_in_text(text: &str) -> Option<String> {
-    let lines: Vec<&str> = text
+    let label = tab_banner_map_text(text);
+    let lines: Vec<&str> = label
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -1071,6 +1139,12 @@ pub(crate) fn map_fuzzy_threshold(len: usize) -> f64 {
     if len <= 6 { 0.80 } else { 0.85 }
 }
 
+/// Lead the best fuzzy map must hold over the next different map. A smaller
+/// gap is a tie, and the read stays unknown. Exact whole-word hits do not
+/// use this: Temple of Anubis and Throne of Anubis still resolve by table
+/// order when the key is present.
+const MAP_FUZZY_MARGIN: f64 = 0.05;
+
 const GRIMSVOTN_NAME: &str = "Watchpoint: Grímsvötn";
 const GIBRALTAR_NAME: &str = "Watchpoint: Gibraltar";
 
@@ -1147,9 +1221,9 @@ fn score_watchpoint_tail(tail: &str) -> (f64, f64) {
 
 /// Bare or ambiguous "watchpoint" is not Gibraltar. A following word is
 /// fuzzy-matched against Grímsvötn and Gibraltar; one side has to clear the
-/// long-name threshold and beat the other. `6` folds to `o` only here, so
-/// Route 66 is left alone. The next two tokens are also joined, so
-/// "GRIMS VOTN" can still hit Grímsvötn.
+/// long-name threshold and lead the other by [`MAP_FUZZY_MARGIN`]. `6` folds
+/// to `o` only here, so Route 66 is left alone. The next two tokens are also
+/// joined, so "GRIMS VOTN" can still hit Grímsvötn.
 fn resolve_watchpoint(text: &str) -> WatchpointFamily {
     // Fold first so an accented letter stays inside its word. Splitting on
     // every non-ASCII byte used to break "Grímsvötn" into two tokens.
@@ -1180,9 +1254,9 @@ fn resolve_watchpoint(text: &str) -> WatchpointFamily {
         best_gib = best_gib.max(gib);
     }
     let threshold = map_fuzzy_threshold("grimsvotn".chars().count());
-    if best_grim >= threshold && best_grim > best_gib {
+    if best_grim >= threshold && best_grim - best_gib >= MAP_FUZZY_MARGIN {
         WatchpointFamily::Named(GRIMSVOTN_NAME)
-    } else if best_gib >= threshold && best_gib > best_grim {
+    } else if best_gib >= threshold && best_gib - best_grim >= MAP_FUZZY_MARGIN {
         WatchpointFamily::Named(GIBRALTAR_NAME)
     } else {
         WatchpointFamily::Undecided
@@ -1222,6 +1296,10 @@ fn find_map(lines: &[&str]) -> Option<String> {
     map_from_normalized(&text, true)
 }
 
+/// Closest map at or above [`map_fuzzy_threshold`], when it leads the next
+/// different display name by [`MAP_FUZZY_MARGIN`]. Below the floor, or inside
+/// that margin, the map is unknown. Aliases of one display name (Lijiang's
+/// `liang` / `lulang` keys) only raise that name's score.
 fn fuzzy_match_map(text: &str) -> Option<String> {
     // `text` is expected to already be glyph-normalized by the caller.
     let text = normalize_ocr_glyphs(text);
@@ -1229,37 +1307,65 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
 
     let mut best_map: Option<&str> = None;
     let mut best_score: f64 = 0.0;
+    let mut second_score: f64 = 0.0;
 
     for &(display_name, pattern) in MAPS {
         let pattern = normalize_ocr_glyphs(pattern);
         let pattern_parts: Vec<&str> = pattern.split_whitespace().collect();
         let threshold = map_fuzzy_threshold(pattern.chars().filter(|c| !c.is_whitespace()).count());
+        let mut pattern_best = 0.0;
 
         if pattern_parts.len() == 1 {
             for &word in &words {
                 let score = normalized_levenshtein(word, &pattern);
-                if score > best_score && score >= threshold {
-                    best_score = score;
-                    best_map = Some(display_name);
+                if score > pattern_best {
+                    pattern_best = score;
                 }
             }
         } else {
             for window in words.windows(pattern_parts.len()) {
                 let candidate = window.join(" ");
                 let score = normalized_levenshtein(&candidate, &pattern);
-                if score > best_score && score >= threshold {
-                    best_score = score;
-                    best_map = Some(display_name);
+                if score > pattern_best {
+                    pattern_best = score;
                 }
             }
         }
+
+        if pattern_best < threshold {
+            continue;
+        }
+        // A second key for the map already in front only improves its score.
+        if best_map == Some(display_name) {
+            if pattern_best > best_score {
+                best_score = pattern_best;
+            }
+            continue;
+        }
+        if best_map.is_none() || pattern_best > best_score {
+            if best_map.is_some() {
+                second_score = second_score.max(best_score);
+            }
+            best_score = pattern_best;
+            best_map = Some(display_name);
+        } else if pattern_best > second_score {
+            second_score = pattern_best;
+        }
     }
 
-    if let Some(map_name) = best_map {
-        tracing::debug!(map = map_name, score = best_score, "fuzzy matched map name");
+    let map_name = best_map?;
+    if best_score - second_score < MAP_FUZZY_MARGIN {
+        tracing::debug!(
+            map = map_name,
+            score = best_score,
+            runner_up = second_score,
+            "fuzzy map match held: top scores are too close"
+        );
+        return None;
     }
 
-    best_map.map(|m| m.to_string())
+    tracing::debug!(map = map_name, score = best_score, "fuzzy matched map name");
+    Some(map_name.to_string())
 }
 
 #[cfg(test)]
@@ -2019,6 +2125,55 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn tab_banner_matches_the_map_side_and_ignores_the_timer() {
+        // The crop used to include the start of the match timer, so the read
+        // was `CONTROL | ILIOS TIM` and the folded bar glued onto the name.
+        for raw in [
+            "CONTROL | ILIOS TIM",
+            "control | ilios tim",
+            "Control | Ilios Tim",
+            "CONTROL|ILIOS TIM",
+            "CONTROL |ILIOS TIM",
+            "Q CONTROL | ILIOS TIM",
+            "@@ CONTROL | ILIOS TIM",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+        // No bar: junk before the mode word is not a map, even when that
+        // junk is itself a map name earlier in the table than Ilios.
+        assert_eq!(
+            match_map_in_text("BUSAN CONTROL ILIOS TIM").as_deref(),
+            Some("Ilios")
+        );
+        assert_eq!(match_map_in_text("CONTROL | TIM"), None);
+        assert_eq!(match_map_in_text("TIM"), None);
+    }
+
+    #[test]
+    fn tab_banner_keeps_anubis_and_antarctica_apart() {
+        for (raw, display) in [
+            ("ASSAULT | TEMPLE OF ANUBIS", "Temple of Anubis"),
+            ("xqz assault | temple of anubis", "Temple of Anubis"),
+            ("CLASH | THRONE OF ANUBIS", "Throne of Anubis"),
+            ("clash | throne of anubis", "Throne of Anubis"),
+            ("CLASH | ANUBIS", "Throne of Anubis"),
+            ("ELIMINATION | ECOPOINT: ANTARCTICA", "Ecopoint: Antarctica"),
+            ("elimination | ecopoint: antarctica", "Ecopoint: Antarctica"),
+            ("ELIMINATION | ANTARCTICA", "Ecopoint: Antarctica"),
+            ("CONTROL | ANTARCTIC PENINSULA", "Antarctic Peninsula"),
+            ("control | antarctic peninsula", "Antarctic Peninsula"),
+            ("CONTROL | ANTARCTIC", "Antarctic Peninsula"),
+            (
+                "OASIS ELIMINATION ECOPOINT: ANTARCTICA",
+                "Ecopoint: Antarctica",
+            ),
+            ("FLASHPOINT NEW JUNK CITY", "New Junk City"),
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some(display), "{raw}");
+        }
+    }
+
+    #[test]
     fn lijiang_ocr_aliases_do_not_steal_other_maps() {
         let liang = normalize_ocr_glyphs("liang tower");
         let lulang = normalize_ocr_glyphs("lulang tower");
@@ -2333,6 +2488,51 @@ mod hero_map_name_tests {
         // Busan with a V-for-A (not a glyph fold — needs the looser short-name
         // fuzzy threshold: BUSVN↔BUSAN scores 0.80).
         assert_eq!(match_map_in_text("BUSVN").as_deref(), Some("Busan"));
+    }
+
+    #[test]
+    fn fuzzy_map_holds_junk_and_close_scores_and_keeps_canonical_names() {
+        // Below the floor: not the closest name.
+        for raw in ["PARXQ", "BUSXY", "TIM", "zzzzz", "not-a-map", "qqqqq"] {
+            assert_eq!(match_map_in_text(raw), None, "{raw}");
+            assert_eq!(exact_map_in_text(raw), None, "{raw}");
+        }
+        // One edit still clears the short-name floor and has no close second.
+        assert_eq!(match_map_in_text("PARIZ").as_deref(), Some("Paris"));
+        assert_eq!(match_map_in_text("BUSVN").as_deref(), Some("Busan"));
+
+        // Oasis and Paris both score 0.80 on these. Antarctic and Antarctica
+        // tie, or lead by less than the margin. Either way the map is unknown.
+        for raw in ["oaris", "pasis", "antarcticx", "antarctia"] {
+            assert_eq!(match_map_in_text(raw), None, "{raw}");
+        }
+
+        // Timer digits stuck on the end of the banner name.
+        for raw in [
+            "ILIOS 0",
+            "ILIOS 7/M",
+            "CONTROL | ILIOS 0",
+            "CONTROL | ILIOS 7/M",
+            "CONTROL|ILIOS 0",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+        // I/L fold, and a single u/i swap that still clears the floor alone.
+        assert_eq!(match_map_in_text("ILios").as_deref(), Some("Ilios"));
+        assert_eq!(match_map_in_text("iuios").as_deref(), Some("Ilios"));
+
+        // #201: a short key does not match inside a longer word.
+        for raw in ["comparison", "parisian", "inparis", "COMPARISON"] {
+            assert_eq!(canonical_map(raw), None, "{raw}");
+        }
+        assert_eq!(canonical_map("PARIS").as_deref(), Some("Paris"));
+
+        let grim = canonical_map("GRIMSVOTN").expect("grimsvotn");
+        assert_eq!(grim, "Watchpoint: Grímsvötn");
+        assert!(grim.contains('í') && grim.contains('ö'), "{grim}");
+        let chateau = canonical_map("Chateau Guillard").expect("chateau");
+        assert_eq!(chateau, "Château Guillard");
+        assert!(chateau.contains('â'), "{chateau}");
     }
 
     #[test]

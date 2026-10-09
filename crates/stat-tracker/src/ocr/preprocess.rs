@@ -1070,18 +1070,173 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
     }
 }
 
+/// Pixels cut from the right of [`crop_map_name`] on a 2560-wide 16:9 frame.
+///
+/// The previous width was `0.27 * 2560` = 691. 69 is 10% of that, which
+/// stops the crop on the map name instead of the match timer (`TIME` read
+/// as `TIM`). Other frame sizes scale this with the 16:9 game rect, so
+/// 1080p and 4K lose the same fraction.
+const MAP_NAME_RIGHT_TRIM_AT_2560: u32 = 69;
+
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
-/// This sits ABOVE the scoreboard crop, so scoreboard OCR never sees it. White
-/// text on a dark bar — pass to `recognize_region`.
+/// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
+/// text on a dark bar. Pass the crop to `recognize_region`.
+///
+/// The right edge is [`MAP_NAME_RIGHT_TRIM_AT_2560`] shorter than the old
+/// 0.27-wide crop, measured at 2560x1440 and scaled with the game rect.
 pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let (gx, gy, gw, gh) = game_rect_16_9(w, h);
     let x = gx + (gw as f64 * 0.68) as u32;
     let y = gy + (gh as f64 * 0.022) as u32;
-    let cw = ((gw as f64 * 0.27) as u32).min(w.saturating_sub(x));
+    let full_w = (gw as f64 * 0.27) as u32;
+    let trim = (MAP_NAME_RIGHT_TRIM_AT_2560 as f64 * gw as f64 / 2560.0).round() as u32;
+    let cw = full_w.saturating_sub(trim).min(w.saturating_sub(x));
     let ch = ((gh as f64 * 0.040) as u32).min(h.saturating_sub(y));
     img.crop_imm(x, y, cw, ch)
+}
+
+/// True when `board` (a [`crop_scoreboard`] result) has a Tab table: a bright
+/// header bar, two stacks of wide flat rows, and a darker gap between the
+/// stacks. Brightness and layout only. Team hue is ignored, so purple, yellow,
+/// or any other recolour still counts. A death cam with a killfeed and HUD
+/// does not.
+pub fn scoreboard_table_present(board: &DynamicImage) -> bool {
+    let Some(m) = measure_table(&board.to_rgb8()) else {
+        return false;
+    };
+    // Header: light bar. Each stack: most scanlines are one brightness.
+    // The VS gap sits between the stacks and is darker than both.
+    let present = m.header_median >= 150.0
+        && m.header_bright >= 0.40
+        && m.team1_flat >= 0.50
+        && m.team2_flat >= 0.50
+        && m.gap_luma + 15.0 < m.team1_luma
+        && m.gap_luma + 15.0 < m.team2_luma;
+    tracing::debug!(
+        header_median = m.header_median,
+        header_bright = m.header_bright,
+        team1_flat = m.team1_flat,
+        team2_flat = m.team2_flat,
+        team1_luma = m.team1_luma,
+        team2_luma = m.team2_luma,
+        gap_luma = m.gap_luma,
+        table = present,
+        "scoreboard table check"
+    );
+    present
+}
+
+struct TableMeasure {
+    header_median: f64,
+    header_bright: f64,
+    team1_flat: f64,
+    team2_flat: f64,
+    team1_luma: f64,
+    team2_luma: f64,
+    gap_luma: f64,
+}
+
+fn measure_table(rgb: &RgbImage) -> Option<TableMeasure> {
+    let (w, h) = rgb.dimensions();
+    if w < 32 || h < 32 {
+        return None;
+    }
+    let (header_median, header_bright) = region_header(rgb, 0.28, 0.97, 0.0, 0.030)?;
+    let (team1_flat, team1_luma) = region_stack(rgb, 0.12, 0.90, 0.10, 0.46)?;
+    let gap_luma = region_median(rgb, 0.12, 0.90, 0.500, 0.555)?;
+    let (team2_flat, team2_luma) = region_stack(rgb, 0.12, 0.90, 0.62, 0.90)?;
+    Some(TableMeasure {
+        header_median,
+        header_bright,
+        team1_flat,
+        team2_flat,
+        team1_luma,
+        team2_luma,
+        gap_luma,
+    })
+}
+
+fn region_px(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = rgb.dimensions();
+    let xa = (w as f64 * x0).round() as u32;
+    let xb = (w as f64 * x1).round() as u32;
+    let ya = (h as f64 * y0).round() as u32;
+    let yb = (h as f64 * y1).round() as u32;
+    if xb <= xa || yb <= ya || xa >= w || ya >= h {
+        return None;
+    }
+    Some((xa, xb.min(w), ya, yb.min(h)))
+}
+
+fn px_luma(px: [u8; 3]) -> u8 {
+    ((px[0] as u16 + px[1] as u16 + px[2] as u16) / 3) as u8
+}
+
+fn median_u8(values: &mut [u8]) -> u8 {
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+fn region_samples(rgb: &RgbImage, x0: u32, x1: u32, y0: u32, y1: u32) -> Vec<u8> {
+    let mut values = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            values.push(px_luma(rgb.get_pixel(x, y).0));
+        }
+    }
+    values
+}
+
+/// Median luma of the header window, and the fraction of pixels at luma >= 140.
+fn region_header(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(f64, f64)> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let mut values = region_samples(rgb, xa, xb, ya, yb);
+    if values.is_empty() {
+        return None;
+    }
+    let bright = values.iter().filter(|&&v| v >= 140).count() as f64 / values.len() as f64;
+    Some((median_u8(&mut values) as f64, bright))
+}
+
+/// Fraction of scanlines whose pixels sit near that line's median, and the
+/// median luma of the whole window. A team row is flat across the table.
+/// A death cam is not.
+fn region_stack(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(f64, f64)> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let width = (xb - xa) as usize;
+    if width == 0 || yb <= ya {
+        return None;
+    }
+    let mut flat = 0u32;
+    let mut all = Vec::with_capacity(width * (yb - ya) as usize);
+    for y in ya..yb {
+        let mut line = Vec::with_capacity(width);
+        for x in xa..xb {
+            line.push(px_luma(rgb.get_pixel(x, y).0));
+        }
+        let med = {
+            let mut sorted = line.clone();
+            median_u8(&mut sorted)
+        };
+        let close = line.iter().filter(|&&v| v.abs_diff(med) <= 36).count();
+        if close as f64 / width as f64 >= 0.62 {
+            flat += 1;
+        }
+        all.extend(line);
+    }
+    let rows = (yb - ya) as f64;
+    Some((flat as f64 / rows, median_u8(&mut all) as f64))
+}
+
+fn region_median(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<f64> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let mut values = region_samples(rgb, xa, xb, ya, yb);
+    if values.is_empty() {
+        return None;
+    }
+    Some(median_u8(&mut values) as f64)
 }
 
 /// Crop the right-side career panel's hero-name title (e.g. "MOIRA").
@@ -2408,5 +2563,179 @@ mod uncapped_retry_tests {
         for h in [20, 27, 39, 44, 48, 60] {
             assert!(prepare_cell_binary_uncapped(&blank(h)).is_none(), "h={h}");
         }
+    }
+}
+
+#[cfg(test)]
+mod map_and_table_tests {
+    use super::{crop_map_name, game_rect_16_9, header_label_groups, scoreboard_table_present};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn edges(w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+        let x = gx + (gw as f64 * 0.68) as u32;
+        let y = gy + (gh as f64 * 0.022) as u32;
+        let old_w = (gw as f64 * 0.27) as u32;
+        let trim = (super::MAP_NAME_RIGHT_TRIM_AT_2560 as f64 * gw as f64 / 2560.0).round() as u32;
+        let cw = old_w.saturating_sub(trim);
+        let ch = (gh as f64 * 0.040) as u32;
+        (x, y, cw, ch)
+    }
+
+    #[test]
+    fn map_name_crop_trims_about_ten_percent_off_the_right() {
+        for (w, h) in [
+            (2560u32, 1440u32),
+            (1920, 1080),
+            (3840, 2160),
+            (2560, 1080),
+            (3440, 1440),
+        ] {
+            let (x, y, cw, ch) = edges(w, h);
+            let mut frame = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+            frame.put_pixel(x, y, Rgb([255, 0, 0]));
+            frame.put_pixel(x + cw - 1, y, Rgb([0, 255, 0]));
+            let crop = crop_map_name(&DynamicImage::ImageRgb8(frame)).to_rgb8();
+            assert_eq!(crop.dimensions(), (cw, ch), "{w}x{h}");
+            assert_eq!(crop.get_pixel(0, 0).0, [255, 0, 0], "{w}x{h} left");
+            assert_eq!(crop.get_pixel(cw - 1, 0).0, [0, 255, 0], "{w}x{h} right");
+        }
+
+        let old_w = (2560.0_f64 * 0.27) as u32;
+        let (_, _, cw, _) = edges(2560, 1440);
+        let trim = old_w - cw;
+        assert_eq!(trim, 69);
+        assert!((trim as f64 / old_w as f64 - 0.10).abs() < 0.01);
+
+        // 1080p and 4K scale the 2560px trim with the 16:9 width.
+        let old_1080 = (1920.0_f64 * 0.27) as u32;
+        let (_, _, cw_1080, _) = edges(1920, 1080);
+        assert_eq!(old_1080 - cw_1080, (69.0 * 1920.0 / 2560.0).round() as u32);
+        let old_4k = (3840.0_f64 * 0.27) as u32;
+        let (_, _, cw_4k, _) = edges(3840, 2160);
+        assert_eq!(old_4k - cw_4k, (69.0 * 3840.0 / 2560.0).round() as u32);
+
+        // 2560x1080 is wider than 16:9, so the trim follows the game rect
+        // (1920 wide), not the full frame.
+        let gw = game_rect_16_9(2560, 1080).2;
+        assert_eq!(gw, 1920);
+        let old_uw = (gw as f64 * 0.27) as u32;
+        let (_, _, cw_uw, _) = edges(2560, 1080);
+        assert_eq!(old_uw - cw_uw, (69.0 * gw as f64 / 2560.0).round() as u32);
+    }
+
+    /// Synthetic Tab table. Rows are flat fills (any team colour) with a
+    /// bright header and a dark gap where team 2 starts. No captured pixels.
+    fn table_crop(team_a: [u8; 3], team_b: [u8; 3], rows: usize, pitch: f64) -> DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = RgbImage::from_pixel(w, h, Rgb([16, 18, 28]));
+        let header_h = (h as f64 * 0.028) as u32;
+        for y in 0..header_h {
+            for x in 0..w {
+                let label = x > w * 3 / 10 && (x / 14) % 6 == 0;
+                let v = if label { 24 } else { 228 };
+                img.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let wf = w as f64;
+        let hf = h as f64;
+        for team in 0..2 {
+            let colour = if team == 0 { team_a } else { team_b };
+            let base = if team == 0 { 0.045 } else { 0.575 };
+            for row in 0..rows {
+                let y0 = ((base + row as f64 * pitch) * hf) as u32;
+                let y1 = y0 + (pitch * 0.80 * hf) as u32;
+                for y in y0..y1.min(h) {
+                    for x in (0.05 * wf) as u32..(0.95 * wf) as u32 {
+                        let n = ((x + y) % 7) as i16 - 3;
+                        let ch = |c: u8| (c as i16 + n).clamp(0, 255) as u8;
+                        img.put_pixel(x, y, Rgb([ch(colour[0]), ch(colour[1]), ch(colour[2])]));
+                    }
+                    let name_x0 = (0.18 * wf) as u32;
+                    let name_x1 = (0.32 * wf) as u32;
+                    for x in name_x0..name_x1 {
+                        if (x + y) % 3 == 0 {
+                            img.put_pixel(x, y, Rgb([240, 240, 240]));
+                        }
+                    }
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// Gameplay stand-in: a varied scene, a bright strip with six dark glyphs
+    /// where the header-label counter looks, and a small HUD chip. Not a table.
+    fn death_screen_crop() -> DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x.wrapping_mul(13).wrapping_add(y.wrapping_mul(29)) % 180) as u8;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([v.saturating_add(30), v / 2 + 20, 40 + (x % 90) as u8]),
+                );
+            }
+        }
+        let header_h = (h as f64 * 0.030) as u32;
+        for y in 0..header_h {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([210, 210, 214]));
+            }
+        }
+        for i in 0..6 {
+            let x0 = (w as f64 * (0.42 + i as f64 * 0.08)) as u32;
+            let y0 = (h as f64 * 0.006) as u32;
+            let y1 = (h as f64 * 0.024) as u32;
+            for y in y0..y1 {
+                for x in x0..x0 + 5 {
+                    img.put_pixel(x.min(w - 1), y, Rgb([18, 18, 18]));
+                }
+            }
+        }
+        for y in h - 28..h {
+            for x in 16..160 {
+                img.put_pixel(x, y, Rgb([20, 180, 70]));
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn recoloured_tables_count_and_a_death_screen_does_not() {
+        let purple = [140, 60, 200];
+        let yellow = [230, 200, 40];
+        let cases = [
+            ("blue/red 6", [40, 110, 220], [200, 50, 50], 6usize, 0.075),
+            ("purple/yellow 6", purple, yellow, 6, 0.075),
+            ("yellow/purple 6", yellow, purple, 6, 0.075),
+            ("purple/yellow 5", purple, yellow, 5, 0.087),
+            ("grey endorse", [150, 150, 150], [120, 120, 120], 6, 0.075),
+        ];
+        for (name, a, b, rows, pitch) in cases {
+            assert!(
+                scoreboard_table_present(&table_crop(a, b, rows, pitch)),
+                "{name} should be a table"
+            );
+        }
+
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 480, Rgb(purple)));
+        assert!(
+            !scoreboard_table_present(&flat),
+            "a flat team colour with no header or gap is not a table"
+        );
+
+        let death = death_screen_crop();
+        let groups = header_label_groups(&death).len();
+        assert!(
+            (3..=10).contains(&groups),
+            "the stand-in header glyphs should fool the label counter, got {groups}"
+        );
+        assert!(
+            !scoreboard_table_present(&death),
+            "a death screen with killfeed glyphs and a HUD chip is not a table"
+        );
     }
 }
