@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -47,8 +48,12 @@ pub struct Config {
     /// accepted scoreboard with a template digit matcher and appends where it
     /// disagrees with ocr-v1 to `{data_dir}/shadow/digits.jsonl` (capped at
     /// about 4 MB). Log only: stored stats, the capture gate, and uploads
-    /// still use ocr-v1. Off by default. Also enabled by env
-    /// `SCUFFED_SHADOW_RECOGNIZER=1`.
+    /// still use ocr-v1, unless [`Self::reader`] is [`ReaderSetting::New`].
+    /// That setting forces this log on for the process. Off by default. Also
+    /// enabled by env `SCUFFED_SHADOW_RECOGNIZER=1`. When hero icon templates
+    /// are installed in `{data_dir}/templates/heroes/`, the same thread also
+    /// reads each Tab row's hero and logs it to `{data_dir}/shadow/heroes.jsonl`;
+    /// without templates that step is skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
     /// First-run guide finished or skipped. Missing means not completed, so
@@ -61,6 +66,63 @@ pub struct Config {
     /// empty. Config-file only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_pack_url: Option<String>,
+    /// Which reader supplies saved and uploaded stats.
+    ///
+    /// Missing, or `"ocr-v1"`, keeps today's Tesseract reads. `"new"` stores
+    /// the shadow reader's values when a field is read and not suspect, and
+    /// falls back to ocr-v1 per field otherwise. Game start, game end, screen
+    /// detection, and plausibility holds stay on ocr-v1 either way.
+    #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
+    pub reader: ReaderSetting,
+}
+
+/// `reader` in config.toml. Missing means [`Self::OcrV1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderSetting {
+    #[default]
+    OcrV1,
+    New,
+}
+
+impl ReaderSetting {
+    pub const OCR_V1: &'static str = "ocr-v1";
+    pub const NEW: &'static str = "new";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OcrV1 => Self::OCR_V1,
+            Self::New => Self::NEW,
+        }
+    }
+
+    pub const fn is_ocr_v1(&self) -> bool {
+        matches!(self, Self::OcrV1)
+    }
+
+    pub const fn is_new(self) -> bool {
+        matches!(self, Self::New)
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            Self::OCR_V1 => Some(Self::OcrV1),
+            Self::NEW => Some(Self::New),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for ReaderSetting {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReaderSetting {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| D::Error::custom("reader must be \"ocr-v1\" or \"new\""))
+    }
 }
 
 fn default_session_window_secs() -> u64 {
@@ -388,6 +450,13 @@ impl Config {
         if only_shadow_recognizer_differs(&loaded, next) {
             return patch_shadow_recognizer(existing, next.shadow_recognizer);
         }
+        if only_reader_differs(&loaded, next) {
+            return patch_reader(existing, next.reader);
+        }
+        if only_reader_and_shadow_differ(&loaded, next) {
+            let with_shadow = patch_shadow_recognizer(existing, next.shadow_recognizer)?;
+            return patch_reader(&with_shadow, next.reader);
+        }
         Ok(toml::to_string_pretty(next)?)
     }
 
@@ -415,6 +484,17 @@ impl Config {
     /// writes the override.
     pub fn shadow_recognizer_enabled(&self) -> bool {
         self.shadow_recognizer_control().enabled()
+    }
+
+    /// `reader = "new"`. Saved and uploaded stats may come from the new reader.
+    pub fn uses_new_reader(&self) -> bool {
+        self.reader.is_new()
+    }
+
+    /// The shadow log runs when its own flag is on, or when saved stats use
+    /// the new reader. The file flag stays independent of `reader`.
+    pub fn shadow_log_enabled(&self) -> bool {
+        self.shadow_recognizer_enabled() || self.uses_new_reader()
     }
 
     /// File value plus whether `SCUFFED_SHADOW_RECOGNIZER` locks this process on.
@@ -481,6 +561,25 @@ fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
         return false;
     }
     let mut same = loaded.clone();
+    same.shadow_recognizer = next.shadow_recognizer;
+    same == *next
+}
+
+fn only_reader_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.reader == next.reader {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.reader = next.reader;
+    same == *next
+}
+
+fn only_reader_and_shadow_differ(loaded: &Config, next: &Config) -> bool {
+    if loaded.reader == next.reader || loaded.shadow_recognizer == next.shadow_recognizer {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.reader = next.reader;
     same.shadow_recognizer = next.shadow_recognizer;
     same == *next
 }
@@ -556,6 +655,72 @@ fn insert_root_shadow_recognizer(
     }
     doc.as_table_mut()
         .insert("shadow_recognizer", toml_edit::value(on));
+    Ok(doc.to_string())
+}
+
+/// Change `reader` and nothing else.
+///
+/// A root string is spliced in place. A missing root key is inserted on the
+/// root table, before the first `[table]` header. Turning the switch off
+/// writes `"ocr-v1"` only when the key is already there.
+fn patch_reader(
+    existing: &str,
+    reader: ReaderSetting,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("reader").is_some() {
+        return splice_root_reader(existing, &doc, reader);
+    }
+    insert_root_reader(existing, reader)
+}
+
+fn splice_root_reader(
+    existing: &str,
+    doc: &toml_edit::Document<&str>,
+    reader: ReaderSetting,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let wanted = format!("\"{}\"", reader.as_str());
+    if let Some(item) = doc.get("reader")
+        && let Some(value) = item.as_value()
+        && value.as_str().is_some()
+        && let Some(span) = value.span()
+        && existing.is_char_boundary(span.start)
+        && existing.is_char_boundary(span.end)
+    {
+        let current = &existing[span.start..span.end];
+        if current.starts_with('"') && current.ends_with('"') {
+            let mut out = String::with_capacity(existing.len() + wanted.len());
+            out.push_str(&existing[..span.start]);
+            out.push_str(&wanted);
+            out.push_str(&existing[span.end..]);
+            return Ok(out);
+        }
+    }
+    Err(unreadable_config(
+        "config.toml could not be updated in place, so it was not replaced".to_string(),
+    ))
+}
+
+fn insert_root_reader(
+    existing: &str,
+    reader: ReaderSetting,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("reader").is_some() {
+        return Err(unreadable_config(
+            "config.toml already has reader at the root, so it was not replaced".to_string(),
+        ));
+    }
+    doc.as_table_mut()
+        .insert("reader", toml_edit::value(reader.as_str()));
     Ok(doc.to_string())
 }
 
@@ -637,6 +802,7 @@ impl Default for Config {
             shadow_recognizer: false,
             setup_completed: false,
             reader_pack_url: None,
+            reader: ReaderSetting::OcrV1,
         }
     }
 }
@@ -1110,6 +1276,11 @@ token = "secret"
             shadow_recognizer: full,
             setup_completed: full,
             reader_pack_url: full.then(|| "https://crew.example/packs/reader.zip".to_string()),
+            reader: if full {
+                ReaderSetting::New
+            } else {
+                ReaderSetting::OcrV1
+            },
         }
     }
 
@@ -1552,5 +1723,85 @@ token = \"old-token\"
         assert!(loaded.setup_completed);
         assert_eq!(loaded.sync.expect("sync").token, "tok");
         assert!(!saved.contains("device_code"));
+    }
+
+    #[test]
+    fn reader_defaults_to_ocr_v1_and_rejects_unknown_values() {
+        assert!(Config::default().reader.is_ocr_v1());
+        assert!(!Config::default().uses_new_reader());
+        assert!(!Config::default().shadow_log_enabled());
+        let raw = settings_shaped_without_shadow();
+        let loaded = Config::parse_file_contents(&raw).expect("missing reader");
+        assert!(loaded.reader.is_ocr_v1());
+        let with_new = format!("reader = \"new\"\n{raw}");
+        let on = Config::parse_file_contents(&with_new).expect("reader = new");
+        assert!(on.uses_new_reader());
+        assert!(on.shadow_log_enabled());
+        assert!(!on.shadow_recognizer);
+        let unknown = format!("reader = \"cv-v5\"\n{raw}");
+        assert!(Config::parse_file_contents(&unknown).is_err());
+    }
+
+    #[test]
+    fn missing_reader_toggles_stay_on_the_root_and_keep_comments() {
+        let original = settings_shaped_without_shadow();
+        let tables = table_block(&original).to_string();
+        assert!(!original.contains("reader"));
+        let mut current = Config::parse_file_contents(&original).expect("seed parses");
+        assert!(current.reader.is_ocr_v1());
+
+        current.reader = ReaderSetting::New;
+        let on = Config::text_for_save(Some(&original), &current).expect("turn on");
+        assert!(on.contains("# ") || !original.contains("# "));
+        assert!(on.contains("reader = \"new\""), "{on}");
+        assert_eq!(
+            table_block(&on),
+            tables,
+            "tables must stay byte for byte:\n{on}"
+        );
+        assert!(
+            on.find("reader").unwrap() < on.find("[auto_detect]").unwrap(),
+            "reader stays on the root:\n{on}"
+        );
+        let loaded = Config::parse_file_contents(&on).expect("reload on");
+        assert!(loaded.uses_new_reader());
+
+        current.reader = ReaderSetting::OcrV1;
+        let off = Config::text_for_save(Some(&on), &current).expect("turn off");
+        assert!(off.contains("reader = \"ocr-v1\""), "{off}");
+        assert_eq!(
+            table_block(&off),
+            tables,
+            "tables must stay byte for byte:\n{off}"
+        );
+        assert!(
+            Config::parse_file_contents(&off)
+                .expect("reload off")
+                .reader
+                .is_ocr_v1()
+        );
+    }
+
+    #[test]
+    fn reader_toggle_preserves_a_hand_edited_comment() {
+        let raw = "\
+# hand-edited tracker config. keep this comment.
+data_dir = \"/tmp/sst-hand-edited\"
+player_name = \"the streamer\"
+reader = \"ocr-v1\"
+custom_note = \"leave this line alone\"
+";
+        let mut next: Config = toml::from_str(raw).expect("hand-edited file must parse");
+        next.reader = ReaderSetting::New;
+        let saved = Config::text_for_save(Some(raw), &next).expect("reader-only save");
+        assert!(saved.contains("# hand-edited tracker config. keep this comment."));
+        assert!(saved.contains("custom_note = \"leave this line alone\""));
+        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("reader = \"new\""));
+        assert!(!saved.contains("reader = \"ocr-v1\""));
+        assert!(
+            !saved.contains("game_process_names"),
+            "a reader toggle must not add default keys: {saved}"
+        );
     }
 }

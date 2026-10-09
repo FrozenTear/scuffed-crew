@@ -4,6 +4,7 @@
 //! pane, Save as a full-width footer strip. Does not invent daemon config keys.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
+//! The new reader switch writes `reader`.
 
 use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Padding};
@@ -51,6 +52,7 @@ pub enum SettingsToggle {
     DebugOcr,
     OverlayHotkey,
     ShadowRecognizer,
+    NewReader,
 }
 
 /// Scoreboard number reader the Settings control can select.
@@ -108,6 +110,15 @@ pub(crate) const SHADOW_READER_ENV_NOTE: &str = "\
 SCUFFED_SHADOW_RECOGNIZER is set for this app, so the toggle stays on and is not written to the config file. \
 The tracker service may differ.";
 
+pub(crate) const NEW_READER_LABEL: &str = "New reader (alpha)";
+
+pub(crate) const NEW_READER_HINT: &str = "\
+Saved games and uploads use the new scoreboard reader. \
+A field it is not sure about keeps the old read and is marked unsure.";
+
+pub(crate) const NEW_READER_RESTART: &str =
+    "The tracker reads this when it starts. Restart it after you save.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
     pub capture_output: String,
@@ -125,6 +136,8 @@ pub struct SettingsForm {
     /// File value and env lock for the extra number reader.
     /// Save writes `file_on` only.
     pub shadow: ShadowRecognizerControl,
+    /// `reader = "new"`. Independent of the extra-log checkbox.
+    pub new_reader: bool,
 }
 
 impl Default for SettingsForm {
@@ -166,6 +179,7 @@ impl SettingsForm {
             overlay_hotkey: crate::hotkey::DEFAULT_BIND.to_string(),
             overlay_hotkey_enabled: true,
             shadow,
+            new_reader: config.reader.is_new(),
         }
     }
 
@@ -213,6 +227,7 @@ impl SettingsForm {
             SettingsToggle::ShadowRecognizer => {
                 self.set_scoreboard_reader(ScoreboardReader::from_file_flag(value));
             }
+            SettingsToggle::NewReader => self.new_reader = value,
         }
     }
 
@@ -239,6 +254,11 @@ impl SettingsForm {
             shadow_recognizer: self.persisted_reader().file_flag(),
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
+            reader: if self.new_reader {
+                stat_tracker::config::ReaderSetting::New
+            } else {
+                stat_tracker::config::ReaderSetting::OcrV1
+            },
         }
     }
 }
@@ -825,8 +845,24 @@ fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
     body = body.push(actions);
+    body = body.push(new_reader_block(app));
     body = body.push(shadow_reader_block(app));
     settings_card("Scoreboard reading", body.into())
+}
+
+fn new_reader_block(app: &TrackerApp) -> Element<'_, Message> {
+    column![
+        checkbox(app.settings.new_reader)
+            .label(NEW_READER_LABEL)
+            .on_toggle(|v| Message::SettingsToggle(SettingsToggle::NewReader, v))
+            .size(16)
+            .text_size(SIZE_BODY)
+            .style(checkbox_style),
+        hint(NEW_READER_HINT),
+        hint(NEW_READER_RESTART),
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
@@ -1121,6 +1157,7 @@ mod tests {
             overlay_hotkey: crate::hotkey::DEFAULT_BIND.into(),
             overlay_hotkey_enabled: true,
             shadow: Config::shadow_control(false, None),
+            new_reader: false,
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());

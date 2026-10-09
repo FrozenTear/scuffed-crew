@@ -224,6 +224,8 @@ pub struct Game {
     /// Server message when this game was refused on upload. `None` when the
     /// row is synced or still queued.
     pub upload_reject: Option<String>,
+    /// Flat names the new reader was not sure about.
+    pub suspect_fields: Vec<String>,
     /// True when this row has already been uploaded. A blank map on a
     /// synced row was stored by an older build. It is not a local hold.
     pub synced: bool,
@@ -268,8 +270,13 @@ impl Game {
                 .map(|(i, s)| SegmentView::from_segment(i as u32, s))
                 .collect(),
             upload_reject: m.upload_rejection().map(str::to_string),
+            suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
             synced: m.synced,
         }
+    }
+
+    pub fn field_unsure(&self, name: &str) -> bool {
+        self.suspect_fields.iter().any(|field| field == name)
     }
 
     pub fn display_hero(&self) -> String {
@@ -470,6 +477,36 @@ mod tests {
         assert_eq!(display_hero_name("unknown"), "Unknown hero");
         assert_eq!(display_hero_name("Ana"), "Ana");
     }
+
+    #[test]
+    fn field_unsure_uses_flat_names() {
+        let mut game = super::Game {
+            session_id: "s".into(),
+            hero: "Ana".into(),
+            map_name: "Busan".into(),
+            role: super::Role::Support,
+            outcome: super::Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: vec!["dmg".into(), "hero".into()],
+            synced: false,
+        };
+        assert!(game.field_unsure("dmg"));
+        assert!(game.field_unsure("hero"));
+        assert!(!game.field_unsure("e"));
+        game.suspect_fields.clear();
+        assert!(!game.field_unsure("dmg"));
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +533,7 @@ mod review_tests {
             ocr: GameOcr::default(),
             segments: Vec::new(),
             upload_reject: None,
+            suspect_fields: Vec::new(),
             synced: false,
         }
     }
