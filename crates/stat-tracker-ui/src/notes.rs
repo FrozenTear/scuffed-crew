@@ -399,11 +399,12 @@ fn notes_for_key(
         .and_then(|row| row.published_at)
         .and_then(format_release_date);
     let bundled_notes = section_for(bundled, &display_version(key));
+    let label = version_label(key, bundled_notes.as_ref(), remote);
     if let Some(row) = remote
         .iter()
         .find(|row| version_key(row.version) == Some(key))
     {
-        let mut from_remote = from_github_body(&display_version(key), row.body);
+        let mut from_remote = from_github_body(&label, row.body);
         if usable(&from_remote) {
             if from_remote.highlights.is_empty()
                 && let Some(bundled_notes) = &bundled_notes
@@ -508,13 +509,43 @@ fn raw_sections(changelog: &str) -> Vec<(String, String)> {
     sections
 }
 
+/// Keep a prerelease or build suffix on the card label. `## 0.5.0-alpha.1`
+/// stays `0.5.0-alpha.1` so it matches the daemon `Cargo.toml` version.
+/// Ordering still uses the numeric triple from [`version_key`].
 fn version_heading(line: &str) -> Option<String> {
     let (level, title) = atx(line)?;
     if level != 2 {
         return None;
     }
-    let key = version_key(title)?;
-    Some(display_version(key))
+    version_key(title)?;
+    let title = title.trim().trim_start_matches('v');
+    if title.is_empty() {
+        return None;
+    }
+    Some(title.to_string())
+}
+
+/// Card label for a numeric triple. Prefer the changelog heading, which
+/// keeps a prerelease suffix, then the GitHub version string, then
+/// `major.minor.patch`.
+fn version_label(
+    key: (u32, u32, u32),
+    bundled: Option<&ReleaseNotes>,
+    remote: &[RemoteRelease<'_>],
+) -> String {
+    if let Some(notes) = bundled {
+        return notes.version.clone();
+    }
+    if let Some(row) = remote
+        .iter()
+        .find(|row| version_key(row.version) == Some(key))
+    {
+        let shown = row.version.trim().trim_start_matches('v');
+        if !shown.is_empty() {
+            return shown.to_string();
+        }
+    }
+    display_version(key)
 }
 
 fn version_key(raw: &str) -> Option<(u32, u32, u32)> {
@@ -1247,6 +1278,53 @@ Detail line with `inline`.
         assert!(!escape_closes_notes(&iced::keyboard::Key::Character(
             "a".into()
         )));
+    }
+
+    #[test]
+    fn prerelease_heading_stays_on_the_card_including_github_notes() {
+        let changelog = "\
+## 0.5.0-alpha.1
+
+Alpha summary for the extra number reader in this test fixture.
+
+### Highlights
+
+- First player change
+- Second player change
+
+Detail stays under the card.
+
+### Install
+
+curl secret-alpha
+";
+        let notes = section_for(changelog, "0.5.0-alpha.1").expect("section");
+        assert_eq!(notes.version, "0.5.0-alpha.1");
+        assert_eq!(version_key("0.5.0-alpha.1"), Some((0, 5, 0)));
+        assert_eq!(version_key("0.5.0"), version_key("0.5.0-alpha.1"));
+
+        let offered = notes_for_update(
+            changelog,
+            "0.4.24",
+            "0.5.0-alpha.1",
+            &[RemoteRelease {
+                version: "0.5.0-alpha.1",
+                body: "\
+Alpha summary from GitHub.
+
+### Highlights
+
+- remote highlight
+
+A detail line.
+",
+                published_at: None,
+            }],
+        );
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].version, "0.5.0-alpha.1");
+        assert_eq!(offered[0].summary, "Alpha summary from GitHub.");
+        assert_eq!(offered[0].highlights, ["remote highlight"]);
     }
 
     #[test]

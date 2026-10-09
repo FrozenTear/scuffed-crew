@@ -1,7 +1,7 @@
 [package]
 license.workspace = true
 name = "scuffed-stat-tracker"
-version = "0.4.24"
+version = "0.5.0-alpha.1"
 edition = "2024"
 default-run = "scuffed-stat-tracker"
 
