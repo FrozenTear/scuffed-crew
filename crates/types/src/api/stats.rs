@@ -292,6 +292,14 @@ pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
 }
 
+/// `GET /api/stats/token-check` (daemon token auth).
+///
+/// Display name only. No ids, emails, or roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCheckResponse {
+    pub display_name: String,
+}
+
 /// Per-role aggregate for `GET /api/stats/me/roles` and
 /// `GET /api/stats/member/{id}/roles`.
 ///
@@ -375,6 +383,37 @@ mod tests {
         assert!(resolve_recognizer(&RecognizerInput::NotAString).is_err());
         assert_eq!(effective_recognizer(""), RECOGNIZER_OCR_V1);
         assert_eq!(effective_recognizer("cv-v1"), "cv-v1");
+    }
+
+    #[test]
+    fn missing_hero_is_rejected_when_null_or_omitted() {
+        let omitted = r#"{
+            "matches": [{
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        assert!(
+            serde_json::from_str::<StatsUploadBody>(omitted).is_err(),
+            "an omitted hero field is not accepted"
+        );
+        let null_hero = r#"{
+            "matches": [{
+                "hero": null,
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        assert!(
+            serde_json::from_str::<StatsUploadBody>(null_hero).is_err(),
+            "a null hero is not accepted"
+        );
     }
 
     #[test]

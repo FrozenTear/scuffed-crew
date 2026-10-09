@@ -932,6 +932,12 @@ pub enum AuditAction {
     CreatedPatchNote,
     UpdatedPatchNote,
     DeletedPatchNote,
+    DeniedDeviceLink,
+    CreatedStatReport,
+    DeletedStatReport,
+    WithdrawnStatReportTraining,
+    DownloadedStatReport,
+    ReadStatReportManifest,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -976,6 +982,7 @@ pub enum AuditTargetType {
     Upload,
     Integration,
     PatchNote,
+    StatReport,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -1483,6 +1490,46 @@ pub struct DmReadMarker {
     pub member_id: String,
     pub peer_pubkey: String,
     pub last_read_at: DateTime<Utc>,
+}
+
+/// Metadata for one tracker bug-report bundle.
+///
+/// Image bytes and the log live on disk. This row does not store them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatReport {
+    pub id: String,
+    pub member_id: String,
+    pub created_at: DateTime<Utc>,
+    pub reason_category: String,
+    pub reason_text: String,
+    pub app_version: String,
+    pub recognizer_matcher: String,
+    pub recognizer_ocr: String,
+    pub training_consent: bool,
+    pub own_name_included: bool,
+    pub glyphs_included: bool,
+    pub size_bytes: u64,
+    pub zip_sha256: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Fields written when a report is accepted.
+#[derive(Debug, Clone)]
+pub struct NewStatReport {
+    pub id: String,
+    pub member_id: String,
+    pub created_at: DateTime<Utc>,
+    pub reason_category: String,
+    pub reason_text: String,
+    pub app_version: String,
+    pub recognizer_matcher: String,
+    pub recognizer_ocr: String,
+    pub training_consent: bool,
+    pub own_name_included: bool,
+    pub glyphs_included: bool,
+    pub size_bytes: u64,
+    pub zip_sha256: String,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Build the deterministic conversation key from a pubkey pair.

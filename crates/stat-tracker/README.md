@@ -9,10 +9,10 @@ install paths and the `.desktop` entry stay the same).
 
 ## Platform requirements
 
-- **Linux + Wayland; experimental X11 capture.**
+- **The tracker runs on Linux with both Wayland and X11 capture.** X11 is still being tested more widely.
   - Wayland: libwayshot on wlr-screencopy compositors (Sway, Hyprland, …),
     with XDG Desktop Portal fallback.
-  - X11 (experimental): native capture when a usable X server is detected and
+  - X11: native capture when a usable X server is detected and
     Wayland capture is unavailable.
   - Portal remains last-resort on either stack (slower; not ideal for the poller).
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
