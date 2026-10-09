@@ -741,12 +741,13 @@ mod tests {
             ("gameplay a", stand_in(0.0904, 0.45, None)),
             ("gameplay b", stand_in(0.0943, 0.45, None)),
             ("gameplay c", stand_in(0.0864, 0.45, None)),
-            // Practice Range: one team block of rows at about 0.084, board
-            // header not in the Tab header strip
-            ("practice range", stand_in(0.0844, 0.5, None)),
-            // history Teams screen: rows at about 0.084, its header sits well
-            // below the Tab header strip
-            ("history teams", stand_in(0.0844, 0.45, Some(150))),
+            // Practice Range: one team block of rows, board header not in
+            // the Tab header strip. Pitch stays above the 0.083 floor so
+            // the no-guess band is not what rejects it.
+            ("practice range", stand_in(0.0904, 0.5, None)),
+            // history Teams screen: rows above the 5v5 floor, its header
+            // sits well below the Tab header strip
+            ("history teams", stand_in(0.0904, 0.45, Some(150))),
             // six stat labels where a Tab board has them, rows, but no stat
             // digits at all: ocr-v1's 3-rows-of-4-cells check fails
             ("labels, no digits", stand_in(0.0904, 0.45, Some(0))),
@@ -769,7 +770,7 @@ mod tests {
             digits::stat_columns_found(&crate::ocr::preprocess::crop_scoreboard(f))
         };
         assert!(cols(&stand_in(0.0904, 0.45, Some(0))));
-        assert!(!cols(&stand_in(0.0844, 0.45, Some(150))));
+        assert!(!cols(&stand_in(0.0904, 0.45, Some(150))));
         assert!(!cols(&stand_in(0.0904, 0.45, None)));
     }
 
