@@ -3,6 +3,7 @@ use std::sync::Arc;
 use surrealdb::engine::any::{self, Any};
 use surrealdb::opt::auth::{Database as DatabaseAuth, Root};
 use surrealdb::Surreal;
+use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::CryptoService;
 
@@ -554,6 +555,30 @@ impl Database {
             .map(Arc::new);
 
         Ok(Self { client, crypto })
+    }
+
+    /// Count rows in one schema table.
+    ///
+    /// SurrealQL cannot bind a table name. Only an ASCII identifier is
+    /// accepted, so this does not interpolate arbitrary text.
+    pub async fn count_table(&self, table: &str) -> DbResult<u64> {
+        if table.is_empty() || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(DbError::Config(format!("invalid table name: {table}")));
+        }
+        crate::with_timeout(async {
+            #[derive(serde::Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+
+            let mut result = self
+                .client
+                .query(format!("SELECT count() FROM {table} GROUP ALL"))
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0))
+        })
+        .await
     }
 }
 
