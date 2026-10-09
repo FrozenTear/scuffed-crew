@@ -179,6 +179,11 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 /// `recognizer` and `suspect_fields` on each object in `matches`. The values
 /// are per match because one sync batch can carry games captured under
 /// different readers.
+///
+/// A later upload of the same session replaces both fields. Omitting
+/// `suspect_fields`, or sending null, stores `[]`, the same way omitting
+/// `recognizer` stores `ocr-v1`. A correction that leaves the list out clears
+/// names stored by an earlier upload of that session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatsUploadBody {
     pub matches: Vec<StatsUploadMatch>,
