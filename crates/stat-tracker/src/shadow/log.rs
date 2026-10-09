@@ -1,6 +1,7 @@
 //! Append-only JSONL log of shadow matcher results at
-//! `<data_dir>/shadow/digits.jsonl` (and `heroes.jsonl` for the hero matcher). One line per job. Values and confidences
-//! only: no player names, no images.
+//! `<data_dir>/shadow/digits.jsonl` (and `heroes.jsonl` for the hero
+//! matcher). One line per job. Values and confidences only: no player names,
+//! no images.
 //!
 //! Size cap: when the next line would push the file past [`MAX_BYTES`], the
 //! file is renamed to `digits.jsonl.1` (replacing any older `.1`) and a fresh
