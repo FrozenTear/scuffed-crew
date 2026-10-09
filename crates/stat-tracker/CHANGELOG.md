@@ -22,7 +22,7 @@ This build is an alpha. You can turn on a new scoreboard reader in Settings, and
 ### Highlights
 
 - Settings has a New reader (alpha) switch (`reader` in config.toml). It stays off until you turn it on. When it is on, it reads numbers, the map, Victory or Defeat, and heroes. A field it is not sure about keeps the old reader's value, and the Games tab marks that field unsure.
-- Hero names from the new reader need the hero icon pack in the tracker's data folder. Without that pack, hero names come from the old reader. A members-only download of the pack comes in a later alpha.
+- Hero names: the new reader needs the hero icon pack. In this alpha the pack isn't downloaded for you yet, so hero names come from the old reader unless the pack is already in your tracker's data folder. A members-only download comes in alpha.2.
 - The first launch opens a setup guide: a screen capture check, Overwatch settings, sync sign-in by a code or a pasted token, and the reader pack.
 - Settings can remove the tracker's own files and services. If a package manager installed this copy, Settings shows that package's remove command instead. Saved games are removed only if you tick that option.
 
