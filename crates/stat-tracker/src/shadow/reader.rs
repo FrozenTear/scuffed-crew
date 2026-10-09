@@ -341,9 +341,10 @@ fn has_stat_rows(d: &digits::BoardRead) -> bool {
 }
 
 /// The size comes from Tracker's own rule, `RowScan::checked_team_size`
-/// (#158): split at a row pitch of 0.079 (6v6 below, 5v5 at or above), pitches
-/// outside 0.062 to 0.095 ignored, and dip and spectral pitches that both
-/// count but disagree give no size. Here that is
+/// (#158, #201): a row pitch below 0.080 is 6v6, above 0.083 is 5v5, and
+/// one from 0.080 to 0.083 is no size. Pitches outside 0.062 to 0.095 are
+/// ignored, and dip and spectral pitches that both count but disagree give
+/// no size. Here that is
 /// [`BoardStatus::TeamSizeUnknown`], as the capture path rejects such a frame
 /// as team size uncertain. With no pitch at all there is no layout either,
 /// where `checked_team_size` would default to 5. Nothing guesses a size.
@@ -391,11 +392,11 @@ pub struct MapName {
 /// ([`crate::parse::canonical_map`]) so both readers emit the same string and
 /// mode ([`crate::parse::map_mode`]).
 ///
-/// Two banner maps fold onto a different map in ocr-v1's table: "Temple of
-/// Anubis" (pattern `anubis` gives Throne of Anubis) and "Ecopoint:
-/// Antarctica" (pattern `antarctic` gives Antarctic Peninsula). The banner
-/// match knows which map it saw, so those keep their own name and are
-/// suspect rather than stored as the wrong map. Maps ocr-v1 has no entry for
+/// A banner map that ocr-v1's table folds onto a different map keeps its own
+/// name and is suspect rather than stored as the wrong map: the banner match
+/// knows which map it saw. Until #201 that was "Temple of Anubis" (pattern
+/// `anubis` gave Throne of Anubis) and "Ecopoint: Antarctica" (pattern
+/// `antarctic` gave Antarctic Peninsula); both now have their own keys. Maps ocr-v1 has no entry for
 /// (Practice Range, Hanamura, ...) also keep their banner name, suspect.
 pub fn map_name(info: &MapInfo) -> MapName {
     let other_banner_map = |n: &str| super::banner::MAPS.iter().any(|m| m.name == n);
@@ -812,9 +813,17 @@ mod tests {
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
             let scan = crate::detect::hero_portrait::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
-            // the stand-in fools the preflight and the pitch rule alone
+            // the stand-in fools the preflight and the pitch rule alone. The
+            // history one's spectral pitch (0.0824) is in #201's no-guess
+            // band, so the rule gives it no size; the column check still has
+            // to turn that into not_found.
             assert!(scan.looks_like_scoreboard(), "{what}: {scan:?}");
-            assert_eq!(layout_from_scan(&scan, labels), Ok(5), "{what}: {scan:?}");
+            let want = if what == "history teams" {
+                Err(BoardStatus::TeamSizeUnknown)
+            } else {
+                Ok(5)
+            };
+            assert_eq!(layout_from_scan(&scan, labels), want, "{what}: {scan:?}");
             let b = reader.read_board(&frame);
             assert_eq!(b.status, BoardStatus::NotFound, "{what}");
             assert_eq!(b.team_size, None, "{what}");
@@ -1065,29 +1074,35 @@ mod tests {
     }
 
     /// The two old Overwatch 1 scoreboards from X (#206): rows and stat
-    /// digits, but no stat labels in the Tab header strip. The pitch rule
-    /// alone gives 6 (1920x1080) and 5 (2560x1437).
+    /// digits, but no stat labels in the Tab header strip. The old 0.079
+    /// split gave 6 (1920x1080) and 5 (2560x1437). Since #201 the 2560x1437
+    /// pitches sit in the 0.080 to 0.083 band, so the pitch rule alone gives
+    /// no size there; the 1920x1080 one still passes it as 6.
     #[test]
     fn ow1_scoreboard_stand_ins_are_not_found() {
         let reader = Reader::load(&ReaderConfig::default());
-        for (what, w, h, team, dip, spectral) in [
-            ("OW1 1080", 1920, 1080, 6, 0.0754, 0.0767),
-            ("OW1 2560x1437", 2560, 1437, 5, 0.0826, 0.0806),
+        for (what, w, h, team, dip, spectral, rule) in [
+            ("OW1 1080", 1920, 1080, 6, 0.0754, 0.0767, Ok(6)),
+            (
+                "OW1 2560x1437",
+                2560,
+                1437,
+                5,
+                0.0826,
+                0.0806,
+                Err(BoardStatus::TeamSizeUnknown),
+            ),
         ] {
             assert_eq!(
                 layout_from_scan(&scan(4, Some(dip), Some(spectral)), 0),
-                Ok(team),
+                rule,
                 "{what}"
             );
             let frame = tab_stand_in(w, h, team, dip, BLUE_RED, false);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
             let scan = crate::detect::hero_portrait::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
-            assert_eq!(
-                layout_from_scan(&scan, labels),
-                Ok(team),
-                "{what}: {scan:?}"
-            );
+            assert_eq!(layout_from_scan(&scan, labels), rule, "{what}: {scan:?}");
             assert!(!digits::stat_columns_found(&crop), "{what}");
             let b = reader.read_board(&frame);
             assert_eq!(b.status, BoardStatus::NotFound, "{what}");
@@ -1106,14 +1121,24 @@ mod tests {
     #[test]
     fn disagreeing_or_implausible_pitches_are_team_size_unknown() {
         let unknown = Err(BoardStatus::TeamSizeUnknown);
-        // the real 1080p 6v6 case: dip 0.0794 says 5, spectral 0.0754 says 6
+        // the four real 1080p 6v6 boards: dip 0.0794 and spectral 0.0754
+        // are both 6 since #201 (they were unknown under the 0.079 split)
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0794), Some(0.0754)), 6),
+            Ok(6)
+        );
+        // both plausible, opposite sides of the no-guess band
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.0866), Some(0.074)), 6),
             unknown
         );
-        // both plausible, opposite sides of the 0.079 split
+        // either pitch inside the 0.080 to 0.083 band
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.083), Some(0.074)), 6),
+            unknown
+        );
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.0826), Some(0.0806)), 6),
             unknown
         );
         // measured, but neither plausible (0.101 / 0.102 traps)
@@ -1130,7 +1155,7 @@ mod tests {
         );
         // agreeing or single plausible pitches still read
         assert_eq!(
-            layout_from_scan(&scan(5, Some(0.083), Some(0.084)), 6),
+            layout_from_scan(&scan(5, Some(0.0866), Some(0.0847)), 6),
             Ok(5)
         );
         assert_eq!(
@@ -1156,8 +1181,9 @@ mod tests {
         assert_eq!(b.team_size, None);
     }
 
-    /// The two banner maps ocr-v1's table folds onto another map.
-    const OCR_V1_COLLISIONS: [&str; 2] = ["Temple of Anubis", "Ecopoint: Antarctica"];
+    /// Banner maps ocr-v1's table folds onto another map. Temple of Anubis
+    /// and Ecopoint: Antarctica did until #201 gave them their own keys.
+    const OCR_V1_COLLISIONS: [&str; 0] = [];
 
     #[test]
     fn map_names_match_ocr_v1_for_every_template() {
@@ -1187,8 +1213,8 @@ mod tests {
                 }
             }
         }
-        // every map in ocr-v1's table is in the banner pack
-        assert_eq!(known, 34);
+        // banner maps ocr-v1 stores under their own name (34 before #201)
+        assert_eq!(known, 59);
         for c in OCR_V1_COLLISIONS {
             assert!(MAPS.iter().any(|m| m.name == c), "{c}");
         }
