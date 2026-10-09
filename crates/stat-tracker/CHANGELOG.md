@@ -17,30 +17,20 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.5.0-alpha.1
 
-This build is an alpha. The new number reader stays off until you turn it on in Settings with the Extra number reader (test) switch. It writes a private log on this computer and leaves saved games and uploads alone.
+This build is an alpha. You can turn on a new scoreboard reader in Settings, and it stays off until you do.
 
 ### Highlights
 
-- At 1080p a correct 4 or 0 is marked unsure less often, and a dim 0 read as 1 is marked unsure.
-- 1080p hero portraits line up with the 1440p grid, and a portrait that is not a full square is skipped.
-- One game the server refuses no longer stops the rest of the upload. That game shows as Upload rejected, with the server message and a Retry button.
-- Saving Settings rewrites only the reader line when that is the change, and it reloads a config file that was edited on disk.
+- Settings has a New reader (alpha) switch (`reader` in config.toml). It stays off until you turn it on. When it is on, it reads numbers, the map, Victory or Defeat, and heroes. A field it is not sure about keeps the old reader's value, and the Games tab marks that field unsure.
+- Hero names from the new reader need the hero icon pack in the tracker's data folder. Without that pack, hero names come from the old reader. A members-only download of the pack comes in a later alpha.
+- The first launch opens a setup guide: a screen capture check, Overwatch settings, sync sign-in by a code or a pasted token, and the reader pack.
+- Settings can remove the tracker's own files and services. If a package manager installed this copy, Settings shows that package's remove command instead. Saved games are removed only if you tick that option.
 
-Still to come:
+The tracker reads `reader` when it starts, so restart it after you save. `ocr-v1` is the default when the key is missing. `new` stores the new reader's value for each field it read confidently on your own row, and keeps the old value for the rest. The map and mode already chosen for the game stay, including a Deathmatch game, which stays on this machine. If the new reader names a different map, Games marks the map unsure. If it cannot find the board, cannot tell the team size, finds the columns but reads no numbers, is not sure which row is yours, or does not replace any field, the game stays tagged with the old reader. A field it never tried is not marked unsure. Editing an unsure field clears the mark. Game start, game end, and the checks that hold a bad number do not change. Uploads send the reader name stored on the game, not whatever the switch says now.
 
-- TODO(cv-v5): fill in the cv-v5 reader notes after that PR merges.
+Hero icon templates live in the data folder under `templates/heroes/`. Without them the new reader does not name heroes, and those names stay with the old reader.
 
-The extra reader is still opt-in. The switch writes `shadow_recognizer` in config.toml. The tracker reads that file when it starts, so restart it after you save. `SCUFFED_SHADOW_RECOGNIZER=1` still forces the reader on for one run and is not saved into the file. The log is still `<data dir>/shadow/digits.jsonl`.
-
-The reader id is `cv-v3`. Its 1080p templates were built from real 1080p scoreboards as well as downscaled 1440p boards. A glyph with very little ink (under 0.15 of a full digit square) is marked unsure, which catches a washed-out 0 that used to come back as 1 with a clean margin. 1440p reads stay in line with the previous reader. Stored stats, the capture gate, and uploads are the same with the reader off or on.
-
-On a 1920x1080 scoreboard the last hero portrait used to sit a few pixels high of the 2560x1440 grid, because the row pitch truncated a fraction of a pixel on every row. The crop is now a full square on the same grid. A board too short for that square is skipped instead of saved as a cut-off hero picture.
-
-A stats upload that came back HTTP 400 or 422 used to retry the whole batch, so one bad game blocked every later upload. The batch is now split until the refused games are found. A refused game is kept on this computer with the server's message, dropped from the queue, and shown as Upload rejected. Retry puts it back on the queue. If the server refuses every game in the pass, nothing is pulled out and the batch waits, the same as a server error.
-
-Uploads post the same fields as 0.4.24 (no recognizer id, no suspect_fields list). The site can show a New reader (alpha) badge and unsure marks when a later build sends those fields. The server also has a read-only token check at `GET /api/stats/token-check` for a later first-run step. This build's sync still proves the token by uploading.
-
-The GitHub release install command fetches bootstrap.sh from this tag. The release tarball no longer ships the digit template images as loose files. Those images are compiled into the tracker.
+The Extra number reader (test) switch is still there. It only writes a private log and does not change saved games or uploads on its own.
 
 A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
 
