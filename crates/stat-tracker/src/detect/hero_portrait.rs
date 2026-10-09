@@ -355,8 +355,8 @@ pub struct RowScan {
 
 impl RowScan {
     /// Cheap non-OCR scoreboard preflight: a real scoreboard always renders
-    /// 5-6 rows of white text in the team-1 band at a known pitch (~7.4%
-    /// for 6v6, ~8.3% for 5v5), so at least three dips at a plausible pitch
+    /// 5-6 rows of white text in the team-1 band at a known pitch (about 7.5%
+    /// to 7.9% for 6v6, about 8.3% to 9.0% for 5v5), so at least three dips at a plausible pitch
     /// must be present. Menus, transitions, black frames, and gameplay
     /// scenes lack this periodic structure and are rejected before any
     /// Tesseract or portrait-template work runs.
@@ -368,12 +368,11 @@ impl RowScan {
     }
 
     /// 5v5 or 6v6 from the row pitch; defaults to 5 when no pitch was
-    /// measurable. Threshold sits between the measured 5v5 (~8.3%) and
-    /// 6v6 (~7.4%) pitches. See [`RowScan::checked_team_size`] for which
-    /// pitch is used. When that returns `None` (the pitches contradict each
-    /// other), this falls back to the old rule (spectral pitch, else dip
-    /// pitch) so offline callers still get a size. The capture path rejects
-    /// that frame instead.
+    /// measurable. The split is [`TEAM_SIZE_PITCH_SPLIT`]. See
+    /// [`RowScan::checked_team_size`] for which pitch is used. When that
+    /// returns `None` (the pitches contradict each other), this falls back
+    /// to the old rule (spectral pitch, else dip pitch) so offline callers
+    /// still get a size. The capture path rejects that frame instead.
     pub fn team_size(&self) -> usize {
         self.checked_team_size().unwrap_or_else(|| {
             match self.spectral_pitch.or(self.median_pitch) {
@@ -420,11 +419,24 @@ impl RowScan {
 
 /// Row pitch (fraction of crop height) between the two layouts: 6v6 below,
 /// 5v5 at or above.
-const TEAM_SIZE_PITCH_SPLIT: f64 = 0.079;
+///
+/// `crop_player_row` slot height over crop height (`row_slot_pitch`):
+/// 1080p crop 756 is 6v6 58/756 = 0.076720 and 5v5 68/756 = 0.089947.
+/// 1440p crop 1007 is 6v6 77/1007 = 0.076465 and 5v5 90/1007 = 0.089374.
+/// 4K crop 1512 matches 1080p (116/1512 and 136/1512).
+/// The closest pair is 6v6 at 0.076720 and 5v5 at 0.089374. Their midpoint
+/// is 0.083047. The split is 0.083, so the margin is 0.006280 above the
+/// highest 6v6 slot and 0.006374 below the lowest 5v5 slot.
+///
+/// Native 1080p 6v6 boards measure about 0.0794 (60/756). That is above the
+/// old 0.079 split, so a dip at 0.0788 and a spectral peak at 0.0794 landed
+/// on opposite sides and the capture was rejected as uncertain. 0.0794 is
+/// 0.0036 below this split, on the 6v6 side. A pitch of 0.083 stays 5v5.
+const TEAM_SIZE_PITCH_SPLIT: f64 = 0.083;
 
-/// Row pitches that can be a real 6v6 (about 0.074) or 5v5 (about 0.083)
-/// scoreboard, with about 15% of margin on each side. 0.101 and 0.102, the
-/// two misleading pitches measured so far, fall outside.
+/// Row pitches that can be a real 6v6 (about 0.074 to 0.0794) or 5v5
+/// (about 0.083 to 0.090) scoreboard, with room on each side. 0.101 and
+/// 0.102, the two misleading pitches measured so far, fall outside.
 const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 
 /// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
@@ -434,7 +446,8 @@ const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 /// gaps. Instead we measure saturation across the name strip per scanline: every
 /// row — occupied or empty — has white text that dips saturation once per row,
 /// so the dip-to-dip pitch reveals the row count regardless of empty slots or
-/// team colors. 6v6 rows are tighter (~7.4% of crop height) than 5v5 (~8.3%).
+/// team colors. 6v6 rows are tighter (about 7.5% to 7.9% of crop height)
+/// than 5v5 (about 8.3% to 9.0%). See [`TEAM_SIZE_PITCH_SPLIT`].
 pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
     scan_rows(scoreboard).team_size()
 }
@@ -531,9 +544,10 @@ const SPECTRAL_MIN_STRENGTH: f64 = 0.12;
 
 /// Row pitch (fraction of crop height) from the strongest DFT component of
 /// the smoothed team-1 saturation profile, scanning periods that span the
-/// 6v6 (~7.4%) to 5v5 (~8.3%) row pitches with margin. The peak must be
-/// interior — a maximum at the range edge means the spectrum is just decaying
-/// (no row periodicity) — and strong enough relative to band variance.
+/// 6v6 (about 7.5% to 7.9%) to 5v5 (about 8.3% to 9.0%) row pitches with
+/// margin. The peak must be interior: a maximum at the range edge means the
+/// spectrum is just decaying (no row periodicity), and it must be strong
+/// enough relative to band variance.
 fn spectral_pitch(band: &[f64], crop_h: u32) -> Option<f64> {
     let n = band.len();
     let p_lo = ((crop_h as f64 * 0.055) as usize).max(4);
@@ -1124,5 +1138,62 @@ mod team_size_tests {
         assert_eq!(s.checked_team_size(), None);
         assert_eq!(s.team_size(), 6);
         assert_eq!(scan(2, Some(0.12), None).checked_team_size(), None);
+    }
+
+    #[test]
+    fn native_1080_six_v_six_pitch_is_six_and_layout_five_stays_five() {
+        // Both reads at the measured 1080p 6v6 pitch. The old 0.079 split
+        // classified 0.0794 as 5v5, and a dip of 0.0788 beside it as 6v6,
+        // so checked_team_size returned None and the capture was rejected.
+        let measured = scan(6, Some(0.0794), Some(0.0794));
+        assert_eq!(measured.checked_team_size(), Some(6));
+        assert_eq!(measured.team_size(), 6);
+        let straddle = scan(6, Some(0.0788), Some(0.0794));
+        assert_eq!(straddle.checked_team_size(), Some(6));
+        assert_eq!(straddle.team_size(), 6);
+
+        let specs = [
+            (1920u32, 1080u32, "1080p"),
+            (2560, 1440, "1440p"),
+            (3840, 2160, "4k"),
+        ];
+        let mut max_six = 0.0_f64;
+        let mut min_five = f64::MAX;
+        for (w, h, label) in specs {
+            let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h));
+            let board = crate::ocr::preprocess::crop_scoreboard(&img);
+            let six = crate::ocr::preprocess::row_slot_height(board.height(), 6) as f64
+                / board.height() as f64;
+            let five = crate::ocr::preprocess::row_slot_height(board.height(), 5) as f64
+                / board.height() as f64;
+            assert!(
+                six < super::TEAM_SIZE_PITCH_SPLIT,
+                "{label} 6v6 {six} crop {}x{}",
+                board.width(),
+                board.height()
+            );
+            assert!(
+                five >= super::TEAM_SIZE_PITCH_SPLIT,
+                "{label} 5v5 {five} crop {}x{}",
+                board.width(),
+                board.height()
+            );
+            max_six = max_six.max(six);
+            min_five = min_five.min(five);
+            let as_six = scan(6, Some(six), Some(six));
+            assert_eq!(as_six.checked_team_size(), Some(6), "{label}");
+            let as_five = scan(5, Some(five), Some(five));
+            assert_eq!(as_five.checked_team_size(), Some(5), "{label}");
+        }
+        let below = super::TEAM_SIZE_PITCH_SPLIT - max_six;
+        let above = min_five - super::TEAM_SIZE_PITCH_SPLIT;
+        assert!(
+            (below - 0.006280).abs() < 1e-6 && (above - 0.006374).abs() < 1e-6,
+            "margin below {below}, above {above}, 6v6 {max_six}, 5v5 {min_five}"
+        );
+        // The 5v5 value the capture check must keep: the closest layout slot.
+        let five = scan(5, Some(min_five), Some(min_five));
+        assert_eq!(five.checked_team_size(), Some(5));
+        assert_eq!(five.team_size(), 5);
     }
 }

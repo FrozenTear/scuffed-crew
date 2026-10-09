@@ -217,11 +217,24 @@ fn best_word_score(text: &str, pattern: &str) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-/// Deathmatch maps are kept in the local store and never uploaded.
-/// Only a trusted map read (top bar, accolade, or an already trusted
-/// session) may divert a capture. A fuzzy board read must not.
+/// Deathmatch and practice maps are kept in the local store and never
+/// uploaded. Only a trusted map read (top bar, accolade, or an already
+/// trusted session) may divert a capture. A fuzzy board read must not.
+///
+/// Practice Range is not a game. With no table entry the name used to
+/// canonicalize to nothing, the row kept an empty map, and that empty map
+/// was uploaded. The Practice bucket keeps it out of uploads.
 pub fn map_is_untracked(name: &str) -> bool {
-    map_mode(name) == Some("Deathmatch")
+    matches!(map_mode(name), Some("Deathmatch" | "Practice"))
+}
+
+/// Reason recorded when an untracked map is kept out of uploads.
+pub fn untracked_close_reason(name: &str) -> &'static str {
+    if map_mode(name) == Some("Practice") {
+        "practice: not tracked"
+    } else {
+        "deathmatch: not tracked"
+    }
 }
 
 /// Mode sent for a row. A known map wins, including a manual map correction.
@@ -235,9 +248,12 @@ pub fn uploaded_game_mode(map_name: &str, game_mode: &str) -> String {
     }
 }
 
-/// A stats row is uploaded only when neither the map nor the mode is Deathmatch.
+/// A stats row is uploaded only when neither the map nor the mode is
+/// Deathmatch or Practice.
 pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
-    !map_is_untracked(map_name) && !game_mode.eq_ignore_ascii_case("Deathmatch")
+    !map_is_untracked(map_name)
+        && !game_mode.eq_ignore_ascii_case("Deathmatch")
+        && !game_mode.eq_ignore_ascii_case("Practice")
 }
 
 /// Mode stored on a row, from the canonical map that was actually kept.
@@ -784,6 +800,14 @@ const MAPS: &[(&str, &str)] = &[
     ("Paraiso", "paraiso"),
     ("Paraiso", "paraíso"),
     ("Neon Junction", "neon junction"),
+    // "antarctica" starts with "antarctic", so the short control-map key
+    // used to store Ecopoint: Antarctica as Antarctic Peninsula. The
+    // peninsula's own word is checked first. The full "antarctica" token,
+    // and "ecopoint", are the arena map. A bare "antarctic" stays the
+    // control map. Both names stay in the table.
+    ("Antarctic Peninsula", "peninsula"),
+    ("Ecopoint: Antarctica", "ecopoint"),
+    ("Ecopoint: Antarctica", "antarctica"),
     ("Antarctic Peninsula", "antarctic"),
     ("Busan", "busan"),
     ("Ilios", "ilios"),
@@ -805,10 +829,53 @@ const MAPS: &[(&str, &str)] = &[
     ("Suravasa", "suravasa"),
     ("Aatlis", "aatlis"),
     ("Hanaoka", "hanaoka"),
+    // "anubis" alone is Throne of Anubis. "temple" has to win first, or
+    // Temple of Anubis is stored as the clash map. Both names stay.
+    ("Temple of Anubis", "temple"),
+    ("Throne of Anubis", "throne"),
     ("Throne of Anubis", "anubis"),
+    // Assault left Quick Play, and these five are still in custom games
+    // and arcade. Temple of Anubis is one of them; the others had no entry.
+    ("Hanamura", "hanamura"),
+    ("Horizon Lunar Colony", "horizon"),
+    ("Horizon Lunar Colony", "lunar colony"),
+    ("Paris", "paris"),
+    ("Volskaya Industries", "volskaya"),
+    // Arena maps. Ecopoint: Antarctica is one of them; the short
+    // "antarctic" key above must not claim it.
+    ("Black Forest", "black forest"),
+    ("Castillo", "castillo"),
+    ("Necropolis", "necropolis"),
+    // Stadium maps that are not a sub-area of a map already stored here.
+    // A name that contains an existing key (Oasis University, Busan
+    // Sanctuary) still stores as that map, so those rows do not split.
+    ("Arena Victoriae", "victoriae"),
+    ("Gogadoro", "gogadoro"),
+    ("Wuxing University - Water College", "wuxing"),
+    ("Wuxing University - Water College", "water college"),
+    ("Place Lacroix", "lacroix"),
+    ("Redwood Dam", "redwood"),
+    ("Serenza", "serenza"),
+    ("Powder Keg Mine", "powder keg"),
+    ("Thames District", "thames"),
+    ("Ayutthaya", "ayutthaya"),
+    // Workshop layouts. The full phrase is the key so "workshop" alone
+    // cannot pick one of them.
+    ("Workshop Chamber", "workshop chamber"),
+    ("Workshop Expanse", "workshop expanse"),
+    ("Workshop Green Screen", "workshop green"),
+    ("Workshop Island", "workshop island"),
+    // Training. Practice Range is not a game: see `map_is_untracked`.
+    ("Practice Range", "practice range"),
+    ("Practice Range", "practice"),
+    ("Mastery Course", "mastery"),
+    ("Tutorial", "tutorial"),
     // Deathmatch only. Kept in the local store. Never uploaded.
     // A trusted read is required before a capture is diverted.
     ("Château Guillard", "guillard"),
+    ("Kanezaka", "kanezaka"),
+    ("Malevento", "malevento"),
+    ("Petra", "petra"),
 ];
 
 /// Fold OCR-ambiguous glyphs and Latin diacritics so a mangled map name still
@@ -870,16 +937,32 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
         "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown"
         | "Neon Junction" | "Numbani" | "Paraiso" => Some("Hybrid"),
         "Antarctic Peninsula"
+        | "Arena Victoriae"
         | "Busan"
+        | "Gogadoro"
         | "Ilios"
         | "Lijiang Tower"
         | "Nepal"
         | "Oasis"
-        | "Samoa" => Some("Control"),
-        "Colosseo" | "Esperanca" | "New Queen Street" | "Runasapi" => Some("Push"),
+        | "Samoa"
+        | "Wuxing University - Water College" => Some("Control"),
+        "Colosseo" | "Esperanca" | "New Queen Street" | "Place Lacroix" | "Redwood Dam"
+        | "Runasapi" | "Serenza" => Some("Push"),
         "Aatlis" | "New Junk City" | "Suravasa" => Some("Flashpoint"),
         "Hanaoka" | "Throne of Anubis" => Some("Clash"),
-        "Château Guillard" => Some("Deathmatch"),
+        "Hanamura"
+        | "Horizon Lunar Colony"
+        | "Paris"
+        | "Temple of Anubis"
+        | "Volskaya Industries" => Some("Assault"),
+        "Black Forest" | "Castillo" | "Ecopoint: Antarctica" | "Necropolis" => Some("Elimination"),
+        "Ayutthaya" => Some("Capture the Flag"),
+        "Powder Keg Mine" | "Thames District" => Some("Payload Race"),
+        "Workshop Chamber" | "Workshop Expanse" | "Workshop Green Screen" | "Workshop Island" => {
+            Some("Workshop")
+        }
+        "Mastery Course" | "Practice Range" | "Tutorial" => Some("Practice"),
+        "Château Guillard" | "Kanezaka" | "Malevento" | "Petra" => Some("Deathmatch"),
         _ => None,
     }
 }
@@ -1862,6 +1945,148 @@ mod hero_map_name_tests {
         }
         assert!(stats_row_is_tracked("Busan", "Control"));
         assert!(!stats_row_is_tracked("Busan", "Deathmatch"));
+    }
+
+    #[test]
+    fn anubis_and_antarctica_names_stay_on_their_own_maps() {
+        // Stored spellings of the maps that were already in the table do
+        // not move. Esperanca and Paraiso stay unaccented.
+        assert_eq!(canonical_map("Esperanca").as_deref(), Some("Esperanca"));
+        assert_eq!(canonical_map("Esperança").as_deref(), Some("Esperanca"));
+        assert_eq!(canonical_map("Paraiso").as_deref(), Some("Paraiso"));
+        assert_eq!(canonical_map("Paraíso").as_deref(), Some("Paraiso"));
+        assert_eq!(
+            canonical_map("Throne of Anubis").as_deref(),
+            Some("Throne of Anubis")
+        );
+        assert_eq!(
+            canonical_map("Antarctic Peninsula").as_deref(),
+            Some("Antarctic Peninsula")
+        );
+
+        for (raw, display, mode) in [
+            ("Temple of Anubis", "Temple of Anubis", "Assault"),
+            ("TEMPLE OF ANUBIS", "Temple of Anubis", "Assault"),
+            ("temple of anubis", "Temple of Anubis", "Assault"),
+            ("Throne of Anubis", "Throne of Anubis", "Clash"),
+            ("THRONE OF ANUBIS", "Throne of Anubis", "Clash"),
+            ("ANUBIS", "Throne of Anubis", "Clash"),
+            (
+                "Ecopoint: Antarctica",
+                "Ecopoint: Antarctica",
+                "Elimination",
+            ),
+            (
+                "ECOPOINT: ANTARCTICA",
+                "Ecopoint: Antarctica",
+                "Elimination",
+            ),
+            ("ANTARCTICA", "Ecopoint: Antarctica", "Elimination"),
+            ("ECOPOINT", "Ecopoint: Antarctica", "Elimination"),
+            ("Antarctic Peninsula", "Antarctic Peninsula", "Control"),
+            ("ANTARCTIC PENINSULA", "Antarctic Peninsula", "Control"),
+            ("ANTARCTIC", "Antarctic Peninsula", "Control"),
+        ] {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(name, display, "{raw}");
+            assert_eq!(map_mode(&name), Some(mode), "{raw}");
+            assert_eq!(
+                exact_map_in_text(raw).as_deref(),
+                Some(display),
+                "accolade {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_missing_from_the_ocr_table_canonicalize_with_their_mode() {
+        let cases = [
+            ("Hanamura", "Hanamura", "Assault", true),
+            ("HANAMURA", "Hanamura", "Assault", true),
+            (
+                "Horizon Lunar Colony",
+                "Horizon Lunar Colony",
+                "Assault",
+                true,
+            ),
+            ("HORIZON", "Horizon Lunar Colony", "Assault", true),
+            ("LUNAR COLONY", "Horizon Lunar Colony", "Assault", true),
+            ("Paris", "Paris", "Assault", true),
+            ("PARIS", "Paris", "Assault", true),
+            (
+                "Volskaya Industries",
+                "Volskaya Industries",
+                "Assault",
+                true,
+            ),
+            ("VOLSKAYA", "Volskaya Industries", "Assault", true),
+            ("Black Forest", "Black Forest", "Elimination", true),
+            ("Castillo", "Castillo", "Elimination", true),
+            ("Necropolis", "Necropolis", "Elimination", true),
+            ("Ayutthaya", "Ayutthaya", "Capture the Flag", true),
+            ("Arena Victoriae", "Arena Victoriae", "Control", true),
+            ("VICTORIAE", "Arena Victoriae", "Control", true),
+            ("Gogadoro", "Gogadoro", "Control", true),
+            (
+                "Wuxing University - Water College",
+                "Wuxing University - Water College",
+                "Control",
+                true,
+            ),
+            (
+                "WUXING",
+                "Wuxing University - Water College",
+                "Control",
+                true,
+            ),
+            (
+                "WATER COLLEGE",
+                "Wuxing University - Water College",
+                "Control",
+                true,
+            ),
+            ("Place Lacroix", "Place Lacroix", "Push", true),
+            ("LACROIX", "Place Lacroix", "Push", true),
+            ("Redwood Dam", "Redwood Dam", "Push", true),
+            ("REDWOOD", "Redwood Dam", "Push", true),
+            ("Serenza", "Serenza", "Push", true),
+            ("Powder Keg Mine", "Powder Keg Mine", "Payload Race", true),
+            ("POWDER KEG MINES", "Powder Keg Mine", "Payload Race", true),
+            ("Thames District", "Thames District", "Payload Race", true),
+            ("THAMES", "Thames District", "Payload Race", true),
+            ("Workshop Chamber", "Workshop Chamber", "Workshop", true),
+            ("Workshop Expanse", "Workshop Expanse", "Workshop", true),
+            (
+                "Workshop Green Screen",
+                "Workshop Green Screen",
+                "Workshop",
+                true,
+            ),
+            ("Workshop Island", "Workshop Island", "Workshop", true),
+            ("Kanezaka", "Kanezaka", "Deathmatch", false),
+            ("Malevento", "Malevento", "Deathmatch", false),
+            ("Petra", "Petra", "Deathmatch", false),
+            ("Practice Range", "Practice Range", "Practice", false),
+            ("PRACTICE RANGE", "Practice Range", "Practice", false),
+            ("PRACTICE", "Practice Range", "Practice", false),
+            ("Mastery Course", "Mastery Course", "Practice", false),
+            ("Tutorial", "Tutorial", "Practice", false),
+        ];
+        for (raw, display, mode, tracked) in cases {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(name, display, "{raw}");
+            assert_eq!(map_mode(&name), Some(mode), "{raw}");
+            assert_eq!(map_is_untracked(&name), !tracked, "{raw}");
+            assert_eq!(stats_row_is_tracked(&name, mode), tracked, "{raw}");
+        }
+        // Hanaoka is not Hanamura. Paraiso is not Paris.
+        assert_eq!(canonical_map("Hanaoka").as_deref(), Some("Hanaoka"));
+        assert_eq!(canonical_map("HANAOKA").as_deref(), Some("Hanaoka"));
+        assert_eq!(canonical_map("Paraiso").as_deref(), Some("Paraiso"));
+        assert_eq!(canonical_map("PARAISO").as_deref(), Some("Paraiso"));
+        assert!(stats_row_is_tracked("Hanamura", "Assault"));
+        assert!(!stats_row_is_tracked("Practice Range", "Practice"));
+        assert!(!stats_row_is_tracked("Busan", "Practice"));
     }
 
     #[test]

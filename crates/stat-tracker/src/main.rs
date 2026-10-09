@@ -1110,8 +1110,8 @@ fn append_unrecorded_row(data_dir: &std::path::Path, row: &serde_json::Value) {
     }
 }
 
-/// Deathmatch is local only. Log once at info and append the same jsonl the
-/// unrecorded path uses, so a later close does not warn again.
+/// Deathmatch and practice are local only. Log once at info and append the
+/// same jsonl the unrecorded path uses, so a later close does not warn again.
 fn note_untracked_once(data_dir: &std::path::Path, g: &ActiveGame, reason: &str) {
     if untracked_already_noted(data_dir, &g.session_id, reason) {
         return;
@@ -1120,7 +1120,7 @@ fn note_untracked_once(data_dir: &std::path::Path, g: &ActiveGame, reason: &str)
         session_id = %g.session_id,
         map = g.map.as_deref().unwrap_or("?"),
         reason,
-        "deathmatch: not tracked"
+        "untracked map: not uploaded"
     );
     let row = serde_json::json!({
         "closed_at": Utc::now().to_rfc3339(),
@@ -1184,7 +1184,11 @@ fn end_screen_split_log(
 /// warn for that session.
 fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str) {
     if parse::map_is_untracked(g.map.as_deref().unwrap_or("")) {
-        note_untracked_once(data_dir, g, "deathmatch: not tracked");
+        note_untracked_once(
+            data_dir,
+            g,
+            parse::untracked_close_reason(g.map.as_deref().unwrap_or("")),
+        );
         return;
     }
     if g.session_created {
@@ -2644,9 +2648,10 @@ async fn apply_capture_report(
             false
         }
         Ok(report) if !report.recorded => {
-            // A fuzzy Guillard read must not rename an open Busan session.
-            // Only a trusted map (top bar or accolade) may adopt Deathmatch,
-            // and only onto an empty session or one that is already Deathmatch.
+            // A fuzzy Guillard or Practice Range read must not rename an open
+            // Busan session. Only a trusted map (top bar or accolade) may
+            // adopt an untracked map, and only onto an empty session or one
+            // that is already untracked.
             if let Some(map) = report.map.clone()
                 && parse::map_is_untracked(&map)
                 && report
@@ -2656,9 +2661,10 @@ async fn apply_capture_report(
             {
                 let current = g.map.as_deref().unwrap_or("");
                 if current.is_empty() || parse::map_is_untracked(current) {
+                    let reason = parse::untracked_close_reason(&map);
                     g.map = Some(map);
                     g.map_source = report.map_source;
-                    note_untracked_once(data_dir, g, "deathmatch: not tracked");
+                    note_untracked_once(data_dir, g, reason);
                     persist_active_game(data_dir, Some(g));
                 }
                 return false;
