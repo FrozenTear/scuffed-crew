@@ -179,9 +179,10 @@ pub fn all_notes(changelog: &str) -> Vec<ReleaseNotes> {
     rows.into_iter().map(|(_, notes)| notes).collect()
 }
 
-/// Notes for an offered update. `remote` is `(version, GitHub release body)`,
-/// newest or not. A non-empty cleaned body wins. The bundled section is the
-/// fallback when GitHub has no usable text for that version.
+/// Notes for an offered update. A non-empty cleaned GitHub body supplies the
+/// technical text. When that body has no `### Highlights` list, the bundled
+/// summary and highlights stay in front and the GitHub text moves under
+/// Details. The bundled section is the fallback when GitHub has no usable text.
 pub fn notes_for_update(
     bundled: &str,
     current: &str,
@@ -355,6 +356,21 @@ fn notes_for_key(
                 && let Some(bundled_notes) = &bundled_notes
             {
                 from_remote.highlights.clone_from(&bundled_notes.highlights);
+                if !bundled_notes.summary.is_empty() && from_remote.summary != bundled_notes.summary
+                {
+                    let mut details = String::new();
+                    let lead = from_remote.summary.trim();
+                    let rest = from_remote.body_markdown.trim();
+                    if !lead.is_empty() {
+                        details.push_str(lead);
+                        if !rest.is_empty() {
+                            details.push_str("\n\n");
+                        }
+                    }
+                    details.push_str(rest);
+                    from_remote.summary.clone_from(&bundled_notes.summary);
+                    from_remote.body_markdown = details;
+                }
             }
             from_remote.published_on = published_on;
             return Some(from_remote);
@@ -994,8 +1010,17 @@ Need GTK.
         assert!(notes[0].highlights.is_empty());
         assert!(notes[0].published_on.is_none());
 
-        assert_eq!(notes[1].summary, "Player summary from GitHub.");
+        assert_eq!(notes[1].summary, "Player summary for two. It stays short.");
+        assert_eq!(
+            notes[1].highlights,
+            ["Maps stay on the right game", "Long games are not cut off"]
+        );
         assert_eq!(notes[1].published_on.as_deref(), Some("4 Mar 2026"));
+        assert!(
+            notes[1]
+                .body_markdown
+                .contains("Player summary from GitHub.")
+        );
         assert!(notes[1].body_markdown.contains("Detail line"));
         assert!(notes[1].body_markdown.contains("- a bullet"));
         assert!(!notes[1].body_markdown.contains("Prebuilt Linux"));
@@ -1045,6 +1070,7 @@ Detail line with `inline`.
                 published_at: None,
             }],
         );
+        assert_eq!(preferred[0].summary, "Player summary from GitHub.");
         assert_eq!(preferred[0].highlights, ["remote highlight"]);
         assert!(!preferred[0].body_markdown.contains("remote highlight"));
         assert!(preferred[0].body_markdown.contains("Detail line"));
