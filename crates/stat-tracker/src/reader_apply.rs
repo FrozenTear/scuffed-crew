@@ -411,14 +411,24 @@ mod tests {
 
     #[test]
     fn not_found_keeps_the_whole_ocr_v1_read() {
-        let board = BoardRead {
+        // A frame with no board can still carry match slots. None of them
+        // are stored, even when a slot looks confident.
+        let mut board = BoardRead {
             status: BoardStatus::NotFound,
             team_size: None,
             fields: vec![unread("map"), unread("mode"), unread("result")],
             elapsed_ms: 1,
         };
+        board.fields[0] = FieldRead {
+            name: "map".into(),
+            value: Some(Value::Text("Ilios".into())),
+            confidence: 0.99,
+            suspect: false,
+        };
         let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
         assert_eq!(saved.map, "Busan");
+        assert_eq!(saved.mode, "Control");
+        assert_eq!(saved.result, "victory");
         assert_eq!(saved.hero, "Ana");
         assert_eq!(saved.elims, 10);
         assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
