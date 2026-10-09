@@ -5,7 +5,7 @@
 //! Test captures and the Tab check stay in memory. The sign-in device code
 //! stays in memory too: it is not written to disk and it is not logged.
 //!
-//! Server contracts (drafts; #188 is token-check, link endpoints are coming):
+//! Server contracts:
 //!
 //! * `POST /api/link/start` with `{device_label, app_version}` returns
 //!   `{user_code, device_code, interval, expires_in}`. `user_code` is
@@ -22,10 +22,12 @@
 //!   parsed, and HTTP 404, which means the route is not on this server yet.
 //! * `GET /api/stats/token-check` returns `{display_name}` or
 //!   `{"error":"Unauthorized"}` for any failure. One check per button press.
-//! * HTTP 429 on token-check, link start, or link poll ignores the body.
-//!   `Retry-After` seconds are the wait when that header is a number.
-//!   Otherwise the wait is 10 seconds. A poll waits that long before the
-//!   next request and does not change its interval.
+//! * HTTP 429 on `/api/link/*` is JSON
+//!   `{"error":"rate_limited","retry_after":N}` plus a `Retry-After` header.
+//!   Token-check can return the same kind of 429. The tracker does not parse
+//!   that body, and it also accepts a plain-text 429. The wait is the
+//!   `Retry-After` header when that header is a number. Otherwise the wait
+//!   is 10 seconds. A poll waits that long and does not change its interval.
 //! * HTTP 404 on token-check or `POST /api/link/start` means this server
 //!   does not have those routes yet. The token is still saved, and site
 //!   sign-in is hidden in favour of pasting a token.
@@ -1968,6 +1970,19 @@ mod tests {
         assert_eq!(waited, TokenCheckResult::Wait { seconds: 8 });
         assert_eq!(token_check_message(&waited), rate_limit_message(8));
         assert_ne!(token_check_message(&waited), TOKEN_REJECTED);
+        let json_header =
+            map_token_check(429, r#"{"error":"rate_limited","retry_after":99}"#, Some(8));
+        assert_eq!(json_header, TokenCheckResult::Wait { seconds: 8 });
+        assert!(!token_check_message(&json_header).contains("99"));
+        let json_body_only =
+            map_token_check(429, r#"{"error":"rate_limited","retry_after":99}"#, None);
+        assert_eq!(
+            json_body_only,
+            TokenCheckResult::Wait {
+                seconds: RATE_LIMIT_FALLBACK_SECS
+            }
+        );
+        assert!(!token_check_message(&json_body_only).contains("99"));
         let plain = map_token_check(429, "not json", None);
         assert_eq!(
             plain,
@@ -2350,29 +2365,25 @@ mod tests {
             let seen = log.iter().filter(|item| item.as_str() == kind).count();
             log.push(kind.to_string());
             drop(log);
+            let link_json = r#"{"error":"rate_limited","retry_after":99}"#;
             match (kind, seen) {
                 ("start", 0) => (
                     429,
                     vec![("Retry-After", "4".into())],
                     "plain text not json".into(),
                 ),
-                ("start", _) => (
-                    429,
-                    vec![],
-                    r#"{"error":"Unauthorized","status":"slow_down"}"#.into(),
-                ),
+                ("start", 1) => (429, vec![], link_json.into()),
+                ("start", _) => (429, vec![("Retry-After", "7".into())], link_json.into()),
                 ("poll", 0) => (
                     429,
                     vec![("Retry-After", "6".into())],
                     "dc-SECRET-9f3a-not-for-disk".into(),
                 ),
-                ("poll", _) => (
-                    429,
-                    vec![],
-                    r#"{"status":"pending","token":"leaked-token"}"#.into(),
-                ),
+                ("poll", 1) => (429, vec![], link_json.into()),
+                ("poll", _) => (429, vec![("Retry-After", "2".into())], link_json.into()),
                 ("check", 0) => (429, vec![("Retry-After", "3".into())], "hold on".into()),
-                ("check", _) => (429, vec![], r#"{"error":"Unauthorized"}"#.into()),
+                ("check", 1) => (429, vec![], link_json.into()),
+                ("check", _) => (429, vec![("Retry-After", "8".into())], link_json.into()),
                 _ => (500, vec![], "nope".into()),
             }
         });
@@ -2387,8 +2398,13 @@ mod tests {
             .await
             .expect_err("json 429");
         assert_eq!(start_json, rate_limit_message(RATE_LIMIT_FALLBACK_SECS));
-        assert!(!start_json.contains("Unauthorized"));
-        assert!(!start_json.contains("slow_down"));
+        assert!(!start_json.contains("rate_limited"));
+        assert!(!start_json.contains("99"));
+        let start_header = start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
+            .await
+            .expect_err("json 429 with header");
+        assert_eq!(start_header, rate_limit_message(7));
+        assert!(!start_header.contains("99"));
 
         let secret = "dc-SECRET-9f3a-not-for-disk";
         let poll_plain = poll_link(base.clone(), secret.into())
@@ -2404,6 +2420,10 @@ mod tests {
                 seconds: RATE_LIMIT_FALLBACK_SECS
             }
         );
+        let poll_header = poll_link(base.clone(), secret.into())
+            .await
+            .expect("json poll 429 with header");
+        assert_eq!(poll_header, PollUpdate::RateLimited { seconds: 2 });
 
         let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
         guide.link = Some(LinkMachine::start(
@@ -2420,13 +2440,7 @@ mod tests {
             Some(rate_limit_message(6).as_str())
         );
         assert!(!guide.link_message.as_deref().unwrap_or("").contains(secret));
-        assert!(
-            !guide
-                .link_message
-                .as_deref()
-                .unwrap_or("")
-                .contains("leaked-token")
-        );
+        assert!(!guide.link_message.as_deref().unwrap_or("").contains("99"));
         assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 5);
         let scheduled = guide.next_poll_at.expect("next poll");
         let wait = scheduled.saturating_duration_since(before);
@@ -2438,6 +2452,21 @@ mod tests {
                 .is_none()
         );
         assert!(guide.poll_request_if_due(scheduled).is_some());
+        guide.poll_inflight = false;
+        let before = Instant::now();
+        assert!(guide.poll_ready(Ok(poll_header)).is_none());
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 5);
+        assert_eq!(
+            guide.link_message.as_deref(),
+            Some("Too many tries, wait 2 seconds and try again")
+        );
+        assert!(!guide.link_message.as_deref().unwrap_or("").contains("99"));
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(2), "{wait:?}");
+        assert!(wait < Duration::from_secs(3), "{wait:?}");
 
         let check_plain = check_token(base.clone(), "tok-1".into())
             .await
@@ -2446,7 +2475,7 @@ mod tests {
         assert_eq!(token_check_message(&check_plain), rate_limit_message(3));
         assert!(!token_check_message(&check_plain).contains("hold"));
 
-        let check_json = check_token(base, "tok-1".into())
+        let check_json = check_token(base.clone(), "tok-1".into())
             .await
             .expect("json check 429");
         assert_eq!(
@@ -2459,7 +2488,13 @@ mod tests {
             token_check_message(&check_json),
             "Too many tries, wait 10 seconds and try again"
         );
-        assert!(!token_check_message(&check_json).contains("Unauthorized"));
+        assert!(!token_check_message(&check_json).contains("99"));
+        assert!(!token_check_message(&check_json).contains("rate_limited"));
+        let check_header = check_token(base, "tok-1".into())
+            .await
+            .expect("json check 429 with header");
+        assert_eq!(check_header, TokenCheckResult::Wait { seconds: 8 });
+        assert!(!token_check_message(&check_header).contains("99"));
         guide.paste_token = "tok-1".into();
         guide.sync_url = guide
             .link
