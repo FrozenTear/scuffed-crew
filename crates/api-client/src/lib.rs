@@ -12,6 +12,35 @@ pub enum ClientError {
     Deserialize(String),
 }
 
+/// HTTP failure that keeps `Retry-After` separate from the body.
+///
+/// Link sign-in uses this so a 429 can fall back to `Retry-After` when the
+/// JSON body has no usable `retry_after`. Other callers keep [`ClientError`].
+#[derive(Debug)]
+pub enum ObservedError {
+    Http {
+        status: u16,
+        body: String,
+        retry_after: Option<String>,
+    },
+    Network(String),
+    Deserialize(String),
+}
+
+impl ObservedError {
+    pub(crate) fn from_client(err: ClientError, retry_after: Option<String>) -> Self {
+        match err {
+            ClientError::Http { status, body } => Self::Http {
+                status,
+                body,
+                retry_after,
+            },
+            ClientError::Network(message) => Self::Network(message),
+            ClientError::Deserialize(message) => Self::Deserialize(message),
+        }
+    }
+}
+
 impl ClientError {
     /// HTTP status when the server answered; `None` for network/parse failures.
     pub fn http_status(&self) -> Option<u16> {
@@ -102,6 +131,17 @@ impl ApiClient {
         self.do_post_json(path, body).await
     }
 
+    /// POST JSON, keeping a `Retry-After` header on HTTP failures.
+    ///
+    /// Uses the same-origin cookie session as [`Self::post_json`]. No extra header.
+    pub async fn post_json_observed<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ObservedError> {
+        self.do_post_json_observed(path, body).await
+    }
+
     /// POST that discards the response body (empty 2xx OK via [`decode_body`]).
     pub async fn post_json_empty<B: serde::Serialize>(
         &self,
@@ -183,6 +223,14 @@ impl ApiClient {
         web_impl::post_json(&self.base_url, path, body).await
     }
     #[cfg(feature = "web")]
+    async fn do_post_json_observed<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ObservedError> {
+        web_impl::post_json_observed(&self.base_url, path, body).await
+    }
+    #[cfg(feature = "web")]
     async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -218,6 +266,14 @@ impl ApiClient {
         body: &B,
     ) -> Result<T, ClientError> {
         native_impl::post_json(&self.base_url, path, body, self.token.as_deref()).await
+    }
+    #[cfg(feature = "native")]
+    async fn do_post_json_observed<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ObservedError> {
+        native_impl::post_json_observed(&self.base_url, path, body, self.token.as_deref()).await
     }
     #[cfg(feature = "native")]
     async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(

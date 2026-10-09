@@ -56,6 +56,16 @@ pub struct Config {
     /// without templates that step is skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
+    /// First-run guide finished or skipped. Missing means not completed, so
+    /// the desktop app shows the guide. The guide writes this with the same
+    /// in-place edit as `shadow_recognizer`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub setup_completed: bool,
+    /// Optional https address of a reader template pack. The setup guide
+    /// offers the download when this is set, and skips that step when it is
+    /// empty. Config-file only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_pack_url: Option<String>,
     /// Which reader supplies saved and uploaded stats.
     ///
     /// Missing, or `"ocr-v1"`, keeps today's Tesseract reads. `"new"` stores
@@ -790,9 +800,265 @@ impl Default for Config {
             debug_ocr: false,
             ocr_threads: None,
             shadow_recognizer: false,
+            setup_completed: false,
+            reader_pack_url: None,
             reader: ReaderSetting::OcrV1,
         }
     }
+}
+
+/// Keys the first-run guide may write. A device code is not a field here
+/// and must never be added: it stays in memory for the sign-in poll.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SetupDiskPatch {
+    pub setup_completed: Option<bool>,
+    pub sync: Option<SyncConfig>,
+}
+
+impl Config {
+    /// Edit `setup_completed` and the sync token in place, the same way
+    /// [`Self::text_for_save`] edits `shadow_recognizer`.
+    ///
+    /// Comments, key order, and every other key stay. A file that does not
+    /// parse is left untouched. A missing file becomes a fresh document.
+    /// The patch has no device-code field, so this write cannot store one.
+    pub fn apply_setup_patch(
+        path: &std::path::Path,
+        patch: &SetupDiskPatch,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
+        }
+        let existing = if path.exists() {
+            Some(std::fs::read_to_string(path)?)
+        } else {
+            None
+        };
+        let toml = Self::text_for_setup_patch(existing.as_deref(), patch)?;
+        if existing.as_deref() != Some(toml.as_str()) {
+            atomic_write_600(path, toml.as_bytes())?;
+        } else if path.exists() {
+            Self::restrict_permissions(path);
+        }
+        Self::parse_file_contents(&toml)
+    }
+
+    /// Text [`Self::apply_setup_patch`] would write.
+    pub fn text_for_setup_patch(
+        existing: Option<&str>,
+        patch: &SetupDiskPatch,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(existing) = existing else {
+            let mut fresh = Self::default();
+            if let Some(done) = patch.setup_completed {
+                fresh.setup_completed = done;
+            }
+            if let Some(sync) = &patch.sync {
+                fresh.sync = Some(sync.clone());
+            }
+            return Ok(toml::to_string_pretty(&fresh)?);
+        };
+        let _loaded = toml::from_str::<Self>(existing).map_err(|err| {
+            unreadable_config(format!(
+                "config.toml could not be parsed, so it was not replaced: {err}"
+            ))
+        })?;
+        let mut text = existing.to_string();
+        if let Some(done) = patch.setup_completed {
+            text = patch_root_bool(&text, "setup_completed", done)?;
+        }
+        if let Some(sync) = &patch.sync {
+            text = patch_sync_keys(&text, sync)?;
+        }
+        let _check = toml::from_str::<Self>(&text).map_err(|err| {
+            unreadable_config(format!(
+                "config.toml could not be updated in place, so it was not replaced: {err}"
+            ))
+        })?;
+        Ok(text)
+    }
+}
+
+/// Splice a root boolean the way `shadow_recognizer` is spliced, or insert
+/// it on the root when the key is missing.
+fn patch_root_bool(
+    existing: &str,
+    key: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get(key).is_some() {
+        return splice_root_bool(existing, &doc, key, on);
+    }
+    insert_root_bool(existing, key, on)
+}
+
+fn splice_root_bool(
+    existing: &str,
+    doc: &toml_edit::Document<&str>,
+    key: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let wanted = if on { "true" } else { "false" };
+    if let Some(item) = doc.get(key)
+        && let Some(value) = item.as_value()
+        && value.as_bool().is_some()
+        && let Some(span) = value.span()
+        && existing.is_char_boundary(span.start)
+        && existing.is_char_boundary(span.end)
+    {
+        let current = &existing[span.start..span.end];
+        if current == "true" || current == "false" {
+            let mut out = String::with_capacity(existing.len() + wanted.len());
+            out.push_str(&existing[..span.start]);
+            out.push_str(wanted);
+            out.push_str(&existing[span.end..]);
+            return Ok(out);
+        }
+    }
+    Err(unreadable_config(
+        "config.toml could not be updated in place, so it was not replaced".to_string(),
+    ))
+}
+
+fn insert_root_bool(
+    existing: &str,
+    key: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get(key).is_some() {
+        return Err(unreadable_config(
+            "config.toml already has that key at the root, so it was not replaced".to_string(),
+        ));
+    }
+    doc.as_table_mut().insert(key, toml_edit::value(on));
+    Ok(doc.to_string())
+}
+
+fn patch_sync_keys(
+    existing: &str,
+    sync: &SyncConfig,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("sync").and_then(|item| item.as_table()).is_none() {
+        return insert_sync_table(existing, sync);
+    }
+    let text = upsert_table_string(existing, "sync", "server_url", &sync.server_url)?;
+    upsert_table_string(&text, "sync", "token", &sync.token)
+}
+
+fn insert_sync_table(
+    existing: &str,
+    sync: &SyncConfig,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("sync").is_some() {
+        return Err(unreadable_config(
+            "config.toml already has a sync entry, so it was not replaced".to_string(),
+        ));
+    }
+    let mut table = toml_edit::Table::new();
+    table["server_url"] = toml_edit::value(sync.server_url.as_str());
+    table["token"] = toml_edit::value(sync.token.as_str());
+    doc["sync"] = toml_edit::Item::Table(table);
+    Ok(doc.to_string())
+}
+
+fn upsert_table_string(
+    existing: &str,
+    table: &str,
+    key: &str,
+    raw: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    let Some(tbl) = doc.get(table).and_then(|item| item.as_table()) else {
+        return Err(unreadable_config(
+            "config.toml could not be updated in place, so it was not replaced".to_string(),
+        ));
+    };
+    let token = toml_edit::Value::from(raw).to_string();
+    if let Some(item) = tbl.get(key) {
+        let Some(value) = item.as_value().filter(|value| value.as_str().is_some()) else {
+            return Err(unreadable_config(
+                "config.toml could not be updated in place, so it was not replaced".to_string(),
+            ));
+        };
+        let Some(span) = value.span() else {
+            return Err(unreadable_config(
+                "config.toml could not be updated in place, so it was not replaced".to_string(),
+            ));
+        };
+        if !existing.is_char_boundary(span.start) || !existing.is_char_boundary(span.end) {
+            return Err(unreadable_config(
+                "config.toml could not be updated in place, so it was not replaced".to_string(),
+            ));
+        }
+        let mut out = String::with_capacity(existing.len() + token.len());
+        out.push_str(&existing[..span.start]);
+        out.push_str(&token);
+        out.push_str(&existing[span.end..]);
+        return Ok(out);
+    }
+    insert_key_after_table_header(existing, table, key, &token)
+}
+
+fn insert_key_after_table_header(
+    existing: &str,
+    table: &str,
+    key: &str,
+    token: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let header = format!("[{table}]");
+    let Some(idx) = existing.find(&header) else {
+        return Err(unreadable_config(
+            "config.toml could not be updated in place, so it was not replaced".to_string(),
+        ));
+    };
+    let line_start = existing[..idx].rfind('\n').map(|n| n + 1).unwrap_or(0);
+    if !existing[line_start..idx].trim().is_empty() {
+        return Err(unreadable_config(
+            "config.toml could not be updated in place, so it was not replaced".to_string(),
+        ));
+    }
+    let after = idx + header.len();
+    let line_end = existing[after..]
+        .find('\n')
+        .map(|n| after + n + 1)
+        .unwrap_or(existing.len());
+    let mut out = String::with_capacity(existing.len() + key.len() + token.len() + 8);
+    out.push_str(&existing[..line_end]);
+    if line_end == existing.len() && !existing.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(key);
+    out.push_str(" = ");
+    out.push_str(token);
+    out.push('\n');
+    out.push_str(&existing[line_end..]);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1008,6 +1274,8 @@ token = "secret"
             debug_ocr: full,
             ocr_threads: full.then_some(2),
             shadow_recognizer: full,
+            setup_completed: full,
+            reader_pack_url: full.then(|| "https://crew.example/packs/reader.zip".to_string()),
             reader: if full {
                 ReaderSetting::New
             } else {
@@ -1362,6 +1630,99 @@ player_name = \"the streamer\"
                 .expect("load")
                 .shadow_recognizer
         );
+    }
+
+    #[test]
+    fn setup_patch_edits_completed_and_sync_in_place_and_never_writes_device_code() {
+        let secret = "dc-SECRET-9f3a-not-for-disk";
+        let original = "\
+# hand-edited tracker config. keep this comment.
+data_dir = \"/tmp/sst-hand-edited\"
+
+# scoreboard name, not a default key dump
+player_name = \"the streamer\"
+
+# extra number reader (private log only)
+shadow_recognizer = true
+
+# a key Settings does not own
+custom_note = \"leave this line alone\"
+
+session_window_secs = 1200
+
+[sync]
+server_url = \"https://old.example\"
+token = \"old-token\"
+";
+        let patch = SetupDiskPatch {
+            setup_completed: Some(true),
+            sync: Some(SyncConfig {
+                server_url: "https://crew.example".to_string(),
+                token: "pasted-token".to_string(),
+            }),
+        };
+        let saved = Config::text_for_setup_patch(Some(original), &patch).expect("patch");
+        assert!(saved.contains("# hand-edited tracker config. keep this comment."));
+        assert!(saved.contains("shadow_recognizer = true"));
+        assert!(saved.contains("custom_note = \"leave this line alone\""));
+        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("setup_completed = true"));
+        assert!(saved.contains("https://crew.example"));
+        assert!(saved.contains("pasted-token"));
+        assert!(!saved.contains("old-token"));
+        assert!(!saved.contains(secret));
+        assert!(
+            !saved.contains("device_code"),
+            "the guide patch must not invent a device_code key:\n{saved}"
+        );
+        let loaded = Config::parse_file_contents(&saved).expect("parse");
+        assert!(loaded.setup_completed);
+        assert!(loaded.shadow_recognizer);
+        let sync = loaded.sync.expect("sync");
+        assert_eq!(sync.server_url, "https://crew.example");
+        assert_eq!(sync.token, "pasted-token");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, original).expect("seed");
+        Config::apply_setup_patch(&path, &patch).expect("write");
+        let disk = std::fs::read_to_string(&path).expect("read");
+        assert!(!disk.contains(secret));
+        assert!(disk.contains("pasted-token"));
+        assert!(disk.contains("shadow_recognizer = true"));
+    }
+
+    #[test]
+    fn setup_patch_refuses_an_unparseable_file() {
+        let original = "this is not toml {";
+        let err = Config::text_for_setup_patch(
+            Some(original),
+            &SetupDiskPatch {
+                setup_completed: Some(true),
+                sync: None,
+            },
+        )
+        .expect_err("broken file");
+        assert!(err.to_string().contains("not replaced"));
+    }
+
+    #[test]
+    fn fresh_setup_patch_writes_completed_without_a_device_code() {
+        let saved = Config::text_for_setup_patch(
+            None,
+            &SetupDiskPatch {
+                setup_completed: Some(true),
+                sync: Some(SyncConfig {
+                    server_url: "https://crew.example".into(),
+                    token: "tok".into(),
+                }),
+            },
+        )
+        .expect("fresh");
+        let loaded = Config::parse_file_contents(&saved).expect("parse");
+        assert!(loaded.setup_completed);
+        assert_eq!(loaded.sync.expect("sync").token, "tok");
+        assert!(!saved.contains("device_code"));
     }
 
     #[test]

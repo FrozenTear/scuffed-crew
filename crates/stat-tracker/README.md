@@ -108,16 +108,36 @@ the tarball root by the release workflow). Source checkouts still use
 
 **Uninstall:**
 
+The desktop app has Uninstall in the sidebar, next to About. It removes the
+tracker from this computer and asks before removing anything.
+
+Saved games, debug images, logs, and settings (including the sync token) stay
+unless that box is checked. The box uses the folder this copy is actually
+using, and shows that path. A folder outside your home folder is left in place.
+
+From a terminal:
+
 ```sh
-scuffed-stat-tracker-uninstall            # keeps match log + config for reinstalls
-scuffed-stat-tracker-uninstall --purge    # also deletes app data and config
+bash bootstrap.sh --uninstall
+bash bootstrap.sh --uninstall --purge
+scuffed-stat-tracker-uninstall
 ```
 
-`install.sh` records everything it installs in
-`$PREFIX/share/scuffed-stat-tracker/install-manifest.txt`; the uninstaller
-removes exactly those files (plus stopping/disabling the systemd unit). For
-installs made before the manifest existed it falls back to the known default
-paths and prints how to identify the bundled libs from the tarball.
+The first command keeps saved games and settings. `--purge` deletes them too.
+`scuffed-stat-tracker-uninstall` does the same as the first command. It lists
+the files and asks before removing them. Add `--yes` to skip the question.
+
+The installer records each file it wrote. Uninstall removes those files and
+nothing else. A recorded path that leaves your home folder, or that contains
+`..`, is left alone. If that record is missing, uninstall shows the original
+files that are still there and asks first. Settings stay unless you also
+delete saved games.
+
+If a system package owns this copy, nothing is removed. The app shows
+`sudo pacman -R <pkg>` or `sudo apt remove <pkg>` and can copy that command.
+An AppImage is removed like any other copy, including the AppImage file.
+A copy outside your home folder is left alone. The app lists the paths and
+says to remove them manually.
 
 ## Running
 
@@ -162,6 +182,8 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
 | `ocr_threads` | Parallel OCR workers (1–8). Each keeps a ~23 MB Tesseract model in RAM. Omit for auto (`(cores/2)` clamped 2–4). Also env `STAT_TRACKER_OCR_THREADS` or CLI `--ocr-threads N`. Use `1` to minimize RAM; higher speeds Tab OCR. |
 | `shadow_recognizer` | Experimental, off by default. Runs a template digit matcher on each accepted scoreboard in a background thread and logs where it disagrees with OCR to `{data_dir}/shadow/digits.jsonl` (values and confidences only, capped at about 4 MB). Stored stats and uploads are unchanged. Settings toggle: Extra number reader (test). Also env `SCUFFED_SHADOW_RECOGNIZER=1` for one run, which is not written to this file. The tracker reads the file when it starts, so restart it after saving. |
+| `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
+| `reader_pack_url` | Optional https address of a reader template pack. The setup guide offers the download when this is set, and skips that step when it is empty. |
 
 Example low-RAM:
 

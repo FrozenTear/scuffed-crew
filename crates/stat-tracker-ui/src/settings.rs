@@ -231,9 +231,10 @@ impl SettingsForm {
         }
     }
 
-    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, and
-    /// `finished_game_close_secs`. `shadow_recognizer` comes from the form's
-    /// persisted reader (the file value). An env lock never writes true by itself.
+    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
+    /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
+    /// `shadow_recognizer` comes from the form's persisted reader (the file
+    /// value). An env lock never writes true by itself.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -251,6 +252,8 @@ impl SettingsForm {
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
+            setup_completed: base.setup_completed,
+            reader_pack_url: base.reader_pack_url.clone(),
             reader: if self.new_reader {
                 stat_tracker::config::ReaderSetting::New
             } else {
@@ -417,6 +420,12 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         ));
     }
 
+    col = col.push(action_btn(
+        "Open setup guide",
+        false,
+        Message::Setup(crate::setup_guide::SetupMessage::Open),
+    ));
+
     let packed = pack_columns(MASONRY_SECTIONS, cols);
     let columns: Vec<Vec<Element<'_, Message>>> = packed
         .into_iter()
@@ -429,7 +438,8 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col = col
         .push(section_columns(columns))
         .push(section_card(SPANNING_SECTION, app, demo))
-        .push(save_footer(demo));
+        .push(save_footer(demo))
+        .push(uninstall_row());
 
     col.into()
 }
@@ -972,6 +982,31 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .spacing(GRID_GAP)
         .width(Fill);
     settings_card("Stored data", body.into())
+}
+
+fn uninstall_row() -> Element<'static, Message> {
+    settings_card(
+        "Uninstall",
+        row![
+            text("Removes the tracker from this computer.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3)
+                .width(Fill),
+            button(
+                text("Uninstall")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(theme::DANGER),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::danger_btn(false))
+            .on_press(Message::OpenUninstall),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(GRID_GAP)
+        .into(),
+    )
 }
 
 fn save_footer(demo: bool) -> Element<'static, Message> {

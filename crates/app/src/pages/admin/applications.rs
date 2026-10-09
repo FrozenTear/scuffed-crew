@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::modal::Modal;
 use crate::components::{
     ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, list_cap_notice, use_toast,
 };
@@ -12,7 +11,7 @@ use scuffed_types::api::PatchApplicationRequest;
 
 // Matches the enriched ApplicationListEntry JSON from GET /api/applications.
 // Name/label fields are optional so the page still renders against an older server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct Application {
     id: String,
     user_id: String,
@@ -43,6 +42,78 @@ impl Application {
         match &self.preferred_game_names {
             Some(names) if !names.is_empty() => names.join(", "),
             _ => self.preferred_games.join(", "),
+        }
+    }
+}
+
+/// Blank optional fields render as the word None. A bare dash is not a value.
+fn detail_text(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "None".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn list_or_none(items: &[String]) -> String {
+    let joined = items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    detail_text(&joined)
+}
+
+#[component]
+fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Element {
+    let title = format!("Application: {}", app.applicant_label());
+    let games = detail_text(&app.games_label());
+    let roles = list_or_none(&app.preferred_roles);
+    let message = detail_text(app.message.as_deref().unwrap_or(""));
+    let notes = detail_text(app.review_notes.as_deref().unwrap_or(""));
+    let submitted = format_datetime(&app.created_at);
+    let updated = match app.updated_at.as_deref() {
+        Some(iso) => detail_text(&format_datetime(iso)),
+        None => "None".to_string(),
+    };
+    rsx! {
+        div {
+            class: "form-modal-overlay",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "form-modal application-detail-modal",
+                onclick: move |e| e.stop_propagation(),
+                div { class: "form-modal-header", "{title}" }
+                div { class: "form-modal-body",
+                    div { class: "application-detail",
+                        dl {
+                            dt { "Status" }
+                            dd { StatusPill { status: app.status.clone() } }
+                            dt { "Games" }
+                            dd { "{games}" }
+                            dt { "Roles" }
+                            dd { "{roles}" }
+                            dt { "Message" }
+                            dd { "{message}" }
+                            dt { "Review notes" }
+                            dd { "{notes}" }
+                            dt { "Submitted" }
+                            dd { "{submitted}" }
+                            dt { "Last update" }
+                            dd { "{updated}" }
+                        }
+                    }
+                }
+                div { class: "form-modal-footer",
+                    button {
+                        class: "btn-cancel",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+            }
         }
     }
 }
@@ -173,48 +244,11 @@ pub fn AdminApplications() -> Element {
 
         {list_cap_notice(&applications, "applications")}
 
-        Modal {
-            open: view_open,
-            on_close: move |_| view_open.set(false),
-            {
-                match view_target() {
-                    Some(app) => {
-                        let roles = if app.preferred_roles.is_empty() {
-                            "—".to_string()
-                        } else {
-                            app.preferred_roles.join(", ")
-                        };
-                        let message = app.message.clone().unwrap_or_else(|| "—".into());
-                        let notes = app.review_notes.clone().unwrap_or_else(|| "—".into());
-                        let submitted = format_datetime(&app.created_at);
-                        let updated = app
-                            .updated_at
-                            .as_deref()
-                            .map(format_datetime)
-                            .unwrap_or_else(|| "—".into());
-                        rsx! {
-                            div { class: "application-detail",
-                                h2 { "Application: {app.applicant_label()}" }
-                                dl {
-                                    dt { "Status" }
-                                    dd { StatusPill { status: app.status.clone() } }
-                                    dt { "Games" }
-                                    dd { "{app.games_label()}" }
-                                    dt { "Roles" }
-                                    dd { "{roles}" }
-                                    dt { "Message" }
-                                    dd { "{message}" }
-                                    dt { "Review notes" }
-                                    dd { "{notes}" }
-                                    dt { "Submitted" }
-                                    dd { "{submitted}" }
-                                    dt { "Last update" }
-                                    dd { "{updated}" }
-                                }
-                            }
-                        }
-                    }
-                    None => rsx! {},
+        if view_open() {
+            if let Some(app) = view_target() {
+                ApplicationDetailDialog {
+                    app,
+                    on_close: move |_| view_open.set(false),
                 }
             }
         }
@@ -240,5 +274,102 @@ pub fn AdminApplications() -> Element {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_application() -> Application {
+        Application {
+            id: "app1".into(),
+            user_id: "user1".into(),
+            applicant_name: Some("Ada".into()),
+            preferred_games: vec![],
+            preferred_game_names: None,
+            preferred_roles: vec![],
+            message: None,
+            status: "pending".into(),
+            review_notes: Some("   ".into()),
+            created_at: "2026-03-01T12:00:00Z".into(),
+            updated_at: None,
+        }
+    }
+
+    fn render(view: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn application_detail_modal_pins_width_rule() {
+        let css = crate::styles::admin::CSS;
+        let rule = ".form-modal.application-detail-modal {\n        width: min(640px, 92vw);\n        max-width: min(640px, 92vw);";
+        assert!(
+            css.contains(rule),
+            "application detail width must stay min(640px, 92vw) on the form-modal shell"
+        );
+        assert!(css.contains(".application-detail dl"));
+        assert!(css.contains("grid-template-columns:"));
+
+        fn view() -> Element {
+            rsx! {
+                ApplicationDetailDialog {
+                    app: sample_application(),
+                    on_close: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(
+            html.contains("form-modal application-detail-modal"),
+            "markup must carry the class the width rule targets: {html}"
+        );
+        assert!(html.contains("<dl"));
+        assert!(html.contains("<dt"));
+        assert!(html.contains("<dd"));
+        assert!(!html.contains("modal-content"), "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+        assert!(!html.contains("&mdash;"), "{html}");
+        assert!(html.contains(">None<"), "{html}");
+        assert!(html.contains("Roles"), "{html}");
+        assert!(html.contains("Review notes"), "{html}");
+    }
+
+    #[test]
+    fn empty_detail_values_say_none_and_filled_values_stay() {
+        assert_eq!(detail_text(""), "None");
+        assert_eq!(detail_text("  "), "None");
+        assert_eq!(detail_text(" flex "), "flex");
+        assert_eq!(list_or_none(&[]), "None");
+        assert_eq!(
+            list_or_none(&["Tank".into(), " ".into(), "Support".into()]),
+            "Tank, Support"
+        );
+
+        fn view() -> Element {
+            let mut app = sample_application();
+            app.preferred_games = vec!["overwatch".into()];
+            app.preferred_game_names = Some(vec!["Overwatch".into()]);
+            app.preferred_roles = vec!["Tank".into()];
+            app.message = Some("Hello".into());
+            app.review_notes = Some("Ready".into());
+            app.updated_at = Some("2026-03-02T08:15:00Z".into());
+            rsx! {
+                ApplicationDetailDialog {
+                    app,
+                    on_close: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("Overwatch"), "{html}");
+        assert!(html.contains("Tank"), "{html}");
+        assert!(html.contains("Hello"), "{html}");
+        assert!(html.contains("Ready"), "{html}");
+        assert!(html.contains("2026-03-02 08:15"), "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
     }
 }

@@ -72,6 +72,50 @@ pub const CSS: &str = r#"
         animation: slide-up 0.2s ease-out;
     }
     .form-modal.wide { max-width: 640px; }
+    /* Application detail uses the attendance form-modal shell.
+       min(640px, 92vw) stays inside a 390px viewport (about 16px of margin each side). */
+    .form-modal.application-detail-modal {
+        width: min(640px, 92vw);
+        max-width: min(640px, 92vw);
+        box-sizing: border-box;
+    }
+    .form-modal.application-detail-modal .form-modal-header {
+        overflow-wrap: anywhere;
+    }
+    .application-detail dl {
+        display: grid;
+        grid-template-columns: minmax(5.5rem, 9rem) minmax(0, 1fr);
+        column-gap: 1rem;
+        row-gap: 0.75rem;
+        margin: 0;
+    }
+    .application-detail dt {
+        margin: 0;
+        font-family: var(--font-head);
+        font-weight: 600;
+        font-size: 0.75rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .application-detail dd {
+        margin: 0;
+        min-width: 0;
+        color: var(--text);
+        overflow-wrap: anywhere;
+    }
+    @media (max-width: 420px) {
+        .form-modal.application-detail-modal .form-modal-header,
+        .form-modal.application-detail-modal .form-modal-body,
+        .form-modal.application-detail-modal .form-modal-footer {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+        .application-detail dl {
+            column-gap: 0.65rem;
+            grid-template-columns: minmax(4.75rem, 7.5rem) minmax(0, 1fr);
+        }
+    }
     .form-modal-header {
         padding: 1.25rem 1.5rem 0.75rem; border-bottom: 1px solid var(--border);
         font-family: var(--font-head); font-weight: 700; font-size: 1.2rem;
