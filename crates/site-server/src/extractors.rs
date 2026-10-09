@@ -1,7 +1,8 @@
 use axum::{
     Json,
     extract::FromRequestParts,
-    http::{StatusCode, header::AUTHORIZATION, request::Parts},
+    http::{StatusCode, header, header::AUTHORIZATION, request::Parts},
+    response::{IntoResponse, Response},
 };
 
 use scuffed_auth::User;
@@ -187,21 +188,43 @@ impl DaemonUnauthorized {
     }
 }
 
-fn unauthorized(error: &str) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-            error: error.to_string(),
-        }),
+/// Daemon-token 401 for upload, daemon-config, and token-check.
+///
+/// `Cache-Control: no-store` so a shared cache does not keep the failure.
+fn unauthorized(error: &str) -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+            .into_response(),
     )
 }
 
-fn internal_error() -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "Internal error".into(),
-        }),
+fn internal_error() -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+            .into_response(),
+    )
+}
+
+fn forbidden(error: &str) -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+            .into_response(),
     )
 }
 
@@ -214,7 +237,7 @@ async fn authenticate_daemon(
     parts: &mut Parts,
     state: &AppState,
     unauthorized_mode: DaemonUnauthorized,
-) -> Result<DaemonUser, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<DaemonUser, Box<Response>> {
     let auth_header = parts
         .headers
         .get(AUTHORIZATION)
@@ -234,22 +257,10 @@ async fn authenticate_daemon(
         .get_member(&member_id)
         .await
         .map_err(|_e| internal_error())?
-        .ok_or_else(|| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "Member not found".into(),
-                }),
-            )
-        })?;
+        .ok_or_else(|| forbidden("Member not found"))?;
 
     if !member.is_active {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Membership inactive".into(),
-            }),
-        ));
+        return Err(forbidden("Membership inactive"));
     }
 
     let suspended_or_banned = state
@@ -259,25 +270,22 @@ async fn authenticate_daemon(
         .map_err(|_e| internal_error())?;
 
     if suspended_or_banned {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Member is suspended or banned".into(),
-            }),
-        ));
+        return Err(forbidden("Member is suspended or banned"));
     }
 
     Ok(DaemonUser { member })
 }
 
 impl FromRequestParts<AppState> for DaemonUser {
-    type Rejection = (StatusCode, Json<ErrorResponse>);
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authenticate_daemon(parts, state, DaemonUnauthorized::Distinct).await
+        authenticate_daemon(parts, state, DaemonUnauthorized::Distinct)
+            .await
+            .map_err(|err| *err)
     }
 }
 
@@ -289,14 +297,15 @@ pub struct OpaqueDaemonUser {
 }
 
 impl FromRequestParts<AppState> for OpaqueDaemonUser {
-    type Rejection = (StatusCode, Json<ErrorResponse>);
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let DaemonUser { member } =
-            authenticate_daemon(parts, state, DaemonUnauthorized::Opaque).await?;
+        let DaemonUser { member } = authenticate_daemon(parts, state, DaemonUnauthorized::Opaque)
+            .await
+            .map_err(|err| *err)?;
         Ok(OpaqueDaemonUser { member })
     }
 }
