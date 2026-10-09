@@ -448,6 +448,7 @@ mod tests {
             edited_fields: Vec::new(),
             ocr: GameOcr::default(),
             segments: Vec::new(),
+            upload_reject: None,
         }
     }
 

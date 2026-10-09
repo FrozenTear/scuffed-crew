@@ -76,8 +76,11 @@ impl SyncUploadError {
     }
 
     /// 401 and 403 pause sync. 429 is rate-limit backoff. 503 is a server
-    /// error that may carry `Retry-After` as a wait floor. Other statuses
-    /// are server errors and ignore `Retry-After`.
+    /// error that may carry `Retry-After` as a wait floor. Other statuses,
+    /// including a bare 400 or 422 from one request, are server errors and
+    /// ignore `Retry-After`. The sync pass does not observe a 400 or 422
+    /// that way: [`isolate_rejected`] splits the batch and quarantines the
+    /// bad rows instead.
     pub fn attempt(&self) -> SyncAttempt {
         match self.status {
             Some(401) | Some(403) => SyncAttempt::AuthRejected,
@@ -89,6 +92,12 @@ impl SyncUploadError {
             },
             _ => SyncAttempt::ServerError { retry_after: None },
         }
+    }
+
+    /// HTTP 400 or 422: the payload was refused. Splitting the batch can
+    /// isolate the bad rows. 5xx, transport errors, 401, 403, and 429 are not.
+    pub fn is_payload_reject(&self) -> bool {
+        matches!(self.status, Some(400) | Some(422))
     }
 }
 
@@ -358,9 +367,157 @@ async fn error_from_response(resp: reqwest::Response, what: &str) -> SyncUploadE
     let retry_after = retry_after_from_response(&resp);
     let body = resp.text().await.unwrap_or_default();
     SyncUploadError {
-        message: format!("{what} failed ({status}): {body}"),
+        message: server_error_text(what, status.as_u16(), &body),
         status: Some(status.as_u16()),
         retry_after,
+    }
+}
+
+/// Text to store and show for a non-2xx body. A JSON `error` field is the
+/// server's message. Anything else is the body, clipped so a HTML error
+/// page does not land in the desktop UI.
+pub fn server_error_text(what: &str, status: u16, body: &str) -> String {
+    let body = body.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(err) = value
+            .get("error")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|err| !err.is_empty())
+    {
+        return clip_text(err);
+    }
+    if body.is_empty() {
+        format!("{what} failed (HTTP {status})")
+    } else {
+        clip_text(body)
+    }
+}
+
+fn clip_text(text: &str) -> String {
+    const MAX: usize = 400;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let end = text
+        .char_indices()
+        .nth(MAX)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    format!("{}...", &text[..end])
+}
+
+/// Logged when every probed row in a pass comes back 400 or 422.
+pub const SERVER_REFUSING_UPLOADS: &str = "Server is refusing uploads";
+
+/// How many HTTP calls one sync pass may spend isolating 400/422 rows.
+/// `2 * ceil(log2(n)) + n` once the batch is larger than one row.
+pub fn isolation_request_budget(n: usize) -> usize {
+    if n <= 1 {
+        return n;
+    }
+    let log2 = usize::BITS - (n - 1).leading_zeros();
+    2 * (log2 as usize) + n
+}
+
+/// One row the server refused while splitting a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedUpload {
+    pub index: usize,
+    pub message: String,
+}
+
+/// Result of [`isolate_rejected`]. Indices are into the batch that was passed in.
+#[derive(Debug)]
+pub struct UploadIsolation {
+    pub accepted: Vec<usize>,
+    pub rejected: Vec<RejectedUpload>,
+    pub deferred: Vec<usize>,
+    /// 5xx, network, 401, 403, 429, or a server-wide 400/422 (every probed
+    /// row refused, so nothing was quarantined). Splitting stops. Already
+    /// accepted indexes stay accepted.
+    pub stopped: Option<SyncUploadError>,
+    pub requests: usize,
+}
+
+/// Upload `rows`. On HTTP 400 or 422, split the slice in half and retry
+/// each half until a singleton is refused or the request budget runs out.
+/// A singleton is quarantined only when some other row in the same pass
+/// was accepted. If both halves of the first split are fully refused, or
+/// every probed row comes back 400 or 422, nothing is quarantined: the
+/// whole batch is deferred and [`UploadIsolation::stopped`] is
+/// [`SERVER_REFUSING_UPLOADS`] (backoff, same as a 5xx).
+/// A 5xx, a network error, 401, 403, or 429 does not split: the rest of
+/// the pass stops and those indexes are [`UploadIsolation::deferred`].
+pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
+where
+    F: FnMut(&[T]) -> Fut,
+    Fut: std::future::Future<Output = Result<StatsUploadResponse, SyncUploadError>>,
+{
+    let budget = isolation_request_budget(rows.len());
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    let mut deferred = Vec::new();
+    let mut stopped = None;
+    let mut requests = 0usize;
+    let mut halt = false;
+    let mut stack = Vec::new();
+    if !rows.is_empty() {
+        stack.push(0..rows.len());
+    }
+    while let Some(range) = stack.pop() {
+        if halt || requests >= budget {
+            deferred.extend(range);
+            continue;
+        }
+        requests += 1;
+        match upload(&rows[range.start..range.end]).await {
+            Ok(_) => accepted.extend(range),
+            Err(err) if err.is_payload_reject() && range.len() > 1 => {
+                let mid = range.start + range.len() / 2;
+                stack.push(mid..range.end);
+                stack.push(range.start..mid);
+            }
+            Err(err) if err.is_payload_reject() => {
+                rejected.push(RejectedUpload {
+                    index: range.start,
+                    message: err.message,
+                });
+            }
+            Err(err) => {
+                deferred.extend(range);
+                stopped = Some(err);
+                halt = true;
+            }
+        }
+    }
+    // No accepted row means the 400/422s were not single bad payloads.
+    // A validator change refuses every subset, including both halves of
+    // the first split. Keep the batch queued and back off.
+    if accepted.is_empty() && !rejected.is_empty() {
+        let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
+        queued.append(&mut deferred);
+        queued.sort_unstable();
+        deferred = queued;
+        if stopped.is_none() {
+            stopped = Some(server_wide_refusal(&rejected[0].message));
+        }
+        rejected.clear();
+    }
+    UploadIsolation {
+        accepted,
+        rejected,
+        deferred,
+        stopped,
+        requests,
+    }
+}
+
+fn server_wide_refusal(detail: &str) -> SyncUploadError {
+    SyncUploadError {
+        message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
+        status: None,
+        retry_after: None,
     }
 }
 
@@ -920,5 +1077,388 @@ mod tests {
         assert!(!backoff.auth_rejected());
         assert!(backoff.should_attempt(t0));
         assert_eq!(backoff.failures(), 0);
+    }
+
+    #[test]
+    fn server_error_text_prefers_the_json_error_field() {
+        assert_eq!(
+            server_error_text(
+                "Upload",
+                400,
+                r#"{"error":"matches[0]: hero is not allowed"}"#
+            ),
+            "matches[0]: hero is not allowed"
+        );
+        assert_eq!(
+            server_error_text("Upload", 422, "  plain refusal  "),
+            "plain refusal"
+        );
+        assert_eq!(
+            server_error_text("Upload", 500, ""),
+            "Upload failed (HTTP 500)"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_400_keeps_the_server_error_field() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"error":"matches[0]: hero is not allowed"}"#;
+        let response = format!(
+            "HTTP/1.1 400 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("400");
+        let _ = server.join().expect("server");
+        assert_eq!(err.status, Some(400));
+        assert_eq!(err.message, "matches[0]: hero is not allowed");
+        assert!(err.is_payload_reject());
+        assert!(matches!(
+            err.attempt(),
+            SyncAttempt::ServerError { retry_after: None }
+        ));
+    }
+
+    fn payload_reject(status: u16) -> SyncUploadError {
+        SyncUploadError {
+            message: "matches[0]: hero is not allowed".into(),
+            status: Some(status),
+            retry_after: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn one_bad_row_uploads_the_rest_of_the_batch() {
+        for status in [400_u16, 422] {
+            let n = 16usize;
+            let bad = 5usize;
+            let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let rows: Vec<usize> = (0..n).collect();
+            let isolation = isolate_rejected(&rows, |batch| {
+                let uploaded = std::sync::Arc::clone(&uploaded);
+                let bad_here = batch.contains(&bad);
+                let ids = batch.to_vec();
+                async move {
+                    if bad_here {
+                        Err(payload_reject(status))
+                    } else {
+                        uploaded.lock().unwrap().extend(ids);
+                        Ok(scuffed_types::api::StatsUploadResponse {
+                            inserted: 1,
+                            skipped: 0,
+                            deleted: 0,
+                        })
+                    }
+                }
+            })
+            .await;
+            let mut got = uploaded.lock().unwrap().clone();
+            got.sort_unstable();
+            got.dedup();
+            let expected: Vec<usize> = (0..n).filter(|index| *index != bad).collect();
+            assert_eq!(got, expected, "status {status} should upload N-1 rows");
+            assert_eq!(isolation.rejected.len(), 1);
+            assert_eq!(isolation.rejected[0].index, bad);
+            assert_eq!(
+                isolation.rejected[0].message,
+                "matches[0]: hero is not allowed"
+            );
+            assert!(isolation.deferred.is_empty());
+            assert!(isolation.stopped.is_none());
+            assert!(
+                isolation.requests <= isolation_request_budget(n),
+                "status {status} used {} requests, budget {}",
+                isolation.requests,
+                isolation_request_budget(n)
+            );
+            assert!(isolation.requests > 1, "the batch must be split");
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_reject_split_stays_inside_the_request_budget() {
+        let n = 32usize;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows: Vec<u32> = (0..n as u32).collect();
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Err(SyncUploadError {
+                    message: "nope".into(),
+                    status: Some(422),
+                    retry_after: None,
+                })
+            }
+        })
+        .await;
+        let budget = isolation_request_budget(n);
+        assert!(isolation.requests <= budget);
+        assert_eq!(
+            isolation.requests,
+            calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            isolation.requests > 1,
+            "the batch is split before giving up"
+        );
+        assert!(isolation.accepted.is_empty());
+        assert!(
+            isolation.rejected.is_empty(),
+            "a pass that accepts nothing quarantines nothing"
+        );
+        assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
+        let stopped = isolation.stopped.expect("server-wide refusal");
+        assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
+        assert!(stopped.message.contains("nope"), "{}", stopped.message);
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::ServerError { retry_after: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_bad_row_in_eight_uploads_seven() {
+        let n = 8usize;
+        let bad = 3usize;
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let uploaded = std::sync::Arc::clone(&uploaded);
+            let bad_here = batch.contains(&bad);
+            let ids = batch.to_vec();
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    let inserted = ids.len() as u32;
+                    uploaded.lock().unwrap().extend(ids);
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        let mut got = uploaded.lock().unwrap().clone();
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got.len(), n - 1);
+        assert!(!got.contains(&bad));
+        assert_eq!(isolation.rejected.len(), 1);
+        assert_eq!(isolation.rejected[0].index, bad);
+        assert!(isolation.stopped.is_none());
+        assert_eq!(isolation.accepted.len(), n - 1);
+    }
+
+    #[tokio::test]
+    async fn bad_rows_in_both_halves_still_upload_the_rest() {
+        let n = 8usize;
+        let bad = [0usize, 4];
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let uploaded = std::sync::Arc::clone(&uploaded);
+            let bad_here = batch.iter().any(|index| bad.contains(index));
+            let ids = batch.to_vec();
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    uploaded.lock().unwrap().extend(ids);
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: 1,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        let mut got = uploaded.lock().unwrap().clone();
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got, vec![1, 2, 3, 5, 6, 7]);
+        assert_eq!(isolation.rejected.len(), 2);
+        assert!(isolation.stopped.is_none());
+    }
+
+    #[tokio::test]
+    async fn server_error_mid_split_keeps_the_accepted_half_and_retry_after() {
+        // Left half of 8 succeeds. The right half splits, then a 503 lands
+        // on its left child while the sibling is still queued. Further
+        // requests must not run: if `halt` stayed false, 6..8 would be sent.
+        let rows: Vec<usize> = (0..8).collect();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let retry = std::time::Duration::from_secs(30);
+        let isolation = isolate_rejected(&rows, |batch| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let first = batch[0];
+            let len = batch.len();
+            let wait = retry;
+            async move {
+                if len == 8 {
+                    Err(payload_reject(400))
+                } else if first == 0 {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: len as u32,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                } else if len == 4 {
+                    Err(payload_reject(422))
+                } else if first == 4 && len == 2 {
+                    Err(SyncUploadError {
+                        message: "unavailable".into(),
+                        status: Some(503),
+                        retry_after: Some(wait),
+                    })
+                } else {
+                    panic!("request after 503 must not be sent, got {first}..+{len}");
+                }
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(isolation.requests, 4);
+        assert_eq!(isolation.accepted, vec![0, 1, 2, 3]);
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![4, 5, 6, 7]);
+        let stopped = isolation.stopped.expect("503 stops the pass");
+        assert_eq!(stopped.status, Some(503));
+        assert_eq!(stopped.retry_after, Some(retry));
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::ServerError {
+                retry_after: Some(wait)
+            } if wait == retry
+        ));
+    }
+
+    #[tokio::test]
+    async fn batch_sizes_and_several_bad_rows() {
+        // N=1 refused cannot be told from a server-wide refusal.
+        let alone = isolate_case(1, &[0]).await;
+        assert!(alone.accepted.is_empty());
+        assert!(alone.rejected.is_empty());
+        assert_eq!(alone.deferred, vec![0]);
+        assert!(
+            alone
+                .stopped
+                .expect("n=1")
+                .message
+                .starts_with(SERVER_REFUSING_UPLOADS)
+        );
+
+        let one_ok = isolate_case(1, &[]).await;
+        assert_eq!(one_ok.accepted, vec![0]);
+        assert!(one_ok.rejected.is_empty());
+        assert!(one_ok.stopped.is_none());
+        assert_eq!(one_ok.requests, 1);
+
+        // N=2, one bad row.
+        let pair = isolate_case(2, &[1]).await;
+        assert_eq!(pair.accepted, vec![0]);
+        assert_eq!(pair.rejected.len(), 1);
+        assert_eq!(pair.rejected[0].index, 1);
+        assert!(pair.stopped.is_none());
+
+        // N=2, both refused.
+        let both = isolate_case(2, &[0, 1]).await;
+        assert!(both.accepted.is_empty());
+        assert!(both.rejected.is_empty());
+        assert_eq!(both.deferred, vec![0, 1]);
+        assert!(both.stopped.is_some());
+
+        // Odd length, one bad row in the longer half.
+        let odd = isolate_case(5, &[2]).await;
+        assert_eq!(odd.rejected.len(), 1);
+        assert_eq!(odd.rejected[0].index, 2);
+        assert_eq!(odd.accepted.len(), 4);
+        assert!(odd.stopped.is_none());
+        assert!(!odd.accepted.contains(&2));
+
+        // Several bad rows.
+        let many = isolate_case(7, &[1, 4, 6]).await;
+        let mut rejected: Vec<usize> = many.rejected.iter().map(|row| row.index).collect();
+        rejected.sort_unstable();
+        assert_eq!(rejected, vec![1, 4, 6]);
+        assert_eq!(many.accepted.len(), 4);
+        assert!(many.stopped.is_none());
+        for index in [1, 4, 6] {
+            assert!(!many.accepted.contains(&index));
+        }
+    }
+
+    async fn isolate_case(n: usize, bad: &[usize]) -> UploadIsolation {
+        let rows: Vec<usize> = (0..n).collect();
+        isolate_rejected(&rows, |batch| {
+            let bad_here = batch.iter().any(|index| bad.contains(index));
+            let inserted = batch.len() as u32;
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn server_and_auth_errors_do_not_split_the_batch() {
+        let cases = [
+            None,
+            Some(500_u16),
+            Some(503),
+            Some(401),
+            Some(403),
+            Some(429),
+        ];
+        for status in cases {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let rows = ["a", "b", "c", "d"];
+            let isolation = isolate_rejected(&rows, |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let code = status;
+                async move {
+                    Err(SyncUploadError {
+                        message: "down".into(),
+                        status: code,
+                        retry_after: None,
+                    })
+                }
+            })
+            .await;
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{status:?} must not split"
+            );
+            assert!(isolation.accepted.is_empty());
+            assert!(isolation.rejected.is_empty());
+            assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+            let attempt = isolation.stopped.expect("stopped").attempt();
+            match status {
+                Some(401) | Some(403) => {
+                    assert!(matches!(attempt, SyncAttempt::AuthRejected));
+                }
+                Some(429) => {
+                    assert!(matches!(attempt, SyncAttempt::RateLimited { .. }));
+                }
+                _ => {
+                    assert!(matches!(attempt, SyncAttempt::ServerError { .. }));
+                }
+            }
+        }
     }
 }

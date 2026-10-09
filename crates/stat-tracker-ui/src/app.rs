@@ -96,6 +96,7 @@ pub enum Message {
         segment: u32,
         confirm: bool,
     },
+    RetryUpload(String),
     SettingsText(SettingsField, String),
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
@@ -658,6 +659,15 @@ impl TrackerApp {
                     );
                 }
                 self.editing = false;
+                Task::none()
+            }
+            Message::RetryUpload(session_id) => {
+                self.toast = Some(
+                    match crate::commands::retry_upload(&self.data_dir, &session_id) {
+                        Ok(()) => "Upload queued again".into(),
+                        Err(e) => format!("Could not retry upload: {e}"),
+                    },
+                );
                 Task::none()
             }
             Message::ResolveSegment {
