@@ -8,17 +8,20 @@ mod api;
 use std::cell::Cell;
 
 use dioxus::prelude::*;
-use scuffed_api_client::ClientError;
 
 use crate::routes::Route;
 use crate::state::use_auth;
-use api::PendingDeviceCode;
+use api::{LinkCallError, PendingDeviceCode};
 
 /// Shown for a wrong, expired, or already-used code. Those cases stay identical.
 pub const CODE_DIDNT_WORK: &str = "That code didn't work. Check the app and try again.";
 
-/// Plain-language 429. No status digit.
+/// Plain-language 429 when the server sent no `Retry-After` header.
 pub const RATE_LIMITED: &str = "Too many tries. Wait a moment and try again.";
+
+pub const NOT_A_MEMBER: &str = "You need to be an org member to link a device.";
+
+pub const SOMETHING_WENT_WRONG: &str = "Something went wrong. Try again.";
 
 pub const COULD_NOT_REACH: &str = "Couldn't reach the site. Try again.";
 
@@ -125,9 +128,9 @@ pub fn step_after_lookup(step: &LinkStep, code: &str) -> LinkStep {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserNotice {
-    Text(&'static str),
+    Text(String),
     SignIn,
 }
 
@@ -137,30 +140,57 @@ pub fn message_for_code_problem(problem: &str) -> &'static str {
     CODE_DIDNT_WORK
 }
 
-fn json_error_owned(body: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+fn is_rejected_code(status: u16) -> bool {
+    matches!(status, 400 | 404 | 409 | 410)
 }
 
-pub fn user_notice(status: Option<u16>, body: &str) -> UserNotice {
+/// Seconds from a `Retry-After` delay or HTTP-date. The body is not read.
+pub fn retry_after_seconds(
+    header: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<u64> {
+    let raw = header?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        let secs: u64 = raw.parse().ok()?;
+        return Some(secs.max(1));
+    }
+    let when = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let delta = when.with_timezone(&chrono::Utc) - now;
+    Some(u64::try_from(delta.num_seconds().max(1)).unwrap_or(1))
+}
+
+pub fn rate_limit_message_at(header: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
+    match retry_after_seconds(header, now) {
+        Some(1) => "Too many tries. Wait 1 second and try again.".to_string(),
+        Some(secs) => format!("Too many tries. Wait {secs} seconds and try again."),
+        None => RATE_LIMITED.to_string(),
+    }
+}
+
+pub fn rate_limit_message(header: Option<&str>) -> String {
+    rate_limit_message_at(header, chrono::Utc::now())
+}
+
+/// `body` is accepted and ignored. A 429 uses `retry_after`, not the payload.
+pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -> UserNotice {
+    let _ignored = body;
     match status {
         Some(401) => UserNotice::SignIn,
-        Some(429) => UserNotice::Text(RATE_LIMITED),
-        Some(_) => {
-            let owned = json_error_owned(body);
-            let problem = owned.as_deref().unwrap_or(body);
-            UserNotice::Text(message_for_code_problem(problem))
+        Some(403) => UserNotice::Text(NOT_A_MEMBER.to_string()),
+        Some(429) => UserNotice::Text(rate_limit_message(retry_after)),
+        Some(status) if is_rejected_code(status) => {
+            UserNotice::Text(message_for_code_problem("invalid code").to_string())
         }
-        None => UserNotice::Text(COULD_NOT_REACH),
+        Some(_) => UserNotice::Text(SOMETHING_WENT_WRONG.to_string()),
+        None => UserNotice::Text(COULD_NOT_REACH.to_string()),
     }
 }
 
-fn notice_from_client(err: &ClientError) -> UserNotice {
-    match err {
-        ClientError::Http { status, body } => user_notice(Some(*status), body),
-        _ => user_notice(None, ""),
-    }
+fn notice_from_call(err: &LinkCallError) -> UserNotice {
+    user_notice(err.status, &err.body, err.retry_after.as_deref())
 }
 
 pub fn format_request_time(created_at: &chrono::DateTime<chrono::Utc>) -> String {
@@ -389,7 +419,7 @@ pub fn LinkDevice() -> Element {
     });
     let mut step = use_signal(|| LinkStep::Enter);
     let mut pending = use_signal(|| None::<PendingDeviceCode>);
-    let mut notice: Signal<Option<&'static str>> = use_signal(|| None);
+    let mut notice: Signal<Option<String>> = use_signal(|| None);
     let mut busy = use_signal(|| false);
 
     use_effect(move || {
@@ -422,7 +452,7 @@ pub fn LinkDevice() -> Element {
         }
         let normalized = normalize_user_code(&code());
         if normalized.is_empty() {
-            notice.set(Some("Enter the code from the app."));
+            notice.set(Some("Enter the code from the app.".to_string()));
             return;
         }
         notice.set(None);
@@ -572,11 +602,11 @@ pub fn LinkDevice() -> Element {
 }
 
 fn apply_client_error(
-    notice: &mut Signal<Option<&'static str>>,
+    notice: &mut Signal<Option<String>>,
     nav: &dioxus_router::Navigator,
-    err: ClientError,
+    err: LinkCallError,
 ) {
-    match notice_from_client(&err) {
+    match notice_from_call(&err) {
         UserNotice::SignIn => {
             arm_return_to_link();
             nav.replace(Route::Login {});
@@ -673,31 +703,114 @@ mod tests {
             );
         }
 
+        let didnt = UserNotice::Text(CODE_DIDNT_WORK.to_string());
         assert_eq!(
-            user_notice(Some(400), r#"{"error":"wrong"}"#),
-            UserNotice::Text(CODE_DIDNT_WORK)
+            user_notice(Some(400), r#"{"error":"invalid code"}"#, None),
+            didnt
         );
         assert_eq!(
-            user_notice(Some(404), r#"{"error":"expired"}"#),
-            UserNotice::Text(CODE_DIDNT_WORK)
+            user_notice(Some(404), r#"{"error":"expired"}"#, None),
+            didnt
+        );
+        assert_eq!(user_notice(Some(409), r#"{"error":"used"}"#, None), didnt);
+        assert_eq!(user_notice(Some(410), "used", None), didnt);
+        assert!(
+            !CODE_DIDNT_WORK.contains("invalid code"),
+            "server wording leaked"
         );
         assert_eq!(
-            user_notice(Some(409), r#"{"error":"used"}"#),
-            UserNotice::Text(CODE_DIDNT_WORK)
-        );
-        assert_eq!(
-            user_notice(Some(410), "used"),
-            UserNotice::Text(CODE_DIDNT_WORK)
-        );
-        assert_eq!(
-            user_notice(Some(429), r#"{"error":"slow down"}"#),
-            UserNotice::Text(RATE_LIMITED)
+            user_notice(Some(429), r#"{"error":"too many invalid codes"}"#, None),
+            UserNotice::Text(RATE_LIMITED.to_string())
         );
         assert_eq!(RATE_LIMITED, "Too many tries. Wait a moment and try again.");
         assert!(!RATE_LIMITED.chars().any(|c| c.is_ascii_digit()));
         assert_ne!(
-            user_notice(Some(429), "expired"),
-            user_notice(Some(404), "expired")
+            user_notice(Some(429), "expired", None),
+            user_notice(Some(404), "expired", None)
+        );
+    }
+
+    #[test]
+    fn rate_limit_uses_retry_after_and_ignores_the_body() {
+        let header = user_notice(
+            Some(429),
+            r#"{"error":"too many invalid codes"}"#,
+            Some("90"),
+        );
+        assert_eq!(
+            header,
+            UserNotice::Text("Too many tries. Wait 90 seconds and try again.".to_string())
+        );
+        let shown = match header {
+            UserNotice::Text(text) => text,
+            UserNotice::SignIn => panic!("429 is not a sign-in"),
+        };
+        assert!(!shown.to_lowercase().contains("invalid"));
+        assert!(!shown.contains("too many invalid"));
+
+        let governor = user_notice(Some(429), "Too Many Requests! Wait for 9s", Some("2"));
+        assert_eq!(
+            governor,
+            UserNotice::Text("Too many tries. Wait 2 seconds and try again.".to_string())
+        );
+        let governor_text = match governor {
+            UserNotice::Text(text) => text,
+            UserNotice::SignIn => panic!("429 is not a sign-in"),
+        };
+        assert!(!governor_text.contains('9'));
+        assert!(!governor_text.contains("Too Many"));
+
+        assert_eq!(
+            user_notice(Some(429), "Too Many Requests! Wait for 9s", None),
+            UserNotice::Text(RATE_LIMITED.to_string())
+        );
+        assert_eq!(retry_after_seconds(Some("0"), chrono::Utc::now()), Some(1));
+        assert_eq!(
+            rate_limit_message(Some("  45  ")),
+            "Too many tries. Wait 45 seconds and try again."
+        );
+        assert_eq!(
+            rate_limit_message(Some("1")),
+            "Too many tries. Wait 1 second and try again."
+        );
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-09T13:00:00Z")
+            .expect("now")
+            .with_timezone(&chrono::Utc);
+        let when = "Fri, 09 Oct 2026 13:00:30 GMT";
+        assert_eq!(retry_after_seconds(Some(when), now), Some(30));
+        assert_eq!(
+            rate_limit_message_at(Some(when), now),
+            "Too many tries. Wait 30 seconds and try again."
+        );
+    }
+
+    #[test]
+    fn member_and_server_errors_do_not_echo_the_body() {
+        assert_eq!(
+            user_notice(Some(403), r#"{"error":"Not an org member"}"#, None),
+            UserNotice::Text(NOT_A_MEMBER.to_string())
+        );
+        let member = match user_notice(Some(403), "Not an org member", None) {
+            UserNotice::Text(text) => text,
+            UserNotice::SignIn => panic!("403 is not a sign-in"),
+        };
+        assert!(!member.contains("Not an org member"));
+        assert_ne!(member, CODE_DIDNT_WORK);
+
+        assert_eq!(
+            user_notice(Some(500), r#"{"error":"Internal error"}"#, None),
+            UserNotice::Text(SOMETHING_WENT_WRONG.to_string())
+        );
+        let server = match user_notice(Some(500), "Internal error", None) {
+            UserNotice::Text(text) => text,
+            UserNotice::SignIn => panic!("500 is not a sign-in"),
+        };
+        assert!(!server.contains("Internal error"));
+        assert_eq!(user_notice(Some(401), "nope", None), UserNotice::SignIn);
+        assert_eq!(
+            user_notice(None, "network", None),
+            UserNotice::Text(COULD_NOT_REACH.to_string())
         );
     }
 
@@ -734,9 +847,14 @@ mod tests {
         for text in [
             CODE_DIDNT_WORK,
             RATE_LIMITED,
+            NOT_A_MEMBER,
+            SOMETHING_WENT_WRONG,
             COULD_NOT_REACH,
             APPROVED_COPY,
             DENIED_COPY,
+            "Too many tries. Wait 90 seconds and try again.",
+            "Too many tries. Wait 1 second and try again.",
+            "Enter the code from the app.",
         ] {
             assert!(!text.contains('\u{2014}'), "{text}");
             assert!(!text.contains('\u{2013}'), "{text}");
