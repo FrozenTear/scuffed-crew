@@ -43,6 +43,14 @@ pub struct CellDiff {
     pub matcher: Option<u32>,
     pub conf: f32,
     pub suspect: bool,
+    /// The frames just before and after read this cell as the same value
+    /// with sure reads (see [`super::confirm`]). Only written when true.
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirmed: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One log line: the result of one shadow job.
@@ -149,6 +157,7 @@ mod tests {
                 matcher: Some(1284),
                 conf: 0.91,
                 suspect: false,
+                confirmed: false,
             }],
         }
     }
@@ -167,6 +176,10 @@ mod tests {
         assert_eq!(v["diffs"][0]["field"], "DMG");
         assert_eq!(v["diffs"][0]["matcher"], 1284);
         assert!(v.get("error").is_none());
+        assert!(
+            v["diffs"][0].get("confirmed").is_none(),
+            "false is not written"
+        );
     }
 
     #[test]

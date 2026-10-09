@@ -4,6 +4,7 @@
 //! `SCUFFED_SHADOW_RECOGNIZER=1`). Nothing in here changes stored stats,
 //! uploads or capture decisions.
 
+pub mod confirm;
 pub mod digits;
 pub mod log;
 pub mod worker;

@@ -12,21 +12,29 @@
 //!   sender; the thread ends after its current job, or with the process. A
 //!   slow frame can not delay the final session save.
 //! - Thread priority is left alone: `libc` is not a dependency of this crate.
+//! - Frame-to-frame confirmation ([`super::confirm`]) needs the next frame,
+//!   so a successful read is logged when the next board arrives, after
+//!   [`CONFIRM_WAIT`] without one, or when the feed closes. A read still
+//!   waiting when the process exits is lost; an error is logged at once.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use image::DynamicImage;
 
+use super::confirm::{self, Frame};
 use super::digits::{self, BoardRead, FIELDS, ShadowError};
 use super::log::{CellDiff, ShadowLog, ShadowRecord};
 use crate::ocr::RowOcrResult;
 
 /// Matcher time allowed per board.
 pub const FRAME_BUDGET: Duration = Duration::from_millis(300);
+/// How long a read waits for the next board before it is logged without
+/// frame-to-frame confirmation.
+pub const CONFIRM_WAIT: Duration = Duration::from_secs(30);
 
 /// What frame analysis hands to the accept path when shadow mode is on.
 #[derive(Debug, Clone)]
@@ -166,14 +174,74 @@ impl ShadowWorker {
     }
 }
 
+/// The last read, held until the next board can confirm its unsure cells.
+struct Held {
+    prev: Option<Frame>,
+    pending: Option<(ShadowRecord, Frame)>,
+}
+
+impl Held {
+    /// Log the pending read. `next` is the following read, when there is one.
+    fn release(&mut self, next: Option<&Frame>, sink: &mut SinkFn) {
+        if let Some((mut record, frame)) = self.pending.take() {
+            if let (Some(prev), Some(next)) = (&self.prev, next) {
+                mark_confirmed(&mut record, &confirm::confirmed(prev, &frame, next));
+            }
+            sink(record);
+            self.prev = Some(frame);
+        }
+    }
+}
+
 fn run(rx: Receiver<ShadowJob>, read: Box<ReadFn>, mut sink: Box<SinkFn>, dropped: Arc<AtomicU64>) {
-    while let Ok(job) = rx.recv() {
+    let mut held = Held {
+        prev: None,
+        pending: None,
+    };
+    loop {
+        let job = match rx.recv_timeout(CONFIRM_WAIT) {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => {
+                held.release(None, &mut *sink);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                held.release(None, &mut *sink);
+                return;
+            }
+        };
         let dropped_since_last = dropped.swap(0, Ordering::Relaxed);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             read(&job.scoreboard, job.team_size, FRAME_BUDGET)
         }))
         .unwrap_or(Err(ShadowError::Layout("matcher panicked")));
-        sink(compare(&job, result, dropped_since_last));
+        let frame = result.as_ref().ok().map(|board| Frame {
+            session: job.session.clone(),
+            at: job.captured_at,
+            team_size: job.team_size,
+            board: board.clone(),
+        });
+        let record = compare(&job, result, dropped_since_last);
+        held.release(frame.as_ref(), &mut *sink);
+        match frame {
+            Some(frame) => held.pending = Some((record, frame)),
+            None => {
+                sink(record);
+                held.prev = None;
+            }
+        }
+    }
+}
+
+/// Set `confirmed` on the listed `(row, field)` cells of a record.
+fn mark_confirmed(record: &mut ShadowRecord, cells: &[(usize, usize)]) {
+    for d in record.diffs.iter_mut() {
+        if cells
+            .iter()
+            .any(|&(r, k)| r == d.row && FIELDS[k] == d.field)
+        {
+            d.confirmed = true;
+        }
     }
 }
 
@@ -222,6 +290,7 @@ pub fn compare(
                     matcher: cell.value,
                     conf: cell.confidence,
                     suspect: cell.suspect,
+                    confirmed: false,
                 });
             }
         }
@@ -289,13 +358,14 @@ mod tests {
         let worker = ShadowWorker::start_if_enabled(&config).expect("flag on spawns");
         // A blank board: the matcher must answer (error or read), never hang.
         assert!(worker.try_submit(job("e2e")));
+        // A read waits for the next board; closing the feed logs it.
+        drop(worker);
         let log = ShadowLog::new(dir.path());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let line_written = || std::fs::read_to_string(log.path()).is_ok_and(|t| t.ends_with('\n'));
         while !line_written() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        drop(worker);
         let text = std::fs::read_to_string(log.path()).expect("one line written");
         let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(v["session"], "e2e");
@@ -442,5 +512,63 @@ mod tests {
         let got = records.lock().unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|r| r.error.is_some()));
+    }
+
+    /// Board with sure 1s everywhere, D of row 0 as given.
+    fn board_with_d(value: u32, suspect: bool) -> BoardRead {
+        let mut cells: [CellRead; 6] = std::array::from_fn(|_| cell(Some(1), false));
+        cells[2] = CellRead {
+            value: Some(value),
+            confidence: if suspect { 0.3 } else { 0.9 },
+            suspect,
+        };
+        BoardRead {
+            rows: vec![RowRead { cells }],
+            elapsed_ms: 5,
+        }
+    }
+
+    #[test]
+    fn unsure_cell_between_sure_neighbours_is_logged_confirmed() {
+        // matcher output per job, in order: sure 0, unsure 0, sure 0, an error, unsure 0
+        let script = Mutex::new(
+            vec![
+                Ok(board_with_d(0, false)),
+                Ok(board_with_d(0, true)),
+                Ok(board_with_d(0, false)),
+                Err(ShadowError::OverBudget),
+                Ok(board_with_d(0, true)),
+            ]
+            .into_iter(),
+        );
+        let (tx, rx) = mpsc::sync_channel::<ShadowJob>(8);
+        let t0 = Utc::now();
+        for i in 0..5 {
+            let mut j = job("m");
+            j.ocr_values = vec![[Some(1), Some(1), Some(0), Some(1), Some(1), Some(1)]];
+            j.captured_at = t0 + chrono::TimeDelta::seconds(5 * i);
+            tx.send(j).unwrap();
+        }
+        drop(tx);
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        run(
+            rx,
+            Box::new(move |_, _, _| script.lock().unwrap().next().unwrap()),
+            Box::new(move |r| sink_records.lock().unwrap().push(r)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let got = records.lock().unwrap();
+        assert_eq!(got.len(), 5, "every job logged once, in order");
+        let d_diff = |i: usize| got[i].diffs.iter().find(|d| d.field == "D").cloned();
+        assert!(d_diff(0).is_none(), "sure and agreeing: not listed");
+        let mid = d_diff(1).unwrap();
+        assert!(mid.suspect && mid.confirmed, "{mid:?}");
+        assert_eq!(mid.matcher, Some(0), "value untouched");
+        assert!(d_diff(2).is_none());
+        assert_eq!(got[3].error.as_deref(), Some("over budget"));
+        // after an error there is no previous frame, and the feed then closed
+        let last = d_diff(4).unwrap();
+        assert!(last.suspect && !last.confirmed);
     }
 }

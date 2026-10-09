@@ -22,6 +22,12 @@
 //! is 2+ px off its row's median takes the row's band, so a lone thin-stem
 //! glyph (a 4 at 1440p) cannot shrink its band and get split into pieces.
 //!
+//! Pair checks: a correct glyph whose runner-up is its known look-alike (a 4
+//! next to a 6, a dim 0 next to a 3) can score below the suspect line on the
+//! whole-shape margin. Such a glyph is re-scored on only the pixels where the
+//! two templates differ, and the flag is cleared only when that check agrees
+//! with the top read (see [`pair_margin`]).
+//!
 //! Resampling reproduces Pillow's float bilinear resize so canvases match the
 //! ones the templates were built from.
 
@@ -48,7 +54,9 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 /// * `cv-v3`: 1080p templates and typical margins rebuilt with real
 ///   1920x1080 captures added to the downscaled 1440p set; cells with too
 ///   little ink for the digits read are flagged.
-pub const RECOGNIZER_ID: &str = "cv-v3";
+/// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
+///   margin that sits below the suspect line.
+pub const RECOGNIZER_ID: &str = "cv-v4";
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
@@ -67,6 +75,22 @@ const PM_REF: f64 = 0.2;
 /// lost most of its ring to compression and reads as '1' or '11' sits at
 /// 0.10 to 0.14.
 const MIN_INK_PER_GLYPH: f64 = 0.15;
+/// Pair check scale: the median pair-check score of correctly read 4s (vs 6)
+/// and 0s (vs 3) on the labelled Tab sets is 0.94 to 0.96 at both sizes (and
+/// moves by under 0.003 with any one map held out), so `score / PAIR_TYP` is
+/// on the same 1.0-is-typical scale as the glyph margin.
+const PAIR_TYP: f64 = 0.95;
+/// A pair check only runs on a glyph whose own calibrated margin is at least
+/// this: the top read must still lead clearly; the check cannot rescue a
+/// coin flip.
+const PAIR_FLOOR: f64 = 0.25;
+/// Pixels where the two templates differ by at least this share of their
+/// largest difference make up the region a pair check looks at.
+const PAIR_MASK: f64 = 0.5;
+/// Zeros are drawn in dim grey. A cell is dim when its brightness peak is
+/// below this share of the board's bright cells (90th percentile of cell
+/// peaks). Real dim zeros sit at 0.66.
+const DIM_RATIO: f64 = 0.8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellRead {
@@ -485,6 +509,8 @@ struct Segment {
     dh: usize,
     runs: Vec<(usize, usize)>,
     rival: f64,
+    /// Brightness peak of the cell before normalising (99.5th percentile).
+    peak: f64,
 }
 
 fn percentile_sorted(v: &[f32], q: f64) -> f64 {
@@ -495,8 +521,14 @@ fn percentile_sorted(v: &[f32], q: f64) -> f64 {
     v[lo] as f64 + (v[hi] as f64 - v[lo] as f64) * f
 }
 
-/// Normalised cell ink map; `None` when the cell holds no contrast.
-fn cell_ink(n: &Plane, band: (usize, usize), win: (usize, usize), pad: usize) -> Option<Plane> {
+/// Normalised cell ink map and its raw brightness peak; `None` when the cell
+/// holds no contrast.
+fn cell_ink(
+    n: &Plane,
+    band: (usize, usize),
+    win: (usize, usize),
+    pad: usize,
+) -> Option<(Plane, f64)> {
     let y0 = band.0.saturating_sub(pad);
     let y1 = (band.1 + pad).min(n.h);
     let (x0, x1) = (win.0.min(n.w), win.1.min(n.w));
@@ -520,7 +552,7 @@ fn cell_ink(n: &Plane, band: (usize, usize), win: (usize, usize), pad: usize) ->
     for v in c.d.iter_mut() {
         *v = ((*v as f64 - bg) / (peak - bg)).clamp(0.0, 1.0) as f32;
     }
-    Some(c)
+    Some((c, peak))
 }
 
 fn runs_of(cols: &[bool]) -> Vec<(usize, usize)> {
@@ -540,7 +572,7 @@ fn runs_of(cols: &[bool]) -> Vec<(usize, usize)> {
 }
 
 /// Pick the centred ink group, find the digit band, and list projection runs.
-fn segment(ink: Plane) -> Option<Segment> {
+fn segment(ink: Plane, peak: f64) -> Option<Segment> {
     let (w, h) = (ink.w, ink.h);
     let b: Vec<bool> = ink.d.iter().map(|&v| v > INK_THR).collect();
     let col_any: Vec<bool> = (0..w).map(|x| (0..h).any(|y| b[y * w + x])).collect();
@@ -598,6 +630,7 @@ fn segment(ink: Plane) -> Option<Segment> {
         dh,
         runs,
         rival,
+        peak,
     })
 }
 
@@ -701,6 +734,13 @@ struct Run {
 
 struct Cell {
     runs: Vec<Run>,
+    /// Piece column ranges `[x0, x1)` in cell pixels, by piece id.
+    pieces: Vec<(usize, usize)>,
+    /// Scaled strip and scale the canvases were cut from.
+    strip: Plane,
+    sc: f64,
+    /// Binarised ink pixels per cell column.
+    colsum: Vec<u32>,
     /// Normalised piece canvases, `CANVAS` floats per piece.
     v: Vec<f32>,
     mass: Vec<f64>,
@@ -709,6 +749,7 @@ struct Cell {
     /// Text height the canvases were scaled for (after the row consensus).
     dh: usize,
     rival: f64,
+    peak: f64,
 }
 
 /// Ink map and segmentation for one cell.
@@ -718,7 +759,8 @@ fn segment_cell(
     win: (usize, usize),
     pad: usize,
 ) -> Option<Segment> {
-    segment(cell_ink(n, band, win, pad)?)
+    let (ink, peak) = cell_ink(n, band, win, pad)?;
+    segment(ink, peak)
 }
 
 /// Row consensus text band `(top, dh)` from the cells' own estimates.
@@ -836,12 +878,17 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
     let total_mass = seg.runs.iter().map(|&(a, e)| (cb[e] - cb[a]) as f64).sum();
     Some(Cell {
         runs,
+        pieces,
+        strip,
+        sc,
+        colsum,
         v,
         mass,
         ar,
         total_mass,
         dh,
         rival: seg.rival,
+        peak: seg.peak,
     })
 }
 
@@ -923,6 +970,72 @@ fn grammar_ok(t: &str, k: usize) -> bool {
     d.len() <= 6 && d.parse::<u64>().is_ok_and(|n| thousands(n) == t)
 }
 
+/// Canvas of piece `p` with edge columns holding at most one ink pixel
+/// dropped. Anti-aliasing can leave one stray pixel beside a glyph (a dim 0's
+/// right flank at 1080p); it widens the piece by a column and shifts the
+/// glyph off centre. Only the pair checks use this; matching keeps the
+/// canvases the templates were built from.
+fn recentred_canvas(cell: &Cell, p: usize) -> [f32; CANVAS] {
+    let (mut x0, mut x1) = cell.pieces[p];
+    while x1 - x0 > 2 && cell.colsum[x0] <= 1 {
+        x0 += 1;
+    }
+    while x1 - x0 > 2 && cell.colsum[x1 - 1] <= 1 {
+        x1 -= 1;
+    }
+    let mut c = piece_canvas(&cell.strip, cell.sc, x0, x1);
+    normalise(&mut c);
+    c
+}
+
+/// Correlation of a canvas with `t[a] - t[b]` over only the pixels where the
+/// two templates differ most (`PAIR_MASK`). For 4 vs 6 that is the 4's open
+/// top-left and stem against the 6's curved top-left and closed bottom loop;
+/// for 0 vs 3 the 0's closed left side and hollow centre against the 3's
+/// open left and middle bar. Positive favours `a`; it is antisymmetric, so a
+/// real 6 scores as negative as a real 4 scores positive.
+fn pair_check(v: &[f32; CANVAS], tpl: &Templates, a: usize, b: usize) -> f64 {
+    let d: Vec<f64> = (0..CANVAS)
+        .map(|i| tpl.t[a][i] as f64 - tpl.t[b][i] as f64)
+        .collect();
+    let lim = PAIR_MASK * d.iter().fold(0f64, |m, x| m.max(x.abs()));
+    let idx: Vec<usize> = (0..CANVAS).filter(|&i| d[i].abs() >= lim).collect();
+    let n = idx.len().max(1) as f64;
+    let vm = idx.iter().map(|&i| v[i] as f64).sum::<f64>() / n;
+    let dm = idx.iter().map(|&i| d[i]).sum::<f64>() / n;
+    let (mut num, mut vv, mut dd) = (0f64, 0f64, 0f64);
+    for &i in &idx {
+        let (x, y) = (v[i] as f64 - vm, d[i] - dm);
+        num += x * y;
+        vv += x * x;
+        dd += y * y;
+    }
+    num / (vv.sqrt() * dd.sqrt()).max(1e-9)
+}
+
+/// Calibrated margin from a pair check, for a glyph read as `best` whose
+/// shape runner-up is `second`, when a check applies:
+/// * a 4 next to a 6, or next to a 1 when the piece is too wide to be a 1
+///   (the 4's tall stem alone resembles a 1), is checked against the 6;
+/// * a 0 next to a 3 is checked only when the cell is dim, since zeros are
+///   drawn in grey; a bright cell read as 0 gets no help.
+fn pair_margin(
+    cell: &Cell,
+    tpl: &Templates,
+    p: usize,
+    best: usize,
+    second: usize,
+    dim: bool,
+) -> Option<f64> {
+    let other = match (best, second) {
+        (4, 6) => 6,
+        (4, 1) if cell.ar[p] > tpl.ar_hi[1] => 6,
+        (0, 3) if dim => 3,
+        _ => return None,
+    };
+    Some(pair_check(&recentred_canvas(cell, p), tpl, best, other) / PAIR_TYP)
+}
+
 /// Value, margin and whether any sanity flag fired.
 struct Reading {
     value: Option<u32>,
@@ -930,7 +1043,9 @@ struct Reading {
     flagged: bool,
 }
 
-fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
+/// `dim`: the cell is much darker than the board's bright cells (see
+/// `DIM_RATIO`).
+fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize, dim: bool) -> Reading {
     let Some(cell) = cell else {
         return Reading {
             value: None,
@@ -946,6 +1061,7 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
     let mut best_c = vec![0usize; np];
     let mut best_s = vec![0f64; np];
     let mut second_s = vec![0f64; np];
+    let mut second_c = vec![0usize; np];
     for p in 0..np {
         let v = &cell.v[p * CANVAS..(p + 1) * CANVAS];
         let s: [f64; NCLS] = std::array::from_fn(|c| {
@@ -971,10 +1087,14 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         best_c[p] = bc;
         best_s[p] = sw[bc];
         // second best: any other allowed class, ignoring the width gate (a shape margin)
-        second_s[p] = (0..NCLS)
-            .filter(|&c| c != bc)
-            .map(|c| if allowed[c] { s[c] } else { -1.0 })
-            .fold(f64::NEG_INFINITY, f64::max);
+        second_s[p] = f64::NEG_INFINITY;
+        for c in (0..NCLS).filter(|&c| c != bc) {
+            let sc = if allowed[c] { s[c] } else { -1.0 };
+            if sc > second_s[p] {
+                second_s[p] = sc;
+                second_c[p] = c;
+            }
+        }
     }
     let total_mass = cell.total_mass.max(1e-9);
     let piece_score: Vec<f64> = (0..np)
@@ -1022,10 +1142,21 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         .iter()
         .find(|(_, a)| text(a).replace(',', "") != digits)
         .map(|(o, _)| *o);
-    // glyph margin in units of that digit's typical margin
+    // glyph margin in units of that digit's typical margin; a glyph below the
+    // suspect line can be lifted by its pair check (never lowered)
+    let glyph_margin = |p: usize| {
+        let raw = (best_s[p] - second_s[p]) / tpl.typ[best_c[p]];
+        if (PAIR_FLOOR..SUSPECT_CONF as f64).contains(&raw)
+            && let Some(m) = pair_margin(cell, tpl, p, best_c[p], second_c[p], dim)
+        {
+            raw.max(m)
+        } else {
+            raw
+        }
+    };
     let gm = acc
         .iter()
-        .map(|&p| (best_s[p] - second_s[p]) / tpl.typ[best_c[p]])
+        .map(|&p| glyph_margin(p))
         .fold(f64::INFINITY, f64::min);
     let gm = if acc.is_empty() { 0.0 } else { gm };
     // partition ambiguity: best alternative reading with a different digit string
@@ -1060,6 +1191,17 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
     }
 }
 
+/// Brightness of the board's bright cells: the 90th percentile of the
+/// segmented cells' peaks (white digits; zeros are drawn darker).
+fn bright_peak(rows: &[[Option<Segment>; 6]]) -> Option<f64> {
+    let mut pk: Vec<f64> = rows.iter().flatten().flatten().map(|s| s.peak).collect();
+    if pk.is_empty() {
+        return None;
+    }
+    pk.sort_by(f64::total_cmp);
+    Some(pk[(pk.len() - 1) * 9 / 10])
+}
+
 // ---------------------------------------------------------------- entry point
 
 /// Read every stat cell of a cropped scoreboard.
@@ -1090,17 +1232,26 @@ pub fn read_board(
     if t0.elapsed() > budget {
         return Err(ShadowError::OverBudget);
     }
-    let mut rows = Vec::with_capacity(bands.len());
-    for band in bands {
-        let mut segs: [Option<Segment>; 6] =
-            std::array::from_fn(|k| segment_cell(&n, band, wins[k], pad));
-        let row_band = row_text_band(&segs);
+    let mut seg_rows: Vec<[Option<Segment>; 6]> = bands
+        .iter()
+        .map(|&band| std::array::from_fn(|k| segment_cell(&n, band, wins[k], pad)))
+        .collect();
+    let bright = bright_peak(&seg_rows);
+    if t0.elapsed() > budget {
+        return Err(ShadowError::OverBudget);
+    }
+    let mut rows = Vec::with_capacity(seg_rows.len());
+    for segs in seg_rows.iter_mut() {
+        let row_band = row_text_band(segs);
         let cells = std::array::from_fn(|k| {
             let cell = segs[k].take().and_then(|mut seg| {
                 apply_row_band(&mut seg, row_band);
                 prepare_cell(seg)
             });
-            let r = read_cell(cell.as_ref(), tpl, k);
+            let dim = cell
+                .as_ref()
+                .is_some_and(|c| bright.is_some_and(|b| c.peak < DIM_RATIO * b));
+            let r = read_cell(cell.as_ref(), tpl, k, dim);
             // NaN cannot reach the log: it becomes 0 (and therefore suspect).
             let confidence = if r.margin.is_finite() {
                 r.margin.clamp(0.0, 1.0) as f32
@@ -1361,6 +1512,7 @@ mod tests {
             dh,
             runs: vec![(1, 7)],
             rival: 0.0,
+            peak: 255.0,
         }
     }
 
@@ -1424,6 +1576,110 @@ mod tests {
         // more digits need proportionally more ink
         assert!(!too_little_ink(44.0, 2, 9));
         assert!(too_little_ink(22.0, 2, 9));
+    }
+
+    /// A one-glyph cell from a template glyph mean (1440 size), optionally
+    /// with one stray ink pixel in the column right of the glyph.
+    fn glyph_cell(c: usize, stray: bool) -> Cell {
+        let g = &glyph_means()[c];
+        let (w, h) = (CW + 8, CH + 8);
+        let mut ink = Plane::zeros(w, h);
+        for y in 0..CH {
+            for x in 0..CW {
+                ink.d[(y + 2) * w + x + 4] = g.at(x, y);
+            }
+        }
+        if stray {
+            let (_, x1) = ink_cols(g);
+            ink.d[(2 + CH / 3) * w + 4 + x1] = 0.5;
+        }
+        prepare_cell(segment(ink, 160.0).unwrap()).unwrap()
+    }
+
+    /// Piece id covering the whole (single) run.
+    fn whole_piece(cell: &Cell) -> usize {
+        let (s, e) = (cell.runs[0].s, cell.runs[0].e);
+        cell.pieces.iter().position(|&p| p == (s, e)).unwrap()
+    }
+
+    #[test]
+    fn pair_check_reads_the_region_where_look_alikes_differ() {
+        let tpl = templates_for(REF_H_1440);
+        let canvas = |c: usize| -> [f32; CANVAS] { tpl.t[c].as_slice().try_into().unwrap() };
+        for (a, b) in [(4, 6), (0, 3)] {
+            assert!(pair_check(&canvas(a), tpl, a, b) > 0.9, "{a} vs {b}");
+            assert!(pair_check(&canvas(b), tpl, a, b) < -0.9, "{b} read as {a}");
+            // antisymmetric: swapping the pair flips the sign
+            let (x, y) = (
+                pair_check(&canvas(a), tpl, a, b),
+                pair_check(&canvas(a), tpl, b, a),
+            );
+            assert!((x + y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn pair_margin_applies_only_to_known_look_alikes() {
+        let tpl = templates_for(REF_H_1440);
+        let four = glyph_cell(4, false);
+        let p = whole_piece(&four);
+        let m = pair_margin(&four, tpl, p, 4, 6, false).unwrap();
+        assert!(m > 0.9, "{m}");
+        // a 4 whose shape runner-up is 1 but which is far too wide to be a 1
+        assert!(four.ar[p] > tpl.ar_hi[1]);
+        assert!(pair_margin(&four, tpl, p, 4, 1, false).is_some());
+        // other pairs get no check
+        assert!(pair_margin(&four, tpl, p, 4, 9, false).is_none());
+        assert!(pair_margin(&four, tpl, p, 6, 4, false).is_none());
+        // a 0 is only helped when the cell is dim
+        let zero = glyph_cell(0, false);
+        let z = whole_piece(&zero);
+        assert!(pair_margin(&zero, tpl, z, 0, 3, true).unwrap() > 0.9);
+        assert!(pair_margin(&zero, tpl, z, 0, 3, false).is_none());
+        assert!(pair_margin(&zero, tpl, z, 3, 0, true).is_none());
+    }
+
+    #[test]
+    fn recentred_canvas_drops_a_one_pixel_edge_column() {
+        let clean = glyph_cell(0, false);
+        let stray = glyph_cell(0, true);
+        let (pc, ps) = (whole_piece(&clean), whole_piece(&stray));
+        assert_eq!(
+            stray.pieces[ps].1,
+            clean.pieces[pc].1 + 1,
+            "the stray pixel widens the run"
+        );
+        let a = recentred_canvas(&clean, pc);
+        let b = recentred_canvas(&stray, ps);
+        let corr: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        assert!(corr > 0.999, "{corr}");
+        // the canvas used for matching keeps the stray column
+        let plain = &stray.v[ps * CANVAS..(ps + 1) * CANVAS];
+        let corr_plain: f64 = a
+            .iter()
+            .zip(plain)
+            .map(|(x, y)| *x as f64 * *y as f64)
+            .sum();
+        assert!(corr_plain < corr);
+    }
+
+    #[test]
+    fn bright_peak_is_the_upper_decile_of_cell_peaks() {
+        let seg = |peak: f64| {
+            let mut s = seg_with(4, 13);
+            s.peak = peak;
+            Some(s)
+        };
+        assert_eq!(bright_peak(&[]), None);
+        // 10 cells: eight white, two dim zeros
+        let row = |a: f64, b: f64| [seg(255.0), seg(a), seg(255.0), seg(b), seg(255.0), None];
+        let rows = [row(170.0, 255.0), row(255.0, 169.0), row(255.0, 255.0)];
+        let b = bright_peak(&rows[..2]).unwrap();
+        assert_eq!(b, 255.0);
+        assert!(170.0 < DIM_RATIO * b && 230.0 > DIM_RATIO * b);
+        // a whole board drawn darker keeps zeros dim relative to it
+        let dark = [[seg(180.0), seg(120.0), seg(180.0), seg(180.0), None, None]];
+        assert!(120.0 < DIM_RATIO * bright_peak(&dark).unwrap());
     }
 
     #[test]
@@ -1525,7 +1781,15 @@ mod tests {
     /// The calibration constants, hashed with the output so a change to any
     /// of them needs a bump even if no fixture cell moves.
     fn calibration_params() -> Vec<f64> {
-        let mut p = vec![SUSPECT_CONF as f64, PM_REF, MIN_INK_PER_GLYPH];
+        let mut p = vec![
+            SUSPECT_CONF as f64,
+            PM_REF,
+            MIN_INK_PER_GLYPH,
+            PAIR_TYP,
+            PAIR_FLOOR,
+            PAIR_MASK,
+            DIM_RATIO,
+        ];
         p.extend_from_slice(&TYP_1440);
         p.extend_from_slice(&TYP_1080);
         p
@@ -1580,6 +1844,7 @@ mod tests {
         ("cv-v1", 0xa20c_600c_992e_6cd5),
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
         ("cv-v3", 0xac0e_b782_9e66_c19a),
+        ("cv-v4", 0x6ebe_8fa5_d54e_b08e),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
