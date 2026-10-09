@@ -7,13 +7,16 @@
 //!
 //! Server contracts:
 //!
-//! * `POST /api/link/start` with `{device_label, app_version}` returns
+//! * `POST /api/link/start` and `POST /api/link/poll` use the shared
+//!   `scuffed_types` device-link bodies. Start sends
+//!   `{device_label, app_version}` and returns
 //!   `{user_code, device_code, interval, expires_in}`. `user_code` is
 //!   `XXXX-XXXX`. `device_code` is 64 hex characters. `interval` is the
 //!   fixed gap between polls (5 seconds on the current server). `expires_in`
-//!   is the code lifetime (600 seconds on the current server).
-//! * `POST /api/link/poll` with `{device_code}` returns `{status}` of
+//!   is the code lifetime (600 seconds on the current server). Poll sends
+//!   `{device_code}` and returns `{status}` of
 //!   `pending`, `slow_down`, `denied`, `expired`, or `approved`.
+//!   Neither request sends an `Origin` header.
 //!   Each `slow_down` adds 5 seconds to this client's poll interval and
 //!   keeps that raised gap for the rest of that device code. `approved`
 //!   includes `token` once. The next poll is `expired` and has no token.
@@ -39,6 +42,9 @@ use iced::widget::image::Handle;
 use iced::widget::{button, column, container, opaque, row, scrollable, space, text, text_input};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
+use scuffed_types::{
+    DeviceLinkPollRequest, DeviceLinkPollResponse, DeviceLinkStartRequest, DeviceLinkStartResponse,
+};
 use stat_tracker::config::{Config, SetupDiskPatch, SyncConfig};
 
 use crate::app::Message;
@@ -577,40 +583,17 @@ pub fn is_device_code(raw: &str) -> bool {
     raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub struct ParsedStart {
-    pub user_code: String,
-    pub device_code: String,
-    pub interval: u64,
-    pub expires_in: u64,
-}
-
-pub fn parse_start_body(body: &str) -> Result<ParsedStart, String> {
-    let value: serde_json::Value =
+pub fn parse_start_body(body: &str) -> Result<DeviceLinkStartResponse, String> {
+    let started: DeviceLinkStartResponse =
         serde_json::from_str(body).map_err(|_| UNREADABLE_SITE.to_string())?;
-    let user_code = value
-        .get("user_code")
-        .and_then(|item| item.as_str())
-        .unwrap_or("");
-    let device_code = value
-        .get("device_code")
-        .and_then(|item| item.as_str())
-        .unwrap_or("");
-    let Some(interval) = value.get("interval").and_then(|item| item.as_u64()) else {
-        return Err(UNREADABLE_SITE.to_string());
-    };
-    let Some(expires_in) = value.get("expires_in").and_then(|item| item.as_u64()) else {
-        return Err(UNREADABLE_SITE.to_string());
-    };
-    if !is_user_code(user_code) || !is_device_code(device_code) || interval == 0 || expires_in == 0
+    if !is_user_code(&started.user_code)
+        || !is_device_code(&started.device_code)
+        || started.interval == 0
+        || started.expires_in == 0
     {
         return Err(UNREADABLE_SITE.to_string());
     }
-    Ok(ParsedStart {
-        user_code: user_code.to_string(),
-        device_code: device_code.to_string(),
-        interval,
-        expires_in,
-    })
+    Ok(started)
 }
 
 fn site_error_message(body: &str, fallback: String) -> String {
@@ -626,23 +609,16 @@ fn site_error_message(body: &str, fallback: String) -> String {
 }
 
 pub fn parse_poll_body(body: &str) -> Result<PollOutcome, String> {
-    let value: serde_json::Value =
+    let parsed: DeviceLinkPollResponse =
         serde_json::from_str(body).map_err(|_| UNREADABLE_SITE.to_string())?;
-    let status = value
-        .get("status")
-        .and_then(|item| item.as_str())
-        .unwrap_or("");
-    match status {
+    match parsed.status.as_str() {
         "pending" => Ok(PollOutcome::Pending),
         "slow_down" => Ok(PollOutcome::SlowDown),
         "denied" => Ok(PollOutcome::Denied),
         "expired" => Ok(PollOutcome::Expired),
         "approved" => {
-            let token = value
-                .get("token")
-                .and_then(|item| item.as_str())
-                .unwrap_or("")
-                .trim();
+            let token = parsed.token.unwrap_or_default();
+            let token = token.trim();
             if token.is_empty() {
                 Err("The site approved sign-in but did not send a token.".into())
             } else {
@@ -766,12 +742,13 @@ pub async fn start_link(
 ) -> Result<LinkStartOutcome, String> {
     let client = http_client()?;
     let url = format!("{base}/api/link/start");
+    // Start does not check Origin. The body is the shared request type.
     let response = client
         .post(&url)
-        .json(&serde_json::json!({
-            "device_label": device_label,
-            "app_version": app_version,
-        }))
+        .json(&DeviceLinkStartRequest {
+            device_label,
+            app_version,
+        })
         .send()
         .await
         .map_err(|_| REACH_SITE.to_string())?;
@@ -813,9 +790,12 @@ pub enum PollUpdate {
 pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, String> {
     let client = http_client()?;
     let url = format!("{base}/api/link/poll");
+    // Poll does not check Origin. The body is the shared request type.
     let response = client
         .post(&url)
-        .json(&serde_json::json!({ "device_code": device_code }))
+        .json(&DeviceLinkPollRequest {
+            device_code: device_code.clone(),
+        })
         .send()
         .await
         .map_err(|_| REACH_SITE.to_string())?;
@@ -1891,10 +1871,32 @@ mod tests {
             r#"{{"user_code":"ABCD-EFGH","device_code":"{device}","interval":5,"expires_in":600}}"#
         ))
         .expect("start");
-        assert_eq!(started.user_code, "ABCD-EFGH");
-        assert_eq!(started.device_code, device);
-        assert_eq!(started.interval, 5);
-        assert_eq!(started.expires_in, 600);
+        assert_eq!(
+            started,
+            DeviceLinkStartResponse {
+                user_code: "ABCD-EFGH".into(),
+                device_code: device.into(),
+                interval: 5,
+                expires_in: 600,
+            }
+        );
+        let start_request = DeviceLinkStartRequest {
+            device_label: DEVICE_LABEL.into(),
+            app_version: "0.4.24".into(),
+        };
+        let encoded = serde_json::to_string(&start_request).expect("encode start");
+        assert_eq!(
+            serde_json::from_str::<DeviceLinkStartRequest>(&encoded).expect("decode start"),
+            start_request
+        );
+        let poll_request = DeviceLinkPollRequest {
+            device_code: device.into(),
+        };
+        let encoded = serde_json::to_string(&poll_request).expect("encode poll");
+        assert_eq!(
+            serde_json::from_str::<DeviceLinkPollRequest>(&encoded).expect("decode poll"),
+            poll_request
+        );
         assert!(
             parse_start_body(
                 r#"{"user_code":"ABCD-234O","device_code":"aa","interval":5,"expires_in":600}"#
@@ -2122,6 +2124,20 @@ mod tests {
         body.len() >= length
     }
 
+    fn assert_no_browser_headers(raw: &str) {
+        let headers = raw.split("\r\n\r\n").next().unwrap_or(raw);
+        for line in headers.lines() {
+            let name = line.split(':').next().unwrap_or("").trim();
+            assert!(
+                !name.eq_ignore_ascii_case("origin")
+                    && !name.eq_ignore_ascii_case("sec-fetch-site")
+                    && !name.eq_ignore_ascii_case("sec-fetch-mode")
+                    && !name.eq_ignore_ascii_case("sec-fetch-dest"),
+                "start and poll must not send browser headers:\n{headers}"
+            );
+        }
+    }
+
     fn spawn_mock(
         handler: impl Fn(&str, &str) -> (u16, Vec<(&'static str, String)>, String)
         + Send
@@ -2186,8 +2202,12 @@ mod tests {
         let checks_handler = checks.clone();
         let base = spawn_mock(move |head, body| {
             if head.contains("POST /api/link/start") {
-                assert!(body.contains("\"device_label\""));
-                assert!(body.contains("\"app_version\""));
+                assert_no_browser_headers(head);
+                let json = body.split("\r\n\r\n").nth(1).unwrap_or("");
+                let request: DeviceLinkStartRequest =
+                    serde_json::from_str(json).expect("shared start request");
+                assert_eq!(request.device_label, DEVICE_LABEL);
+                assert_eq!(request.app_version, "0.4.24");
                 assert!(!body.contains(secret));
                 return (
                     200,
@@ -2198,10 +2218,11 @@ mod tests {
                 );
             }
             if head.contains("POST /api/link/poll") {
-                assert!(
-                    body.contains(secret),
-                    "the poll body has to carry the device code to the site"
-                );
+                assert_no_browser_headers(head);
+                let json = body.split("\r\n\r\n").nth(1).unwrap_or("");
+                let request: DeviceLinkPollRequest =
+                    serde_json::from_str(json).expect("shared poll request");
+                assert_eq!(request.device_code, secret);
                 let mut n = polls_handler.lock().expect("polls");
                 *n += 1;
                 let body = match *n {
