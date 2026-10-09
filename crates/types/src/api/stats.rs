@@ -400,6 +400,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_hero_is_rejected_when_null_or_omitted() {
+        let omitted = r#"{
+            "matches": [{
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        assert!(
+            serde_json::from_str::<StatsUploadBody>(omitted).is_err(),
+            "an omitted hero field is not accepted"
+        );
+        let null_hero = r#"{
+            "matches": [{
+                "hero": null,
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        assert!(
+            serde_json::from_str::<StatsUploadBody>(null_hero).is_err(),
+            "a null hero is not accepted"
+        );
+    }
+
+    #[test]
     fn old_shape_upload_body_deserializes_without_recognizer() {
         let current = serde_json::to_string(&sample_request()).unwrap();
         assert!(

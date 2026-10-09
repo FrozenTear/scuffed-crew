@@ -5657,16 +5657,11 @@ where
     let claims = storage::SyncClaim::capture(&unsynced);
     let mut newest_first = unsynced;
     newest_first.reverse(); // get_unsynced is played_at ASC
-    let collapsed = storage::latest_per_game(newest_first);
-    let (to_upload, held_blank): (Vec<_>, Vec<_>) = collapsed.into_iter().partition(|row| {
-        let mode = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
-        !parse::upload_identity_blank(row.display_map_name(), &mode, row.display_hero())
-    });
-    if !held_blank.is_empty() {
-        tracing::info!(
-            rows = held_blank.len(),
-            "held rows with a blank map, mode, or hero, not sent"
-        );
+    let staged = storage::latest_per_game(newest_first);
+    let (review_held, to_upload): (Vec<_>, Vec<_>) =
+        staged.into_iter().partition(sync::row_needs_review);
+    if !review_held.is_empty() {
+        tracing::info!(games = review_held.len(), "held games for review, not sent");
     }
     if to_upload.is_empty() && tombstones.is_empty() {
         return sync::SyncAttempt::NoServerCall;
@@ -7730,6 +7725,141 @@ mod tests {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn blank_map_and_unknown_hero_stay_local_until_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut missed_map = test_match("held-map", "victory");
+        missed_map.map_name.clear();
+        missed_map.game_mode.clear();
+        store.insert_match(missed_map).await.unwrap();
+        let mut unknown_hero = test_match("held-hero", "victory");
+        unknown_hero.hero = "Unknown".into();
+        store.insert_match(unknown_hero).await.unwrap();
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let calls_bg = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            *calls_bg.lock().unwrap() += 1;
+            async { Ok(upload_ok()) }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::NoServerCall));
+        assert_eq!(*calls.lock().unwrap(), 0);
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| !row.synced)
+        );
+
+        store
+            .edit_match(
+                "held-map",
+                &storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .edit_match(
+                "held-hero",
+                &storage::MatchEdit {
+                    hero: Some("Ana".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_bg = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_bg = std::sync::Arc::clone(&seen_bg);
+            async move {
+                seen_bg.lock().unwrap().extend(matches);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let got = seen.lock().unwrap().clone();
+        let body = serde_json::to_string(&sync::upload_request(&got, &[])).unwrap();
+        assert!(!body.contains("\"map_name\":\"\""));
+        assert!(!body.contains("\"game_mode\":\"\""));
+        assert!(!body.contains("Unknown"));
+        let parsed: scuffed_types::api::StatsUploadRequest = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.matches.len(), 2);
+        assert!(
+            parsed
+                .matches
+                .iter()
+                .any(|m| m.map_name == "King's Row" && m.game_mode == "Hybrid" && m.hero == "Ana")
+        );
+        assert!(
+            parsed
+                .matches
+                .iter()
+                .any(|m| m.map_name == "Busan" && m.game_mode == "Control" && m.hero == "Ana")
+        );
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.synced)
+        );
+    }
+
+    #[tokio::test]
+    async fn held_game_stays_unsynced_while_a_ready_game_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("ready-game", "victory"))
+            .await
+            .unwrap();
+        let mut held = test_match("held-game", "victory");
+        held.map_name.clear();
+        held.game_mode.clear();
+        store.insert_match(held).await.unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_bg = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_bg = std::sync::Arc::clone(&seen_bg);
+            async move {
+                seen_bg.lock().unwrap().extend(matches);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].session_id, "ready-game");
+        let body = serde_json::to_string(&sync::upload_request(&got, &[])).unwrap();
+        assert!(!body.contains("\"map_name\":\"\""));
+
+        let rows = store.get_all_matches().await.unwrap();
+        let ready = rows
+            .iter()
+            .find(|row| row.session_id == "ready-game")
+            .unwrap();
+        let held = rows
+            .iter()
+            .find(|row| row.session_id == "held-game")
+            .unwrap();
+        assert!(ready.synced, "the ready game is marked synced");
+        assert!(!held.synced, "the held game stays unsynced");
+        assert!(held.map_name.is_empty());
     }
 
     /// Shadow mode is log only: the same capture stored and uploaded with the
@@ -12475,15 +12605,21 @@ mod tests {
         let uploaded = seen.lock().unwrap().clone();
         assert!(
             uploaded.is_empty(),
-            "a blank map stays local until a map is set: {uploaded:?}"
+            "a later GUI result still does not send a blank map: {uploaded:?}"
         );
-        let queued = store.get_unsynced().await.unwrap();
+        let kept = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.elims == 3)
+            .unwrap();
+        assert!(!kept.synced, "the blank map stays unsynced for a pick");
         assert!(
-            queued.iter().any(|row| {
-                row.session_id == held.session_id && row.map_name.is_empty() && !row.synced
-            }),
-            "the archived hold stays queued, not uploaded as Busan: {queued:?}"
+            kept.map_name.is_empty(),
+            "the fresh hold must not become Busan"
         );
+        assert_eq!(kept.outcome, "victory");
     }
 
     #[tokio::test]
@@ -12659,20 +12795,15 @@ mod tests {
         let uploaded = seen.lock().unwrap().clone();
         assert!(
             uploaded.is_empty(),
-            "a blank map is not uploaded: {uploaded:?}"
+            "the empty map stays local and is not sent as Busan: {uploaded:?}"
         );
+        let kept = night.store.get_session_snapshots(&opened).await.unwrap();
         assert!(
-            uploaded
-                .iter()
-                .all(|(_, map, mode)| map != "Busan" && mode != "Control"),
-            "nothing from the guillard split uploads as Busan: {uploaded:?}"
-        );
-        let queued = night.store.get_unsynced().await.unwrap();
-        assert!(
-            queued
-                .iter()
-                .any(|row| row.session_id == opened && row.map_name.is_empty() && !row.synced),
-            "the new session stays queued until it has a map: {queued:?}"
+            !kept.is_empty()
+                && kept
+                    .iter()
+                    .all(|row| !row.synced && row.map_name.is_empty() && row.game_mode.is_empty()),
+            "the split stays unsynced with no map until a pick: {kept:?}"
         );
     }
 

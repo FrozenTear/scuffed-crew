@@ -1060,14 +1060,15 @@ impl LocalStore {
                      corrected_map_name = $cmap, corrected_outcome = $co, \
                      corrected_elims = $ce, corrected_deaths = $cd, corrected_assists = $ca, \
                      corrected_damage = $cdmg, corrected_healing = $chl, \
-                     corrected_mitigation = $cmit, edited_fields = $ef, edited_at = $ea, \
-                     suspect_fields = $sf, \
+                     corrected_mitigation = $cmit, game_mode = $mode, edited_fields = $ef, \
+                     edited_at = $ea, suspect_fields = $sf, \
                      synced = false, upload_reject = '', sync_rev = (sync_rev ?? 0) + 1",
                 )
                 .bind(("id", id))
                 .bind(("ch", m.corrected_hero.clone()))
                 .bind(("cr", m.corrected_role.clone()))
                 .bind(("cmap", m.corrected_map_name.clone()))
+                .bind(("mode", m.game_mode.clone()))
                 .bind(("co", m.corrected_outcome.clone()))
                 .bind(("ce", m.corrected_elims))
                 .bind(("cd", m.corrected_deaths))
@@ -1482,6 +1483,14 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
         mark_edited(&mut m.edited_fields, "hero");
         crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "hero");
         changed = true;
+        let guessed = crate::parse::guess_role_public(v);
+        if edit.role.is_none()
+            && !crate::parse::hero_is_unknown_label(v)
+            && guessed != m.display_role()
+        {
+            m.corrected_role = Some(guessed);
+            mark_edited(&mut m.edited_fields, "role");
+        }
     }
     if let Some(v) = &edit.role {
         m.corrected_role = Some(v.clone());
@@ -1493,6 +1502,10 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
         mark_edited(&mut m.edited_fields, "map_name");
         crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
         changed = true;
+        let derived = crate::parse::stored_game_mode(v);
+        if !derived.is_empty() {
+            m.game_mode = derived;
+        }
     }
     if let Some(v) = &edit.outcome {
         m.corrected_outcome = Some(v.clone());
@@ -2051,6 +2064,62 @@ mod tests {
             && m.display_hero() == "Ana"
             && m.elims != 30
             && m.is_edited()));
+    }
+
+    #[tokio::test]
+    async fn picked_map_and_hero_clear_the_upload_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        let mut m = snap("s1", 4);
+        m.hero = "Unknown".into();
+        m.role = "Damage".into();
+        m.map_name.clear();
+        m.game_mode.clear();
+        m.outcome = "victory".into();
+        store.insert_match(m).await.unwrap();
+
+        let before = store.get_unsynced().await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            crate::parse::review_suspect_fields(
+                before[0].display_map_name(),
+                &before[0].game_mode,
+                before[0].display_hero()
+            ),
+            vec!["map", "mode", "hero"]
+        );
+        assert!(crate::sync::upload_request(&before, &[]).matches.is_empty());
+
+        store
+            .edit_match(
+                "s1",
+                &MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    hero: Some("Ana".into()),
+                    ..MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let after = store.get_all_matches().await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].display_map_name(), "King's Row");
+        assert_eq!(after[0].game_mode, "Hybrid");
+        assert_eq!(after[0].display_hero(), "Ana");
+        assert_eq!(after[0].display_role(), "Support");
+        assert_eq!(after[0].hero, "Unknown", "OCR hero stays on the row");
+        assert!(after[0].map_name.is_empty(), "OCR map stays on the row");
+        assert!(!crate::sync::row_needs_review(&after[0]));
+        let uploaded = crate::sync::upload_request(&after, &[]);
+        assert_eq!(uploaded.matches.len(), 1);
+        assert_eq!(uploaded.matches[0].map_name, "King's Row");
+        assert_eq!(uploaded.matches[0].game_mode, "Hybrid");
+        assert_eq!(uploaded.matches[0].hero, "Ana");
+        let body = serde_json::to_string(&uploaded).unwrap();
+        assert!(!body.contains("\"map_name\":\"\""));
+        assert!(!body.contains("\"game_mode\":\"\""));
+        assert!(!body.contains("Unknown"));
     }
 
     #[test]

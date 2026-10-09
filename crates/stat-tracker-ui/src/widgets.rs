@@ -659,6 +659,10 @@ pub fn expanded_game_card<'a>(
     ]
     .spacing(10);
 
+    if game.needs_review() {
+        body = body.push(review_panel(game));
+    }
+
     if let Some(message) = game.upload_reject.as_deref() {
         body = body.push(upload_rejected_panel(game.session_id.clone(), message));
     }
@@ -872,10 +876,76 @@ fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Ele
     .into()
 }
 
+fn review_panel(game: &Game) -> Element<'static, Message> {
+    let fields = game.review_fields();
+    let notice = game.review_notice().unwrap_or("");
+    let mut col =
+        column![
+            text(notice)
+                .size(SIZE_BODY)
+                .font(FONT_MEDIUM)
+                .color(if game.held_locally() {
+                    theme::WARN
+                } else {
+                    TEXT_2
+                }),
+        ]
+        .spacing(8)
+        .width(Fill);
+
+    if fields
+        .iter()
+        .any(|field| *field == "map" || *field == "mode")
+    {
+        col = col.push(label_text("Pick a map"));
+        col = col.push(
+            text("Mode follows the map.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in stat_tracker::parse::known_map_names() {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                name.to_string(),
+                game.map_name == name,
+                Message::PickMap {
+                    session_id: sid,
+                    map: name.to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    if fields.contains(&"hero") {
+        col = col.push(label_text("Pick a hero"));
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in scuffed_types::HEROES {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                (*name).to_string(),
+                game.hero == *name,
+                Message::PickHero {
+                    session_id: sid,
+                    hero: (*name).to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    col.into()
+}
+
 fn role_and_edited(game: &Game) -> Element<'static, Message> {
     let mut r = row![label_text(game.role.label())]
         .spacing(8)
         .align_y(Alignment::Center);
+    if game.held_locally() {
+        r = r.push(status_chip("needs review", theme::WARN));
+    }
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
     }
@@ -955,7 +1025,7 @@ fn with_unsure(body: Element<'static, Message>, unsure: bool) -> Element<'static
 
 fn map_block(game: &Game, size: f32, font: iced::Font) -> Element<'static, Message> {
     let map = with_unsure(
-        text(game.map_name.clone())
+        text(game.display_map())
             .size(size)
             .font(font)
             .color(TEXT)

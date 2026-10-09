@@ -258,7 +258,7 @@ pub struct OverlayLastGame {
 impl OverlayLastGame {
     fn from_game(game: &Game) -> Self {
         Self {
-            map_name: game.map_name.clone(),
+            map_name: game.display_map(),
             hero: game.display_hero(),
             role: game.role,
             outcome: game.outcome,
