@@ -110,15 +110,31 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid upload governor config"),
     );
-    // Token-check is a read, but it accepts the same bearer secret as stats
-    // upload. It shares this governor so guesses do not get a second budget.
-    // POST /api/stats/upload itself is not on a governor.
     let upload_routes = Router::new()
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
         .route("/api/upload/image", post(routes::uploads::upload_image))
-        .route("/api/stats/token-check", get(routes::stats::token_check))
         .layer(
             GovernorLayer::new(upload_governor_config)
+                .error_handler(rate_limit::governor_error_response),
+        );
+
+    // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
+    // 10s), but a separate bucket. Using up one does not block the other.
+    // The key is the client IP from TrustedProxyIpKeyExtractor, the same
+    // extractor the other governors use. POST /api/stats/upload itself is
+    // not on a governor.
+    let token_check_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid token-check governor config"),
+    );
+    let token_check_routes = Router::new()
+        .route("/api/stats/token-check", get(routes::stats::token_check))
+        .layer(
+            GovernorLayer::new(token_check_governor_config)
                 .error_handler(rate_limit::governor_error_response),
         );
 
@@ -218,6 +234,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .merge(auth_routes)
         // Upload routes carry their own (dedicated) rate limiter
         .merge(upload_routes)
+        .merge(token_check_routes)
         // Public aggregate routes (dedicated rate limiter — HS-DR P1)
         .merge(public_routes)
         .route("/api/auth/me", get(routes::auth::me))

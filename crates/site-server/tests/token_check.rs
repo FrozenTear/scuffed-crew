@@ -262,8 +262,8 @@ async fn token_check_returns_display_name_and_identical_401s() {
         "expired auth must not stamp last_used_at"
     );
 
-    // Upload governor: burst 8, then 1 every 10s. A fresh peer so the auth
-    // calls above do not consume this bucket.
+    // Token-check governor: burst 8, then 1 every 10s, per client IP. A fresh
+    // peer so the auth calls above do not consume this bucket.
     let mut statuses = Vec::new();
     for i in 0..12 {
         let (status, body) = get_token_check(&app, RATE_PEER, Some("guess")).await;
@@ -276,11 +276,75 @@ async fn token_check_returns_display_name_and_identical_401s() {
     assert_eq!(
         statuses[8],
         StatusCode::TOO_MANY_REQUESTS,
-        "the 9th guess must hit the upload governor, saw {statuses:?}"
+        "the 9th guess must hit the token-check governor, saw {statuses:?}"
     );
     assert_eq!(
         row_count(&state.db).await,
         before,
         "rate-limited calls must not insert or delete rows"
     );
+}
+
+async fn post_image(app: &axum::Router, peer: [u8; 4]) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/upload/image")
+                .extension(axum::extract::ConnectInfo(SocketAddr::from((peer, 44000))))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Token-check and image uploads each have a per-IP bucket. Filling one does
+/// not 429 the other, even from the same client IP.
+#[tokio::test]
+async fn token_check_and_image_upload_rate_limits_are_separate() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let token_peer = [203, 0, 113, 20];
+    let mut token_statuses = Vec::new();
+    for _ in 0..9 {
+        let (status, _) = get_token_check(&app, token_peer, None).await;
+        token_statuses.push(status);
+    }
+    assert!(
+        token_statuses[..8]
+            .iter()
+            .all(|status| *status == StatusCode::UNAUTHORIZED),
+        "token-check burst should reach the handler, saw {token_statuses:?}"
+    );
+    assert_eq!(token_statuses[8], StatusCode::TOO_MANY_REQUESTS);
+    let image_after = post_image(&app, token_peer).await;
+    assert_ne!(
+        image_after,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a used-up token-check bucket must not block image uploads from the same IP"
+    );
+    assert_eq!(image_after, StatusCode::UNAUTHORIZED);
+
+    let image_peer = [203, 0, 113, 21];
+    let mut image_statuses = Vec::new();
+    for _ in 0..9 {
+        image_statuses.push(post_image(&app, image_peer).await);
+    }
+    assert!(
+        image_statuses[..8]
+            .iter()
+            .all(|status| *status == StatusCode::UNAUTHORIZED),
+        "image upload burst should reach the handler, saw {image_statuses:?}"
+    );
+    assert_eq!(image_statuses[8], StatusCode::TOO_MANY_REQUESTS);
+    let (token_after, _) = get_token_check(&app, image_peer, None).await;
+    assert_ne!(
+        token_after,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a used-up image upload bucket must not block token-check from the same IP"
+    );
+    assert_eq!(token_after, StatusCode::UNAUTHORIZED);
 }
