@@ -460,7 +460,7 @@ const TEAM_SIZE_6V6_PITCH_MAX: f64 = 0.080;
 /// [`TEAM_SIZE_6V6_PITCH_MAX`].
 const TEAM_SIZE_5V5_PITCH_MIN: f64 = 0.083;
 
-/// Row pitches that can be a real 6v6 (about 0.074 to 0.0794) or 5v5
+/// Row pitches that can be a real 6v6 (about 0.0725 to 0.0794) or 5v5
 /// (about 0.083 to 0.090) scoreboard, with room on each side. 0.101 and
 /// 0.102, the two misleading pitches measured so far, fall outside.
 const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
