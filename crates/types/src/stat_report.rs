@@ -116,7 +116,7 @@ pub struct StatReportDeleted {
 /// Members receive id, time, size, and the three consent flags. Officer-only
 /// fields are omitted for a member (`skip_serializing_if`). Free text is one
 /// of those fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatReportListItem {
     pub id: String,
     pub created_at: DateTime<Utc>,

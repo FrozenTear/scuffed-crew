@@ -1479,15 +1479,15 @@ mod tests {
         assert!(!officer.contains("boom"));
 
         let json = r#"{"error":"rate_limited","retry_after":12}"#;
-        let limited = ClientError::http(429, json, Some("99"));
-        assert_eq!(limited.http_status(), Some(429));
-        assert_eq!(limited.to_string(), "Try again in 12 s");
-        assert!(!limited.to_string().contains("HTTP error"));
+        let rate_limited = ClientError::http(429, json, Some("99"));
+        assert_eq!(rate_limited.http_status(), Some(429));
+        assert_eq!(rate_limited.to_string(), "Try again in 12 s");
+        assert!(!rate_limited.to_string().contains("HTTP error"));
         let from_json = visible_load_error(
             COPY_ERROR_MINE,
-            limited.http_status(),
-            limited.http_body().unwrap_or(""),
-            limited.retry_after_header(),
+            rate_limited.http_status(),
+            rate_limited.http_body().unwrap_or(""),
+            rate_limited.retry_after_header(),
         );
         assert_eq!(from_json, "Too many requests. Try again in 12 seconds.");
         let from_header = visible_load_error(COPY_ERROR_ALL, Some(429), "slow down", Some(8));
