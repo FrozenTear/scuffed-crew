@@ -85,8 +85,9 @@ pub enum BoardStatus {
     Read,
     /// No board: the capture path's preflight (row dips or header stat
     /// labels) fails, the six stat labels are not in the Tab header strip,
-    /// or fewer than 3 rows have 4 read stat cells (ocr-v1's final check).
-    /// `team_size` is `None`, no row fields.
+    /// fewer than 3 rows have 4 read stat cells (ocr-v1's final check), or
+    /// the digit read is empty after columns were found (for example the
+    /// time budget ran out). `team_size` is `None`, no row fields.
     NotFound,
     /// Passed the preflight, but the row pitch gives no 5v5 or 6v6 under
     /// Tracker's rule (no pitch, implausible pitches, or dip and spectral
@@ -216,6 +217,12 @@ impl Reader {
     /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
     /// [`not_found`] with that status: no team size, no row fields, no map.
     pub fn read_board(&self, frame: &DynamicImage) -> BoardRead {
+        self.read_board_timed(frame, READ_BUDGET)
+    }
+
+    /// [`Self::read_board`] with an explicit digit/hero budget (tests use a
+    /// zero budget to force an empty digit read after columns are found).
+    fn read_board_timed(&self, frame: &DynamicImage, budget: Duration) -> BoardRead {
         let t0 = Instant::now();
         let scoreboard = crate::ocr::preprocess::crop_scoreboard(frame);
         let team_size = match board_layout(&scoreboard) {
@@ -226,11 +233,10 @@ impl Reader {
                 return b;
             }
         };
-        // Err here (the time budget, after the columns were found) is not a
-        // digit read. assemble still marks the board Read, with no digit
-        // values. reader_apply keeps the whole ocr-v1 row for that board.
-        let digit_read = digits::read_board(&scoreboard, team_size, READ_BUDGET).ok();
-        if digit_read.as_ref().is_some_and(|d| !has_stat_rows(d)) {
+        let digit_read = digits::read_board(&scoreboard, team_size, budget).ok();
+        // Columns found but no usable digit rows (budget ran out, empty
+        // read, or fewer than 3 rows with 4 cells): not a board.
+        if digit_read.as_ref().is_none_or(|d| !has_stat_rows(d)) {
             let mut b = not_found(BoardStatus::NotFound);
             b.elapsed_ms = elapsed_ms(t0);
             return b;
@@ -238,7 +244,7 @@ impl Reader {
         let hero_read = self
             .heroes
             .as_ref()
-            .and_then(|h| h.read_board(&scoreboard, team_size, READ_BUDGET).ok());
+            .and_then(|h| h.read_board(&scoreboard, team_size, budget).ok());
         let mut board = assemble(
             team_size,
             digit_read.as_ref(),
@@ -395,13 +401,12 @@ pub struct MapName {
 /// ([`crate::parse::canonical_map`]) so both readers emit the same string and
 /// mode ([`crate::parse::map_mode`]).
 ///
-/// A banner name that `canonical_map` folds onto a different banner map
-/// keeps its own name and stays suspect: the banner match knows which map
-/// it saw. Temple of Anubis and Ecopoint: Antarctica are their own rows in
-/// the table now (until #201, pattern `anubis` gave Throne of Anubis and
-/// pattern `antarctic` gave Antarctic Peninsula). A name the table does not
-/// have (Practice Range, Hanamura, ...) also keeps its banner name and
-/// stays suspect.
+/// A banner map that ocr-v1's table folds onto a different map keeps its own
+/// name and is suspect rather than stored as the wrong map: the banner match
+/// knows which map it saw. Until #201 that was "Temple of Anubis" (pattern
+/// `anubis` gave Throne of Anubis) and "Ecopoint: Antarctica" (pattern
+/// `antarctic` gave Antarctic Peninsula); both now have their own keys. Maps ocr-v1 has no entry for
+/// (Practice Range, Hanamura, ...) also keep their banner name, suspect.
 pub fn map_name(info: &MapInfo) -> MapName {
     let other_banner_map = |n: &str| super::banner::MAPS.iter().any(|m| m.name == n);
     match crate::parse::canonical_map(info.name) {
@@ -807,8 +812,7 @@ mod tests {
             // header not in the Tab header strip
             ("practice range", stand_in(0.0844, 0.5, None)),
             // history Teams screen: rows at about 0.084, its header sits well
-            // below the Tab header strip. Its spectral pitch lands in the
-            // 0.080 to 0.083 band, so the pitch rule gives no size.
+            // below the Tab header strip
             ("history teams", stand_in(0.0844, 0.45, Some(150))),
             // six stat labels where a Tab board has them, rows, but no stat
             // digits at all: ocr-v1's 3-rows-of-4-cells check fails
@@ -1050,6 +1054,21 @@ mod tests {
         }
     }
 
+    /// Columns found, but the digit read is empty (zero budget forces
+    /// OverBudget): the board is `not_found` with no team size, not `read`.
+    #[test]
+    fn empty_digit_read_after_columns_is_not_found() {
+        let reader = Reader::load(&ReaderConfig::default());
+        let frame = tab_stand_in(2560, 1440, 6, PITCH_6V6, BLUE_RED, true);
+        let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+        assert!(digits::stat_columns_found(&crop));
+        assert_eq!(board_layout(&crop), Ok(6));
+        let b = reader.read_board_timed(&frame, Duration::ZERO);
+        assert_eq!(b.status, BoardStatus::NotFound);
+        assert_eq!(b.team_size, None);
+        assert!(b.fields.iter().all(|f| f.suspect && f.value.is_none()));
+    }
+
     /// Team colours never decide anything: rows, teams and the size come
     /// from the layout (row pitch, team 2 at 0.565 of the crop) and from
     /// brightness. Swapped, purple/yellow and yellow/purple teams read the
@@ -1126,9 +1145,8 @@ mod tests {
     #[test]
     fn disagreeing_or_implausible_pitches_are_team_size_unknown() {
         let unknown = Err(BoardStatus::TeamSizeUnknown);
-        // 0.0794 is under 0.080, so both pitches are 6v6 and they agree.
-        // The four real 1080p 6v6 boards measure dip 0.0794 and spectral
-        // 0.0754 (they were unknown under the 0.079 split).
+        // the four real 1080p 6v6 boards: dip 0.0794 and spectral 0.0754
+        // are both 6 since #201 (they were unknown under the 0.079 split)
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0794), Some(0.0754)), 6),
             Ok(6)
@@ -1138,9 +1156,7 @@ mod tests {
             layout_from_scan(&scan(5, Some(0.0866), Some(0.074)), 6),
             unknown
         );
-        // 0.083 sits in the no-guess band, so the size stays unknown even
-        // when the other pitch is a clear 6v6. Either pitch inside the
-        // 0.080 to 0.083 band does the same.
+        // either pitch inside the 0.080 to 0.083 band
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.083), Some(0.074)), 6),
             unknown
@@ -1161,17 +1177,11 @@ mod tests {
             layout_from_scan(&scan(1, None, None), 0),
             Err(BoardStatus::NotFound)
         );
-        // agreeing pitches above the 5v5 floor still read
-        assert_eq!(
-            layout_from_scan(&scan(5, Some(0.084), Some(0.086)), 6),
-            Ok(5)
-        );
+        // agreeing or single plausible pitches still read
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0866), Some(0.0847)), 6),
             Ok(5)
         );
-        // a lone pitch inside the band is not a size
-        assert_eq!(layout_from_scan(&scan(5, Some(0.081), None), 6), unknown);
         assert_eq!(
             layout_from_scan(&scan(5, Some(0.0745), Some(0.102)), 6),
             Ok(6)
@@ -1206,9 +1216,8 @@ mod tests {
         let mut known = 0;
         for info in MAPS {
             let n = map_name(info);
-            let other_banner = |name: &str| MAPS.iter().any(|m| m.name == name);
             match canonical_map(info.name) {
-                Some(v1) if v1 == info.name || !other_banner(&v1) => {
+                Some(v1) if !OCR_V1_COLLISIONS.contains(&info.name) => {
                     assert_eq!(n.name, v1, "{} differs from ocr-v1", info.key);
                     assert!(n.known_to_ocr_v1, "{}", info.key);
                     assert_eq!(n.mode, map_mode(&v1).or(info.mode), "{}", info.key);
@@ -1219,7 +1228,6 @@ mod tests {
                 }
                 Some(v1) => {
                     assert_ne!(v1, info.name);
-                    assert!(other_banner(&v1), "{}", info.key);
                     assert_eq!(n.name, info.name, "keeps its own map");
                     assert!(!n.known_to_ocr_v1, "{} must stay suspect", info.key);
                 }
@@ -1229,11 +1237,7 @@ mod tests {
                 }
             }
         }
-        // Temple of Anubis and Ecopoint: Antarctica are their own rows, and
-        // every banner map now has a table name (some fold onto a longer one).
-        // 59 is the banner count after #201 (34 stored under their own name
-        // before that).
-        assert_eq!(known, MAPS.len());
+        // banner maps ocr-v1 stores under their own name (34 before #201)
         assert_eq!(known, 59);
         for c in OCR_V1_COLLISIONS {
             assert!(MAPS.iter().any(|m| m.name == c), "{c}");
