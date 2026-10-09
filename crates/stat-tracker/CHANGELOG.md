@@ -205,7 +205,7 @@ Grímsvötn is stored as its own map, not as Watchpoint: Gibraltar.
 - The quiet wait is about 3 minutes from the last activity, and never shorter than 75 seconds after the result.
 - A Tab during those 75 seconds still counts toward the game that just ended.
 - Grímsvötn is recognized with or without accents, and with or without the Watchpoint prefix.
-- An unfinished game stays open through 20 minutes of idle. It closes after 6 hours with no result, or when the next game starts.
+- A game with no result that sits idle for 20 minutes is closed as Unknown and not uploaded (0.4.22 removed this timeout).
 
 The last game of the night now uploads by itself about 3 minutes after
 the result screen. Before this, that game stayed open until the next

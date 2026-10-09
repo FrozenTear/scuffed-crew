@@ -1374,10 +1374,6 @@ mod tests {
         super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("save");
         assert!(shown_launch(dir.path(), Some("0.4.23"), None).is_none());
 
-        let upgraded = shown_launch(dir.path(), Some("0.4.23"), None);
-        // Stored version is already 0.4.23, so a same-version launch stays quiet.
-        assert!(upgraded.is_none());
-
         super::seasons::save_last_seen_version(dir.path(), "0.4.19").expect("older");
         let upgraded = shown_launch(dir.path(), Some("0.4.23"), None).expect("upgrade");
         let versions: Vec<_> = upgraded

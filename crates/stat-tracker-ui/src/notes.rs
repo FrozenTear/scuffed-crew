@@ -1231,6 +1231,9 @@ Detail line with `inline`.
         assert!(!notes_link_allowed("HTTP://example.com"));
         assert!(!notes_link_allowed("HTTPS://example.com"));
         assert!(!notes_link_allowed(" https://example.com"));
+        assert!(!notes_link_allowed("data:text/plain,hi"));
+        assert!(!notes_link_allowed("mailto:player@example.com"));
+        assert!(!notes_link_allowed("releases/0.4.23"));
     }
 
     #[test]
