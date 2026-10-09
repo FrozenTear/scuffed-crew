@@ -85,8 +85,9 @@ pub enum BoardStatus {
     Read,
     /// No board: the capture path's preflight (row dips or header stat
     /// labels) fails, the six stat labels are not in the Tab header strip,
-    /// or fewer than 3 rows have 4 read stat cells (ocr-v1's final check).
-    /// `team_size` is `None`, no row fields.
+    /// fewer than 3 rows have 4 read stat cells (ocr-v1's final check), or
+    /// the digit read is empty after columns were found (for example the
+    /// time budget ran out). `team_size` is `None`, no row fields.
     NotFound,
     /// Passed the preflight, but the row pitch gives no 5v5 or 6v6 under
     /// Tracker's rule (no pitch, implausible pitches, or dip and spectral
@@ -216,6 +217,12 @@ impl Reader {
     /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
     /// [`not_found`] with that status: no team size, no row fields, no map.
     pub fn read_board(&self, frame: &DynamicImage) -> BoardRead {
+        self.read_board_timed(frame, READ_BUDGET)
+    }
+
+    /// [`Self::read_board`] with an explicit digit/hero budget (tests use a
+    /// zero budget to force an empty digit read after columns are found).
+    fn read_board_timed(&self, frame: &DynamicImage, budget: Duration) -> BoardRead {
         let t0 = Instant::now();
         let scoreboard = crate::ocr::preprocess::crop_scoreboard(frame);
         let team_size = match board_layout(&scoreboard) {
@@ -226,8 +233,10 @@ impl Reader {
                 return b;
             }
         };
-        let digit_read = digits::read_board(&scoreboard, team_size, READ_BUDGET).ok();
-        if digit_read.as_ref().is_some_and(|d| !has_stat_rows(d)) {
+        let digit_read = digits::read_board(&scoreboard, team_size, budget).ok();
+        // Columns found but no usable digit rows (budget ran out, empty
+        // read, or fewer than 3 rows with 4 cells): not a board.
+        if digit_read.as_ref().is_none_or(|d| !has_stat_rows(d)) {
             let mut b = not_found(BoardStatus::NotFound);
             b.elapsed_ms = elapsed_ms(t0);
             return b;
@@ -235,7 +244,7 @@ impl Reader {
         let hero_read = self
             .heroes
             .as_ref()
-            .and_then(|h| h.read_board(&scoreboard, team_size, READ_BUDGET).ok());
+            .and_then(|h| h.read_board(&scoreboard, team_size, budget).ok());
         let mut board = assemble(
             team_size,
             digit_read.as_ref(),
@@ -1043,6 +1052,21 @@ mod tests {
             let b = reader.read_board(&frame);
             assert_stand_in_read(&b, team, &format!("{team}v{team}"));
         }
+    }
+
+    /// Columns found, but the digit read is empty (zero budget forces
+    /// OverBudget): the board is `not_found` with no team size, not `read`.
+    #[test]
+    fn empty_digit_read_after_columns_is_not_found() {
+        let reader = Reader::load(&ReaderConfig::default());
+        let frame = tab_stand_in(2560, 1440, 6, PITCH_6V6, BLUE_RED, true);
+        let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+        assert!(digits::stat_columns_found(&crop));
+        assert_eq!(board_layout(&crop), Ok(6));
+        let b = reader.read_board_timed(&frame, Duration::ZERO);
+        assert_eq!(b.status, BoardStatus::NotFound);
+        assert_eq!(b.team_size, None);
+        assert!(b.fields.iter().all(|f| f.suspect && f.value.is_none()));
     }
 
     /// Team colours never decide anything: rows, teams and the size come
