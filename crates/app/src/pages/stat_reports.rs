@@ -93,6 +93,7 @@ pub(crate) const COPY_TRY_AGAIN: &str = "Try again";
 pub(crate) const COPY_NO_DELETION: &str = "No deletion date";
 pub(crate) const COPY_DELETION_MISSING: &str = "Deletion date missing";
 pub(crate) const COPY_UNUSABLE: &str = "This report cannot be changed from this page.";
+pub(crate) const COPY_DISABLED: &str = "Reports are switched off right now.";
 
 pub(crate) const MY_REPORTS_RETRY_ID: &str = "my-reports-retry";
 pub(crate) const OFFICER_REPORTS_RETRY_ID: &str = "officer-reports-retry";
@@ -156,6 +157,7 @@ pub(crate) enum MemberScreen {
     Error,
     Empty,
     Ready,
+    Disabled,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -166,6 +168,7 @@ pub(crate) enum OfficerScreen {
     Error,
     Empty,
     Ready,
+    Disabled,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -328,6 +331,33 @@ pub(crate) fn confirm_copy(intent: ReportIntent) -> (&'static str, &'static str,
     }
 }
 
+/// `503` whose JSON body is `{"error":"reports_disabled"}`.
+///
+/// `ClientError` displays that response as `HTTP error 503: reports_disabled`.
+pub(crate) fn is_reports_disabled(error: &str) -> bool {
+    error
+        .split_once("HTTP error 503:")
+        .is_some_and(|(_, message)| message.trim() == "reports_disabled")
+}
+
+/// Training consent does not expire. Any other report whose `expires_at` is
+/// strictly before `now` is already due, so the client hides it as well.
+pub(crate) fn report_is_current(row: &StatReportListItem, now: DateTime<Utc>) -> bool {
+    if row.training_consent {
+        return true;
+    }
+    !row.expires_at.is_some_and(|expires_at| expires_at < now)
+}
+
+pub(crate) fn without_expired(
+    rows: Vec<StatReportListItem>,
+    now: DateTime<Utc>,
+) -> Vec<StatReportListItem> {
+    rows.into_iter()
+        .filter(|row| report_is_current(row, now))
+        .collect()
+}
+
 pub(crate) fn error_message(lead: &str, detail: &str) -> String {
     let detail = detail.trim();
     if detail.is_empty() {
@@ -362,12 +392,34 @@ pub(crate) fn member_screen(
                 MemberScreen::Membership
             };
         }
+        if is_reports_disabled(err) {
+            return MemberScreen::Disabled;
+        }
         return MemberScreen::Error;
     }
     match row_count {
         None => MemberScreen::Loading,
         Some(0) => MemberScreen::Empty,
         Some(_) => MemberScreen::Ready,
+    }
+}
+
+/// Delete or withdraw answered `reports_disabled` after the list had loaded.
+/// Sign-in, membership, and loading still win. A list, an empty list, and a
+/// generic error are replaced by the switched-off sentence.
+pub(crate) fn apply_reports_switch(screen: MemberScreen, switched_off: bool) -> MemberScreen {
+    if switched_off
+        && !matches!(
+            screen,
+            MemberScreen::SignIn
+                | MemberScreen::Membership
+                | MemberScreen::Inactive
+                | MemberScreen::Loading
+        )
+    {
+        MemberScreen::Disabled
+    } else {
+        screen
     }
 }
 
@@ -382,7 +434,10 @@ pub(crate) fn officer_screen(
     if !auth.is_officer_or_above() {
         return OfficerScreen::Forbidden;
     }
-    if error.is_some() {
+    if let Some(err) = error {
+        if is_reports_disabled(err) {
+            return OfficerScreen::Disabled;
+        }
         return OfficerScreen::Error;
     }
     match row_count {
@@ -453,6 +508,7 @@ fn static_copy() -> &'static [&'static str] {
         COPY_NO_DELETION,
         COPY_DELETION_MISSING,
         COPY_UNUSABLE,
+        COPY_DISABLED,
         "My reports",
         "Reports",
         "Kept for training",
@@ -507,7 +563,9 @@ pub(crate) fn MyReportsBody(
         style { {REPORTS_CSS} }
         main { class: "reports-page",
             h1 { "My reports" }
-            p { class: "reports-intro", "{COPY_INTRO_MINE}" }
+            if screen != MemberScreen::Disabled {
+                p { class: "reports-intro", "{COPY_INTRO_MINE}" }
+            }
             match screen {
                 MemberScreen::Loading => rsx! { p { class: "reports-status", "{COPY_LOADING_MINE}" } },
                 MemberScreen::SignIn => rsx! {
@@ -524,6 +582,7 @@ pub(crate) fn MyReportsBody(
                     {retry_button(MY_REPORTS_RETRY_ID, on_retry)}
                 },
                 MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
+                MemberScreen::Disabled => rsx! { p { class: "reports-status", "{COPY_DISABLED}" } },
                 MemberScreen::Ready => rsx! {
                     div { class: "reports-scroll",
                         table { class: "reports-table",
@@ -728,6 +787,12 @@ pub(crate) fn OfficerReportsBody(
                     p { class: "reports-status", "{COPY_EMPTY_ALL}" }
                 }
             },
+            OfficerScreen::Disabled => rsx! {
+                div { class: "reports-page",
+                    h1 { "Reports" }
+                    p { class: "reports-status", "{COPY_DISABLED}" }
+                }
+            },
             OfficerScreen::Ready => rsx! {
                 div { class: "reports-page",
                     h1 { "Reports" }
@@ -806,6 +871,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use dioxus::dioxus_core::NoOpMutations;
+    use scuffed_api_client::ClientError;
     use scuffed_types::{OrgRole, UserInfo};
 
     const REPORT_A: &str = "0123456789abcdef0123456789abcdef";
@@ -1307,6 +1373,314 @@ mod tests {
             COPY_FORBIDDEN,
             "You need officer permissions to access the admin panel."
         );
+    }
+
+    fn reports_disabled_text() -> String {
+        ClientError::Http {
+            status: 503,
+            body: r#"{"error":"reports_disabled"}"#.into(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn reports_disabled_replaces_the_list_and_the_empty_state() {
+        let text = reports_disabled_text();
+        assert_eq!(text, "HTTP error 503: reports_disabled");
+        assert!(is_reports_disabled(&text));
+        assert!(!is_reports_disabled(
+            &ClientError::Http {
+                status: 500,
+                body: r#"{"error":"reports_disabled"}"#.into(),
+            }
+            .to_string()
+        ));
+        assert!(!is_reports_disabled(
+            &ClientError::Http {
+                status: 503,
+                body: r#"{"error":"unavailable"}"#.into(),
+            }
+            .to_string()
+        ));
+        assert!(!is_reports_disabled(
+            &ClientError::Http {
+                status: 503,
+                body: "offline".into(),
+            }
+            .to_string()
+        ));
+
+        let member = auth(Some(OrgRole::Member), false);
+        assert_eq!(
+            member_screen(&member, Some(&text), Some(0)),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            member_screen(&member, Some(&text), Some(3)),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            member_screen(&member, Some(&text), None),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            member_screen(&auth(None, false), Some(&text), Some(0)),
+            MemberScreen::SignIn
+        );
+        let signed_out = AuthState {
+            user: Some(UserInfo {
+                id: "user-1".into(),
+                username: "account".into(),
+                avatar_url: None,
+                role: None,
+            }),
+            loading: false,
+        };
+        assert_eq!(
+            member_screen(&signed_out, Some(&text), Some(1)),
+            MemberScreen::Membership
+        );
+
+        let officer = auth(Some(OrgRole::Officer), false);
+        assert_eq!(
+            officer_screen(&officer, Some(&text), Some(0)),
+            OfficerScreen::Disabled
+        );
+        assert_eq!(
+            officer_screen(&officer, Some(&text), Some(4)),
+            OfficerScreen::Disabled
+        );
+        assert_eq!(
+            officer_screen(&auth(Some(OrgRole::Member), false), Some(&text), Some(2)),
+            OfficerScreen::Forbidden
+        );
+        assert_eq!(
+            officer_screen(&auth(Some(OrgRole::Admin), true), Some(&text), Some(1)),
+            OfficerScreen::Checking
+        );
+
+        assert_eq!(
+            apply_reports_switch(MemberScreen::Ready, true),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            apply_reports_switch(MemberScreen::Empty, true),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            apply_reports_switch(MemberScreen::Error, true),
+            MemberScreen::Disabled
+        );
+        assert_eq!(
+            apply_reports_switch(MemberScreen::SignIn, true),
+            MemberScreen::SignIn
+        );
+        assert_eq!(
+            apply_reports_switch(MemberScreen::Ready, false),
+            MemberScreen::Ready
+        );
+
+        fn member_off() -> Element {
+            rsx! {
+                MyReportsBody {
+                    screen: MemberScreen::Disabled,
+                    error_detail: String::from("HTTP error 503: reports_disabled"),
+                    rows: vec![row(REPORT_A, false, Some(at(2026, 11, 8, 15, 30)))],
+                    pending: None,
+                    busy: false,
+                }
+            }
+        }
+        let html = html_of(member_off);
+        assert!(html.contains(COPY_DISABLED), "{html}");
+        assert!(!html.contains(COPY_EMPTY_MINE), "{html}");
+        assert!(!html.contains(COPY_INTRO_MINE), "{html}");
+        assert!(!html.contains(REPORT_A), "{html}");
+        assert!(!html.contains("<table"), "{html}");
+        assert!(!html.contains("reports_disabled"), "{html}");
+        assert_plain(&html);
+
+        fn officer_off() -> Element {
+            let mut item = row(REPORT_A, false, Some(at(2026, 11, 8, 15, 30)));
+            item.member_id = Some("m-100".into());
+            rsx! {
+                OfficerReportsBody {
+                    screen: OfficerScreen::Disabled,
+                    error_detail: String::from("HTTP error 503: reports_disabled"),
+                    rows: vec![item],
+                }
+            }
+        }
+        let html = html_of(officer_off);
+        assert!(html.contains(COPY_DISABLED), "{html}");
+        assert!(!html.contains(COPY_EMPTY_ALL), "{html}");
+        assert!(!html.contains(COPY_INTRO_ALL), "{html}");
+        assert!(!html.contains(REPORT_A), "{html}");
+        assert!(!html.contains("m-100"), "{html}");
+        assert!(!html.contains("Download"), "{html}");
+        assert!(!html.contains("<table"), "{html}");
+        assert!(!html.contains("reports_disabled"), "{html}");
+        assert_plain(&html);
+    }
+
+    #[test]
+    fn past_expiry_is_hidden_unless_training_consent() {
+        let now = at(2026, 10, 9, 12, 0);
+        let past = row(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            false,
+            Some(at(2026, 10, 8, 12, 0)),
+        );
+        let future = row(REPORT_A, false, Some(at(2026, 11, 8, 12, 0)));
+        let boundary = row(REPORT_B, false, Some(now));
+        let missing = row("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false, None);
+        let training_past = row(
+            "cccccccccccccccccccccccccccccccc",
+            true,
+            Some(at(2026, 1, 1, 0, 0)),
+        );
+        let training_open = row("dddddddddddddddddddddddddddddddd", true, None);
+        let source = vec![
+            past.clone(),
+            future.clone(),
+            boundary.clone(),
+            missing.clone(),
+            training_past.clone(),
+            training_open.clone(),
+        ];
+
+        let PreparedRows::Rows(member_rows) = prepare_member_rows(&source, None) else {
+            panic!("member payload has no member id");
+        };
+        let member_rows = without_expired(member_rows, now);
+        let member_ids: Vec<_> = member_rows.iter().map(|row| row.id.as_str()).collect();
+        assert!(!member_ids.contains(&past.id.as_str()));
+        assert_eq!(
+            member_ids,
+            vec![
+                future.id.as_str(),
+                boundary.id.as_str(),
+                missing.id.as_str(),
+                training_past.id.as_str(),
+                training_open.id.as_str(),
+            ]
+        );
+        assert_eq!(
+            apply_own_filter(MemberScreen::Ready, &PreparedRows::Rows(member_rows), true),
+            MemberScreen::Ready
+        );
+
+        let officer_rows = without_expired(source, now);
+        assert!(officer_rows.iter().all(|row| row.id != past.id));
+        assert_eq!(
+            officer_screen(
+                &auth(Some(OrgRole::Officer), false),
+                None,
+                Some(officer_rows.len())
+            ),
+            OfficerScreen::Ready
+        );
+
+        let only_expired = without_expired(vec![past], now);
+        assert!(only_expired.is_empty());
+        assert_eq!(
+            officer_screen(
+                &auth(Some(OrgRole::Officer), false),
+                None,
+                Some(only_expired.len())
+            ),
+            OfficerScreen::Empty
+        );
+        assert_eq!(
+            apply_own_filter(MemberScreen::Ready, &PreparedRows::Rows(only_expired), true),
+            MemberScreen::Empty
+        );
+        assert_eq!(
+            officer_screen(
+                &auth(Some(OrgRole::Officer), false),
+                None,
+                Some(without_expired(vec![training_past], now).len())
+            ),
+            OfficerScreen::Ready
+        );
+    }
+
+    #[test]
+    fn withdraw_consent_waits_for_confirm() {
+        let mut gate = ConfirmGate::default();
+        gate.arm(ReportIntent::Withdraw, REPORT_A);
+        assert_eq!(
+            gate.pending().map(|pending| pending.intent),
+            Some(ReportIntent::Withdraw)
+        );
+        gate.cancel();
+        assert!(gate.pending().is_none());
+        assert!(gate.confirm().is_none());
+
+        gate.arm(ReportIntent::Withdraw, REPORT_A);
+        let mutation = gate
+            .confirm()
+            .expect("confirm returns the withdraw request");
+        assert_eq!(mutation.intent, ReportIntent::Withdraw);
+        assert_eq!(
+            mutation.path,
+            format!("/api/stat-reports/{REPORT_A}/withdraw")
+        );
+        assert!(gate.confirm().is_none());
+
+        gate.arm(ReportIntent::Withdraw, "not-a-report-id");
+        assert!(gate.pending().is_none());
+        assert!(mutation_for(ReportIntent::Withdraw, "not-a-report-id").is_none());
+
+        fn closed() -> Element {
+            rsx! {
+                MyReportsBody {
+                    screen: MemberScreen::Ready,
+                    error_detail: String::new(),
+                    rows: vec![row(REPORT_A, true, None)],
+                    pending: None,
+                    busy: false,
+                }
+            }
+        }
+        let html = html_of(closed);
+        assert!(html.contains("Withdraw consent"), "{html}");
+        assert!(!html.contains(CONFIRM_FORM_ID), "{html}");
+        assert!(
+            !html.contains("Withdraw training consent for this report?"),
+            "{html}"
+        );
+        assert!(!html.contains("action=\"/api/stat-reports"), "{html}");
+
+        fn open() -> Element {
+            rsx! {
+                MyReportsBody {
+                    screen: MemberScreen::Ready,
+                    error_detail: String::new(),
+                    rows: vec![row(REPORT_A, true, None)],
+                    pending: Some(PendingReportAction {
+                        intent: ReportIntent::Withdraw,
+                        report_id: REPORT_A.into(),
+                    }),
+                    busy: false,
+                }
+            }
+        }
+        let html = html_of(open);
+        assert!(html.contains(CONFIRM_FORM_ID), "{html}");
+        assert!(
+            html.contains("Withdraw training consent for this report? It is deleted 30 days after it was received. If that date has already passed, the report is deleted now."),
+            "{html}"
+        );
+        assert!(!html.contains("action=\"/api/stat-reports"), "{html}");
+        assert_labeled(&html, CONFIRM_SUBMIT_ID, "confirm");
+        assert_labeled(&html, CONFIRM_CANCEL_ID, "cancel");
+        assert_labeled(
+            &html,
+            &control_id("withdraw", REPORT_A),
+            "withdraw-training",
+        );
+        assert_plain(&html);
     }
 
     #[test]

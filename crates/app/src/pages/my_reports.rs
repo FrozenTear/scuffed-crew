@@ -1,5 +1,6 @@
 //! Signed-in member list of tracker bug reports (`/reports`).
 
+use chrono::Utc;
 use dioxus::prelude::*;
 
 use scuffed_api_client::ApiClient;
@@ -11,7 +12,8 @@ use crate::state::use_auth;
 use super::stat_reports::{
     COPY_DELETE_FAILED, COPY_DELETED, COPY_WITHDRAW_FAILED, COPY_WITHDRAWN, ConfirmGate,
     MyReportsBody, PreparedRows, ReportIntent, StatReportList, StatReportWithdrawn,
-    WithdrawTrainingBody, apply_own_filter, member_screen, prepare_member_rows,
+    WithdrawTrainingBody, apply_own_filter, apply_reports_switch, is_reports_disabled,
+    member_screen, prepare_member_rows, without_expired,
 };
 
 #[component]
@@ -22,6 +24,7 @@ pub fn MyReports() -> Element {
     let me = use_resource(|| async move { ApiClient::web().get_me().await });
     let mut gate = use_signal(ConfirmGate::default);
     let mut busy = use_signal(|| false);
+    let mut switched_off = use_signal(|| false);
 
     let auth_now = auth();
     let error = reports.error.read().as_ref().cloned();
@@ -38,15 +41,22 @@ pub fn MyReports() -> Element {
             .and_then(|body| body.member.as_ref().map(|member| member.id.clone()));
         (settled, member_id)
     };
-    let prepared = list
+    let prepared = match list
         .as_ref()
         .map(|list| prepare_member_rows(&list.reports, member_id.as_deref()))
-        .unwrap_or(PreparedRows::Rows(Vec::new()));
+    {
+        Some(PreparedRows::Rows(rows)) => PreparedRows::Rows(without_expired(rows, Utc::now())),
+        Some(other) => other,
+        None => PreparedRows::Rows(Vec::new()),
+    };
     let row_count = list.as_ref().map(|list| list.reports.len());
-    let screen = apply_own_filter(
-        member_screen(&auth_now, error.as_deref(), row_count),
-        &prepared,
-        me_settled,
+    let screen = apply_reports_switch(
+        apply_own_filter(
+            member_screen(&auth_now, error.as_deref(), row_count),
+            &prepared,
+            me_settled,
+        ),
+        switched_off(),
     );
     let rows = match prepared {
         PreparedRows::Rows(rows) => rows,
@@ -105,11 +115,16 @@ pub fn MyReports() -> Element {
                     refresh += 1;
                 }
                 Err(err) => {
-                    let lead = match mutation.intent {
-                        ReportIntent::Delete => COPY_DELETE_FAILED,
-                        ReportIntent::Withdraw => COPY_WITHDRAW_FAILED,
-                    };
-                    toast.show(Toast::error(format!("{lead} {err}")));
+                    let text = err.to_string();
+                    if is_reports_disabled(&text) {
+                        switched_off.set(true);
+                    } else {
+                        let lead = match mutation.intent {
+                            ReportIntent::Delete => COPY_DELETE_FAILED,
+                            ReportIntent::Withdraw => COPY_WITHDRAW_FAILED,
+                        };
+                        toast.show(Toast::error(format!("{lead} {text}")));
+                    }
                 }
             }
         });

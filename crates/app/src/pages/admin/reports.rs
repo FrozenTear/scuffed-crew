@@ -3,12 +3,15 @@
 //! Non-officers hit the same officer check as the admin layout. Download uses
 //! `GET /api/stat-reports/{id}` from PR 189. The zip is not rendered here.
 
+use chrono::Utc;
 use dioxus::prelude::*;
 
 use crate::hooks::use_api;
 use crate::state::use_auth;
 
-use super::super::stat_reports::{OfficerReportsBody, StatReportList, officer_screen};
+use super::super::stat_reports::{
+    OfficerReportsBody, StatReportList, officer_screen, without_expired,
+};
 
 #[component]
 pub fn AdminReports() -> Element {
@@ -20,9 +23,12 @@ pub fn AdminReports() -> Element {
         let data = reports.data.read();
         data.as_ref().and_then(|inner| inner.clone())
     };
-    let row_count = list.as_ref().map(|list| list.reports.len());
+    let rows = list
+        .as_ref()
+        .map(|list| without_expired(list.reports.clone(), Utc::now()))
+        .unwrap_or_default();
+    let row_count = list.as_ref().map(|_| rows.len());
     let screen = officer_screen(&auth_now, error.as_deref(), row_count);
-    let rows = list.map(|list| list.reports).unwrap_or_default();
     let mut refresh = reports.refresh;
 
     rsx! {
