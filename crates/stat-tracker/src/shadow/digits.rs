@@ -45,7 +45,10 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 ///
 /// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
 /// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
-pub const RECOGNIZER_ID: &str = "cv-v2";
+/// * `cv-v3`: 1080p templates and typical margins rebuilt with real
+///   1920x1080 captures added to the downscaled 1440p set; cells with too
+///   little ink for the digits read are flagged.
+pub const RECOGNIZER_ID: &str = "cv-v3";
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
@@ -58,6 +61,14 @@ pub const SUSPECT_CONF: f32 = 0.35;
 /// Partition margins (best reading minus best different reading) are scaled
 /// by this so `2 * pm / PM_REF` sits on the same 1.0-is-typical scale.
 const PM_REF: f64 = 0.2;
+/// Flag a reading whose ink (binarised pixels over all runs) is below this
+/// many `dh * dh` per digit read. A correct lone '1', the thinnest reading,
+/// measures at least 0.17 on every labelled and stressed set; a dim 0 that
+/// lost most of its ring to compression and reads as '1' or '11' sits at
+/// 0.10 to 0.14. The gap is thin (wiped 0 up to 0.14, floor 0.15, thinnest
+/// right '1' 0.17) and was fitted only on those sets, so recheck it when new
+/// labelled captures or capture paths are added.
+const MIN_INK_PER_GLYPH: f64 = 0.15;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellRead {
@@ -182,41 +193,42 @@ const AR_1440: ([f64; NCLS], [f64; NCLS]) = (
 );
 const AR_1080: ([f64; NCLS], [f64; NCLS]) = (
     [
-        0.5503191449372535,
-        0.14119802759209582,
-        0.5124228076317954,
-        0.45866675656073513,
-        0.5509440937355133,
-        0.4301998649477294,
-        0.5170751754054589,
-        0.539402375514284,
-        0.42419604756409807,
-        0.5345078549932906,
-        0.04589385469689673,
+        0.5354627551785398,
+        0.1488864871283631,
+        0.5115792255872451,
+        0.45885760516669244,
+        0.5614913920983633,
+        0.4361674000280148,
+        0.525508415749264,
+        0.5432641600839146,
+        0.4354083992183799,
+        0.5231755267856124,
+        0.04069201805657961,
     ],
     [
-        1.0192159688115103,
-        0.5820841361505943,
-        0.9569391285618241,
-        0.8965868666276705,
-        1.0663226503604988,
-        0.897423980560247,
-        1.027188600565634,
-        0.9283669204992868,
-        0.9048665655376031,
-        1.0220619928628643,
-        0.4024194267374038,
+        1.0302281481894173,
+        0.5901592117963682,
+        0.9693204051613282,
+        0.916986156683895,
+        1.0684266406885221,
+        0.9265699566179713,
+        1.0263344682970097,
+        0.9474721819588406,
+        0.9177098803515125,
+        1.0324979185430054,
+        0.4252125696587077,
     ],
 );
 
 // Median best-minus-second-best margin of correctly read glyphs per class
-// 0-9 and ',', measured with these templates on the labelled 1440p and 1080p
-// Tab sets (20 boards each; per-match hold-out moves no flag decision).
+// 0-9 and ',', measured with these templates on the labelled Tab sets:
+// 1440p (20 boards; per-match hold-out moves no flag decision) and 1080p
+// (the same 20 boards downscaled plus 15 real 1920x1080 captures).
 const TYP_1440: [f64; NCLS] = [
     0.1931, 0.4281, 0.2000, 0.1210, 0.3097, 0.1475, 0.1769, 0.4278, 0.1161, 0.2369, 0.7227,
 ];
 const TYP_1080: [f64; NCLS] = [
-    0.1883, 0.3636, 0.1719, 0.1177, 0.2792, 0.1396, 0.1582, 0.3833, 0.1142, 0.2124, 0.7031,
+    0.1795, 0.3726, 0.1666, 0.1123, 0.2683, 0.1376, 0.1596, 0.3788, 0.1116, 0.2110, 0.7110,
 ];
 
 fn load_templates(png: &[u8], ar: ([f64; NCLS], [f64; NCLS]), typ: [f64; NCLS]) -> Templates {
@@ -696,6 +708,8 @@ struct Cell {
     mass: Vec<f64>,
     ar: Vec<f64>,
     total_mass: f64,
+    /// Text height the canvases were scaled for (after the row consensus).
+    dh: usize,
     rival: f64,
 }
 
@@ -828,11 +842,18 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
         mass,
         ar,
         total_mass,
+        dh,
         rival: seg.rival,
     })
 }
 
 type Scored = (f64, Vec<usize>);
+
+/// True when `ink` binarised pixels are too few for `digits` glyphs of text
+/// height `dh` (see `MIN_INK_PER_GLYPH`).
+fn too_little_ink(ink: f64, digits: usize, dh: usize) -> bool {
+    ink < MIN_INK_PER_GLYPH * (digits * dh * dh) as f64
+}
 
 fn sort_desc(v: &mut [Scored]) {
     v.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -1030,6 +1051,9 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
     flagged |= s.starts_with(',') || s.ends_with(',');
     flagged |= cell.rival > 0.5;
     flagged |= obj < 0.55;
+    // Too little ink for the digits read: a dim 0 half wiped out by
+    // compression reads as a thin "1" with a clean margin.
+    flagged |= too_little_ink(cell.total_mass, nd, cell.dh);
     let value = parsed.and_then(|n| u32::try_from(n).ok());
     Reading {
         flagged: flagged || value.is_none(),
@@ -1392,6 +1416,68 @@ mod tests {
     }
 
     #[test]
+    fn ink_floor_flags_a_wiped_zero_not_a_thin_one() {
+        // Measured on real cells: a correct lone '1' at 1080p (dh 9) holds >= 0.17 dh^2
+        // of ink; JPEG-wiped dim zeros read as '1' held 0.10 to 0.14.
+        assert!(!too_little_ink(0.172 * 81.0, 1, 9));
+        assert!(!too_little_ink(22.0, 1, 9));
+        assert!(too_little_ink(9.0, 1, 8));
+        assert!(too_little_ink(0.099 * 2.0 * 81.0, 2, 9));
+        // more digits need proportionally more ink
+        assert!(!too_little_ink(44.0, 2, 9));
+        assert!(too_little_ink(22.0, 2, 9));
+    }
+
+    /// One lone glyph cell whose canvas is exactly template `c`, with `ink`
+    /// binarised pixels at text height `dh`. Shape match is perfect, so only
+    /// the ink floor can flag it.
+    fn lone_glyph_cell(tpl: &Templates, c: usize, dh: usize, ink: f64) -> Cell {
+        Cell {
+            runs: vec![Run {
+                s: 0,
+                e: 1,
+                kind: RunKind::Enum(vec![vec![0]]),
+            }],
+            v: tpl.t[c].to_vec(),
+            mass: vec![ink],
+            ar: vec![(tpl.ar_lo[c] + tpl.ar_hi[c]) / 2.0],
+            total_mass: ink,
+            dh,
+            rival: 0.0,
+        }
+    }
+
+    #[test]
+    fn ink_floor_flags_a_wiped_zero_read_as_one() {
+        for (h, dh) in [(756, 9), (1007, 12)] {
+            let tpl = templates_for(h);
+            let area = (dh * dh) as f64;
+            for k in [0, 5] {
+                // A dim 0 mostly wiped out by compression: a clean '1' shape
+                // with 0.14 dh^2 of ink. Shape margin alone would pass it.
+                let wiped = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.14 * area)), tpl, k);
+                assert_eq!(wiped.value, Some(1));
+                assert!(
+                    wiped.margin >= SUSPECT_CONF as f64,
+                    "{h} {k}: {}",
+                    wiped.margin
+                );
+                assert!(
+                    wiped.flagged,
+                    "{h} {k}: a wiped 0 read as 1 must be flagged"
+                );
+                // The thinnest correct lone '1' measured on real cells, 0.17 dh^2.
+                let thin = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.17 * area)), tpl, k);
+                assert_eq!(thin.value, Some(1));
+                assert!(
+                    !thin.flagged,
+                    "{h} {k}: a thin correct 1 must not be flagged"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn calibration_scale_frees_close_digit_pairs() {
         for typ in [TYP_1440, TYP_1080] {
             // a right '3' or '8' at the lowest raw margin seen (0.049) passes ...
@@ -1490,7 +1576,7 @@ mod tests {
     /// The calibration constants, hashed with the output so a change to any
     /// of them needs a bump even if no fixture cell moves.
     fn calibration_params() -> Vec<f64> {
-        let mut p = vec![SUSPECT_CONF as f64, PM_REF];
+        let mut p = vec![SUSPECT_CONF as f64, PM_REF, MIN_INK_PER_GLYPH];
         p.extend_from_slice(&TYP_1440);
         p.extend_from_slice(&TYP_1080);
         p
@@ -1544,6 +1630,7 @@ mod tests {
     const RECOGNIZER_HISTORY: &[(&str, u64)] = &[
         ("cv-v1", 0xa20c_600c_992e_6cd5),
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
+        ("cv-v3", 0xac0e_b782_9e66_c19a),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
@@ -1552,11 +1639,11 @@ mod tests {
         ("clean r0 E", Some(12), 0.925, false),
         ("clean r0 H", Some(950), 0.864, false),
         ("touching r0 D", Some(3), 0.790, false),
-        ("odd_noisy r2 DMG", Some(18744), 0.447, false),
-        ("small_touching r3 H", Some(23456), 0.487, false),
-        ("small_touching r10 DMG", Some(11111), 0.111, true),
-        ("tiny_noisy r0 DMG", Some(5480), 0.246, true),
-        ("tiny_noisy r7 DMG", Some(22058), 0.275, true),
+        ("odd_noisy r2 DMG", Some(18744), 0.471, false),
+        ("small_touching r3 H", Some(23456), 0.462, false),
+        ("small_touching r10 DMG", Some(11111), 0.100, true),
+        ("tiny_noisy r0 DMG", Some(5480), 0.208, true),
+        ("tiny_noisy r7 DMG", Some(22058), 0.246, true),
     ];
 
     /// Mean confidence per fixture board for the current id, checked within
@@ -1565,9 +1652,9 @@ mod tests {
         ("clean", 0.9003),
         ("touching", 0.9020),
         ("noisy", 0.8726),
-        ("odd_noisy", 0.7939),
-        ("small_touching", 0.8336),
-        ("tiny_noisy", 0.7713),
+        ("odd_noisy", 0.8024),
+        ("small_touching", 0.8350),
+        ("tiny_noisy", 0.7728),
     ];
 
     #[test]
