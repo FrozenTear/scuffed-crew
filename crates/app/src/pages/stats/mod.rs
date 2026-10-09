@@ -232,7 +232,10 @@ const STATS_CSS: &str = r#"
     }
     .stats-header-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 0.5rem;
+        min-width: 0;
+        max-width: 100%;
     }
     .stats-header-actions a, .stats-header-actions button {
         padding: 0.4rem 1rem;
@@ -876,6 +879,21 @@ const STATS_CSS: &str = r#"
     }
     @media (max-width: 720px) {
         .stats-page { padding: 1.25rem 1rem; }
+        /* Phone widths: the season select takes the full actions row so the
+           closed control is wide enough to show "Current season". */
+        .stats-header { align-items: stretch; }
+        .stats-header-actions { flex: 1 1 100%; }
+        .stats-header-actions .season-select {
+            flex: 1 1 100%;
+            min-width: 0;
+            width: 100%;
+            max-width: 100%;
+        }
+        .stats-header-actions .season-select select {
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+        }
         .overview-grid { grid-template-columns: 1fr; }
         .stats-summary { grid-template-columns: 1fr; }
         /* W5b mobile: row1 outcome | identity | date; row2 equal stats strip.
@@ -1238,6 +1256,53 @@ mod match_row_tests {
         );
         assert_eq!(page.data[0].mitigation, 9);
         assert!(page.next_cursor.is_none());
+    }
+}
+
+#[cfg(test)]
+mod header_layout_tests {
+    use super::STATS_CSS;
+
+    fn block_after<'a>(css: &'a str, marker: &str) -> &'a str {
+        let start = css
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        &css[start..]
+    }
+
+    #[test]
+    fn phone_width_gives_the_season_select_the_full_row() {
+        let actions = block_after(STATS_CSS, ".stats-header-actions {");
+        let actions_head = actions.split('}').next().unwrap();
+        assert!(actions_head.contains("flex-wrap: wrap"), "{actions_head}");
+        assert!(actions_head.contains("min-width: 0"), "{actions_head}");
+
+        let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
+        let season = block_after(phone, ".stats-header-actions .season-select {");
+        let season_head = season.split('}').next().unwrap();
+        assert!(season_head.contains("flex: 1 1 100%"), "{season_head}");
+        assert!(season_head.contains("min-width: 0"), "{season_head}");
+        assert!(has_declaration(season_head, "width: 100%"), "{season_head}");
+        let select = block_after(phone, ".stats-header-actions .season-select select {");
+        let select_head = select.split('}').next().unwrap();
+        assert!(select_head.contains("min-width: 0"), "{select_head}");
+        assert!(has_declaration(select_head, "width: 100%"), "{select_head}");
+    }
+
+    fn has_declaration(block: &str, decl: &str) -> bool {
+        block
+            .split(';')
+            .any(|part| part.lines().any(|line| line.trim() == decl))
+    }
+
+    #[test]
+    fn width_declaration_does_not_match_max_width() {
+        assert!(has_declaration(
+            "width: 100%; max-width: 100%;",
+            "width: 100%"
+        ));
+        assert!(!has_declaration("max-width: 100%;", "width: 100%"));
+        assert!(has_declaration("max-width: 100%;", "max-width: 100%"));
     }
 }
 
