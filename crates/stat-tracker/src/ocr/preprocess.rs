@@ -2610,10 +2610,13 @@ mod map_and_table_tests {
         // 1080p and 4K scale the 2560px trim with the 16:9 width.
         let old_1080 = (1920.0_f64 * 0.27) as u32;
         let (_, _, cw_1080, _) = edges(1920, 1080);
-        assert_eq!(old_1080 - cw_1080, (69.0 * 1920.0 / 2560.0).round() as u32);
+        assert_eq!(
+            old_1080 - cw_1080,
+            (69.0_f64 * 1920.0 / 2560.0).round() as u32
+        );
         let old_4k = (3840.0_f64 * 0.27) as u32;
         let (_, _, cw_4k, _) = edges(3840, 2160);
-        assert_eq!(old_4k - cw_4k, (69.0 * 3840.0 / 2560.0).round() as u32);
+        assert_eq!(old_4k - cw_4k, (69.0_f64 * 3840.0 / 2560.0).round() as u32);
 
         // 2560x1080 is wider than 16:9, so the trim follows the game rect
         // (1920 wide), not the full frame.
