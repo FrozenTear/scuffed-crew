@@ -13,8 +13,11 @@
 //!   `{status}` of `pending`, `slow_down`, `denied`, `expired`, or
 //!   `approved` (approved also has `token`).
 //! * `GET /api/stats/token-check` returns `{display_name}` or
-//!   `{"error":"Unauthorized"}` for any failure. HTTP 429 is a wait, not
-//!   that failure. One check per button press.
+//!   `{"error":"Unauthorized"}` for any failure. One check per button press.
+//! * HTTP 429 on token-check, link start, or link poll ignores the body.
+//!   `Retry-After` seconds are the wait when that header is a number.
+//!   Otherwise the wait is 10 seconds. A poll waits that long before the
+//!   next request.
 //! * HTTP 404 on token-check or `POST /api/link/start` means this server
 //!   does not have those routes yet. The token is still saved, and site
 //!   sign-in is hidden in favour of pasting a token.
@@ -79,11 +82,16 @@ pub fn connected_as(display_name: &str) -> String {
     format!("Connected as {display_name}")
 }
 
-pub fn rate_limit_message(seconds: Option<u64>) -> String {
-    match seconds {
-        Some(n) => format!("The site asked us to wait {n} seconds, then try again."),
-        None => "The site asked us to wait, then try again.".to_string(),
-    }
+/// Used when a 429 has no `Retry-After` seconds.
+pub const RATE_LIMIT_FALLBACK_SECS: u64 = 10;
+
+/// Header seconds when present, otherwise [`RATE_LIMIT_FALLBACK_SECS`].
+pub fn rate_limit_seconds(retry_after: Option<u64>) -> u64 {
+    retry_after.unwrap_or(RATE_LIMIT_FALLBACK_SECS)
+}
+
+pub fn rate_limit_message(seconds: u64) -> String {
+    format!("Too many tries, wait {seconds} seconds and try again")
 }
 
 /// Static sentences the guide shows. Tests reject em and en dashes here.
@@ -576,7 +584,7 @@ pub enum TokenCheckResult {
     },
     Rejected,
     Wait {
-        seconds: Option<u64>,
+        seconds: u64,
     },
     /// HTTP 404: the route is not on this server yet.
     Unchecked,
@@ -584,8 +592,9 @@ pub enum TokenCheckResult {
 
 pub fn map_token_check(status: u16, body: &str, retry_after_secs: Option<u64>) -> TokenCheckResult {
     if status == 429 {
+        // The body is ignored on purpose. A 429 may be plain text or JSON.
         return TokenCheckResult::Wait {
-            seconds: retry_after_secs,
+            seconds: rate_limit_seconds(retry_after_secs),
         };
     }
     if status == 404 {
@@ -690,12 +699,12 @@ pub async fn start_link(
         .map_err(|_| REACH_SITE.to_string())?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
+    if status.as_u16() == 429 {
+        return Err(rate_limit_message(rate_limit_seconds(retry)));
+    }
     let text = response.text().await.unwrap_or_default();
     if status.as_u16() == 404 {
         return Ok(LinkStartOutcome::Unsupported);
-    }
-    if status.as_u16() == 429 {
-        return Err(rate_limit_message(retry));
     }
     if !status.is_success() {
         return Err(format!(
@@ -733,7 +742,14 @@ pub async fn start_link(
     }))
 }
 
-pub async fn poll_link(base: String, device_code: String) -> Result<PollOutcome, String> {
+/// A poll response. `RateLimited` does not parse the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollUpdate {
+    Outcome(PollOutcome),
+    RateLimited { seconds: u64 },
+}
+
+pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, String> {
     let client = http_client()?;
     let url = format!("{base}/api/link/poll");
     let response = client
@@ -744,18 +760,22 @@ pub async fn poll_link(base: String, device_code: String) -> Result<PollOutcome,
         .map_err(|_| REACH_SITE.to_string())?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
+    if status.as_u16() == 429 {
+        return Ok(PollUpdate::RateLimited {
+            seconds: rate_limit_seconds(retry),
+        });
+    }
     let text = response.text().await.unwrap_or_default();
     let text = redact_secret(&text, &device_code);
-    if status.as_u16() == 429 {
-        return Err(rate_limit_message(retry));
-    }
     if !status.is_success() {
         return Err(format!(
             "The site could not continue sign-in ({}).",
             status.as_u16()
         ));
     }
-    parse_poll_body(&text).map_err(|err| redact_secret(&err, &device_code))
+    parse_poll_body(&text)
+        .map(PollUpdate::Outcome)
+        .map_err(|err| redact_secret(&err, &device_code))
 }
 
 /// One GET. Callers must not loop on the result.
@@ -770,6 +790,11 @@ pub async fn check_token(base: String, token: String) -> Result<TokenCheckResult
         .map_err(|_| REACH_SITE.to_string())?;
     let status = response.status().as_u16();
     let retry = retry_after_secs(response.headers());
+    if status == 429 {
+        return Ok(TokenCheckResult::Wait {
+            seconds: rate_limit_seconds(retry),
+        });
+    }
     let body = response.text().await.unwrap_or_default();
     Ok(map_token_check(status, &body, retry))
 }
@@ -783,7 +808,7 @@ pub async fn download_reader_pack(url: String, dest_dir: PathBuf) -> Result<Stri
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     if status.as_u16() == 429 {
-        return Err(rate_limit_message(retry));
+        return Err(rate_limit_message(rate_limit_seconds(retry)));
     }
     if !status.is_success() {
         return Err(format!(
@@ -821,7 +846,7 @@ pub enum SetupMessage {
     ConfirmScoreboard,
     SignIn,
     LinkStarted(Result<LinkStartOutcome, String>),
-    PollReady(Result<PollOutcome, String>),
+    PollReady(Result<PollUpdate, String>),
     CheckToken,
     TokenChecked(Result<TokenCheckResult, String>),
     OpenSite,
@@ -1072,7 +1097,7 @@ impl GuideUi {
         Some((url, code))
     }
 
-    pub fn poll_ready(&mut self, result: Result<PollOutcome, String>) -> Option<SetupDiskPatch> {
+    pub fn poll_ready(&mut self, result: Result<PollUpdate, String>) -> Option<SetupDiskPatch> {
         self.poll_inflight = false;
         if !self.open {
             return None;
@@ -1088,7 +1113,14 @@ impl GuideUi {
                 }
                 None
             }
-            Ok(outcome) => {
+            Ok(PollUpdate::RateLimited { seconds }) => {
+                self.link_message = Some(rate_limit_message(seconds));
+                if machine.is_polling() {
+                    self.next_poll_at = Some(Instant::now() + Duration::from_secs(seconds));
+                }
+                None
+            }
+            Ok(PollUpdate::Outcome(outcome)) => {
                 let decision = machine.apply(outcome);
                 match decision {
                     PollDecision::Continue { interval_secs } => {
@@ -1565,8 +1597,8 @@ mod tests {
         assert_plain(&geometry_line(&display_geometry(2560, 1080)));
         assert_plain(&geometry_line(&display_geometry(1920, 1080)));
         assert_plain(&connected_as("FrozenTear"));
-        assert_plain(&rate_limit_message(Some(12)));
-        assert_plain(&rate_limit_message(None));
+        assert_plain(&rate_limit_message(12));
+        assert_plain(&rate_limit_message(RATE_LIMIT_FALLBACK_SECS));
         assert_plain(&token_check_message(&TokenCheckResult::Rejected));
     }
 
@@ -1807,14 +1839,22 @@ mod tests {
             );
         }
         let waited = map_token_check(429, r#"{"error":"Unauthorized"}"#, Some(8));
-        assert_eq!(waited, TokenCheckResult::Wait { seconds: Some(8) });
-        let message = token_check_message(&waited);
-        assert!(message.contains("wait"));
-        assert_ne!(message, TOKEN_REJECTED);
+        assert_eq!(waited, TokenCheckResult::Wait { seconds: 8 });
+        assert_eq!(token_check_message(&waited), rate_limit_message(8));
+        assert_ne!(token_check_message(&waited), TOKEN_REJECTED);
+        let plain = map_token_check(429, "not json", None);
         assert_eq!(
-            token_check_message(&map_token_check(429, r#"{"error":"Unauthorized"}"#, None)),
-            rate_limit_message(None)
+            plain,
+            TokenCheckResult::Wait {
+                seconds: RATE_LIMIT_FALLBACK_SECS
+            }
         );
+        assert_eq!(
+            token_check_message(&plain),
+            "Too many tries, wait 10 seconds and try again"
+        );
+        assert!(!token_check_message(&plain).contains("not json"));
+        assert!(!token_check_message(&waited).contains("Unauthorized"));
     }
 
     #[test]
@@ -1830,10 +1870,10 @@ mod tests {
             guide.begin_check().is_none(),
             "a second press while the check is running does not schedule another request"
         );
-        let _ = guide.token_checked(Ok(TokenCheckResult::Wait { seconds: Some(3) }));
+        let _ = guide.token_checked(Ok(TokenCheckResult::Wait { seconds: 3 }));
         assert_eq!(
             guide.token_message.as_deref(),
-            Some(rate_limit_message(Some(3)).as_str())
+            Some(rate_limit_message(3).as_str())
         );
         assert!(
             guide.begin_check().is_some(),
@@ -2060,23 +2100,29 @@ mod tests {
         assert!(!format!("{:?}", started.machine).contains(secret));
 
         let mut machine = started.machine;
-        let first = poll_link(base.clone(), machine.device_code_for_request().to_string())
-            .await
-            .expect("pending");
+        let first = expect_outcome(
+            poll_link(base.clone(), machine.device_code_for_request().to_string())
+                .await
+                .expect("pending"),
+        );
         assert_eq!(
             machine.apply(first),
             PollDecision::Continue { interval_secs: 5 }
         );
-        let second = poll_link(base.clone(), machine.device_code_for_request().to_string())
-            .await
-            .expect("slow");
+        let second = expect_outcome(
+            poll_link(base.clone(), machine.device_code_for_request().to_string())
+                .await
+                .expect("slow"),
+        );
         assert_eq!(
             machine.apply(second),
             PollDecision::Continue { interval_secs: 10 }
         );
-        let third = poll_link(base.clone(), machine.device_code_for_request().to_string())
-            .await
-            .expect("approved");
+        let third = expect_outcome(
+            poll_link(base.clone(), machine.device_code_for_request().to_string())
+                .await
+                .expect("approved"),
+        );
         assert_eq!(machine.apply(third), PollDecision::Stop);
         assert_eq!(machine.saved_token(), Some("tok-1"));
         assert_eq!(
@@ -2090,7 +2136,8 @@ mod tests {
         let limited = check_token(base.clone(), "tok-1".into())
             .await
             .expect("429");
-        assert_eq!(limited, TokenCheckResult::Wait { seconds: Some(4) });
+        assert_eq!(limited, TokenCheckResult::Wait { seconds: 4 });
+        assert_eq!(token_check_message(&limited), rate_limit_message(4));
         assert_ne!(token_check_message(&limited), TOKEN_REJECTED);
         let ok = check_token(base, "tok-1".into()).await.expect("200");
         assert_eq!(token_check_message(&ok), "Connected as FrozenTear");
@@ -2142,5 +2189,150 @@ mod tests {
 
         guide.set_sync_url(format!("{}/other", guide.sync_url.trim_end_matches('/')));
         assert!(sign_in_offered(&guide));
+    }
+
+    fn expect_outcome(update: PollUpdate) -> PollOutcome {
+        match update {
+            PollUpdate::Outcome(outcome) => outcome,
+            PollUpdate::RateLimited { seconds } => panic!("rate limited for {seconds}s"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_ignores_plain_text_and_json_bodies() {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let hits_handler = hits.clone();
+        let base = spawn_mock(move |head, _body| {
+            let kind = if head.contains("POST /api/link/start") {
+                "start"
+            } else if head.contains("POST /api/link/poll") {
+                "poll"
+            } else if head.contains("GET /api/stats/token-check") {
+                "check"
+            } else {
+                "other"
+            };
+            let mut log = hits_handler.lock().expect("hits");
+            let seen = log.iter().filter(|item| item.as_str() == kind).count();
+            log.push(kind.to_string());
+            drop(log);
+            match (kind, seen) {
+                ("start", 0) => (
+                    429,
+                    vec![("Retry-After", "4".into())],
+                    "plain text not json".into(),
+                ),
+                ("start", _) => (
+                    429,
+                    vec![],
+                    r#"{"error":"Unauthorized","status":"slow_down"}"#.into(),
+                ),
+                ("poll", 0) => (
+                    429,
+                    vec![("Retry-After", "6".into())],
+                    "dc-SECRET-9f3a-not-for-disk".into(),
+                ),
+                ("poll", _) => (
+                    429,
+                    vec![],
+                    r#"{"status":"pending","token":"leaked-token"}"#.into(),
+                ),
+                ("check", 0) => (429, vec![("Retry-After", "3".into())], "hold on".into()),
+                ("check", _) => (429, vec![], r#"{"error":"Unauthorized"}"#.into()),
+                _ => (500, vec![], "nope".into()),
+            }
+        });
+
+        let start_plain = start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
+            .await
+            .expect_err("plain 429");
+        assert_eq!(start_plain, rate_limit_message(4));
+        assert!(!start_plain.contains("plain text"));
+
+        let start_json = start_link(base.clone(), DEVICE_LABEL.into(), "0.4.24".into())
+            .await
+            .expect_err("json 429");
+        assert_eq!(start_json, rate_limit_message(RATE_LIMIT_FALLBACK_SECS));
+        assert!(!start_json.contains("Unauthorized"));
+        assert!(!start_json.contains("slow_down"));
+
+        let secret = "dc-SECRET-9f3a-not-for-disk";
+        let poll_plain = poll_link(base.clone(), secret.into())
+            .await
+            .expect("plain poll 429");
+        assert_eq!(poll_plain, PollUpdate::RateLimited { seconds: 6 });
+        let poll_json = poll_link(base.clone(), secret.into())
+            .await
+            .expect("json poll 429");
+        assert_eq!(
+            poll_json,
+            PollUpdate::RateLimited {
+                seconds: RATE_LIMIT_FALLBACK_SECS
+            }
+        );
+
+        let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
+        guide.link = Some(LinkMachine::start(
+            secret.into(),
+            "ABCD-EFGH".into(),
+            base.clone(),
+            5,
+            600,
+        ));
+        let before = Instant::now();
+        assert!(guide.poll_ready(Ok(poll_plain)).is_none());
+        assert_eq!(
+            guide.link_message.as_deref(),
+            Some(rate_limit_message(6).as_str())
+        );
+        assert!(!guide.link_message.as_deref().unwrap_or("").contains(secret));
+        assert!(
+            !guide
+                .link_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("leaked-token")
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 5);
+        let scheduled = guide.next_poll_at.expect("next poll");
+        let wait = scheduled.saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(6), "{wait:?}");
+        assert!(wait < Duration::from_secs(7), "{wait:?}");
+        assert!(
+            guide
+                .poll_request_if_due(scheduled - Duration::from_millis(1))
+                .is_none()
+        );
+        assert!(guide.poll_request_if_due(scheduled).is_some());
+
+        let check_plain = check_token(base.clone(), "tok-1".into())
+            .await
+            .expect("plain check 429");
+        assert_eq!(check_plain, TokenCheckResult::Wait { seconds: 3 });
+        assert_eq!(token_check_message(&check_plain), rate_limit_message(3));
+        assert!(!token_check_message(&check_plain).contains("hold"));
+
+        let check_json = check_token(base, "tok-1".into())
+            .await
+            .expect("json check 429");
+        assert_eq!(
+            check_json,
+            TokenCheckResult::Wait {
+                seconds: RATE_LIMIT_FALLBACK_SECS
+            }
+        );
+        assert_eq!(
+            token_check_message(&check_json),
+            "Too many tries, wait 10 seconds and try again"
+        );
+        assert!(!token_check_message(&check_json).contains("Unauthorized"));
+        guide.paste_token = "tok-1".into();
+        guide.sync_url = guide
+            .link
+            .as_ref()
+            .expect("machine")
+            .server_url()
+            .to_string();
+        assert!(guide.token_checked(Ok(check_json)).is_none());
     }
 }
