@@ -154,6 +154,14 @@ pub enum Message {
     ToggleEdit,
     EditField(EditField, String),
     SaveEdit,
+    PickMap {
+        session_id: String,
+        map: String,
+    },
+    PickHero {
+        session_id: String,
+        hero: String,
+    },
     ResolveSegment {
         session_id: String,
         segment: u32,
@@ -205,6 +213,7 @@ pub enum Message {
         version: String,
     },
     ShowOlderReleases(notes::NotesSurface),
+    Setup(crate::setup_guide::SetupMessage),
 }
 
 struct NotesDialog {
@@ -325,6 +334,7 @@ pub struct TrackerApp {
     pub game_running: bool,
     pub overlay_hotkey: OverlayHotkey,
     companion_toggle_mtime: Option<SystemTime>,
+    pub setup: crate::setup_guide::GuideUi,
 }
 
 impl TrackerApp {
@@ -365,6 +375,9 @@ impl TrackerApp {
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games);
+        let config_existed = Config::config_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         let (saved_config, config_unreadable) = match Config::load() {
             Ok(config) => (config, false),
             Err(e) => {
@@ -423,6 +436,15 @@ impl TrackerApp {
             tracing::warn!(error = %e, "failed to persist overlay hold");
         }
         let game_running = session_key.is_some();
+        let setup = crate::setup_guide::GuideUi::startup(
+            cli.fixture.is_none()
+                && crate::setup_guide::should_auto_open(
+                    config_existed,
+                    saved_config.setup_completed,
+                ),
+            &saved_config,
+            installed_version.as_deref(),
+        );
         let mut app = Self {
             live_status,
             health_status,
@@ -486,6 +508,7 @@ impl TrackerApp {
             game_running,
             overlay_hotkey,
             companion_toggle_mtime: None,
+            setup,
         };
 
         if let Some(err) = overlay::reconcile_companion(
@@ -535,6 +558,8 @@ impl TrackerApp {
         }
         if self.uninstall_dialog.is_some() {
             subs.push(iced::event::listen_with(uninstall_dialog_escape));
+        } else if self.setup.open {
+            subs.push(iced::event::listen_with(setup_guide_keys));
         } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
         }
@@ -734,6 +759,24 @@ impl TrackerApp {
                     );
                 }
                 self.editing = false;
+                Task::none()
+            }
+            Message::PickMap { session_id, map } => {
+                self.toast = Some(
+                    match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
+                        Ok(()) => "Map saved".into(),
+                        Err(e) => format!("Could not save map: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::PickHero { session_id, hero } => {
+                self.toast = Some(
+                    match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
+                        Ok(()) => "Hero saved".into(),
+                        Err(e) => format!("Could not save hero: {e}"),
+                    },
+                );
                 Task::none()
             }
             Message::RetryUpload(session_id) => {
@@ -1285,6 +1328,186 @@ impl TrackerApp {
             }
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
+            Message::Setup(message) => self.on_setup(message),
+        }
+    }
+
+    fn on_setup(&mut self, message: crate::setup_guide::SetupMessage) -> Task<Message> {
+        use crate::setup_guide::SetupMessage as Step;
+        match message {
+            Step::Open => {
+                self.setup.reopen(&self.saved_config);
+                Task::none()
+            }
+            Step::Skip => {
+                let patch = self.setup.skip();
+                self.persist_setup_patch(patch);
+                Task::none()
+            }
+            Step::SkipStep => {
+                if let Some(patch) = self.setup.skip_step() {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::Back => {
+                self.setup.back();
+                Task::none()
+            }
+            Step::Next => {
+                if let Some(patch) = self.setup.continue_step() {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::SyncUrl(value) => {
+                self.setup.set_sync_url(value);
+                Task::none()
+            }
+            Step::PasteToken(value) => {
+                self.setup.set_paste_token(value);
+                Task::none()
+            }
+            Step::TogglePaste => {
+                self.setup.toggle_paste();
+                Task::none()
+            }
+            Step::RequestCapture => self.spawn_guide_capture(false),
+            Step::CaptureReady(result) => {
+                self.setup.capture_ready(result);
+                Task::none()
+            }
+            Step::RequestTab => self.spawn_guide_capture(true),
+            Step::TabReady(result) => {
+                self.setup.tab_ready(result);
+                Task::none()
+            }
+            Step::ConfirmScoreboard => {
+                self.setup.confirm_scoreboard();
+                Task::none()
+            }
+            Step::SignIn => {
+                let Some((base, label, version)) = self.setup.begin_sign_in() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    crate::setup_guide::start_link(base, label, version),
+                    |result| Message::Setup(Step::LinkStarted(result)),
+                )
+            }
+            Step::LinkStarted(result) => {
+                self.setup.link_started(result);
+                Task::none()
+            }
+            Step::PollReady(result) => {
+                if let Some(patch) = self.setup.poll_ready(result) {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::CheckToken => {
+                let Some((base, token)) = self.setup.begin_check() else {
+                    return Task::none();
+                };
+                Task::perform(crate::setup_guide::check_token(base, token), |result| {
+                    Message::Setup(Step::TokenChecked(result))
+                })
+            }
+            Step::TokenChecked(result) => {
+                if let Some(patch) = self.setup.token_checked(result) {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::OpenSite => {
+                if let Some(url) = self.setup.prepare_site_url() {
+                    update::open_release_page(&url);
+                }
+                Task::none()
+            }
+            Step::DownloadPack => {
+                let dest = self.saved_config.data_dir.clone();
+                let Some((url, dir)) = self.setup.begin_download(&dest) else {
+                    return Task::none();
+                };
+                Task::perform(
+                    crate::setup_guide::download_reader_pack(url, dir),
+                    |result| Message::Setup(Step::PackReady(result)),
+                )
+            }
+            Step::PackReady(result) => {
+                self.setup.download_ready(result);
+                Task::none()
+            }
+        }
+    }
+
+    fn spawn_guide_capture(&mut self, tab: bool) -> Task<Message> {
+        let started = if tab {
+            self.setup.begin_tab()
+        } else {
+            self.setup.begin_capture()
+        };
+        if !started {
+            return Task::none();
+        }
+        let backend = match capture::backend_ready(self.backend) {
+            Ok(backend) => backend,
+            Err(_) => {
+                let message = crate::setup_guide::CAPTURE_FAILED.to_string();
+                if tab {
+                    self.setup.tab_ready(Err(message));
+                } else {
+                    self.setup.capture_ready(Err(message));
+                }
+                return Task::none();
+            }
+        };
+        let output = settings::nonempty(&self.settings.capture_output);
+        Task::perform(
+            crate::setup_guide::capture_test_frame(backend, output),
+            move |result| {
+                if tab {
+                    Message::Setup(crate::setup_guide::SetupMessage::TabReady(result))
+                } else {
+                    Message::Setup(crate::setup_guide::SetupMessage::CaptureReady(result))
+                }
+            },
+        )
+    }
+
+    fn persist_setup_patch(&mut self, patch: stat_tracker::config::SetupDiskPatch) {
+        if self.fixture.is_some() {
+            return;
+        }
+        if self.config_unreadable {
+            self.show_refused_toast();
+            return;
+        }
+        let path = match Config::config_path() {
+            Ok(path) => path,
+            Err(_) => {
+                self.toast = Some(crate::setup_guide::SAVE_FAILED.to_string());
+                return;
+            }
+        };
+        match Config::apply_setup_patch(&path, &patch) {
+            Ok(fresh) => {
+                if patch.setup_completed.is_some() {
+                    self.saved_config.setup_completed = fresh.setup_completed;
+                }
+                if patch.sync.is_some() {
+                    self.saved_config.sync = fresh.sync.clone();
+                    if let Some(sync) = &fresh.sync {
+                        self.settings.sync_url = sync.server_url.clone();
+                        self.settings.sync_token = sync.token.clone();
+                    }
+                    self.health_status = self.health_now();
+                }
+            }
+            Err(_) => {
+                self.toast = Some(crate::setup_guide::SAVE_FAILED.to_string());
+            }
         }
     }
 
@@ -1347,6 +1570,12 @@ impl TrackerApp {
         }
 
         let mut tasks = Vec::new();
+        if let Some((url, code)) = self.setup.poll_request_if_due(std::time::Instant::now()) {
+            tasks.push(Task::perform(
+                crate::setup_guide::poll_link(url, code),
+                |result| Message::Setup(crate::setup_guide::SetupMessage::PollReady(result)),
+            ));
+        }
 
         self.tick_count = self.tick_count.saturating_add(1);
         if self.fixture.is_none() && self.tick_count.is_multiple_of(10) {
@@ -1495,12 +1724,7 @@ impl TrackerApp {
             .height(Fill)
             .style(theme::page_background);
 
-        if let Some(dialog) = &self.uninstall_dialog {
-            stack![page, crate::uninstall::view(dialog, self.uninstall_busy)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else if let Some(dialog) = &self.notes_dialog {
+        let with_notes = if let Some(dialog) = &self.notes_dialog {
             // `notes::dialog` includes the backdrop and is opaque, so a press
             // on the scrim or the card does not reach Update now underneath.
             stack![
@@ -1512,6 +1736,25 @@ impl TrackerApp {
             .into()
         } else {
             page.into()
+        };
+        let with_guide = if self.setup.open {
+            stack![with_notes, crate::setup_guide::view(&self.setup)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            with_notes
+        };
+        if let Some(dialog) = &self.uninstall_dialog {
+            stack![
+                with_guide,
+                crate::uninstall::view(dialog, self.uninstall_busy)
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            with_guide
         }
     }
 
@@ -1598,7 +1841,35 @@ fn notes_dialog_escape(
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
-    notes::escape_closes_notes(&key).then_some(Message::DismissNotes)
+    foreground_key_message(false, true, &key)
+}
+
+fn setup_guide_keys(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    // The guide is open, so Escape must not dismiss notes underneath it.
+    foreground_key_message(true, true, &key)
+}
+
+/// While the setup guide is open it owns Escape and Enter.
+pub fn foreground_key_message(
+    guide_open: bool,
+    notes_open: bool,
+    key: &iced::keyboard::Key,
+) -> Option<Message> {
+    if guide_open {
+        return crate::setup_guide::guide_key_action(key).map(Message::Setup);
+    }
+    if notes_open && notes::escape_closes_notes(key) {
+        Some(Message::DismissNotes)
+    } else {
+        None
+    }
 }
 
 fn notes_dialog_for(
@@ -1675,6 +1946,28 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn setup_guide_keys_do_not_dismiss_notes_underneath() {
+        use iced::keyboard::Key;
+        use iced::keyboard::key::Named;
+
+        let escape = Key::Named(Named::Escape);
+        let enter = Key::Named(Named::Enter);
+        match super::foreground_key_message(true, true, &escape) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Skip)) => {}
+            other => panic!("escape should skip the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(true, true, &enter) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
+            other => panic!("enter should continue the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(false, true, &escape) {
+            Some(super::Message::DismissNotes) => {}
+            other => panic!("escape should close notes when the guide is closed, got {other:?}"),
+        }
+        assert!(super::foreground_key_message(false, true, &enter).is_none());
+    }
 
     #[test]
     fn save_toasts_have_no_em_or_en_dash() {

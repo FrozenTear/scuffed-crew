@@ -325,19 +325,20 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     };
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
-            .size(SIZE_FEATURED)
-            .font(FONT_EXTRABOLD)
-            .color(TEXT),
-        text(format!(
-            "{}  ·  {}",
-            game.display_hero(),
-            local_hm(game.played_at)
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_MEDIUM)
-        .color(TEXT_2),
-        outcome_label(game.outcome),
+        map_block(game, SIZE_FEATURED, FONT_EXTRABOLD),
+        with_unsure(
+            text(format!(
+                "{}  ·  {}",
+                game.display_hero(),
+                local_hm(game.played_at)
+            ))
+            .size(SIZE_BODY)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2)
+            .into(),
+            game.field_unsure("hero"),
+        ),
+        with_unsure(outcome_label(game.outcome), game.field_unsure("result")),
     ]
     .spacing(6);
     let mut inner = column![body].spacing(GRID_GAP);
@@ -366,19 +367,20 @@ pub fn compact_game_card_clickable(game: &Game, selected: bool) -> Element<'stat
 fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Message> {
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
-            .size(SIZE_TITLE)
-            .font(FONT_BOLD)
-            .color(TEXT),
-        text(game.display_hero())
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_2),
+        map_block(game, SIZE_TITLE, FONT_BOLD),
+        with_unsure(
+            text(game.display_hero())
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_2)
+                .into(),
+            game.field_unsure("hero"),
+        ),
         text(local_hm(game.played_at))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-        outcome_label(game.outcome),
+        with_unsure(outcome_label(game.outcome), game.field_unsure("result")),
     ]
     .spacing(4);
     let card = card_shell(game.role, game.outcome, body.into(), theme::HEIGHT_COMPACT);
@@ -650,23 +652,28 @@ pub fn expanded_game_card<'a>(
     let sid = game.session_id.clone();
     let mut body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
-            .size(SIZE_TITLE)
-            .font(FONT_BOLD)
-            .color(TEXT),
-        text(format!(
-            "{}  ·  {}",
-            game.display_hero(),
-            local_hm(game.played_at)
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_MEDIUM)
-        .color(TEXT_2),
-        outcome_label(game.outcome),
+        map_block(game, SIZE_TITLE, FONT_BOLD),
+        with_unsure(
+            text(format!(
+                "{}  ·  {}",
+                game.display_hero(),
+                local_hm(game.played_at)
+            ))
+            .size(SIZE_BODY)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2)
+            .into(),
+            game.field_unsure("hero"),
+        ),
+        with_unsure(outcome_label(game.outcome), game.field_unsure("result")),
         stat_line(game),
         action_row(game, editing, confirm_delete),
     ]
     .spacing(10);
+
+    if game.needs_review() {
+        body = body.push(review_panel(game));
+    }
 
     if let Some(message) = game.upload_reject.as_deref() {
         body = body.push(upload_rejected_panel(game.session_id.clone(), message));
@@ -881,10 +888,76 @@ fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Ele
     .into()
 }
 
+fn review_panel(game: &Game) -> Element<'static, Message> {
+    let fields = game.review_fields();
+    let notice = game.review_notice().unwrap_or("");
+    let mut col =
+        column![
+            text(notice)
+                .size(SIZE_BODY)
+                .font(FONT_MEDIUM)
+                .color(if game.held_locally() {
+                    theme::WARN
+                } else {
+                    TEXT_2
+                }),
+        ]
+        .spacing(8)
+        .width(Fill);
+
+    if fields
+        .iter()
+        .any(|field| *field == "map" || *field == "mode")
+    {
+        col = col.push(label_text("Pick a map"));
+        col = col.push(
+            text("Mode follows the map.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in stat_tracker::parse::known_map_names() {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                name.to_string(),
+                game.map_name == name,
+                Message::PickMap {
+                    session_id: sid,
+                    map: name.to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    if fields.contains(&"hero") {
+        col = col.push(label_text("Pick a hero"));
+        let mut chips = row![].spacing(8).width(Fill);
+        for name in scuffed_types::HEROES {
+            let sid = game.session_id.clone();
+            chips = chips.push(filter_chip(
+                (*name).to_string(),
+                game.hero == *name,
+                Message::PickHero {
+                    session_id: sid,
+                    hero: (*name).to_string(),
+                },
+            ));
+        }
+        col = col.push(chips.wrap());
+    }
+
+    col.into()
+}
+
 fn role_and_edited(game: &Game) -> Element<'static, Message> {
     let mut r = row![label_text(game.role.label())]
         .spacing(8)
         .align_y(Alignment::Center);
+    if game.held_locally() {
+        r = r.push(status_chip("needs review", theme::WARN));
+    }
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
     }
@@ -943,37 +1016,81 @@ fn outcome_label(outcome: Outcome) -> Element<'static, Message> {
         .into()
 }
 
+const UNSURE_MARK: &str = "unsure";
+
+fn unsure_label() -> text::Text<'static> {
+    text(UNSURE_MARK)
+        .size(SIZE_LABEL)
+        .font(FONT_SEMIBOLD)
+        .color(theme::WARN)
+}
+
+fn with_unsure(body: Element<'static, Message>, unsure: bool) -> Element<'static, Message> {
+    if !unsure {
+        return body;
+    }
+    row![body, unsure_label()]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn map_block(game: &Game, size: f32, font: iced::Font) -> Element<'static, Message> {
+    let map = with_unsure(
+        text(game.display_map())
+            .size(size)
+            .font(font)
+            .color(TEXT)
+            .into(),
+        game.field_unsure("map"),
+    );
+    if !game.field_unsure("mode") {
+        return map;
+    }
+    column![
+        map,
+        text("mode unsure")
+            .size(SIZE_LABEL)
+            .font(FONT_SEMIBOLD)
+            .color(theme::WARN),
+    ]
+    .spacing(2)
+    .into()
+}
+
 fn stat_line(game: &Game) -> Element<'static, Message> {
     row![
-        stat_box("E", game.elims),
-        stat_box("D", game.deaths),
-        stat_box("A", game.assists),
-        stat_box("DMG", game.damage),
-        stat_box("HEAL", game.healing),
-        stat_box("MIT", game.mitigation),
+        stat_box("E", game.elims, game.field_unsure("e")),
+        stat_box("D", game.deaths, game.field_unsure("d")),
+        stat_box("A", game.assists, game.field_unsure("a")),
+        stat_box("DMG", game.damage, game.field_unsure("dmg")),
+        stat_box("HEAL", game.healing, game.field_unsure("h")),
+        stat_box("MIT", game.mitigation, game.field_unsure("mit")),
     ]
     .spacing(8)
     .into()
 }
 
-fn stat_box(label: &'static str, value: u32) -> Element<'static, Message> {
-    container(
-        column![
-            text(label)
-                .size(SIZE_LABEL)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT_3),
-            text(format_stat(value))
-                .size(SIZE_BODY)
-                .font(FONT_BOLD)
-                .color(TEXT),
-        ]
-        .spacing(2)
-        .align_x(Alignment::Center),
-    )
-    .padding(Padding::from([8, 10]))
-    .style(theme::stat_box)
-    .into()
+fn stat_box(label: &'static str, value: u32, unsure: bool) -> Element<'static, Message> {
+    let mut body = column![
+        text(label)
+            .size(SIZE_LABEL)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_3),
+        text(format_stat(value))
+            .size(SIZE_BODY)
+            .font(FONT_BOLD)
+            .color(TEXT),
+    ]
+    .spacing(2)
+    .align_x(Alignment::Center);
+    if unsure {
+        body = body.push(unsure_label());
+    }
+    container(body)
+        .padding(Padding::from([8, 10]))
+        .style(theme::stat_box)
+        .into()
 }
 
 fn format_stat(n: u32) -> String {

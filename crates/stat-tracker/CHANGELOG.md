@@ -15,6 +15,18 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+You can turn the new scoreboard reader on in Settings. It stays off until you do. The tracker reads that switch when it starts, so restart it after you save. A field the new reader is not sure about keeps the old read, and Games marks that field unsure until you edit it.
+
+### Highlights
+
+- Settings has a New reader (alpha) switch. Saved games and uploads use it only after you turn it on and restart.
+- Games shows a small unsure mark on a field the new reader was not sure about. Editing that field clears the mark.
+- Each saved game remembers which reader produced it, including after a restart and when an upload is tried again.
+
+The switch is `reader` in config.toml. `ocr-v1` is today's reader and the default when the key is missing. `new` stores the new reader's value for each field it read confidently on your own row, and keeps the old value for the rest. The map and mode already chosen for the game stay, including a Deathmatch game, which stays on this machine. If the new reader names a different map, Games marks the map unsure. If it cannot find the board, cannot tell the team size, finds the columns but reads no numbers, is not sure which row is yours, or does not replace any field, the game stays tagged with the old reader. A field it never tried is not marked unsure. Game start, game end, and the checks that hold a bad number do not change. Uploads send the reader name stored on the game, not whatever the switch says now.
+
 ## 0.4.24
 
 Release notes now show inside the desktop app. The extra number reader,
