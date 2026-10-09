@@ -12356,13 +12356,20 @@ mod tests {
         .await;
         let uploaded = seen.lock().unwrap().clone();
         assert!(
-            !uploaded.is_empty(),
-            "a later GUI result uploads the archived hold"
+            uploaded.is_empty(),
+            "an empty map stays in the local queue: {uploaded:?}"
         );
+        let rows = store.get_all_matches().await.unwrap();
+        let held = rows
+            .iter()
+            .find(|row| row.elims == 3)
+            .expect("the fresh hold stays stored");
+        assert!(!held.synced, "the member can still pick a map");
         assert!(
-            uploaded.iter().all(|(_, _, map, _)| map.is_empty()),
-            "the fresh hold must not upload as Busan: {uploaded:?}"
+            held.map_name.is_empty(),
+            "the fresh hold must not become Busan"
         );
+        assert_eq!(held.outcome, "victory");
     }
 
     #[tokio::test]
@@ -12537,19 +12544,18 @@ mod tests {
         .await;
         let uploaded = seen.lock().unwrap().clone();
         assert!(
-            !uploaded.is_empty(),
-            "the new session has a result and is eligible to upload"
-        );
-        assert!(
             uploaded
                 .iter()
-                .all(|(_, map, mode)| map != "Busan" && mode != "Control"),
-            "nothing from the guillard split uploads as Busan: {uploaded:?}"
+                .all(|(id, map, _)| id != &opened && !map.is_empty()),
+            "an empty map stays queued and is not sent as Busan: {uploaded:?}"
         );
+        let rows = night.store.get_all_matches().await.unwrap();
+        let held: Vec<_> = rows.iter().filter(|row| row.session_id == opened).collect();
+        assert!(!held.is_empty(), "the split session is still stored");
         assert!(
-            uploaded
-                .iter()
-                .all(|(id, map, _)| id == &opened && map.is_empty())
+            held.iter()
+                .all(|row| !row.synced && row.map_name.is_empty() && row.game_mode.is_empty()),
+            "the untrusted split waits for a map pick: {held:?}"
         );
     }
 
