@@ -30,7 +30,7 @@ impl ClientError {
 /// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
 /// toasts explain the failure instead of only showing the status code.
 fn format_http_error(status: u16, body: &str) -> String {
-    if let Some(msg) = scuffed_types::rate_limited_retry_message(status, body) {
+    if let Some(msg) = scuffed_types::too_many_requests_message(status, body) {
         return msg;
     }
     let message = serde_json::from_str::<serde_json::Value>(body)
@@ -304,11 +304,19 @@ mod tests {
         );
         assert_eq!(
             format_http_error(429, "Too Many Requests! Wait for 9s"),
-            "HTTP error: 429"
+            "Too many requests. Try again later."
         );
         assert_eq!(
             format_http_error(429, r#"{"error":"too many login attempts"}"#),
-            "HTTP error 429: too many login attempts"
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(429, r#"{"error":"rate_limited","retry_after":3601}"#),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(429, r#"{"error":"rate_limited","retry_after":1.5}"#),
+            "Too many requests. Try again later."
         );
         assert_eq!(
             format_http_error(400, r#"{"error":"rate_limited","retry_after":9}"#),

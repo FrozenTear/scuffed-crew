@@ -162,21 +162,22 @@ fn body_error_or(body: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// `Try again in N s` when the body is governor JSON. Other 429s return `None`.
+/// `Try again in N s` for a usable wait. Any other 429 is
+/// `Too many requests. Try again later.`
 fn client_rate_limit_message(err: &scuffed_api_client::ClientError) -> Option<String> {
     let scuffed_api_client::ClientError::Http { status, body } = err else {
         return None;
     };
-    scuffed_types::rate_limited_retry_message(*status, body)
+    scuffed_types::too_many_requests_message(*status, body)
 }
 
-/// Password login. Lockout and plain-text 429s stay on the generic failure.
+/// Password login. A 429 (lockout, or a rate limit with no usable wait) names
+/// the wait. Any other failure stays the generic credential message.
 fn login_failure_message(err: &scuffed_api_client::ClientError) -> String {
     client_rate_limit_message(err).unwrap_or_else(|| "Invalid username or password".into())
 }
 
-/// Local register. 409, 400, and 403 keep their own copy. A governor 429
-/// names the wait. A plain-text 429 stays on the generic failure.
+/// Local register. 409, 400, and 403 keep their own copy. A 429 names the wait.
 fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
     match err {
         scuffed_api_client::ClientError::Http { status: 409, .. } => {
@@ -462,7 +463,7 @@ pub fn Login() -> Element {
                             loading: false,
                         });
                     }
-                    // New accounts exist to join — funnel straight to the application.
+                    // New accounts exist to join, so send them straight to the application.
                     nav.replace(Route::Apply {});
                 }
                 Err(e) => {
@@ -522,7 +523,7 @@ pub fn Login() -> Element {
                 h1 { if registering() { "Create account" } else { "Sign in" } }
                 p { class: "lead",
                     if registering() {
-                        "No email needed — just pick a username and password."
+                        "No email needed. Just pick a username and password."
                     } else {
                         "Sign in to continue."
                     }
@@ -635,7 +636,7 @@ pub fn Login() -> Element {
                             "Sign in with Nostr"
                         }
                         p { class: "login-nostr-hint",
-                            "Uses your NIP-07 browser extension — no account details shared."
+                            "Uses your NIP-07 browser extension. No account details shared."
                         }
                     }
                 }
@@ -795,42 +796,37 @@ mod tests {
         assert_eq!(scuffed_types::json_retry_after(plain), None);
         assert_eq!(scuffed_types::json_retry_after(lockout), None);
 
+        let later = "Too many requests. Try again later.";
+        let over_hour = http(429, r#"{"error":"rate_limited","retry_after":3601}"#);
         assert_eq!(json_err.to_string(), "Try again in 9 s");
-        assert_eq!(plain_err.to_string(), "HTTP error: 429");
+        assert_eq!(plain_err.to_string(), later);
+        assert_eq!(lockout_err.to_string(), later);
+        assert_eq!(over_hour.to_string(), later);
         assert_eq!(
-            lockout_err.to_string(),
-            "HTTP error 429: too many login attempts"
+            http(429, r#"{"error":"rate_limited","retry_after":1.5}"#).to_string(),
+            later
         );
 
         assert_eq!(login_failure_message(&json_err), "Try again in 9 s");
+        assert_eq!(login_failure_message(&plain_err), later);
+        assert_eq!(login_failure_message(&lockout_err), later);
+        assert_eq!(login_failure_message(&over_hour), later);
         assert_eq!(
-            login_failure_message(&plain_err),
-            "Invalid username or password"
-        );
-        assert_eq!(
-            login_failure_message(&lockout_err),
+            login_failure_message(&http(401, r#"{"error":"invalid username or password"}"#)),
             "Invalid username or password"
         );
 
         assert_eq!(register_failure_message(&json_err), "Try again in 9 s");
-        assert_eq!(
-            register_failure_message(&plain_err),
-            "Registration failed. Try again."
-        );
-        assert_eq!(
-            register_failure_message(&lockout_err),
-            "Registration failed. Try again."
-        );
+        assert_eq!(register_failure_message(&plain_err), later);
+        assert_eq!(register_failure_message(&lockout_err), later);
+        assert_eq!(register_failure_message(&over_hour), later);
         assert_eq!(
             register_failure_message(&http(409, json)),
             "Could not create account. Try a different username."
         );
 
         assert_eq!(nostr_verify_failure_message(&json_err), "Try again in 9 s");
-        assert_eq!(
-            nostr_verify_failure_message(&plain_err),
-            "Verification failed: HTTP error: 429"
-        );
+        assert_eq!(nostr_verify_failure_message(&plain_err), later);
         assert_eq!(
             nostr_verify_failure_message(&http(403, json)),
             "Registration is currently closed"

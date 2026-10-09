@@ -118,6 +118,9 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
         502 => "The relay rejected the encrypted message.".into(),
         503 => "Can't reach the chat relay.".into(),
         _ => super::rate_limited_retry_message(status, body).unwrap_or_else(|| {
+            if status == 429 && is_rate_limited_code(body) {
+                return super::TRY_AGAIN_LATER.to_string();
+            }
             serde_json::from_str::<serde_json::Value>(body)
                 .ok()
                 .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
@@ -128,6 +131,18 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
 
 fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
+}
+
+fn is_rate_limited_code(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.as_str())
+                .map(|text| text == "rate_limited")
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -217,6 +232,17 @@ mod tests {
             chat_api_error_copy(429, "Too Many Requests! Wait for 4s"),
             "Chat request failed (HTTP 429)"
         );
+        assert_eq!(
+            chat_api_error_copy(429, r#"{"error":"rate_limited","retry_after":3601}"#),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            chat_api_error_copy(429, r#"{"error":"rate_limited","retry_after":1.5}"#),
+            "Too many requests. Try again later."
+        );
+        // API PR 209 changes this Nostr limiter 429 to
+        // {"error":"rate_limited","retry_after":N}. This assertion stays on
+        // the old sentence until that PR lands.
         assert_eq!(
             chat_api_error_copy(
                 429,

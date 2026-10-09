@@ -60,18 +60,32 @@ pub fn json_retry_after(body: &str) -> Option<u64> {
     }
 }
 
-/// Member copy for a tower-governor 429.
+/// Shown for a 429 that does not carry a usable `retry_after`.
+pub const TRY_AGAIN_LATER: &str = "Too many requests. Try again later.";
+
+/// Member copy for a 429 with a usable wait: `Try again in N s`.
 ///
-/// The body `{"error":"rate_limited","retry_after":N}` becomes
-/// `Try again in N s`. Any other body returns `None`, including plain text
-/// (`Too Many Requests! Wait for Ns`) and password-lockout JSON
-/// (`{"error":"too many login attempts"}`), so callers keep their existing copy.
+/// Returns `None` when the status is not 429 or [`json_retry_after`] finds no
+/// wait. Callers that must not show a raw `rate_limited` code use
+/// [`too_many_requests_message`] for that case.
 pub fn rate_limited_retry_message(status: u16, body: &str) -> Option<String> {
     if status != 429 {
         return None;
     }
     let secs = json_retry_after(body)?;
     Some(format!("Try again in {secs} s"))
+}
+
+/// Member copy for any HTTP 429.
+///
+/// A usable wait is `Try again in N s`. Every other 429, including a
+/// `rate_limited` body whose wait is missing, not an integer, or over 3600
+/// seconds, is [`TRY_AGAIN_LATER`].
+pub fn too_many_requests_message(status: u16, body: &str) -> Option<String> {
+    if status != 429 {
+        return None;
+    }
+    Some(rate_limited_retry_message(status, body).unwrap_or_else(|| TRY_AGAIN_LATER.to_string()))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -193,6 +207,14 @@ mod tests {
         );
         assert_eq!(
             json_retry_after(r#"{"error":"rate_limited","retry_after":"-5"}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":1.5}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"abc"}"#),
             None
         );
         assert_eq!(json_retry_after("[]"), None);
