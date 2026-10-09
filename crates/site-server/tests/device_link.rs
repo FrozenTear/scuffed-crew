@@ -1228,6 +1228,47 @@ async fn same_origin_is_accepted_on_lookup_approve_and_deny() {
 }
 
 #[tokio::test]
+async fn start_and_poll_succeed_without_origin_or_sec_fetch_site() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let start = req(
+        Method::POST,
+        "/api/link/start",
+        Some(json!({"device_label": "Desk", "app_version": "1.0.0"})),
+        None,
+        [127, 0, 0, 1],
+        "203.0.113.120",
+        None,
+    );
+    assert!(start.headers().get(header::ORIGIN).is_none());
+    assert!(start.headers().get("sec-fetch-site").is_none());
+    let (status, body) = send(&app, start).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(body, BAD_ORIGIN);
+    let started = json_of(&body);
+    assert!(started["user_code"].as_str().unwrap().contains('-'));
+    assert_eq!(started["device_code"].as_str().unwrap().len(), 64);
+    assert_eq!(started["interval"], DEVICE_LINK_INTERVAL_SECS);
+    assert_eq!(started["expires_in"], DEVICE_LINK_TTL_SECS);
+
+    let device_code = started["device_code"].as_str().unwrap().to_string();
+    let poll = req(
+        Method::POST,
+        "/api/link/poll",
+        Some(json!({"device_code": device_code})),
+        None,
+        [127, 0, 0, 1],
+        "203.0.113.120",
+        None,
+    );
+    assert!(poll.headers().get(header::ORIGIN).is_none());
+    assert!(poll.headers().get("sec-fetch-site").is_none());
+    let (status, body) = send(&app, poll).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"status":"pending"}"#);
+}
+
+#[tokio::test]
 async fn lookup_returns_device_label_app_version_and_created_at() {
     let state = test_state().await;
     seed_member(&state.db).await;

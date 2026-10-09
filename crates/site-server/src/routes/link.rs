@@ -1,7 +1,9 @@
 //! Device-code sign-in for the stat tracker.
 //!
-//! `POST /api/link/start` and `POST /api/link/poll` are unauthenticated. The
-//! device shows `user_code` (shaped `XXXX-XXXX`) and polls with `device_code`.
+//! `POST /api/link/start` and `POST /api/link/poll` are unauthenticated and do
+//! not check `Origin` or `Sec-Fetch-Site`. The desktop app calls them with no
+//! browser headers. The device shows `user_code` (shaped `XXXX-XXXX`) and
+//! polls with `device_code`.
 //! `POST /api/link/lookup`, `/approve`, and `/deny` require a signed-in session
 //! (`OrgMember`), the same cookie or bearer session check as other mutations.
 //! Lookup, approve, and deny reject a request with 403 `{"error":"bad_origin"}`
@@ -25,7 +27,6 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use scuffed_auth::server::session::ErrorResponse;
@@ -33,7 +34,10 @@ use scuffed_db::queries::device_link::{
     DEVICE_LINK_INTERVAL_SECS, DEVICE_LINK_TTL_SECS, DeviceLinkPoll,
 };
 use scuffed_db::{AuditAction, AuditTargetType};
-use scuffed_types::{DeviceLinkLookupResponse, DeviceLinkOkResponse, DeviceLinkUserCodeRequest};
+use scuffed_types::{
+    DeviceLinkLookupResponse, DeviceLinkOkResponse, DeviceLinkPollRequest, DeviceLinkPollResponse,
+    DeviceLinkStartRequest, DeviceLinkStartResponse, DeviceLinkUserCodeRequest,
+};
 
 use crate::extractors::OrgMember;
 use crate::rate_limit::TrustedProxyIpKeyExtractor;
@@ -61,32 +65,6 @@ const SEC_FETCH_SITE: header::HeaderName = header::HeaderName::from_static("sec-
 /// Set by [`strip_link_query_secrets`] when the URI carried a code or token.
 #[derive(Clone, Copy)]
 pub(crate) struct LinkSecretInQuery;
-
-#[derive(Deserialize)]
-pub struct StartRequest {
-    pub device_label: String,
-    pub app_version: String,
-}
-
-#[derive(Deserialize)]
-pub struct DeviceCodeRequest {
-    pub device_code: String,
-}
-
-#[derive(Serialize)]
-pub struct StartBody {
-    pub user_code: String,
-    pub device_code: String,
-    pub interval: u64,
-    pub expires_in: u64,
-}
-
-#[derive(Serialize)]
-pub struct PollBody {
-    pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-}
 
 fn key_extractor() -> &'static TrustedProxyIpKeyExtractor {
     static EXTRACTOR: OnceLock<TrustedProxyIpKeyExtractor> = OnceLock::new();
@@ -341,15 +319,18 @@ fn generate_secret_hex() -> String {
     out
 }
 
-fn poll_body(status: &'static str, token: Option<String>) -> Json<PollBody> {
-    Json(PollBody { status, token })
+fn poll_body(status: &'static str, token: Option<String>) -> Json<DeviceLinkPollResponse> {
+    Json(DeviceLinkPollResponse {
+        status: status.to_string(),
+        token,
+    })
 }
 
 /// POST /api/link/start
 pub async fn start(
     State(state): State<AppState>,
-    Json(body): Json<StartRequest>,
-) -> Result<Json<StartBody>, (StatusCode, Json<ErrorResponse>)> {
+    Json(body): Json<DeviceLinkStartRequest>,
+) -> Result<Json<DeviceLinkStartResponse>, (StatusCode, Json<ErrorResponse>)> {
     if let Err(_error) = state.db.cleanup_expired_device_links().await {
         tracing::error!("device link cleanup failed");
     }
@@ -366,7 +347,7 @@ pub async fn start(
             internal()
         })?;
     tracing::info!("device link started");
-    Ok(Json(StartBody {
+    Ok(Json(DeviceLinkStartResponse {
         user_code,
         device_code,
         interval: DEVICE_LINK_INTERVAL_SECS,
@@ -377,8 +358,8 @@ pub async fn start(
 /// POST /api/link/poll
 pub async fn poll(
     State(state): State<AppState>,
-    Json(body): Json<DeviceCodeRequest>,
-) -> Result<Json<PollBody>, (StatusCode, Json<ErrorResponse>)> {
+    Json(body): Json<DeviceLinkPollRequest>,
+) -> Result<Json<DeviceLinkPollResponse>, (StatusCode, Json<ErrorResponse>)> {
     let Some(device_code) = canonical_device_code(&body.device_code) else {
         return Ok(poll_body("expired", None));
     };
