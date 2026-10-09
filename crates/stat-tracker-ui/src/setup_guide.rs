@@ -8,10 +8,18 @@
 //! Server contracts (drafts; #188 is token-check, link endpoints are coming):
 //!
 //! * `POST /api/link/start` with `{device_label, app_version}` returns
-//!   `{user_code, device_code, interval, expires_in}`.
-//! * `POST /api/link/poll` with `{device_code}` returns
-//!   `{status}` of `pending`, `slow_down`, `denied`, `expired`, or
-//!   `approved` (approved also has `token`).
+//!   `{user_code, device_code, interval, expires_in}`. `user_code` is
+//!   `XXXX-XXXX`. `device_code` is 64 hex characters. `interval` is the
+//!   fixed gap between polls (5 seconds on the current server). `expires_in`
+//!   is the code lifetime (600 seconds on the current server).
+//! * `POST /api/link/poll` with `{device_code}` returns `{status}` of
+//!   `pending`, `slow_down`, `denied`, `expired`, or `approved`.
+//!   `slow_down` means the poll arrived before `interval` seconds. The
+//!   client waits that same interval again. `approved` includes `token`
+//!   once. The next poll is `expired` and has no token. A later result
+//!   does not replace the token already saved.
+//! * A non-success body is `{"error":"..."}` except HTTP 429, which is not
+//!   parsed, and HTTP 404, which means the route is not on this server yet.
 //! * `GET /api/stats/token-check` returns `{display_name}` or
 //!   `{"error":"Unauthorized"}` for any failure. One check per button press.
 //! * HTTP 429 on token-check, link start, or link poll ignores the body.
@@ -67,7 +75,7 @@ You can finish without it.";
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const DEVICE_LABEL: &str = "Scuffed Tracker";
 
-const SLOW_DOWN_STEP_SECS: u64 = 5;
+const USER_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// Show the guide on launch when no config file exists, or setup is not done.
 pub fn should_auto_open(config_existed: bool, setup_completed: bool) -> bool {
@@ -483,16 +491,12 @@ impl LinkMachine {
                 }
             }
             PollOutcome::SlowDown => {
-                let interval_secs = interval_after_slow_down(self.interval_secs());
-                if let LinkPhase::Polling {
-                    interval_secs: slot,
-                    ..
-                } = &mut self.phase
-                {
-                    *slot = interval_secs;
-                }
+                // The server interval stays fixed. slow_down means this poll
+                // was early, so the next one waits that same interval.
                 log_link_status("slow_down");
-                PollDecision::Continue { interval_secs }
+                PollDecision::Continue {
+                    interval_secs: self.interval_secs(),
+                }
             }
             PollOutcome::Denied => {
                 self.phase = LinkPhase::Denied;
@@ -543,8 +547,68 @@ pub fn normalize_interval(secs: u64) -> u64 {
     secs.clamp(1, 300)
 }
 
-pub fn interval_after_slow_down(current: u64) -> u64 {
-    normalize_interval(current.saturating_add(SLOW_DOWN_STEP_SECS))
+/// `user_code` on the wire: `XXXX-XXXX` from the server alphabet.
+pub fn is_user_code(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || USER_CODE_ALPHABET.contains(byte))
+}
+
+/// `device_code` on the wire: 64 hex characters.
+pub fn is_device_code(raw: &str) -> bool {
+    raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub struct ParsedStart {
+    pub user_code: String,
+    pub device_code: String,
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+pub fn parse_start_body(body: &str) -> Result<ParsedStart, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| UNREADABLE_SITE.to_string())?;
+    let user_code = value
+        .get("user_code")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    let device_code = value
+        .get("device_code")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    let Some(interval) = value.get("interval").and_then(|item| item.as_u64()) else {
+        return Err(UNREADABLE_SITE.to_string());
+    };
+    let Some(expires_in) = value.get("expires_in").and_then(|item| item.as_u64()) else {
+        return Err(UNREADABLE_SITE.to_string());
+    };
+    if !is_user_code(user_code) || !is_device_code(device_code) || interval == 0 || expires_in == 0
+    {
+        return Err(UNREADABLE_SITE.to_string());
+    }
+    Ok(ParsedStart {
+        user_code: user_code.to_string(),
+        device_code: device_code.to_string(),
+        interval,
+        expires_in,
+    })
+}
+
+fn site_error_message(body: &str, fallback: String) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(message) = value.get("error").and_then(|item| item.as_str())
+    {
+        let message = message.trim();
+        if !message.is_empty() {
+            return message.to_string();
+        }
+    }
+    fallback
 }
 
 pub fn parse_poll_body(body: &str) -> Result<PollOutcome, String> {
@@ -707,38 +771,21 @@ pub async fn start_link(
         return Ok(LinkStartOutcome::Unsupported);
     }
     if !status.is_success() {
-        return Err(format!(
-            "The site could not start sign-in ({}).",
-            status.as_u16()
+        return Err(site_error_message(
+            &text,
+            format!("The site could not start sign-in ({}).", status.as_u16()),
         ));
     }
-    let parsed: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| UNREADABLE_SITE.to_string())?;
-    let user_code = parsed
-        .get("user_code")
-        .and_then(|item| item.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let device_code = parsed
-        .get("device_code")
-        .and_then(|item| item.as_str())
-        .unwrap_or("")
-        .to_string();
-    let interval = parsed
-        .get("interval")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(5);
-    let expires_in = parsed
-        .get("expires_in")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(600);
-    if user_code.is_empty() || device_code.is_empty() {
-        return Err(UNREADABLE_SITE.to_string());
-    }
+    let started = parse_start_body(&text)?;
     log_link_status("started");
     Ok(LinkStartOutcome::Ready(LinkStart {
-        machine: LinkMachine::start(device_code, user_code, base, interval, expires_in),
+        machine: LinkMachine::start(
+            started.device_code,
+            started.user_code,
+            base,
+            started.interval,
+            started.expires_in,
+        ),
     }))
 }
 
@@ -768,9 +815,12 @@ pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, 
     let text = response.text().await.unwrap_or_default();
     let text = redact_secret(&text, &device_code);
     if !status.is_success() {
-        return Err(format!(
-            "The site could not continue sign-in ({}).",
-            status.as_u16()
+        return Err(redact_secret(
+            &site_error_message(
+                &text,
+                format!("The site could not continue sign-in ({}).", status.as_u16()),
+            ),
+            &device_code,
         ));
     }
     parse_poll_body(&text)
@@ -1745,12 +1795,13 @@ mod tests {
         );
         assert_eq!(
             machine.apply(PollOutcome::SlowDown),
-            PollDecision::Continue { interval_secs: 10 }
+            PollDecision::Continue { interval_secs: 5 }
         );
         assert_eq!(
             machine.apply(PollOutcome::SlowDown),
-            PollDecision::Continue { interval_secs: 15 }
+            PollDecision::Continue { interval_secs: 5 }
         );
+        assert_eq!(machine.interval_secs(), 5);
 
         let mut denied = LinkMachine::start(
             "code".into(),
@@ -1799,10 +1850,66 @@ mod tests {
             "a second approved result is ignored"
         );
         assert_eq!(approved.saved_token(), Some("tok-1"));
+        assert_eq!(
+            approved.apply(PollOutcome::Expired),
+            PollDecision::Stop,
+            "the server poll after handover is expired and does not clear the token"
+        );
+        assert_eq!(approved.saved_token(), Some("tok-1"));
         let debug = format!("{approved:?}");
         assert!(!debug.contains("dc-SECRET-9f3a-not-for-disk"));
         assert!(!debug.contains("tok-1"));
         assert_eq!(format!("{}", approved.device_code), "[redacted]");
+    }
+
+    #[test]
+    fn start_and_poll_bodies_match_the_device_link_contract() {
+        let device = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let started = parse_start_body(&format!(
+            r#"{{"user_code":"ABCD-EFGH","device_code":"{device}","interval":5,"expires_in":600}}"#
+        ))
+        .expect("start");
+        assert_eq!(started.user_code, "ABCD-EFGH");
+        assert_eq!(started.device_code, device);
+        assert_eq!(started.interval, 5);
+        assert_eq!(started.expires_in, 600);
+        assert!(
+            parse_start_body(
+                r#"{"user_code":"ABCD-234O","device_code":"aa","interval":5,"expires_in":600}"#
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_poll_body(r#"{"status":"pending"}"#).unwrap(),
+            PollOutcome::Pending
+        );
+        assert_eq!(
+            parse_poll_body(r#"{"status":"slow_down"}"#).unwrap(),
+            PollOutcome::SlowDown
+        );
+        assert_eq!(
+            parse_poll_body(r#"{"status":"denied"}"#).unwrap(),
+            PollOutcome::Denied
+        );
+        assert_eq!(
+            parse_poll_body(r#"{"status":"expired"}"#).unwrap(),
+            PollOutcome::Expired
+        );
+        assert_eq!(
+            parse_poll_body(&format!(r#"{{"status":"approved","token":"{token}"}}"#)).unwrap(),
+            PollOutcome::Approved {
+                token: token.into()
+            }
+        );
+        assert!(parse_poll_body(r#"{"status":"approved"}"#).is_err());
+        assert_eq!(
+            site_error_message(
+                r#"{"error":"device_label must be 1-64 characters without control characters"}"#,
+                "fallback".into(),
+            ),
+            "device_label must be 1-64 characters without control characters"
+        );
     }
 
     #[test]
@@ -2034,15 +2141,19 @@ mod tests {
 
     #[tokio::test]
     async fn mock_server_link_flow_and_single_token_check() {
-        let secret = "dc-SECRET-9f3a-not-for-disk";
+        let secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let handover = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(is_device_code(secret));
+        assert!(is_device_code(handover));
+        assert!(is_user_code("ABCD-EFGH"));
         let polls = Arc::new(Mutex::new(0u32));
         let checks = Arc::new(Mutex::new(0u32));
         let polls_handler = polls.clone();
         let checks_handler = checks.clone();
         let base = spawn_mock(move |head, body| {
             if head.contains("POST /api/link/start") {
-                assert!(body.contains("device_label"));
-                assert!(body.contains("app_version"));
+                assert!(body.contains("\"device_label\""));
+                assert!(body.contains("\"app_version\""));
                 assert!(!body.contains(secret));
                 return (
                     200,
@@ -2059,19 +2170,13 @@ mod tests {
                 );
                 let mut n = polls_handler.lock().expect("polls");
                 *n += 1;
-                let status = match *n {
-                    1 => "pending",
-                    2 => "slow_down",
-                    _ => "approved",
+                let body = match *n {
+                    1 => r#"{"status":"pending"}"#.to_string(),
+                    2 => r#"{"status":"slow_down"}"#.to_string(),
+                    3 => format!(r#"{{"status":"approved","token":"{handover}"}}"#),
+                    _ => r#"{"status":"expired"}"#.to_string(),
                 };
-                if status == "approved" {
-                    return (
-                        200,
-                        vec![],
-                        r#"{"status":"approved","token":"tok-1"}"#.to_string(),
-                    );
-                }
-                return (200, vec![], format!(r#"{{"status":"{status}"}}"#));
+                return (200, vec![], body);
             }
             if head.contains("GET /api/stats/token-check") {
                 let mut n = checks_handler.lock().expect("checks");
@@ -2096,6 +2201,7 @@ mod tests {
             LinkStartOutcome::Unsupported => panic!("this mock implements link start"),
         };
         assert_eq!(started.machine.user_code(), "ABCD-EFGH");
+        assert_eq!(started.machine.interval_secs(), 5);
         assert_eq!(started.machine.device_code_for_request(), secret);
         assert!(!format!("{:?}", started.machine).contains(secret));
 
@@ -2116,7 +2222,7 @@ mod tests {
         );
         assert_eq!(
             machine.apply(second),
-            PollDecision::Continue { interval_secs: 10 }
+            PollDecision::Continue { interval_secs: 5 }
         );
         let third = expect_outcome(
             poll_link(base.clone(), machine.device_code_for_request().to_string())
@@ -2124,14 +2230,22 @@ mod tests {
                 .expect("approved"),
         );
         assert_eq!(machine.apply(third), PollDecision::Stop);
-        assert_eq!(machine.saved_token(), Some("tok-1"));
+        assert_eq!(machine.saved_token(), Some(handover));
+        let again = expect_outcome(
+            poll_link(base.clone(), machine.device_code_for_request().to_string())
+                .await
+                .expect("expired after handover"),
+        );
+        assert_eq!(again, PollOutcome::Expired);
+        assert_eq!(machine.apply(again), PollDecision::Stop);
+        assert_eq!(machine.saved_token(), Some(handover));
         assert_eq!(
             machine.apply(PollOutcome::Approved {
                 token: "tok-2".into()
             }),
             PollDecision::Stop
         );
-        assert_eq!(machine.saved_token(), Some("tok-1"));
+        assert_eq!(machine.saved_token(), Some(handover));
 
         let limited = check_token(base.clone(), "tok-1".into())
             .await
