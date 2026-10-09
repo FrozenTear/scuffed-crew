@@ -82,6 +82,16 @@ no_long_dash() {
   fi
 }
 
+# Commit subjects are historical and may contain em or en dashes (for
+# example bf2bda0). The release body swaps those for a hyphen so the dash
+# guard can cover the whole note, including the commit list.
+flatten_subject_dashes() {
+  local text="$1"
+  text="${text//$'\u2014'/-}"
+  text="${text//$'\u2013'/-}"
+  printf '%s' "$text"
+}
+
 # Rewrite bootstrap one-liners onto this tag. Manual draft tags
 # (stat-tracker-manual-*) are not git refs that host bootstrap.sh, so
 # those bodies are left as written in the changelog.
@@ -137,35 +147,39 @@ no_long_dash "release intro" "$INTRO"
 
 MAIN_BOOTSTRAP_URL="https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh"
 
+COMMITS_BLOCK=""
+if [[ "$SKIP_COMMITS" -eq 0 ]]; then
+  if [[ -n "$COMMITS_FILE" ]]; then
+    if [[ -s "$COMMITS_FILE" ]]; then
+      subjects="$(flatten_subject_dashes "$(cat "$COMMITS_FILE")")"
+      COMMITS_BLOCK="$(printf '## Commits\n\n%s' "$subjects")"
+    fi
+  else
+    # Exclude the tag being released. On a tag push that tag is already local.
+    PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
+      | grep -vx "${TAG}" | head -1 || true)"
+    if [[ -n "${PREV}" ]]; then
+      subjects="$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
+        crates/stat-tracker crates/stat-tracker-ui \
+        .github/workflows/stat-tracker-release.yml)")"
+      COMMITS_BLOCK="$(printf '## Commits since %s\n\n%s' "${PREV#stat-tracker-}" "$subjects")"
+    fi
+  fi
+fi
+
 body="$(
   printf '%s\n\n' "$INTRO"
   if [[ -n "$(printf '%s' "${CURATED}" | tr -d '[:space:]')" ]]; then
     printf '%s\n\n' "${CURATED}"
   fi
-  if [[ "$SKIP_COMMITS" -eq 0 ]]; then
-    if [[ -n "$COMMITS_FILE" ]]; then
-      if [[ -s "$COMMITS_FILE" ]]; then
-        echo "## Commits"
-        echo
-        cat "$COMMITS_FILE"
-        echo
-      fi
-    else
-      # Exclude the tag being released. On a tag push that tag is already local.
-      PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
-        | grep -vx "${TAG}" | head -1 || true)"
-      if [[ -n "${PREV}" ]]; then
-        echo "## Commits since ${PREV#stat-tracker-}"
-        echo
-        git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
-          crates/stat-tracker crates/stat-tracker-ui \
-          .github/workflows/stat-tracker-release.yml
-        echo
-      fi
-    fi
+  if [[ -n "$COMMITS_BLOCK" ]]; then
+    printf '%s\n\n' "$COMMITS_BLOCK"
   fi
   printf '%s\n' "$FOOTER"
 )"
+
+# Covers the intro, changelog section, commit list, and footer.
+no_long_dash "release notes" "$body"
 
 # A stat-tracker-v* body that still names main's bootstrap.sh means the
 # curl rewrite above did not match that line.

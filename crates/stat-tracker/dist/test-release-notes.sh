@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The release body pins bootstrap.sh to the tag and has no em dashes.
+# The release body pins bootstrap.sh to the tag and checks em dashes and en dashes.
 # bootstrap.sh on main remains the fresh-install entrypoint.
 set -euo pipefail
 
@@ -203,3 +203,29 @@ set -e
 grep -q 'unpinned main bootstrap.sh URL' "$TMP/unpinned.err" \
   || fail "unpinned URL error was: $(cat "$TMP/unpinned.err")"
 pass "unpinned main bootstrap URL fails the notes build"
+
+# Commit subjects may contain em or en dashes. The generated list swaps
+# them for a hyphen, and the dash guard then accepts the whole note.
+cat > "$TMP/commits-changelog.md" <<'EOF'
+## 7.7.7
+
+Summary.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v7.7.7/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v7.7.7 bash
+```
+EOF
+{
+  printf -- '- fix(stat-tracker-ui): P1 review %s win bars, wrap filters, session groups\n' $'\u2014'
+  printf -- '- range %s end\n' $'\u2013'
+} > "$TMP/commits.txt"
+commits_out="$(bash "$NOTES" --tag stat-tracker-v7.7.7 --changelog "$TMP/commits-changelog.md" --commits-file "$TMP/commits.txt")"
+printf '%s\n' "$commits_out" | grep -q $'\u2014' && fail "commit list kept an em dash"
+printf '%s\n' "$commits_out" | grep -q $'\u2013' && fail "commit list kept an en dash"
+printf '%s\n' "$commits_out" | grep -F -- '- fix(stat-tracker-ui): P1 review - win bars, wrap filters, session groups' >/dev/null \
+  || fail "em dash in a commit subject was not replaced with a hyphen"
+printf '%s\n' "$commits_out" | grep -F -- '- range - end' >/dev/null \
+  || fail "en dash in a commit subject was not replaced with a hyphen"
+pass "commit subjects replace em dashes and en dashes with a hyphen"
