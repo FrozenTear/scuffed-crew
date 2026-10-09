@@ -48,7 +48,10 @@ pub struct Config {
     /// disagrees with ocr-v1 to `{data_dir}/shadow/digits.jsonl` (capped at
     /// about 4 MB). Log only: stored stats, the capture gate, and uploads
     /// still use ocr-v1. Off by default. Also enabled by env
-    /// `SCUFFED_SHADOW_RECOGNIZER=1`.
+    /// `SCUFFED_SHADOW_RECOGNIZER=1`. When hero icon templates are installed
+    /// in `{data_dir}/templates/heroes/`, the same thread also reads each Tab
+    /// row's hero and logs it to `{data_dir}/shadow/heroes.jsonl`; without
+    /// templates that step is skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
 }

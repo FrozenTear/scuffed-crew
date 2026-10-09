@@ -1,5 +1,5 @@
 //! Append-only JSONL log of shadow matcher results at
-//! `<data_dir>/shadow/digits.jsonl`. One line per job. Values and confidences
+//! `<data_dir>/shadow/digits.jsonl` (and `heroes.jsonl` for the hero matcher). One line per job. Values and confidences
 //! only: no player names, no images.
 //!
 //! Size cap: when the next line would push the file past [`MAX_BYTES`], the
@@ -106,14 +106,19 @@ impl ShadowLog {
         PathBuf::from(os)
     }
 
+    /// The hero log under `<data_dir>/shadow/heroes.jsonl`, same cap.
+    pub fn heroes(data_dir: &Path) -> Self {
+        Self::with_limit(data_dir.join("shadow").join("heroes.jsonl"), MAX_BYTES)
+    }
+
     /// Append one record. Never returns an error.
-    pub fn append(&self, record: &ShadowRecord) {
+    pub fn append<T: Serialize>(&self, record: &T) {
         if let Err(e) = self.try_append(record) {
             tracing::debug!(error = %e, path = %self.path.display(), "shadow log write failed");
         }
     }
 
-    fn try_append(&self, record: &ShadowRecord) -> std::io::Result<()> {
+    fn try_append<T: Serialize>(&self, record: &T) -> std::io::Result<()> {
         let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
         line.push(b'\n');
         if let Some(dir) = self.path.parent() {
@@ -232,6 +237,8 @@ mod tests {
         let log = ShadowLog::new(Path::new("/data"));
         assert_eq!(log.path(), Path::new("/data/shadow/digits.jsonl"));
         assert_eq!(log.rotated_path(), Path::new("/data/shadow/digits.jsonl.1"));
+        let heroes = ShadowLog::heroes(Path::new("/data"));
+        assert_eq!(heroes.path(), Path::new("/data/shadow/heroes.jsonl"));
     }
 
     #[test]
