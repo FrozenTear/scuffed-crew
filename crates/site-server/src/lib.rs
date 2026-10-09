@@ -4,6 +4,7 @@ pub mod dm_subscriber;
 pub mod extractors;
 pub mod leaderboard_cache;
 pub mod link_attempts;
+pub mod link_poll;
 pub mod login_lockout;
 pub mod membership_policy;
 pub mod nostr_rate_limit;
@@ -217,7 +218,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
 
     // Device-link sign-in. Three buckets so a poll loop cannot starve start,
     // and guessing a user code cannot starve the device. Wrong-code guesses
-    // have a second, stricter limit inside the handlers.
+    // have a second, stricter limit inside the handlers. Poll refills one
+    // cell per second (see `link_poll`) so three devices can sit on the
+    // 5 second interval for the whole code lifetime.
     let link_period = 30;
     let link_start_routes = Router::new()
         .route("/api/link/start", post(routes::link::start))
@@ -232,21 +235,16 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                     .expect("valid device link start governor"),
             ))
             .error_handler(rate_limit::governor_error_response),
-        );
+        )
+        .layer(middleware::from_fn(routes::link::no_store_link));
     let link_poll_routes = Router::new()
         .route("/api/link/poll", post(routes::link::poll))
         .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor.clone())
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_POLL_BURST)
-                    .finish()
-                    .expect("valid device link poll governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        );
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::link::limit_link_poll,
+        ))
+        .layer(middleware::from_fn(routes::link::no_store_link));
     let link_user_routes = Router::new()
         .route("/api/link/lookup", post(routes::link::lookup))
         .route("/api/link/approve", post(routes::link::approve))
@@ -262,7 +260,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                     .expect("valid device link user governor"),
             ))
             .error_handler(rate_limit::governor_error_response),
-        );
+        )
+        .layer(middleware::from_fn(routes::link::no_store_link));
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).

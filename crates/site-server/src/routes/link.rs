@@ -11,8 +11,18 @@
 //! `REDIRECT_BASE_URL` when that list is unset). When `Origin` is absent,
 //! `Sec-Fetch-Site: same-origin` is accepted instead. Missing both is rejected.
 //! A present `Origin` that does not match is rejected even if `Sec-Fetch-Site`
-//! says same-origin. These three routes are POST only, which keeps the "no
-//! state-changing GET" rule intact. Session cookies stay `SameSite=Lax`.
+//! says same-origin. `Origin: null` and a lookalike host or an `http` scheme
+//! do not match an `https` site origin. These three routes are POST only, which
+//! keeps the "no state-changing GET" rule intact. Session cookies stay
+//! `SameSite=Lax`.
+//!
+//! Every `/api/link/*` response, success or error, sends `Cache-Control: no-store`.
+//!
+//! A pending code can be denied by any signed-in member. After approve, and
+//! before the device collects the token, only that member can deny the code.
+//! That deny revokes the daemon token. Another member's approve or deny is the
+//! same `invalid code` error, and the token stays active. If the code expires
+//! first, cleanup revokes the uncollected token.
 //!
 //! Codes are read from the JSON body only. A query string that carries one is
 //! stripped before the trace layer logs the URI, and the request is rejected.
@@ -46,8 +56,7 @@ use crate::state::AppState;
 
 /// Burst for `POST /api/link/start`, then one request per 30s.
 pub const LINK_START_BURST: u32 = 4;
-/// Burst for `POST /api/link/poll`, then one request per 30s.
-pub const LINK_POLL_BURST: u32 = 8;
+pub use crate::link_poll::{LINK_POLL_BURST, LINK_POLL_REFILL_SECS};
 /// Burst shared by lookup, approve, and deny, then one request per 30s.
 pub const LINK_USER_BURST: u32 = 12;
 
@@ -152,6 +161,44 @@ fn origin_is_allowed(state: &AppState, headers: &HeaderMap) -> bool {
                 .any(|allowed| normalized_origin(allowed) == origin);
     }
     header_text(headers, &SEC_FETCH_SITE) == Some("same-origin")
+}
+
+fn too_many_polls(secs: u64) -> Response {
+    let secs = secs.max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs.to_string())],
+        format!("Too Many Requests! Wait for {secs}s"),
+    )
+        .into_response()
+}
+
+/// `Cache-Control: no-store` on every link response, including errors.
+pub async fn no_store_link(req: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Per-IP poll bucket. Runs outside the query-secret reject so a rejected
+/// request still spends a cell, and inside [`no_store_link`] so the 429 is
+/// not cached.
+pub async fn limit_link_poll(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
+        return internal().into_response();
+    };
+    let ip = client_ip(peer, req.headers());
+    if let Some(secs) = state.link_poll.take(ip) {
+        return too_many_polls(secs);
+    }
+    next.run(req).await
 }
 
 fn origin_rejected() -> Response {
@@ -365,7 +412,7 @@ pub async fn poll(
     };
     let outcome = state
         .db
-        .poll_device_link(&device_code)
+        .poll_device_link(&device_code, state.link_poll.now())
         .await
         .map_err(|_error| {
             tracing::error!("device link poll failed");
@@ -496,6 +543,11 @@ pub async fn approve(
 }
 
 /// POST /api/link/deny
+///
+/// Pending codes are open to any signed-in member. An approved code that the
+/// device has not collected yet can be denied only by the member who approved
+/// it, and that deny revokes the daemon token. Any other member gets
+/// `invalid code` and the token stays active.
 pub async fn deny(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -513,7 +565,11 @@ pub async fn deny(
     let Some(user_code) = canonical_user_code(&body.user_code) else {
         return note_invalid(&state, ip);
     };
-    match state.db.deny_device_link(&user_code).await {
+    match state
+        .db
+        .deny_device_link(&user_code, &member.member.id)
+        .await
+    {
         Ok(Some(denied)) => {
             if let (Some(token_id), Some(member_id)) = (denied.daemon_token_id, denied.member_id) {
                 if let Err(_error) = state.db.revoke_daemon_token(&token_id, &member_id).await {
