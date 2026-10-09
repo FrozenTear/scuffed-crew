@@ -47,6 +47,11 @@ impl PortraitMatcher {
         self.references.is_empty()
     }
 
+    #[cfg(test)]
+    fn from_references(references: HashMap<String, RgbImage>) -> Self {
+        Self { references }
+    }
+
     pub fn match_portrait(&self, crop: &DynamicImage) -> Option<(String, f64)> {
         if self.references.is_empty() {
             return None;
@@ -71,8 +76,9 @@ impl PortraitMatcher {
         // MAD ranges from 0 (identical) to 255 (maximum difference)
         let confidence = 1.0 - (best_score / 255.0);
 
-        // Reject matches below threshold
-        if confidence < 0.70 {
+        // Same floor as a portrait switch. A live Tab guessed Sierra or Tracer
+        // at 0.77, and that guess overrode the new reader. Below 0.85 is not a hero.
+        if confidence < crate::hero_auth::PORTRAIT_SWITCH_MIN_CONF {
             tracing::debug!(best_score, confidence, "portrait match below threshold");
             return None;
         }
@@ -1303,5 +1309,41 @@ mod team_size_tests {
         let img = image::open(path).unwrap_or_else(|err| panic!("open {path}: {err}"));
         let scan = super::scan_rows(&crate::ocr::preprocess::crop_scoreboard(&img));
         assert_eq!(scan.checked_team_size(), Some(5), "{path}: {scan:?}");
+    }
+}
+
+#[cfg(test)]
+mod portrait_floor_tests {
+    use super::PortraitMatcher;
+    use image::{DynamicImage, Rgb, RgbImage};
+    use std::collections::HashMap;
+
+    fn solid(value: u8) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([value, value, value])))
+    }
+
+    #[test]
+    fn portrait_matcher_rejects_a_low_confidence_guess() {
+        let mut references = HashMap::new();
+        references.insert("sierra".into(), solid(128).to_rgb8());
+        let matcher = PortraitMatcher::from_references(references);
+        let weak = solid(128 + 59);
+        let confidence = 1.0 - (59.0 / 255.0);
+        assert!(
+            (0.70..0.85).contains(&confidence),
+            "synthetic pair should sit near 0.77, got {confidence}"
+        );
+        assert!(
+            matcher.match_portrait(&weak).is_none(),
+            "0.77 must not override the new reader"
+        );
+        let trusted = matcher
+            .match_portrait(&solid(128 + 30))
+            .expect("about 0.88 is a portrait");
+        assert_eq!(trusted.0, "sierra");
+        assert!(trusted.1 >= 0.85, "{}", trusted.1);
+        let same = matcher.match_portrait(&solid(128)).expect("identical crop");
+        assert_eq!(same.0, "sierra");
+        assert!(same.1 > 0.99, "{}", same.1);
     }
 }
