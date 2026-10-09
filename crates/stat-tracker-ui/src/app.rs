@@ -25,6 +25,18 @@ use crate::tray::{self, TrayAction, TrayHandle};
 use crate::update::{self, UpdateInfo, UpdatePlan, UpdateProgress};
 use crate::widgets;
 
+/// Shown when the tracker service is already running.
+const SETTINGS_SAVED_RESTART: &str =
+    "Settings saved. Restart the tracker for changes to take effect.";
+
+/// Save must not replace a config.toml that did not parse.
+const SETTINGS_SAVE_REFUSED: &str =
+    "Could not read config.toml, so settings were not saved. Fix that file, then try again.";
+
+fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
+    unreadable.then_some(SETTINGS_SAVE_REFUSED)
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
@@ -164,6 +176,8 @@ pub struct TrackerApp {
     pub toast: Option<String>,
     pub settings: SettingsForm,
     pub saved_config: Config,
+    /// The on-disk config.toml did not parse. Save must not overwrite it.
+    config_unreadable: bool,
     pub daemon: DaemonView,
     pub daemon_busy: bool,
     pub outputs: Vec<String>,
@@ -242,7 +256,16 @@ impl TrackerApp {
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games);
-        let saved_config = Config::load().unwrap_or_default();
+        let (saved_config, config_unreadable) = match Config::load() {
+            Ok(config) => (config, false),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "config.toml did not parse; Settings will not overwrite it"
+                );
+                (Config::default(), true)
+            }
+        };
         let health_status = health_status_for(
             &cli.data_dir,
             &games,
@@ -312,6 +335,7 @@ impl TrackerApp {
             toast: None,
             settings,
             saved_config,
+            config_unreadable,
             daemon,
             daemon_busy: false,
             outputs: Vec::new(),
@@ -638,6 +662,10 @@ impl TrackerApp {
                 if self.fixture.is_some() {
                     return Task::none();
                 }
+                if let Some(toast) = toast_if_config_unreadable(self.config_unreadable) {
+                    self.toast = Some(toast.to_string());
+                    return Task::none();
+                }
                 // Block the whole save. Writing the form would either store
                 // the cleartext URL or drop the sync block; the file on disk
                 // stays as it is until the URL is https, loopback http, or blank.
@@ -669,8 +697,7 @@ impl TrackerApp {
                                 self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                                 self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
                                 self.toast = Some(if daemon_up {
-                                    "Settings saved — restart the tracker for changes to take effect"
-                                        .into()
+                                    SETTINGS_SAVED_RESTART.into()
                                 } else {
                                     "Settings saved".into()
                                 });
@@ -1327,6 +1354,25 @@ mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn save_toasts_have_no_em_or_en_dash() {
+        for copy in [
+            super::SETTINGS_SAVED_RESTART,
+            super::SETTINGS_SAVE_REFUSED,
+            "Settings saved",
+        ] {
+            assert!(!copy.contains('—'), "{copy}");
+            assert!(!copy.contains('–'), "{copy}");
+        }
+        assert_eq!(
+            super::toast_if_config_unreadable(true),
+            Some(super::SETTINGS_SAVE_REFUSED)
+        );
+        assert!(super::SETTINGS_SAVE_REFUSED.contains("not saved"));
+        assert!(super::toast_if_config_unreadable(false).is_none());
+        assert!(super::SETTINGS_SAVED_RESTART.contains("Restart the tracker"));
+    }
 
     #[test]
     fn hide_closes_the_open_window_and_is_noop_when_already_hidden() {

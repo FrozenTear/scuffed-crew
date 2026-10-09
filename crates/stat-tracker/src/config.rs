@@ -297,33 +297,54 @@ impl Config {
     ///
     /// When the file already on disk parses as this same config, it is left
     /// untouched, so comments and key layout survive an unchanged Settings save.
+    /// A file that does not parse is left untouched too: save returns an error
+    /// instead of replacing it with defaults.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let path = Self::config_path()?;
-        if let Some(dir) = path.parent() {
+        self.save_to_path(&Self::config_path()?)
+    }
+
+    fn save_to_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
             std::fs::create_dir_all(dir)?;
         }
-        let existing = std::fs::read_to_string(&path).ok();
+        let existing = std::fs::read_to_string(path).ok();
         let toml = Self::text_for_save(existing.as_deref(), self)?;
         if existing.as_deref() == Some(toml.as_str()) {
             return Ok(());
         }
-        std::fs::write(&path, toml)?;
-        Self::restrict_permissions(&path);
-        Ok(())
+        atomic_write_600(path, toml.as_bytes())
     }
 
-    /// Text `save` would write. An `existing` document that parses as `next`
-    /// is returned unchanged (byte for byte), comments included. Anything
-    /// else is a fresh pretty-printed document.
+    /// Text `save` would write.
+    ///
+    /// An `existing` document that parses as `next` is returned unchanged
+    /// (byte for byte), comments included. When the only change is
+    /// `shadow_recognizer`, that key is edited in place so comments, order,
+    /// and every other key stay as they were. A document that does not parse
+    /// is an error, not a pretty-printed replacement. A missing file (no
+    /// `existing` text) is a fresh pretty-printed document.
     pub fn text_for_save(
         existing: Option<&str>,
         next: &Self,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(existing) = existing
-            && let Ok(loaded) = toml::from_str::<Self>(existing)
-            && loaded == *next
-        {
+        let Some(existing) = existing else {
+            return Ok(toml::to_string_pretty(next)?);
+        };
+        let loaded = toml::from_str::<Self>(existing).map_err(|err| {
+            unreadable_config(format!(
+                "config.toml could not be parsed, so it was not replaced: {err}"
+            ))
+        })?;
+        if loaded == *next {
             return Ok(existing.to_string());
+        }
+        if only_shadow_recognizer_differs(&loaded, next) {
+            return patch_shadow_recognizer(existing, next.shadow_recognizer);
         }
         Ok(toml::to_string_pretty(next)?)
     }
@@ -356,8 +377,11 @@ impl Config {
 
     /// File value plus whether `SCUFFED_SHADOW_RECOGNIZER` locks this process on.
     ///
-    /// This is the only read of that variable. `file_on` is what Settings may
-    /// write. `locked` is display-only and must not be saved.
+    /// This is the only read of that variable, and it is this process's
+    /// environment. The tracker service is started by systemd with
+    /// `session.env`, and it does not report the shadow reader back here, so
+    /// Settings cannot treat this lock as the service's. `file_on` is what
+    /// Settings may write. `locked` is display-only and must not be saved.
     pub fn shadow_recognizer_control(&self) -> ShadowRecognizerControl {
         Self::shadow_control(
             self.shadow_recognizer,
@@ -403,6 +427,123 @@ impl Config {
     fn arg_value(key: &str) -> Option<String> {
         let args: Vec<String> = std::env::args().collect();
         args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
+    }
+}
+
+fn unreadable_config(message: String) -> Box<dyn std::error::Error + Send + Sync> {
+    message.into()
+}
+
+fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.shadow_recognizer == next.shadow_recognizer {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.shadow_recognizer = next.shadow_recognizer;
+    same == *next
+}
+
+/// Change `shadow_recognizer` and nothing else.
+///
+/// `toml_edit` locates the boolean. The new token is spliced into the
+/// original text, so comments, order, spacing, and every other key stay
+/// byte for byte.
+fn patch_shadow_recognizer(
+    existing: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    let wanted = if on { "true" } else { "false" };
+    if let Some(item) = doc.get("shadow_recognizer")
+        && let Some(value) = item.as_value()
+        && value.as_bool().is_some()
+        && let Some(span) = value.span()
+        && existing.is_char_boundary(span.start)
+        && existing.is_char_boundary(span.end)
+    {
+        let current = &existing[span.start..span.end];
+        if current == "true" || current == "false" {
+            let mut out = String::with_capacity(existing.len() + wanted.len());
+            out.push_str(&existing[..span.start]);
+            out.push_str(wanted);
+            out.push_str(&existing[span.end..]);
+            return Ok(out);
+        }
+    }
+    if doc.get("shadow_recognizer").is_none() {
+        let mut out = existing.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("shadow_recognizer = ");
+        out.push_str(wanted);
+        out.push('\n');
+        return Ok(out);
+    }
+    Err(unreadable_config(
+        "config.toml could not be updated in place, so it was not replaced".to_string(),
+    ))
+}
+
+/// Write `bytes` by creating a 0600 temp file in the same directory, fsyncing
+/// it, and renaming it over `path`. A failed write removes the temp file.
+fn atomic_write_600(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| unreadable_config("config path has no directory".to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| unreadable_config("config path has no file name".to_string()))?;
+    let mut tmp_name = file_name.to_os_string();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    tmp_name.push(format!(".{}.{unique}.tmp", std::process::id()));
+    let tmp_path = dir.join(tmp_name);
+
+    let write_result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut file = open_private(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn open_private(
+    path: &std::path::Path,
+) -> Result<std::fs::File, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?)
     }
 }
 
@@ -683,6 +824,173 @@ token = "secret"
         assert!(
             changelog.contains(&format!("## {version}")),
             "CHANGELOG is missing a section for {version}"
+        );
+    }
+
+    fn hand_edited_config(shadow_line: &str) -> String {
+        format!(
+            "\
+# hand-edited tracker config. keep this comment.
+data_dir = \"/tmp/sst-hand-edited\"
+
+# scoreboard name, not a default key dump
+player_name = \"the streamer\"
+
+# extra number reader (private log only)
+{shadow_line}
+
+# a key Settings does not own
+custom_note = \"leave this line alone\"
+
+session_window_secs = 1200
+"
+        )
+    }
+
+    fn changed_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        let before_lines: Vec<_> = before.split_inclusive('\n').collect();
+        let after_lines: Vec<_> = after.split_inclusive('\n').collect();
+        let mut diffs = Vec::new();
+        let count = before_lines.len().max(after_lines.len());
+        for index in 0..count {
+            let left = before_lines.get(index).copied().unwrap_or("");
+            let right = after_lines.get(index).copied().unwrap_or("");
+            if left != right {
+                diffs.push((left, right));
+            }
+        }
+        diffs
+    }
+
+    #[test]
+    fn flipping_shadow_recognizer_changes_only_that_line() {
+        for (before_line, after_line) in [
+            ("shadow_recognizer = false", "shadow_recognizer = true"),
+            ("shadow_recognizer = true", "shadow_recognizer = false"),
+        ] {
+            let raw = hand_edited_config(before_line);
+            let mut next: Config = toml::from_str(&raw).expect("hand-edited file must parse");
+            next.shadow_recognizer = !next.shadow_recognizer;
+            let saved = Config::text_for_save(Some(&raw), &next).expect("shadow-only save");
+            let diffs = changed_lines(&raw, &saved);
+            assert_eq!(
+                diffs.len(),
+                1,
+                "flipping the toggle must change one line, got {diffs:?}\n{saved}"
+            );
+            assert!(
+                diffs[0].0.contains(before_line),
+                "old line: {:?}",
+                diffs[0].0
+            );
+            assert!(
+                diffs[0].1.contains(after_line),
+                "new line: {:?}",
+                diffs[0].1
+            );
+            assert!(saved.contains("# hand-edited tracker config. keep this comment."));
+            assert!(saved.contains("# scoreboard name, not a default key dump"));
+            assert!(saved.contains("# extra number reader (private log only)"));
+            assert!(saved.contains("custom_note = \"leave this line alone\""));
+            assert!(saved.contains("player_name = \"the streamer\""));
+            assert!(
+                !saved.contains("game_process_names"),
+                "a shadow toggle must not add default keys: {saved}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_skips_write_when_nothing_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = hand_edited_config("shadow_recognizer = true");
+        std::fs::write(&path, &raw).expect("seed");
+        let stamped = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(stamped)
+            .expect("stamp mtime");
+
+        let cfg: Config = toml::from_str(&raw).expect("parse");
+        cfg.save_to_path(&path).expect("unchanged save");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), raw);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("meta")
+                .modified()
+                .expect("mtime"),
+            stamped,
+            "save() must not touch the file when the text is unchanged"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn save_refuses_to_replace_an_unparseable_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = "\
+this is not toml
+server_url = \"https://crew.example\"
+token = \"secret-token-must-stay\"
+";
+        std::fs::write(&path, raw).expect("seed");
+        let err = Config::default()
+            .save_to_path(&path)
+            .expect_err("a broken config must not be replaced");
+        let message = err.to_string();
+        assert!(
+            message.contains("not replaced"),
+            "error should say the file was kept: {message}"
+        );
+        assert!(
+            !message.contains('—') && !message.contains('–'),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), raw);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("secret-token-must-stay")
+        );
+    }
+
+    #[test]
+    fn save_replaces_the_file_atomically_with_mode_0600() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = hand_edited_config("shadow_recognizer = false");
+        std::fs::write(&path, &raw).expect("seed");
+        let mut next: Config = toml::from_str(&raw).expect("parse");
+        next.shadow_recognizer = true;
+        next.save_to_path(&path).expect("save");
+
+        let saved = std::fs::read_to_string(&path).expect("read");
+        let diffs = changed_lines(&raw, &saved);
+        assert_eq!(diffs.len(), 1, "{diffs:?}\n{saved}");
+        assert!(diffs[0].1.contains("shadow_recognizer = true"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "saved config must be owner-only");
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("config.toml")],
+            "the temp file must be renamed, not left behind"
         );
     }
 }

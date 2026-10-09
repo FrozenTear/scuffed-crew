@@ -105,8 +105,8 @@ pub(crate) const SHADOW_READER_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
 
 pub(crate) const SHADOW_READER_ENV_NOTE: &str = "\
-On for this run because the environment variable SCUFFED_SHADOW_RECOGNIZER is set. \
-It is not written to the config file.";
+SCUFFED_SHADOW_RECOGNIZER is set for this app, so the toggle stays on and is not written to the config file. \
+The tracker service may differ.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
@@ -1360,6 +1360,8 @@ mod tests {
         assert!(SHADOW_READER_RESTART.contains("Restart"));
         assert!(SHADOW_READER_RESTART.contains("when it starts"));
         assert!(SHADOW_READER_ENV_NOTE.contains("SCUFFED_SHADOW_RECOGNIZER"));
+        assert!(SHADOW_READER_ENV_NOTE.contains("this app"));
+        assert!(SHADOW_READER_ENV_NOTE.contains("tracker service"));
         assert!(SHADOW_READER_ENV_NOTE.contains("not written"));
     }
 
@@ -1549,5 +1551,61 @@ token = \"not-a-real-token\"
         assert!(saved.contains("# watch for match start and end"));
         assert!(saved.contains("finished_game_close_secs = 240"));
         assert!(saved.contains("not-a-real-token"));
+    }
+
+    #[test]
+    fn flipping_the_toggle_changes_only_the_shadow_line() {
+        let raw = "\
+# hand-edited tracker config
+data_dir = \"/tmp/sst-hand-edited\"
+
+# scoreboard name
+player_name = \"the streamer\"
+
+# extra number reader (private log only)
+shadow_recognizer = false  # keep this comment
+
+session_window_secs = 1200
+custom_note = \"leave this line alone\"
+";
+        let loaded: Config = toml::from_str(raw).expect("hand-edited config must parse");
+        assert!(!loaded.shadow_recognizer);
+        let mut form = SettingsForm::from_config_and_shadow(
+            &loaded,
+            Config::shadow_control(loaded.shadow_recognizer, None),
+        );
+        assert_eq!(form.displayed_reader(), ScoreboardReader::OcrV1);
+        form.set_toggle(SettingsToggle::ShadowRecognizer, true);
+        assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
+
+        let saved =
+            Config::text_for_save(Some(raw), &form.to_config(&loaded)).expect("toggle save");
+        let before: Vec<_> = raw.split_inclusive('\n').collect();
+        let after: Vec<_> = saved.split_inclusive('\n').collect();
+        let diffs: Vec<_> = before
+            .iter()
+            .zip(after.iter())
+            .filter(|(left, right)| left != right)
+            .collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the toggle must not add or drop a line:\n{saved}"
+        );
+        assert_eq!(
+            diffs.len(),
+            1,
+            "one line should change, got {diffs:?}\n{saved}"
+        );
+        assert!(diffs[0].1.contains("shadow_recognizer = true"));
+        assert!(diffs[0].1.contains("# keep this comment"));
+        assert!(saved.contains("# hand-edited tracker config"));
+        assert!(saved.contains("# scoreboard name"));
+        assert!(saved.contains("custom_note = \"leave this line alone\""));
+        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(
+            !saved.contains("game_process_names"),
+            "the toggle must not add default keys: {saved}"
+        );
     }
 }
