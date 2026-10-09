@@ -1749,6 +1749,62 @@ mod tests {
         assert_reads(&read, &want);
     }
 
+    /// The live miss behind cv-v5: MIT 1,148 whose comma is too faint to
+    /// segment, so a gap a little over [`GAP_K`] text heights sits between
+    /// the 1 and 148. The full read must give 1148, never 148.
+    #[test]
+    fn full_read_keeps_the_leading_1_of_1148() {
+        let mut want = sample_values(6);
+        want[0][5] = 1148;
+        // board with row 0 MIT blank, then paint "1" + wide gap + "148" there
+        let mut vals = want.clone();
+        vals[0][5] = 0;
+        let mut img = synth_board(&vals, 6, 3).to_rgb8();
+        let glyphs = glyph_means();
+        // wipe the "0" drawn for row 0 MIT
+        let (h, cx) = (1007usize, 960 + 5 * 100);
+        let t1 = (h as f64 * HEADER_RATIO) as usize;
+        let t2 = (h as f64 * TEAM2_START_RATIO) as usize;
+        let ctr = t1 + (t2 - t1) / 7 / 2;
+        for y in ctr - 12..ctr + 20 {
+            for x in cx - 40..cx + 40 {
+                img.put_pixel(x as u32, y as u32, Rgb([18, 20, 32]));
+            }
+        }
+        // text height of the glyphs as drawn (canvas scale 1:1)
+        let one = &glyphs[1];
+        let rows: Vec<usize> = (0..CH)
+            .filter(|&y| (0..CW).any(|x| one.at(x, y) > 0.5))
+            .collect();
+        let dh = rows[rows.len() - 1] - rows[0] + 1;
+        let gap = ((GAP_K + SEP_GAP_K) / 2.0 * dh as f64).round() as usize;
+        assert!(gap as f64 > GAP_K * dh as f64 && (gap as f64) <= SEP_GAP_K * dh as f64);
+        let (a, b) = ink_cols(&glyphs[1]);
+        let w148: usize = "148"
+            .chars()
+            .map(|c| {
+                let (a, b) = ink_cols(&glyphs[c as usize - '0' as usize]);
+                b - a
+            })
+            .sum::<usize>()
+            + 2 * 3;
+        let left = cx - (b - a + gap + w148) / 2;
+        draw_text(&mut img, &glyphs, "1", left + (b - a) / 2, ctr - 10, 3);
+        draw_text(
+            &mut img,
+            &glyphs,
+            "148",
+            left + (b - a) + gap + w148 / 2,
+            ctr - 10,
+            3,
+        );
+        let read = read_board(&DynamicImage::ImageRgb8(img), 6, Duration::from_secs(10)).unwrap();
+        let mit = &read.rows[0].cells[5];
+        assert_eq!(mit.value, Some(1148), "{mit:?}");
+        assert_ne!(mit.value, Some(148));
+        assert_reads(&read, &want);
+    }
+
     #[test]
     fn reads_rescaled_1080_board() {
         let want = sample_values(6);
@@ -2409,13 +2465,8 @@ mod tests {
         assert_eq!(seg.runs.len(), 4, "runs={:?}", seg.runs);
         assert_eq!(seg.sep_after, vec![true, false, false]);
 
-        // Without joining: drop the leading 1 so only 148 remains, put noise left.
-        let mut split = Plane::zeros(w, h);
-        paint(&mut split, rest, rest + 4);
-        paint(&mut split, rest + 6, rest + 14);
-        paint(&mut split, rest + 15, rest + 23);
-        paint(&mut split, 10, 14); // left rival, gap still large
-        // Force a gap bigger than SEP_GAP_K*hmax so it will not join
+        // A gap bigger than SEP_GAP_K*hmax does not join: the 1 far left is
+        // ink left of the picked group and must force the guard.
         let mut far = Plane::zeros(w, h);
         paint(&mut far, 2, 6); // left ink
         paint(&mut far, 50, 54);
