@@ -831,7 +831,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 
     let (status, body) = send(
         &app,
@@ -890,7 +890,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 
     for n in 0..LINK_POLL_BURST {
         let xff = format!("198.51.100.{n}");
@@ -927,6 +927,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 }
 
 #[tokio::test]
@@ -974,6 +975,12 @@ async fn wrong_user_codes_are_limited_per_ip() {
             .get(header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok()),
         Some(retry_after.to_string()).as_deref()
+    );
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
     );
     assert_eq!(
         headers
@@ -1495,6 +1502,17 @@ async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
         .parse()
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry_after:?} body {body}"));
     assert!(wait >= 1, "Retry-After={retry_after} body {body}");
+    assert_eq!(
+        body,
+        format!(r#"{{"error":"rate_limited","retry_after":{wait}}}"#)
+    );
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert!(!body.contains("Too Many Requests"), "{body}");
     assert_no_store(&headers, &body);
 }
 
@@ -1675,7 +1693,7 @@ async fn link_responses_are_not_stored() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
     assert_no_store(&headers, &body);
 
     let pending = send(
@@ -1721,8 +1739,7 @@ async fn link_responses_are_not_stored() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
-    assert!(!body.contains("rate_limited"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
     assert_no_store(&headers, &body);
 }
 
@@ -1961,6 +1978,16 @@ async fn deny_returns_an_error_when_revoke_fails() {
     assert_eq!(
         rows[0]["is_active"], true,
         "a failed revoke leaves the token active: {rows:?}"
+    );
+    let mut links = db
+        .client
+        .query("SELECT status FROM device_link WHERE device_label = 'Living Room PC'")
+        .await
+        .unwrap();
+    let link_rows: Vec<serde_json::Value> = links.take(0).unwrap();
+    assert_eq!(
+        link_rows[0]["status"], "approved",
+        "a failed revoke does not mark the code denied: {link_rows:?}"
     );
 }
 

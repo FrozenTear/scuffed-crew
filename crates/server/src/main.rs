@@ -209,8 +209,7 @@ async fn main() {
         join_timeout: routes::ws::WS_JOIN_TIMEOUT,
     };
 
-    // Hourly session cleanup. Device-link codes have their own 60 second timer
-    // below, and POST /api/link/start runs a pass as well.
+    // Hourly session cleanup. Device-link codes have their own 60 second timer.
     let cleanup_db = db.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
