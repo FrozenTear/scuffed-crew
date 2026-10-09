@@ -5518,6 +5518,17 @@ where
             tracing::error!(error = %e, "failed to keep a deathmatch row local");
         }
     }
+    // Blank map, empty mode, or unknown hero: leave the row unsynced so the
+    // member can pick a value. Do not mark it synced and do not send it.
+    let (waiting, unsynced): (Vec<_>, Vec<_>) = unsynced
+        .into_iter()
+        .partition(|row| parse::review_hold(row).is_held());
+    if !waiting.is_empty() {
+        tracing::debug!(
+            rows = waiting.len(),
+            "held games until a map, mode, or hero is picked"
+        );
+    }
     // Locally-deleted sessions whose server rows must go too.
     let tombstones = match store
         .get_pending_tombstones()
@@ -13043,5 +13054,113 @@ mod tests {
         assert!(closed);
         assert!(st.active_game.is_none());
         assert_eq!(st.settle_closed_unknown.as_deref(), Some("long-busan"));
+    }
+
+    #[tokio::test]
+    async fn blank_map_mode_and_unknown_hero_stay_queued_until_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+
+        let mut no_map = test_match("no-map", "victory");
+        no_map.map_name.clear();
+        no_map.game_mode.clear();
+        store.insert_match(no_map).await.unwrap();
+
+        let mut no_mode = test_match("no-mode", "victory");
+        no_mode.map_name = "not a map".into();
+        no_mode.game_mode.clear();
+        store.insert_match(no_mode).await.unwrap();
+
+        let mut unknown_hero = test_match("unknown-hero", "victory");
+        unknown_hero.hero = "Unknown".into();
+        store.insert_match(unknown_hero).await.unwrap();
+
+        store
+            .insert_match(test_match("ready", "victory"))
+            .await
+            .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_pass = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let json = serde_json::to_string(&sync::upload_request(&matches, &[])).unwrap();
+            *seen_pass.lock().unwrap() = json;
+            async move { Ok(upload_ok()) }
+        })
+        .await;
+        let json = seen.lock().unwrap().clone();
+        assert!(json.contains("\"session_id\":\"ready\""));
+        assert!(json.contains("Busan"));
+        assert!(json.contains("Control"));
+        assert!(!json.contains("\"map_name\":\"\""));
+        assert!(!json.contains("\"game_mode\":\"\""));
+        assert!(!json.contains("Unknown"));
+        assert!(!json.contains("not a map"));
+        assert!(!json.contains("no-map"));
+        assert!(!json.contains("no-mode"));
+        assert!(!json.contains("unknown-hero"));
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(rows.iter().any(|r| r.session_id == "no-map" && !r.synced));
+        assert!(rows.iter().any(|r| r.session_id == "no-mode" && !r.synced));
+        assert!(
+            rows.iter()
+                .any(|r| r.session_id == "unknown-hero" && !r.synced)
+        );
+        assert!(rows.iter().any(|r| r.session_id == "ready" && r.synced));
+
+        store
+            .apply_command(&storage::StoreCommand::EditMatch {
+                session_id: "no-map".into(),
+                edit: storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            })
+            .await
+            .unwrap();
+        store
+            .apply_command(&storage::StoreCommand::EditMatch {
+                session_id: "no-mode".into(),
+                edit: storage::MatchEdit {
+                    map_name: Some("Ilios".into()),
+                    ..storage::MatchEdit::default()
+                },
+            })
+            .await
+            .unwrap();
+        store
+            .apply_command(&storage::StoreCommand::EditMatch {
+                session_id: "unknown-hero".into(),
+                edit: storage::MatchEdit {
+                    hero: Some("Reinhardt".into()),
+                    role: Some("Tank".into()),
+                    ..storage::MatchEdit::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let seen_after = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_after_pass = std::sync::Arc::clone(&seen_after);
+        let attempt_after = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let json = serde_json::to_string(&sync::upload_request(&matches, &[])).unwrap();
+            *seen_after_pass.lock().unwrap() = json;
+            async move { Ok(upload_ok()) }
+        })
+        .await;
+        let json_after = seen_after.lock().unwrap().clone();
+        assert!(json_after.contains("King's Row"));
+        assert!(json_after.contains("Hybrid"));
+        assert!(json_after.contains("Ilios"));
+        assert!(json_after.contains("Reinhardt"));
+        assert!(!json_after.contains("Unknown"));
+        assert!(!json_after.contains("\"map_name\":\"\""));
+        assert!(!json_after.contains("\"game_mode\":\"\""));
+        assert!(!json_after.contains("suspect_fields"));
+        assert!(matches!(attempt_after, sync::SyncAttempt::Uploaded));
+        let after = store.get_all_matches().await.unwrap();
+        assert!(after.iter().all(|row| row.synced));
     }
 }

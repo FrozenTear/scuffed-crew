@@ -34,6 +34,12 @@ pub struct StatsUploadEntry {
     /// badge on the site. Defaulted so older daemons keep uploading.
     #[serde(default)]
     pub edited: bool,
+    /// Names the tracker is still unsure about (`map`, `mode`, `hero`, and
+    /// the stat names in [`SUSPECT_FIELD_NAMES`]). Omitted when empty, so a
+    /// game with nothing unsure keeps the pre-field JSON shape. The upload
+    /// route reads this off the match object before the entry fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspect_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,11 +180,11 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 /// `POST /api/stats/upload` as the server reads it.
 ///
 /// [`StatsUploadRequest`] is the body the desktop tracker builds. That struct
-/// has no `recognizer` or `suspect_fields` field, so current and 0.4.x clients
-/// keep emitting the same JSON. This type accepts that JSON plus an optional
-/// `recognizer` and `suspect_fields` on each object in `matches`. The values
-/// are per match because one sync batch can carry games captured under
-/// different readers.
+/// has no `recognizer` field. `suspect_fields` is omitted when the list is
+/// empty, so a game with nothing unsure still matches the 0.4.x JSON. This
+/// type accepts that JSON plus an optional `recognizer` and `suspect_fields`
+/// on each object in `matches`. The values are per match because one sync
+/// batch can carry games captured under different readers.
 ///
 /// A later upload of the same session replaces both fields. Omitting
 /// `suspect_fields`, or sending null, stores `[]`, the same way omitting
@@ -345,6 +351,7 @@ mod tests {
                     .unwrap()
                     .with_timezone(&chrono::Utc),
                 edited: false,
+                suspect_fields: Vec::new(),
             }],
             deleted_sessions: vec![],
         }
@@ -528,6 +535,54 @@ mod tests {
         assert!(resolve_suspect_fields(&SuspectFieldsInput::Value(too_many)).is_err());
         assert!(resolve_suspect_fields(&SuspectFieldsInput::NotAnArray).is_err());
         assert!(resolve_suspect_fields(&SuspectFieldsInput::NonStringEntry).is_err());
+    }
+
+    #[test]
+    fn upload_rejects_null_hero_and_omitted_hero() {
+        // `hero` is a required string. Null and a missing key both fail
+        // before a row is written. An empty string decodes, which is how a
+        // blank identity used to land in the table.
+        let omitted = r#"{
+            "matches": [{
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        let omitted_err = serde_json::from_str::<StatsUploadBody>(omitted).unwrap_err();
+        assert!(omitted_err.to_string().contains("hero"), "{omitted_err}");
+
+        let null_hero = r#"{
+            "matches": [{
+                "hero": null,
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        let null_err = serde_json::from_str::<StatsUploadBody>(null_hero).unwrap_err();
+        let null_msg = null_err.to_string();
+        assert!(
+            null_msg.contains("null") && null_msg.contains("string"),
+            "{null_msg}"
+        );
+
+        let empty_hero = r#"{
+            "matches": [{
+                "hero": "",
+                "map_name": "Oasis",
+                "game_mode": "Control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        }"#;
+        let empty = serde_json::from_str::<StatsUploadBody>(empty_hero).unwrap();
+        assert_eq!(empty.matches[0].entry.hero, "");
     }
 
     #[test]

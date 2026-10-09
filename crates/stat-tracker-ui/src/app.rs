@@ -160,6 +160,14 @@ pub enum Message {
         confirm: bool,
     },
     RetryUpload(String),
+    PickMap {
+        session_id: String,
+        map: String,
+    },
+    PickHero {
+        session_id: String,
+        hero: String,
+    },
     SettingsText(SettingsField, String),
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
@@ -729,6 +737,24 @@ impl TrackerApp {
                     match crate::commands::retry_upload(&self.data_dir, &session_id) {
                         Ok(()) => "Upload queued again".into(),
                         Err(e) => format!("Could not retry upload: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::PickMap { session_id, map } => {
+                self.toast = Some(
+                    match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
+                        Ok(()) => format!("Map set to {map}"),
+                        Err(e) => e,
+                    },
+                );
+                Task::none()
+            }
+            Message::PickHero { session_id, hero } => {
+                self.toast = Some(
+                    match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
+                        Ok(()) => format!("Hero set to {hero}"),
+                        Err(e) => e,
                     },
                 );
                 Task::none()

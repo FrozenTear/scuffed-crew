@@ -272,6 +272,28 @@ impl Game {
         display_hero_name(&self.hero)
     }
 
+    pub fn map_needs_pick(&self) -> bool {
+        !stat_tracker::parse::map_is_known(&self.map_name)
+    }
+
+    pub fn hero_needs_pick(&self) -> bool {
+        !stat_tracker::parse::hero_is_known(&self.hero)
+    }
+
+    /// Map, mode, or hero still needs a member pick before upload.
+    /// Mode follows the map, so a missing mode is the map pick.
+    pub fn needs_review(&self) -> bool {
+        self.map_needs_pick() || self.hero_needs_pick()
+    }
+
+    pub fn map_label(&self) -> String {
+        if self.map_name.is_empty() {
+            "Map needed".into()
+        } else {
+            self.map_name.clone()
+        }
+    }
+
     pub fn has_stat_line(&self) -> bool {
         self.elims + self.deaths + self.assists + self.damage + self.healing + self.mitigation > 0
     }

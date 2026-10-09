@@ -313,7 +313,7 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     };
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.map_label())
             .size(SIZE_FEATURED)
             .font(FONT_EXTRABOLD)
             .color(TEXT),
@@ -354,7 +354,7 @@ pub fn compact_game_card_clickable(game: &Game, selected: bool) -> Element<'stat
 fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Message> {
     let body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.map_label())
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
@@ -638,7 +638,7 @@ pub fn expanded_game_card<'a>(
     let sid = game.session_id.clone();
     let mut body = column![
         role_and_edited(game),
-        text(game.map_name.clone())
+        text(game.map_label())
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
@@ -655,6 +655,10 @@ pub fn expanded_game_card<'a>(
         action_row(game, editing, confirm_delete),
     ]
     .spacing(10);
+
+    if game.needs_review() {
+        body = body.push(review_picks(game));
+    }
 
     if let Some(message) = game.upload_reject.as_deref() {
         body = body.push(upload_rejected_panel(game.session_id.clone(), message));
@@ -854,6 +858,46 @@ fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
     .into()
 }
 
+fn review_picks(game: &Game) -> Element<'static, Message> {
+    let sid = game.session_id.clone();
+    let mut col = column![].spacing(8).width(Fill);
+    if game.map_needs_pick() {
+        let sid_map = sid.clone();
+        col = col.push(label_text("Pick the map")).push(choice_wrap(
+            stat_tracker::parse::known_map_names(),
+            move |name| Message::PickMap {
+                session_id: sid_map.clone(),
+                map: name,
+            },
+        ));
+    }
+    if game.hero_needs_pick() {
+        col = col.push(label_text("Pick the hero")).push(choice_wrap(
+            scuffed_types::HEROES,
+            move |name| Message::PickHero {
+                session_id: sid.clone(),
+                hero: name,
+            },
+        ));
+    }
+    col.into()
+}
+
+fn choice_wrap(
+    names: &[&str],
+    mut pick: impl FnMut(String) -> Message,
+) -> Element<'static, Message> {
+    let mut line = row![].spacing(8);
+    for name in names {
+        line = line.push(filter_chip(
+            (*name).to_string(),
+            false,
+            pick((*name).to_string()),
+        ));
+    }
+    line.wrap().into()
+}
+
 fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Element<'a, Message> {
     column![
         label_text(label),
@@ -875,6 +919,9 @@ fn role_and_edited(game: &Game) -> Element<'static, Message> {
         .align_y(Alignment::Center);
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
+    }
+    if game.needs_review() {
+        r = r.push(status_chip("Needs review", theme::WARN));
     }
     if game.upload_reject.is_some() {
         r = r.push(status_chip(UPLOAD_REJECTED_LABEL, theme::DANGER));

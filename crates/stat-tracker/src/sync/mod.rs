@@ -571,21 +571,34 @@ pub fn upload_request(
         // server aggregates and the leaderboard reflect manual fixes, and
         // flag edited rows for the site badge. The immutable OCR reads stay
         // local; the transparency detail lives in the tracker GUI.
-        .map(|m| StatsUploadEntry {
-            session_id: m.session_id.clone(),
-            hero: m.display_hero().to_string(),
-            map_name: m.display_map_name().to_string(),
-            game_mode: crate::parse::uploaded_game_mode(m.display_map_name(), &m.game_mode),
-            role: m.display_role().to_string(),
-            outcome: m.display_outcome().to_string(),
-            elims: m.display_elims(),
-            deaths: m.display_deaths(),
-            assists: m.display_assists(),
-            damage: m.display_damage(),
-            healing: m.display_healing(),
-            mitigation: m.display_mitigation(),
-            played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
-            edited: m.is_edited(),
+        .filter_map(|m| {
+            let hold = crate::parse::review_hold(m);
+            // A blank map, an empty mode, or an unknown hero stays in the
+            // local queue. The body never carries an empty map_name, an
+            // empty game_mode, or the literal "Unknown".
+            if hold.is_held() {
+                return None;
+            }
+            let map_name = m.display_map_name().to_string();
+            let game_mode = crate::parse::uploaded_game_mode(&map_name, &m.game_mode);
+            Some(StatsUploadEntry {
+                session_id: m.session_id.clone(),
+                hero: m.display_hero().to_string(),
+                map_name,
+                game_mode,
+                role: m.display_role().to_string(),
+                outcome: m.display_outcome().to_string(),
+                elims: m.display_elims(),
+                deaths: m.display_deaths(),
+                assists: m.display_assists(),
+                damage: m.display_damage(),
+                healing: m.display_healing(),
+                mitigation: m.display_mitigation(),
+                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
+                edited: m.is_edited(),
+                // Picked and already-known fields are not in this list.
+                suspect_fields: hold.suspect_fields(),
+            })
         })
         .collect();
     StatsUploadRequest {
@@ -1460,5 +1473,140 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn row(hero: &str, map_name: &str, game_mode: &str) -> PersonalMatch {
+        PersonalMatch {
+            id: None,
+            hero: hero.into(),
+            map_name: map_name.into(),
+            game_mode: game_mode.into(),
+            role: "Support".into(),
+            outcome: "victory".into(),
+            elims: 4,
+            deaths: 1,
+            assists: 2,
+            damage: 1000,
+            healing: 4000,
+            mitigation: 0,
+            played_at: surrealdb_types::Datetime::from(chrono::Utc::now()),
+            synced: false,
+            sync_rev: 0,
+            upload_reject: None,
+            session_id: "sess".into(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+        }
+    }
+
+    fn body_json(matches: &[PersonalMatch]) -> String {
+        serde_json::to_string(&upload_request(matches, &[])).unwrap()
+    }
+
+    #[test]
+    fn blank_map_is_not_uploaded_until_it_is_picked() {
+        let blank = row("Ana", "", "");
+        let hold = crate::parse::review_hold(&blank);
+        assert!(hold.map);
+        assert!(hold.mode);
+        assert!(!hold.hero);
+        assert_eq!(
+            hold.suspect_fields(),
+            vec!["map".to_string(), "mode".to_string()]
+        );
+        let json = body_json(std::slice::from_ref(&blank));
+        assert!(
+            upload_request(std::slice::from_ref(&blank), &[])
+                .matches
+                .is_empty()
+        );
+        assert!(!json.contains("\"map_name\":\"\""));
+        assert!(!json.contains("\"game_mode\":\"\""));
+
+        let mut picked = blank;
+        picked.corrected_map_name = Some("King's Row".into());
+        picked.edited_fields.push("map_name".into());
+        let after = crate::parse::review_hold(&picked);
+        assert!(!after.is_held());
+        assert!(after.suspect_fields().is_empty());
+        let sent = upload_request(&[picked], &[]);
+        assert_eq!(sent.matches.len(), 1);
+        assert_eq!(sent.matches[0].map_name, "King's Row");
+        assert_eq!(sent.matches[0].game_mode, "Hybrid");
+        assert!(sent.matches[0].suspect_fields.is_empty());
+        let picked_json = serde_json::to_string(&sent).unwrap();
+        assert!(!picked_json.contains("\"map_name\":\"\""));
+        assert!(!picked_json.contains("\"game_mode\":\"\""));
+        assert!(!picked_json.contains("suspect_fields"));
+    }
+
+    #[test]
+    fn empty_game_mode_is_never_sent() {
+        let known_map = row("Ana", "Busan", "");
+        assert!(!crate::parse::review_hold(&known_map).is_held());
+        let sent = upload_request(&[known_map], &[]);
+        assert_eq!(sent.matches[0].game_mode, "Control");
+        let json = serde_json::to_string(&sent).unwrap();
+        assert!(!json.contains("\"game_mode\":\"\""));
+
+        let unrecognised = row("Ana", "not a map", "");
+        let hold = crate::parse::review_hold(&unrecognised);
+        assert!(hold.map);
+        assert!(hold.mode);
+        let json = body_json(&[unrecognised]);
+        assert!(!json.contains("not a map"));
+        assert!(!json.contains("\"game_mode\":\"\""));
+        assert!(!json.contains("\"map_name\":\"\""));
+    }
+
+    #[test]
+    fn unknown_hero_is_not_uploaded_until_it_is_picked() {
+        let unknown = row("Unknown", "Oasis", "Control");
+        let hold = crate::parse::review_hold(&unknown);
+        assert!(hold.hero);
+        assert!(!hold.map);
+        assert!(!hold.mode);
+        assert_eq!(hold.suspect_fields(), vec!["hero".to_string()]);
+        let json = body_json(std::slice::from_ref(&unknown));
+        assert!(!json.contains("Unknown"));
+        assert!(!json.contains("Oasis"));
+        assert!(
+            upload_request(std::slice::from_ref(&unknown), &[])
+                .matches
+                .is_empty()
+        );
+
+        let mut map_only = unknown.clone();
+        map_only.corrected_map_name = Some("Oasis".into());
+        map_only.edited_fields.push("map_name".into());
+        assert!(crate::parse::review_hold(&map_only).hero);
+        assert!(upload_request(&[map_only], &[]).matches.is_empty());
+
+        let mut picked = unknown;
+        picked.corrected_hero = Some("Reinhardt".into());
+        picked.edited_fields.push("hero".into());
+        let after = crate::parse::review_hold(&picked);
+        assert!(!after.is_held());
+        assert!(after.suspect_fields().is_empty());
+        let sent = upload_request(&[picked], &[]);
+        assert_eq!(sent.matches.len(), 1);
+        assert_eq!(sent.matches[0].hero, "Reinhardt");
+        assert_eq!(sent.matches[0].map_name, "Oasis");
+        assert!(sent.matches[0].suspect_fields.is_empty());
+        let picked_json = serde_json::to_string(&sent).unwrap();
+        assert!(!picked_json.contains("Unknown"));
+        assert!(!picked_json.contains("suspect_fields"));
     }
 }

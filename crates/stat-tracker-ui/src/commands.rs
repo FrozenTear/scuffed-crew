@@ -45,6 +45,34 @@ pub fn edit_match(data_dir: &Path, session_id: &str, edit: MatchEdit) -> Result<
     )
 }
 
+pub fn pick_map(data_dir: &Path, session_id: &str, map: &str) -> Result<(), String> {
+    if !stat_tracker::parse::map_is_known(map) {
+        return Err("Pick a map from the list".into());
+    }
+    edit_match(
+        data_dir,
+        session_id,
+        MatchEdit {
+            map_name: Some(map.to_string()),
+            ..MatchEdit::default()
+        },
+    )
+}
+
+pub fn pick_hero(data_dir: &Path, session_id: &str, hero: &str) -> Result<(), String> {
+    if !stat_tracker::parse::hero_is_known(hero) {
+        return Err("Pick a hero from the list".into());
+    }
+    let mut edit = MatchEdit {
+        hero: Some(hero.to_string()),
+        ..MatchEdit::default()
+    };
+    if let Some(role) = scuffed_types::role_for_hero_name(hero) {
+        edit.role = Some(role.to_string());
+    }
+    edit_match(data_dir, session_id, edit)
+}
+
 pub fn retry_upload(data_dir: &Path, session_id: &str) -> Result<(), String> {
     queue(
         data_dir,
@@ -199,6 +227,40 @@ mod tests {
             &cmds[0],
             StoreCommand::RetryUpload { session_id } if session_id == "sess-t1"
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pick_map_and_hero_queue_known_names_only() {
+        let dir = tmp();
+        let err = pick_map(&dir, "sess-t1", "Paraíso").unwrap_err();
+        assert!(err.contains("list"));
+        assert!(queued(&dir).is_empty());
+        pick_map(&dir, "sess-t1", "King's Row").unwrap();
+        pick_hero(&dir, "sess-t1", "Reinhardt").unwrap();
+        let cmds = queued(&dir);
+        assert!(matches!(
+            &cmds[0],
+            StoreCommand::EditMatch { session_id, edit }
+                if session_id == "sess-t1" && edit.map_name.as_deref() == Some("King's Row")
+        ));
+        assert!(matches!(
+            &cmds[1],
+            StoreCommand::EditMatch { session_id, edit }
+                if session_id == "sess-t1"
+                    && edit.hero.as_deref() == Some("Reinhardt")
+                    && edit.role.as_deref() == Some("Tank")
+        ));
+        let mut game = sample_game();
+        assert!(!game.needs_review());
+        game.map_name.clear();
+        assert!(game.map_needs_pick());
+        assert_eq!(game.map_label(), "Map needed");
+        game.map_name = "King's Row".into();
+        game.hero = "Unknown".into();
+        assert!(!game.map_needs_pick());
+        assert!(game.hero_needs_pick());
+        assert!(game.needs_review());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -245,6 +245,67 @@ pub fn stored_game_mode(canonical: &str) -> String {
     map_mode(canonical).unwrap_or("").to_string()
 }
 
+/// True when `name` is a [`MAPS`] display name, accents included.
+///
+/// Alias spellings (`paraíso`, `esperança`) are not display names. The
+/// picker and the upload gate both use this exact list.
+pub fn map_is_known(name: &str) -> bool {
+    map_mode(name).is_some()
+}
+
+/// True when `name` is a [`HEROES`] display name.
+///
+/// The literal `Unknown` (any ASCII case) is not a hero. Empty is not a hero.
+pub fn hero_is_known(name: &str) -> bool {
+    !name.eq_ignore_ascii_case("unknown") && HEROES.contains(&name)
+}
+
+/// Identity fields that must not be uploaded yet.
+///
+/// `map` is set when the effective map is empty or not a known display name.
+/// `mode` is set when the mode that would be sent is still empty. A known
+/// map fills the mode, including a map the member just picked. `hero` is set
+/// when the effective hero is empty or `Unknown`. A picked known value clears
+/// that flag, because the effective value is then the pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewHold {
+    pub map: bool,
+    pub mode: bool,
+    pub hero: bool,
+}
+
+impl ReviewHold {
+    pub fn is_held(self) -> bool {
+        self.map || self.mode || self.hero
+    }
+
+    /// Suspect names in upload order. Empty when nothing is unsure.
+    pub fn suspect_fields(self) -> Vec<String> {
+        let mut names = Vec::new();
+        if self.map {
+            names.push("map".to_string());
+        }
+        if self.mode {
+            names.push("mode".to_string());
+        }
+        if self.hero {
+            names.push("hero".to_string());
+        }
+        names
+    }
+}
+
+/// Which identity fields still need a pick before this row can upload.
+pub fn review_hold(row: &PersonalMatch) -> ReviewHold {
+    let map_name = row.display_map_name();
+    let mode = uploaded_game_mode(map_name, &row.game_mode);
+    ReviewHold {
+        map: !map_is_known(map_name),
+        mode: mode.is_empty(),
+        hero: !hero_is_known(row.display_hero()),
+    }
+}
+
 /// Extract the six stats from one OCR'd row. Columns are positional:
 /// 0=Elims, 1=Assists, 2=Deaths, 3=Damage, 4=Healing, 5=Mitigation.
 /// Returns `None` if any cell is unreadable or the narrow E/A/D columns hold
@@ -884,6 +945,22 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Unique [`MAPS`] display names, first-seen order. Accents stay as stored.
+pub fn known_map_names() -> &'static [&'static str] {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let mut names = Vec::new();
+            for &(display, _) in MAPS {
+                if !names.contains(&display) {
+                    names.push(display);
+                }
+            }
+            names
+        })
+        .as_slice()
+}
+
 /// Fuzzy threshold for a map name of `len` non-space chars. Short names get a
 /// touch more slack: a single wrong glyph in a 5-char name (BUSAN→BUSVN) is a
 /// 0.80 score, which the strict long-name bar would reject. Kept close to the
@@ -1503,6 +1580,30 @@ mod tests {
 #[cfg(test)]
 mod hero_map_name_tests {
     use super::*;
+
+    #[test]
+    fn known_map_names_match_the_maps_table_without_accent_changes() {
+        let mut expect = Vec::new();
+        for &(display, _) in MAPS {
+            if !expect.contains(&display) {
+                expect.push(display);
+            }
+        }
+        assert_eq!(known_map_names(), expect.as_slice());
+        assert!(known_map_names().contains(&"Château Guillard"));
+        assert!(known_map_names().contains(&"Watchpoint: Grímsvötn"));
+        assert!(known_map_names().contains(&"Paraiso"));
+        assert!(known_map_names().contains(&"Esperanca"));
+        assert!(!known_map_names().contains(&"Paraíso"));
+        assert!(!known_map_names().contains(&"Esperança"));
+        assert!(map_is_known("King's Row"));
+        assert!(!map_is_known(""));
+        assert!(!map_is_known("not a map"));
+        assert!(!hero_is_known("Unknown"));
+        assert!(!hero_is_known("unknown"));
+        assert!(!hero_is_known(""));
+        assert!(hero_is_known("Ana"));
+    }
 
     #[test]
     fn short_hero_names_need_word_boundaries() {
