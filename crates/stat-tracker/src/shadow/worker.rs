@@ -1,5 +1,6 @@
 //! The shadow worker: one background thread that runs the digit matcher on
-//! accepted scoreboards and logs how it compares with ocr-v1.
+//! accepted scoreboards and logs how it compares with ocr-v1, then (when hero
+//! templates are installed) the hero matcher, logged to `heroes.jsonl`.
 //!
 //! Guardrails:
 //! - Fed by a bounded channel of capacity 1 through `try_send`. When the
@@ -12,21 +13,32 @@
 //!   sender; the thread ends after its current job, or with the process. A
 //!   slow frame can not delay the final session save.
 //! - Thread priority is left alone: `libc` is not a dependency of this crate.
+//! - Frame-to-frame confirmation ([`super::confirm`]) needs the next frame,
+//!   so a successful read is logged when the next board arrives, after
+//!   [`CONFIRM_WAIT`] without one, or when the feed closes. A read still
+//!   waiting when the process exits is lost; an error is logged at once.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use image::DynamicImage;
 
+use super::confirm::{self, Frame};
 use super::digits::{self, BoardRead, FIELDS, ShadowError};
+use super::heroes::{
+    HERO_RECOGNIZER_ID, HeroBoard, HeroError, HeroRecord, HeroRowLog, HeroTemplates, HeroVoter,
+};
 use super::log::{CellDiff, ShadowLog, ShadowRecord};
 use crate::ocr::RowOcrResult;
 
 /// Matcher time allowed per board.
 pub const FRAME_BUDGET: Duration = Duration::from_millis(300);
+/// How long a read waits for the next board before it is logged without
+/// frame-to-frame confirmation.
+pub const CONFIRM_WAIT: Duration = Duration::from_secs(30);
 
 /// What frame analysis hands to the accept path when shadow mode is on.
 #[derive(Debug, Clone)]
@@ -110,6 +122,96 @@ fn cell_number(s: &str) -> Option<u32> {
 
 type ReadFn = dyn Fn(&DynamicImage, usize, Duration) -> Result<BoardRead, ShadowError> + Send;
 type SinkFn = dyn FnMut(ShadowRecord) + Send;
+type HeroSinkFn = dyn FnMut(HeroRecord) + Send;
+
+/// The optional hero stage: runs after the digit matcher on the same board.
+pub struct HeroStage {
+    templates: HeroTemplates,
+    voter: HeroVoter,
+    sink: Box<HeroSinkFn>,
+    budget: Duration,
+}
+
+impl std::fmt::Debug for HeroStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeroStage")
+            .field("classes", &self.templates.class_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeroStage {
+    pub fn new(templates: HeroTemplates, sink: Box<HeroSinkFn>) -> Self {
+        Self {
+            templates,
+            voter: HeroVoter::default(),
+            sink,
+            budget: FRAME_BUDGET,
+        }
+    }
+
+    /// Hero stage for the config, or `None` (logged) when the template
+    /// directory is missing or empty.
+    fn from_config(config: &crate::config::Config) -> Option<Self> {
+        let dir = HeroTemplates::dir_in(&config.data_dir);
+        let Some(templates) = HeroTemplates::load_dir(&dir) else {
+            tracing::info!(dir = %dir.display(), "no hero templates, shadow hero recognizer skipped");
+            return None;
+        };
+        let log = ShadowLog::heroes(&config.data_dir);
+        tracing::info!(
+            heroes = templates.hero_count(),
+            log = %log.path().display(),
+            "shadow hero recognizer on (log only)"
+        );
+        Some(Self::new(templates, Box::new(move |r| log.append(&r))))
+    }
+
+    fn process(&mut self, job: &ShadowJob) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.templates
+                .read_board(&job.scoreboard, job.team_size, self.budget)
+        }))
+        .unwrap_or(Err(HeroError::Unsupported("matcher panicked")));
+        let record = hero_record(job, result, &mut self.voter);
+        (self.sink)(record);
+    }
+}
+
+/// Build the hero log line for one job and advance the session vote.
+pub fn hero_record(
+    job: &ShadowJob,
+    result: Result<HeroBoard, HeroError>,
+    voter: &mut HeroVoter,
+) -> HeroRecord {
+    let mut record = HeroRecord {
+        ts: job.captured_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        session: job.session.clone(),
+        recognizer: HERO_RECOGNIZER_ID,
+        resolution: job.frame_height,
+        team_size: job.team_size,
+        owner_row: job.owner_row,
+        elapsed_us: None,
+        error: None,
+        rows: Vec::new(),
+    };
+    match result {
+        Ok(board) => {
+            let voted = voter.update(&job.session, &board.rows);
+            record.elapsed_us = Some(board.elapsed_us);
+            record.rows = board
+                .rows
+                .into_iter()
+                .map(|read| HeroRowLog {
+                    voted: voted.get(read.row).cloned().flatten(),
+                    read,
+                })
+                .collect();
+        }
+        Err(e) => record.error = Some(e.to_string()),
+    }
+    record
+}
 
 /// Handle to the running worker. Dropping it stops the feed; nothing waits.
 #[derive(Debug)]
@@ -126,20 +228,27 @@ impl ShadowWorker {
         }
         let log = ShadowLog::new(&config.data_dir);
         tracing::info!(log = %log.path().display(), "shadow digit recognizer on (log only)");
-        Self::spawn(
+        Self::spawn_with(
             Box::new(digits::read_board),
             Box::new(move |r| log.append(&r)),
+            HeroStage::from_config(config),
         )
     }
 
-    /// Spawn with a custom matcher and sink. Tests use this.
+    /// Spawn with a custom matcher and sink, no hero stage. Tests use this.
+    #[cfg(test)]
     fn spawn(read: Box<ReadFn>, sink: Box<SinkFn>) -> Option<Self> {
+        Self::spawn_with(read, sink, None)
+    }
+
+    /// Spawn with a custom matcher, sink and optional hero stage.
+    fn spawn_with(read: Box<ReadFn>, sink: Box<SinkFn>, heroes: Option<HeroStage>) -> Option<Self> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<ShadowJob>(1);
         let dropped = Arc::new(AtomicU64::new(0));
         let worker_dropped = Arc::clone(&dropped);
         let spawned = std::thread::Builder::new()
             .name("shadow-digits".into())
-            .spawn(move || run(rx, read, sink, worker_dropped));
+            .spawn(move || run(rx, read, sink, heroes, worker_dropped));
         match spawned {
             Ok(_detached) => Some(Self { tx, dropped }),
             Err(e) => {
@@ -166,14 +275,83 @@ impl ShadowWorker {
     }
 }
 
-fn run(rx: Receiver<ShadowJob>, read: Box<ReadFn>, mut sink: Box<SinkFn>, dropped: Arc<AtomicU64>) {
-    while let Ok(job) = rx.recv() {
+/// The last read, held until the next board can confirm its unsure cells.
+struct Held {
+    prev: Option<Frame>,
+    pending: Option<(ShadowRecord, Frame)>,
+}
+
+impl Held {
+    /// Log the pending read. `next` is the following read, when there is one.
+    fn release(&mut self, next: Option<&Frame>, sink: &mut SinkFn) {
+        if let Some((mut record, frame)) = self.pending.take() {
+            if let (Some(prev), Some(next)) = (&self.prev, next) {
+                mark_confirmed(&mut record, &confirm::confirmed(prev, &frame, next));
+            }
+            sink(record);
+            self.prev = Some(frame);
+        }
+    }
+}
+
+fn run(
+    rx: Receiver<ShadowJob>,
+    read: Box<ReadFn>,
+    mut sink: Box<SinkFn>,
+    mut heroes: Option<HeroStage>,
+    dropped: Arc<AtomicU64>,
+) {
+    let mut held = Held {
+        prev: None,
+        pending: None,
+    };
+    loop {
+        let job = match rx.recv_timeout(CONFIRM_WAIT) {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => {
+                held.release(None, &mut *sink);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                held.release(None, &mut *sink);
+                return;
+            }
+        };
         let dropped_since_last = dropped.swap(0, Ordering::Relaxed);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             read(&job.scoreboard, job.team_size, FRAME_BUDGET)
         }))
         .unwrap_or(Err(ShadowError::Layout("matcher panicked")));
-        sink(compare(&job, result, dropped_since_last));
+        let frame = result.as_ref().ok().map(|board| Frame {
+            session: job.session.clone(),
+            at: job.captured_at,
+            team_size: job.team_size,
+            board: board.clone(),
+        });
+        let record = compare(&job, result, dropped_since_last);
+        if let Some(stage) = heroes.as_mut() {
+            stage.process(&job);
+        }
+        held.release(frame.as_ref(), &mut *sink);
+        match frame {
+            Some(frame) => held.pending = Some((record, frame)),
+            None => {
+                sink(record);
+                held.prev = None;
+            }
+        }
+    }
+}
+
+/// Set `confirmed` on the listed `(row, field)` cells of a record.
+fn mark_confirmed(record: &mut ShadowRecord, cells: &[(usize, usize)]) {
+    for d in record.diffs.iter_mut() {
+        if cells
+            .iter()
+            .any(|&(r, k)| r == d.row && FIELDS[k] == d.field)
+        {
+            d.confirmed = true;
+        }
     }
 }
 
@@ -222,6 +400,7 @@ pub fn compare(
                     matcher: cell.value,
                     conf: cell.confidence,
                     suspect: cell.suspect,
+                    confirmed: false,
                 });
             }
         }
@@ -289,17 +468,70 @@ mod tests {
         let worker = ShadowWorker::start_if_enabled(&config).expect("flag on spawns");
         // A blank board: the matcher must answer (error or read), never hang.
         assert!(worker.try_submit(job("e2e")));
+        // A read waits for the next board; closing the feed logs it.
+        drop(worker);
         let log = ShadowLog::new(dir.path());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let line_written = || std::fs::read_to_string(log.path()).is_ok_and(|t| t.ends_with('\n'));
         while !line_written() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        drop(worker);
         let text = std::fs::read_to_string(log.path()).expect("one line written");
         let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(v["session"], "e2e");
         assert_eq!(v["resolution"], 1440);
+        // No templates installed: the hero stage is skipped, no hero log.
+        assert!(!ShadowLog::heroes(dir.path()).path().exists());
+    }
+
+    #[test]
+    fn hero_stage_reads_installed_templates_and_logs_votes() {
+        use crate::shadow::heroes::test_fixtures::{TEAL, YELLOW, board, template_dir};
+        let ids: Vec<u32> = (1..=12).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let tdir = template_dir(&ids);
+        let dest = HeroTemplates::dir_in(dir.path());
+        std::fs::create_dir_all(&dest).unwrap();
+        for e in std::fs::read_dir(tdir.path()).unwrap() {
+            let e = e.unwrap();
+            std::fs::copy(e.path(), dest.join(e.file_name())).unwrap();
+        }
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            shadow_recognizer: true,
+            ..crate::config::Config::default()
+        };
+        let mut stage = HeroStage::from_config(&config).expect("templates installed");
+        stage.budget = Duration::from_secs(30); // unoptimised test build
+        let mut j = job("hero");
+        j.team_size = 6;
+        j.scoreboard = Arc::new(DynamicImage::ImageRgb8(board(&ids, 6, 76, [YELLOW, TEAL])));
+        stage.process(&j);
+        stage.process(&j);
+        let text = std::fs::read_to_string(ShadowLog::heroes(dir.path()).path()).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let rows = lines[1]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 12, "{}", lines[1]);
+        for (i, r) in rows.iter().enumerate() {
+            let want = format!("hero-{}", ids[i]);
+            assert_eq!(r["hero"], want.as_str());
+            assert_eq!(r["voted"], want.as_str());
+            assert_eq!(r["suspect"], false);
+        }
+        assert_eq!(lines[0]["recognizer"], "hero-v1");
+        assert!(lines[0]["elapsed_us"].as_u64().is_some());
+    }
+
+    #[test]
+    fn hero_record_carries_errors_without_rows() {
+        let mut voter = HeroVoter::default();
+        let r = hero_record(&job("e"), Err(HeroError::NoHeader), &mut voter);
+        assert_eq!(r.error.as_deref(), Some("no header bar"));
+        assert!(r.rows.is_empty() && r.elapsed_us.is_none());
     }
 
     #[test]
@@ -442,5 +674,64 @@ mod tests {
         let got = records.lock().unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|r| r.error.is_some()));
+    }
+
+    /// Board with sure 1s everywhere, D of row 0 as given.
+    fn board_with_d(value: u32, suspect: bool) -> BoardRead {
+        let mut cells: [CellRead; 6] = std::array::from_fn(|_| cell(Some(1), false));
+        cells[2] = CellRead {
+            value: Some(value),
+            confidence: if suspect { 0.3 } else { 0.9 },
+            suspect,
+        };
+        BoardRead {
+            rows: vec![RowRead { cells }],
+            elapsed_ms: 5,
+        }
+    }
+
+    #[test]
+    fn unsure_cell_between_sure_neighbours_is_logged_confirmed() {
+        // matcher output per job, in order: sure 0, unsure 0, sure 0, an error, unsure 0
+        let script = Mutex::new(
+            vec![
+                Ok(board_with_d(0, false)),
+                Ok(board_with_d(0, true)),
+                Ok(board_with_d(0, false)),
+                Err(ShadowError::OverBudget),
+                Ok(board_with_d(0, true)),
+            ]
+            .into_iter(),
+        );
+        let (tx, rx) = mpsc::sync_channel::<ShadowJob>(8);
+        let t0 = Utc::now();
+        for i in 0..5 {
+            let mut j = job("m");
+            j.ocr_values = vec![[Some(1), Some(1), Some(0), Some(1), Some(1), Some(1)]];
+            j.captured_at = t0 + chrono::TimeDelta::seconds(5 * i);
+            tx.send(j).unwrap();
+        }
+        drop(tx);
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        run(
+            rx,
+            Box::new(move |_, _, _| script.lock().unwrap().next().unwrap()),
+            Box::new(move |r| sink_records.lock().unwrap().push(r)),
+            None,
+            Arc::new(AtomicU64::new(0)),
+        );
+        let got = records.lock().unwrap();
+        assert_eq!(got.len(), 5, "every job logged once, in order");
+        let d_diff = |i: usize| got[i].diffs.iter().find(|d| d.field == "D").cloned();
+        assert!(d_diff(0).is_none(), "sure and agreeing: not listed");
+        let mid = d_diff(1).unwrap();
+        assert!(mid.suspect && mid.confirmed, "{mid:?}");
+        assert_eq!(mid.matcher, Some(0), "value untouched");
+        assert!(d_diff(2).is_none());
+        assert_eq!(got[3].error.as_deref(), Some("over budget"));
+        // after an error there is no previous frame, and the feed then closed
+        let last = d_diff(4).unwrap();
+        assert!(last.suspect && !last.confirmed);
     }
 }

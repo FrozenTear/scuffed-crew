@@ -22,6 +22,19 @@
 //! is 2+ px off its row's median takes the row's band, so a lone thin-stem
 //! glyph (a 4 at 1440p) cannot shrink its band and get split into pieces.
 //!
+//! Pair checks: a correct glyph whose runner-up is its known look-alike (a 4
+//! next to a 6, a dim 0 next to a 3) can score below the suspect line on the
+//! whole-shape margin. Such a glyph is re-scored on only the pixels where the
+//! two templates differ, and the flag is cleared only when that check agrees
+//! with the top read (see [`pair_margin`]).
+//!
+//! Slanted cuts: inside a run of touching glyphs a vertical cut can slice a
+//! glyph (an overhanging 7 top bar above a 4's diagonal). Cut lines leaning
+//! like the font's diagonals ('/') are added where they cross less ink than
+//! the vertical cut at the same place; pieces between such lines are masked
+//! to their side of the line (see [`add_slanted_pieces`]). The font itself is
+//! upright: a shear search over real boards peaks at zero slant.
+//!
 //! Resampling reproduces Pillow's float bilinear resize so canvases match the
 //! ones the templates were built from.
 
@@ -48,7 +61,13 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 /// * `cv-v3`: 1080p templates and typical margins rebuilt with real
 ///   1920x1080 captures added to the downscaled 1440p set; cells with too
 ///   little ink for the digits read are flagged.
-pub const RECOGNIZER_ID: &str = "cv-v3";
+/// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
+///   margin that sits below the suspect line; touching glyphs can also be
+///   split along slanted cut lines.
+/// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
+///   ink) joins digit groups instead of splitting them; any ink left of the
+///   picked group inside the cell forces suspect.
+pub const RECOGNIZER_ID: &str = "cv-v5";
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
@@ -69,6 +88,22 @@ const PM_REF: f64 = 0.2;
 /// right '1' 0.17) and was fitted only on those sets, so recheck it when new
 /// labelled captures or capture paths are added.
 const MIN_INK_PER_GLYPH: f64 = 0.15;
+/// Pair check scale: the median pair-check score of correctly read 4s (vs 6)
+/// and 0s (vs 3) on the labelled Tab sets is 0.94 to 0.96 at both sizes (and
+/// moves by under 0.003 with any one map held out), so `score / PAIR_TYP` is
+/// on the same 1.0-is-typical scale as the glyph margin.
+const PAIR_TYP: f64 = 0.95;
+/// A pair check only runs on a glyph whose own calibrated margin is at least
+/// this: the top read must still lead clearly; the check cannot rescue a
+/// coin flip.
+const PAIR_FLOOR: f64 = 0.25;
+/// Pixels where the two templates differ by at least this share of their
+/// largest difference make up the region a pair check looks at.
+const PAIR_MASK: f64 = 0.5;
+/// Zeros are drawn in dim grey. A cell is dim when its brightness peak is
+/// below this share of the board's bright cells (90th percentile of cell
+/// peaks). Real dim zeros sit at 0.66.
+const DIM_RATIO: f64 = 0.8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellRead {
@@ -126,6 +161,10 @@ const CANVAS: usize = CH * CW;
 const INK_THR: f32 = 0.45;
 /// Max gap inside one number, in text heights ('11' is wide-set).
 const GAP_K: f64 = 0.9;
+/// Gaps wider than [`GAP_K`] but at most this many text heights are treated
+/// as a thousands separator: the groups join and a comma is inserted at the
+/// bridge. Fitted on the web hand-check MIT 1,148 cell (gap 10 px, hmax 11).
+const SEP_GAP_K: f64 = 1.35;
 /// Runs wider than this (in text heights) hold 2+ touching glyphs.
 const WIDE_RUN: f64 = 0.95;
 const BEAM: usize = 64;
@@ -136,6 +175,16 @@ const MAX_GLYPH: f64 = 1.10;
 const SPLIT_PEN: f64 = 0.04;
 /// Canvas covers [top, top + DESC * dh) so the comma tail fits.
 const DESC: f64 = 1.35;
+/// Slopes (px per row, negative leans like '/') of the extra cut lines tried
+/// inside runs of touching glyphs. The diagonals of 7, 4 and 2 measure about
+/// -0.65 at 1080p.
+const SLANTS: [f64; 2] = [-0.35, -0.7];
+/// A slanted cut is kept only where it crosses at most this many ink pixels
+/// (and fewer than the vertical cut through the same point).
+const SLANT_MAX_INK: usize = 1;
+/// A slanted piece's column extent covers pixels with at least this much ink,
+/// so a glyph keeps its anti-aliased edge like an isolated glyph does.
+const SLANT_EXTENT_INK: f32 = 0.15;
 /// A cell whose own text height is this many px off its row's median takes
 /// the row's text band instead (see [`row_text_band`]).
 const BAND_TOL: usize = 2;
@@ -345,6 +394,14 @@ fn column_centres(board: &DynamicImage) -> Result<[f64; 6], ShadowError> {
     Ok(c)
 }
 
+/// True when the six stat header labels (E A D DMG H MIT) sit in the Tab
+/// header strip at a plausible spacing: the same column rule
+/// [`read_board`] needs before it can read a cell. Reading this never
+/// changes digit output.
+pub fn stat_columns_found(board: &DynamicImage) -> bool {
+    column_centres(board).is_ok()
+}
+
 fn column_windows(c: &[f64; 6], w: usize) -> [(usize, usize); 6] {
     let mut out = [(0, 0); 6];
     for i in 0..6 {
@@ -487,6 +544,13 @@ struct Segment {
     dh: usize,
     runs: Vec<(usize, usize)>,
     rival: f64,
+    /// Brightness peak of the cell before normalising (99.5th percentile).
+    peak: f64,
+    /// Binarised ink exists in the cell to the left of the picked group.
+    ink_left: bool,
+    /// `sep_after[i]` is set when runs[i] and runs[i+1] were joined across a
+    /// thousands-separator gap (a comma is inserted there when reading).
+    sep_after: Vec<bool>,
 }
 
 fn percentile_sorted(v: &[f32], q: f64) -> f64 {
@@ -497,8 +561,14 @@ fn percentile_sorted(v: &[f32], q: f64) -> f64 {
     v[lo] as f64 + (v[hi] as f64 - v[lo] as f64) * f
 }
 
-/// Normalised cell ink map; `None` when the cell holds no contrast.
-fn cell_ink(n: &Plane, band: (usize, usize), win: (usize, usize), pad: usize) -> Option<Plane> {
+/// Normalised cell ink map and its raw brightness peak; `None` when the cell
+/// holds no contrast.
+fn cell_ink(
+    n: &Plane,
+    band: (usize, usize),
+    win: (usize, usize),
+    pad: usize,
+) -> Option<(Plane, f64)> {
     let y0 = band.0.saturating_sub(pad);
     let y1 = (band.1 + pad).min(n.h);
     let (x0, x1) = (win.0.min(n.w), win.1.min(n.w));
@@ -522,7 +592,7 @@ fn cell_ink(n: &Plane, band: (usize, usize), win: (usize, usize), pad: usize) ->
     for v in c.d.iter_mut() {
         *v = ((*v as f64 - bg) / (peak - bg)).clamp(0.0, 1.0) as f32;
     }
-    Some(c)
+    Some((c, peak))
 }
 
 fn runs_of(cols: &[bool]) -> Vec<(usize, usize)> {
@@ -542,7 +612,7 @@ fn runs_of(cols: &[bool]) -> Vec<(usize, usize)> {
 }
 
 /// Pick the centred ink group, find the digit band, and list projection runs.
-fn segment(ink: Plane) -> Option<Segment> {
+fn segment(ink: Plane, peak: f64) -> Option<Segment> {
     let (w, h) = (ink.w, ink.h);
     let b: Vec<bool> = ink.d.iter().map(|&v| v > INK_THR).collect();
     let col_any: Vec<bool> = (0..w).map(|x| (0..h).any(|y| b[y * w + x])).collect();
@@ -557,10 +627,16 @@ fn segment(ink: Plane) -> Option<Segment> {
     let hmax = runs.iter().map(run_h).max().unwrap_or(0);
     let gap_max = (GAP_K * hmax as f64).max(2.0);
     let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+    // Original run-index pairs joined only because of a thousands separator.
+    let mut sep_bridges: Vec<(usize, usize)> = Vec::new();
     for i in 1..runs.len() {
         let last = *groups.last().unwrap().last().unwrap();
-        if (runs[i].0 - runs[last].1) as f64 <= gap_max {
+        let gap = (runs[i].0 - runs[last].1) as f64;
+        if gap <= gap_max {
             groups.last_mut().unwrap().push(i);
+        } else if is_separator_gap(gap, hmax, &b, w, h, runs[last].1, runs[i].0) {
+            groups.last_mut().unwrap().push(i);
+            sep_bridges.push((last, i));
         } else {
             groups.push(vec![i]);
         }
@@ -592,15 +668,66 @@ fn segment(ink: Plane) -> Option<Segment> {
     } else {
         0.0
     };
-    let runs = g.iter().map(|&i| runs[i]).collect();
+    let ink_left = (0..gx0).any(|x| (0..h).any(|y| b[y * w + x]));
+    let picked: Vec<(usize, usize)> = g.iter().map(|&i| runs[i]).collect();
+    let mut sep_after = vec![false; picked.len().saturating_sub(1)];
+    for &(a, b_idx) in &sep_bridges {
+        if let (Some(ia), Some(ib)) = (
+            g.iter().position(|&x| x == a),
+            g.iter().position(|&x| x == b_idx),
+        ) && ib == ia + 1
+        {
+            sep_after[ia] = true;
+        }
+    }
     Some(Segment {
         ink,
         b,
         top,
         dh,
-        runs,
+        runs: picked,
         rival,
+        peak,
+        ink_left,
+        sep_after,
     })
+}
+
+/// A gap wider than [`GAP_K`] that should still keep digit groups together.
+///
+/// True when the gap width is in the thousands-separator range
+/// (`gap_max`, [`SEP_GAP_K`] * hmax], or when the gap's binarised ink is
+/// bottom-heavy like a comma (more ink in the lower half than the upper).
+fn is_separator_gap(
+    gap: f64,
+    hmax: usize,
+    b: &[bool],
+    w: usize,
+    h: usize,
+    x0: usize,
+    x1: usize,
+) -> bool {
+    let sep_hi = (SEP_GAP_K * hmax as f64).max(2.0);
+    if gap <= sep_hi {
+        return true;
+    }
+    if x1 <= x0 || h < 2 {
+        return false;
+    }
+    let mid = h / 2;
+    let mut top = 0usize;
+    let mut bot = 0usize;
+    for y in 0..h {
+        let row = y * w;
+        let n = (x0..x1).filter(|&x| b[row + x]).count();
+        if y < mid {
+            top += n;
+        } else {
+            bot += n;
+        }
+    }
+    // Comma: some ink, mostly in the lower half, gap not enormous.
+    bot > 0 && bot >= top.saturating_mul(2) && gap <= (2.0 * hmax as f64).max(4.0)
 }
 
 /// Rows [top, top + DESC*dh) scaled so the strip is CH rows tall; same factor horizontally.
@@ -691,8 +818,16 @@ fn partitions(s: usize, e: usize, cuts: &[usize]) -> Vec<Vec<(usize, usize)>> {
 enum RunKind {
     /// Explicit partitions, as lists of piece ids.
     Enum(Vec<Vec<usize>>),
-    /// Touching glyphs: for each end x1 (ascending), the pieces (id, x0) ending there.
+    /// Touching glyphs: for each end cut (ascending [`cut_key`]), the pieces
+    /// (id, start cut key) ending there.
     Dp(Vec<(usize, Vec<(usize, usize)>)>),
+}
+
+/// DP node key of a cut line through column boundary `x` (at the text band's
+/// middle row): `kind` 0 is vertical, `k > 0` uses slope `SLANTS[k - 1]`.
+/// Keys sort by `x` first.
+fn cut_key(x: usize, kind: usize) -> usize {
+    x * (SLANTS.len() + 1) + kind
 }
 
 struct Run {
@@ -703,6 +838,15 @@ struct Run {
 
 struct Cell {
     runs: Vec<Run>,
+    /// Piece column ranges `[x0, x1)` in cell pixels, by piece id.
+    pieces: Vec<(usize, usize)>,
+    /// Scaled strip and scale the canvases were cut from.
+    strip: Plane,
+    sc: f64,
+    /// Binarised ink pixels per cell column.
+    colsum: Vec<u32>,
+    /// Piece `p` was cut along a slanted line (masked; `pieces[p]` is its ink extent).
+    slanted: Vec<bool>,
     /// Normalised piece canvases, `CANVAS` floats per piece.
     v: Vec<f32>,
     mass: Vec<f64>,
@@ -711,6 +855,12 @@ struct Cell {
     /// Text height the canvases were scaled for (after the row consensus).
     dh: usize,
     rival: f64,
+    peak: f64,
+    ink_left: bool,
+    /// Run index of each piece (for inserting commas at separator bridges).
+    piece_run: Vec<usize>,
+    /// Copied from [`Segment::sep_after`].
+    sep_after: Vec<bool>,
 }
 
 /// Ink map and segmentation for one cell.
@@ -720,7 +870,8 @@ fn segment_cell(
     win: (usize, usize),
     pad: usize,
 ) -> Option<Segment> {
-    segment(cell_ink(n, band, win, pad)?)
+    let (ink, peak) = cell_ink(n, band, win, pad)?;
+    segment(ink, peak)
 }
 
 /// Row consensus text band `(top, dh)` from the cells' own estimates.
@@ -776,15 +927,17 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
         .map(|x| (0..seg.ink.h).filter(|&y| seg.b[y * w + x]).count() as u32)
         .collect();
     let mut pieces: Vec<(usize, usize)> = Vec::new();
+    let mut piece_run: Vec<usize> = Vec::new();
     let mut index = std::collections::HashMap::new();
-    let mut pid = |x0: usize, x1: usize| {
+    let mut pid = |x0: usize, x1: usize, run_i: usize, piece_run: &mut Vec<usize>| {
         *index.entry((x0, x1)).or_insert_with(|| {
             pieces.push((x0, x1));
+            piece_run.push(run_i);
             pieces.len() - 1
         })
     };
     let mut runs = Vec::new();
-    for &(rs, re) in &seg.runs {
+    for (run_i, &(rs, re)) in seg.runs.iter().enumerate() {
         if (re - rs) as f64 > WIDE_RUN * dh as f64 {
             let maxw = (MAX_GLYPH * dh as f64).ceil() as usize;
             let mut ends = Vec::new();
@@ -795,9 +948,9 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
                 let starts: Vec<(usize, usize)> = (rs.max(x1.saturating_sub(maxw))
                     ..x1.saturating_sub(1))
                     .filter(|&x0| x0 == rs || x0 >= rs + 2)
-                    .map(|x0| (pid(x0, x1), x0))
+                    .map(|x0| (pid(x0, x1, run_i, &mut piece_run), cut_key(x0, 0)))
                     .collect();
-                ends.push((x1, starts));
+                ends.push((cut_key(x1, 0), starts));
             }
             runs.push(Run {
                 s: rs,
@@ -808,7 +961,11 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
             let cuts = candidate_cuts(&colsum, rs, re, dh);
             let parts = partitions(rs, re, &cuts)
                 .into_iter()
-                .map(|p| p.into_iter().map(|(a, b)| pid(a, b)).collect())
+                .map(|p| {
+                    p.into_iter()
+                        .map(|(a, b)| pid(a, b, run_i, &mut piece_run))
+                        .collect()
+                })
                 .collect();
             runs.push(Run {
                 s: rs,
@@ -827,24 +984,193 @@ fn prepare_cell(seg: Segment) -> Option<Cell> {
     for x in 0..w {
         cb[x + 1] = cb[x] + colsum[x] as u64;
     }
-    let mass = pieces
+    let mass: Vec<f64> = pieces
         .iter()
         .map(|&(a, b)| (cb[b] - cb[a]) as f64)
         .collect();
-    let ar = pieces
+    let ar: Vec<f64> = pieces
         .iter()
         .map(|&(a, b)| (b - a) as f64 / dh as f64)
         .collect();
     let total_mass = seg.runs.iter().map(|&(a, e)| (cb[e] - cb[a]) as f64).sum();
+    let mut set = PieceSet {
+        slanted: vec![false; pieces.len()],
+        pieces,
+        piece_run,
+        v,
+        mass,
+        ar,
+    };
+    for (run_i, run) in runs.iter_mut().enumerate() {
+        add_slanted_pieces(&seg, run, &mut set, run_i);
+    }
+    let PieceSet {
+        pieces,
+        piece_run,
+        slanted,
+        v,
+        mass,
+        ar,
+    } = set;
     Some(Cell {
         runs,
+        pieces,
+        slanted,
+        strip,
+        sc,
+        colsum,
         v,
         mass,
         ar,
         total_mass,
         dh,
         rival: seg.rival,
+        peak: seg.peak,
+        ink_left: seg.ink_left,
+        piece_run,
+        sep_after: seg.sep_after,
     })
+}
+
+/// Piece list under construction: ranges, canvases, ink and width ratios.
+struct PieceSet {
+    pieces: Vec<(usize, usize)>,
+    piece_run: Vec<usize>,
+    slanted: Vec<bool>,
+    v: Vec<f32>,
+    mass: Vec<f64>,
+    ar: Vec<f64>,
+}
+
+/// Add slanted cuts to a touching-glyph run (`RunKind::Dp`).
+///
+/// A cut through `x` with slope `m` runs along `x + m * (y + 0.5 - mid)`;
+/// pixel `(px, y)` is left of it when `px + 0.5` is. Only cuts that cross at
+/// most `SLANT_MAX_INK` ink pixels, and fewer than the vertical cut through
+/// the same point, are added. Every piece between two cuts where at least one
+/// is slanted holds only the ink between the lines; its canvas is cut from a
+/// strip of that masked ink over its own ink extent, like an isolated glyph.
+/// A masked piece that holds the same ink as a vertical piece reuses it.
+fn add_slanted_pieces(seg: &Segment, run: &mut Run, set: &mut PieceSet, run_i: usize) {
+    let RunKind::Dp(ends) = &mut run.kind else {
+        return;
+    };
+    let (rs, re, dh, w) = (run.s, run.e, seg.dh, seg.ink.w);
+    let maxw = (MAX_GLYPH * dh as f64).ceil() as usize;
+    let mid = seg.top as f64 + dh as f64 / 2.0;
+    let line = |x: usize, kind: usize, y: usize| {
+        let m = if kind == 0 { 0.0 } else { SLANTS[kind - 1] };
+        x as f64 + m * (y as f64 + 0.5 - mid)
+    };
+    let rows: Vec<usize> = (0..seg.ink.h)
+        .filter(|&y| (rs..re).any(|x| seg.b[y * w + x]))
+        .collect();
+    let crossed = |x: usize, kind: usize| {
+        rows.iter()
+            .filter(|&&y| {
+                let c = line(x, kind, y).floor();
+                c >= rs as f64 && c < re as f64 && seg.b[y * w + c as usize]
+            })
+            .count()
+    };
+    let mut cuts: Vec<(usize, usize)> = vec![(rs, 0), (re, 0)];
+    cuts.extend((rs + 2..=re.saturating_sub(2)).map(|x| (x, 0)));
+    let mut any = false;
+    for x in rs + 2..re.saturating_sub(1) {
+        let vertical = crossed(x, 0);
+        for kind in 1..=SLANTS.len() {
+            let c = crossed(x, kind);
+            if c < vertical && c <= SLANT_MAX_INK {
+                cuts.push((x, kind));
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+    let mut seen: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+    let mut extra: std::collections::BTreeMap<usize, Vec<(usize, usize)>> = Default::default();
+    for &(xb, kb) in &cuts {
+        for &(xa, ka) in &cuts {
+            if (ka == 0 && kb == 0) || xa >= xb || xb == rs || xa == re {
+                continue;
+            }
+            let narrowest = rows
+                .iter()
+                .map(|&y| line(xb, kb, y) - line(xa, ka, y))
+                .fold(f64::INFINITY, f64::min);
+            if narrowest < 2.0 {
+                continue;
+            }
+            let inside = |x: usize, y: usize| {
+                let px = x as f64 + 0.5;
+                px >= line(xa, ka, y) && px < line(xb, kb, y)
+            };
+            let mut masked = Plane::zeros(w, seg.ink.h);
+            let (mut e0, mut e1, mut ink) = (usize::MAX, 0, 0usize);
+            for y in 0..seg.ink.h {
+                for x in rs..re {
+                    if !inside(x, y) {
+                        continue;
+                    }
+                    let v = seg.ink.at(x, y);
+                    masked.d[y * w + x] = v;
+                    ink += seg.b[y * w + x] as usize;
+                    if v > SLANT_EXTENT_INK {
+                        e0 = e0.min(x);
+                        e1 = e1.max(x + 1);
+                    }
+                }
+            }
+            if ink == 0 || e1 <= e0 + 1 || e1 - e0 > maxw {
+                continue;
+            }
+            // same ink as the vertical piece over its extent: reuse that piece
+            let uncut =
+                (e0..e1).all(|x| (0..seg.ink.h).all(|y| inside(x, y) || seg.ink.at(x, y) <= 0.0));
+            let vertical = uncut
+                .then(|| {
+                    set.pieces
+                        .iter()
+                        .zip(&set.slanted)
+                        .position(|(&p, &sl)| !sl && p == (e0, e1))
+                })
+                .flatten();
+            let sig: Vec<u32> = (0..seg.ink.h)
+                .flat_map(|y| (e0..e1).map(move |x| (x, y)))
+                .map(|(x, y)| masked.d[y * w + x].to_bits())
+                .chain([e0 as u32, e1 as u32])
+                .collect();
+            let id = match vertical.or_else(|| seen.get(&sig).copied()) {
+                Some(id) => id,
+                None => {
+                    let (strip, sc) = scaled_strip(&masked, seg.top, dh);
+                    let mut c = piece_canvas(&strip, sc, e0, e1);
+                    normalise(&mut c);
+                    set.v.extend_from_slice(&c);
+                    set.pieces.push((e0, e1));
+                    set.piece_run.push(run_i);
+                    set.slanted.push(true);
+                    set.mass.push(ink as f64);
+                    set.ar.push((e1 - e0) as f64 / dh as f64);
+                    seen.insert(sig, set.pieces.len() - 1);
+                    set.pieces.len() - 1
+                }
+            };
+            extra
+                .entry(cut_key(xb, kb))
+                .or_default()
+                .push((id, cut_key(xa, ka)));
+        }
+    }
+    for (key, starts) in extra {
+        match ends.iter_mut().find(|e| e.0 == key) {
+            Some(e) => e.1.extend(starts),
+            None => ends.push((key, starts)),
+        }
+    }
+    ends.sort_by_key(|e| e.0);
 }
 
 type Scored = (f64, Vec<usize>);
@@ -874,7 +1200,7 @@ fn kbest_run(run: &Run, piece_score: &[f64], k: usize) -> Vec<Scored> {
         RunKind::Dp(ends) => {
             let mut best: std::collections::HashMap<usize, Vec<Scored>> =
                 std::collections::HashMap::new();
-            best.insert(run.s, vec![(0.0, Vec::new())]);
+            best.insert(cut_key(run.s, 0), vec![(0.0, Vec::new())]);
             for (x1, starts) in ends {
                 let mut cand: Vec<Scored> = Vec::new();
                 for &(p, x0) in starts {
@@ -888,11 +1214,14 @@ fn kbest_run(run: &Run, piece_score: &[f64], k: usize) -> Vec<Scored> {
                 }
                 if !cand.is_empty() {
                     sort_desc(&mut cand);
+                    // slanted and vertical cuts can reach the same pieces
+                    let mut seen = std::collections::HashSet::new();
+                    cand.retain(|c| seen.insert(c.1.clone()));
                     cand.truncate(k);
                     best.insert(*x1, cand);
                 }
             }
-            best.remove(&run.e).unwrap_or_default()
+            best.remove(&cut_key(run.e, 0)).unwrap_or_default()
         }
     }
 }
@@ -925,6 +1254,78 @@ fn grammar_ok(t: &str, k: usize) -> bool {
     d.len() <= 6 && d.parse::<u64>().is_ok_and(|n| thousands(n) == t)
 }
 
+/// Canvas of piece `p` with edge columns holding at most one ink pixel
+/// dropped. Anti-aliasing can leave one stray pixel beside a glyph (a dim 0's
+/// right flank at 1080p); it widens the piece by a column and shifts the
+/// glyph off centre. Only the pair checks use this; matching keeps the
+/// canvases the templates were built from.
+fn recentred_canvas(cell: &Cell, p: usize) -> [f32; CANVAS] {
+    if cell.slanted[p] {
+        // already cut to its own ink extent
+        let mut c = [0f32; CANVAS];
+        c.copy_from_slice(&cell.v[p * CANVAS..(p + 1) * CANVAS]);
+        return c;
+    }
+    let (mut x0, mut x1) = cell.pieces[p];
+    while x1 - x0 > 2 && cell.colsum[x0] <= 1 {
+        x0 += 1;
+    }
+    while x1 - x0 > 2 && cell.colsum[x1 - 1] <= 1 {
+        x1 -= 1;
+    }
+    let mut c = piece_canvas(&cell.strip, cell.sc, x0, x1);
+    normalise(&mut c);
+    c
+}
+
+/// Correlation of a canvas with `t[a] - t[b]` over only the pixels where the
+/// two templates differ most (`PAIR_MASK`). For 4 vs 6 that is the 4's open
+/// top-left and stem against the 6's curved top-left and closed bottom loop;
+/// for 0 vs 3 the 0's closed left side and hollow centre against the 3's
+/// open left and middle bar. Positive favours `a`; it is antisymmetric, so a
+/// real 6 scores as negative as a real 4 scores positive.
+fn pair_check(v: &[f32; CANVAS], tpl: &Templates, a: usize, b: usize) -> f64 {
+    let d: Vec<f64> = (0..CANVAS)
+        .map(|i| tpl.t[a][i] as f64 - tpl.t[b][i] as f64)
+        .collect();
+    let lim = PAIR_MASK * d.iter().fold(0f64, |m, x| m.max(x.abs()));
+    let idx: Vec<usize> = (0..CANVAS).filter(|&i| d[i].abs() >= lim).collect();
+    let n = idx.len().max(1) as f64;
+    let vm = idx.iter().map(|&i| v[i] as f64).sum::<f64>() / n;
+    let dm = idx.iter().map(|&i| d[i]).sum::<f64>() / n;
+    let (mut num, mut vv, mut dd) = (0f64, 0f64, 0f64);
+    for &i in &idx {
+        let (x, y) = (v[i] as f64 - vm, d[i] - dm);
+        num += x * y;
+        vv += x * x;
+        dd += y * y;
+    }
+    num / (vv.sqrt() * dd.sqrt()).max(1e-9)
+}
+
+/// Calibrated margin from a pair check, for a glyph read as `best` whose
+/// shape runner-up is `second`, when a check applies:
+/// * a 4 next to a 6, or next to a 1 when the piece is too wide to be a 1
+///   (the 4's tall stem alone resembles a 1), is checked against the 6;
+/// * a 0 next to a 3 is checked only when the cell is dim, since zeros are
+///   drawn in grey; a bright cell read as 0 gets no help.
+fn pair_margin(
+    cell: &Cell,
+    tpl: &Templates,
+    p: usize,
+    best: usize,
+    second: usize,
+    dim: bool,
+) -> Option<f64> {
+    let other = match (best, second) {
+        (4, 6) => 6,
+        (4, 1) if cell.ar[p] > tpl.ar_hi[1] => 6,
+        (0, 3) if dim => 3,
+        _ => return None,
+    };
+    Some(pair_check(&recentred_canvas(cell, p), tpl, best, other) / PAIR_TYP)
+}
+
 /// Value, margin and whether any sanity flag fired.
 struct Reading {
     value: Option<u32>,
@@ -932,7 +1333,9 @@ struct Reading {
     flagged: bool,
 }
 
-fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
+/// `dim`: the cell is much darker than the board's bright cells (see
+/// `DIM_RATIO`).
+fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize, dim: bool) -> Reading {
     let Some(cell) = cell else {
         return Reading {
             value: None,
@@ -948,6 +1351,7 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
     let mut best_c = vec![0usize; np];
     let mut best_s = vec![0f64; np];
     let mut second_s = vec![0f64; np];
+    let mut second_c = vec![0usize; np];
     for p in 0..np {
         let v = &cell.v[p * CANVAS..(p + 1) * CANVAS];
         let s: [f64; NCLS] = std::array::from_fn(|c| {
@@ -973,10 +1377,14 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         best_c[p] = bc;
         best_s[p] = sw[bc];
         // second best: any other allowed class, ignoring the width gate (a shape margin)
-        second_s[p] = (0..NCLS)
-            .filter(|&c| c != bc)
-            .map(|c| if allowed[c] { s[c] } else { -1.0 })
-            .fold(f64::NEG_INFINITY, f64::max);
+        second_s[p] = f64::NEG_INFINITY;
+        for c in (0..NCLS).filter(|&c| c != bc) {
+            let sc = if allowed[c] { s[c] } else { -1.0 };
+            if sc > second_s[p] {
+                second_s[p] = sc;
+                second_c[p] = c;
+            }
+        }
     }
     let total_mass = cell.total_mass.max(1e-9);
     let piece_score: Vec<f64> = (0..np)
@@ -1001,15 +1409,27 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         beam = next;
     }
     let text = |a: &[usize]| -> String {
-        a.iter()
-            .map(|&p| {
-                if best_c[p] == COMMA {
-                    ','
-                } else {
-                    char::from(b'0' + best_c[p] as u8)
+        let mut out = String::new();
+        let mut prev_run: Option<usize> = None;
+        for &p in a {
+            let r = cell.piece_run[p];
+            if let Some(pr) = prev_run
+                && r > pr
+            {
+                for br in pr..r {
+                    if cell.sep_after.get(br) == Some(&true) {
+                        out.push(',');
+                    }
                 }
-            })
-            .collect()
+            }
+            if best_c[p] == COMMA {
+                out.push(',');
+            } else {
+                out.push(char::from(b'0' + best_c[p] as u8));
+            }
+            prev_run = Some(r);
+        }
+        out
     };
     let good: Vec<&Scored> = beam
         .iter()
@@ -1024,10 +1444,21 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         .iter()
         .find(|(_, a)| text(a).replace(',', "") != digits)
         .map(|(o, _)| *o);
-    // glyph margin in units of that digit's typical margin
+    // glyph margin in units of that digit's typical margin; a glyph below the
+    // suspect line can be lifted by its pair check (never lowered)
+    let glyph_margin = |p: usize| {
+        let raw = (best_s[p] - second_s[p]) / tpl.typ[best_c[p]];
+        if (PAIR_FLOOR..SUSPECT_CONF as f64).contains(&raw)
+            && let Some(m) = pair_margin(cell, tpl, p, best_c[p], second_c[p], dim)
+        {
+            raw.max(m)
+        } else {
+            raw
+        }
+    };
     let gm = acc
         .iter()
-        .map(|&p| (best_s[p] - second_s[p]) / tpl.typ[best_c[p]])
+        .map(|&p| glyph_margin(p))
         .fold(f64::INFINITY, f64::min);
     let gm = if acc.is_empty() { 0.0 } else { gm };
     // partition ambiguity: best alternative reading with a different digit string
@@ -1050,6 +1481,7 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
     }
     flagged |= s.starts_with(',') || s.ends_with(',');
     flagged |= cell.rival > 0.5;
+    flagged |= cell.ink_left;
     flagged |= obj < 0.55;
     // Too little ink for the digits read: a dim 0 half wiped out by
     // compression reads as a thin "1" with a clean margin.
@@ -1060,6 +1492,17 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         value,
         margin,
     }
+}
+
+/// Brightness of the board's bright cells: the 90th percentile of the
+/// segmented cells' peaks (white digits; zeros are drawn darker).
+fn bright_peak(rows: &[[Option<Segment>; 6]]) -> Option<f64> {
+    let mut pk: Vec<f64> = rows.iter().flatten().flatten().map(|s| s.peak).collect();
+    if pk.is_empty() {
+        return None;
+    }
+    pk.sort_by(f64::total_cmp);
+    Some(pk[(pk.len() - 1) * 9 / 10])
 }
 
 // ---------------------------------------------------------------- entry point
@@ -1092,17 +1535,26 @@ pub fn read_board(
     if t0.elapsed() > budget {
         return Err(ShadowError::OverBudget);
     }
-    let mut rows = Vec::with_capacity(bands.len());
-    for band in bands {
-        let mut segs: [Option<Segment>; 6] =
-            std::array::from_fn(|k| segment_cell(&n, band, wins[k], pad));
-        let row_band = row_text_band(&segs);
+    let mut seg_rows: Vec<[Option<Segment>; 6]> = bands
+        .iter()
+        .map(|&band| std::array::from_fn(|k| segment_cell(&n, band, wins[k], pad)))
+        .collect();
+    let bright = bright_peak(&seg_rows);
+    if t0.elapsed() > budget {
+        return Err(ShadowError::OverBudget);
+    }
+    let mut rows = Vec::with_capacity(seg_rows.len());
+    for segs in seg_rows.iter_mut() {
+        let row_band = row_text_band(segs);
         let cells = std::array::from_fn(|k| {
             let cell = segs[k].take().and_then(|mut seg| {
                 apply_row_band(&mut seg, row_band);
                 prepare_cell(seg)
             });
-            let r = read_cell(cell.as_ref(), tpl, k);
+            let dim = cell
+                .as_ref()
+                .is_some_and(|c| bright.is_some_and(|b| c.peak < DIM_RATIO * b));
+            let r = read_cell(cell.as_ref(), tpl, k, dim);
             // NaN cannot reach the log: it becomes 0 (and therefore suspect).
             let confidence = if r.margin.is_finite() {
                 r.margin.clamp(0.0, 1.0) as f32
@@ -1126,13 +1578,15 @@ pub fn read_board(
     })
 }
 
+/// Test support shared with the reader tests: the embedded 1440 templates
+/// drawn as synthetic stat text. No captured pixels.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_glyphs {
     use super::*;
     use image::{Rgb, RgbImage};
 
     /// Mean glyph canvases (0..1) straight from the embedded 1440 templates.
-    fn glyph_means() -> Vec<Plane> {
+    pub(super) fn glyph_means() -> Vec<Plane> {
         let img = image::load_from_memory(TPL_1440_PNG).unwrap().to_luma8();
         (0..NCLS)
             .map(|c| {
@@ -1149,14 +1603,14 @@ mod tests {
     }
 
     /// Glyph columns that carry ink, so glyphs can be laid out with a fixed gap.
-    fn ink_cols(g: &Plane) -> (usize, usize) {
+    pub(super) fn ink_cols(g: &Plane) -> (usize, usize) {
         let cols: Vec<usize> = (0..g.w)
             .filter(|&x| (0..g.h).any(|y| g.at(x, y) > 0.2))
             .collect();
         (cols[0], cols[cols.len() - 1] + 1)
     }
 
-    fn text_for(v: u32, k: usize) -> String {
+    pub(super) fn text_for(v: u32, k: usize) -> String {
         if plain_field(k) {
             v.to_string()
         } else {
@@ -1165,7 +1619,7 @@ mod tests {
     }
 
     /// Paste `text` centred at (cx, top) in neutral grey on a dark board.
-    fn draw_text(
+    pub(super) fn draw_text(
         img: &mut RgbImage,
         glyphs: &[Plane],
         text: &str,
@@ -1200,6 +1654,20 @@ mod tests {
             x += b - a + gap;
         }
     }
+
+    /// Draw stat `v` of column `k` (with its thousands commas) centred at
+    /// (cx, top), 3 px between glyphs, as [`super::read_board`] expects on a
+    /// 1440p board crop.
+    pub(crate) fn draw_stat(img: &mut RgbImage, v: u32, k: usize, cx: usize, top: usize) {
+        draw_text(img, &glyph_means(), &text_for(v, k), cx, top, 3);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+    use test_glyphs::{draw_text, glyph_means, ink_cols, text_for};
 
     /// 1664x1007 scoreboard (a 1440p crop): bright header with six dark labels,
     /// dark rows holding the given stat values. No name or hero pixels.
@@ -1305,6 +1773,62 @@ mod tests {
         assert_reads(&read, &want);
     }
 
+    /// The live miss behind cv-v5: MIT 1,148 whose comma is too faint to
+    /// segment, so a gap a little over [`GAP_K`] text heights sits between
+    /// the 1 and 148. The full read must give 1148, never 148.
+    #[test]
+    fn full_read_keeps_the_leading_1_of_1148() {
+        let mut want = sample_values(6);
+        want[0][5] = 1148;
+        // board with row 0 MIT blank, then paint "1" + wide gap + "148" there
+        let mut vals = want.clone();
+        vals[0][5] = 0;
+        let mut img = synth_board(&vals, 6, 3).to_rgb8();
+        let glyphs = glyph_means();
+        // wipe the "0" drawn for row 0 MIT
+        let (h, cx) = (1007usize, 960 + 5 * 100);
+        let t1 = (h as f64 * HEADER_RATIO) as usize;
+        let t2 = (h as f64 * TEAM2_START_RATIO) as usize;
+        let ctr = t1 + (t2 - t1) / 7 / 2;
+        for y in ctr - 12..ctr + 20 {
+            for x in cx - 40..cx + 40 {
+                img.put_pixel(x as u32, y as u32, Rgb([18, 20, 32]));
+            }
+        }
+        // text height of the glyphs as drawn (canvas scale 1:1)
+        let one = &glyphs[1];
+        let rows: Vec<usize> = (0..CH)
+            .filter(|&y| (0..CW).any(|x| one.at(x, y) > 0.5))
+            .collect();
+        let dh = rows[rows.len() - 1] - rows[0] + 1;
+        let gap = ((GAP_K + SEP_GAP_K) / 2.0 * dh as f64).round() as usize;
+        assert!(gap as f64 > GAP_K * dh as f64 && (gap as f64) <= SEP_GAP_K * dh as f64);
+        let (a, b) = ink_cols(&glyphs[1]);
+        let w148: usize = "148"
+            .chars()
+            .map(|c| {
+                let (a, b) = ink_cols(&glyphs[c as usize - '0' as usize]);
+                b - a
+            })
+            .sum::<usize>()
+            + 2 * 3;
+        let left = cx - (b - a + gap + w148) / 2;
+        draw_text(&mut img, &glyphs, "1", left + (b - a) / 2, ctr - 10, 3);
+        draw_text(
+            &mut img,
+            &glyphs,
+            "148",
+            left + (b - a) + gap + w148 / 2,
+            ctr - 10,
+            3,
+        );
+        let read = read_board(&DynamicImage::ImageRgb8(img), 6, Duration::from_secs(10)).unwrap();
+        let mit = &read.rows[0].cells[5];
+        assert_eq!(mit.value, Some(1148), "{mit:?}");
+        assert_ne!(mit.value, Some(148));
+        assert_reads(&read, &want);
+    }
+
     #[test]
     fn reads_rescaled_1080_board() {
         let want = sample_values(6);
@@ -1363,6 +1887,9 @@ mod tests {
             dh,
             runs: vec![(1, 7)],
             rival: 0.0,
+            peak: 255.0,
+            ink_left: false,
+            sep_after: vec![],
         }
     }
 
@@ -1428,6 +1955,163 @@ mod tests {
         assert!(too_little_ink(22.0, 2, 9));
     }
 
+    /// A one-glyph cell from a template glyph mean (1440 size), optionally
+    /// with one stray ink pixel in the column right of the glyph.
+    fn glyph_cell(c: usize, stray: bool) -> Cell {
+        let g = &glyph_means()[c];
+        let (w, h) = (CW + 8, CH + 8);
+        let mut ink = Plane::zeros(w, h);
+        for y in 0..CH {
+            for x in 0..CW {
+                ink.d[(y + 2) * w + x + 4] = g.at(x, y);
+            }
+        }
+        if stray {
+            let (_, x1) = ink_cols(g);
+            ink.d[(2 + CH / 3) * w + 4 + x1] = 0.5;
+        }
+        prepare_cell(segment(ink, 160.0).unwrap()).unwrap()
+    }
+
+    /// Piece id covering the whole (single) run.
+    fn whole_piece(cell: &Cell) -> usize {
+        let (s, e) = (cell.runs[0].s, cell.runs[0].e);
+        cell.pieces.iter().position(|&p| p == (s, e)).unwrap()
+    }
+
+    #[test]
+    fn pair_check_reads_the_region_where_look_alikes_differ() {
+        let tpl = templates_for(REF_H_1440);
+        let canvas = |c: usize| -> [f32; CANVAS] { tpl.t[c].as_slice().try_into().unwrap() };
+        for (a, b) in [(4, 6), (0, 3)] {
+            assert!(pair_check(&canvas(a), tpl, a, b) > 0.9, "{a} vs {b}");
+            assert!(pair_check(&canvas(b), tpl, a, b) < -0.9, "{b} read as {a}");
+            // antisymmetric: swapping the pair flips the sign
+            let (x, y) = (
+                pair_check(&canvas(a), tpl, a, b),
+                pair_check(&canvas(a), tpl, b, a),
+            );
+            assert!((x + y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn pair_margin_applies_only_to_known_look_alikes() {
+        let tpl = templates_for(REF_H_1440);
+        let four = glyph_cell(4, false);
+        let p = whole_piece(&four);
+        let m = pair_margin(&four, tpl, p, 4, 6, false).unwrap();
+        assert!(m > 0.9, "{m}");
+        // a 4 whose shape runner-up is 1 but which is far too wide to be a 1
+        assert!(four.ar[p] > tpl.ar_hi[1]);
+        assert!(pair_margin(&four, tpl, p, 4, 1, false).is_some());
+        // other pairs get no check
+        assert!(pair_margin(&four, tpl, p, 4, 9, false).is_none());
+        assert!(pair_margin(&four, tpl, p, 6, 4, false).is_none());
+        // a 0 is only helped when the cell is dim
+        let zero = glyph_cell(0, false);
+        let z = whole_piece(&zero);
+        assert!(pair_margin(&zero, tpl, z, 0, 3, true).unwrap() > 0.9);
+        assert!(pair_margin(&zero, tpl, z, 0, 3, false).is_none());
+        assert!(pair_margin(&zero, tpl, z, 3, 0, true).is_none());
+    }
+
+    #[test]
+    fn recentred_canvas_drops_a_one_pixel_edge_column() {
+        let clean = glyph_cell(0, false);
+        let stray = glyph_cell(0, true);
+        let (pc, ps) = (whole_piece(&clean), whole_piece(&stray));
+        assert_eq!(
+            stray.pieces[ps].1,
+            clean.pieces[pc].1 + 1,
+            "the stray pixel widens the run"
+        );
+        let a = recentred_canvas(&clean, pc);
+        let b = recentred_canvas(&stray, ps);
+        let corr: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        assert!(corr > 0.999, "{corr}");
+        // the canvas used for matching keeps the stray column
+        let plain = &stray.v[ps * CANVAS..(ps + 1) * CANVAS];
+        let corr_plain: f64 = a
+            .iter()
+            .zip(plain)
+            .map(|(x, y)| *x as f64 * *y as f64)
+            .sum();
+        assert!(corr_plain < corr);
+    }
+
+    /// Ink plane holding template glyphs `a` then `b` (1440 means), with
+    /// `b`'s ink columns starting `overlap` columns before `a`'s end
+    /// (negative: a gap).
+    fn pair_ink(a: usize, b: usize, overlap: isize) -> Plane {
+        let g = glyph_means();
+        let ((a0, a1), (b0, b1)) = (ink_cols(&g[a]), ink_cols(&g[b]));
+        let w = 12 + (a1 - a0) + (b1 - b0);
+        let mut ink = Plane::zeros(w, CH + 8);
+        let xb = (4 + (a1 - a0)) as isize - overlap;
+        let xb = xb as usize;
+        for y in 0..CH {
+            for x in a0..a1 {
+                ink.d[(y + 2) * w + 4 + x - a0] = g[a].at(x, y);
+            }
+            for x in b0..b1 {
+                let i = (y + 2) * w + xb + x - b0;
+                ink.d[i] = ink.d[i].max(g[b].at(x, y));
+            }
+        }
+        ink
+    }
+
+    #[test]
+    fn cut_keys_sort_by_column_then_kind() {
+        assert!(cut_key(10, SLANTS.len()) < cut_key(11, 0));
+        assert!(cut_key(10, 0) < cut_key(10, 1));
+        assert_eq!(cut_key(0, 0), 0);
+    }
+
+    #[test]
+    fn slanted_cut_separates_a_seven_overhanging_a_four() {
+        let tpl = templates_for(REF_H_1440);
+        let cell = prepare_cell(segment(pair_ink(7, 4, 3), 200.0).unwrap()).unwrap();
+        assert_eq!(cell.runs.len(), 1, "one run of touching glyphs");
+        assert!(matches!(cell.runs[0].kind, RunKind::Dp(_)));
+        assert!(cell.slanted.iter().any(|&s| s), "a slanted cut was added");
+        let r = read_cell(Some(&cell), tpl, 3, false);
+        assert_eq!(r.value, Some(74));
+        // masked pieces carry only their own ink
+        for p in (0..cell.slanted.len()).filter(|&p| cell.slanted[p]) {
+            let (a, b) = cell.pieces[p];
+            assert!(cell.mass[p] > 0.0 && b > a + 1);
+        }
+    }
+
+    #[test]
+    fn separate_glyphs_get_no_slanted_cuts() {
+        // a two-column gap: two runs, no touching-glyph split at all
+        let cell = prepare_cell(segment(pair_ink(7, 4, -2), 200.0).unwrap()).unwrap();
+        assert_eq!(cell.runs.len(), 2);
+        assert!(cell.slanted.iter().all(|&s| !s));
+    }
+
+    #[test]
+    fn bright_peak_is_the_upper_decile_of_cell_peaks() {
+        let seg = |peak: f64| {
+            let mut s = seg_with(4, 13);
+            s.peak = peak;
+            Some(s)
+        };
+        assert_eq!(bright_peak(&[]), None);
+        // 10 cells: eight white, two dim zeros
+        let row = |a: f64, b: f64| [seg(255.0), seg(a), seg(255.0), seg(b), seg(255.0), None];
+        let rows = [row(170.0, 255.0), row(255.0, 169.0), row(255.0, 255.0)];
+        let b = bright_peak(&rows[..2]).unwrap();
+        assert_eq!(b, 255.0);
+        assert!(170.0 < DIM_RATIO * b && 230.0 > DIM_RATIO * b);
+        // a whole board drawn darker keeps zeros dim relative to it
+        let dark = [[seg(180.0), seg(120.0), seg(180.0), seg(180.0), None, None]];
+        assert!(120.0 < DIM_RATIO * bright_peak(&dark).unwrap());
+    }
+
     /// One lone glyph cell whose canvas is exactly template `c`, with `ink`
     /// binarised pixels at text height `dh`. Shape match is perfect, so only
     /// the ink floor can flag it.
@@ -1438,12 +2122,21 @@ mod tests {
                 e: 1,
                 kind: RunKind::Enum(vec![vec![0]]),
             }],
+            pieces: vec![(0, 1)],
+            slanted: vec![false],
+            strip: Plane::zeros(1, CH),
+            sc: 1.0,
+            colsum: vec![0],
             v: tpl.t[c].to_vec(),
             mass: vec![ink],
             ar: vec![(tpl.ar_lo[c] + tpl.ar_hi[c]) / 2.0],
             total_mass: ink,
             dh,
             rival: 0.0,
+            peak: 255.0,
+            ink_left: false,
+            piece_run: vec![0],
+            sep_after: vec![],
         }
     }
 
@@ -1455,7 +2148,12 @@ mod tests {
             for k in [0, 5] {
                 // A dim 0 mostly wiped out by compression: a clean '1' shape
                 // with 0.14 dh^2 of ink. Shape margin alone would pass it.
-                let wiped = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.14 * area)), tpl, k);
+                let wiped = read_cell(
+                    Some(&lone_glyph_cell(tpl, 1, dh, 0.14 * area)),
+                    tpl,
+                    k,
+                    false,
+                );
                 assert_eq!(wiped.value, Some(1));
                 assert!(
                     wiped.margin >= SUSPECT_CONF as f64,
@@ -1467,7 +2165,12 @@ mod tests {
                     "{h} {k}: a wiped 0 read as 1 must be flagged"
                 );
                 // The thinnest correct lone '1' measured on real cells, 0.17 dh^2.
-                let thin = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.17 * area)), tpl, k);
+                let thin = read_cell(
+                    Some(&lone_glyph_cell(tpl, 1, dh, 0.17 * area)),
+                    tpl,
+                    k,
+                    false,
+                );
                 assert_eq!(thin.value, Some(1));
                 assert!(
                     !thin.flagged,
@@ -1576,7 +2279,19 @@ mod tests {
     /// The calibration constants, hashed with the output so a change to any
     /// of them needs a bump even if no fixture cell moves.
     fn calibration_params() -> Vec<f64> {
-        let mut p = vec![SUSPECT_CONF as f64, PM_REF, MIN_INK_PER_GLYPH];
+        let mut p = vec![
+            SUSPECT_CONF as f64,
+            PM_REF,
+            MIN_INK_PER_GLYPH,
+            PAIR_TYP,
+            PAIR_FLOOR,
+            PAIR_MASK,
+            DIM_RATIO,
+            SLANT_MAX_INK as f64,
+            SLANT_EXTENT_INK as f64,
+            SEP_GAP_K,
+        ];
+        p.extend_from_slice(&SLANTS);
         p.extend_from_slice(&TYP_1440);
         p.extend_from_slice(&TYP_1080);
         p
@@ -1631,6 +2346,8 @@ mod tests {
         ("cv-v1", 0xa20c_600c_992e_6cd5),
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
         ("cv-v3", 0xac0e_b782_9e66_c19a),
+        ("cv-v4", 0xb51b_4c1f_19e1_1c65),
+        ("cv-v5", 0xa751_b3dc_413b_764a),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
@@ -1653,7 +2370,7 @@ mod tests {
         ("touching", 0.9020),
         ("noisy", 0.8726),
         ("odd_noisy", 0.8024),
-        ("small_touching", 0.8350),
+        ("small_touching", 0.8382),
         ("tiny_noisy", 0.7728),
     ];
 
@@ -1734,6 +2451,95 @@ mod tests {
                 assert!((0.0..=1.0).contains(&c.confidence), "{c:?}");
             }
         }
+    }
+
+    /// Wide gap (just over GAP_K*hmax) between a leading 1 and "148" joins as a
+    /// thousands separator; ink left of a picked-only-"148" group forces suspect.
+    #[test]
+    fn separator_gap_joins_thousands_and_ink_left_flags() {
+        let hmax = 11usize;
+        let gap_max = (GAP_K * hmax as f64).max(2.0);
+        let gap = (gap_max + 0.5).ceil() as usize; // just over gap_max, under SEP_GAP_K
+        assert!(gap as f64 > gap_max && (gap as f64) <= SEP_GAP_K * hmax as f64);
+
+        // Cell: leading 1, separator gap, then 148. Digit band rows 2..13.
+        let (w, h) = (80usize, 16usize);
+        let mut ink = Plane::zeros(w, h);
+        let paint = |ink: &mut Plane, x0: usize, x1: usize| {
+            for y in 2..13 {
+                for x in x0..x1 {
+                    ink.d[y * w + x] = 0.9;
+                }
+            }
+        };
+        // leading 1 at x=10..14
+        paint(&mut ink, 10, 14);
+        let rest = 14 + gap;
+        // "148" blobs
+        paint(&mut ink, rest, rest + 4); // 1
+        paint(&mut ink, rest + 6, rest + 14); // 4
+        paint(&mut ink, rest + 15, rest + 23); // 8
+
+        let seg = segment(ink.clone(), 200.0).expect("segment");
+        assert!(
+            !seg.ink_left,
+            "joined group should include the leading 1, ink_left={}",
+            seg.ink_left
+        );
+        assert_eq!(seg.runs.len(), 4, "runs={:?}", seg.runs);
+        assert_eq!(seg.sep_after, vec![true, false, false]);
+
+        // A gap bigger than SEP_GAP_K*hmax does not join: the 1 far left is
+        // ink left of the picked group and must force the guard.
+        let mut far = Plane::zeros(w, h);
+        paint(&mut far, 2, 6); // left ink
+        paint(&mut far, 50, 54);
+        paint(&mut far, 56, 64);
+        paint(&mut far, 65, 73);
+        let seg2 = segment(far, 200.0).expect("segment far");
+        assert!(seg2.ink_left, "left ink must force the guard");
+        assert!(seg2.sep_after.iter().all(|&x| !x));
+
+        // prepare keeps the bridge marks for the reader
+        let cell = prepare_cell(seg).expect("prepare");
+        assert!(!cell.ink_left);
+        assert_eq!(cell.sep_after, vec![true, false, false]);
+        assert_eq!(cell.piece_run.len(), cell.pieces.len());
+    }
+
+    #[test]
+    fn is_separator_gap_width_and_bottom_comma() {
+        let hmax = 10;
+        let gap_max = (GAP_K * hmax as f64).max(2.0);
+        // width path
+        assert!(is_separator_gap(gap_max + 1.0, hmax, &[], 1, 1, 0, 0));
+        assert!(!is_separator_gap(
+            SEP_GAP_K * hmax as f64 + 1.0,
+            hmax,
+            &[],
+            1,
+            1,
+            0,
+            0
+        ));
+        // bottom-heavy comma ink in a wider gap
+        let (w, h) = (20usize, 12usize);
+        let mut b = vec![false; w * h];
+        for y in 8..12 {
+            for x in 5..8 {
+                b[y * w + x] = true;
+            }
+        }
+        let wide = SEP_GAP_K * hmax as f64 + 3.0;
+        assert!(is_separator_gap(wide, hmax, &b, w, h, 5, 8));
+        // top-heavy is not a comma
+        let mut top = vec![false; w * h];
+        for y in 0..4 {
+            for x in 5..8 {
+                top[y * w + x] = true;
+            }
+        }
+        assert!(!is_separator_gap(wide, hmax, &top, w, h, 5, 8));
     }
 
     #[test]
