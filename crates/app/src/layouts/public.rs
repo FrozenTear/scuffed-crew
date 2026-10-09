@@ -29,18 +29,37 @@ fn disclosure_focus_id(mobile: bool, more: bool, account: bool) -> Option<&'stat
     }
 }
 
+/// Hamburger regains focus when the mobile menu closes.
+/// Already-closed stays `None` so a desktop click does not steal focus.
+fn mobile_menu_close_focus(was_open: bool) -> Option<&'static str> {
+    if was_open { Some(NAV_TOGGLE_ID) } else { None }
+}
+
+/// Move focus to the hamburger first, then mark the menu closed.
+/// The next render sets `inert`. Doing it in this order means the closed
+/// overlay is not `aria-hidden` over a link that still holds focus.
+fn close_mobile_nav(mut mobile_open: Signal<bool>) {
+    let was_open = mobile_open();
+    if let Some(id) = mobile_menu_close_focus(was_open) {
+        focus_element(id);
+    }
+    if was_open {
+        mobile_open.set(false);
+    }
+}
+
 fn close_disclosures(
-    mut mobile_open: Signal<bool>,
+    mobile_open: Signal<bool>,
     mut more_open: Signal<bool>,
     mut account_open: Signal<bool>,
 ) {
-    let focus = disclosure_focus_id(mobile_open(), more_open(), account_open());
-    mobile_open.set(false);
-    more_open.set(false);
-    account_open.set(false);
-    if let Some(id) = focus {
+    if mobile_open() {
+        close_mobile_nav(mobile_open);
+    } else if let Some(id) = disclosure_focus_id(false, more_open(), account_open()) {
         focus_element(id);
     }
+    more_open.set(false);
+    account_open.set(false);
 }
 
 /// Map catalog id → public route. Unknown ids are skipped.
@@ -546,7 +565,7 @@ pub fn PublicLayout() -> Element {
                 to: Route::Home {},
                 class: "nav-mark",
                 onclick: move |_| {
-                    mobile_open.set(false);
+                    close_mobile_nav(mobile_open);
                     more_open.set(false);
                     account_open.set(false);
                 },
@@ -675,7 +694,7 @@ pub fn PublicLayout() -> Element {
                                         });
                                     });
                                     account_open.set(false);
-                                    mobile_open.set(false);
+                                    close_mobile_nav(mobile_open);
                                 },
                                 "Log out"
                             }
@@ -703,12 +722,12 @@ pub fn PublicLayout() -> Element {
                     aria_expanded: if mobile_open() { "true" } else { "false" },
                     aria_controls: NAV_MENU_ID,
                     onclick: move |_| {
-                        let closing = mobile_open();
-                        mobile_open.toggle();
                         more_open.set(false);
                         account_open.set(false);
-                        if closing {
-                            focus_element(NAV_TOGGLE_ID);
+                        if mobile_open() {
+                            close_mobile_nav(mobile_open);
+                        } else {
+                            mobile_open.set(true);
                         }
                     },
                     span {}
@@ -742,24 +761,21 @@ pub fn PublicLayout() -> Element {
                 r#type: "button",
                 tabindex: "-1",
                 aria_label: "Close menu",
-                onclick: move |_| {
-                    mobile_open.set(false);
-                    focus_element(NAV_TOGGLE_ID);
-                },
+                onclick: move |_| close_mobile_nav(mobile_open),
             }
             div { class: "nav-overlay-sheet",
             for link in primary_links.iter() {
                 Link {
                     key: "m-{link.id}",
                     to: link.route.clone(),
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "{link.label}"
                 }
             }
             Link {
                 to: Route::Apply {},
                 class: "nav-cta",
-                onclick: move |_| mobile_open.set(false),
+                onclick: move |_| close_mobile_nav(mobile_open),
                 "Apply"
             }
             if !more_links.is_empty() {
@@ -768,7 +784,7 @@ pub fn PublicLayout() -> Element {
                     Link {
                         key: "mm-{link.id}",
                         to: link.route.clone(),
-                        onclick: move |_| mobile_open.set(false),
+                        onclick: move |_| close_mobile_nav(mobile_open),
                         "{link.label}"
                     }
                 }
@@ -778,33 +794,33 @@ pub fn PublicLayout() -> Element {
                 if is_officer {
                     Link {
                         to: Route::AdminDashboard {},
-                        onclick: move |_| mobile_open.set(false),
+                        onclick: move |_| close_mobile_nav(mobile_open),
                         "Admin"
                     }
                 }
                 Link {
                     to: Route::ProfileSettings {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Edit Profile"
                 }
                 Link {
                     to: Route::IdentitySettings {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Settings"
                 }
                 Link {
                     to: Route::MyReports {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "My reports"
                 }
                 Link {
                     to: Route::DmInbox {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "DMs"
                 }
                 Link {
                     to: Route::TeamChat {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Chat"
                 }
                 button {
@@ -817,14 +833,14 @@ pub fn PublicLayout() -> Element {
                                 loading: false,
                             });
                         });
-                        mobile_open.set(false);
+                        close_mobile_nav(mobile_open);
                     },
                     "Log out"
                 }
             } else if !loading {
                 Link {
                     to: Route::Login {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Login"
                 }
             }
@@ -943,5 +959,38 @@ mod tests {
             Some(ACCOUNT_TOGGLE_ID)
         );
         assert_eq!(disclosure_focus_id(true, true, true), Some(NAV_TOGGLE_ID));
+    }
+
+    #[test]
+    fn my_reports_closes_the_mobile_menu_through_one_helper() {
+        assert_eq!(mobile_menu_close_focus(true), Some(NAV_TOGGLE_ID));
+        assert_eq!(mobile_menu_close_focus(false), None);
+        let src = include_str!("public.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
+        assert_eq!(
+            prod.matches("mobile_open.set(false)").count(),
+            1,
+            "only close_mobile_nav may close the menu"
+        );
+        let close_at = prod.find("fn close_mobile_nav").expect("close_mobile_nav");
+        let body = &prod[close_at..];
+        let end = body.find("\nfn ").expect("next fn");
+        let body = &body[..end];
+        let focus_at = body.find("focus_element").expect("focus");
+        let set_at = body.find("mobile_open.set(false)").expect("set");
+        assert!(
+            focus_at < set_at,
+            "focus the hamburger before the menu is marked closed: {body}"
+        );
+        let sheet = prod
+            .split("nav-overlay-sheet")
+            .nth(2)
+            .expect("mobile sheet");
+        assert!(sheet.contains("My reports"));
+        assert!(sheet.contains("close_mobile_nav(mobile_open)"));
+        assert!(
+            !sheet.contains("mobile_open.set(false)"),
+            "My reports must not add another mobile_open.set(false)"
+        );
     }
 }

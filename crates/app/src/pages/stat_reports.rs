@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::components::{AccessDenied, is_http_status};
 use crate::state::auth::AuthState;
 
+use super::login::remember_login_return;
+
 /// `GET /api/stat-reports` body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StatReportList {
@@ -72,7 +74,8 @@ pub(crate) struct StatReportWithdrawn {
 }
 
 pub(crate) const COPY_LOADING_MINE: &str = "Loading your reports.";
-pub(crate) const COPY_ERROR_MINE: &str = "Could not load your reports.";
+pub(crate) const COPY_ERROR_MINE: &str =
+    "Something went wrong loading your reports. Try again in a moment.";
 pub(crate) const COPY_EMPTY_MINE: &str = "You have no reports.";
 pub(crate) const COPY_SIGN_IN: &str = "Sign in to view your reports.";
 pub(crate) const COPY_MEMBERSHIP: &str = "You need to be an org member to view your reports.";
@@ -82,7 +85,8 @@ pub(crate) const COPY_INTRO_MINE: &str = "Reports you sent from the stat tracker
 pub(crate) const COPY_CHECKING: &str = "Checking session.";
 pub(crate) const COPY_FORBIDDEN: &str = "You need officer permissions to access the admin panel.";
 pub(crate) const COPY_LOADING_ALL: &str = "Loading reports.";
-pub(crate) const COPY_ERROR_ALL: &str = "Could not load reports.";
+pub(crate) const COPY_ERROR_ALL: &str =
+    "Something went wrong loading reports. Try again in a moment.";
 pub(crate) const COPY_EMPTY_ALL: &str = "No reports yet.";
 pub(crate) const COPY_INTRO_ALL: &str = "Tracker reports from members. Download saves the zip. This page does not show what is inside a report.";
 pub(crate) const COPY_DELETED: &str = "Report deleted.";
@@ -94,9 +98,13 @@ pub(crate) const COPY_NO_DELETION: &str = "No deletion date";
 pub(crate) const COPY_DELETION_MISSING: &str = "Deletion date missing";
 pub(crate) const COPY_UNUSABLE: &str = "This report cannot be changed from this page.";
 pub(crate) const COPY_DISABLED: &str = "Reports are off right now.";
+pub(crate) const COPY_RATE_LIMIT_WAIT: &str = "Too many requests. Try again in a moment.";
+pub(crate) const COPY_OFFICER_SIGN_IN: &str = "Sign in to view reports.";
+pub(crate) const OFFICER_REPORTS_PATH: &str = "/admin/reports";
 
 pub(crate) const MY_REPORTS_RETRY_ID: &str = "my-reports-retry";
 pub(crate) const OFFICER_REPORTS_RETRY_ID: &str = "officer-reports-retry";
+pub(crate) const CONFIRM_DIALOG_ID: &str = "report-confirm-dialog";
 pub(crate) const CONFIRM_FORM_ID: &str = "report-confirm-form";
 pub(crate) const CONFIRM_CANCEL_ID: &str = "report-confirm-cancel";
 pub(crate) const CONFIRM_SUBMIT_ID: &str = "report-confirm-submit";
@@ -169,6 +177,7 @@ pub(crate) enum OfficerScreen {
     Empty,
     Ready,
     Disabled,
+    SignIn,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -181,6 +190,8 @@ pub(crate) enum ReportIntent {
 pub(crate) struct PendingReportAction {
     pub intent: ReportIntent,
     pub report_id: String,
+    /// Row button that opened the dialog. Focus returns here when it closes.
+    pub return_focus_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +216,7 @@ impl ConfirmGate {
             self.pending = Some(PendingReportAction {
                 intent,
                 report_id: report_id.to_string(),
+                return_focus_id: opener_focus_id(intent, report_id),
             });
         }
     }
@@ -233,6 +245,23 @@ pub(crate) fn is_report_id(id: &str) -> bool {
 
 pub(crate) fn control_id(kind: &str, report_id: &str) -> String {
     format!("report-{kind}-{report_id}")
+}
+
+pub(crate) fn opener_focus_id(intent: ReportIntent, report_id: &str) -> String {
+    let kind = match intent {
+        ReportIntent::Delete => "delete",
+        ReportIntent::Withdraw => "withdraw",
+    };
+    control_id(kind, report_id)
+}
+
+/// Escape closes an open confirm dialog. A busy request keeps the dialog up.
+pub(crate) fn confirm_escape_closes(key: &str, open: bool, busy: bool) -> bool {
+    open && !busy && key == "Escape"
+}
+
+pub(crate) fn login_return_href(path: &str) -> String {
+    format!("/login?return={path}")
 }
 
 pub(crate) fn mutation_for(intent: ReportIntent, report_id: &str) -> Option<ReportMutation> {
@@ -358,12 +387,62 @@ pub(crate) fn without_expired(
         .collect()
 }
 
-pub(crate) fn error_message(lead: &str, detail: &str) -> String {
-    let detail = detail.trim();
-    if detail.is_empty() {
-        lead.to_string()
+/// Seconds to wait on a 429. JSON `retry_after` wins. The header is the fallback.
+/// A plain-text body with no usable wait returns `None`.
+pub(crate) fn retry_after_seconds(body: &str, header_seconds: Option<u64>) -> Option<u64> {
+    json_retry_after(body).or_else(|| header_seconds.filter(|seconds| *seconds >= 1))
+}
+
+fn json_retry_after(body: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error").and_then(|error| error.as_str()) != Some("rate_limited") {
+        return None;
+    }
+    match value.get("retry_after")? {
+        serde_json::Value::Number(number) => number.as_u64().filter(|seconds| *seconds >= 1),
+        serde_json::Value::String(text) => text
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds >= 1),
+        _ => None,
+    }
+}
+
+pub(crate) fn rate_limit_sentence(seconds: Option<u64>) -> String {
+    match seconds {
+        Some(seconds) => format!("Too many requests. Try again in {seconds} seconds."),
+        None => COPY_RATE_LIMIT_WAIT.to_string(),
+    }
+}
+
+/// Load failures stay in plain words. The raw client string is not shown.
+pub(crate) fn visible_load_error(
+    fallback: &str,
+    detail: &str,
+    body: &str,
+    header_seconds: Option<u64>,
+) -> String {
+    if is_http_status(detail, 429) {
+        rate_limit_sentence(retry_after_seconds(body, header_seconds))
     } else {
-        format!("{lead} {detail}")
+        fallback.to_string()
+    }
+}
+
+pub(crate) fn mutation_failure_copy(
+    intent: ReportIntent,
+    detail: &str,
+    body: &str,
+    header_seconds: Option<u64>,
+) -> String {
+    if is_http_status(detail, 429) {
+        rate_limit_sentence(retry_after_seconds(body, header_seconds))
+    } else {
+        match intent {
+            ReportIntent::Delete => COPY_DELETE_FAILED.to_string(),
+            ReportIntent::Withdraw => COPY_WITHDRAW_FAILED.to_string(),
+        }
     }
 }
 
@@ -430,6 +509,14 @@ pub(crate) fn officer_screen(
 ) -> OfficerScreen {
     if auth.loading {
         return OfficerScreen::Checking;
+    }
+    if let Some(err) = error {
+        if is_http_status(err, 401) {
+            return OfficerScreen::SignIn;
+        }
+        if is_http_status(err, 403) {
+            return OfficerScreen::Forbidden;
+        }
     }
     if !auth.is_officer_or_above() {
         return OfficerScreen::Forbidden;
@@ -509,6 +596,9 @@ fn static_copy() -> &'static [&'static str] {
         COPY_DELETION_MISSING,
         COPY_UNUSABLE,
         COPY_DISABLED,
+        COPY_RATE_LIMIT_WAIT,
+        COPY_OFFICER_SIGN_IN,
+        "Too many requests. Try again in 12 seconds.",
         "My reports",
         "Reports",
         "Kept for training",
@@ -549,6 +639,8 @@ fn labeled_control(id: &str, label: &str, button: Element) -> Element {
 pub(crate) fn MyReportsBody(
     screen: MemberScreen,
     error_detail: String,
+    #[props(default)] error_body: String,
+    #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
     pending: Option<PendingReportAction>,
     busy: bool,
@@ -578,7 +670,7 @@ pub(crate) fn MyReportsBody(
                 },
                 MemberScreen::Inactive => rsx! { p { class: "reports-status", "{COPY_INACTIVE}" } },
                 MemberScreen::Error => rsx! {
-                    p { class: "reports-status reports-error", "{error_message(COPY_ERROR_MINE, &error_detail)}" }
+                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_MINE, &error_detail, &error_body, retry_after_seconds)}" }
                     {retry_button(MY_REPORTS_RETRY_ID, on_retry)}
                 },
                 MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
@@ -701,6 +793,8 @@ fn confirm_dialog(
             aria_labelledby: "report-confirm-title",
             onclick: move |_| on_cancel.call(()),
             div {
+                id: CONFIRM_DIALOG_ID,
+                tabindex: "-1",
                 class: "report-dialog",
                 onclick: move |evt| evt.stop_propagation(),
                 h2 { id: "report-confirm-title", "{title}" }
@@ -756,6 +850,8 @@ fn retry_button(id: &'static str, on_retry: EventHandler<()>) -> Element {
 pub(crate) fn OfficerReportsBody(
     screen: OfficerScreen,
     error_detail: String,
+    #[props(default)] error_body: String,
+    #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
     #[props(default)] on_retry: EventHandler<()>,
 ) -> Element {
@@ -776,8 +872,20 @@ pub(crate) fn OfficerReportsBody(
                 div { class: "reports-page",
                     h1 { "Reports" }
                     p { class: "reports-intro", "{COPY_INTRO_ALL}" }
-                    p { class: "reports-status reports-error", "{error_message(COPY_ERROR_ALL, &error_detail)}" }
+                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_ALL, &error_detail, &error_body, retry_after_seconds)}" }
                     {retry_button(OFFICER_REPORTS_RETRY_ID, on_retry)}
+                }
+            },
+            OfficerScreen::SignIn => rsx! {
+                div { class: "reports-page",
+                    h1 { "Reports" }
+                    p { class: "reports-status", "{COPY_OFFICER_SIGN_IN}" }
+                    a {
+                        href: "{login_return_href(OFFICER_REPORTS_PATH)}",
+                        class: "report-btn",
+                        onclick: move |_| remember_login_return(OFFICER_REPORTS_PATH),
+                        "Sign in"
+                    }
                 }
             },
             OfficerScreen::Empty => rsx! {
@@ -1247,6 +1355,7 @@ mod tests {
                     pending: Some(PendingReportAction {
                         intent: ReportIntent::Delete,
                         report_id: REPORT_A.into(),
+                        return_focus_id: opener_focus_id(ReportIntent::Delete, REPORT_A),
                     }),
                     busy: false,
                 }
@@ -1322,9 +1431,10 @@ mod tests {
         let failed_html = html_of(failed);
         assert!(failed_html.contains(COPY_ERROR_MINE), "{failed_html}");
         assert!(
-            failed_html.contains("HTTP error 500: Internal error"),
+            !failed_html.contains("HTTP error 500: Internal error"),
             "{failed_html}"
         );
+        assert!(!failed_html.contains("HTTP error"), "{failed_html}");
         assert_labeled(&failed_html, MY_REPORTS_RETRY_ID, "retry");
         let signed_out_html = html_of(signed_out);
         assert!(signed_out_html.contains(COPY_SIGN_IN), "{signed_out_html}");
@@ -1375,12 +1485,217 @@ mod tests {
         );
     }
 
-    fn reports_disabled_text() -> String {
-        ClientError::Http {
-            status: 503,
-            body: r#"{"error":"reports_disabled"}"#.into(),
+    #[test]
+    fn load_errors_stay_plain_and_rate_limits_name_the_wait() {
+        let raw = "HTTP error 500: Internal error";
+        let mine = visible_load_error(COPY_ERROR_MINE, raw, "", None);
+        assert_eq!(mine, COPY_ERROR_MINE);
+        assert!(!mine.contains("HTTP error"));
+        assert!(!mine.contains("Internal error"));
+        let officer = visible_load_error(COPY_ERROR_ALL, raw, r#"{"error":"boom"}"#, None);
+        assert_eq!(officer, COPY_ERROR_ALL);
+        assert!(!officer.contains("boom"));
+
+        let json = r#"{"error":"rate_limited","retry_after":12}"#;
+        let from_json = visible_load_error(
+            COPY_ERROR_MINE,
+            "HTTP error 429: rate_limited",
+            json,
+            Some(99),
+        );
+        assert_eq!(from_json, "Too many requests. Try again in 12 seconds.");
+        let from_header = visible_load_error(
+            COPY_ERROR_ALL,
+            "HTTP error 429: rate_limited",
+            "slow down",
+            Some(8),
+        );
+        assert_eq!(from_header, "Too many requests. Try again in 8 seconds.");
+        assert!(!from_header.contains("slow down"));
+        let missing = visible_load_error(
+            COPY_ERROR_MINE,
+            "HTTP error 429: rate_limited",
+            "slow down",
+            None,
+        );
+        assert_eq!(missing, COPY_RATE_LIMIT_WAIT);
+        assert!(!missing.contains("slow down"));
+        assert!(!missing.contains("HTTP error"));
+        let header_only = retry_after_seconds("not json", Some(4));
+        assert_eq!(header_only, Some(4));
+        assert_eq!(
+            retry_after_seconds(r#"{"error":"rate_limited"}"#, Some(4)),
+            Some(4)
+        );
+        assert_eq!(
+            mutation_failure_copy(
+                ReportIntent::Delete,
+                "HTTP error 500: Internal error",
+                r#"{"error":"Internal error"}"#,
+                None
+            ),
+            COPY_DELETE_FAILED
+        );
+        assert_eq!(
+            mutation_failure_copy(
+                ReportIntent::Withdraw,
+                "HTTP error 429: rate_limited",
+                json,
+                None
+            ),
+            "Too many requests. Try again in 12 seconds."
+        );
+        assert_plain(&from_json);
+        assert_plain(&missing);
+
+        fn limited() -> Element {
+            rsx! {
+                MyReportsBody {
+                    screen: MemberScreen::Error,
+                    error_detail: String::from("HTTP error 429: rate_limited"),
+                    error_body: String::from(r#"{"error":"rate_limited","retry_after":12}"#),
+                    retry_after_seconds: Some(99),
+                    rows: vec![row(REPORT_A, false, None)],
+                    pending: None,
+                    busy: false,
+                }
+            }
         }
-        .to_string()
+        let html = html_of(limited);
+        assert!(
+            html.contains("Too many requests. Try again in 12 seconds."),
+            "{html}"
+        );
+        assert!(!html.contains(REPORT_A), "{html}");
+        assert!(!html.contains(COPY_EMPTY_MINE), "{html}");
+        assert!(!html.contains("rate_limited"), "{html}");
+        assert!(!html.contains("<table"), "{html}");
+        assert_plain(&html);
+    }
+
+    #[test]
+    fn officer_401_goes_to_sign_in_and_403_is_no_access() {
+        let officer = auth(Some(OrgRole::Officer), false);
+        let expired = "HTTP error 401: Unauthorized";
+        let denied = "HTTP error 403: Forbidden";
+        assert_eq!(
+            officer_screen(&officer, Some(expired), Some(2)),
+            OfficerScreen::SignIn
+        );
+        assert_eq!(
+            officer_screen(&officer, Some(denied), Some(0)),
+            OfficerScreen::Forbidden
+        );
+        assert_eq!(
+            officer_screen(&auth(Some(OrgRole::Member), false), Some(denied), Some(1)),
+            OfficerScreen::Forbidden
+        );
+        assert_eq!(
+            officer_screen(&auth(None, false), None, Some(1)),
+            OfficerScreen::Forbidden
+        );
+        assert_eq!(
+            login_return_href(OFFICER_REPORTS_PATH),
+            "/login?return=/admin/reports"
+        );
+        assert_eq!(
+            super::super::login::safe_return_route(OFFICER_REPORTS_PATH),
+            Some(crate::routes::Route::AdminReports {})
+        );
+        assert_eq!(
+            super::super::login::route_after_sign_in(
+                true,
+                Some(crate::routes::Route::AdminReports {})
+            ),
+            crate::routes::Route::AdminReports {}
+        );
+        assert_eq!(
+            super::super::login::route_after_sign_in(true, None),
+            crate::routes::Route::Home {}
+        );
+        assert!(
+            super::super::login::safe_return_route("https://evil.example/admin/reports").is_none()
+        );
+        assert!(super::super::login::safe_return_route("//evil.example").is_none());
+
+        fn signed_out() -> Element {
+            rsx! {
+                OfficerReportsBody {
+                    screen: OfficerScreen::SignIn,
+                    error_detail: String::from("HTTP error 401: Unauthorized"),
+                    rows: vec![row(REPORT_A, false, None)],
+                }
+            }
+        }
+        let html = html_of(signed_out);
+        assert!(html.contains(COPY_OFFICER_SIGN_IN), "{html}");
+        assert!(
+            html.contains("href=\"/login?return=/admin/reports\""),
+            "{html}"
+        );
+        assert!(html.contains("Sign in"), "{html}");
+        assert!(!html.contains(REPORT_A), "{html}");
+        assert!(!html.contains("HTTP error"), "{html}");
+        assert!(!html.contains(COPY_EMPTY_ALL), "{html}");
+        assert_plain(&html);
+        assert_eq!(
+            COPY_FORBIDDEN,
+            "You need officer permissions to access the admin panel."
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_focus_returns_to_the_row_button() {
+        let mut gate = ConfirmGate::default();
+        gate.arm(ReportIntent::Delete, REPORT_A);
+        let pending = gate.pending().unwrap();
+        assert_eq!(
+            pending.return_focus_id,
+            opener_focus_id(ReportIntent::Delete, REPORT_A)
+        );
+        assert_eq!(CONFIRM_DIALOG_ID, "report-confirm-dialog");
+        assert!(confirm_escape_closes("Escape", true, false));
+        assert!(!confirm_escape_closes("Escape", true, true));
+        assert!(!confirm_escape_closes("Enter", true, false));
+        assert!(!confirm_escape_closes("Escape", false, false));
+        let return_id = gate.pending().unwrap().return_focus_id.clone();
+        gate.cancel();
+        assert!(gate.pending().is_none());
+        assert_eq!(return_id, control_id("delete", REPORT_A));
+
+        gate.arm(ReportIntent::Withdraw, REPORT_B);
+        assert_eq!(
+            gate.pending().unwrap().return_focus_id,
+            control_id("withdraw", REPORT_B)
+        );
+
+        fn open() -> Element {
+            rsx! {
+                MyReportsBody {
+                    screen: MemberScreen::Ready,
+                    error_detail: String::new(),
+                    rows: vec![row(REPORT_A, true, None)],
+                    pending: Some(PendingReportAction {
+                        intent: ReportIntent::Delete,
+                        report_id: REPORT_A.into(),
+                        return_focus_id: opener_focus_id(ReportIntent::Delete, REPORT_A),
+                    }),
+                    busy: false,
+                }
+            }
+        }
+        let html = html_of(open);
+        assert!(html.contains("id=\"report-confirm-dialog\""), "{html}");
+        assert!(html.contains("tabindex=\"-1\""), "{html}");
+        assert!(
+            html.contains(&format!("id=\"{}\"", control_id("delete", REPORT_A))),
+            "{html}"
+        );
+        assert_plain(&html);
+    }
+
+    fn reports_disabled_text() -> String {
+        ClientError::http(503, r#"{"error":"reports_disabled"}"#, None).to_string()
     }
 
     #[test]
@@ -1390,25 +1705,13 @@ mod tests {
         assert_eq!(text, "HTTP error 503: reports_disabled");
         assert!(is_reports_disabled(&text));
         assert!(!is_reports_disabled(
-            &ClientError::Http {
-                status: 500,
-                body: r#"{"error":"reports_disabled"}"#.into(),
-            }
-            .to_string()
+            &ClientError::http(500, r#"{"error":"reports_disabled"}"#, None).to_string()
         ));
         assert!(!is_reports_disabled(
-            &ClientError::Http {
-                status: 503,
-                body: r#"{"error":"unavailable"}"#.into(),
-            }
-            .to_string()
+            &ClientError::http(503, r#"{"error":"unavailable"}"#, None).to_string()
         ));
         assert!(!is_reports_disabled(
-            &ClientError::Http {
-                status: 503,
-                body: "offline".into(),
-            }
-            .to_string()
+            &ClientError::http(503, "offline", None).to_string()
         ));
 
         let member = auth(Some(OrgRole::Member), false);
@@ -1662,6 +1965,7 @@ mod tests {
                     pending: Some(PendingReportAction {
                         intent: ReportIntent::Withdraw,
                         report_id: REPORT_A.into(),
+                        return_focus_id: opener_focus_id(ReportIntent::Withdraw, REPORT_A),
                     }),
                     busy: false,
                 }

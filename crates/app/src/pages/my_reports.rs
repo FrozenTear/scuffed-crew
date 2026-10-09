@@ -3,35 +3,60 @@
 use chrono::Utc;
 use dioxus::prelude::*;
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 
 use crate::components::{Toast, use_toast};
-use crate::hooks::use_api;
+use crate::layouts::{focus_element, use_document_keydown};
 use crate::state::use_auth;
 
 use super::stat_reports::{
-    COPY_DELETE_FAILED, COPY_DELETED, COPY_WITHDRAW_FAILED, COPY_WITHDRAWN, ConfirmGate,
-    MyReportsBody, PreparedRows, ReportIntent, StatReportList, StatReportWithdrawn,
-    WithdrawTrainingBody, apply_own_filter, apply_reports_switch, is_reports_disabled,
-    member_screen, prepare_member_rows, without_expired,
+    CONFIRM_DIALOG_ID, COPY_DELETED, COPY_WITHDRAWN, ConfirmGate, MyReportsBody, PreparedRows,
+    ReportIntent, StatReportList, StatReportWithdrawn, WithdrawTrainingBody, apply_own_filter,
+    apply_reports_switch, confirm_escape_closes, is_reports_disabled, member_screen,
+    mutation_failure_copy, prepare_member_rows, without_expired,
 };
 
 #[component]
 pub fn MyReports() -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
-    let reports = use_api::<StatReportList>("/api/stat-reports");
+    let mut refresh = use_signal(|| 0u64);
+    let mut list_error = use_signal(|| None::<ClientError>);
+    let reports = use_resource(move || async move {
+        let _generation = refresh();
+        match ApiClient::web()
+            .fetch::<StatReportList>("/api/stat-reports")
+            .await
+        {
+            Ok(list) => {
+                list_error.set(None);
+                Some(list)
+            }
+            Err(err) => {
+                list_error.set(Some(err));
+                None
+            }
+        }
+    });
     let me = use_resource(|| async move { ApiClient::web().get_me().await });
     let mut gate = use_signal(ConfirmGate::default);
     let mut busy = use_signal(|| false);
     let mut switched_off = use_signal(|| false);
 
     let auth_now = auth();
-    let error = reports.error.read().as_ref().cloned();
-    let list = {
-        let data = reports.data.read();
-        data.as_ref().and_then(|inner| inner.clone())
+    let (error_detail, error_body, retry_after_seconds) = {
+        let current = list_error.read();
+        match current.as_ref() {
+            Some(err) => (
+                err.to_string(),
+                err.http_body().unwrap_or("").to_string(),
+                err.retry_after_header(),
+            ),
+            None => (String::new(), String::new(), None),
+        }
     };
+    let error = (!error_detail.is_empty()).then(|| error_detail.clone());
+    let list = reports.read().clone().flatten();
     let (me_settled, member_id) = {
         let me_data = me.read();
         let settled = me_data.is_some();
@@ -64,6 +89,27 @@ pub fn MyReports() -> Element {
     };
     let pending = gate.read().pending().cloned();
 
+    use_effect(move || {
+        if gate.read().pending().is_some() {
+            focus_element(CONFIRM_DIALOG_ID);
+        }
+    });
+    use_document_keydown(move |evt| {
+        let open = gate.read().pending().is_some();
+        if !confirm_escape_closes(&evt.key(), open, busy()) {
+            return;
+        }
+        evt.prevent_default();
+        let return_id = gate
+            .read()
+            .pending()
+            .map(|action| action.return_focus_id.clone());
+        gate.write().cancel();
+        if let Some(id) = return_id {
+            focus_element(&id);
+        }
+    });
+
     let arm_delete = move |id: String| {
         if busy() {
             return;
@@ -77,20 +123,34 @@ pub fn MyReports() -> Element {
         gate.write().arm(ReportIntent::Withdraw, &id);
     };
     let on_cancel = move |_| {
-        if !busy() {
-            gate.write().cancel();
+        if busy() {
+            return;
+        }
+        let return_id = gate
+            .read()
+            .pending()
+            .map(|action| action.return_focus_id.clone());
+        gate.write().cancel();
+        if let Some(id) = return_id {
+            focus_element(&id);
         }
     };
     let on_confirm = move |_| {
         if busy() {
             return;
         }
+        let return_id = gate
+            .read()
+            .pending()
+            .map(|action| action.return_focus_id.clone());
         let mutation = gate.write().confirm();
+        if let Some(id) = return_id {
+            focus_element(&id);
+        }
         let Some(mutation) = mutation else {
             return;
         };
         busy.set(true);
-        let mut refresh = reports.refresh;
         spawn(async move {
             let client = ApiClient::web();
             let outcome = match mutation.intent {
@@ -119,17 +179,17 @@ pub fn MyReports() -> Element {
                     if is_reports_disabled(&text) {
                         switched_off.set(true);
                     } else {
-                        let lead = match mutation.intent {
-                            ReportIntent::Delete => COPY_DELETE_FAILED,
-                            ReportIntent::Withdraw => COPY_WITHDRAW_FAILED,
-                        };
-                        toast.show(Toast::error(format!("{lead} {text}")));
+                        toast.show(Toast::error(mutation_failure_copy(
+                            mutation.intent,
+                            &text,
+                            err.http_body().unwrap_or(""),
+                            err.retry_after_header(),
+                        )));
                     }
                 }
             }
         });
     };
-    let mut refresh = reports.refresh;
     let on_retry = move |_| {
         refresh += 1;
     };
@@ -138,6 +198,8 @@ pub fn MyReports() -> Element {
         MyReportsBody {
             screen,
             error_detail: error.unwrap_or_default(),
+            error_body,
+            retry_after_seconds,
             rows,
             pending,
             busy: busy(),

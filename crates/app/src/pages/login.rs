@@ -193,6 +193,78 @@ fn login_banner_from_search(search: &str) -> Option<&'static str> {
     login_error_banner(login_error_code(search))
 }
 
+/// Same-origin route to open after sign-in. Rejects off-site and login loops.
+pub(crate) fn safe_return_route(raw: &str) -> Option<Route> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || !raw.starts_with('/')
+        || raw.starts_with("//")
+        || raw.contains('\\')
+        || raw.contains("://")
+    {
+        return None;
+    }
+    let path = raw.split(['?', '#']).next().unwrap_or(raw);
+    match Route::from_str(path).ok()? {
+        Route::NotFound { .. } | Route::Login {} => None,
+        route => Some(route),
+    }
+}
+
+pub(crate) fn route_after_sign_in(is_member: bool, return_to: Option<Route>) -> Route {
+    if let Some(route) = return_to {
+        return route;
+    }
+    if is_member {
+        Route::Home {}
+    } else {
+        Route::Apply {}
+    }
+}
+
+fn login_return_from_search(search: &str) -> Option<String> {
+    let query = search.strip_prefix('?').unwrap_or(search);
+    let value = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "return").then_some(value)
+    })?;
+    let path = value.trim();
+    safe_return_route(path).map(|route| route.to_string())
+}
+
+fn login_return_from_browser_url(url: &str) -> Option<String> {
+    let without_hash = url.split_once('#').map(|(path, _)| path).unwrap_or(url);
+    let (path, search) = without_hash.split_once('?').unwrap_or((without_hash, ""));
+    if !is_login_route(path) {
+        return None;
+    }
+    login_return_from_search(search)
+}
+
+static LOGIN_RETURN: Mutex<Option<String>> = Mutex::new(None);
+
+fn login_return_lock() -> std::sync::MutexGuard<'static, Option<String>> {
+    LOGIN_RETURN.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Remember a safe in-app path. The next successful sign-in opens it once.
+pub(crate) fn remember_login_return(path: &str) {
+    if let Some(route) = safe_return_route(path) {
+        *login_return_lock() = Some(route.to_string());
+    }
+}
+
+fn remember_login_return_from_url(url: &str) {
+    if let Some(path) = login_return_from_browser_url(url) {
+        remember_login_return(&path);
+    }
+}
+
+pub(crate) fn take_login_return() -> Option<Route> {
+    let path = login_return_lock().take()?;
+    safe_return_route(&path)
+}
+
 /// Banner for a browser URL in the shape `history.current_route()` returns
 /// (`pathname` + `search` + `hash`). Only the login route is considered.
 ///
@@ -253,6 +325,7 @@ fn capture_login_banner_from_url(url: &str) {
         return;
     }
     *slot = LoginBannerSlot::Ready(login_banner_from_browser_url(url));
+    remember_login_return_from_url(url);
 }
 
 fn initial_browser_url() -> String {
@@ -365,14 +438,10 @@ pub fn Login() -> Element {
                                 loading: false,
                             });
                             // Align with register / Nostr: bare accounts go to Apply.
-                            if is_member {
-                                nav.replace(Route::Home {});
-                            } else {
-                                nav.replace(Route::Apply {});
-                            }
+                            nav.replace(route_after_sign_in(is_member, take_login_return()));
                         }
                         Err(_) => {
-                            nav.replace(Route::Home {});
+                            nav.replace(route_after_sign_in(true, take_login_return()));
                         }
                     }
                 }
@@ -420,7 +489,8 @@ pub fn Login() -> Element {
                             loading: false,
                         });
                     }
-                    // New accounts exist to join — funnel straight to the application.
+                    // New accounts exist to join. A report return path does not apply.
+                    let _ = take_login_return();
                     nav.replace(Route::Apply {});
                 }
                 Err(e) => {
@@ -430,9 +500,11 @@ pub fn Login() -> Element {
                         scuffed_api_client::ClientError::Http { status: 409, .. } => {
                             "Could not create account. Try a different username.".into()
                         }
-                        scuffed_api_client::ClientError::Http { status: 400, body } => {
-                            body_error_or(&body, "Check your input")
-                        }
+                        scuffed_api_client::ClientError::Http {
+                            status: 400,
+                            body,
+                            retry_after: _,
+                        } => body_error_or(&body, "Check your input"),
                         scuffed_api_client::ClientError::Http { status: 403, .. } => {
                             "Registration is currently closed".into()
                         }
@@ -459,14 +531,10 @@ pub fn Login() -> Element {
                                 loading: false,
                             });
                             // New/bare users go straight to the application funnel.
-                            if is_member {
-                                nav.replace(Route::Home {});
-                            } else {
-                                nav.replace(Route::Apply {});
-                            }
+                            nav.replace(route_after_sign_in(is_member, take_login_return()));
                         }
                         Err(_) => {
-                            nav.replace(Route::Home {});
+                            nav.replace(route_after_sign_in(true, take_login_return()));
                         }
                     }
                 }
