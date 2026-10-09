@@ -317,6 +317,24 @@ mod tests {
     }
 
     #[test]
+    fn http_status_is_some_only_for_an_http_response() {
+        use super::ClientError;
+        assert_eq!(
+            ClientError::Http {
+                status: 429,
+                body: String::new(),
+            }
+            .http_status(),
+            Some(429)
+        );
+        assert_eq!(ClientError::Network("offline".into()).http_status(), None);
+        assert_eq!(
+            ClientError::Deserialize("bad json".into()).http_status(),
+            None
+        );
+    }
+
+    #[test]
     fn forbidden_is_http_403_only() {
         use super::ClientError;
         assert!(

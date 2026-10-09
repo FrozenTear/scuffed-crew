@@ -782,6 +782,19 @@ mod tests {
         let plain_err = http(429, plain);
         let lockout_err = http(429, lockout);
 
+        assert_eq!(json_err.http_status(), Some(429));
+        assert_eq!(
+            scuffed_api_client::ClientError::Network("offline".into()).http_status(),
+            None
+        );
+        assert_eq!(scuffed_types::json_retry_after(json), Some(9));
+        assert_eq!(
+            scuffed_types::json_retry_after(r#"{"error":"rate_limited","retry_after":" 12 "}"#),
+            Some(12)
+        );
+        assert_eq!(scuffed_types::json_retry_after(plain), None);
+        assert_eq!(scuffed_types::json_retry_after(lockout), None);
+
         assert_eq!(json_err.to_string(), "Try again in 9 s");
         assert_eq!(plain_err.to_string(), "HTTP error: 429");
         assert_eq!(

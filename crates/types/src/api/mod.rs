@@ -37,6 +37,27 @@ pub struct ApiError {
     pub details: Option<String>,
 }
 
+/// Seconds from a governor JSON body's `retry_after`.
+///
+/// `{"error":"rate_limited","retry_after":N}` yields `N` when `N` is a JSON
+/// number or a numeric string, and at least 1. Any other body is `None`,
+/// including plain text and password-lockout JSON.
+pub fn json_retry_after(body: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error").and_then(|error| error.as_str()) != Some("rate_limited") {
+        return None;
+    }
+    match value.get("retry_after")? {
+        serde_json::Value::Number(number) => number.as_u64().filter(|seconds| *seconds >= 1),
+        serde_json::Value::String(text) => text
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds >= 1),
+        _ => None,
+    }
+}
+
 /// Member copy for a tower-governor 429.
 ///
 /// The body `{"error":"rate_limited","retry_after":N}` becomes
@@ -47,11 +68,7 @@ pub fn rate_limited_retry_message(status: u16, body: &str) -> Option<String> {
     if status != 429 {
         return None;
     }
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("error")?.as_str()? != "rate_limited" {
-        return None;
-    }
-    let secs = value.get("retry_after")?.as_u64()?;
+    let secs = json_retry_after(body)?;
     Some(format!("Try again in {secs} s"))
 }
 
@@ -130,7 +147,33 @@ fn decode_cursor(s: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::rate_limited_retry_message;
+    use super::{json_retry_after, rate_limited_retry_message};
+
+    #[test]
+    fn json_retry_after_reads_number_or_numeric_string() {
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":12}"#),
+            Some(12)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":" 4 "}"#),
+            Some(4)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":0}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"0"}"#),
+            None
+        );
+        assert_eq!(json_retry_after(r#"{"error":"rate_limited"}"#), None);
+        assert_eq!(
+            json_retry_after(r#"{"error":"too many login attempts","retry_after":9}"#),
+            None
+        );
+        assert_eq!(json_retry_after("Too Many Requests! Wait for 9s"), None);
+    }
 
     #[test]
     fn governor_json_429_uses_retry_after() {
