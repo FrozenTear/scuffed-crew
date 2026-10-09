@@ -65,7 +65,9 @@ const PM_REF: f64 = 0.2;
 /// many `dh * dh` per digit read. A correct lone '1', the thinnest reading,
 /// measures at least 0.17 on every labelled and stressed set; a dim 0 that
 /// lost most of its ring to compression and reads as '1' or '11' sits at
-/// 0.10 to 0.14.
+/// 0.10 to 0.14. The gap is thin (wiped 0 up to 0.14, floor 0.15, thinnest
+/// right '1' 0.17) and was fitted only on those sets, so recheck it when new
+/// labelled captures or capture paths are added.
 const MIN_INK_PER_GLYPH: f64 = 0.15;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1415,7 +1417,7 @@ mod tests {
 
     #[test]
     fn ink_floor_flags_a_wiped_zero_not_a_thin_one() {
-        // Real cells: a correct lone '1' at 1080p (dh 9) holds >= 0.17 dh^2
+        // Measured on real cells: a correct lone '1' at 1080p (dh 9) holds >= 0.17 dh^2
         // of ink; JPEG-wiped dim zeros read as '1' held 0.10 to 0.14.
         assert!(!too_little_ink(0.172 * 81.0, 1, 9));
         assert!(!too_little_ink(22.0, 1, 9));
@@ -1424,6 +1426,55 @@ mod tests {
         // more digits need proportionally more ink
         assert!(!too_little_ink(44.0, 2, 9));
         assert!(too_little_ink(22.0, 2, 9));
+    }
+
+    /// One lone glyph cell whose canvas is exactly template `c`, with `ink`
+    /// binarised pixels at text height `dh`. Shape match is perfect, so only
+    /// the ink floor can flag it.
+    fn lone_glyph_cell(tpl: &Templates, c: usize, dh: usize, ink: f64) -> Cell {
+        Cell {
+            runs: vec![Run {
+                s: 0,
+                e: 1,
+                kind: RunKind::Enum(vec![vec![0]]),
+            }],
+            v: tpl.t[c].to_vec(),
+            mass: vec![ink],
+            ar: vec![(tpl.ar_lo[c] + tpl.ar_hi[c]) / 2.0],
+            total_mass: ink,
+            dh,
+            rival: 0.0,
+        }
+    }
+
+    #[test]
+    fn ink_floor_flags_a_wiped_zero_read_as_one() {
+        for (h, dh) in [(756, 9), (1007, 12)] {
+            let tpl = templates_for(h);
+            let area = (dh * dh) as f64;
+            for k in [0, 5] {
+                // A dim 0 mostly wiped out by compression: a clean '1' shape
+                // with 0.14 dh^2 of ink. Shape margin alone would pass it.
+                let wiped = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.14 * area)), tpl, k);
+                assert_eq!(wiped.value, Some(1));
+                assert!(
+                    wiped.margin >= SUSPECT_CONF as f64,
+                    "{h} {k}: {}",
+                    wiped.margin
+                );
+                assert!(
+                    wiped.flagged,
+                    "{h} {k}: a wiped 0 read as 1 must be flagged"
+                );
+                // The thinnest correct lone '1' measured on real cells, 0.17 dh^2.
+                let thin = read_cell(Some(&lone_glyph_cell(tpl, 1, dh, 0.17 * area)), tpl, k);
+                assert_eq!(thin.value, Some(1));
+                assert!(
+                    !thin.flagged,
+                    "{h} {k}: a thin correct 1 must not be flagged"
+                );
+            }
+        }
     }
 
     #[test]
