@@ -2253,10 +2253,11 @@ struct FrameAnalysis {
 /// by the pre-OCR preflight before any Tesseract/portrait work ran.
 enum FrameAnalysisOutcome {
     Analyzed(Box<FrameAnalysis>),
-    /// The frame is not a scoreboard: no table, or a table with neither row
-    /// dips nor header labels. Carried back with the frame so it lands in
-    /// debug/rejected. `scan` is logged with the rejection. A gameplay frame
-    /// stays on this path even when its pitch does not settle 5v5 vs 6v6.
+    /// The frame is not a scoreboard: neither row dips nor header labels, or
+    /// the pitch failed and the table detector found no table. Carried back
+    /// with the frame so it lands in debug/rejected. `scan` is logged with
+    /// the rejection. A gameplay frame whose pitch does not settle stays on
+    /// this path when it has no table.
     NotAScoreboard {
         outcome: detect::MatchOutcome,
         frame: image::DynamicImage,
@@ -3592,12 +3593,12 @@ fn analyze_frame(
     };
 
     let scoreboard = Arc::new(ocr::preprocess::crop_scoreboard(&img));
-    // Pre-OCR preflight. The table check (layout and brightness, no team
-    // colour) runs before the row-pitch / 5v5-vs-6v6 decision, so a gameplay
-    // frame is "not a scoreboard" rather than a team-size reject. A frame
-    // that has a table still needs the saturation row dips or the header
-    // stat labels, then a pitch that settles 5 or 6. The OCR gate downstream
-    // stays the final check for frames that pass.
+    // Pre-OCR preflight. Row dips or header stat labels accept a board, then
+    // the pitch has to settle 5 or 6. The table check (layout and brightness,
+    // no team colour) does not block that. It runs only when the pitch fails
+    // or the two pitches disagree: no table is "not a scoreboard", a table is
+    // "team size unsure". The OCR gate downstream stays the final check for
+    // frames that pass.
     let (preflight, row_scan) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
     let team_size = match preflight {
         detect::hero_portrait::ScoreboardPreflight::NotAScoreboard => {

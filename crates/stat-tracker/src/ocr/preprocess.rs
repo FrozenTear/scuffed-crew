@@ -1070,31 +1070,100 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
     }
 }
 
-/// Pixels cut from the right of [`crop_map_name`] on a 2560-wide 16:9 frame.
-///
-/// The previous width was `0.27 * 2560` = 691. 69 is 10% of that, which
-/// stops the crop on the map name instead of the match timer (`TIME` read
-/// as `TIM`). Other frame sizes scale this with the 16:9 game rect, so
-/// 1080p and 4K lose the same fraction.
-const MAP_NAME_RIGHT_TRIM_AT_2560: u32 = 69;
-
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
 /// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
 /// text on a dark bar. Pass the crop to `recognize_region`.
 ///
-/// The right edge is [`MAP_NAME_RIGHT_TRIM_AT_2560`] shorter than the old
-/// 0.27-wide crop, measured at 2560x1440 and scaled with the game rect.
+/// The full 0.27-wide window still reaches the match timer (`ILIOS` read as
+/// `ILIOS TIM`). A fixed slice off that window also cuts long names
+/// (`WATCHPOINT: GRIMSVOTN` came back as `GRiMsVO`). The right edge moves
+/// left only when a timer-sized ink run sits past a gap wider than letter
+/// and word spacing. No such gap, and the full window stays, so the longest
+/// name still fits at 1440p and 1080p.
 pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let (gx, gy, gw, gh) = game_rect_16_9(w, h);
     let x = gx + (gw as f64 * 0.68) as u32;
     let y = gy + (gh as f64 * 0.022) as u32;
     let full_w = (gw as f64 * 0.27) as u32;
-    let trim = (MAP_NAME_RIGHT_TRIM_AT_2560 as f64 * gw as f64 / 2560.0).round() as u32;
-    let cw = full_w.saturating_sub(trim).min(w.saturating_sub(x));
+    let cw_full = full_w.min(w.saturating_sub(x));
     let ch = ((gh as f64 * 0.040) as u32).min(h.saturating_sub(y));
-    img.crop_imm(x, y, cw, ch)
+    let trim = map_name_timer_trim(img, x, y, cw_full, ch, gh).min(cw_full.saturating_sub(1));
+    img.crop_imm(x, y, cw_full.saturating_sub(trim), ch)
+}
+
+/// How much of the map-name window is the match timer, in pixels.
+///
+/// Ink columns merge across gaps up to about 1.2% of the game height (letter
+/// and word spacing). A later run is the timer when that gap is wider and the
+/// run is narrower than the name, or when the hole is at least 6% of the
+/// window (a short name with the clock far to the right).
+fn map_name_timer_trim(img: &DynamicImage, x: u32, y: u32, cw: u32, ch: u32, gh: u32) -> u32 {
+    if cw < 8 || ch < 4 || gh == 0 {
+        return 0;
+    }
+    let rgb = img.crop_imm(x, y, cw, ch).to_rgb8();
+    let ink: Vec<bool> = (0..cw)
+        .map(|col| {
+            (0..ch)
+                .filter(|&row| {
+                    let p = rgb.get_pixel(col, row).0;
+                    let luma = (u16::from(p[0]) + u16::from(p[1]) + u16::from(p[2])) / 3;
+                    luma >= 170
+                })
+                .count()
+                >= 2
+        })
+        .collect();
+    let merge = ((gh as f64) * 0.012).round().max(3.0) as u32;
+    let runs = ink_runs(&ink, merge);
+    let Some((last_i, &(last_s, last_e))) = runs.iter().enumerate().next_back() else {
+        return 0;
+    };
+    if last_i == 0 {
+        return 0;
+    }
+    let prev_e = runs[last_i - 1].1;
+    let gap = last_s.saturating_sub(prev_e);
+    if gap <= merge {
+        return 0;
+    }
+    let timer_w = last_e.saturating_sub(last_s);
+    let left_span = prev_e.saturating_sub(runs[0].0);
+    let shorter_than_name = left_span > 0 && timer_w.saturating_mul(2) < left_span;
+    let wide_hole = gap as f64 >= cw as f64 * 0.06;
+    if shorter_than_name || wide_hole {
+        cw.saturating_sub(last_s)
+    } else {
+        0
+    }
+}
+
+/// Ink runs, bridging holes of at most `merge` columns.
+fn ink_runs(ink: &[bool], merge: u32) -> Vec<(u32, u32)> {
+    let mut runs = Vec::new();
+    let mut start: Option<u32> = None;
+    let mut last: Option<u32> = None;
+    for (i, on) in ink.iter().copied().enumerate() {
+        let i = i as u32;
+        if on {
+            if start.is_none() {
+                start = Some(i);
+            }
+            last = Some(i);
+        } else if let (Some(s), Some(end)) = (start, last)
+            && i - end > merge
+        {
+            runs.push((s, end + 1));
+            start = None;
+            last = None;
+        }
+    }
+    if let (Some(s), Some(end)) = (start, last) {
+        runs.push((s, end + 1));
+    }
+    runs
 }
 
 /// True when `board` (a [`crop_scoreboard`] result) has a Tab table: a bright
@@ -2571,19 +2640,17 @@ mod map_and_table_tests {
     use super::{crop_map_name, game_rect_16_9, header_label_groups, scoreboard_table_present};
     use image::{DynamicImage, Rgb, RgbImage};
 
-    fn edges(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    fn full_map_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
         let (gx, gy, gw, gh) = game_rect_16_9(w, h);
         let x = gx + (gw as f64 * 0.68) as u32;
         let y = gy + (gh as f64 * 0.022) as u32;
-        let old_w = (gw as f64 * 0.27) as u32;
-        let trim = (super::MAP_NAME_RIGHT_TRIM_AT_2560 as f64 * gw as f64 / 2560.0).round() as u32;
-        let cw = old_w.saturating_sub(trim);
+        let cw = (gw as f64 * 0.27) as u32;
         let ch = (gh as f64 * 0.040) as u32;
         (x, y, cw, ch)
     }
 
     #[test]
-    fn map_name_crop_trims_about_ten_percent_off_the_right() {
+    fn map_name_crop_keeps_the_full_window_when_there_is_no_timer() {
         for (w, h) in [
             (2560u32, 1440u32),
             (1920, 1080),
@@ -2591,7 +2658,7 @@ mod map_and_table_tests {
             (2560, 1080),
             (3440, 1440),
         ] {
-            let (x, y, cw, ch) = edges(w, h);
+            let (x, y, cw, ch) = full_map_rect(w, h);
             let mut frame = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
             frame.put_pixel(x, y, Rgb([255, 0, 0]));
             frame.put_pixel(x + cw - 1, y, Rgb([0, 255, 0]));
@@ -2600,31 +2667,82 @@ mod map_and_table_tests {
             assert_eq!(crop.get_pixel(0, 0).0, [255, 0, 0], "{w}x{h} left");
             assert_eq!(crop.get_pixel(cw - 1, 0).0, [0, 255, 0], "{w}x{h} right");
         }
+        // Ultrawide uses the 16:9 game width, not the full frame.
+        assert_eq!(game_rect_16_9(2560, 1080).2, 1920);
+    }
 
-        let old_w = (2560.0_f64 * 0.27) as u32;
-        let (_, _, cw, _) = edges(2560, 1440);
-        let trim = old_w - cw;
-        assert_eq!(trim, 69);
-        assert!((trim as f64 / old_w as f64 - 0.10).abs() < 0.01);
-
-        // 1080p and 4K scale the 2560px trim with the 16:9 width.
-        let old_1080 = (1920.0_f64 * 0.27) as u32;
-        let (_, _, cw_1080, _) = edges(1920, 1080);
-        assert_eq!(
-            old_1080 - cw_1080,
-            (69.0_f64 * 1920.0 / 2560.0).round() as u32
+    /// `WATCHPOINT: GRIMSVOTN` drawn into the old 10% trim zone, then a timer
+    /// past a wide gap. Returns the frame, the crop x, the last name pixel,
+    /// and the timer's first pixel.
+    fn draw_long_name_and_timer(w: u32, h: u32) -> (RgbImage, u32, u32, u32) {
+        let (x, y, cw, ch) = full_map_rect(w, h);
+        let gh = game_rect_16_9(w, h).3;
+        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 22]));
+        let merge = ((gh as f64) * 0.012).round().max(3.0) as u32;
+        let letter_gap = 2u32;
+        let word_gap = (merge / 2).max(2);
+        let timer_gap = merge + 4;
+        let timer_w = 16u32;
+        let text = "WATCHPOINT: GRIMSVOTN";
+        let n = text.chars().filter(|c| *c != ' ').count() as u32;
+        let gaps = (n - 2) * letter_gap + word_gap;
+        let name_end = x + cw - timer_gap - timer_w;
+        let max_total = name_end.saturating_sub(x + 4);
+        let letter_w = max_total.saturating_sub(gaps) / n;
+        assert!(letter_w >= 3, "{w}x{h} letter {letter_w}");
+        let total = n * letter_w + gaps;
+        let mut cursor = name_end - total;
+        let y0 = y + ch / 5;
+        let y1 = (y + ch * 4 / 5).min(y + ch);
+        let mut last_name_x = cursor;
+        let chars: Vec<char> = text.chars().collect();
+        for (i, glyph) in chars.iter().copied().enumerate() {
+            if glyph == ' ' {
+                cursor += word_gap;
+                continue;
+            }
+            for py in y0..y1 {
+                for px in cursor..cursor + letter_w {
+                    img.put_pixel(px, py, Rgb([236, 236, 236]));
+                }
+            }
+            last_name_x = cursor + letter_w - 1;
+            cursor += letter_w;
+            if chars.get(i + 1).is_some_and(|next| *next != ' ') {
+                cursor += letter_gap;
+            }
+        }
+        let timer_x = last_name_x + 1 + timer_gap;
+        assert!(timer_x + timer_w <= x + cw, "{w}x{h} timer past the window");
+        let old_trim = (69.0_f64 * game_rect_16_9(w, h).2 as f64 / 2560.0).round() as u32;
+        assert!(
+            last_name_x >= x + cw - old_trim,
+            "{w}x{h} name ends at {last_name_x}, old trim starts at {}",
+            x + cw - old_trim
         );
-        let old_4k = (3840.0_f64 * 0.27) as u32;
-        let (_, _, cw_4k, _) = edges(3840, 2160);
-        assert_eq!(old_4k - cw_4k, (69.0_f64 * 3840.0 / 2560.0).round() as u32);
+        for py in y0..y1 {
+            for px in timer_x..timer_x + timer_w {
+                img.put_pixel(px.min(w - 1), py, Rgb([236, 236, 236]));
+            }
+        }
+        (img, x, last_name_x, timer_x)
+    }
 
-        // 2560x1080 is wider than 16:9, so the trim follows the game rect
-        // (1920 wide), not the full frame.
-        let gw = game_rect_16_9(2560, 1080).2;
-        assert_eq!(gw, 1920);
-        let old_uw = (gw as f64 * 0.27) as u32;
-        let (_, _, cw_uw, _) = edges(2560, 1080);
-        assert_eq!(old_uw - cw_uw, (69.0 * gw as f64 / 2560.0).round() as u32);
+    #[test]
+    fn longest_map_name_fits_and_the_timer_is_cut() {
+        for (w, h) in [(2560u32, 1440u32), (1920, 1080), (3840, 2160)] {
+            let (frame, x, last_name_x, timer_x) = draw_long_name_and_timer(w, h);
+            let crop = crop_map_name(&DynamicImage::ImageRgb8(frame));
+            let right = x + crop.width();
+            assert!(
+                right > last_name_x,
+                "{w}x{h} clipped WATCHPOINT: GRIMSVOTN at {right}, name ends {last_name_x}"
+            );
+            assert!(
+                right <= timer_x,
+                "{w}x{h} timer at {timer_x} still inside the crop ending {right}"
+            );
+        }
     }
 
     /// Synthetic Tab table. Rows are flat fills (any team colour) with a

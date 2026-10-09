@@ -1296,6 +1296,19 @@ fn find_map(lines: &[&str]) -> Option<String> {
     map_from_normalized(&text, true)
 }
 
+/// Score for an OCR tail cut off the end of a long map name (`GRiMsVO` for
+/// Grímsvötn). Short keys stay on the whole-word rule. The score is the
+/// average of a full match and the covered fraction, so two missing letters
+/// on a 9-letter name clear the long-name floor and a stub does not.
+fn prefix_truncation_score(word: &str, pattern: &str) -> f64 {
+    let n = pattern.chars().count();
+    let k = word.chars().count();
+    if n <= 6 || k < 6 || k >= n || !pattern.starts_with(word) {
+        return 0.0;
+    }
+    (n + k) as f64 / (2.0 * n as f64)
+}
+
 /// Closest map at or above [`map_fuzzy_threshold`], when it leads the next
 /// different display name by [`MAP_FUZZY_MARGIN`]. Below the floor, or inside
 /// that margin, the map is unknown. Aliases of one display name (Lijiang's
@@ -1317,7 +1330,12 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
 
         if pattern_parts.len() == 1 {
             for &word in &words {
-                let score = normalized_levenshtein(word, &pattern);
+                let token = word.trim_matches(|c: char| !c.is_alphanumeric());
+                if token.is_empty() {
+                    continue;
+                }
+                let score = normalized_levenshtein(token, &pattern)
+                    .max(prefix_truncation_score(token, &pattern));
                 if score > pattern_best {
                     pattern_best = score;
                 }
@@ -2520,6 +2538,18 @@ mod hero_map_name_tests {
         // I/L fold, and a single u/i swap that still clears the floor alone.
         assert_eq!(match_map_in_text("ILios").as_deref(), Some("Ilios"));
         assert_eq!(match_map_in_text("iuios").as_deref(), Some("Ilios"));
+        // A long name clipped before the last letters. Two missing glyphs
+        // clear the floor; a stub does not. The canonical spelling keeps
+        // the accents.
+        for raw in ["GRiMsVO", "GRiMsVO™", "WATCHPOINT: GRiMsVO™"] {
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some("Watchpoint: Grímsvötn"),
+                "{raw}"
+            );
+        }
+        assert_eq!(match_map_in_text("GRIMS"), None);
+        assert_eq!(match_map_in_text("GRIMSV"), None);
 
         // #201: a short key does not match inside a longer word.
         for raw in ["comparison", "parisian", "inparis", "COMPARISON"] {

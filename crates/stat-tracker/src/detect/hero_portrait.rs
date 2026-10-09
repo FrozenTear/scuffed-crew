@@ -467,24 +467,28 @@ const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 
 /// What the capture preflight decided, before any OCR.
 ///
-/// [`ScoreboardPreflight::NotAScoreboard`] is decided before the 5v5-vs-6v6
-/// pitch check. A gameplay frame that happens to show a stray pitch is not
-/// reported as an uncertain team size.
+/// A frame the row dips or the header labels accept, and whose pitch settles,
+/// is a board. The table check does not override that. It runs only when the
+/// pitch fails or the two pitches disagree, and then only picks the log line:
+/// no table is [`ScoreboardPreflight::NotAScoreboard`], a table is
+/// [`ScoreboardPreflight::TeamSizeUncertain`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreboardPreflight {
-    /// No table, or a table with neither row dips nor header labels.
+    /// Neither row dips nor header labels, or the pitch failed and there is
+    /// no table.
     NotAScoreboard,
-    /// A table is present and the row or header signal passed, but the pitch
-    /// does not settle 5v5 or 6v6.
+    /// Row dips or header labels are present, the pitch does not settle 5v5
+    /// or 6v6, and a table is present.
     TeamSizeUncertain,
     /// Row pitch settled on this team size (5 or 6).
     Ready(usize),
 }
 
-/// Table structure first, then the existing row-dip / header-label gate, then
-/// the pitch. `table_present` comes from
-/// [`crate::ocr::preprocess::scoreboard_table_present`] and does not use team
-/// colour. `header_labels` is the count from
+/// Same accept path as before the table detector: row dips or header labels,
+/// then a settled pitch. `table_present` (from
+/// [`crate::ocr::preprocess::scoreboard_table_present`], layout and brightness
+/// only) is consulted only when [`RowScan::checked_team_size`] is `None`.
+/// `header_labels` is the count from
 /// [`crate::ocr::preprocess::header_label_groups`].
 pub fn classify_scoreboard_preflight(
     scan: &RowScan,
@@ -493,12 +497,13 @@ pub fn classify_scoreboard_preflight(
 ) -> ScoreboardPreflight {
     let rows = scan.looks_like_scoreboard();
     let header = (3..=10).contains(&header_labels);
-    if !table_present || (!rows && !header) {
+    if !rows && !header {
         return ScoreboardPreflight::NotAScoreboard;
     }
     match scan.checked_team_size() {
         Some(n) => ScoreboardPreflight::Ready(n),
-        None => ScoreboardPreflight::TeamSizeUncertain,
+        None if table_present => ScoreboardPreflight::TeamSizeUncertain,
+        None => ScoreboardPreflight::NotAScoreboard,
     }
 }
 
@@ -1223,17 +1228,91 @@ mod team_size_tests {
             super::classify_scoreboard_preflight(&death, 6, true),
             super::ScoreboardPreflight::TeamSizeUncertain
         );
-        // A settled board is read only when the table is present. Colour
-        // is not an input here.
+        // A settled pitch is a board even when the table detector misses
+        // (empty, grey, and low-contrast boards). The table check does not
+        // block a frame main would accept.
         let board = scan(6, Some(0.074), Some(0.0742));
         assert_eq!(
-            super::classify_scoreboard_preflight(&board, 0, true),
+            super::classify_scoreboard_preflight(&board, 0, false),
             super::ScoreboardPreflight::Ready(6)
         );
         assert_eq!(
-            super::classify_scoreboard_preflight(&board, 6, false),
+            super::classify_scoreboard_preflight(&board, 6, true),
+            super::ScoreboardPreflight::Ready(6)
+        );
+        // Header labels and no measurable pitch: main's default size is 5.
+        // A missed table must not turn that into a reject.
+        let grey = scan(0, None, None);
+        assert!(!grey.looks_like_scoreboard());
+        assert_eq!(
+            super::classify_scoreboard_preflight(&grey, 6, false),
+            super::ScoreboardPreflight::Ready(5)
+        );
+        // Neither signal: not a board, table or not.
+        assert_eq!(
+            super::classify_scoreboard_preflight(&grey, 0, true),
             super::ScoreboardPreflight::NotAScoreboard
         );
+    }
+
+    /// Rows of `row` colour with a near-white name line and no stat digits.
+    fn row_board(row: [u8; 3], text: [u8; 3], bg: [u8; 3]) -> image::DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb(bg));
+        let y0s = [40u32, 76, 112, 148, 184];
+        for y_mid in y0s {
+            for y in y_mid.saturating_sub(8)..y_mid + 8 {
+                for x in (0.06 * w as f64) as u32..(0.55 * w as f64) as u32 {
+                    let px = if (y_mid..y_mid + 3).contains(&y) {
+                        text
+                    } else {
+                        row
+                    };
+                    img.put_pixel(x, y, image::Rgb(px));
+                }
+            }
+        }
+        image::DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn empty_grey_and_low_contrast_boards_still_count() {
+        use super::ScoreboardPreflight;
+        use crate::ocr::preprocess::scoreboard_table_present;
+
+        // Empty ban-style board: row bars and name ink, no stat digits.
+        // The table detector misses it. The pitch still settles 6v6.
+        let empty = row_board([40, 110, 220], [240, 240, 240], [16, 18, 28]);
+        assert!(
+            !scoreboard_table_present(&empty),
+            "empty rows should miss the table detector"
+        );
+        let (pre, scan) = super::preflight_scoreboard(&empty);
+        assert_eq!(pre, ScoreboardPreflight::Ready(6), "{scan:?}");
+
+        // Desaturated grey board: header labels, no saturation dips.
+        // Main accepts this as size 5. A flat grey body has no darker gap,
+        // so the table detector says no.
+        let (w, h) = (800u32, 480u32);
+        let mut grey = image::RgbImage::from_pixel(w, h, image::Rgb([150, 150, 150]));
+        for i in 0..6 {
+            let x0 = (w as f64 * (0.42 + i as f64 * 0.08)) as u32;
+            for y in (h as f64 * 0.006) as u32..(h as f64 * 0.022) as u32 {
+                for x in x0..x0 + 6 {
+                    grey.put_pixel(x, y, image::Rgb([16, 16, 16]));
+                }
+            }
+        }
+        let grey = image::DynamicImage::ImageRgb8(grey);
+        assert!(!scoreboard_table_present(&grey));
+        let (pre, scan) = super::preflight_scoreboard(&grey);
+        assert_eq!(pre, ScoreboardPreflight::Ready(5), "{scan:?}");
+
+        // Low-contrast replay: muted rows, no bright header, no stat digits.
+        let replay = row_board([96, 84, 84], [148, 146, 144], [60, 62, 64]);
+        assert!(!scoreboard_table_present(&replay));
+        let (pre, scan) = super::preflight_scoreboard(&replay);
+        assert_eq!(pre, ScoreboardPreflight::Ready(6), "{scan:?}");
     }
 
     #[test]
