@@ -457,6 +457,26 @@ it does not control. Those members must republish from their own client.
 The confirmed run is audit-logged. Unset `NIP05_REPUBLISH_ENABLED` and restart
 once you are done — leaving it armed serves no purpose.
 
+## Tracker bug reports
+
+Member bug-report zips stay on disk. They are not rows in SurrealDB and they
+are not under the web root. Compose sets `REPORTS_DIR` to `/app/data/reports`
+and mounts the named volume `reports-data` there.
+
+The image entrypoint (`scripts/site-entrypoint.sh`) creates that directory,
+gives it to the container user `scuffed`, and sets mode 0700 before the server
+process starts. A fresh named volume is often owned by root, which is why the
+entrypoint does this instead of starting the binary directly.
+
+If the directory is missing or not writable when the server starts, stat
+reports turn themselves off. The log line is `stat reports disabled: ...` and
+the rest of the site keeps serving. Every report route then returns 503
+with body `{"error":"reports_disabled"}` until the directory can be written
+and the server is restarted.
+
+`scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
+the same way it includes uploads.
+
 ## Backups
 
 `scripts/backup.sh` stores the SurrealDB export, data volumes, and

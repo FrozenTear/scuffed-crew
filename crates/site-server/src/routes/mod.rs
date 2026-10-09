@@ -23,6 +23,7 @@ pub mod rsvps;
 pub mod scrims;
 pub mod seo;
 pub mod settings;
+pub mod stat_reports;
 pub mod stats;
 pub mod teams;
 pub mod tournaments;
