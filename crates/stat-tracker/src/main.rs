@@ -12474,12 +12474,15 @@ mod tests {
         .await;
         let uploaded = seen.lock().unwrap().clone();
         assert!(
-            !uploaded.is_empty(),
-            "a later GUI result uploads the archived hold"
+            uploaded.is_empty(),
+            "a blank map stays local until a map is set: {uploaded:?}"
         );
+        let queued = store.get_unsynced().await.unwrap();
         assert!(
-            uploaded.iter().all(|(_, _, map, _)| map.is_empty()),
-            "the fresh hold must not upload as Busan: {uploaded:?}"
+            queued.iter().any(|row| {
+                row.session_id == held.session_id && row.map_name.is_empty() && !row.synced
+            }),
+            "the archived hold stays queued, not uploaded as Busan: {queued:?}"
         );
     }
 
@@ -12655,8 +12658,8 @@ mod tests {
         .await;
         let uploaded = seen.lock().unwrap().clone();
         assert!(
-            !uploaded.is_empty(),
-            "the new session has a result and is eligible to upload"
+            uploaded.is_empty(),
+            "a blank map is not uploaded: {uploaded:?}"
         );
         assert!(
             uploaded
@@ -12664,10 +12667,12 @@ mod tests {
                 .all(|(_, map, mode)| map != "Busan" && mode != "Control"),
             "nothing from the guillard split uploads as Busan: {uploaded:?}"
         );
+        let queued = night.store.get_unsynced().await.unwrap();
         assert!(
-            uploaded
+            queued
                 .iter()
-                .all(|(id, map, _)| id == &opened && map.is_empty())
+                .any(|row| row.session_id == opened && row.map_name.is_empty() && !row.synced),
+            "the new session stays queued until it has a map: {queued:?}"
         );
     }
 
