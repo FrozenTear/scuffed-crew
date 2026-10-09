@@ -205,7 +205,11 @@ fn host_net(ip: IpAddr) -> IpNet {
     }
 }
 
-/// 429 body for every governor layer.
+/// JSON 429 shared by every governor layer and the per-member Nostr limiter.
+///
+/// Body is `{"error":"rate_limited","retry_after":N}` with
+/// `Content-Type: application/json` and `Cache-Control: no-store`.
+/// `Retry-After` is the same second count. `N` is at least 1.
 ///
 /// `tower_governor` 0.8 writes `Retry-After` from `Duration::as_secs`, which
 /// truncates. The public limiter refills every 200 ms, so that header is
@@ -213,22 +217,42 @@ fn host_net(ip: IpAddr) -> IpNet {
 /// is already gone by the time this handler runs, so a reported wait of 0
 /// becomes 1 (the ceil of any sub-second wait, and the minimum). A wait of
 /// 2 seconds stays 2.
+pub fn rate_limited_response(secs: u64) -> Response<Body> {
+    rate_limited_response_with_headers(secs, HeaderMap::new())
+}
+
+fn rate_limited_response_with_headers(secs: u64, headers: HeaderMap) -> Response<Body> {
+    let secs = secs.max(1);
+    let body = serde_json::json!({
+        "error": "rate_limited",
+        "retry_after": secs,
+    });
+    let mut response = Response::new(Body::from(body.to_string()));
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    let mut headers = headers;
+    let value = HeaderValue::from_str(&secs.to_string()).expect("digit header");
+    headers.insert(axum::http::header::RETRY_AFTER, value.clone());
+    headers.insert(
+        axum::http::HeaderName::from_static("x-ratelimit-after"),
+        value,
+    );
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    *response.headers_mut() = headers;
+    response
+}
+
+/// 429 for every governor layer (auth, uploads, token-check, public reads).
 pub fn governor_error_response(error: GovernorError) -> Response<Body> {
     match error {
         GovernorError::TooManyRequests { wait_time, headers } => {
-            let secs = wait_time.max(1);
-            let mut response =
-                Response::new(Body::from(format!("Too Many Requests! Wait for {secs}s")));
-            *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-            let mut headers = headers.unwrap_or_default();
-            let value = HeaderValue::from_str(&secs.to_string()).expect("digit header");
-            headers.insert(axum::http::header::RETRY_AFTER, value.clone());
-            headers.insert(
-                axum::http::HeaderName::from_static("x-ratelimit-after"),
-                value,
-            );
-            *response.headers_mut() = headers;
-            response
+            rate_limited_response_with_headers(wait_time, headers.unwrap_or_default())
         }
         other => Response::<Body>::from(other),
     }
@@ -393,8 +417,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn subsecond_wait_retry_after_is_at_least_one() {
+    fn header_once(headers: &HeaderMap, name: &str) -> String {
+        let values: Vec<_> = headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(values.len(), 1, "{name} must appear once, got {values:?}");
+        values[0].clone()
+    }
+
+    #[tokio::test]
+    async fn subsecond_wait_retry_after_is_at_least_one() {
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::RETRY_AFTER, "0".parse().unwrap());
         headers.insert(
@@ -406,13 +440,40 @@ mod tests {
             headers: Some(headers),
         });
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(res.headers().get("retry-after").unwrap(), "1");
-        assert_eq!(res.headers().get("x-ratelimit-after").unwrap(), "1");
+        assert_eq!(header_once(res.headers(), "retry-after"), "1");
+        assert_eq!(header_once(res.headers(), "x-ratelimit-after"), "1");
+        assert_eq!(
+            header_once(res.headers(), "content-type"),
+            "application/json"
+        );
+        assert_eq!(header_once(res.headers(), "cache-control"), "no-store");
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"error":"rate_limited","retry_after":1}"#
+        );
+
         let res = super::governor_error_response(GovernorError::TooManyRequests {
             wait_time: 2,
             headers: None,
         });
-        assert_eq!(res.headers().get("retry-after").unwrap(), "2");
-        assert_eq!(res.headers().get("x-ratelimit-after").unwrap(), "2");
+        assert_eq!(header_once(res.headers(), "retry-after"), "2");
+        assert_eq!(header_once(res.headers(), "x-ratelimit-after"), "2");
+        assert_eq!(
+            header_once(res.headers(), "content-type"),
+            "application/json"
+        );
+        assert_eq!(header_once(res.headers(), "cache-control"), "no-store");
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"error":"rate_limited","retry_after":2}"#
+        );
     }
 }
