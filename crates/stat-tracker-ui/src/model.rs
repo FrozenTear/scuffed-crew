@@ -221,7 +221,13 @@ pub struct Game {
     pub edited_fields: Vec<String>,
     pub ocr: GameOcr,
     pub segments: Vec<SegmentView>,
+    /// Server message when this game was refused on upload. `None` when the
+    /// row is synced or still queued.
+    pub upload_reject: Option<String>,
 }
+
+/// Label for a game the server refused. The detail line is the server message.
+pub const UPLOAD_REJECTED_LABEL: &str = "Upload rejected";
 
 impl Game {
     pub fn from_match(m: &PersonalMatch) -> Self {
@@ -258,6 +264,7 @@ impl Game {
                 .enumerate()
                 .map(|(i, s)| SegmentView::from_segment(i as u32, s))
                 .collect(),
+            upload_reject: m.upload_rejection().map(str::to_string),
         }
     }
 

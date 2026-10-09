@@ -109,6 +109,7 @@ pub fn read_scoreboard(
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
             sync_rev: 0,
+            upload_reject: None,
             session_id: String::new(),
             corrected_hero: None,
             corrected_role: None,
