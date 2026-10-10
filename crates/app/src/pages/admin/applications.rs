@@ -75,10 +75,17 @@ fn application_view_trigger_id(app_id: &str) -> String {
     format!("application-view-{app_id}")
 }
 
-/// Tab stops inside the dialog, in DOM order. The shell itself is `tabindex="-1"`
-/// so it can take focus on open without joining this cycle.
+/// Tab stops inside the dialog, in DOM order.
+/// The heading is `tabindex="-1"`: it takes focus when the dialog opens, and it is
+/// the first stop, so Shift+Tab from there wraps to the last control.
 fn application_dialog_tab_ids() -> &'static [&'static str] {
     &[APPLICATION_DETAIL_TITLE_ID, APPLICATION_DETAIL_CLOSE_ID]
+}
+
+/// Focus this when the dialog opens. Not the dialog shell: a shell with
+/// `tabindex="-1"` sits outside the tab cycle, so Shift+Tab leaves the dialog.
+fn application_dialog_initial_focus_id() -> &'static str {
+    APPLICATION_DETAIL_TITLE_ID
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,7 +106,11 @@ enum DialogKeyEffect {
 fn application_dialog_tab_target(active_id: &str, shift: bool) -> Option<&'static str> {
     let ids = application_dialog_tab_ids();
     let len = ids.len();
-    let current = ids.iter().position(|id| *id == active_id)?;
+    // The shell is not a tab stop. If focus is still there, treat it as the heading.
+    let current = ids
+        .iter()
+        .position(|id| *id == active_id)
+        .or_else(|| (active_id == APPLICATION_DETAIL_DIALOG_ID).then_some(0))?;
     let wraps = if shift {
         current == 0
     } else {
@@ -217,15 +228,14 @@ fn ApplicationDetailDialog(
                 role: "dialog",
                 aria_modal: "true",
                 aria_labelledby: APPLICATION_DETAIL_TITLE_ID,
-                tabindex: "-1",
                 onmounted: move |_| {
-                    focus_element_by_id(APPLICATION_DETAIL_DIALOG_ID);
+                    focus_element_by_id(application_dialog_initial_focus_id());
                 },
                 onclick: move |e| e.stop_propagation(),
                 onkeydown: move |evt| {
                     let shift = evt.modifiers().contains(Modifiers::SHIFT);
                     let active = current_focus_id()
-                        .unwrap_or_else(|| APPLICATION_DETAIL_DIALOG_ID.to_string());
+                        .unwrap_or_else(|| application_dialog_initial_focus_id().to_string());
                     if handle_application_dialog_key(
                         &evt.key(),
                         shift,
@@ -241,7 +251,7 @@ fn ApplicationDetailDialog(
                 div {
                     class: "form-modal-header",
                     id: APPLICATION_DETAIL_TITLE_ID,
-                    tabindex: "0",
+                    tabindex: "-1",
                     "{title}"
                 }
                 div { class: "form-modal-body",
@@ -547,11 +557,11 @@ mod tests {
         );
         assert!(
             dialog_tag.contains("id=\"application-detail-dialog\""),
-            "focus target id: {dialog_tag}"
+            "dialog id: {dialog_tag}"
         );
         assert!(
-            dialog_tag.contains("tabindex=\"-1\""),
-            "dialog must be focusable: {dialog_tag}"
+            !dialog_tag.contains("tabindex"),
+            "the shell must not take the initial focus: {dialog_tag}"
         );
 
         let header_at = html.find("form-modal-header").expect("heading");
@@ -560,6 +570,10 @@ mod tests {
         assert!(
             header.contains("id=\"application-detail-title\""),
             "heading id: {header}"
+        );
+        assert!(
+            header.contains("tabindex=\"-1\""),
+            "heading takes focus on open: {header}"
         );
         assert!(
             header.contains("Application: Ada"),
@@ -651,6 +665,60 @@ mod tests {
         assert!(
             keydown.contains("focus_element_by_id"),
             "the handler must move focus, not only recognize Escape: {keydown}"
+        );
+    }
+
+    #[test]
+    fn open_focuses_the_heading_and_shift_tab_stays_inside() {
+        assert_eq!(
+            application_dialog_initial_focus_id(),
+            APPLICATION_DETAIL_TITLE_ID
+        );
+        assert_ne!(
+            application_dialog_initial_focus_id(),
+            APPLICATION_DETAIL_DIALOG_ID
+        );
+
+        let trigger = application_view_trigger_id("app1");
+        let mut focused = None;
+        let mut closed = false;
+        let handled = handle_application_dialog_key(
+            &Key::Tab,
+            true,
+            application_dialog_initial_focus_id(),
+            &trigger,
+            || closed = true,
+            |id| focused = Some(id.to_string()),
+        );
+        assert!(handled);
+        assert!(!closed);
+        assert_eq!(focused.as_deref(), Some(APPLICATION_DETAIL_CLOSE_ID));
+
+        // A shell that still holds focus must not let Shift+Tab escape either.
+        focused = None;
+        let handled = handle_application_dialog_key(
+            &Key::Tab,
+            true,
+            APPLICATION_DETAIL_DIALOG_ID,
+            &trigger,
+            || closed = true,
+            |id| focused = Some(id.to_string()),
+        );
+        assert!(handled);
+        assert!(!closed);
+        assert_eq!(focused.as_deref(), Some(APPLICATION_DETAIL_CLOSE_ID));
+
+        let src = include_str!("applications.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
+        let mounted_at = prod.find("onmounted:").expect("open focus");
+        let mounted = &prod[mounted_at..mounted_at + 180];
+        assert!(
+            mounted.contains("application_dialog_initial_focus_id()"),
+            "open must focus the heading: {mounted}"
+        );
+        assert!(
+            !mounted.contains("APPLICATION_DETAIL_DIALOG_ID"),
+            "open must not focus the dialog shell: {mounted}"
         );
     }
 
