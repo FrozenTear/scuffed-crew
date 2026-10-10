@@ -35,7 +35,7 @@ pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const PACK_CURRENT: &str = "The reader pack is already installed.";
-pub const PACK_UNAVAILABLE: &str = "Reader packs aren't set up on the server yet.";
+pub const PACK_UNAVAILABLE: &str = "Reader packs aren't set up on the server yet. The tracker still works. Try again later or ask an admin.";
 pub const PACK_UNSUPPORTED: &str = "This server does not offer reader packs yet.";
 pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
 pub const PACK_MISMATCH: &str =
@@ -67,7 +67,8 @@ pub fn rate_limit_message(seconds: u64) -> String {
 pub enum PackSync {
     Installed,
     Current,
-    /// HTTP 503 `packs_disabled`. Callers keep the installed files and stay quiet.
+    /// HTTP 503 whose body is `{"error":"packs_disabled"}`. Callers keep the
+    /// installed files. A proxy 502 or 503 is [`PackSync::Failed`] instead.
     Unavailable,
     /// HTTP 404 on the list. This server does not have the route yet.
     Unsupported,
@@ -277,8 +278,12 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
     if status == 404 {
         return Get::Unsupported;
     }
-    if status == 503 {
-        return Get::Unavailable;
+    if status == 502 || status == 503 {
+        let body = response.text().await.unwrap_or_default();
+        if status == 503 && packs_disabled_body(&body) {
+            return Get::Unavailable;
+        }
+        return Get::Failed(PACK_FAILED.to_string());
     }
     if status == 429 {
         let header = retry_after_header(response.headers());
@@ -295,6 +300,14 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
         Ok(bytes) => Get::Ok(bytes),
         Err(message) => Get::Failed(message.to_string()),
     }
+}
+
+/// True only for the site's packs-disabled body. A proxy page is not this.
+fn packs_disabled_body(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value.get("error").and_then(|error| error.as_str()) == Some("packs_disabled")
 }
 
 fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -840,6 +853,7 @@ mod tests {
             403 => "Forbidden",
             404 => "Not Found",
             429 => "Too Many Requests",
+            502 => "Bad Gateway",
             503 => "Service Unavailable",
             _ => "Error",
         };
@@ -1267,7 +1281,7 @@ mod tests {
         );
         assert_eq!(
             PackSync::Unavailable.guide_result(),
-            Ok("Reader packs aren't set up on the server yet.".to_string())
+            Ok("Reader packs aren't set up on the server yet. The tracker still works. Try again later or ask an admin.".to_string())
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
 
@@ -1288,6 +1302,43 @@ mod tests {
             PackSync::Unsupported
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_502_or_503_is_a_failed_download() {
+        async fn expect_failed(status: u16, body: &'static [u8]) {
+            let token = "pack-token";
+            let dir = tempfile::tempdir().expect("tempdir");
+            let heroes = HeroTemplates::dir_in(dir.path());
+            std::fs::create_dir_all(&heroes).unwrap();
+            std::fs::write(heroes.join("keep.txt"), b"old").unwrap();
+            let fake = Arc::new(Fake {
+                token: token.into(),
+                list_status: status,
+                list_body: body.to_vec(),
+                list_retry: None,
+                file_status: 200,
+                file_body: Vec::new(),
+                file_chunked: false,
+                file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                requested: requested_paths(),
+            });
+            let base = spawn_fake(fake);
+            let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+            assert_eq!(
+                result,
+                PackSync::Failed(
+                    "Could not download the reader pack. The installed pack was left in place."
+                        .into()
+                ),
+                "HTTP {status}"
+            );
+            assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+        }
+
+        expect_failed(503, b"<html>upstream restart</html>").await;
+        expect_failed(502, b"Bad Gateway").await;
+        expect_failed(502, br#"{"error":"packs_disabled"}"#).await;
     }
 
     #[tokio::test]
