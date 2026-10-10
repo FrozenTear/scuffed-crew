@@ -114,6 +114,26 @@ pub fn resolve_current_version(
     None
 }
 
+/// Version line for `stat-tracker-gui --version`.
+///
+/// This is the daemon package version, not this crate's `0.1.0`. Release
+/// builds that set `SST_RELEASE_VERSION` print that tag, same as the daemon.
+pub fn gui_version_line() -> String {
+    format!("stat-tracker-gui {}", daemon_package_version())
+}
+
+pub fn daemon_package_version() -> String {
+    if let Some(compiled) = option_env!("SST_RELEASE_VERSION") {
+        let trimmed = compiled.trim().trim_start_matches('v').trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    crate::notes::stat_tracker_package_version(include_str!("../../stat-tracker/Cargo.toml"))
+        .unwrap_or("0.0.0")
+        .to_string()
+}
+
 /// `scuffed-stat-tracker --version` prints `scuffed-stat-tracker 0.3.3`.
 pub fn parse_daemon_version_line(line: &str) -> Option<String> {
     let line = line.trim();
@@ -1210,6 +1230,31 @@ mod tests {
         );
         assert!(parse_daemon_version_line("scuffed-stat-tracker").is_none());
         assert!(parse_daemon_version_line("garbage").is_none());
+    }
+
+    #[test]
+    fn gui_version_line_reports_the_daemon_package() {
+        let version = daemon_package_version();
+        assert_ne!(version, env!("CARGO_PKG_VERSION"));
+        assert_ne!(version, "0.1.0");
+        assert_eq!(
+            parse_daemon_version_line(&gui_version_line()).as_deref(),
+            Some(version.as_str())
+        );
+        assert!(gui_version_line().starts_with("stat-tracker-gui "));
+        assert!(!gui_version_line().contains('\u{2014}'));
+        assert!(!gui_version_line().contains('\u{2013}'));
+        if option_env!("SST_RELEASE_VERSION")
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            let packaged = crate::notes::stat_tracker_package_version(include_str!(
+                "../../stat-tracker/Cargo.toml"
+            ))
+            .expect("daemon package version");
+            assert_eq!(version, packaged);
+        }
     }
 
     #[test]

@@ -168,6 +168,22 @@ pub fn live_active_game_key(
     Some(id.to_string())
 }
 
+/// Games-tab session that should use the in-progress card.
+///
+/// Same file rules as [`live_active_game_key`]: a decided or stale
+/// `active_game.json` is not live, and the game process has to be running.
+pub fn in_progress_session_id(
+    data_dir: &Path,
+    window_secs: u64,
+    now: DateTime<Utc>,
+    process_running: bool,
+) -> Option<String> {
+    if !process_running {
+        return None;
+    }
+    live_active_game_key(data_dir, window_secs, now)
+}
+
 fn parse_last_activity(v: &serde_json::Value) -> Option<DateTime<Utc>> {
     let raw = v.get("last_activity")?;
     if let Some(s) = raw.as_str() {
@@ -1095,6 +1111,11 @@ mod tests {
             resolve_live_session_key(&dir, false, 1800, now, true).as_deref(),
             Some("sess-tab")
         );
+        assert_eq!(
+            in_progress_session_id(&dir, 1800, now, true).as_deref(),
+            Some("sess-tab")
+        );
+        assert_eq!(in_progress_session_id(&dir, 1800, now, false), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

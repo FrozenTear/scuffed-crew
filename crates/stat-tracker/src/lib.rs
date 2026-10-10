@@ -5,6 +5,7 @@ pub mod config;
 pub mod detect;
 pub mod fs_mode;
 pub mod hero_auth;
+pub mod mapcrops;
 pub mod ocr;
 pub mod packs;
 pub mod parse;

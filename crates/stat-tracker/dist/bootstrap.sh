@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download a prebuilt Linux x86_64 release and run its in-tarball installer.
 #
-# Fresh install (stable entrypoint — older GUIs curl this too):
+# Fresh install (stable entrypoint, older GUIs curl this too):
 #   curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 #
 # That `main` copy only resolves the release tag, then re-execs bootstrap.sh
@@ -332,7 +332,7 @@ verify_release_signature() {
     pub="$(configured_minisign_pub)"
     sig_url="${SIG_URL:-}"
     # No key configured: sha256 is the only check. A configured key must not
-    # fall back when the .minisig asset is missing — that would let a stripped
+    # fall back when the .minisig asset is missing, that would let a stripped
     # signature downgrade the install to a same-origin checksum.
     if [[ -z "${pub//[[:space:]]/}" ]]; then
         warn_signature_fallback
@@ -374,9 +374,9 @@ minisign_key_configured() {
     [[ -n "${pub//[[:space:]]/}" ]]
 }
 
-# sha256 of the tarball. With a minisign public key configured, a missing
-# .sha256 asset or a missing sha256sum is a hard failure. With no key, both
-# stay warnings (today's same-origin checksum is optional).
+# sha256 of the tarball. A missing .sha256 asset stops the install.
+# A missing sha256sum is a hard failure when a minisign public key is
+# configured, and a warning otherwise.
 verify_release_checksum() {
     local asset="$1"
     local sha_url="${SHA_URL:-}"
@@ -384,17 +384,16 @@ verify_release_checksum() {
     dir="$(cd "$(dirname "$asset")" && pwd)"
     name="$(basename "$asset")"
     sumfile="${dir}/${name}.sha256"
-    if minisign_key_configured; then
-        if [[ -z "$sha_url" ]]; then
-            error "A minisign public key is configured, but this release has no .sha256 asset. Refusing to install."
-            exit 1
-        fi
-        if ! command -v sha256sum >/dev/null 2>&1; then
+    if [[ -z "$sha_url" ]]; then
+        error "This release has no .sha256 asset. Refusing to install."
+        exit 1
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if minisign_key_configured; then
             error "A minisign public key is configured, but sha256sum is not installed. Refusing to install."
             exit 1
         fi
-    elif [[ -z "$sha_url" ]] || ! command -v sha256sum >/dev/null 2>&1; then
-        warn "No .sha256 asset or sha256sum missing — skipping integrity check."
+        warn "sha256sum is not installed, skipping the integrity check."
         return 0
     fi
     info "Verifying sha256…"

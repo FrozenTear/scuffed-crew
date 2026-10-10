@@ -6,12 +6,14 @@
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
 //! The new reader switch writes `reader`.
 
-use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
+use iced::widget::{
+    Row, button, checkbox, column, container, row, scrollable, space, text, text_input,
+};
 use iced::{Alignment, Element, Fill, Padding};
 use stat_tracker::config::{AutoDetectConfig, Config, ShadowRecognizerControl, SyncConfig};
 
 use crate::app::{Message, TrackerApp};
-use crate::layout::settings_columns;
+use crate::layout::{settings_columns, settings_pane_max};
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_LABEL,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
@@ -442,7 +444,8 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         .push(save_footer(demo))
         .push(uninstall_row());
 
-    col.into()
+    let body = col.width(Fill).max_width(settings_pane_max(content_width));
+    scrollable(body).width(Fill).height(Fill).into()
 }
 
 fn section_card(id: SettingsSection, app: &TrackerApp, demo: bool) -> Element<'_, Message> {

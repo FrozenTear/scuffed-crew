@@ -106,6 +106,8 @@ pub const GRID_GAP: f32 = 12.0;
 pub const STRIPE: f32 = 4.0;
 pub const HEIGHT_FEATURED: f32 = 216.0;
 pub const HEIGHT_COMPACT: f32 = 180.0;
+/// Open game on the Games tab: label, two stat rows, and the not-final note.
+pub const HEIGHT_IN_PROGRESS: f32 = 292.0;
 pub const HEIGHT_HERO: f32 = 160.0;
 /// Maps screen compact card — name, featured WR, games · W–L, win bar.
 pub const HEIGHT_MAP: f32 = 148.0;

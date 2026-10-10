@@ -691,12 +691,12 @@ Esperanca accept both plain and accented live names (Paraíso /
 Esperança) and classify as Hybrid / Push.
 
 0.4.12 shipped cheap outcome-only poll during end_reel_wake (#87).
-Still on prior polish / packaging from 0.4.1–0.4.12.
+Still on prior polish / packaging from 0.4.1-0.4.12.
 
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -717,12 +717,12 @@ does not wake end-reel. Tab-reject Victory adopt is out of scope
 (follow-up).
 
 0.4.11 shipped end-reel / POTG false-wake tighten (#85). Still on
-prior polish / packaging from 0.4.1–0.4.11.
+prior polish / packaging from 0.4.1-0.4.11.
 
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -748,7 +748,7 @@ unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -765,7 +765,7 @@ Or extract the tarball and run `./install.sh`. Pin with
 POTG nameplate title-card wake (#83): a Play of the Game **nameplate**
 title card (gold battletag + white title, color gate) holds full ~4s
 poll cadence for 45s. Letterbox / highlight end-reel path is unchanged.
-Phrase OCR is optional and log-only — the cheap color gate wakes.
+Phrase OCR is optional and log-only, the cheap color gate wakes.
 Calibrated on a real 2560×1440 card.
 
 0.4.9 already shipped on-hit poll debug PNGs (#80) and POTG / end-reel
@@ -774,7 +774,7 @@ letterbox wake (#81). Confirm rules are unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -800,7 +800,7 @@ Victory/Defeat window is sampled. Confirm rules are unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -823,7 +823,7 @@ toast if wl-clipboard is missing.
 Daemon OCR / capture / sync / store schema are unchanged. Settings
 Maps-level polish (0.4.7), Maps-grammar Seasons grid (0.4.6),
 Settings/Maps/Games polish (0.4.5), companion overlay hotkey (0.4.4),
-and packaging hotfixes 0.4.1–0.4.3 are unchanged.
+and packaging hotfixes 0.4.1-0.4.3 are unchanged.
 
 ### Install
 
@@ -841,7 +841,7 @@ pane, full-width Save footer, denser surface cards. Companion hotkey
 setting is unchanged.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging
-hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), Settings/Maps/Games
+hotfixes 0.4.1-0.4.3, companion overlay hotkey (0.4.4), Settings/Maps/Games
 polish (0.4.5), and Maps-grammar Seasons grid (0.4.6) are unchanged.
 
 ### Install
@@ -855,14 +855,14 @@ Or extract the tarball and run `./install.sh`. Pin with
 
 ## 0.4.6
 
-Seasons Maps-grammar grid (#74): season cards use the same 2–4 column
+Seasons Maps-grammar grid (#74): season cards use the same 2-4 column
 layout as Maps, with a big WR, win/loss stripe, and FillPortion bar.
 
-Settings denser cards (#74): surface cards with a 1–2 column field grid.
+Settings denser cards (#74): surface cards with a 1-2 column field grid.
 Companion hotkey setting is unchanged.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging
-hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), and prior
+hotfixes 0.4.1-0.4.3, companion overlay hotkey (0.4.4), and prior
 Settings/Maps/Games polish (0.4.5) are unchanged.
 
 ### Install
@@ -883,11 +883,11 @@ Split-game dedupe (#71): reuse an unfinished same-map/hero session within
 ~20 min instead of opening a second empty Games card. Tab debounce and the
 1800s session grouping window are unchanged.
 
-Maps visual polish (#72): compact 2–4 column map cards with a WR bar and
+Maps visual polish (#72): compact 2-4 column map cards with a WR bar and
 win/loss stripe.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging hotfixes
-0.4.1–0.4.3 and the companion overlay hotkey (0.4.4) are unchanged.
+0.4.1-0.4.3 and the companion overlay hotkey (0.4.4) are unchanged.
 
 ### Install
 
@@ -905,7 +905,7 @@ Companion overlay show/hide hotkey (#68). **Settings → Companion**: enable
 click-through (`KeyboardInteractivity::None`); Esc does not apply.
 
 The **main GUI process** reads `/dev/input` with **evdev** (same path as
-daemon Tab capture — not X11 `XGrabKey`). Needs the `input` group or seat
+daemon Tab capture, not X11 `XGrabKey`). Needs the `input` group or seat
 `uaccess`, same as Tab. OverlayHold is the same as the tray / header
 **Hide / show overlay**: hide sticks until the game ends; the shortcut
 shows the overlay again mid-session if you press it while hidden.
@@ -970,7 +970,7 @@ quits when there is no tray.
 - Optional Ayatana AppIndicator package on distros that ship it
   (Debian/Ubuntu: `libayatana-appindicator3-1`, Fedora:
   `libayatana-appindicator-gtk3`, Arch: `libayatana-appindicator`).
-- AerynOS may not ship it — the main window still works.
+- AerynOS may not ship it, the main window still works.
 
 Daemon OCR / capture / sync / store schema are unchanged. OpenSSL packaging
 from 0.4.1 is unchanged.

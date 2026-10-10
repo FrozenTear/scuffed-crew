@@ -6,7 +6,7 @@ use crate::aggregate::{
 };
 use crate::app::{Message, TrackerApp};
 use crate::layout::games_columns;
-use crate::model::{Game, Outcome};
+use crate::model::{Game, Outcome, game_card_in_progress};
 use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
 use crate::widgets;
 
@@ -47,39 +47,47 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 /// (full-width) instead of duplicating below the row.
 fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Element<'a, Message> {
     let cols = cols.max(1);
+    let live = app.live_game_session.as_deref();
     let mut col = column![].spacing(GRID_GAP).width(Fill);
     let mut pending: Vec<&Game> = Vec::new();
     for g in games {
         let selected = app.expanded.as_deref() == Some(g.session_id.as_str());
         if selected {
             if !pending.is_empty() {
-                col = col.push(flush_compact(&mut pending, cols));
+                col = col.push(flush_compact(&mut pending, cols, live));
             }
             let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
+            let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
             col = col.push(widgets::expanded_game_card(
                 g,
                 app.editing && app.edit.session_id == g.session_id,
                 &app.edit,
                 confirm,
+                in_progress,
             ));
         } else {
             pending.push(g);
             if pending.len() == cols {
-                col = col.push(flush_compact(&mut pending, cols));
+                col = col.push(flush_compact(&mut pending, cols, live));
             }
         }
     }
     if !pending.is_empty() {
-        col = col.push(flush_compact(&mut pending, cols));
+        col = col.push(flush_compact(&mut pending, cols, live));
     }
     col.into()
 }
 
-fn flush_compact(pending: &mut Vec<&Game>, cols: usize) -> Element<'static, Message> {
+fn flush_compact(
+    pending: &mut Vec<&Game>,
+    cols: usize,
+    live: Option<&str>,
+) -> Element<'static, Message> {
     let mut pair = row![].spacing(GRID_GAP).width(Fill);
     let n = pending.len();
     for p in pending.drain(..) {
-        pair = pair.push(widgets::compact_game_card_clickable(p, false));
+        let in_progress = game_card_in_progress(&p.session_id, p.outcome, live);
+        pair = pair.push(widgets::compact_game_card_clickable(p, false, in_progress));
     }
     for _ in n..cols {
         pair = pair.push(space().width(Fill));

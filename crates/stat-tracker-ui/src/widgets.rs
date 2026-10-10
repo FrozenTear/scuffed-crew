@@ -7,8 +7,8 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
 use crate::model::{
-    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, UPLOAD_REJECTED_LABEL,
-    display_hero_name, local_hm,
+    EditField, EditForm, Game, IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, Role, Screen, SeasonSel,
+    UPLOAD_REJECTED_LABEL, display_hero_name, local_hm,
 };
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
@@ -354,18 +354,26 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
 }
 
 pub fn compact_game_card(game: &Game) -> Element<'static, Message> {
-    compact_game_card_inner(game, false)
+    compact_game_card_inner(game, false, false)
 }
 
-pub fn compact_game_card_clickable(game: &Game, selected: bool) -> Element<'static, Message> {
+pub fn compact_game_card_clickable(
+    game: &Game,
+    selected: bool,
+    in_progress: bool,
+) -> Element<'static, Message> {
     let sid = game.session_id.clone();
-    mouse_area(compact_game_card_inner(game, selected))
+    mouse_area(compact_game_card_inner(game, selected, in_progress))
         .on_press(Message::ToggleGame(sid))
         .into()
 }
 
-fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Message> {
-    let body = column![
+fn compact_game_card_inner(
+    game: &Game,
+    selected: bool,
+    in_progress: bool,
+) -> Element<'static, Message> {
+    let mut body = column![
         role_and_edited(game),
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
@@ -380,10 +388,22 @@ fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Mess
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-        with_unsure(outcome_label(game.outcome), game.field_unsure("result")),
+        if in_progress {
+            in_progress_label()
+        } else {
+            with_unsure(outcome_label(game.outcome), game.field_unsure("result"))
+        },
     ]
     .spacing(4);
-    let card = card_shell(game.role, game.outcome, body.into(), theme::HEIGHT_COMPACT);
+    if in_progress {
+        body = body.push(in_progress_stats(game));
+    }
+    let height = if in_progress {
+        theme::HEIGHT_IN_PROGRESS
+    } else {
+        theme::HEIGHT_COMPACT
+    };
+    let card = card_shell(game.role, game.outcome, body.into(), height);
     if selected {
         container(card)
             .style(|_t| container::Style {
@@ -648,8 +668,16 @@ pub fn expanded_game_card<'a>(
     editing: bool,
     edit: &'a EditForm,
     confirm_delete: bool,
+    in_progress: bool,
 ) -> Element<'a, Message> {
     let sid = game.session_id.clone();
+    let result = if in_progress {
+        column![in_progress_label(), in_progress_note()]
+            .spacing(4)
+            .into()
+    } else {
+        with_unsure(outcome_label(game.outcome), game.field_unsure("result"))
+    };
     let mut body = column![
         role_and_edited(game),
         map_block(game, SIZE_TITLE, FONT_BOLD),
@@ -665,7 +693,7 @@ pub fn expanded_game_card<'a>(
             .into(),
             game.field_unsure("hero"),
         ),
-        with_unsure(outcome_label(game.outcome), game.field_unsure("result")),
+        result,
         stat_line(game),
         action_row(game, editing, confirm_delete),
     ]
@@ -1014,6 +1042,47 @@ fn outcome_label(outcome: Outcome) -> Element<'static, Message> {
         .font(FONT_BOLD)
         .color(theme::outcome_color(outcome))
         .into()
+}
+
+fn in_progress_label() -> Element<'static, Message> {
+    text(IN_PROGRESS_LABEL)
+        .size(SIZE_LABEL)
+        .font(FONT_BOLD)
+        .color(theme::WARN)
+        .into()
+}
+
+fn in_progress_note() -> Element<'static, Message> {
+    text(NOT_FINAL_NOTE)
+        .size(SIZE_LABEL)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3)
+        .into()
+}
+
+/// Latest saved E / D / A / damage / healing / mitigation, plus the note
+/// that they are not the closed-game line yet.
+fn in_progress_stats(game: &Game) -> Element<'static, Message> {
+    column![
+        row![
+            stat_box("E", game.elims, game.field_unsure("e")),
+            stat_box("D", game.deaths, game.field_unsure("d")),
+            stat_box("A", game.assists, game.field_unsure("a")),
+        ]
+        .spacing(6)
+        .width(Fill),
+        row![
+            stat_box("DMG", game.damage, game.field_unsure("dmg")),
+            stat_box("HEAL", game.healing, game.field_unsure("h")),
+            stat_box("MIT", game.mitigation, game.field_unsure("mit")),
+        ]
+        .spacing(6)
+        .width(Fill),
+        in_progress_note(),
+    ]
+    .spacing(6)
+    .width(Fill)
+    .into()
 }
 
 const UNSURE_MARK: &str = "unsure";

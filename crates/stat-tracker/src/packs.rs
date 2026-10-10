@@ -35,8 +35,7 @@ pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const PACK_CURRENT: &str = "The reader pack is already installed.";
-pub const PACK_UNAVAILABLE: &str =
-    "No reader pack is published on the site. The tracker will keep what is already installed.";
+pub const PACK_UNAVAILABLE: &str = "Reader packs aren't set up on the server yet. The tracker still works. Try again later or ask an admin.";
 pub const PACK_UNSUPPORTED: &str = "This server does not offer reader packs yet.";
 pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
 pub const PACK_MISMATCH: &str =
@@ -45,8 +44,8 @@ pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
-pub const PACK_AUTH: &str =
-    "The site rejected the tracker token. The installed pack was left in place.";
+pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
+pub const PACK_FORBIDDEN: &str = "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.";
 pub const PACK_SIGN_IN: &str = "Sign in first. Then the tracker can download the reader pack.";
 
 /// A huge `Retry-After` must not be added to a clock.
@@ -68,7 +67,8 @@ pub fn rate_limit_message(seconds: u64) -> String {
 pub enum PackSync {
     Installed,
     Current,
-    /// HTTP 503 `packs_disabled`. Callers keep the installed files and stay quiet.
+    /// HTTP 503 whose body is `{"error":"packs_disabled"}`. Callers keep the
+    /// installed files. A proxy 502 or 503 is [`PackSync::Failed`] instead.
     Unavailable,
     /// HTTP 404 on the list. This server does not have the route yet.
     Unsupported,
@@ -134,6 +134,7 @@ pub async fn sync_reader_packs(
         Get::Unavailable => return PackSync::Unavailable,
         Get::Unsupported => return PackSync::Unsupported,
         Get::Auth => return PackSync::Failed(PACK_AUTH.to_string()),
+        Get::Forbidden => return PackSync::Failed(PACK_FORBIDDEN.to_string()),
         Get::Limited(seconds) => return PackSync::Failed(rate_limit_message(seconds)),
         Get::Failed(message) => return PackSync::Failed(message),
     };
@@ -145,14 +146,16 @@ pub async fn sync_reader_packs(
         Ok(entry) => entry,
         Err(outcome) => return outcome,
     };
+    let heroes_dir = HeroTemplates::dir_in(data_dir);
     let installed = read_versions(data_dir);
-    if installed
+    let version_matches = installed
         .get(HEROES_PACK_NAME)
-        .is_some_and(|version| version == &entry.version)
-    {
+        .is_some_and(|version| version == &entry.version);
+    // pack-versions.json can outlive a deleted heroes folder. Download again.
+    if version_matches && heroes_dir.is_dir() {
         return PackSync::Current;
     }
-    let parent = HeroTemplates::dir_in(data_dir)
+    let parent = heroes_dir
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| data_dir.to_path_buf());
@@ -192,6 +195,10 @@ pub async fn sync_reader_packs(
             let _ = std::fs::remove_dir_all(&staging);
             return PackSync::Failed(PACK_AUTH.to_string());
         }
+        Get::Forbidden => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return PackSync::Failed(PACK_FORBIDDEN.to_string());
+        }
         Get::Limited(seconds) => {
             let _ = std::fs::remove_dir_all(&staging);
             return PackSync::Failed(rate_limit_message(seconds));
@@ -212,8 +219,7 @@ pub async fn sync_reader_packs(
     }
     let mut versions = BTreeMap::new();
     versions.insert(HEROES_PACK_NAME.to_string(), entry.version.clone());
-    let live = HeroTemplates::dir_in(data_dir);
-    if let Err(message) = swap_dir(&staging, &live) {
+    if let Err(message) = swap_dir(&staging, &heroes_dir) {
         let _ = std::fs::remove_dir_all(&staging);
         tracing::warn!(error = %message, "reader pack was not swapped into place");
         return PackSync::Failed(PACK_FAILED.to_string());
@@ -232,13 +238,16 @@ struct PackListEntry {
     size: u64,
 }
 
-/// The first list entry is the hero template pack. Anything else is refused
-/// before a download.
+/// The hero template pack is the entry named [`HEROES_PACK_NAME`].
+/// Other names are ignored. An empty list means there is nothing to install.
 fn select_heroes_pack(entries: &[PackListEntry]) -> Result<&PackListEntry, PackSync> {
-    let Some(entry) = entries.first() else {
+    if entries.is_empty() {
         return Err(PackSync::Current);
+    }
+    let Some(entry) = entries.iter().find(|entry| entry.name == HEROES_PACK_NAME) else {
+        return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
     };
-    if entry.name != HEROES_PACK_NAME || !is_sha256(&entry.sha256) || !is_version(&entry.version) {
+    if !is_sha256(&entry.sha256) || !is_version(&entry.version) {
         return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
     }
     Ok(entry)
@@ -249,6 +258,7 @@ enum Get {
     Unavailable,
     Unsupported,
     Auth,
+    Forbidden,
     Limited(u64),
     Failed(String),
 }
@@ -262,11 +272,18 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
     if status == 401 {
         return Get::Auth;
     }
+    if status == 403 {
+        return Get::Forbidden;
+    }
     if status == 404 {
         return Get::Unsupported;
     }
-    if status == 503 {
-        return Get::Unavailable;
+    if status == 502 || status == 503 {
+        let body = response.text().await.unwrap_or_default();
+        if status == 503 && packs_disabled_body(&body) {
+            return Get::Unavailable;
+        }
+        return Get::Failed(PACK_FAILED.to_string());
     }
     if status == 429 {
         let header = retry_after_header(response.headers());
@@ -283,6 +300,14 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
         Ok(bytes) => Get::Ok(bytes),
         Err(message) => Get::Failed(message.to_string()),
     }
+}
+
+/// True only for the site's packs-disabled body. A proxy page is not this.
+fn packs_disabled_body(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value.get("error").and_then(|error| error.as_str()) == Some("packs_disabled")
 }
 
 fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -399,6 +424,29 @@ struct InnerFile {
 }
 
 fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
+    let _ = sync_dir(staging);
+    if live.exists() {
+        match exchange_paths(staging, live) {
+            Ok(()) => {
+                if let Err(err) = std::fs::remove_dir_all(staging) {
+                    tracing::warn!(
+                        error = %err,
+                        "previous reader pack was left beside the new one"
+                    );
+                }
+                let _ = sync_dir(live.parent().unwrap_or(live));
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "atomic pack exchange was not available");
+            }
+        }
+    } else {
+        std::fs::rename(staging, live).map_err(|err| err.to_string())?;
+        let _ = sync_dir(live.parent().unwrap_or(live));
+        return Ok(());
+    }
+
     let parent = live.parent().unwrap_or_else(|| Path::new("."));
     let backup = parent.join(format!(
         ".heroes-prev-{}-{}",
@@ -408,20 +456,43 @@ fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0)
     ));
-    let had_live = live.exists();
-    if had_live {
-        std::fs::rename(live, &backup).map_err(|err| err.to_string())?;
-    }
+    std::fs::rename(live, &backup).map_err(|err| err.to_string())?;
     if let Err(err) = std::fs::rename(staging, live) {
-        if had_live {
-            let _ = std::fs::rename(&backup, live);
-        }
+        let _ = std::fs::rename(&backup, live);
         return Err(err.to_string());
     }
-    if had_live {
-        let _ = std::fs::remove_dir_all(&backup);
-    }
+    let _ = std::fs::remove_dir_all(&backup);
+    let _ = sync_dir(parent);
     Ok(())
+}
+
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+/// Swap two directory entries in one syscall when the kernel allows it.
+/// After this returns, `live` is the new tree and `staging` is the old one.
+fn exchange_paths(staging: &Path, live: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let staging_c = std::ffi::CString::new(staging.as_os_str().as_bytes())
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let live_c = std::ffi::CString::new(live.as_os_str().as_bytes())
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staging_c.as_ptr(),
+            libc::AT_FDCWD,
+            live_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn versions_path(data_dir: &Path) -> PathBuf {
@@ -779,8 +850,10 @@ mod tests {
         let reason = match status {
             200 => "OK",
             401 => "Unauthorized",
+            403 => "Forbidden",
             404 => "Not Found",
             429 => "Too Many Requests",
+            502 => "Bad Gateway",
             503 => "Service Unavailable",
             _ => "Error",
         };
@@ -839,7 +912,7 @@ mod tests {
         let raw =
             format!(r#"[{{"name":"heroes-v1.tar","version":"1","sha256":"{sha}","size":12}}]"#);
         let entries: Vec<PackListEntry> = serde_json::from_str(&raw).expect("list");
-        let entry = select_heroes_pack(&entries).expect("first pack");
+        let entry = select_heroes_pack(&entries).expect("named pack");
         assert_eq!(entry.name, HEROES_PACK_NAME);
         assert_eq!(entry.sha256, sha);
         assert_eq!(entry.size, 12);
@@ -853,6 +926,27 @@ mod tests {
             select_heroes_pack(&other).unwrap_err(),
             PackSync::Failed(PACK_MISMATCH.into())
         );
+        assert_eq!(select_heroes_pack(&[]).unwrap_err(), PackSync::Current);
+        let named = vec![
+            PackListEntry {
+                name: "other.tar".into(),
+                version: "9".into(),
+                sha256: sha.into(),
+                size: 4,
+            },
+            PackListEntry {
+                name: HEROES_PACK_NAME.into(),
+                version: "3".into(),
+                sha256: sha.into(),
+                size: 9,
+            },
+        ];
+        let picked = select_heroes_pack(&named).expect("heroes by name");
+        assert_eq!(picked.version, "3");
+        assert_eq!(picked.size, 9);
+        assert!(PACK_FORBIDDEN.contains("403"));
+        assert!(!PACK_FORBIDDEN.contains('\u{2014}'));
+        assert!(!PACK_FORBIDDEN.contains('\u{2013}'));
     }
 
     #[test]
@@ -1067,6 +1161,16 @@ mod tests {
         let second = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(second, PackSync::Current);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::fs::remove_dir_all(&heroes).expect("remove heroes");
+        assert!(!heroes.exists());
+        let again = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(again, PackSync::Installed);
+        assert_eq!(
+            std::fs::read(heroes.join("ana.png")).expect("redownloaded"),
+            hero
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1175,6 +1279,10 @@ mod tests {
             sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
             PackSync::Unavailable
         );
+        assert_eq!(
+            PackSync::Unavailable.guide_result(),
+            Ok("Reader packs aren't set up on the server yet. The tracker still works. Try again later or ask an admin.".to_string())
+        );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
 
         let missing = Arc::new(Fake {
@@ -1194,6 +1302,43 @@ mod tests {
             PackSync::Unsupported
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_502_or_503_is_a_failed_download() {
+        async fn expect_failed(status: u16, body: &'static [u8]) {
+            let token = "pack-token";
+            let dir = tempfile::tempdir().expect("tempdir");
+            let heroes = HeroTemplates::dir_in(dir.path());
+            std::fs::create_dir_all(&heroes).unwrap();
+            std::fs::write(heroes.join("keep.txt"), b"old").unwrap();
+            let fake = Arc::new(Fake {
+                token: token.into(),
+                list_status: status,
+                list_body: body.to_vec(),
+                list_retry: None,
+                file_status: 200,
+                file_body: Vec::new(),
+                file_chunked: false,
+                file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                requested: requested_paths(),
+            });
+            let base = spawn_fake(fake);
+            let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+            assert_eq!(
+                result,
+                PackSync::Failed(
+                    "Could not download the reader pack. The installed pack was left in place."
+                        .into()
+                ),
+                "HTTP {status}"
+            );
+            assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+        }
+
+        expect_failed(503, b"<html>upstream restart</html>").await;
+        expect_failed(502, b"Bad Gateway").await;
+        expect_failed(502, br#"{"error":"packs_disabled"}"#).await;
     }
 
     #[tokio::test]
@@ -1233,6 +1378,133 @@ mod tests {
         });
         let base = spawn_fake(fake);
         let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32).await;
-        assert_eq!(result, PackSync::Failed(PACK_AUTH.into()));
+        assert_eq!(
+            result,
+            PackSync::Failed("Your sync token isn't valid. Sign in again from Settings.".into())
+        );
+    }
+
+    #[test]
+    fn swap_exchanges_the_live_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("heroes");
+        let staging = dir.path().join(".heroes-next");
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("old.txt"), b"old").unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("new.txt"), b"new").unwrap();
+        swap_dir(&staging, &live).expect("swap");
+        assert_eq!(std::fs::read(live.join("new.txt")).unwrap(), b"new");
+        assert!(!live.join("old.txt").exists());
+        assert!(!staging.exists());
+
+        let fresh = dir.path().join("missing");
+        let staged = dir.path().join(".heroes-fresh");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("only.txt"), b"only").unwrap();
+        swap_dir(&staged, &fresh).expect("create");
+        assert_eq!(std::fs::read(fresh.join("only.txt")).unwrap(), b"only");
+        assert!(!staged.exists());
+    }
+
+    #[tokio::test]
+    async fn heroes_pack_is_downloaded_by_name_when_it_is_not_first() {
+        let token = "pack-token";
+        let bytes = pack_bytes(HEROES_PACK_NAME, "1", &[("ana.png", b"named")]);
+        let list = serde_json::to_vec(&serde_json::json!([
+            {
+                "name": "other.tar",
+                "version": "9",
+                "sha256": "ab".repeat(32),
+                "size": 4,
+            },
+            {
+                "name": HEROES_PACK_NAME,
+                "version": "1",
+                "sha256": sha256_hex(&bytes),
+                "size": bytes.len(),
+            },
+        ]))
+        .unwrap();
+        let requested = requested_paths();
+        let fake = Arc::new(Fake {
+            token: token.into(),
+            list_status: 200,
+            list_body: list,
+            list_retry: None,
+            file_status: 200,
+            file_body: bytes,
+            file_chunked: false,
+            file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested.clone(),
+        });
+        let base = spawn_fake(fake);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(result, PackSync::Installed);
+        let paths = requested.lock().expect("paths").clone();
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/api/tracker/packs/heroes-v1.tar"),
+            "{paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|path| path != "/api/tracker/packs/other.tar")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_403_names_the_refusal_and_leaves_installed_files() {
+        let token = "pack-token";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let heroes = HeroTemplates::dir_in(dir.path());
+        std::fs::create_dir_all(&heroes).unwrap();
+        std::fs::write(heroes.join("keep.txt"), b"old").unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listed = Arc::new(Fake {
+            token: token.into(),
+            list_status: 403,
+            list_body: br#"{"error":"forbidden"}"#.to_vec(),
+            list_retry: None,
+            file_status: 200,
+            file_body: Vec::new(),
+            file_chunked: false,
+            file_hits: hits.clone(),
+            requested: requested_paths(),
+        });
+        let base = spawn_fake(listed);
+        assert_eq!(
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            PackSync::Failed(
+                "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
+            )
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+
+        let bytes = pack_bytes(HEROES_PACK_NAME, "2", &[("ana.png", b"new")]);
+        let file = Arc::new(Fake {
+            token: token.into(),
+            list_status: 200,
+            list_body: list_json(HEROES_PACK_NAME, "2", &bytes),
+            list_retry: None,
+            file_status: 403,
+            file_body: bytes,
+            file_chunked: false,
+            file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
+        });
+        let base = spawn_fake(file);
+        assert_eq!(
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            PackSync::Failed(
+                "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
+            )
+        );
+        assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+        assert!(!heroes.join("ana.png").exists());
     }
 }

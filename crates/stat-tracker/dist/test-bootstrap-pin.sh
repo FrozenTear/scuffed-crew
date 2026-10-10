@@ -189,11 +189,28 @@ if grep -q -- '-fL --progress-bar' "$BOOTSTRAP"; then
 fi
 pass "curl calls are https-only and the tarball fetch is -fsSL"
 
+python3 - "$BOOTSTRAP" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+bad = []
+for number, line in enumerate(text.splitlines(), 1):
+    if "\u2014" in line or "\u2013" in line:
+        bad.append(f"{number}:{line}")
+if bad:
+    raise SystemExit("em or en dash in bootstrap.sh\n" + "\n".join(bad))
+PY
+pass "bootstrap.sh has no em or en dash"
+
 unset STAT_TRACKER_MINISIGN_PUB || true
 SHA_URL=""
+set +e
 skip_sum="$(verify_release_checksum "$TMP/payload" 2>&1)"
-[[ "$skip_sum" == *skipping* ]] || fail "no-key missing sha256 did not warn: $skip_sum"
-pass "no key and missing .sha256 stays a warning"
+skip_sum_code=$?
+set -e
+[[ "$skip_sum_code" -ne 0 ]] || fail "missing .sha256 was accepted: $skip_sum"
+[[ "$skip_sum" == *"no .sha256 asset"* ]] || fail "missing-sha256 error was: $skip_sum"
+[[ "$skip_sum" == *"Refusing to install"* ]] || fail "missing-sha256 did not refuse: $skip_sum"
+pass "missing .sha256 refuses to install"
 
 set +e
 miss_sum="$(
