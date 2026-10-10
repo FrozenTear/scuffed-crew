@@ -623,12 +623,12 @@ mod tests {
     #[test]
     fn a_placeholder_row_is_not_saved_as_a_hero() {
         let rows = [
-            hero(0, RowClass::Placeholder, Some("placeholder_07"), false),
+            hero(0, RowClass::Placeholder, Some("empty_01"), false),
             HeroRead {
                 row: 1,
                 class: RowClass::Hero,
-                hero: Some("placeholder_13".into()),
-                best: "placeholder_13".into(),
+                hero: Some("skull_06".into()),
+                best: "skull_06".into(),
                 score: 0.9,
                 lead: 0.4,
                 second: "ana".into(),

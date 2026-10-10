@@ -861,13 +861,13 @@ mod tests {
     #[test]
     fn a_placeholder_match_falls_back_to_career_or_portrait() {
         let mut board = confident_board(5, 0);
-        set_hero(&mut board, "placeholder_07");
+        set_hero(&mut board, "empty_01");
 
         let mut career = ocr();
         career.hero = "Wrecking Ball".into();
         let saved = merge_saved(&career, identified(0, 5), Some(&board));
         assert_eq!(saved.hero, "Wrecking Ball");
-        assert_ne!(saved.hero, "placeholder_07");
+        assert_ne!(saved.hero, "empty_01");
         assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
@@ -878,9 +878,10 @@ mod tests {
         assert_eq!(saved.hero, "Wrecking Ball");
         assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
 
-        set_hero(&mut board, "special/placeholder_13.png");
+        set_hero(&mut board, "special/skull_06.png");
         let saved = merge_saved(&career, identified(0, 5), Some(&board));
         assert_eq!(saved.hero, "Wrecking Ball");
+        assert_ne!(saved.hero, "skull_06");
     }
 
     #[test]

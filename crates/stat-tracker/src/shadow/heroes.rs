@@ -1125,15 +1125,15 @@ mod tests {
     fn a_top_level_placeholder_file_is_not_a_hero() {
         let dir = template_dir(&[1]);
         portrait(500, 74, Some(YELLOW))
-            .save(dir.path().join("placeholder_07.png"))
+            .save(dir.path().join("empty_01.png"))
             .unwrap();
         let tpl = load(&dir);
         assert_eq!(tpl.hero_count(), 1);
         let q = prep_rgba(&portrait(500, 74, Some(YELLOW)), false).unwrap();
         let r = tpl.read_patch(0, &q);
-        assert_eq!(r.class, RowClass::Placeholder);
+        assert_eq!(r.class, RowClass::Empty);
         assert!(r.hero.is_none());
-        assert_ne!(r.best, "placeholder_07");
+        assert_ne!(r.best, "empty_01");
     }
 
     #[test]

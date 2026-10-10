@@ -487,27 +487,29 @@ pub const HERO_NAMES: &[HeroName] = &[
 ];
 
 /// Empty or unknown scoreboard slots in the hero pack. A match against one
-/// of these is not a hero.
+/// of these is not a hero. The pack's `special/` directory holds `empty_01`,
+/// `placeholder_01` through `placeholder_06`, and `skull_01` through `skull_06`.
 pub const HERO_PACK_PLACEHOLDERS: &[&str] = &[
+    "special/empty_01.png",
     "special/placeholder_01.png",
     "special/placeholder_02.png",
     "special/placeholder_03.png",
     "special/placeholder_04.png",
     "special/placeholder_05.png",
     "special/placeholder_06.png",
-    "special/placeholder_07.png",
-    "special/placeholder_08.png",
-    "special/placeholder_09.png",
-    "special/placeholder_10.png",
-    "special/placeholder_11.png",
-    "special/placeholder_12.png",
-    "special/placeholder_13.png",
+    "special/skull_01.png",
+    "special/skull_02.png",
+    "special/skull_03.png",
+    "special/skull_04.png",
+    "special/skull_05.png",
+    "special/skull_06.png",
 ];
 
 /// Every file in the hero pack besides `manifest.json`.
 ///
-/// Hero icons sit next to the manifest. The 13 placeholder icons sit in
-/// `special/` and are not heroes.
+/// Hero icons sit next to the manifest. The 13 special icons (`empty_01`,
+/// `placeholder_01` through `placeholder_06`, `skull_01` through `skull_06`)
+/// sit in `special/` and are not heroes.
 pub const HERO_PACK_FILES: &[&str] = &[
     "ana.png",
     "anran.png",
@@ -563,19 +565,19 @@ pub const HERO_PACK_FILES: &[&str] = &[
     "wuyang.png",
     "zarya.png",
     "zenyatta.png",
+    "special/empty_01.png",
     "special/placeholder_01.png",
     "special/placeholder_02.png",
     "special/placeholder_03.png",
     "special/placeholder_04.png",
     "special/placeholder_05.png",
     "special/placeholder_06.png",
-    "special/placeholder_07.png",
-    "special/placeholder_08.png",
-    "special/placeholder_09.png",
-    "special/placeholder_10.png",
-    "special/placeholder_11.png",
-    "special/placeholder_12.png",
-    "special/placeholder_13.png",
+    "special/skull_01.png",
+    "special/skull_02.png",
+    "special/skull_03.png",
+    "special/skull_04.png",
+    "special/skull_05.png",
+    "special/skull_06.png",
 ];
 
 /// File name without a directory or `.png`. `special/placeholder_01.png` is
@@ -834,10 +836,37 @@ mod tests {
     }
 
     /// The pack file list and the name table are one roster. A file is either
-    /// a named hero or one of the 13 placeholder icons.
+    /// a named hero or one of the 13 special icons.
     #[test]
     fn every_hero_pack_file_is_a_named_hero_or_a_known_placeholder() {
+        const SPECIAL: &[&str] = &[
+            "empty_01",
+            "placeholder_01",
+            "placeholder_02",
+            "placeholder_03",
+            "placeholder_04",
+            "placeholder_05",
+            "placeholder_06",
+            "skull_01",
+            "skull_02",
+            "skull_03",
+            "skull_04",
+            "skull_05",
+            "skull_06",
+        ];
         assert_eq!(HERO_PACK_PLACEHOLDERS.len(), 13);
+        assert_eq!(SPECIAL.len(), 13);
+        for stem in SPECIAL {
+            let path = format!("special/{stem}.png");
+            assert!(
+                HERO_PACK_PLACEHOLDERS.contains(&path.as_str()),
+                "{path} is not a known placeholder"
+            );
+            assert!(is_placeholder_hero(stem), "{stem}");
+            assert!(is_placeholder_hero(&path), "{path}");
+            assert!(hero_key_to_name(stem).is_none(), "{stem}");
+            assert!(hero_for_pack_file(stem).is_none(), "{stem}");
+        }
         let mut named = 0usize;
         let mut placeholders = 0usize;
         for path in HERO_PACK_FILES {
