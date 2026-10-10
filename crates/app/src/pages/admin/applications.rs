@@ -66,6 +66,39 @@ fn list_or_none(items: &[String]) -> String {
     detail_text(&joined)
 }
 
+const APPLICATION_DETAIL_DIALOG_ID: &str = "application-detail-dialog";
+const APPLICATION_DETAIL_TITLE_ID: &str = "application-detail-title";
+
+/// Id of the View control that opened this application's detail dialog.
+fn application_view_trigger_id(app_id: &str) -> String {
+    format!("application-view-{app_id}")
+}
+
+fn is_application_dialog_dismiss_key(key: &Key) -> bool {
+    *key == Key::Escape
+}
+
+fn focus_element_by_id(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(el) = document.get_element_by_id(id) else {
+            return;
+        };
+        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native tests have no DOM focus. The wasm branch above moves focus.
+        let _ = id;
+    }
+}
+
 #[component]
 fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Element {
     let title = format!("Application: {}", app.applicant_label());
@@ -84,8 +117,26 @@ fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Elem
             onclick: move |_| on_close.call(()),
             div {
                 class: "form-modal application-detail-modal",
+                id: APPLICATION_DETAIL_DIALOG_ID,
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: APPLICATION_DETAIL_TITLE_ID,
+                tabindex: "-1",
+                onmounted: move |_| {
+                    focus_element_by_id(APPLICATION_DETAIL_DIALOG_ID);
+                },
                 onclick: move |e| e.stop_propagation(),
-                div { class: "form-modal-header", "{title}" }
+                onkeydown: move |evt| {
+                    if is_application_dialog_dismiss_key(&evt.key()) {
+                        evt.stop_propagation();
+                        on_close.call(());
+                    }
+                },
+                div {
+                    class: "form-modal-header",
+                    id: APPLICATION_DETAIL_TITLE_ID,
+                    "{title}"
+                }
                 div { class: "form-modal-body",
                     div { class: "application-detail",
                         dl {
@@ -96,7 +147,7 @@ fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Elem
                             dt { "Roles" }
                             dd { "{roles}" }
                             dt { "Message" }
-                            dd { "{message}" }
+                            dd { style: "white-space: pre-wrap;", "{message}" }
                             dt { "Review notes" }
                             dd { "{notes}" }
                             dt { "Submitted" }
@@ -201,6 +252,7 @@ pub fn AdminApplications() -> Element {
                                 // Officers can act on the open pipeline: pending and trial
                                 // (server validates transitions either way).
                                 let can_action = app.status == "pending" || app.status == "trial";
+                                let view_trigger = application_view_trigger_id(&app.id);
                                 let view_app = app.clone();
                                 rsx! {
                                     tr { key: "{id}",
@@ -225,6 +277,7 @@ pub fn AdminApplications() -> Element {
                                                 }
                                                 button {
                                                     class: "row-btn",
+                                                    id: "{view_trigger}",
                                                     onclick: move |_| {
                                                         view_target.set(Some(view_app.clone()));
                                                         view_open.set(true);
@@ -244,12 +297,21 @@ pub fn AdminApplications() -> Element {
 
         {list_cap_notice(&applications, "applications")}
 
-        if view_open() {
-            if let Some(app) = view_target() {
-                ApplicationDetailDialog {
-                    app,
-                    on_close: move |_| view_open.set(false),
+        {
+            let dialog = if view_open() { view_target() } else { None };
+            if let Some(app) = dialog {
+                let trigger_id = application_view_trigger_id(&app.id);
+                rsx! {
+                    ApplicationDetailDialog {
+                        app,
+                        on_close: move |_| {
+                            focus_element_by_id(&trigger_id);
+                            view_open.set(false);
+                        },
+                    }
                 }
+            } else {
+                rsx! {}
             }
         }
 
@@ -336,6 +398,71 @@ mod tests {
         assert!(html.contains(">None<"), "{html}");
         assert!(html.contains("Roles"), "{html}");
         assert!(html.contains("Review notes"), "{html}");
+    }
+
+    #[test]
+    fn application_detail_dialog_labels_itself_and_keeps_message_line_breaks() {
+        assert!(is_application_dialog_dismiss_key(&Key::Escape));
+        assert!(!is_application_dialog_dismiss_key(&Key::Enter));
+        assert_eq!(application_view_trigger_id("app1"), "application-view-app1");
+
+        fn view() -> Element {
+            let mut app = sample_application();
+            app.message = Some("Line one\nLine two".into());
+            rsx! {
+                ApplicationDetailDialog {
+                    app,
+                    on_close: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        let dialog_at = html.find("application-detail-modal").expect("dialog class");
+        let dialog_tag_end = html[dialog_at..].find('>').expect("dialog tag") + dialog_at;
+        let dialog_tag = &html[dialog_at..dialog_tag_end];
+        assert!(
+            dialog_tag.contains("role=\"dialog\""),
+            "dialog role: {dialog_tag}"
+        );
+        assert!(
+            dialog_tag.contains("aria-modal=\"true\""),
+            "aria-modal: {dialog_tag}"
+        );
+        assert!(
+            dialog_tag.contains("aria-labelledby=\"application-detail-title\""),
+            "aria-labelledby: {dialog_tag}"
+        );
+        assert!(
+            dialog_tag.contains("id=\"application-detail-dialog\""),
+            "focus target id: {dialog_tag}"
+        );
+        assert!(
+            dialog_tag.contains("tabindex=\"-1\""),
+            "dialog must be focusable: {dialog_tag}"
+        );
+
+        let header_at = html.find("form-modal-header").expect("heading");
+        let header_end = html[header_at..].find("</div>").expect("heading end") + header_at;
+        let header = &html[header_at..header_end];
+        assert!(
+            header.contains("id=\"application-detail-title\""),
+            "heading id: {header}"
+        );
+        assert!(
+            header.contains("Application: Ada"),
+            "labelled heading text: {header}"
+        );
+
+        assert!(
+            html.contains("white-space:pre-wrap") || html.contains("white-space: pre-wrap"),
+            "message keeps line breaks: {html}"
+        );
+        assert!(
+            html.contains("Line one\nLine two"),
+            "message text keeps the newline: {html}"
+        );
+        assert!(!html.contains('\u{2014}'), "{html}");
+        assert!(!html.contains("&mdash;"), "{html}");
     }
 
     #[test]
