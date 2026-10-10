@@ -44,6 +44,9 @@ sha2 = "0.10"
 name = "stat_tracker"
 path = "src/lib.rs"
 
+[dev-dependencies]
+ab_glyph = "0.2"
+
 [[bin]]
 name = "scuffed-stat-tracker"
 path = "src/main.rs"

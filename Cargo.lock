@@ -10948,6 +10948,7 @@ dependencies = [
 name = "scuffed-stat-tracker"
 version = "0.5.0-alpha.2"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "ashpd",
  "chrono",
