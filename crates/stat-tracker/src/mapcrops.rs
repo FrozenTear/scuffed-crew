@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use image::DynamicImage;
 
-use crate::ocr::preprocess::{self, MapNameRect};
+use crate::ocr::preprocess;
 
 /// How many map-label crops to keep. Older files are removed.
 pub const MAPCROP_KEEP: usize = 100;
@@ -30,12 +30,14 @@ pub fn prepare_mapcrop(
     frame: &DynamicImage,
 ) -> Option<MapcropJob> {
     let file_name = mapcrop_file_name(session_id)?;
-    let rect = preprocess::map_name_rect(frame.width(), frame.height())?;
+    preprocess::map_name_rect(frame.width(), frame.height())?;
     let dir = mapcrop_dir(data_dir);
     if dir.join(&file_name).is_file() {
         return None;
     }
-    let image = crop_rect(frame, rect);
+    // Same crop the reader uses, including the timer trim. The full window
+    // stays inside the top bar; the trim only shortens the right edge.
+    let image = preprocess::crop_map_name(frame);
     Some(MapcropJob {
         dir,
         file_name,
@@ -106,10 +108,6 @@ fn mapcrop_file_name(session_id: &str) -> Option<String> {
         return None;
     }
     Some(format!("{session_id}.png"))
-}
-
-fn crop_rect(frame: &DynamicImage, rect: MapNameRect) -> DynamicImage {
-    frame.crop_imm(rect.x, rect.y, rect.w, rect.h)
 }
 
 fn prune_mapcrops(dir: &Path, keep: usize) {
