@@ -1,7 +1,7 @@
 # Recognizer asset packs
 
-The stat tracker downloads private asset packs from the site. A hero icon pack
-is the usual one. Those files are game art.
+The stat tracker downloads private asset packs from the site. Today it reads
+one pack: the hero template pack, `heroes-v1.tar`. Those files are game art.
 
 Do not commit them. Do not attach them to a GitHub release. Do not put them in
 fixtures or under `crates/stat-tracker/test-data/`. The server only reads files
@@ -52,7 +52,7 @@ change `PACKS_DIR` and restart.
 ```json
 [
   {
-    "name": "hero-icons.bin",
+    "name": "heroes-v1.tar",
     "version": "1",
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "size": 1234
@@ -70,6 +70,76 @@ characters). `sha256` is 64 lowercase hex characters, the SHA-256 of the file.
 A name that is not in this file is not served, including a path that tries to
 leave the directory. The server canonicalizes the file and requires it to stay
 inside `PACKS_DIR`.
+
+## The hero pack the tracker needs
+
+The server serves any valid name. The tracker only installs the entry named
+exactly `heroes-v1.tar`. If the list is empty, the tracker does nothing. If
+the list has entries but none is `heroes-v1.tar`, every tracker reports "The
+reader pack did not match the site" and keeps what it had. Other entries are
+ignored.
+
+The file is a plain ustar archive. At the top level it holds:
+
+- `manifest.json`, exactly once.
+- `<hero>.png` for each hero. Use the `file` names from `HERO_NAMES` in
+  `crates/types/src/heroes.rs` (`ana.png`, `wrecking-ball.png`).
+- `special/` with the non-hero row images. Their names start with
+  `placeholder`, `skull`, or `empty` (`special/skull_01.png`).
+
+No other folder and nothing deeper than `special/`. Only regular files and the
+`special/` directory entry. A symlink, hard link, pax or GNU long-name header,
+or a `./` directory entry makes the tracker reject the pack. Build it with
+GNU tar and list the members, not `.`:
+
+```bash
+cd /path/to/private-packs/heroes
+tar --format=ustar -cf ../heroes-v1.tar manifest.json *.png special
+```
+
+The inner `manifest.json` names the pack and lists every other file in the
+archive:
+
+```json
+{
+  "name": "heroes-v1.tar",
+  "version": "1",
+  "files": [
+    {
+      "path": "ana.png",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size": 1234
+    },
+    {
+      "path": "special/skull_01.png",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size": 567
+    }
+  ]
+}
+```
+
+`name` must be `heroes-v1.tar`. `version` must equal the `version` of the
+`heroes-v1.tar` entry in `PACKS_DIR/manifest.json`. `files` lists every
+regular file in the archive except `manifest.json` itself, once each, with its
+lowercase SHA-256 and byte length. Do not list the `special/` directory entry:
+the tracker skips directory entries, so listing one fails the pack. A file in the archive that is not listed, or a listed
+file that is missing, fails the pack.
+
+The tracker checks the downloaded file's size and sha256 against
+`PACKS_DIR/manifest.json` before it unpacks anything. It is capped at 32 MiB.
+
+### Where it lands and when it is fetched again
+
+The tracker unpacks into `<data_dir>/templates/heroes/` and records the
+installed version in `<data_dir>/templates/pack-versions.json`. A failed
+download or a rejected pack leaves the old folder in place.
+
+It checks the list when the daemon starts and when the setup guide runs its
+reader pack step. It downloads again only when the listed `version` differs
+from the recorded one, or the `heroes` folder is gone. To ship new art, change
+`version` in both manifests. Replacing the file under the same version does
+not reach trackers that already have it.
 
 ## Copy into the volume
 
