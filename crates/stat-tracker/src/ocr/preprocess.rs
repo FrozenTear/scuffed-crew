@@ -1070,17 +1070,59 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
     }
 }
 
+/// Top-bar map label, as fractions of the 16:9 playfield. Top-right, above
+/// the scoreboard (for example "WATCHPOINT: GIBRALTAR").
+const MAP_NAME_X_RATIO: f64 = 0.68;
+const MAP_NAME_Y_RATIO: f64 = 0.022;
+const MAP_NAME_W_RATIO: f64 = 0.27;
+const MAP_NAME_H_RATIO: f64 = 0.040;
+
+/// Pixel rectangle of the top-bar map-name label, in full-frame coordinates.
+///
+/// `None` when that rectangle is empty or does not fit inside the frame. The
+/// ratios match [`crop_map_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapNameRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+pub fn map_name_rect(frame_w: u32, frame_h: u32) -> Option<MapNameRect> {
+    let (gx, gy, gw, gh) = game_rect_16_9(frame_w, frame_h);
+    if gw == 0 || gh == 0 || frame_w == 0 || frame_h == 0 {
+        return None;
+    }
+    let x = gx + (gw as f64 * MAP_NAME_X_RATIO) as u32;
+    let y = gy + (gh as f64 * MAP_NAME_Y_RATIO) as u32;
+    let w = (gw as f64 * MAP_NAME_W_RATIO) as u32;
+    let h = (gh as f64 * MAP_NAME_H_RATIO) as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let x_end = x.checked_add(w)?;
+    let y_end = y.checked_add(h)?;
+    if x_end > frame_w || y_end > frame_h {
+        return None;
+    }
+    Some(MapNameRect { x, y, w, h })
+}
+
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
-/// This sits ABOVE the scoreboard crop, so scoreboard OCR never sees it. White
-/// text on a dark bar — pass to `recognize_region`.
+/// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
+/// text on a dark bar. Pass it to `recognize_region`.
 pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
+    if let Some(r) = map_name_rect(w, h) {
+        return img.crop_imm(r.x, r.y, r.w, r.h);
+    }
     let (gx, gy, gw, gh) = game_rect_16_9(w, h);
-    let x = gx + (gw as f64 * 0.68) as u32;
-    let y = gy + (gh as f64 * 0.022) as u32;
-    let cw = ((gw as f64 * 0.27) as u32).min(w.saturating_sub(x));
-    let ch = ((gh as f64 * 0.040) as u32).min(h.saturating_sub(y));
+    let x = gx + (gw as f64 * MAP_NAME_X_RATIO) as u32;
+    let y = gy + (gh as f64 * MAP_NAME_Y_RATIO) as u32;
+    let cw = ((gw as f64 * MAP_NAME_W_RATIO) as u32).min(w.saturating_sub(x));
+    let ch = ((gh as f64 * MAP_NAME_H_RATIO) as u32).min(h.saturating_sub(y));
     img.crop_imm(x, y, cw, ch)
 }
 
@@ -2407,6 +2449,74 @@ mod uncapped_retry_tests {
         assert_eq!(capped.height(), 62, "64/39 of 38 px");
         for h in [20, 27, 39, 44, 48, 60] {
             assert!(prepare_cell_binary_uncapped(&blank(h)).is_none(), "h={h}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod map_name_rect_tests {
+    use super::{
+        HEADER_RATIO, NAME_COL_W, NAME_COL_W_6V6, NAME_COL_X, NAME_COL_X_6V6, SCOREBOARD_H_RATIO,
+        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, game_rect_16_9, map_name_rect,
+    };
+
+    fn overlaps(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
+        let (ax, ay, aw, ah) = a;
+        let (bx, by, bw, bh) = b;
+        ax < bx.saturating_add(bw)
+            && bx < ax.saturating_add(aw)
+            && ay < by.saturating_add(bh)
+            && by < ay.saturating_add(ah)
+    }
+
+    /// Name column inside the scoreboard crop. `x_ratio` / `w_ratio` are the
+    /// 5v5 or 6v6 name-cell fractions of that crop.
+    fn name_area(frame_w: u32, frame_h: u32, x_ratio: f64, w_ratio: f64) -> (u32, u32, u32, u32) {
+        let (gx, gy, gw, gh) = game_rect_16_9(frame_w, frame_h);
+        let bx = gx + (gw as f64 * SCOREBOARD_X_RATIO) as u32;
+        let by = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
+        let bw = (gw as f64 * SCOREBOARD_W_RATIO) as u32;
+        let bh = (gh as f64 * SCOREBOARD_H_RATIO) as u32;
+        let x = bx + (bw as f64 * x_ratio) as u32;
+        let y = by + (bh as f64 * HEADER_RATIO) as u32;
+        let w = (bw as f64 * w_ratio) as u32;
+        let h = bh.saturating_sub(y.saturating_sub(by));
+        (x, y, w, h)
+    }
+
+    #[test]
+    fn map_label_stays_in_the_top_bar_at_1080p_1440p_and_4k() {
+        for (w, h, label) in [
+            (1920, 1080, "1080p"),
+            (2560, 1440, "1440p"),
+            (3840, 2160, "4K"),
+        ] {
+            let rect = map_name_rect(w, h).unwrap_or_else(|| panic!("{label}: region missing"));
+            let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+            let top_bar_bottom = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
+            assert!(rect.x >= gx, "{label}: left of the playfield");
+            assert!(
+                rect.x.saturating_add(rect.w) <= gx.saturating_add(gw),
+                "{label}: past the playfield"
+            );
+            assert!(rect.y >= gy, "{label}: above the playfield");
+            assert!(
+                rect.y.saturating_add(rect.h) <= top_bar_bottom,
+                "{label}: map crop y {}..{} crosses the scoreboard at {top_bar_bottom}",
+                rect.y,
+                rect.y + rect.h
+            );
+            let crop = (rect.x, rect.y, rect.w, rect.h);
+            let names_5 = name_area(w, h, NAME_COL_X, NAME_COL_W);
+            let names_6 = name_area(w, h, NAME_COL_X_6V6, NAME_COL_W_6V6);
+            assert!(
+                !overlaps(crop, names_5),
+                "{label}: reaches 5v5 names {names_5:?}"
+            );
+            assert!(
+                !overlaps(crop, names_6),
+                "{label}: reaches 6v6 names {names_6:?}"
+            );
         }
     }
 }

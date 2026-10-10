@@ -2,7 +2,7 @@ use stat_tracker::boundary::{self, ResultMark};
 use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
 use stat_tracker::{
-    capture, config, detect, ocr, parse, reader_apply, setup, shadow, storage, sync,
+    capture, config, detect, mapcrops, ocr, parse, reader_apply, setup, shadow, storage, sync,
 };
 
 use std::sync::Arc;
@@ -4192,6 +4192,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let analysis = match analysis {
         Ok(a) => a,
         Err((outcome, frame, reason)) => {
+            // A settled scoreboard that failed the team-size check still has
+            // the top bar. Menus (preflight) do not.
+            if reason != "preflight" {
+                archive_map_label_crop(data_dir, session_id, &frame);
+            }
             save_rejected_frame(data_dir, frame, reason);
             return Ok(CaptureReport {
                 recorded: false,
@@ -4292,6 +4297,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             rows = rows.len(),
             "capture rejected — frame does not look like a scoreboard (saved to debug/rejected)"
         );
+        archive_map_label_crop(data_dir, session_id, &frame_img);
         save_rejected_frame(data_dir, frame_img, "noscoreboard");
         return Ok(CaptureReport {
             recorded: false,
@@ -4496,6 +4502,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             outcome_label = staged.outcome_label.clone();
             parsed.outcome = outcome_label.clone();
             let target_session = staged.target_session.clone();
+            // This board's session, including a split's new game. The first
+            // Tab that still has the map label wins; later Tabs no-op.
+            archive_map_label_crop(data_dir, &target_session, &frame_img);
             if split {
                 tracing::info!(
                     old_session = %session_id,
@@ -4715,6 +4724,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     "unreadable"
                 }
             };
+            archive_map_label_crop(data_dir, session_id, &frame_img);
             save_rejected_frame(data_dir, frame_img, reason);
             Ok(CaptureReport {
                 recorded: false,
@@ -4839,6 +4849,20 @@ fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImag
     tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
     });
+}
+
+/// Keep the top-bar map-name crop from the first Tab of a game that still
+/// shows that region. Local files under `debug/mapcrops` only. Not part of
+/// the rolling debug rings, and not gated on `debug_ocr`.
+fn archive_map_label_crop(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+) {
+    let Some(job) = mapcrops::prepare_mapcrop(data_dir, session_id, frame) else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || mapcrops::commit_mapcrop(job));
 }
 
 fn rand_id() -> u64 {
