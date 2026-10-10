@@ -314,7 +314,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
-    use std::time::SystemTime;
 
     fn entry_names(bytes: &[u8]) -> Vec<String> {
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
@@ -387,29 +386,15 @@ mod tests {
 
     #[test]
     fn a_report_bundle_built_while_mapcrops_exist_has_no_mapcrops_entries() {
-        let dir = std::env::temp_dir().join(format!(
-            "mapcrop-bundle-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let crops = dir.join("debug/mapcrops");
-        std::fs::create_dir_all(&crops).unwrap();
-        let slot1 = crops.join("sessreport-1.png");
-        let slot2 = crops.join("sessreport-2.png");
-        std::fs::write(&slot1, b"local-mapcrop-1").unwrap();
-        std::fs::write(&slot2, b"local-mapcrop-2").unwrap();
-        let crop1 = std::fs::read(&slot1).unwrap();
-        let crop2 = std::fs::read(&slot2).unwrap();
         let log = b"synthetic log line\n";
+        let crop1: &[u8] = b"local-mapcrop-1";
+        let crop2: &[u8] = b"local-mapcrop-2";
         let manifest = log_manifest(log);
         let input = stored_zip(&[
             ("manifest.json", &manifest),
             ("log.txt", log),
-            ("debug/mapcrops/sessreport-1.png", &crop1),
-            ("debug/mapcrops/sessreport-2.png", &crop2),
+            ("debug/mapcrops/sessreport-1920x1080-1.png", crop1),
+            ("debug/mapcrops/sessreport-1920x1080-2.png", crop2),
         ]);
         let input_names = entry_names(&input);
         assert!(
@@ -434,7 +419,33 @@ mod tests {
                 .all(|name| !name.to_ascii_lowercase().contains("mapcrops")),
             "{names:?}"
         );
-        assert!(slot1.is_file() && slot2.is_file());
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manifest_that_lists_a_mapcrop_is_file_missing() {
+        let log = b"synthetic log line\n";
+        let crop: &[u8] = b"local-mapcrop";
+        let mut manifest: serde_json::Value = serde_json::from_slice(&log_manifest(log)).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": "debug/mapcrops/sessreport-1920x1080-1.png",
+                "sha256": sha256_hex(crop),
+                "bytes": crop.len(),
+                "role": "crop",
+                "screen_class": "tab"
+            }));
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let input = stored_zip(&[
+            ("manifest.json", manifest_bytes.as_slice()),
+            ("log.txt", log),
+            ("debug/mapcrops/sessreport-1920x1080-1.png", crop),
+        ]);
+        match accept_bundle(&input) {
+            Err(BundleReject::Invalid(reason)) => assert_eq!(reason, "file missing"),
+            Ok(_) => panic!("a listed mapcrop was stored"),
+            Err(BundleReject::TooLarge) => panic!("report bundle was too large"),
+        }
     }
 }

@@ -1141,6 +1141,44 @@ pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
     img.crop_imm(x, y, cw_full.saturating_sub(trim), ch)
 }
 
+/// Full map-label box, with no timer trim and no pixel change.
+///
+/// The reader still uses [`crop_map_name`]. A saved crop uses this so the
+/// PNG is the native rectangle, including the clock when it sits in the box.
+pub fn crop_map_label_box(img: &DynamicImage) -> Option<DynamicImage> {
+    let rect = map_name_rect(img.width(), img.height())?;
+    Some(img.crop_imm(rect.x, rect.y, rect.w, rect.h))
+}
+
+/// Whether the map-label box has text worth saving.
+///
+/// A flat bar saves nothing. The floor is under a mid fade-in (luma near
+/// 107), so a faint label still counts. This is not the reader trim, which
+/// still treats luma 170 as ink.
+pub fn map_label_has_text(img: &DynamicImage) -> bool {
+    let Some(rect) = map_name_rect(img.width(), img.height()) else {
+        return false;
+    };
+    // Below a fade-in near 107, above a dark empty bar.
+    const SAVE_LUMA: u16 = 100;
+    // A flat fill, dark or bright, has almost no spread.
+    const FLAT_SPREAD: u16 = 24;
+    const MIN_INK: u32 = 8;
+    let rgb = img.crop_imm(rect.x, rect.y, rect.w, rect.h).to_rgb8();
+    let mut min_l = 255u16;
+    let mut max_l = 0u16;
+    let mut ink = 0u32;
+    for px in rgb.pixels() {
+        let luma = (u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3;
+        min_l = min_l.min(luma);
+        max_l = max_l.max(luma);
+        if luma >= SAVE_LUMA {
+            ink += 1;
+        }
+    }
+    max_l.saturating_sub(min_l) >= FLAT_SPREAD && ink >= MIN_INK
+}
+
 /// How much of the map-name window is the match timer, in pixels.
 ///
 /// Ink columns merge across gaps up to about 1.2% of the game height (letter
@@ -2687,8 +2725,8 @@ mod uncapped_retry_tests {
 mod map_name_rect_tests {
     use super::{
         HEADER_RATIO, NAME_COL_W, NAME_COL_W_6V6, NAME_COL_X, NAME_COL_X_6V6, SCOREBOARD_H_RATIO,
-        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, crop_map_name, game_rect_16_9,
-        map_name_rect,
+        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, crop_map_label_box,
+        game_rect_16_9, map_name_rect,
     };
     use image::{DynamicImage, Rgb, RgbImage};
 
@@ -2771,7 +2809,9 @@ mod map_name_rect_tests {
                     }
                 }
             }
-            let crop = crop_map_name(&DynamicImage::ImageRgb8(img)).to_rgb8();
+            let crop = crop_map_label_box(&DynamicImage::ImageRgb8(img))
+                .unwrap_or_else(|| panic!("{label}: box missing"))
+                .to_rgb8();
             assert!(
                 crop.width() <= rect.w && crop.height() <= rect.h,
                 "{label}: crop {}x{} is outside the map-label box {}x{}",

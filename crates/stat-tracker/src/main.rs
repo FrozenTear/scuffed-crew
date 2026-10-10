@@ -4854,11 +4854,15 @@ fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImag
     });
 }
 
-/// Keep the top-bar map-name crop from a Tab that still shows that region.
-/// The first Tab writes `<session_id>-1.png`. A later Tab at least 60 seconds
-/// after that writes `<session_id>-2.png`. Local files under `debug/mapcrops`
-/// only. Not part of the rolling debug rings, not gated on `debug_ocr`, and
-/// not included in report bundles.
+/// Keep the full top-bar map-label box from a Tab whose label is not a flat bar.
+/// The first such Tab writes `<session_id>-<width>x<height>-1.png`. A later
+/// Tab at least 60 seconds after that writes the matching `-2.png`. Width and
+/// height are the capture size. The PNG is the raw box from this frame, with
+/// no timer trim and no brightness stretch. The map-label OCR retry does not
+/// supply these pixels. A flat bar does not take a slot. Local files under
+/// `debug/mapcrops` only.
+/// Not part of the rolling debug rings, not gated on `debug_ocr`, and not
+/// included in report bundles.
 fn archive_map_label_crop(
     data_dir: &std::path::Path,
     session_id: &str,

@@ -136,6 +136,7 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         stat_tracker::packs::PACK_UNSAFE,
         stat_tracker::packs::PACK_FAILED,
         stat_tracker::packs::PACK_AUTH,
+        stat_tracker::packs::PACK_FORBIDDEN,
         stat_tracker::packs::PACK_SIGN_IN,
         SITE_TRY_AGAIN,
         SITE_BAD_LABEL,

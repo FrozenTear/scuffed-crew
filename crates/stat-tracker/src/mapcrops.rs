@@ -1,12 +1,16 @@
 //! Tab map-label crops, stored only on disk.
 //!
 //! Two lossless PNGs per game under `<data_dir>/debug/mapcrops/`:
-//! `<session_id>-1.png` from the first Tab that shows the map label, and
-//! `<session_id>-2.png` from a later Tab at least 60 seconds after that.
-//! Each file is the top-bar map-name rectangle and nothing else. The cap is
-//! 100 games, not 100 files. These files are never handed to [`crate::sync`],
-//! are not part of a report zip, and are not part of the rolling `debug/poll`,
-//! `debug/rejected`, `debug/accepted`, or `debug/mapmiss` rings.
+//! `<session_id>-<width>x<height>-1.png` from the first Tab whose map-label
+//! box has text, and `<session_id>-<width>x<height>-2.png` from a later Tab
+//! at least 60 seconds after that. Width and height are the capture size.
+//! Each file is the full map-label box at native resolution, raw pixels,
+//! with no timer trim and no brighten or invert. The reader still trims
+//! when it reads. The cap is 100 games, not 100 files. Both files of a game
+//! are removed together. These files are never handed to [`crate::sync`]
+//! and are not part of the rolling debug rings. Report zips must leave
+//! `debug/mapcrops/` out. The helpers here are not called by a report
+//! builder yet.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,29 +34,30 @@ pub struct MapcropJob {
     image: DynamicImage,
 }
 
-/// `Some` when this Tab should add a crop and the map-label rectangle fits
-/// inside the frame. The first Tab gets `-1`. A later Tab gets `-2` only
-/// once the first file is at least 60 seconds old.
+/// `Some` when this Tab should add a crop. The label box must fit in the
+/// frame and must not be a flat bar. The first such Tab gets slot 1. A
+/// later Tab gets slot 2 only once slot 1 is at least 60 seconds old.
+/// A blank bar does not take a slot.
 pub fn prepare_mapcrop(
     data_dir: &Path,
     session_id: &str,
     frame: &DynamicImage,
 ) -> Option<MapcropJob> {
     validate_session_id(session_id)?;
-    preprocess::map_name_rect(frame.width(), frame.height())?;
+    if !preprocess::map_label_has_text(frame) {
+        return None;
+    }
+    let image = preprocess::crop_map_label_box(frame)?;
     let dir = mapcrop_dir(data_dir);
-    let first = format!("{session_id}-1.png");
-    let second = format!("{session_id}-2.png");
-    let file_name = if !dir.join(&first).is_file() {
-        first
-    } else if dir.join(&second).is_file() || !second_crop_due(&dir.join(&first)) {
+    let slots = session_slots(&dir, session_id);
+    let slot = if !slots.has_first {
+        1
+    } else if slots.has_second || !second_crop_due(slots.first_mtime) {
         return None;
     } else {
-        second
+        2
     };
-    // Same crop the reader uses, including the timer trim. The full window
-    // stays inside the top bar; the trim only shortens the right edge.
-    let image = preprocess::crop_map_name(frame);
+    let file_name = crop_file_name(session_id, frame.width(), frame.height(), slot);
     Some(MapcropJob {
         dir,
         file_name,
@@ -114,10 +119,24 @@ pub fn excluded_from_report_bundle(rel: &str) -> bool {
     is_mapcrop_report_path(rel)
 }
 
+/// Manifest `files` paths. `debug/mapcrops/` is never listed.
+///
+/// Nothing in the daemon calls this yet. The real report builder must use
+/// it when that flow lands, so a manifest cannot name a map-label crop.
+pub fn report_manifest_paths(candidates: &[&str]) -> Vec<String> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|path| !excluded_from_report_bundle(path))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Stored zip of `wanted` paths under `data_dir`.
 ///
 /// A path under `debug/mapcrops` is left out even when that file exists and
-/// the caller listed it. Other listed files are copied as they are.
+/// the caller listed it. Nothing in the daemon calls this yet. The real
+/// report builder must use the same exclusion when reports land.
 pub fn build_report_bundle(data_dir: &Path, wanted: &[&str]) -> Vec<u8> {
     let mut files = Vec::new();
     for rel in wanted {
@@ -156,11 +175,52 @@ fn validate_session_id(session_id: &str) -> Option<()> {
     }
 }
 
-fn second_crop_due(first: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(first) else {
-        return false;
+fn crop_file_name(session_id: &str, width: u32, height: u32, slot: u8) -> String {
+    format!("{session_id}-{width}x{height}-{slot}.png")
+}
+
+struct Slots {
+    has_first: bool,
+    first_mtime: Option<SystemTime>,
+    has_second: bool,
+}
+
+fn session_slots(dir: &Path, session_id: &str) -> Slots {
+    let mut slots = Slots {
+        has_first: false,
+        first_mtime: None,
+        has_second: false,
     };
-    let Ok(modified) = meta.modified() else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return slots;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        let Some(parsed) = parse_crop_name(&name) else {
+            continue;
+        };
+        if parsed.game_id != session_id {
+            continue;
+        }
+        if parsed.slot == 1 {
+            slots.has_first = true;
+            if let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) {
+                slots.first_mtime = Some(match slots.first_mtime {
+                    Some(have) => have.min(modified),
+                    None => modified,
+                });
+            }
+        } else if parsed.slot == 2 {
+            slots.has_second = true;
+        }
+    }
+    slots
+}
+
+fn second_crop_due(first_mtime: Option<SystemTime>) -> bool {
+    let Some(modified) = first_mtime else {
         return false;
     };
     match SystemTime::now().duration_since(modified) {
@@ -194,23 +254,55 @@ struct GameFiles {
     paths: Vec<PathBuf>,
 }
 
-fn game_id_from_file_name(name: &str) -> Option<String> {
+struct ParsedCrop {
+    game_id: String,
+    slot: u8,
+}
+
+/// `<session>-<width>x<height>-1.png`, or a legacy `<session>-1.png`.
+/// Both slots of one session are one game, whatever the capture size was.
+fn parse_crop_name(name: &str) -> Option<ParsedCrop> {
     if name.starts_with('.') {
         return None;
     }
     let stem = name.strip_suffix(".png")?;
-    if stem.is_empty() {
+    let (rest, slot) = if let Some(rest) = stem.strip_suffix("-1") {
+        (rest, 1u8)
+    } else {
+        let rest = stem.strip_suffix("-2")?;
+        (rest, 2)
+    };
+    if rest.is_empty() {
         return None;
     }
-    let id = stem
-        .strip_suffix("-1")
-        .or_else(|| stem.strip_suffix("-2"))
-        .unwrap_or(stem);
-    if id.is_empty() {
+    let game_id = strip_capture_size(rest).unwrap_or(rest);
+    if game_id.is_empty() {
         None
     } else {
-        Some(id.to_string())
+        Some(ParsedCrop {
+            game_id: game_id.to_string(),
+            slot,
+        })
     }
+}
+
+fn strip_capture_size(rest: &str) -> Option<&str> {
+    let dash = rest.rfind('-')?;
+    let (width, height) = rest[dash + 1..].split_once('x')?;
+    if width.is_empty()
+        || height.is_empty()
+        || width.starts_with('0')
+        || height.starts_with('0')
+        || !width.bytes().all(|b| b.is_ascii_digit())
+        || !height.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(&rest[..dash])
+}
+
+fn game_id_from_file_name(name: &str) -> Option<String> {
+    parse_crop_name(name).map(|parsed| parsed.game_id)
 }
 
 fn prune_mapcrops(dir: &Path, keep: usize) {
@@ -337,14 +429,47 @@ mod tests {
 
     fn frame_with_map(w: u32, h: u32, map_color: [u8; 3], name_color: [u8; 3]) -> DynamicImage {
         let mut img = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+        paint_label_ink(&mut img, map_color);
+        paint_name(&mut img, w, h, name_color);
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// A small glyph on a dark bar. A solid fill of the box is flat and must not save.
+    fn paint_label_ink(img: &mut RgbImage, color: [u8; 3]) {
+        let rect = preprocess::map_name_rect(img.width(), img.height()).expect("map rect");
+        let bw = 16.min(rect.w);
+        let bh = 8.min(rect.h);
+        for y in rect.y..rect.y + bh {
+            for x in rect.x..rect.x + bw {
+                img.put_pixel(x, y, Rgb(color));
+            }
+        }
+    }
+
+    fn frame_flat(w: u32, h: u32, color: [u8; 3]) -> DynamicImage {
+        let mut img = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
         let rect = preprocess::map_name_rect(w, h).expect("map rect");
         for y in rect.y..rect.y + rect.h {
             for x in rect.x..rect.x + rect.w {
-                img.put_pixel(x, y, Rgb(map_color));
+                img.put_pixel(x, y, Rgb(color));
             }
         }
-        paint_name(&mut img, w, h, name_color);
         DynamicImage::ImageRgb8(img)
+    }
+
+    fn crop_path(dir: &Path, id: &str, w: u32, h: u32, slot: u8) -> PathBuf {
+        dir.join("debug/mapcrops")
+            .join(format!("{id}-{w}x{h}-{slot}.png"))
+    }
+
+    fn assert_saved_is_raw_box(path: &Path, frame: &DynamicImage) {
+        let saved = image::open(path).unwrap().to_rgb8();
+        let raw = preprocess::crop_map_label_box(frame)
+            .expect("box")
+            .to_rgb8();
+        let rect = preprocess::map_name_rect(frame.width(), frame.height()).unwrap();
+        assert_eq!((saved.width(), saved.height()), (rect.w, rect.h));
+        assert_eq!(saved.as_raw(), raw.as_raw());
     }
 
     fn paint_name(img: &mut RgbImage, w: u32, h: u32, color: [u8; 3]) {
@@ -400,9 +525,9 @@ mod tests {
     }
 
     #[test]
-    fn saved_png_is_only_the_map_label_and_is_lossless() {
+    fn saved_png_is_the_full_label_box_and_is_lossless() {
         let dir = tempfile::tempdir().unwrap();
-        let map = [10, 220, 30];
+        let map = [40, 220, 80];
         let names = [240, 20, 20];
         let frame = frame_with_map(1920, 1080, map, names);
         assert!(save_mapcrop(dir.path(), "sess1080", &frame));
@@ -410,19 +535,18 @@ mod tests {
             !save_mapcrop(
                 dir.path(),
                 "sess1080",
-                &frame_with_map(1920, 1080, [1, 2, 3], names)
+                &frame_with_map(1920, 1080, [220, 80, 80], names)
             ),
             "a later Tab in the same minute must not replace the first crop or write the second"
         );
 
-        let path = dir.path().join("debug/mapcrops/sess1080-1.png");
-        assert!(!dir.path().join("debug/mapcrops/sess1080-2.png").exists());
+        let path = crop_path(dir.path(), "sess1080", 1920, 1080, 1);
+        assert!(!crop_path(dir.path(), "sess1080", 1920, 1080, 2).exists());
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_saved_is_raw_box(&path, &frame);
         let saved = image::open(&path).unwrap().to_rgb8();
-        let rect = preprocess::map_name_rect(1920, 1080).unwrap();
-        assert_eq!((saved.width(), saved.height()), (rect.w, rect.h));
-        assert!(saved.pixels().all(|px| px.0 == map));
+        assert!(saved.pixels().any(|px| px.0 == map));
         assert!(saved.pixels().all(|px| px.0 != names));
 
         let rejected = dir.path().join("debug/rejected");
@@ -430,71 +554,182 @@ mod tests {
     }
 
     #[test]
-    fn the_second_crop_waits_60_seconds_and_is_written_once() {
+    fn the_saved_box_keeps_the_timer_the_reader_trims() {
         let dir = tempfile::tempdir().unwrap();
-        let first = [10, 180, 40];
-        let second = [20, 40, 200];
-        let names = [240, 20, 20];
-        assert!(save_mapcrop(
+        let mut img = RgbImage::from_pixel(1920, 1080, Rgb([0, 0, 0]));
+        let rect = preprocess::map_name_rect(1920, 1080).unwrap();
+        let name = [220, 220, 220];
+        let timer = [255, 255, 255];
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + 80 {
+                img.put_pixel(x, y, Rgb(name));
+            }
+            for x in rect.x + 450..rect.x + 470 {
+                img.put_pixel(x, y, Rgb(timer));
+            }
+        }
+        let frame = DynamicImage::ImageRgb8(img);
+        let trimmed = preprocess::crop_map_name(&frame).to_rgb8();
+        assert!(
+            trimmed.width() < rect.w,
+            "reader trim width {} should be under the box {}",
+            trimmed.width(),
+            rect.w
+        );
+        assert!(save_mapcrop(dir.path(), "sessclock", &frame));
+        let path = crop_path(dir.path(), "sessclock", 1920, 1080, 1);
+        assert_saved_is_raw_box(&path, &frame);
+        let saved = image::open(&path).unwrap().to_rgb8();
+        assert_eq!(saved.get_pixel(450, 0).0, timer);
+        assert!(trimmed.width() <= 450);
+    }
+
+    #[test]
+    fn a_blank_top_bar_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!save_mapcrop(
             dir.path(),
-            "sesswait",
-            &frame_with_map(1920, 1080, first, names)
-        ));
-        let slot1 = dir.path().join("debug/mapcrops/sesswait-1.png");
-        age_file(&slot1, 1_700_000_000);
-        assert!(save_mapcrop(
-            dir.path(),
-            "sesswait",
-            &frame_with_map(1920, 1080, second, names)
+            "sessblank",
+            &frame_flat(1920, 1080, [0, 0, 0])
         ));
         assert!(
             !save_mapcrop(
                 dir.path(),
+                "sessblank",
+                &frame_flat(1920, 1080, [107, 107, 107])
+            ),
+            "a flat mid-grey bar is still empty"
+        );
+        assert!(!save_mapcrop(
+            dir.path(),
+            "sessblank",
+            &frame_flat(1920, 1080, [250, 250, 250])
+        ));
+        assert!(!dir.path().join("debug/mapcrops").exists());
+
+        let faded = frame_with_map(1920, 1080, [107, 107, 107], [240, 20, 20]);
+        assert!(
+            save_mapcrop(dir.path(), "sessblank", &faded),
+            "a blank first Tab must not consume slot 1"
+        );
+        let path = crop_path(dir.path(), "sessblank", 1920, 1080, 1);
+        assert!(path.is_file());
+        assert_saved_is_raw_box(&path, &faded);
+    }
+
+    #[test]
+    fn a_faded_label_is_saved_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let faded = frame_with_map(1920, 1080, [107, 107, 107], [240, 20, 20]);
+        assert!(preprocess::map_label_has_text(&faded));
+        assert!(save_mapcrop(dir.path(), "lijiang", &faded));
+        let path = crop_path(dir.path(), "lijiang", 1920, 1080, 1);
+        assert_saved_is_raw_box(&path, &faded);
+        let saved = image::open(&path).unwrap().to_rgb8();
+        assert!(saved.pixels().any(|px| px.0 == [107, 107, 107]));
+        assert!(saved.pixels().all(|px| {
+            let luma = (u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3;
+            luma < 170
+        }));
+    }
+
+    #[test]
+    fn the_second_crop_waits_60_seconds_and_uses_that_frames_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = [240, 20, 20];
+        let first = frame_with_map(1920, 1080, [240, 240, 40], names);
+        let second = frame_with_map(2560, 1440, [40, 180, 240], names);
+        assert!(save_mapcrop(dir.path(), "sesswait", &first));
+        let slot1 = crop_path(dir.path(), "sesswait", 1920, 1080, 1);
+        age_file(&slot1, 1_700_000_000);
+        assert!(save_mapcrop(dir.path(), "sesswait", &second));
+        assert!(
+            !save_mapcrop(
+                dir.path(),
                 "sesswait",
-                &frame_with_map(1920, 1080, [1, 2, 3], names)
+                &frame_with_map(1920, 1080, [220, 80, 80], names)
             ),
             "a third Tab must not replace the second crop"
         );
 
-        let slot2 = dir.path().join("debug/mapcrops/sesswait-2.png");
-        let saved = image::open(&slot2).unwrap().to_rgb8();
-        assert!(saved.pixels().all(|px| px.0 == second));
-        let kept = image::open(&slot1).unwrap().to_rgb8();
-        assert!(kept.pixels().all(|px| px.0 == first));
+        let slot2 = crop_path(dir.path(), "sesswait", 2560, 1440, 2);
+        assert!(slot2.is_file());
+        assert!(!crop_path(dir.path(), "sesswait", 1920, 1080, 2).exists());
+        assert_saved_is_raw_box(&slot1, &first);
+        assert_saved_is_raw_box(&slot2, &second);
     }
 
     #[test]
     fn the_folder_keeps_the_newest_100_games_and_leaves_other_debug_files() {
         let dir = tempfile::tempdir().unwrap();
-        let frame = frame_with_map(640, 360, [8, 8, 8], [9, 9, 9]);
+        let small = frame_with_map(640, 360, [220, 220, 220], [240, 20, 20]);
+        let wide = frame_with_map(1920, 1080, [180, 40, 220], [240, 20, 20]);
         let crops = dir.path().join("debug/mapcrops");
         for i in 0..MAPCROP_KEEP {
             let id = format!("old{i:03}");
-            assert!(save_mapcrop(dir.path(), &id, &frame), "{id}");
-            age_file(&crops.join(format!("{id}-1.png")), 1_700_000_000 + i as u64);
+            assert!(save_mapcrop(dir.path(), &id, &small), "{id}");
+            age_file(
+                &crops.join(format!("{id}-640x360-1.png")),
+                1_700_000_000 + i as u64,
+            );
         }
-        age_file(&crops.join("old001-1.png"), 1_700_000_000);
+        age_file(&crops.join("old000-640x360-1.png"), 1_700_000_000);
+        assert!(save_mapcrop(dir.path(), "old000", &wide));
+        age_file(&crops.join("old000-1920x1080-2.png"), 1_700_000_050);
+        age_file(&crops.join("old001-640x360-1.png"), 1_700_000_100);
         assert!(
-            save_mapcrop(dir.path(), "old001", &frame),
+            save_mapcrop(dir.path(), "old001", &wide),
             "the second slot of a kept game is still due"
         );
-        age_file(&crops.join("old001-2.png"), 1_700_000_001);
+        age_file(&crops.join("old001-1920x1080-2.png"), 1_700_000_150);
         assert_eq!(game_ids(&crops).len(), MAPCROP_KEEP);
 
         let rejected = dir.path().join("debug/rejected/keep.png");
         std::fs::create_dir_all(rejected.parent().unwrap()).unwrap();
         std::fs::write(&rejected, b"leave-me").unwrap();
 
-        assert!(save_mapcrop(dir.path(), "newest", &frame));
+        assert!(save_mapcrop(dir.path(), "newest", &small));
 
         let ids = game_ids(&crops);
         assert_eq!(ids.len(), MAPCROP_KEEP);
         assert!(!ids.iter().any(|id| id == "old000"));
-        assert!(!crops.join("old000-1.png").exists());
-        assert!(crops.join("old001-1.png").is_file());
-        assert!(crops.join("old001-2.png").is_file());
-        assert!(crops.join("newest-1.png").is_file());
+        assert!(!crops.join("old000-640x360-1.png").exists());
+        assert!(!crops.join("old000-1920x1080-2.png").exists());
+        assert!(crops.join("old001-640x360-1.png").is_file());
+        assert!(crops.join("old001-1920x1080-2.png").is_file());
+        assert!(crops.join("newest-640x360-1.png").is_file());
+        let pngs = std::fs::read_dir(&crops)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("png"))
+            .count();
+        assert_eq!(pngs, MAPCROP_KEEP + 1);
         assert_eq!(std::fs::read(&rejected).unwrap(), b"leave-me");
+    }
+
+    #[test]
+    fn crop_names_group_one_session_across_sizes() {
+        assert_eq!(
+            game_id_from_file_name("ab-cd-1920x1080-1.png").as_deref(),
+            Some("ab-cd")
+        );
+        assert_eq!(
+            game_id_from_file_name("ab-cd-3440x1440-2.png").as_deref(),
+            Some("ab-cd")
+        );
+        assert_eq!(
+            game_id_from_file_name("ab-cd-1.png").as_deref(),
+            Some("ab-cd")
+        );
+        assert_eq!(
+            game_id_from_file_name("ab-cd-2.png").as_deref(),
+            Some("ab-cd")
+        );
+        assert!(game_id_from_file_name("ab-cd.png").is_none());
+        assert_eq!(
+            game_id_from_file_name("ab-cd-01920x1080-1.png").as_deref(),
+            Some("ab-cd-01920x1080")
+        );
     }
 
     #[test]
@@ -514,12 +749,12 @@ mod tests {
     #[test]
     fn a_report_bundle_built_while_mapcrops_exist_has_no_mapcrops_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let frame = frame_with_map(640, 360, [8, 8, 8], [9, 9, 9]);
+        let frame = frame_with_map(640, 360, [220, 220, 220], [240, 20, 20]);
         assert!(save_mapcrop(dir.path(), "sessreport", &frame));
-        let slot1 = dir.path().join("debug/mapcrops/sessreport-1.png");
+        let slot1 = crop_path(dir.path(), "sessreport", 640, 360, 1);
         age_file(&slot1, 1_700_000_000);
         assert!(save_mapcrop(dir.path(), "sessreport", &frame));
-        let slot2 = dir.path().join("debug/mapcrops/sessreport-2.png");
+        let slot2 = crop_path(dir.path(), "sessreport", 640, 360, 2);
         assert!(slot1.is_file() && slot2.is_file());
 
         let rejected = dir.path().join("debug/rejected/keep.png");
@@ -532,9 +767,9 @@ mod tests {
             &[
                 "log.txt",
                 "debug/rejected/keep.png",
-                "debug/mapcrops/sessreport-1.png",
-                "debug/mapcrops/sessreport-2.png",
-                "Debug/MapCrops/sessreport-1.png",
+                "debug/mapcrops/sessreport-640x360-1.png",
+                "debug/mapcrops/sessreport-640x360-2.png",
+                "Debug/MapCrops/sessreport-640x360-1.png",
             ],
         );
         let names = zip_entry_names(&zip);
@@ -550,5 +785,21 @@ mod tests {
             "{names:?}"
         );
         assert!(slot1.is_file() && slot2.is_file());
+    }
+
+    #[test]
+    fn report_manifest_paths_leave_mapcrops_out() {
+        let listed = report_manifest_paths(&[
+            "log.txt",
+            "debug/rejected/keep.png",
+            "debug/mapcrops/sess-1920x1080-1.png",
+            "debug/mapcrops/ab-cd-3440x1440-2.png",
+            "Debug/MapCrops/sess-1920x1080-1.png",
+            r"debug\mapcrops\sess-1.png",
+        ]);
+        assert_eq!(
+            listed,
+            vec!["log.txt".to_string(), "debug/rejected/keep.png".to_string(),]
+        );
     }
 }

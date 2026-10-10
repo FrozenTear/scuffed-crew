@@ -35,8 +35,7 @@ pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const PACK_CURRENT: &str = "The reader pack is already installed.";
-pub const PACK_UNAVAILABLE: &str =
-    "No reader pack is published on the site. The tracker will keep what is already installed.";
+pub const PACK_UNAVAILABLE: &str = "Reader packs aren't set up on the server yet.";
 pub const PACK_UNSUPPORTED: &str = "This server does not offer reader packs yet.";
 pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
 pub const PACK_MISMATCH: &str =
@@ -45,10 +44,8 @@ pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
-pub const PACK_AUTH: &str =
-    "The site rejected the tracker token. The installed pack was left in place.";
-pub const PACK_FORBIDDEN: &str =
-    "The site refused the reader pack (403). The installed pack was left in place.";
+pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
+pub const PACK_FORBIDDEN: &str = "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.";
 pub const PACK_SIGN_IN: &str = "Sign in first. Then the tracker can download the reader pack.";
 
 /// A huge `Retry-After` must not be added to a clock.
@@ -1268,6 +1265,10 @@ mod tests {
             sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
             PackSync::Unavailable
         );
+        assert_eq!(
+            PackSync::Unavailable.guide_result(),
+            Ok("Reader packs aren't set up on the server yet.".to_string())
+        );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
 
         let missing = Arc::new(Fake {
@@ -1326,7 +1327,10 @@ mod tests {
         });
         let base = spawn_fake(fake);
         let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32).await;
-        assert_eq!(result, PackSync::Failed(PACK_AUTH.into()));
+        assert_eq!(
+            result,
+            PackSync::Failed("Your sync token isn't valid. Sign in again from Settings.".into())
+        );
     }
 
     #[test]
@@ -1423,7 +1427,9 @@ mod tests {
         let base = spawn_fake(listed);
         assert_eq!(
             sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
-            PackSync::Failed(PACK_FORBIDDEN.into())
+            PackSync::Failed(
+                "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
+            )
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
@@ -1443,7 +1449,9 @@ mod tests {
         let base = spawn_fake(file);
         assert_eq!(
             sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
-            PackSync::Failed(PACK_FORBIDDEN.into())
+            PackSync::Failed(
+                "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
+            )
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
