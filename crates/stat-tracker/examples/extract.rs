@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // from dedicated regions outside the scoreboard crop.
     let career_raw =
         ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img)).unwrap_or_default();
-    let map_raw = ocr::recognize_map_label(&img);
+    let (preflight, _) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
+    let map_raw = ocr::recognize_map_label(&img, preflight);
     println!(
         "career hero: raw={:?} -> {:?}",
         career_raw.trim(),

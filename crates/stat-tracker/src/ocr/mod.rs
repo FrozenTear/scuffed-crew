@@ -10,7 +10,7 @@ use std::time::Instant;
 use image::{DynamicImage, ImageEncoder};
 use rayon::prelude::*;
 
-use crate::detect::hero_portrait::{ScoreboardPreflight, detect_team_size, preflight_scoreboard};
+use crate::detect::hero_portrait::{ScoreboardPreflight, detect_team_size};
 
 /// Cached column offset from a previous successful calibration (keyed by board
 /// size + team size). Avoids re-running ~300 probe OCRs when the layout is stable.
@@ -280,29 +280,24 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// True when the capture preflight would accept `frame` as a Tab scoreboard.
-fn frame_is_tab_scoreboard(frame: &DynamicImage) -> bool {
-    let board = preprocess::crop_scoreboard(frame);
-    matches!(
-        preflight_scoreboard(&board).0,
-        ScoreboardPreflight::Ready(_)
-    )
-}
-
 /// Read the Tab top-bar map label from a full frame.
+///
+/// `preflight` is the capture path's existing scoreboard result. The stretch
+/// retry runs only for [`ScoreboardPreflight::Ready`]. This function does not
+/// scan the board again.
 ///
 /// The first pass is [`recognize_region`] on [`preprocess::crop_map_name`],
 /// the same preprocess a fully lit label already uses. A label caught mid
 /// fade-in is dim grey. The white mask drops it, and Tesseract returns junk.
-/// That miss is retried once, and only when this frame is a Tab scoreboard,
-/// on a brightness stretch inverted to black-on-white. The stretch uses the
-/// channel mean only. A crop whose brightness range or bright-pixel coverage
-/// is too low to hold a label is not stretched. The first read is what comes
-/// back unless the retry matches a map.
-pub fn recognize_map_label(frame: &DynamicImage) -> String {
+/// That miss is retried once, on a brightness stretch inverted to
+/// black-on-white. The stretch uses the channel mean only. A crop whose
+/// brightness range or bright-pixel coverage is too low to hold a label is
+/// not stretched. The first read is what comes back unless the retry matches
+/// a map.
+pub fn recognize_map_label(frame: &DynamicImage, preflight: ScoreboardPreflight) -> String {
     read_map_crop(
         &preprocess::crop_map_name(frame),
-        frame_is_tab_scoreboard(frame),
+        matches!(preflight, ScoreboardPreflight::Ready(_)),
     )
 }
 
@@ -1238,11 +1233,12 @@ pub(crate) mod map_label_fixtures {
 #[cfg(test)]
 mod map_label_ocr_tests {
     use super::map_label_fixtures::{self, FADED, GRIMSVOTN, LIJIANG, LIT};
-    use super::preprocess::{self, MAP_LABEL_MIN_RANGE};
+    use super::preprocess::{self, MAP_LABEL_MIN_RANGE, crop_scoreboard};
     use super::{
         MAP_LABEL_RETRY_LAST_US, MAP_LABEL_RETRY_RUNS, read_map_crop, recognize_map_label,
         recognize_prepared, recognize_region,
     };
+    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
     use crate::parse::match_map_in_text;
     use image::{DynamicImage, Rgb, RgbImage};
 
@@ -1348,8 +1344,18 @@ mod map_label_ocr_tests {
     fn a_non_scoreboard_frame_never_retries() {
         let gameplay = map_label_fixtures::frame_1080(false);
         let tab = map_label_fixtures::frame_1080(true);
+        let gameplay_preflight = preflight_scoreboard(&crop_scoreboard(&gameplay)).0;
+        let tab_preflight = preflight_scoreboard(&crop_scoreboard(&tab)).0;
+        assert!(
+            !matches!(gameplay_preflight, ScoreboardPreflight::Ready(_)),
+            "gameplay stand-in was classified Ready"
+        );
+        assert!(
+            matches!(tab_preflight, ScoreboardPreflight::Ready(_)),
+            "Tab stand-in was not Ready"
+        );
         let before = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
-        let raw = recognize_map_label(&gameplay);
+        let raw = recognize_map_label(&gameplay, gameplay_preflight);
         assert_eq!(
             MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get),
             before,
@@ -1360,7 +1366,7 @@ mod map_label_ocr_tests {
             "gameplay frame produced a map: {raw:?}"
         );
 
-        let tab_raw = recognize_map_label(&tab);
+        let tab_raw = recognize_map_label(&tab, tab_preflight);
         let runs = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
         assert!(
             runs > before,
