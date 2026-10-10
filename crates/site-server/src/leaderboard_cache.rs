@@ -24,7 +24,8 @@
 //! do not all land on the same millisecond. Cold keys and boards past 10
 //! TTLs may use any free slot, including one a refresh cannot take, so
 //! they are not queued behind those refreshes. A blocking read whose key
-//! is already refreshing joins that scan.
+//! is already refreshing joins that scan. A scan whose request was dropped
+//! mid-load leaves no live flight, so the next request for that key scans.
 //!
 //! The public handler stores one grouped snapshot per season. Hero, metric,
 //! and limit are projections of that snapshot, so they do not each take a
@@ -527,6 +528,17 @@ impl LeaderboardCache {
         let mut guard = self.lock();
         let now = self.clock.now_ms();
         let max_stale = self.ttl_ms().saturating_mul(MAX_STALE_FACTOR);
+        // A blocking leader runs in the request future. If that future is
+        // dropped (client disconnect) before `lead` removes its entry, the
+        // sender is gone and the flight can never finish. Joining it would
+        // Wait/Retry forever, so discard it and let this request lead.
+        if guard
+            .inflight
+            .get(key)
+            .is_some_and(|rx| rx.has_changed().is_err())
+        {
+            guard.inflight.remove(key);
+        }
         let stored = guard.entries.get(key).map(|entry| {
             (
                 entry.board.as_ref().clone(),
@@ -1975,6 +1987,89 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// Start a blocking leader on `key` whose scan waits on `hold`, and
+    /// return its task once the scan has started.
+    async fn spawn_held_leader(
+        cache: &LeaderboardCache,
+        key: &LeaderboardKey,
+        hold: watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<Result<CachedBoard, CacheError<DbErr>>> {
+        let started = Arc::new(AtomicU32::new(0));
+        let cache_bg = cache.clone();
+        let key_bg = key.clone();
+        let started_bg = Arc::clone(&started);
+        let task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(key_bg, move || async move {
+                    started_bg.fetch_add(1, Ordering::SeqCst);
+                    wait_gate(hold).await;
+                    Ok::<_, DbErr>(vec![sample("never", 1)])
+                })
+                .await
+        });
+        wait_until(|| started.load(Ordering::SeqCst) >= 1).await;
+        task
+    }
+
+    #[tokio::test]
+    async fn aborted_leader_does_not_strand_the_key() {
+        let (cache, clock) = cache_with(Duration::from_millis(10), 8);
+        let (_hold_tx, hold_rx) = watch::channel(false);
+
+        // A cold leader dropped mid-scan, as when hyper drops the handler
+        // future on client disconnect. The next request must scan again.
+        let cold = public_key("games", 25, "", "");
+        let leader = spawn_held_leader(&cache, &cold, hold_rx.clone()).await;
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+        let next = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.get_or_load(cold, || async {
+                Ok::<_, DbErr>(vec![sample("after-abort", 1)])
+            }),
+        )
+        .await
+        .expect("request after an aborted leader hung")
+        .unwrap();
+        assert_eq!(next.rows[0].member_id, "after-abort");
+        assert_eq!(cache.follower_count(), 0);
+        assert_eq!(cache.inflight_len(), 0);
+
+        // A board past 10 TTLs with a follower already waiting when the
+        // leader is dropped. The follower must take over, not spin.
+        let old = public_key("kd", 25, "", "");
+        cache
+            .get_or_load(old.clone(), || async {
+                Ok::<_, DbErr>(vec![sample("old", 1)])
+            })
+            .await
+            .unwrap();
+        clock.advance(100);
+        let leader = spawn_held_leader(&cache, &old, hold_rx).await;
+        let cache_bg = cache.clone();
+        let old_bg = old.clone();
+        let follower = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(old_bg, || async {
+                    Ok::<_, DbErr>(vec![sample("follower", 2)])
+                })
+                .await
+        });
+        wait_until(|| cache.follower_count() >= 1).await;
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+        let took_over = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower of an aborted leader hung")
+            .unwrap()
+            .unwrap();
+        assert_eq!(took_over.rows[0].member_id, "follower");
+        // One join of the dead flight, then it leads. A Wait/Retry spin
+        // would keep joining.
+        assert_eq!(cache.follower_count(), 1);
+        assert_eq!(cache.inflight_len(), 0);
     }
 
     #[tokio::test]
