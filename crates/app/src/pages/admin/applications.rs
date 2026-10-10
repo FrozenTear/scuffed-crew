@@ -68,14 +68,91 @@ fn list_or_none(items: &[String]) -> String {
 
 const APPLICATION_DETAIL_DIALOG_ID: &str = "application-detail-dialog";
 const APPLICATION_DETAIL_TITLE_ID: &str = "application-detail-title";
+const APPLICATION_DETAIL_CLOSE_ID: &str = "application-detail-close";
 
 /// Id of the View control that opened this application's detail dialog.
 fn application_view_trigger_id(app_id: &str) -> String {
     format!("application-view-{app_id}")
 }
 
-fn is_application_dialog_dismiss_key(key: &Key) -> bool {
-    *key == Key::Escape
+/// Tab stops inside the dialog, in DOM order. The shell itself is `tabindex="-1"`
+/// so it can take focus on open without joining this cycle.
+fn application_dialog_tab_ids() -> &'static [&'static str] {
+    &[APPLICATION_DETAIL_TITLE_ID, APPLICATION_DETAIL_CLOSE_ID]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DialogKeyEffect {
+    /// Escape closes the dialog and focus goes back to the View button.
+    Dismiss {
+        restore_focus: String,
+    },
+    /// Tab would leave the dialog, so focus moves to this stop instead.
+    MoveFocus {
+        id: &'static str,
+    },
+    Ignore,
+}
+
+/// Tab from the last stop wraps to the first. Shift+Tab from the first wraps to the last.
+/// Any other Tab is left to the browser, which stays inside the same list.
+fn application_dialog_tab_target(active_id: &str, shift: bool) -> Option<&'static str> {
+    let ids = application_dialog_tab_ids();
+    let len = ids.len();
+    let current = ids.iter().position(|id| *id == active_id)?;
+    let wraps = if shift {
+        current == 0
+    } else {
+        current + 1 == len
+    };
+    if !wraps {
+        return None;
+    }
+    let next = if shift { len - 1 } else { 0 };
+    Some(ids[next])
+}
+
+fn application_dialog_key_effect(
+    key: &Key,
+    shift: bool,
+    active_id: &str,
+    trigger_id: &str,
+) -> DialogKeyEffect {
+    if *key == Key::Escape {
+        return DialogKeyEffect::Dismiss {
+            restore_focus: trigger_id.to_string(),
+        };
+    }
+    if *key == Key::Tab
+        && let Some(id) = application_dialog_tab_target(active_id, shift)
+    {
+        return DialogKeyEffect::MoveFocus { id };
+    }
+    DialogKeyEffect::Ignore
+}
+
+/// Shared by the dialog `onkeydown`. Escape focuses the View button, then closes.
+/// A wrapping Tab focuses the stop on the other end of the dialog.
+fn handle_application_dialog_key(
+    key: &Key,
+    shift: bool,
+    active_id: &str,
+    trigger_id: &str,
+    mut on_dismiss: impl FnMut(),
+    mut on_focus: impl FnMut(&str),
+) -> bool {
+    match application_dialog_key_effect(key, shift, active_id, trigger_id) {
+        DialogKeyEffect::Dismiss { restore_focus } => {
+            on_focus(&restore_focus);
+            on_dismiss();
+            true
+        }
+        DialogKeyEffect::MoveFocus { id } => {
+            on_focus(id);
+            true
+        }
+        DialogKeyEffect::Ignore => false,
+    }
 }
 
 fn focus_element_by_id(id: &str) {
@@ -99,8 +176,27 @@ fn focus_element_by_id(id: &str) {
     }
 }
 
+fn current_focus_id() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let id = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .map(|el| el.id())?;
+        if id.is_empty() { None } else { Some(id) }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
 #[component]
-fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Element {
+fn ApplicationDetailDialog(
+    app: Application,
+    trigger_id: String,
+    on_close: EventHandler<()>,
+) -> Element {
     let title = format!("Application: {}", app.applicant_label());
     let games = detail_text(&app.games_label());
     let roles = list_or_none(&app.preferred_roles);
@@ -127,14 +223,25 @@ fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Elem
                 },
                 onclick: move |e| e.stop_propagation(),
                 onkeydown: move |evt| {
-                    if is_application_dialog_dismiss_key(&evt.key()) {
+                    let shift = evt.modifiers().contains(Modifiers::SHIFT);
+                    let active = current_focus_id()
+                        .unwrap_or_else(|| APPLICATION_DETAIL_DIALOG_ID.to_string());
+                    if handle_application_dialog_key(
+                        &evt.key(),
+                        shift,
+                        &active,
+                        &trigger_id,
+                        || on_close.call(()),
+                        focus_element_by_id,
+                    ) {
+                        evt.prevent_default();
                         evt.stop_propagation();
-                        on_close.call(());
                     }
                 },
                 div {
                     class: "form-modal-header",
                     id: APPLICATION_DETAIL_TITLE_ID,
+                    tabindex: "0",
                     "{title}"
                 }
                 div { class: "form-modal-body",
@@ -147,7 +254,11 @@ fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Elem
                             dt { "Roles" }
                             dd { "{roles}" }
                             dt { "Message" }
-                            dd { style: "white-space: pre-wrap;", "{message}" }
+                            dd {
+                                class: "application-detail-message",
+                                style: "white-space: pre-wrap; overflow-wrap: anywhere;",
+                                "{message}"
+                            }
                             dt { "Review notes" }
                             dd { "{notes}" }
                             dt { "Submitted" }
@@ -160,6 +271,7 @@ fn ApplicationDetailDialog(app: Application, on_close: EventHandler<()>) -> Elem
                 div { class: "form-modal-footer",
                     button {
                         class: "btn-cancel",
+                        id: APPLICATION_DETAIL_CLOSE_ID,
                         onclick: move |_| on_close.call(()),
                         "Close"
                     }
@@ -304,6 +416,7 @@ pub fn AdminApplications() -> Element {
                 rsx! {
                     ApplicationDetailDialog {
                         app,
+                        trigger_id: trigger_id.clone(),
                         on_close: move |_| {
                             focus_element_by_id(&trigger_id);
                             view_open.set(false);
@@ -380,6 +493,7 @@ mod tests {
             rsx! {
                 ApplicationDetailDialog {
                     app: sample_application(),
+                    trigger_id: application_view_trigger_id("app1"),
                     on_close: |_| {},
                 }
             }
@@ -402,8 +516,6 @@ mod tests {
 
     #[test]
     fn application_detail_dialog_labels_itself_and_keeps_message_line_breaks() {
-        assert!(is_application_dialog_dismiss_key(&Key::Escape));
-        assert!(!is_application_dialog_dismiss_key(&Key::Enter));
         assert_eq!(application_view_trigger_id("app1"), "application-view-app1");
 
         fn view() -> Element {
@@ -412,6 +524,7 @@ mod tests {
             rsx! {
                 ApplicationDetailDialog {
                     app,
+                    trigger_id: application_view_trigger_id("app1"),
                     on_close: |_| {},
                 }
             }
@@ -453,9 +566,37 @@ mod tests {
             "labelled heading text: {header}"
         );
 
+        let message_at = html.find("Line one").expect("message text");
+        let message_tag_at = html[..message_at].rfind("<dd").expect("message dd");
+        let message_tag_end =
+            html[message_tag_at..].find('>').expect("message tag") + message_tag_at;
+        let message_tag = &html[message_tag_at..message_tag_end];
         assert!(
-            html.contains("white-space:pre-wrap") || html.contains("white-space: pre-wrap"),
-            "message keeps line breaks: {html}"
+            message_tag.contains("application-detail-message"),
+            "message field class: {message_tag}"
+        );
+        assert!(
+            message_tag.contains("white-space:pre-wrap")
+                || message_tag.contains("white-space: pre-wrap"),
+            "message keeps line breaks: {message_tag}"
+        );
+        assert!(
+            message_tag.contains("overflow-wrap:anywhere")
+                || message_tag.contains("overflow-wrap: anywhere"),
+            "long message text wraps inside 390px: {message_tag}"
+        );
+        let css = crate::styles::admin::CSS;
+        assert!(
+            css.contains(".application-detail dd.application-detail-message"),
+            "message wrap rule missing: {css}"
+        );
+        assert!(
+            css.contains("white-space: pre-wrap"),
+            "message css keeps line breaks"
+        );
+        assert!(
+            css.contains("overflow-wrap: anywhere"),
+            "message css wraps long tokens"
         );
         assert!(
             html.contains("Line one\nLine two"),
@@ -463,6 +604,105 @@ mod tests {
         );
         assert!(!html.contains('\u{2014}'), "{html}");
         assert!(!html.contains("&mdash;"), "{html}");
+    }
+
+    #[test]
+    fn escape_closes_the_dialog_and_returns_focus_to_view() {
+        let trigger = application_view_trigger_id("app1");
+        let steps = std::cell::RefCell::new(Vec::new());
+        let handled = handle_application_dialog_key(
+            &Key::Escape,
+            false,
+            APPLICATION_DETAIL_CLOSE_ID,
+            &trigger,
+            || steps.borrow_mut().push("close".to_string()),
+            |id| steps.borrow_mut().push(format!("focus:{id}")),
+        );
+        assert!(handled);
+        assert_eq!(
+            steps.borrow().as_slice(),
+            [
+                "focus:application-view-app1".to_string(),
+                "close".to_string(),
+            ]
+        );
+        assert_eq!(trigger, "application-view-app1");
+
+        steps.borrow_mut().clear();
+        let handled = handle_application_dialog_key(
+            &Key::Enter,
+            false,
+            APPLICATION_DETAIL_CLOSE_ID,
+            &trigger,
+            || steps.borrow_mut().push("close".to_string()),
+            |id| steps.borrow_mut().push(format!("focus:{id}")),
+        );
+        assert!(!handled);
+        assert!(steps.borrow().is_empty());
+
+        let src = include_str!("applications.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
+        let keydown_at = prod.find("onkeydown:").expect("dialog key handler");
+        let keydown = &prod[keydown_at..keydown_at + 600];
+        assert!(
+            keydown.contains("handle_application_dialog_key("),
+            "Escape must go through the close and focus handler: {keydown}"
+        );
+        assert!(
+            keydown.contains("focus_element_by_id"),
+            "the handler must move focus, not only recognize Escape: {keydown}"
+        );
+    }
+
+    #[test]
+    fn tab_wraps_inside_the_application_dialog() {
+        let ids = application_dialog_tab_ids();
+        assert_eq!(
+            ids,
+            &[APPLICATION_DETAIL_TITLE_ID, APPLICATION_DETAIL_CLOSE_ID]
+        );
+        let trigger = application_view_trigger_id("app1");
+        let first = ids[0];
+        let last = ids[ids.len() - 1];
+
+        let mut focused = None;
+        let mut closed = false;
+        let handled = handle_application_dialog_key(
+            &Key::Tab,
+            false,
+            last,
+            &trigger,
+            || closed = true,
+            |id| focused = Some(id.to_string()),
+        );
+        assert!(handled);
+        assert!(!closed);
+        assert_eq!(focused.as_deref(), Some(first));
+
+        focused = None;
+        let handled = handle_application_dialog_key(
+            &Key::Tab,
+            true,
+            first,
+            &trigger,
+            || closed = true,
+            |id| focused = Some(id.to_string()),
+        );
+        assert!(handled);
+        assert!(!closed);
+        assert_eq!(focused.as_deref(), Some(last));
+
+        // Interior Tab stays with the browser so it can move to the next stop.
+        let handled = handle_application_dialog_key(
+            &Key::Tab,
+            false,
+            first,
+            &trigger,
+            || closed = true,
+            |_| {},
+        );
+        assert!(!handled);
+        assert!(!closed);
     }
 
     #[test]
@@ -487,6 +727,7 @@ mod tests {
             rsx! {
                 ApplicationDetailDialog {
                     app,
+                    trigger_id: application_view_trigger_id("app1"),
                     on_close: |_| {},
                 }
             }

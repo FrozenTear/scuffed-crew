@@ -147,8 +147,8 @@ fn attendance_stats_load_message(err: &ClientError) -> String {
             _ => "",
         };
         return match scuffed_types::json_retry_after(body) {
-            Some(seconds) => format!("Too many requests. Try again in {seconds} seconds."),
-            None => "Try again later.".to_string(),
+            Some(seconds) => attendance_retry_after_message(seconds),
+            None => "Too many requests. Try again later.".to_string(),
         };
     }
     match err {
@@ -162,6 +162,14 @@ fn attendance_stats_load_message(err: &ClientError) -> String {
         }
     }
     .to_string()
+}
+
+fn attendance_retry_after_message(seconds: u64) -> String {
+    if seconds == 1 {
+        "Too many requests. Try again in 1 second.".to_string()
+    } else {
+        format!("Too many requests. Try again in {seconds} seconds.")
+    }
 }
 
 #[component]
@@ -1322,23 +1330,16 @@ mod tests {
         assert_eq!(
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
-                body: r#"{"error":"rate_limited","retry_after":1}"#.into(),
-            }),
-            "Too many requests. Try again in 1 seconds."
-        );
-        assert_eq!(
-            attendance_stats_load_message(&ClientError::Http {
-                status: 429,
                 body: "Too Many Requests".into(),
             }),
-            "Try again later."
+            "Too many requests. Try again later."
         );
         assert_eq!(
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
                 body: r#"{"error":"rate_limited","retry_after":3601}"#.into(),
             }),
-            "Try again later."
+            "Too many requests. Try again later."
         );
         assert_eq!(
             attendance_stats_load_message(&ClientError::Http {
@@ -1359,6 +1360,26 @@ mod tests {
         assert!(html.contains("role=\"alert\""), "{html}");
         assert!(html.contains(&wait), "{html}");
         assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    #[test]
+    fn attendance_stats_429_one_second_is_singular_and_two_are_plural() {
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":1}"#.into(),
+            }),
+            "Too many requests. Try again in 1 second."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":2}"#.into(),
+            }),
+            "Too many requests. Try again in 2 seconds."
+        );
+        assert!(!attendance_retry_after_message(1).contains('\u{2014}'));
+        assert!(!attendance_retry_after_message(2).contains('\u{2014}'));
     }
 
     #[test]
