@@ -212,11 +212,8 @@ fn host_net(ip: IpAddr) -> IpNet {
 /// `Retry-After` is the same second count. `N` is at least 1.
 ///
 /// `tower_governor` 0.8 writes `Retry-After` from `Duration::as_secs`, which
-/// truncates. The public limiter refills every 200 ms, so that header is
-/// always `0` and a client that honors it retries immediately. The fraction
-/// is already gone by the time this handler runs, so a reported wait of 0
-/// becomes 1 (the ceil of any sub-second wait, and the minimum). A wait of
-/// 2 seconds stays 2.
+/// truncates. [`governor_error_response`] rounds that back up before it gets
+/// here. Other callers pass their own second count.
 pub fn rate_limited_response(secs: u64) -> Response<Body> {
     rate_limited_response_with_headers(secs, HeaderMap::new())
 }
@@ -249,10 +246,20 @@ fn rate_limited_response_with_headers(secs: u64, headers: HeaderMap) -> Response
 }
 
 /// 429 for every governor layer (auth, uploads, token-check, public reads).
+///
+/// `tower_governor` 0.8 hands over `wait_time` as `Duration::as_secs`, which
+/// truncates. The public limiter refills every 200 ms, so its wait is always
+/// `0`, and a 10 s bucket reports a 9.9 s wait as `9`. A client that honors
+/// either retries early and gets another 429. The fraction is gone by the
+/// time this runs, so the real wait is somewhere in `[N, N + 1)`. Reporting
+/// `N + 1` never sends a client back early.
 pub fn governor_error_response(error: GovernorError) -> Response<Body> {
     match error {
         GovernorError::TooManyRequests { wait_time, headers } => {
-            rate_limited_response_with_headers(wait_time, headers.unwrap_or_default())
+            rate_limited_response_with_headers(
+                wait_time.saturating_add(1),
+                headers.unwrap_or_default(),
+            )
         }
         other => Response::<Body>::from(other),
     }
@@ -456,12 +463,13 @@ mod tests {
             br#"{"error":"rate_limited","retry_after":1}"#
         );
 
+        // A truncated 2 is a real wait of 2.0 to 2.99 s, so it goes out as 3.
         let res = super::governor_error_response(GovernorError::TooManyRequests {
             wait_time: 2,
             headers: None,
         });
-        assert_eq!(header_once(res.headers(), "retry-after"), "2");
-        assert_eq!(header_once(res.headers(), "x-ratelimit-after"), "2");
+        assert_eq!(header_once(res.headers(), "retry-after"), "3");
+        assert_eq!(header_once(res.headers(), "x-ratelimit-after"), "3");
         assert_eq!(
             header_once(res.headers(), "content-type"),
             "application/json"
@@ -473,7 +481,42 @@ mod tests {
             .to_bytes();
         assert_eq!(
             bytes.as_ref(),
-            br#"{"error":"rate_limited","retry_after":2}"#
+            br#"{"error":"rate_limited","retry_after":3}"#
         );
+    }
+
+    /// A real 10 s bucket, drained, then hit again right away. The wait is
+    /// just under 10 s, which `tower_governor` truncates to 9. A client that
+    /// waited 9 s would be refused again, so the header must say 10.
+    #[tokio::test]
+    async fn multi_second_wait_is_rounded_up() {
+        use tower::ServiceExt;
+        use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+
+        let config = std::sync::Arc::new(
+            GovernorConfigBuilder::default()
+                .key_extractor(TrustedProxyIpKeyExtractor::with_proxies(""))
+                .per_second(10)
+                .burst_size(1)
+                .finish()
+                .unwrap(),
+        );
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(GovernorLayer::new(config).error_handler(governor_error_response));
+        let call = || {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/")
+                    .extension(ConnectInfo(SocketAddr::from(([203, 0, 113, 7], 44000))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        assert_eq!(call().await.unwrap().status(), StatusCode::OK);
+        let res = call().await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(header_once(res.headers(), "retry-after"), "10");
+        assert_eq!(header_once(res.headers(), "x-ratelimit-after"), "10");
     }
 }
