@@ -2687,8 +2687,10 @@ mod uncapped_retry_tests {
 mod map_name_rect_tests {
     use super::{
         HEADER_RATIO, NAME_COL_W, NAME_COL_W_6V6, NAME_COL_X, NAME_COL_X_6V6, SCOREBOARD_H_RATIO,
-        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, game_rect_16_9, map_name_rect,
+        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, crop_map_name, game_rect_16_9,
+        map_name_rect,
     };
+    use image::{DynamicImage, Rgb, RgbImage};
 
     fn overlaps(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
         let (ax, ay, aw, ah) = a;
@@ -2715,11 +2717,11 @@ mod map_name_rect_tests {
     }
 
     #[test]
-    fn map_label_stays_in_the_top_bar_at_1080p_1440p_and_4k() {
+    fn map_label_stays_inside_the_box_at_1080p_1440p_and_ultrawide() {
         for (w, h, label) in [
             (1920, 1080, "1080p"),
             (2560, 1440, "1440p"),
-            (3840, 2160, "4K"),
+            (3440, 1440, "21:9"),
         ] {
             let rect = map_name_rect(w, h).unwrap_or_else(|| panic!("{label}: region missing"));
             let (gx, gy, gw, gh) = game_rect_16_9(w, h);
@@ -2736,16 +2738,56 @@ mod map_name_rect_tests {
                 rect.y,
                 rect.y + rect.h
             );
-            let crop = (rect.x, rect.y, rect.w, rect.h);
+            let crop_box = (rect.x, rect.y, rect.w, rect.h);
             let names_5 = name_area(w, h, NAME_COL_X, NAME_COL_W);
             let names_6 = name_area(w, h, NAME_COL_X_6V6, NAME_COL_W_6V6);
+            let name_top = names_5.1.min(names_6.1);
             assert!(
-                !overlaps(crop, names_5),
+                rect.y.saturating_add(rect.h) <= name_top,
+                "{label}: map crop ends at {} and the name row starts at {name_top}",
+                rect.y + rect.h
+            );
+            assert!(
+                !overlaps(crop_box, names_5),
                 "{label}: reaches 5v5 names {names_5:?}"
             );
             assert!(
-                !overlaps(crop, names_6),
+                !overlaps(crop_box, names_6),
                 "{label}: reaches 6v6 names {names_6:?}"
+            );
+
+            let map = [10, 220, 30];
+            let name = [240, 20, 20];
+            let mut img = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+            for y in rect.y..rect.y + rect.h {
+                for x in rect.x..rect.x + rect.w {
+                    img.put_pixel(x, y, Rgb(map));
+                }
+            }
+            for (nx, ny, nw, nh) in [names_5, names_6] {
+                for y in ny..ny.saturating_add(nh).min(h) {
+                    for x in nx..nx.saturating_add(nw).min(w) {
+                        img.put_pixel(x, y, Rgb(name));
+                    }
+                }
+            }
+            let crop = crop_map_name(&DynamicImage::ImageRgb8(img)).to_rgb8();
+            assert!(
+                crop.width() <= rect.w && crop.height() <= rect.h,
+                "{label}: crop {}x{} is outside the map-label box {}x{}",
+                crop.width(),
+                crop.height(),
+                rect.w,
+                rect.h
+            );
+            assert_eq!(
+                (crop.width(), crop.height()),
+                (rect.w, rect.h),
+                "{label}: a solid label should keep the whole box"
+            );
+            assert!(
+                crop.pixels().all(|px| px.0 == map),
+                "{label}: crop left the map-label box or reached a name row"
             );
         }
     }

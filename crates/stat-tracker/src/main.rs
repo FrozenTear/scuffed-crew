@@ -4854,9 +4854,11 @@ fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImag
     });
 }
 
-/// Keep the top-bar map-name crop from the first Tab of a game that still
-/// shows that region. Local files under `debug/mapcrops` only. Not part of
-/// the rolling debug rings, and not gated on `debug_ocr`.
+/// Keep the top-bar map-name crop from a Tab that still shows that region.
+/// The first Tab writes `<session_id>-1.png`. A later Tab at least 60 seconds
+/// after that writes `<session_id>-2.png`. Local files under `debug/mapcrops`
+/// only. Not part of the rolling debug rings, not gated on `debug_ocr`, and
+/// not included in report bundles.
 fn archive_map_label_crop(
     data_dir: &std::path::Path,
     session_id: &str,
