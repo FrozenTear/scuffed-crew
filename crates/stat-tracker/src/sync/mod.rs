@@ -607,6 +607,8 @@ pub fn upload_request(
                 mitigation: m.display_mitigation(),
                 played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
                 edited: m.is_edited(),
+                // A string on every row, including a full fallback's ocr-v1.
+                // None is what an older client omits; this client does not.
                 recognizer: Some(m.stored_recognizer().to_string()),
                 suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
             })
@@ -808,6 +810,264 @@ mod tests {
         assert!(!body.contains("\"map_name\":\"\""));
         assert!(!body.contains("\"game_mode\":\"\""));
         assert!(!body.contains("Unknown"));
+    }
+
+    #[test]
+    fn upload_json_names_recognizer_on_every_row() {
+        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved, own_row};
+        use crate::shadow::digits::RECOGNIZER_ID;
+        use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
+
+        fn snap() -> OcrSnapshot {
+            OcrSnapshot {
+                map: "Busan".into(),
+                mode: "Control".into(),
+                result: "victory".into(),
+                hero: "Ana".into(),
+                elims: 10,
+                assists: 4,
+                deaths: 2,
+                damage: 4000,
+                healing: 8000,
+                mitigation: 100,
+            }
+        }
+
+        fn text(name: &str, value: &str) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Text(value.into())),
+                confidence: 0.95,
+                suspect: false,
+            }
+        }
+
+        fn number(name: &str, value: u32) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Int(value)),
+                confidence: 0.95,
+                suspect: false,
+            }
+        }
+
+        fn board() -> BoardRead {
+            let mut fields = vec![
+                text("map", "Ilios"),
+                text("mode", "Control"),
+                text("result", "victory"),
+                text("r0.hero", "wrecking-ball"),
+            ];
+            for (suffix, value) in [
+                ("e", 21u32),
+                ("a", 9),
+                ("d", 3),
+                ("dmg", 9100),
+                ("h", 1200),
+                ("mit", 50),
+            ] {
+                fields.push(number(&format!("r0.{suffix}"), value));
+            }
+            BoardRead {
+                status: BoardStatus::Read,
+                team_size: Some(6),
+                fields,
+                elapsed_ms: 1,
+            }
+        }
+
+        let read = board();
+        let fallback = merge_saved(&snap(), OwnRow::Uncertain, Some(&read));
+        let named = own_row(Some("Ada"), None, Some(0), 6);
+        let kept = merge_saved(&snap(), named, Some(&read));
+        let mut agreeing = snap();
+        agreeing.map = "Ilios".into();
+        let clean = merge_saved(&agreeing, named, Some(&read));
+
+        assert_eq!(fallback.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert!(fallback.suspect_fields.is_empty());
+        assert_eq!(kept.recognizer, RECOGNIZER_ID);
+        assert_eq!(kept.hero, "Wrecking Ball");
+        assert_eq!(kept.suspect_fields, vec!["map".to_string()]);
+        assert_eq!(clean.recognizer, RECOGNIZER_ID);
+        assert!(clean.suspect_fields.is_empty());
+
+        let saved = [fallback, kept, clean];
+        let mut rows = Vec::new();
+        for (index, saved) in saved.iter().enumerate() {
+            let mut match_row = row(&saved.hero, &saved.map, &saved.mode);
+            match_row.session_id = format!("sess-{index}");
+            match_row.elims = saved.elims;
+            match_row.recognizer = saved.recognizer.to_string();
+            match_row.suspect_fields = saved.suspect_fields.clone();
+            rows.push(match_row);
+        }
+
+        let request = upload_request(&rows, &[]);
+        assert_eq!(request.matches.len(), rows.len());
+        let json = serde_json::to_value(&request).unwrap();
+        let matches = json["matches"].as_array().expect("matches array");
+        assert_eq!(matches.len(), saved.len());
+        for (entry, saved) in matches.iter().zip(&saved) {
+            let recognizer = entry
+                .get("recognizer")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("recognizer omitted or not a string: {entry}"));
+            assert_eq!(recognizer, saved.recognizer);
+            assert_ne!(recognizer, "");
+            match entry.get("suspect_fields") {
+                None => assert!(
+                    saved.suspect_fields.is_empty(),
+                    "suspect_fields dropped: {entry}"
+                ),
+                Some(list) => {
+                    let names: Vec<String> = list
+                        .as_array()
+                        .unwrap_or_else(|| panic!("suspect_fields is not an array: {entry}"))
+                        .iter()
+                        .map(|name| {
+                            name.as_str()
+                                .unwrap_or_else(|| panic!("suspect name is not a string: {entry}"))
+                                .to_string()
+                        })
+                        .collect();
+                    assert_eq!(names, saved.suspect_fields);
+                }
+            }
+        }
+        assert_eq!(matches[0]["recognizer"], "ocr-v1");
+        assert!(matches[0].get("suspect_fields").is_none());
+        assert_eq!(matches[1]["recognizer"], "cv-v5");
+        assert_eq!(matches[1]["suspect_fields"], serde_json::json!(["map"]));
+        assert_eq!(matches[1]["hero"], "Wrecking Ball");
+        assert_eq!(matches[2]["recognizer"], "cv-v5");
+        assert!(matches[2].get("suspect_fields").is_none());
+        let raw = serde_json::to_string(&request).unwrap();
+        assert!(!raw.contains("\"recognizer\":null"));
+        assert!(raw.contains("\"recognizer\":\"ocr-v1\""));
+        assert!(raw.contains("\"recognizer\":\"cv-v5\""));
+    }
+
+    #[test]
+    fn mixed_row_uploads_cv_v5_when_any_stat_came_from_the_new_reader() {
+        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::shadow::digits::RECOGNIZER_ID;
+        use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
+
+        fn snap() -> OcrSnapshot {
+            OcrSnapshot {
+                map: "Busan".into(),
+                mode: "Control".into(),
+                result: "victory".into(),
+                hero: "Ana".into(),
+                elims: 10,
+                assists: 4,
+                deaths: 2,
+                damage: 4000,
+                healing: 8000,
+                mitigation: 100,
+            }
+        }
+
+        fn text(name: &str, value: &str, suspect: bool) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Text(value.into())),
+                confidence: if suspect { 0.2 } else { 0.95 },
+                suspect,
+            }
+        }
+
+        fn number(name: &str, value: u32, suspect: bool) -> FieldRead {
+            FieldRead {
+                name: name.into(),
+                value: Some(Value::Int(value)),
+                confidence: if suspect { 0.2 } else { 0.95 },
+                suspect,
+            }
+        }
+
+        fn board(elims_suspect: bool) -> BoardRead {
+            BoardRead {
+                status: BoardStatus::Read,
+                team_size: Some(6),
+                elapsed_ms: 1,
+                fields: vec![
+                    text("map", "Busan", false),
+                    text("mode", "Control", false),
+                    text("result", "defeat", true),
+                    text("r0.hero", "tracer", true),
+                    number("r0.e", 21, elims_suspect),
+                    number("r0.a", 1, true),
+                    number("r0.d", 99, true),
+                    number("r0.dmg", 1, true),
+                    number("r0.h", 1, true),
+                    number("r0.mit", 1, true),
+                ],
+            }
+        }
+
+        let own = OwnRow::Identified {
+            index: 0,
+            team_size: 6,
+        };
+        let policy = snap();
+        let mixed = merge_saved(&policy, own, Some(&board(false)));
+        assert_eq!(
+            mixed.elims, 21,
+            "the confident elim came from the new reader"
+        );
+        assert_eq!(
+            mixed.deaths, policy.deaths,
+            "a suspect death stays on ocr-v1"
+        );
+        assert_eq!(mixed.hero, policy.hero);
+        assert_eq!(mixed.result, policy.result);
+        assert_eq!(mixed.recognizer, RECOGNIZER_ID);
+        assert!(mixed.suspect_fields.iter().any(|name| name == "d"));
+        assert!(!mixed.suspect_fields.iter().any(|name| name == "e"));
+
+        let all_fallback = merge_saved(&policy, own, Some(&board(true)));
+        assert_eq!(all_fallback.elims, policy.elims);
+        assert_eq!(all_fallback.deaths, policy.deaths);
+        assert_eq!(all_fallback.hero, policy.hero);
+        assert_eq!(all_fallback.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert!(all_fallback.suspect_fields.iter().any(|name| name == "e"));
+
+        let mut rows = Vec::new();
+        for (session, saved) in [("sess-mixed", &mixed), ("sess-fallback", &all_fallback)] {
+            let mut match_row = row(&saved.hero, &saved.map, &saved.mode);
+            match_row.session_id = session.into();
+            match_row.outcome = saved.result.clone();
+            match_row.elims = saved.elims;
+            match_row.assists = saved.assists;
+            match_row.deaths = saved.deaths;
+            match_row.damage = saved.damage;
+            match_row.healing = saved.healing;
+            match_row.mitigation = saved.mitigation;
+            match_row.recognizer = saved.recognizer.to_string();
+            match_row.suspect_fields = saved.suspect_fields.clone();
+            rows.push(match_row);
+        }
+
+        let request = upload_request(&rows, &[]);
+        let json = serde_json::to_value(&request).unwrap();
+        let matches = json["matches"].as_array().expect("matches array");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0]["recognizer"], "cv-v5");
+        assert_eq!(matches[0]["elims"], 21);
+        assert_eq!(matches[0]["deaths"], policy.deaths);
+        assert_eq!(matches[0]["hero"], "Ana");
+        let suspects = matches[0]["suspect_fields"]
+            .as_array()
+            .expect("mixed row sends suspect_fields");
+        assert!(suspects.iter().any(|name| name == "d"));
+        assert!(suspects.iter().all(|name| name != "e"));
+        assert_eq!(matches[1]["recognizer"], "ocr-v1");
+        assert_eq!(matches[1]["elims"], policy.elims);
+        assert_eq!(matches[1]["deaths"], policy.deaths);
+        assert!(matches[1]["recognizer"].is_string());
+        assert!(matches[0]["recognizer"].is_string());
     }
 
     #[test]

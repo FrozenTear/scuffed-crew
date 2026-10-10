@@ -47,6 +47,11 @@ impl PortraitMatcher {
         self.references.is_empty()
     }
 
+    #[cfg(test)]
+    fn from_references(references: HashMap<String, RgbImage>) -> Self {
+        Self { references }
+    }
+
     pub fn match_portrait(&self, crop: &DynamicImage) -> Option<(String, f64)> {
         if self.references.is_empty() {
             return None;
@@ -71,8 +76,9 @@ impl PortraitMatcher {
         // MAD ranges from 0 (identical) to 255 (maximum difference)
         let confidence = 1.0 - (best_score / 255.0);
 
-        // Reject matches below threshold
-        if confidence < 0.70 {
+        // Same floor as a portrait switch. A live Tab guessed Sierra or Tracer
+        // at 0.77, and that guess overrode the new reader. Below 0.85 is not a hero.
+        if !portrait_confidence_is_trusted(confidence) {
             tracing::debug!(best_score, confidence, "portrait match below threshold");
             return None;
         }
@@ -671,6 +677,11 @@ fn spectral_pitch(band: &[f64], crop_h: u32) -> Option<f64> {
         return None;
     }
     Some((p_lo + best_idx) as f64 / crop_h as f64)
+}
+
+/// At 0.85 the portrait is trusted. Just below that it is not.
+fn portrait_confidence_is_trusted(confidence: f64) -> bool {
+    confidence >= crate::hero_auth::PORTRAIT_SWITCH_MIN_CONF
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
@@ -1466,5 +1477,62 @@ mod team_size_tests {
         let img = image::open(path).unwrap_or_else(|err| panic!("open {path}: {err}"));
         let scan = super::scan_rows(&crate::ocr::preprocess::crop_scoreboard(&img));
         assert_eq!(scan.checked_team_size(), Some(5), "{path}: {scan:?}");
+    }
+}
+
+#[cfg(test)]
+mod portrait_floor_tests {
+    use super::{PortraitMatcher, portrait_confidence_is_trusted};
+    use image::{DynamicImage, Rgb, RgbImage};
+    use std::collections::HashMap;
+
+    fn solid(value: u8) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([value, value, value])))
+    }
+
+    #[test]
+    fn portrait_matcher_rejects_a_low_confidence_guess() {
+        let mut references = HashMap::new();
+        references.insert("sierra".into(), solid(128).to_rgb8());
+        let matcher = PortraitMatcher::from_references(references);
+        let weak = solid(128 + 59);
+        let confidence = 1.0 - (59.0 / 255.0);
+        assert!(
+            (0.70..0.85).contains(&confidence),
+            "synthetic pair should sit near 0.77, got {confidence}"
+        );
+        assert!(
+            matcher.match_portrait(&weak).is_none(),
+            "0.77 must not override the new reader"
+        );
+        let trusted = matcher
+            .match_portrait(&solid(128 + 30))
+            .expect("about 0.88 is a portrait");
+        assert_eq!(trusted.0, "sierra");
+        assert!(trusted.1 >= 0.85, "{}", trusted.1);
+        let same = matcher.match_portrait(&solid(128)).expect("identical crop");
+        assert_eq!(same.0, "sierra");
+        assert!(same.1 > 0.99, "{}", same.1);
+    }
+
+    #[test]
+    fn portrait_matcher_accepts_the_floor_and_rejects_just_below() {
+        assert!(portrait_confidence_is_trusted(0.85));
+        assert!(!portrait_confidence_is_trusted(0.85_f64.next_down()));
+        let mut references = HashMap::new();
+        references.insert("sierra".into(), solid(128).to_rgb8());
+        let matcher = PortraitMatcher::from_references(references);
+        // A flat image's confidence is 1 - delta/255. Delta 38 is the first
+        // step at or above 0.85. Delta 39 is the step just below.
+        let at_floor = 1.0 - (38.0 / 255.0);
+        let just_below = 1.0 - (39.0 / 255.0);
+        assert!(at_floor >= 0.85, "{at_floor}");
+        assert!(just_below < 0.85, "{just_below}");
+        let accepted = matcher
+            .match_portrait(&solid(128 + 38))
+            .expect("the 0.85 step is a portrait");
+        assert_eq!(accepted.0, "sierra");
+        assert!((accepted.1 - at_floor).abs() < 1e-9, "{}", accepted.1);
+        assert!(matcher.match_portrait(&solid(128 + 39)).is_none());
     }
 }

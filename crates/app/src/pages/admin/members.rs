@@ -140,7 +140,17 @@ fn avatar_upload_failure_message(status: u16) -> String {
 
 /// User-facing copy for a failed attendance stats fetch. Never includes the
 /// raw serde error (field names, column numbers).
-fn attendance_stats_load_message(err: &ClientError) -> &'static str {
+fn attendance_stats_load_message(err: &ClientError) -> String {
+    if err.http_status() == Some(429) {
+        let body = match err {
+            ClientError::Http { body, .. } => body.as_str(),
+            _ => "",
+        };
+        return match scuffed_types::json_retry_after(body) {
+            Some(seconds) => attendance_retry_after_message(seconds),
+            None => "Too many requests. Try again later.".to_string(),
+        };
+    }
     match err {
         ClientError::Deserialize(_) => "Attendance stats could not be read. Try again.",
         ClientError::Http { status: 403, .. } => {
@@ -149,6 +159,27 @@ fn attendance_stats_load_message(err: &ClientError) -> &'static str {
         ClientError::Http { status: 404, .. } => "That member no longer exists.",
         ClientError::Network(_) | ClientError::Http { .. } => {
             "Could not load attendance stats. Try again."
+        }
+    }
+    .to_string()
+}
+
+fn attendance_retry_after_message(seconds: u64) -> String {
+    if seconds == 1 {
+        "Too many requests. Try again in 1 second.".to_string()
+    } else {
+        format!("Too many requests. Try again in {seconds} seconds.")
+    }
+}
+
+#[component]
+fn AttendanceStatsError(message: String) -> Element {
+    rsx! {
+        p {
+            class: "empty-state",
+            role: "alert",
+            style: "color: var(--danger);",
+            "{message}"
         }
     }
 }
@@ -390,7 +421,7 @@ pub fn AdminMembers() -> Element {
                 .await
             {
                 Ok(data) => stats_data.set(Some(data)),
-                Err(e) => stats_error.set(Some(attendance_stats_load_message(&e).to_string())),
+                Err(e) => stats_error.set(Some(attendance_stats_load_message(&e))),
             }
             stats_loading.set(false);
         });
@@ -892,9 +923,7 @@ pub fn AdminMembers() -> Element {
                         if stats_loading() {
                             p { class: "admin-loading", "Loading..." }
                         } else if let Some(err) = stats_error() {
-                            p { class: "empty-state", style: "color: var(--danger);",
-                                "{err}"
-                            }
+                            AttendanceStatsError { message: err }
                         } else if let Some(stats) = stats_data() {
                             {
                                 let total = stats.total.to_string();
@@ -1279,6 +1308,78 @@ mod tests {
             attendance_stats_load_message(&ClientError::Network("connection reset".into())),
             "Could not load attendance stats. Try again."
         );
+    }
+
+    fn render(view: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn attendance_stats_429_names_the_wait_and_alerts() {
+        let limited = ClientError::Http {
+            status: 429,
+            body: r#"{"error":"rate_limited","retry_after":12}"#.into(),
+        };
+        assert_eq!(limited.http_status(), Some(429));
+        let wait = attendance_stats_load_message(&limited);
+        assert_eq!(wait, "Too many requests. Try again in 12 seconds.");
+        assert!(!wait.contains('\u{2014}'), "{wait}");
+
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: "Too Many Requests".into(),
+            }),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":3601}"#.into(),
+            }),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 500,
+                body: r#"{"error":"rate_limited","retry_after":9}"#.into(),
+            }),
+            "Could not load attendance stats. Try again."
+        );
+
+        fn view() -> Element {
+            rsx! {
+                AttendanceStatsError {
+                    message: "Too many requests. Try again in 12 seconds.".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("role=\"alert\""), "{html}");
+        assert!(html.contains(&wait), "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    #[test]
+    fn attendance_stats_429_one_second_is_singular_and_two_are_plural() {
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":1}"#.into(),
+            }),
+            "Too many requests. Try again in 1 second."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":2}"#.into(),
+            }),
+            "Too many requests. Try again in 2 seconds."
+        );
+        assert!(!attendance_retry_after_message(1).contains('\u{2014}'));
+        assert!(!attendance_retry_after_message(2).contains('\u{2014}'));
     }
 
     #[test]

@@ -12,11 +12,15 @@
 //! `suspect_fields` and does not replace the policy map or mode.
 //!
 //! The whole ocr-v1 read is kept, with recognizer `ocr-v1` and no suspect
-//! list, when the board is missing, the team size is unknown, the member's
-//! own row is uncertain or does not agree with the new reader's row index,
-//! or the board is marked read but has no digit values (the digit pass can
-//! miss its time budget after the columns are found). The recognizer is
-//! also `ocr-v1` when every stored field fell back to ocr-v1.
+//! list, when the board is missing, the team size is unknown or disagrees,
+//! the member's own row was not identified, the row index is outside the
+//! board, or the board is marked read but has no digit values (the digit
+//! pass can miss its time budget after the columns are found). Each of
+//! those full fallbacks logs one info line with the reason. A blank map, a
+//! hero key that is not the display name, and a hero that came from the
+//! career panel or the portrait matcher are per-field: confident digits
+//! stay on this reader. The recognizer is also `ocr-v1` when every stored
+//! field fell back to ocr-v1.
 
 use scuffed_types::{RECOGNIZER_OCR_V1, SUSPECT_FIELD_NAMES};
 
@@ -68,9 +72,11 @@ pub struct SavedRead {
 
 /// Own row from the same match ocr-v1 uses.
 ///
-/// A configured player name counts only when that name matches a row. With
-/// no name, the brightness row ocr-v1 already fell back to is the own row.
-/// A name that does not match is uncertain even if a brightness row exists.
+/// A configured player name wins when that name matches a row. When it does
+/// not, the brightness row ocr-v1 already stored is the own row. The row is
+/// uncertain only when neither one names a row. A name miss after the
+/// highlight row is known is not a failed board: that used to drop every
+/// confident digit and tag the save `ocr-v1` with an empty suspect list.
 pub fn own_row(
     player_name: Option<&str>,
     name_match: Option<usize>,
@@ -78,7 +84,11 @@ pub fn own_row(
     team_size: usize,
 ) -> OwnRow {
     let named = player_name.is_some_and(|name| !name.trim().is_empty());
-    let index = if named { name_match } else { fallback_row };
+    let index = if named {
+        name_match.or(fallback_row)
+    } else {
+        fallback_row
+    };
     match index {
         Some(index) => OwnRow::Identified { index, team_size },
         None => OwnRow::Uncertain,
@@ -94,7 +104,7 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         map: ocr.map.clone(),
         mode: ocr.mode.clone(),
         result: ocr.result.clone(),
-        hero: ocr.hero.clone(),
+        hero: canonical_board_hero(&ocr.hero),
         elims: ocr.elims,
         assists: ocr.assists,
         deaths: ocr.deaths,
@@ -107,20 +117,13 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     let Some(board) = board else {
         return keep();
     };
-    if board.status != BoardStatus::Read || !has_digit_value(board) {
+    if let Some(reason) = full_fallback_reason(board, own) {
+        tracing::info!(reason, "new reader full fallback");
         return keep();
     }
-    let OwnRow::Identified { index, team_size } = own else {
+    let OwnRow::Identified { index, .. } = own else {
         return keep();
     };
-    // Do not guess 5 or 6. A missing or different team size means the new
-    // reader's row index is not the member's row.
-    let Some(read_size) = board.team_size else {
-        return keep();
-    };
-    if read_size != team_size || index >= team_size.saturating_mul(2) {
-        return keep();
-    }
 
     let mut suspect = Vec::new();
     let mut used_cv = false;
@@ -143,11 +146,17 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     };
     let hero_name = format!("r{index}.hero");
     let hero = match take_text(board, &hero_name, &mut suspect, "hero") {
+        // A placeholder icon is an empty or unknown slot. It is not a hero
+        // read, so the career panel or portrait hero already on the snapshot
+        // stays.
+        Some(value) if scuffed_types::is_placeholder_hero(&value) => {
+            canonical_board_hero(&ocr.hero)
+        }
         Some(value) => {
             used_cv = true;
-            value
+            canonical_board_hero(&value)
         }
-        None => ocr.hero.clone(),
+        None => canonical_board_hero(&ocr.hero),
     };
     let stats = [
         ("e", ocr.elims),
@@ -180,6 +189,8 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         damage: numbers[3],
         healing: numbers[4],
         mitigation: numbers[5],
+        // One tag for the whole row. cv-v5 when any stored field came from
+        // this reader. ocr-v1 only when every field fell back.
         recognizer: if used_cv {
             RECOGNIZER_ID
         } else {
@@ -230,6 +241,44 @@ pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
         };
         !drop_names.contains(&flat)
     });
+}
+
+/// Why a provided board cannot replace any field.
+///
+/// `None` means per-field merge. A blank map, a hero template key, and which
+/// older source named the hero are not reasons: those fields fall back on
+/// their own and confident digits keep [`RECOGNIZER_ID`].
+fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> {
+    match board.status {
+        BoardStatus::Read => {}
+        BoardStatus::NotFound => return Some("board was not found"),
+        BoardStatus::TeamSizeUnknown => return Some("team size is unknown"),
+    }
+    if !has_digit_value(board) {
+        return Some("read board has no digit values");
+    }
+    let OwnRow::Identified { index, team_size } = own else {
+        return Some("own row is uncertain");
+    };
+    let Some(read_size) = board.team_size else {
+        return Some("team size is missing");
+    };
+    if read_size != team_size {
+        return Some("team size disagrees");
+    }
+    if index >= team_size.saturating_mul(2) {
+        return Some("row index is outside the board");
+    }
+    None
+}
+
+/// Template keys (`wrecking-ball`, `wrecking_ball`) store the display name.
+///
+/// A key and the career-panel name are the same hero. Leaving the key on the
+/// row made cv-v5 saves and later ocr-v1 saves look like two heroes, and a
+/// raw string compare is not a reason to drop the board.
+fn canonical_board_hero(raw: &str) -> String {
+    crate::parse::canonical_hero(raw)
 }
 
 fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
@@ -735,12 +784,162 @@ mod tests {
     }
 
     #[test]
-    fn name_match_is_the_own_row_and_a_miss_is_uncertain() {
+    fn name_match_wins_and_a_miss_uses_the_highlight_row() {
         assert_eq!(own_row(Some("Ada"), Some(3), Some(0), 5), identified(3, 5));
-        assert_eq!(own_row(Some("Ada"), None, Some(0), 5), OwnRow::Uncertain);
+        assert_eq!(own_row(Some("Ada"), None, Some(0), 5), identified(0, 5));
+        assert_eq!(own_row(Some("Ada"), None, None, 5), OwnRow::Uncertain);
         assert_eq!(own_row(None, None, Some(1), 6), identified(1, 6));
         assert_eq!(own_row(Some("  "), None, Some(1), 6), identified(1, 6));
         assert_eq!(own_row(None, None, None, 5), OwnRow::Uncertain);
+    }
+
+    #[test]
+    fn highlight_row_keeps_confident_digits_when_the_name_misses() {
+        let own = own_row(Some("Ada"), None, Some(2), 5);
+        let saved = merge_saved(&ocr(), own, Some(&confident_board(5, 2)));
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+        assert_eq!(saved.elims, 21);
+        assert_eq!(saved.damage, 9100);
+        assert_eq!(saved.hero, "Kiriko");
+        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
+    }
+
+    #[test]
+    fn blank_map_and_a_hero_key_do_not_drop_confident_digits() {
+        let mut board = confident_board(6, 0);
+        let hero = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "r0.hero")
+            .unwrap();
+        hero.value = Some(Value::Text("wrecking-ball".into()));
+        hero.confidence = 0.95;
+        hero.suspect = false;
+        let mut snap = ocr();
+        snap.map.clear();
+        snap.mode.clear();
+        snap.hero = "Tracer".into();
+        let saved = merge_saved(&snap, identified(0, 6), Some(&board));
+        assert_eq!(saved.map, "", "a blank policy map stays");
+        assert_eq!(saved.mode, "");
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_eq!(crate::parse::guess_role_public(&saved.hero), "Tank");
+        assert_eq!(saved.elims, 21);
+        assert_eq!(saved.damage, 9100);
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
+        assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
+
+        let mut unread_map = board.clone();
+        for name in ["map", "mode"] {
+            let field = unread_map
+                .fields
+                .iter_mut()
+                .find(|field| field.name == name)
+                .unwrap();
+            *field = unread(name);
+        }
+        let quiet = merge_saved(&snap, identified(0, 6), Some(&unread_map));
+        assert_eq!(quiet.map, "");
+        assert_eq!(quiet.hero, "Wrecking Ball");
+        assert_eq!(quiet.elims, 21);
+        assert_eq!(quiet.recognizer, RECOGNIZER_ID);
+        assert!(quiet.suspect_fields.is_empty());
+    }
+
+    fn set_hero(board: &mut crate::shadow::BoardRead, value: &str) {
+        let hero = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "r0.hero")
+            .unwrap();
+        hero.value = Some(Value::Text(value.into()));
+        hero.confidence = 0.95;
+        hero.suspect = false;
+    }
+
+    #[test]
+    fn a_placeholder_match_falls_back_to_career_or_portrait() {
+        let mut board = confident_board(5, 0);
+        set_hero(&mut board, "empty_01");
+
+        let mut career = ocr();
+        career.hero = "Wrecking Ball".into();
+        let saved = merge_saved(&career, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_ne!(saved.hero, "empty_01");
+        assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
+        assert_eq!(saved.elims, 21);
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+
+        let mut portrait = ocr();
+        portrait.hero = "wrecking_ball".into();
+        let saved = merge_saved(&portrait, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
+
+        set_hero(&mut board, "special/skull_06.png");
+        let saved = merge_saved(&career, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_ne!(saved.hero, "skull_06");
+    }
+
+    #[test]
+    fn a_rejected_board_still_stores_the_pack_key_as_the_display_name() {
+        let mut snap = ocr();
+        snap.hero = "wrecking-ball".into();
+        let saved = merge_saved(&snap, OwnRow::Uncertain, Some(&confident_board(5, 0)));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_eq!(crate::parse::guess_role_public(&saved.hero), "Tank");
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
+    }
+
+    #[test]
+    fn full_fallback_names_the_reason_and_keeps_ocr_v1() {
+        let board = confident_board(5, 0);
+        assert_eq!(
+            full_fallback_reason(&board, OwnRow::Uncertain),
+            Some("own row is uncertain")
+        );
+        let saved = merge_saved(&ocr(), OwnRow::Uncertain, Some(&board));
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
+        assert!(saved.suspect_fields.is_empty());
+
+        let mut missing = board.clone();
+        missing.status = BoardStatus::NotFound;
+        missing.team_size = None;
+        assert_eq!(
+            full_fallback_reason(&missing, identified(0, 5)),
+            Some("board was not found")
+        );
+        let mut unknown = board.clone();
+        unknown.status = BoardStatus::TeamSizeUnknown;
+        unknown.team_size = None;
+        assert_eq!(
+            full_fallback_reason(&unknown, identified(0, 5)),
+            Some("team size is unknown")
+        );
+        let mut no_digits = board.clone();
+        for field in &mut no_digits.fields {
+            if is_stat_field(&field.name) {
+                field.value = None;
+            }
+        }
+        assert_eq!(
+            full_fallback_reason(&no_digits, identified(0, 5)),
+            Some("read board has no digit values")
+        );
+        let mut other_size = board.clone();
+        other_size.team_size = Some(6);
+        assert_eq!(
+            full_fallback_reason(&other_size, identified(0, 5)),
+            Some("team size disagrees")
+        );
+        assert_eq!(
+            full_fallback_reason(&board, identified(10, 5)),
+            Some("row index is outside the board")
+        );
+        assert_eq!(full_fallback_reason(&board, identified(0, 5)), None);
     }
 
     #[test]

@@ -45,6 +45,9 @@ libc = "0.2"
 name = "stat_tracker"
 path = "src/lib.rs"
 
+[dev-dependencies]
+ab_glyph = "0.2"
+
 [[bin]]
 name = "scuffed-stat-tracker"
 path = "src/main.rs"

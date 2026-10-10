@@ -963,15 +963,12 @@ pub fn outcome_from_board_header(raw_text: &str) -> crate::detect::MatchOutcome 
 }
 
 fn guess_role(hero: &str) -> String {
-    match hero.to_lowercase().as_str() {
-        "d.mon" | "dmon" | "d.va" | "dva" | "doomfist" | "domina" | "junker queen"
-        | "junker_queen" | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
-        | "winston" | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "jetpack cat" | "juno"
-        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "sombra"
-        | "wuyang" | "zenyatta" => "Support".to_string(),
-        _ => "Damage".to_string(),
-    }
+    // The role follows the canonical hero, including a pack key such as
+    // `wrecking-ball`. An unknown key is not Damage: that used to file every
+    // missed name under the Damage column.
+    scuffed_types::role_for_hero_name(hero)
+        .map(|role| role.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 const MAPS: &[(&str, &str)] = &[
@@ -1743,16 +1740,19 @@ mod tests {
     }
 
     /// Season 5 (2026-10-06): Doctrine is Support, Sombra moved to Support.
-    /// An unknown name still falls through to Damage. Roadhog stays Tank.
+    /// An unknown name is Unknown, not Damage. Roadhog stays Tank.
     #[test]
-    fn season5_roles_and_damage_fallback() {
+    fn season5_roles_and_unknown_names_are_not_damage() {
         assert_eq!(guess_role("Doctrine"), "Support");
         assert_eq!(guess_role("doctrine"), "Support");
         assert_eq!(guess_role("Sombra"), "Support");
         assert_eq!(guess_role("sombra"), "Support");
         assert_eq!(guess_role("Roadhog"), "Tank");
-        assert_eq!(guess_role("NotAHero"), "Damage");
-        assert_eq!(guess_role(""), "Damage");
+        assert_eq!(guess_role("Wrecking Ball"), "Tank");
+        assert_eq!(guess_role("wrecking-ball"), "Tank");
+        assert_eq!(guess_role("NotAHero"), "Unknown");
+        assert_eq!(guess_role(""), "Unknown");
+        assert_ne!(guess_role("NotAHero"), "Damage");
     }
 
     /// Site role lookup and the role stamped on a captured game stay aligned.

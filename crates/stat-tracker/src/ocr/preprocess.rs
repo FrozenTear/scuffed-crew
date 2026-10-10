@@ -1112,7 +1112,7 @@ pub fn map_name_rect(frame_w: u32, frame_h: u32) -> Option<MapNameRect> {
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
 /// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
-/// text on a dark bar. Pass the crop to `recognize_region`.
+/// text on a dark bar. `recognize_map_label` crops this window from the frame.
 ///
 /// The full 0.27-wide window still reaches the match timer (`ILIOS` read as
 /// `ILIOS TIM`). A fixed slice off that window also cuts long names
@@ -1250,6 +1250,80 @@ fn ink_runs(ink: &[bool], merge: u32) -> Vec<(u32, u32)> {
         runs.push((s, end + 1));
     }
     runs
+}
+
+/// Peak-to-peak channel-mean brightness below this is not a map label.
+///
+/// Flat grey and a black bar are 0. The low-amplitude noise bar in the tests
+/// stays at or under 16. A glyph at about 40% brightness (102) on the dark
+/// top bar (about 22) clears 70, so 24 sits in that gap. Stretching a narrower
+/// range would lift noise up to ink and OCR would guess a name.
+pub(crate) const MAP_LABEL_MIN_RANGE: u8 = 24;
+
+/// Minimum share of pixels in the bright half of the crop's own range.
+///
+/// Glyphs on a Tab label are well above this. A blank bar with a few hot
+/// pixels is not. Stretching those pixels would turn specks into a guess.
+pub(crate) const MAP_LABEL_MIN_TEXT_COVERAGE: f64 = 0.005;
+
+/// Channel-mean brightness. Hue is not read, so a tint and a grey of the
+/// same mean stretch to the same value.
+fn channel_mean(r: u8, g: u8, b: u8) -> u8 {
+    ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8
+}
+
+/// Stretch a crop so its darkest pixel is 0 and its brightest is 255.
+///
+/// Returns `None` when the brightness range or the bright-pixel coverage is
+/// too low to be a label. The caller must not OCR a stretch in that case.
+/// Brightness is the channel mean. Saturation and hue are not used.
+pub(crate) fn contrast_stretch_brightness(img: &DynamicImage) -> Option<GrayImage> {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let rgb = img.to_rgb8();
+    let mut gray = GrayImage::new(w, h);
+    let mut min_v = 255u8;
+    let mut max_v = 0u8;
+    for (x, y, px) in rgb.enumerate_pixels() {
+        let v = channel_mean(px.0[0], px.0[1], px.0[2]);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+        gray.put_pixel(x, y, Luma([v]));
+    }
+    let range = max_v.saturating_sub(min_v);
+    if range < MAP_LABEL_MIN_RANGE {
+        tracing::debug!(range, "map label brightness range too low to stretch");
+        return None;
+    }
+    let total = (w as usize).saturating_mul(h as usize);
+    let mid = u16::from(min_v) + u16::from(range) / 2;
+    let text = gray.pixels().filter(|px| u16::from(px.0[0]) >= mid).count();
+    let coverage = text as f64 / total as f64;
+    if coverage < MAP_LABEL_MIN_TEXT_COVERAGE {
+        tracing::debug!(coverage, "map label text coverage too low to stretch");
+        return None;
+    }
+    let span = u16::from(range);
+    for px in gray.pixels_mut() {
+        px.0[0] = ((u16::from(px.0[0].saturating_sub(min_v)) * 255) / span) as u8;
+    }
+    Some(gray)
+}
+
+/// Second-pass image for a faded Tab map label: the brightness stretch,
+/// inverted to black text on white, then the same narrow-crop upscale as
+/// [`prepare`]. `None` when [`contrast_stretch_brightness`] refuses the crop.
+pub(crate) fn map_label_retry_image(img: &DynamicImage) -> Option<GrayImage> {
+    let mut gray = contrast_stretch_brightness(img)?;
+    for px in gray.pixels_mut() {
+        px.0[0] = 255 - px.0[0];
+    }
+    if gray.width() < 1280 {
+        gray = nearest_2x_upscale(&gray);
+    }
+    Some(add_white_border(&gray, 8))
 }
 
 /// True when `board` (a [`crop_scoreboard`] result) has a Tab table: a bright
@@ -3056,5 +3130,70 @@ mod map_and_table_tests {
             !scoreboard_table_present(&death),
             "a death screen with killfeed glyphs and a HUD chip is not a table"
         );
+    }
+}
+
+#[cfg(test)]
+mod map_label_stretch_tests {
+    use super::{MAP_LABEL_MIN_RANGE, contrast_stretch_brightness};
+    use crate::ocr::map_label_fixtures::{brightness_range, low_noise};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn solid(w: u32, h: u32, colour: [u8; 3]) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb(colour)))
+    }
+
+    #[test]
+    fn stretch_uses_channel_mean_and_ignores_hue() {
+        // Left half is the dark bar. Right half is one grey and one tint
+        // whose channel means are both 102. Hue must not split them.
+        let mut img = RgbImage::new(40, 20);
+        for y in 0..20 {
+            for x in 0..40 {
+                let colour = if x < 20 {
+                    [18, 18, 18]
+                } else if y < 10 {
+                    [102, 102, 102]
+                } else {
+                    [255, 51, 0]
+                };
+                img.put_pixel(x, y, Rgb(colour));
+            }
+        }
+        let stretched =
+            contrast_stretch_brightness(&DynamicImage::ImageRgb8(img)).expect("label-sized range");
+        assert_eq!(stretched.get_pixel(4, 4).0[0], 0, "dark bar");
+        assert_eq!(stretched.get_pixel(30, 4).0[0], 255, "grey");
+        assert_eq!(
+            stretched.get_pixel(30, 14).0[0],
+            255,
+            "same mean, different hue"
+        );
+    }
+
+    #[test]
+    fn flat_blank_and_low_noise_are_not_stretched() {
+        let flat = solid(320, 48, [90, 90, 90]);
+        let blank = solid(320, 48, [0, 0, 0]);
+        let noise = low_noise(320, 48);
+        assert_eq!(brightness_range(&flat), 0);
+        assert_eq!(brightness_range(&blank), 0);
+        assert!(
+            brightness_range(&noise) < MAP_LABEL_MIN_RANGE,
+            "noise range {} must stay under the gate",
+            brightness_range(&noise)
+        );
+        assert!(contrast_stretch_brightness(&flat).is_none());
+        assert!(contrast_stretch_brightness(&blank).is_none());
+        assert!(contrast_stretch_brightness(&noise).is_none());
+
+        // Wide range, almost no bright pixels. Coverage is the gate here.
+        let mut speck = RgbImage::from_pixel(320, 48, Rgb([0, 0, 0]));
+        for (x, y) in [(10, 10), (11, 10), (10, 11), (12, 12)] {
+            speck.put_pixel(x, y, Rgb([255, 255, 255]));
+        }
+        let speck = DynamicImage::ImageRgb8(speck);
+        assert!(brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
+        assert!(contrast_stretch_brightness(&speck).is_none());
     }
 }

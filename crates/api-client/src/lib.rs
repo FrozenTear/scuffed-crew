@@ -163,7 +163,7 @@ impl ApiClient {
     /// PUT that discards the response body.
     ///
     /// Empty 2xx bodies succeed via [`decode_body`] (F-AUI-004). Prefer this (or
-    /// `delete`) for bare `StatusCode::OK` handlers — never `put_json::<T>` when
+    /// `delete`) for bare `StatusCode::OK` handlers. Never `put_json::<T>` when
     /// the server returns no JSON.
     pub async fn put_json_empty<B: serde::Serialize>(
         &self,
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn empty_success_body_decodes_as_null() {
-        // *_json_empty helpers discard the payload as Value — a bare 200 OK
+        // *_json_empty helpers discard the payload as Value. A bare 200 OK
         // with no body must succeed (F-AUI-004).
         let v: serde_json::Value = decode_body("").expect("empty body ok");
         assert!(v.is_null());

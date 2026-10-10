@@ -104,6 +104,10 @@ pub const CSS: &str = r#"
         color: var(--text);
         overflow-wrap: anywhere;
     }
+    .application-detail dd.application-detail-message {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
     @media (max-width: 420px) {
         .form-modal.application-detail-modal .form-modal-header,
         .form-modal.application-detail-modal .form-modal-body,
