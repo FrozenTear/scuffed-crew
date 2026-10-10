@@ -1073,7 +1073,7 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
 /// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
-/// text on a dark bar. Pass the crop to `recognize_map_label`.
+/// text on a dark bar. `recognize_map_label` crops this window from the frame.
 ///
 /// The full 0.27-wide window still reaches the match timer (`ILIOS` read as
 /// `ILIOS TIM`). A fixed slice off that window also cuts long names
@@ -2938,34 +2938,11 @@ mod map_and_table_tests {
 #[cfg(test)]
 mod map_label_stretch_tests {
     use super::{MAP_LABEL_MIN_RANGE, contrast_stretch_brightness};
+    use crate::ocr::map_label_fixtures::{brightness_range, low_noise};
     use image::{DynamicImage, Rgb, RgbImage};
 
     fn solid(w: u32, h: u32, colour: [u8; 3]) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb(colour)))
-    }
-
-    /// Values 40 through 52. Peak-to-peak stays under [`MAP_LABEL_MIN_RANGE`].
-    fn low_noise(w: u32, h: u32) -> DynamicImage {
-        let mut img = RgbImage::new(w, h);
-        let mut state = 0x1234_5678u32;
-        for px in img.pixels_mut() {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let v = 40 + ((state >> 16) % 13) as u8;
-            *px = Rgb([v, v, v]);
-        }
-        DynamicImage::ImageRgb8(img)
-    }
-
-    fn range_of(img: &DynamicImage) -> u8 {
-        let rgb = img.to_rgb8();
-        let mut min_v = 255u8;
-        let mut max_v = 0u8;
-        for px in rgb.pixels() {
-            let v = ((u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3) as u8;
-            min_v = min_v.min(v);
-            max_v = max_v.max(v);
-        }
-        max_v.saturating_sub(min_v)
     }
 
     #[test]
@@ -3001,12 +2978,12 @@ mod map_label_stretch_tests {
         let flat = solid(320, 48, [90, 90, 90]);
         let blank = solid(320, 48, [0, 0, 0]);
         let noise = low_noise(320, 48);
-        assert_eq!(range_of(&flat), 0);
-        assert_eq!(range_of(&blank), 0);
+        assert_eq!(brightness_range(&flat), 0);
+        assert_eq!(brightness_range(&blank), 0);
         assert!(
-            range_of(&noise) < MAP_LABEL_MIN_RANGE,
+            brightness_range(&noise) < MAP_LABEL_MIN_RANGE,
             "noise range {} must stay under the gate",
-            range_of(&noise)
+            brightness_range(&noise)
         );
         assert!(contrast_stretch_brightness(&flat).is_none());
         assert!(contrast_stretch_brightness(&blank).is_none());
@@ -3018,7 +2995,7 @@ mod map_label_stretch_tests {
             speck.put_pixel(x, y, Rgb([255, 255, 255]));
         }
         let speck = DynamicImage::ImageRgb8(speck);
-        assert!(range_of(&speck) >= MAP_LABEL_MIN_RANGE);
+        assert!(brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
         assert!(contrast_stretch_brightness(&speck).is_none());
     }
 }

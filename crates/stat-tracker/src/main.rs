@@ -3641,9 +3641,12 @@ fn analyze_frame(
     let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
         .ok()
         .and_then(|t| parse::match_hero_in_text(&t));
-    let map_panel_raw = Some(ocr::recognize_map_label(&ocr::preprocess::crop_map_name(
-        &img,
-    )));
+    let map_text = ocr::recognize_map_label(&img);
+    let map_panel_raw = if map_text.trim().is_empty() {
+        None
+    } else {
+        Some(map_text)
+    };
     let map_from_panel = map_panel_raw.as_deref().and_then(parse::match_map_in_text);
 
     // Full-board OCR exists only to supply raw text for hero/map name

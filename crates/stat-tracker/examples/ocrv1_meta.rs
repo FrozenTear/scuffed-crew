@@ -10,7 +10,7 @@ fn main() {
             println!("{path}\tERR\tERR\tERR");
             continue;
         };
-        let raw = ocr::recognize_map_label(&ocr::preprocess::crop_map_name(&img));
+        let raw = ocr::recognize_map_label(&img);
         let map = parse::match_map_in_text(&raw).unwrap_or_default();
         let o = detect_outcome(&img);
         let t = detect_outcome_text(&img);
