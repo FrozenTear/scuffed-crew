@@ -631,6 +631,31 @@ mod tests {
             let luma = (u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3;
             luma < 170
         }));
+        let raw = preprocess::crop_map_label_box(&faded).unwrap();
+        let retry =
+            preprocess::map_label_retry_image(&raw).expect("this fade is in the retry range");
+        assert_ne!(
+            (saved.width(), saved.height()),
+            (retry.width(), retry.height()),
+            "the saved PNG is the raw box, not the stretched retry"
+        );
+    }
+
+    #[test]
+    fn a_small_fade_saves_when_the_retry_refuses_the_crop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut img = RgbImage::from_pixel(1920, 1080, Rgb([0, 0, 0]));
+        let rect = preprocess::map_name_rect(1920, 1080).unwrap();
+        for y in rect.y..rect.y + 2 {
+            for x in rect.x..rect.x + 4 {
+                img.put_pixel(x, y, Rgb([107, 107, 107]));
+            }
+        }
+        let frame = DynamicImage::ImageRgb8(img);
+        let raw = preprocess::crop_map_label_box(&frame).unwrap();
+        assert!(preprocess::map_label_retry_image(&raw).is_none());
+        assert!(save_mapcrop(dir.path(), "thin", &frame));
+        assert_saved_is_raw_box(&crop_path(dir.path(), "thin", 1920, 1080, 1), &frame);
     }
 
     #[test]
