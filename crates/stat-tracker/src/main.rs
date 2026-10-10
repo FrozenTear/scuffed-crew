@@ -2253,12 +2253,15 @@ struct FrameAnalysis {
 /// by the pre-OCR preflight before any Tesseract/portrait work ran.
 enum FrameAnalysisOutcome {
     Analyzed(Box<FrameAnalysis>),
-    /// The frame lacks scoreboard row structure (menu, transition, black
-    /// frame) — carried back with the frame so it lands in debug/rejected.
+    /// The frame is not a scoreboard: neither row dips nor header labels, or
+    /// the pitch failed and the table detector found no table. Carried back
+    /// with the frame so it lands in debug/rejected. `scan` is logged with
+    /// the rejection. A gameplay frame whose pitch does not settle stays on
+    /// this path when it has no table.
     NotAScoreboard {
         outcome: detect::MatchOutcome,
         frame: image::DynamicImage,
-        dip_count: usize,
+        scan: detect::hero_portrait::RowScan,
     },
     /// Row structure is there, but the row pitch does not say 5v5 or 6v6
     /// without contradiction (`RowScan::checked_team_size`). Reading it with
@@ -3590,31 +3593,29 @@ fn analyze_frame(
     };
 
     let scoreboard = Arc::new(ocr::preprocess::crop_scoreboard(&img));
-    // Pre-OCR preflight (H1): a few milliseconds of pixel work that
-    // rejects menus/transitions/gameplay/black frames before the
-    // expensive portrait-match + calibration + row-OCR pipeline runs.
-    // Two independent signals, either accepts: the saturation row-dip
-    // scan (fails on the desaturated endorse-phase board) or the
-    // brightness-based header stat labels (fail on some vivid boards).
-    // Validated on 38 captured frames: all real boards pass, 29/33
-    // garbage frames rejected. The OCR-based looks_like_scoreboard gate
-    // downstream stays as the final arbiter for frames that pass.
-    let row_scan = detect::hero_portrait::scan_rows(&scoreboard);
-    if !row_scan.looks_like_scoreboard()
-        && !(3..=10).contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
-    {
-        return FrameAnalysisOutcome::NotAScoreboard {
-            outcome,
-            frame: img,
-            dip_count: row_scan.dip_count,
-        };
-    }
-    let Some(team_size) = row_scan.checked_team_size() else {
-        return FrameAnalysisOutcome::TeamSizeUncertain {
-            outcome,
-            frame: img,
-            scan: row_scan,
-        };
+    // Pre-OCR preflight. Row dips or header stat labels accept a board, then
+    // the pitch has to settle 5 or 6. The table check (layout and brightness,
+    // no team colour) does not block that. It runs only when the pitch fails
+    // or the two pitches disagree: no table is "not a scoreboard", a table is
+    // "team size unsure". The OCR gate downstream stays the final check for
+    // frames that pass.
+    let (preflight, row_scan) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
+    let team_size = match preflight {
+        detect::hero_portrait::ScoreboardPreflight::NotAScoreboard => {
+            return FrameAnalysisOutcome::NotAScoreboard {
+                outcome,
+                frame: img,
+                scan: row_scan,
+            };
+        }
+        detect::hero_portrait::ScoreboardPreflight::TeamSizeUncertain => {
+            return FrameAnalysisOutcome::TeamSizeUncertain {
+                outcome,
+                frame: img,
+                scan: row_scan,
+            };
+        }
+        detect::hero_portrait::ScoreboardPreflight::Ready(team_size) => team_size,
     };
     // Pass team_size into portrait match + cell OCR so neither re-detects
     // size or re-crops the full scoreboard (P7).
@@ -4167,11 +4168,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         FrameAnalysisOutcome::NotAScoreboard {
             outcome,
             frame,
-            dip_count,
+            scan,
         } => {
             tracing::warn!(
-                dip_count,
-                "capture rejected by pre-OCR preflight: no scoreboard row structure (saved to debug/rejected)"
+                dip_count = scan.dip_count,
+                dip_pitch = ?scan.median_pitch,
+                spectral_pitch = ?scan.spectral_pitch,
+                "capture rejected: not a scoreboard (saved to debug/rejected)"
             );
             Err((outcome, frame, "preflight"))
         }
