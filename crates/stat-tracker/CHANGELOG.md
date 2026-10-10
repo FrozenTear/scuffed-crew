@@ -15,6 +15,33 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.3
+
+This alpha keeps a bad scoreboard read from wiping a stat you already had. A faded map name gets one brighter try, and a match that is still going shows on the Games tab with a note that the numbers are not final.
+
+### Highlights
+
+- Heroes land on the right name and role. Wrecking Ball is a Tank, including a one-time fix of games you already saved.
+- Settings fits a tall portrait screen, and the form scrolls inside the window.
+- Install stops when the checksum file is missing. `stat-tracker-gui --version` prints the tracker version and exits.
+- The hero reader pack is chosen by name and swapped in safely. Sign-in and server errors say what happened, and the pack you already have stays put.
+
+The new reader falls back one field at a time to the old reader (#214). A stat never drops because of a single bad read. If eliminations were 11 and one frame reads them as 1, the saved value stays 11.
+
+Dim or faded map names, such as Lijiang Tower, get one brightened retry on scoreboard frames (#218).
+
+On the Games tab, an open match shows In progress with the live stats and a note that they are not final (#217). When the match closes, the card goes back to the usual outcome. Settings uses the available height on a tall portrait display. `bootstrap.sh` refuses the install if the `.sha256` file is missing. The desktop app accepts `--version` and `-V`. The hero pack file is selected by name. The live heroes directory is swapped into place, and the previous pack is left alone if the download fails. A 401 says the sync token is not valid and to sign in again from Settings. A 403 says the site refused the reader pack and the installed pack was left in place. A 503 that says packs are not set up yet says the tracker still works and to try again later. Each game saves two local map-name images under `debug/mapcrops` so later checks can compare them with what was read. Those images stay on this machine. They are never uploaded and they are not included in reports.
+
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.3/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.3 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.2
 
 This build is the next alpha. Signed-in members get the hero icon pack from the Scuffed Crew server.
