@@ -268,6 +268,31 @@ pub fn recognize_region(
     Ok(text)
 }
 
+/// Read the Tab top-bar map label.
+///
+/// The first pass is [`recognize_region`], the same preprocess a fully lit
+/// label already uses. A label caught mid fade-in is dim grey. The white mask
+/// drops it, and Tesseract returns junk. That miss is retried once on a
+/// brightness stretch inverted to black-on-white. The stretch uses the
+/// channel mean only. A crop whose brightness range or bright-pixel coverage
+/// is too low to hold a label is not stretched, and this returns the first
+/// read so the matcher still yields no map.
+pub fn recognize_map_label(img: &DynamicImage) -> String {
+    let first = recognize_region(img).unwrap_or_default();
+    if crate::parse::match_map_in_text(&first).is_some() {
+        return first;
+    }
+    let Some(retry) = preprocess::map_label_retry_image(img) else {
+        return first;
+    };
+    let second = recognize_prepared(&retry, "7", None).unwrap_or_default();
+    if crate::parse::match_map_in_text(&second).is_some() || first.trim().is_empty() {
+        second
+    } else {
+        first
+    }
+}
+
 /// OCR a multi-line screen region (phase headers like "BAN HEROES 13" or
 /// "VOTE FOR A MAP") as sparse text. Feeds Tesseract the plain grayscale crop:
 /// the scoreboard-tuned `prepare()` white-mask erases stylized/red UI text
@@ -1030,5 +1055,186 @@ mod tests {
     #[test]
     fn better_offset_tie_without_anchor_prefers_smaller_magnitude() {
         assert_eq!(better_offset((-0.20, 4), (-0.05, 4), None), (-0.05, 4));
+    }
+}
+
+#[cfg(test)]
+mod map_label_ocr_tests {
+    use super::{recognize_map_label, recognize_region};
+    use crate::ocr::preprocess::{self, MAP_LABEL_MIN_RANGE};
+    use crate::parse::match_map_in_text;
+    use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    const LIJIANG: &str = "Lijiang Tower";
+    const GRIMSVOTN: &str = "Watchpoint: Gr\u{00ed}msv\u{00f6}tn";
+    /// 102 / 255 is about 40% brightness.
+    const FADED: u8 = 102;
+    const LIT: u8 = 236;
+
+    fn sans_bold() -> Vec<u8> {
+        const CANDIDATES: &[&str] = &[
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        ];
+        for path in CANDIDATES {
+            if let Ok(bytes) = std::fs::read(path) {
+                return bytes;
+            }
+        }
+        panic!("map-label test needs a sans bold font");
+    }
+
+    /// One line of synthetic top-bar text. Not a captured frame.
+    fn draw_label(text: &str, ink: u8) -> DynamicImage {
+        let bytes = sans_bold();
+        let font = FontRef::try_from_slice(&bytes).expect("sans bold");
+        let scale = PxScale::from(48.0);
+        let scaled = font.as_scaled(scale);
+        let width = 1200u32;
+        let height = 88u32;
+        let bg = [18u8, 20, 28];
+        let mut img = RgbImage::from_pixel(width, height, Rgb(bg));
+        let mut cursor = 20.0f32;
+        let baseline = 14.0 + scaled.ascent();
+        for ch in text.chars() {
+            let id = font.glyph_id(ch);
+            let mut glyph = id.with_scale(scale);
+            glyph.position = point(cursor, baseline);
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|dx, dy, cov| {
+                    if cov <= 0.0 {
+                        return;
+                    }
+                    let x = (bounds.min.x + dx as f32).round() as i32;
+                    let y = (bounds.min.y + dy as f32).round() as i32;
+                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+                        return;
+                    }
+                    let dest = img.get_pixel_mut(x as u32, y as u32);
+                    let cov = cov.clamp(0.0, 1.0);
+                    for channel in 0..3 {
+                        let from = f32::from(dest.0[channel]);
+                        let to = f32::from(ink);
+                        dest.0[channel] = (from + (to - from) * cov).round() as u8;
+                    }
+                });
+            }
+            cursor += scaled.h_advance(id);
+        }
+        assert!(
+            cursor < width as f32 - 8.0,
+            "{text} ran off the crop at {cursor}"
+        );
+        DynamicImage::ImageRgb8(img)
+    }
+
+    fn low_noise() -> DynamicImage {
+        let mut img = RgbImage::new(320, 48);
+        let mut state = 0x1234_5678u32;
+        for px in img.pixels_mut() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let v = 40 + ((state >> 16) % 13) as u8;
+            *px = Rgb([v, v, v]);
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    fn brightness_range(img: &DynamicImage) -> u8 {
+        let rgb = img.to_rgb8();
+        let mut min_v = 255u8;
+        let mut max_v = 0u8;
+        for px in rgb.pixels() {
+            let v = ((u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3) as u8;
+            min_v = min_v.min(v);
+            max_v = max_v.max(v);
+        }
+        max_v.saturating_sub(min_v)
+    }
+
+    fn assert_no_map(img: &DynamicImage) {
+        assert!(
+            preprocess::map_label_retry_image(img).is_none(),
+            "stretch ran on a crop that cannot hold a label"
+        );
+        let raw = recognize_map_label(img);
+        assert!(match_map_in_text(&raw).is_none(), "got a map from {raw:?}");
+    }
+
+    #[test]
+    fn faded_map_labels_read_after_the_stretch_retry() {
+        for (text, want) in [
+            ("CONTROL | LIJIANG TOWER", LIJIANG),
+            ("ESCORT | WATCHPOINT: GRIMSVOTN", GRIMSVOTN),
+        ] {
+            let img = draw_label(text, FADED);
+            assert!(
+                brightness_range(&img) >= MAP_LABEL_MIN_RANGE,
+                "{text} range collapsed"
+            );
+            assert!(preprocess::contrast_stretch_brightness(&img).is_some());
+            let first = recognize_region(&img).unwrap_or_default();
+            assert!(
+                match_map_in_text(&first).is_none(),
+                "dim {text} matched on the first read ({first:?}); the retry is untested"
+            );
+            let raw = recognize_map_label(&img);
+            assert_eq!(
+                match_map_in_text(&raw).as_deref(),
+                Some(want),
+                "{text} read {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_brightness_map_labels_stay_on_the_first_read() {
+        for (text, want) in [
+            ("CONTROL | LIJIANG TOWER", LIJIANG),
+            ("ESCORT | WATCHPOINT: GRIMSVOTN", GRIMSVOTN),
+        ] {
+            let img = draw_label(text, LIT);
+            let first = recognize_region(&img).expect("full brightness ocr");
+            assert_eq!(
+                match_map_in_text(&first).as_deref(),
+                Some(want),
+                "first read of {text} changed: {first:?}"
+            );
+            let raw = recognize_map_label(&img);
+            assert_eq!(raw, first, "{text} left the full-brightness path");
+        }
+    }
+
+    #[test]
+    fn junk_label_stays_unknown() {
+        let img = draw_label("ZZZQQQ NOTAMAP", FADED);
+        assert!(preprocess::map_label_retry_image(&img).is_some());
+        let raw = recognize_map_label(&img);
+        assert!(
+            match_map_in_text(&raw).is_none(),
+            "junk read as a map: {raw:?}"
+        );
+    }
+
+    #[test]
+    fn flat_grey_blank_and_noise_bars_return_no_map() {
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 48, Rgb([90, 90, 90])));
+        let blank = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 48, Rgb([0, 0, 0])));
+        let noise = low_noise();
+        assert!(brightness_range(&noise) < MAP_LABEL_MIN_RANGE);
+        assert_no_map(&flat);
+        assert_no_map(&blank);
+        assert_no_map(&noise);
+
+        let mut speck = RgbImage::from_pixel(320, 48, Rgb([0, 0, 0]));
+        for (x, y) in [(10u32, 10u32), (11, 10), (10, 11), (12, 12)] {
+            speck.put_pixel(x, y, Rgb([255, 255, 255]));
+        }
+        let speck = DynamicImage::ImageRgb8(speck);
+        assert!(brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
+        assert_no_map(&speck);
     }
 }
