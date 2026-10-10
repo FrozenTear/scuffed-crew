@@ -4066,12 +4066,16 @@ async fn commit_capture_rows(
 ///
 /// `apply_new_reader` overwrites the OCR numbers. A drop is clamped back
 /// and flagged. A single-field jump past the capture gate's limit waits
-/// until the next read matches. The returned gate is what the next capture
-/// compares against.
+/// until the next read matches. `suspect` and `trusted` are the old reader's
+/// marks for this capture, so a raw-text fallback stays low-trust when the
+/// new reader does not replace it. The returned gate is what the next
+/// capture compares against.
 fn hold_new_reader_stats(
     parsed: &mut storage::PersonalMatch,
     prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    suspect: [bool; capture_gate::GATE_COLS],
     split: bool,
+    trusted: bool,
 ) -> capture_gate::GateOutcome {
     let read = capture_gate::Counters {
         elims: parsed.elims,
@@ -4081,7 +4085,7 @@ fn hold_new_reader_stats(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let held = capture_gate::apply_gate(prior, read, [false; capture_gate::GATE_COLS], split);
+    let held = capture_gate::apply_gate_with_trust(prior, read, suspect, split, trusted);
     parsed.elims = held.accepted.elims;
     parsed.assists = held.accepted.assists;
     parsed.deaths = held.accepted.deaths;
@@ -4148,19 +4152,25 @@ async fn apply_new_reader(
     rows: &[ocr::RowOcrResult],
     player_row_idx: Option<usize>,
     team_size: usize,
+    board_override: Option<shadow::BoardRead>,
 ) {
-    let frame = frame.clone();
-    let evidence = evidence.clone();
-    let board = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut board = shadow::read_board(&frame);
-            board.set_result(shadow::result_field(&evidence));
-            board
-        }))
+    let board = if let Some(mut board) = board_override {
+        board.set_result(shadow::result_field(evidence));
+        board
+    } else {
+        let frame = frame.clone();
+        let evidence = evidence.clone();
+        tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut board = shadow::read_board(&frame);
+                board.set_result(shadow::result_field(&evidence));
+                board
+            }))
+            .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound))
+        })
+        .await
         .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound))
-    })
-    .await
-    .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound));
+    };
     let name_match = player_name.and_then(|name| parse::find_player_row_by_name(rows, name));
     let own = reader_apply::own_row(player_name, name_match, player_row_idx, team_size);
     let ocr = reader_apply::OcrSnapshot {
@@ -4196,6 +4206,29 @@ async fn apply_new_reader(
     );
 }
 
+/// A prepared analysis for tests of [`handle_capture`]. Production never sets it.
+#[cfg(test)]
+struct InjectedCapture {
+    analysis: FrameAnalysis,
+    board: Option<shadow::BoardRead>,
+}
+
+#[cfg(test)]
+static INJECTED_CAPTURE: std::sync::Mutex<Option<InjectedCapture>> = std::sync::Mutex::new(None);
+
+fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)> {
+    #[cfg(test)]
+    {
+        return INJECTED_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .map(|item| (item.analysis, item.board));
+    }
+    #[cfg(not(test))]
+    None
+}
+
 async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
     // QUAL-002 follow-up (multi-file seam split — parked for USER per DR-1 A4)
     // Ergonomic locals over the context/request (the body predates A1).
@@ -4210,87 +4243,93 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let session_map = req.session_map.as_deref();
     let allow_banner_recovery = req.allow_banner_recovery;
 
-    tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
-    let img = capture::capture_screen_output(backend, capture_output)
-        .await
-        .map_err(anyhow::Error::from_boxed)
-        .context("screen capture failed")?;
+    let injected = take_injected_capture();
+    let (analysis, board_override) = if let Some(injected) = injected {
+        injected
+    } else {
+        tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
+        let img = capture::capture_screen_output(backend, capture_output)
+            .await
+            .map_err(anyhow::Error::from_boxed)
+            .context("screen capture failed")?;
 
-    let matcher = Arc::clone(&ctx.portrait_matcher);
-    // Clone player_name so the blocking closure can own it.
-    let player_name_owned = player_name.map(|s| s.to_string());
-    let session_map_known = session_map.is_some();
-    let shadow_on = ctx.shadow.is_some();
-    let analysis = tokio::task::spawn_blocking(move || {
-        analyze_frame(
-            img,
-            matcher,
-            player_name_owned,
-            game_outcome,
-            allow_banner_recovery,
-            session_map_known,
-            shadow_on,
-        )
-    })
-    .await?;
-    let analysis = match analysis {
-        FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
-        FrameAnalysisOutcome::NotAScoreboard {
-            outcome,
-            frame,
-            scan,
-        } => {
-            tracing::warn!(
-                dip_count = scan.dip_count,
-                dip_pitch = ?scan.median_pitch,
-                spectral_pitch = ?scan.spectral_pitch,
-                "capture rejected: not a scoreboard (saved to debug/rejected)"
-            );
-            Err((outcome, frame, "preflight"))
-        }
-        FrameAnalysisOutcome::TeamSizeUncertain {
-            outcome,
-            frame,
-            scan,
-        } => {
-            tracing::warn!(
-                dip_count = scan.dip_count,
-                dip_pitch = ?scan.median_pitch,
-                spectral_pitch = ?scan.spectral_pitch,
-                "capture rejected: row pitch does not settle 5v5 vs 6v6 (saved to debug/rejected)"
-            );
-            Err((outcome, frame, "teamsize"))
-        }
-    };
-    let analysis = match analysis {
-        Ok(a) => a,
-        Err((outcome, frame, reason)) => {
-            save_rejected_frame(data_dir, frame, reason);
-            return Ok(CaptureReport {
-                recorded: false,
+        let matcher = Arc::clone(&ctx.portrait_matcher);
+        // Clone player_name so the blocking closure can own it.
+        let player_name_owned = player_name.map(|s| s.to_string());
+        let session_map_known = session_map.is_some();
+        let shadow_on = ctx.shadow.is_some();
+        let analysis = tokio::task::spawn_blocking(move || {
+            analyze_frame(
+                img,
+                matcher,
+                player_name_owned,
+                game_outcome,
+                allow_banner_recovery,
+                session_map_known,
+                shadow_on,
+            )
+        })
+        .await?;
+        let analysis = match analysis {
+            FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
+            FrameAnalysisOutcome::NotAScoreboard {
                 outcome,
-                map: None,
-                map_source: None,
-                session_id: session_id.to_string(),
-                split: false,
-                armed_reset: false,
-                ignore_row: false,
-                reset_streak: req.reset_streak,
-                reset_baseline: req.reset_baseline,
-                baseline_row: req.baseline_row,
-                refresh_baseline: false,
-                clear_hint: false,
-                count_progress: false,
-                career_panel: false,
-                held_counters: None,
-                held_hero: None,
-                gate_state: None,
-                hero_auth: req.hero_auth.clone(),
-                seal: None,
-                close_reason: None,
-                held_at: None,
-            });
-        }
+                frame,
+                scan,
+            } => {
+                tracing::warn!(
+                    dip_count = scan.dip_count,
+                    dip_pitch = ?scan.median_pitch,
+                    spectral_pitch = ?scan.spectral_pitch,
+                    "capture rejected: not a scoreboard (saved to debug/rejected)"
+                );
+                Err((outcome, frame, "preflight"))
+            }
+            FrameAnalysisOutcome::TeamSizeUncertain {
+                outcome,
+                frame,
+                scan,
+            } => {
+                tracing::warn!(
+                    dip_count = scan.dip_count,
+                    dip_pitch = ?scan.median_pitch,
+                    spectral_pitch = ?scan.spectral_pitch,
+                    "capture rejected: row pitch does not settle 5v5 vs 6v6 (saved to debug/rejected)"
+                );
+                Err((outcome, frame, "teamsize"))
+            }
+        };
+        let analysis = match analysis {
+            Ok(a) => a,
+            Err((outcome, frame, reason)) => {
+                save_rejected_frame(data_dir, frame, reason);
+                return Ok(CaptureReport {
+                    recorded: false,
+                    outcome,
+                    map: None,
+                    map_source: None,
+                    session_id: session_id.to_string(),
+                    split: false,
+                    armed_reset: false,
+                    ignore_row: false,
+                    reset_streak: req.reset_streak,
+                    reset_baseline: req.reset_baseline,
+                    baseline_row: req.baseline_row,
+                    refresh_baseline: false,
+                    clear_hint: false,
+                    count_progress: false,
+                    career_panel: false,
+                    held_counters: None,
+                    held_hero: None,
+                    gate_state: None,
+                    hero_auth: req.hero_auth.clone(),
+                    seal: None,
+                    close_reason: None,
+                    held_at: None,
+                });
+            }
+        };
+        (analysis, None)
     };
     let FrameAnalysis {
         mut frame_outcome,
@@ -4681,12 +4720,15 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     &rows,
                     player_row_idx,
                     team_size,
+                    board_override,
                 )
                 .await;
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-                staged.gate = hold_new_reader_stats(&mut parsed, prior, split);
+                staged.gate =
+                    hold_new_reader_stats(&mut parsed, prior, suspect, split, trusted_cells);
+            } else {
+                note_gate_suspects(&mut parsed, held_stats, &held_cells);
             }
-            note_gate_suspects(&mut parsed, held_stats, &held_cells);
             let created_this_capture =
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
 
@@ -7865,8 +7907,14 @@ mod tests {
             },
             ..capture_gate::GateState::default()
         };
-        let held =
-            hold_new_reader_stats(&mut parsed, Some((prior, Duration::from_secs(20))), false);
+        let clean = [false; capture_gate::GATE_COLS];
+        let held = hold_new_reader_stats(
+            &mut parsed,
+            Some((prior, Duration::from_secs(20))),
+            clean,
+            false,
+            true,
+        );
         assert_eq!(
             parsed.elims, 11,
             "a new-reader 1 does not replace a held 11"
@@ -7880,8 +7928,13 @@ mod tests {
         // The same hold waits on a lone jump, then stores the matching second read.
         parsed.elims = 18;
         parsed.suspect_fields.clear();
-        let jumped =
-            hold_new_reader_stats(&mut parsed, Some((prior, Duration::from_secs(20))), false);
+        let jumped = hold_new_reader_stats(
+            &mut parsed,
+            Some((prior, Duration::from_secs(20))),
+            clean,
+            false,
+            true,
+        );
         assert_eq!(parsed.elims, 11, "one 18 does not count");
         assert!(parsed.suspect_fields.iter().any(|field| field == "e"));
         parsed.elims = 18;
@@ -7889,10 +7942,207 @@ mod tests {
         let matched = hold_new_reader_stats(
             &mut parsed,
             Some((jumped.state, Duration::from_secs(20))),
+            clean,
             false,
+            true,
         );
         assert_eq!(matched.accepted.elims, 18, "the second 18 counts");
         assert_eq!(parsed.elims, 18);
+    }
+
+    #[test]
+    fn new_reader_keeps_a_fallback_of_40_18_until_two_clean_reads_of_0_0() {
+        let clean = [false; capture_gate::GATE_COLS];
+        let mut parsed = test_match("s", "unknown");
+        parsed.elims = 2;
+        parsed.assists = 40;
+        parsed.deaths = 18;
+        parsed.damage = 450;
+        parsed.healing = 0;
+        parsed.mitigation = 2;
+        let first = hold_new_reader_stats(&mut parsed, None, clean, false, false);
+        assert_eq!((parsed.assists, parsed.deaths), (40, 18));
+        assert!(first.state.low_trust);
+        assert!(first.state.unconfirmed[1] && first.state.unconfirmed[2]);
+
+        parsed.assists = 0;
+        parsed.deaths = 0;
+        parsed.damage = 1105;
+        parsed.healing = 259;
+        parsed.mitigation = 450;
+        parsed.suspect_fields.clear();
+        let second = hold_new_reader_stats(
+            &mut parsed,
+            Some((first.state, Duration::from_secs(20))),
+            clean,
+            false,
+            true,
+        );
+        assert_eq!(
+            (parsed.assists, parsed.deaths),
+            (40, 18),
+            "one clean read keeps the fallback"
+        );
+        assert!(parsed.suspect_fields.iter().any(|field| field == "a"));
+        assert!(parsed.suspect_fields.iter().any(|field| field == "d"));
+
+        parsed.assists = 0;
+        parsed.deaths = 0;
+        parsed.suspect_fields.clear();
+        let third = hold_new_reader_stats(
+            &mut parsed,
+            Some((second.state, Duration::from_secs(20))),
+            clean,
+            false,
+            true,
+        );
+        assert_eq!((third.accepted.assists, third.accepted.deaths), (0, 0));
+        assert_eq!((parsed.assists, parsed.deaths), (0, 0));
+        assert!(!third.state.low_trust);
+    }
+
+    #[tokio::test]
+    async fn handle_capture_new_reader_keeps_11_when_the_next_read_is_1() {
+        fn stat_rows(elims: u32) -> Vec<ocr::RowOcrResult> {
+            let values = [
+                elims.to_string(),
+                "4".into(),
+                "2".into(),
+                "3000".into(),
+                "800".into(),
+                "400".into(),
+            ];
+            (0..10)
+                .map(|_| ocr::RowOcrResult {
+                    name: Some(ocr::CellOcrResult {
+                        value: "PLAYER".into(),
+                        confidence: 80,
+                        suspect: false,
+                    }),
+                    stats: values
+                        .iter()
+                        .map(|value| ocr::CellOcrResult {
+                            value: value.clone(),
+                            confidence: 90,
+                            suspect: false,
+                        })
+                        .collect(),
+                    mean_confidence: 90,
+                })
+                .collect()
+        }
+        fn analysis_for(elims: u32) -> FrameAnalysis {
+            let frame = image::DynamicImage::new_rgb8(64, 64);
+            FrameAnalysis {
+                frame_outcome: detect::MatchOutcome::Unknown,
+                ocr: Ok(ocr::OcrResult {
+                    raw_text: "Ana\nBusan".into(),
+                    confidence: 80,
+                }),
+                rows: stat_rows(elims),
+                portrait_hero: None,
+                career_hero: None,
+                map_from_panel: Some("Busan".into()),
+                map_panel_raw: Some("BUSAN".into()),
+                scoreboard: std::sync::Arc::new(frame.clone()),
+                player_row_idx: Some(0),
+                team_size: 5,
+                frame,
+                shadow_input: None,
+            }
+        }
+        fn board_for(elims: u32) -> shadow::BoardRead {
+            let mut fields = vec![
+                shadow::FieldRead {
+                    name: "map".into(),
+                    value: Some(shadow::Value::Text("Busan".into())),
+                    confidence: 0.9,
+                    suspect: false,
+                },
+                shadow::FieldRead {
+                    name: "r0.hero".into(),
+                    value: Some(shadow::Value::Text("Ana".into())),
+                    confidence: 0.9,
+                    suspect: false,
+                },
+            ];
+            for (suffix, value) in [
+                ("e", elims),
+                ("a", 4),
+                ("d", 2),
+                ("dmg", 3000),
+                ("h", 800),
+                ("mit", 400),
+            ] {
+                fields.push(shadow::FieldRead {
+                    name: format!("r0.{suffix}"),
+                    value: Some(shadow::Value::Int(value)),
+                    confidence: 0.9,
+                    suspect: false,
+                });
+            }
+            shadow::BoardRead {
+                status: shadow::BoardStatus::Read,
+                team_size: Some(5),
+                fields,
+                elapsed_ms: 1,
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let ctx = DaemonCtx {
+            backend: capture::CaptureBackend::None,
+            store: store.clone(),
+            sync_client: None,
+            player_name: None,
+            capture_output: None,
+            auto_detect: config::AutoDetectConfig::default(),
+            finished_game_close: Duration::from_secs(90),
+            game_process_names: Vec::new(),
+            portrait_matcher: std::sync::Arc::new(detect::hero_portrait::PortraitMatcher::load(
+                dir.path(),
+            )),
+            collect_portraits: false,
+            dump_poll_frames: false,
+            debug_ocr: false,
+            data_dir: dir.path().to_path_buf(),
+            empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
+            shadow: None,
+            use_new_reader: true,
+        };
+        let mut now = test_now();
+        let mut active = game(detect::MatchOutcome::Unknown, None, now);
+        active.session_id = "held-11".into();
+        active.map = Some("Busan".into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        let mut st = session(Some(active), now);
+
+        for elims in [11u32, 1] {
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+                analysis: analysis_for(elims),
+                board: Some(board_for(elims)),
+            });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(&ctx, req).await.unwrap();
+            assert!(report.recorded, "elims read {elims} was not stored");
+            assert!(!report.split, "elims read {elims} must stay on this game");
+            apply_capture_report(
+                &mut st,
+                &ctx.store,
+                &ctx.data_dir,
+                "held-11",
+                Ok(report),
+                now,
+            )
+            .await;
+            now += Duration::from_secs(20);
+        }
+
+        let saved = ctx.store.get_session_snapshots("held-11").await.unwrap();
+        let elims: Vec<u32> = saved.iter().map(|row| row.elims).collect();
+        assert_eq!(elims, vec![11, 11], "a read of 1 must not replace 11");
     }
 
     #[tokio::test]

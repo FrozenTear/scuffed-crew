@@ -363,48 +363,75 @@ fn lock_store_dir(
     }
 }
 
-/// Display name and role when `raw` is a pack file key such as `wrecking-ball`.
+/// Display name and role for a pack file key or a hero the table already names.
 ///
-/// A value that is already the display name is left alone.
-fn pack_key_hero_role(raw: &str) -> Option<(&'static str, String)> {
-    let row = scuffed_types::hero_for_pack_file(raw)?;
-    if raw.trim() == row.display {
-        return None;
-    }
-    Some((row.display, row.role.to_string()))
+/// `wrecking-ball` becomes `Wrecking Ball` / Tank. A stored display name such
+/// as `Wrecking Ball` keeps that text and still returns the table role, so a
+/// wrong role can be corrected. A folded alias such as `Lucio` keeps its
+/// stored spelling. `None` when the text is not a known hero.
+fn known_hero_role(raw: &str) -> Option<(String, String)> {
+    let from_pack = scuffed_types::hero_for_pack_file(raw);
+    let display = from_pack
+        .map(|row| row.display)
+        .or_else(|| scuffed_types::hero_key_to_name(raw))?;
+    let role = scuffed_types::role_for_hero_name(display)?.to_string();
+    let hero = if from_pack.is_some() || raw.trim() == display {
+        display.to_string()
+    } else {
+        raw.trim().to_string()
+    };
+    Some((hero, role))
 }
 
-/// Rewrite pack-key hero fields on one saved game.
-///
-/// Returns whether any field changed. When the hero that would be uploaded
-/// changes, the row is marked unsynced. A role-only difference on an
-/// already canonical hero is not a change.
-fn rewrite_pack_key_fields(row: &mut PersonalMatch) -> bool {
-    let before = row.display_hero().to_string();
+/// Write `hero` and `role` from the hero table when this text is a known hero.
+fn apply_known_hero(hero: &mut String, role: &mut String) -> bool {
+    let Some((next_hero, next_role)) = known_hero_role(hero) else {
+        return false;
+    };
     let mut changed = false;
-    if let Some((hero, role)) = pack_key_hero_role(&row.hero) {
-        row.hero = hero.to_string();
-        row.role = role;
+    if *hero != next_hero {
+        *hero = next_hero;
         changed = true;
     }
-    if let Some(current) = row.corrected_hero.clone()
-        && let Some((hero, role)) = pack_key_hero_role(&current)
-    {
-        row.corrected_hero = Some(hero.to_string());
-        row.corrected_role = Some(role);
+    if *role != next_role {
+        *role = next_role;
         changed = true;
+    }
+    changed
+}
+
+/// Rewrite pack-key heroes, and fix a wrong role on a canonical hero.
+///
+/// Returns whether any field changed. The row is marked unsynced only when
+/// the hero or role that would be uploaded changes.
+fn rewrite_pack_key_fields(row: &mut PersonalMatch) -> bool {
+    let before_hero = row.display_hero().to_string();
+    let before_role = row.display_role().to_string();
+    let mut changed = false;
+    changed |= apply_known_hero(&mut row.hero, &mut row.role);
+    if let Some(current) = row.corrected_hero.clone() {
+        let mut hero = current;
+        let had_role = row.corrected_role.is_some();
+        let mut role = row.corrected_role.clone().unwrap_or_default();
+        if apply_known_hero(&mut hero, &mut role) {
+            let hero_changed = row.corrected_hero.as_deref() != Some(hero.as_str());
+            let role_changed = had_role && row.corrected_role.as_deref() != Some(role.as_str());
+            if hero_changed || role_changed {
+                row.corrected_hero = Some(hero);
+                if had_role || hero_changed {
+                    row.corrected_role = Some(role);
+                }
+                changed = true;
+            }
+        }
     }
     for segment in &mut row.heroes_played {
-        if let Some((hero, role)) = pack_key_hero_role(&segment.hero) {
-            segment.hero = hero.to_string();
-            segment.role = role;
-            changed = true;
-        }
+        changed |= apply_known_hero(&mut segment.hero, &mut segment.role);
     }
     if !changed {
         return false;
     }
-    if before != row.display_hero() {
+    if before_hero != row.display_hero() || before_role != row.display_role() {
         row.synced = false;
         row.sync_rev = row.sync_rev.saturating_add(1);
         row.upload_reject = None;
@@ -452,12 +479,13 @@ impl LocalStore {
         Ok(store)
     }
 
-    /// Rewrite saved heroes that are still pack file keys (`wrecking-ball`)
-    /// to the canonical display name, and set the role from that hero.
+    /// Rewrite saved pack-key heroes to the display name, and set the role
+    /// from the hero table. A row that already says `Wrecking Ball` keeps
+    /// that name and still gets Tank when the stored role is wrong.
     ///
-    /// Runs on every open. A second run finds no pack keys and writes
-    /// nothing. A game is queued for upload only when the hero that would
-    /// be sent actually changes.
+    /// Runs on every open. A second run finds nothing to change and writes
+    /// nothing. A game is queued for upload only when the hero or role that
+    /// would be sent actually changes.
     pub async fn migrate_pack_key_heroes(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -466,24 +494,28 @@ impl LocalStore {
         let mut reupload = 0usize;
         let mut sessions = std::collections::BTreeSet::new();
         for mut row in matches {
-            let before = row.display_hero().to_string();
+            let before_hero = row.display_hero().to_string();
+            let before_role = row.display_role().to_string();
             if !rewrite_pack_key_fields(&mut row) {
                 continue;
             }
-            let hero_changed = before != row.display_hero();
-            self.write_rewritten_match(&row, hero_changed).await?;
+            let queue = before_hero != row.display_hero() || before_role != row.display_role();
+            self.write_rewritten_match(&row, queue).await?;
             if !row.session_id.is_empty() {
                 sessions.insert(row.session_id.clone());
             }
             rewritten += 1;
-            if hero_changed {
+            if queue {
                 reupload += 1;
             }
         }
         for session in self.get_all_sessions().await? {
-            let Some((hero, role)) = pack_key_hero_role(&session.hero) else {
+            let Some((hero, role)) = known_hero_role(&session.hero) else {
                 continue;
             };
+            if session.hero == hero && session.role == role {
+                continue;
+            }
             self.db
                 .query(
                     "UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid",
@@ -2116,6 +2148,13 @@ mod tests {
         canonical.sync_rev = 2;
         store.insert_match(canonical).await.unwrap();
 
+        let mut wrong_role = snap("wrong-role", 6);
+        wrong_role.hero = "Wrecking Ball".into();
+        wrong_role.role = "Damage".into();
+        wrong_role.synced = true;
+        wrong_role.sync_rev = 3;
+        store.insert_match(wrong_role).await.unwrap();
+
         let mut other = snap("other", 1);
         other.hero = "Ana".into();
         other.role = "Support".into();
@@ -2145,6 +2184,19 @@ mod tests {
             })
             .await
             .unwrap();
+        store
+            .create_session(&MatchSession {
+                session_id: "wrong-role".into(),
+                hero: "Wrecking Ball".into(),
+                map_name: String::new(),
+                role: "Damage".into(),
+                started_at: SurrealDatetime::from(Utc::now()),
+                last_capture_at: SurrealDatetime::from(Utc::now()),
+                capture_count: 1,
+                final_outcome: "victory".into(),
+            })
+            .await
+            .unwrap();
 
         store.migrate_pack_key_heroes().await.unwrap();
 
@@ -2162,6 +2214,15 @@ mod tests {
         assert_eq!(canonical.hero, "Wrecking Ball");
         assert!(canonical.synced);
         assert_eq!(canonical.sync_rev, 2);
+
+        let wrong_role = rows
+            .iter()
+            .find(|row| row.session_id == "wrong-role")
+            .unwrap();
+        assert_eq!(wrong_role.hero, "Wrecking Ball");
+        assert_eq!(wrong_role.role, "Tank");
+        assert!(!wrong_role.synced, "a corrected role is queued");
+        assert_eq!(wrong_role.sync_rev, 4);
 
         let other = rows.iter().find(|row| row.session_id == "other").unwrap();
         assert_eq!(other.hero, "Ana");
@@ -2185,6 +2246,15 @@ mod tests {
             .unwrap();
         assert_eq!(session.hero, "Wrecking Ball");
         assert_eq!(session.role, "Tank");
+        let wrong_session = store
+            .get_all_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.session_id == "wrong-role")
+            .unwrap();
+        assert_eq!(wrong_session.hero, "Wrecking Ball");
+        assert_eq!(wrong_session.role, "Tank");
 
         store.migrate_pack_key_heroes().await.unwrap();
         let rows = store.get_all_matches().await.unwrap();
@@ -2202,6 +2272,16 @@ mod tests {
             .unwrap();
         assert!(canonical.synced);
         assert_eq!(canonical.sync_rev, 2);
+        let wrong_role = rows
+            .iter()
+            .find(|row| row.session_id == "wrong-role")
+            .unwrap();
+        assert_eq!(wrong_role.role, "Tank");
+        assert!(!wrong_role.synced);
+        assert_eq!(
+            wrong_role.sync_rev, 4,
+            "a second run must not queue the role again"
+        );
         let pinned = rows.iter().find(|row| row.session_id == "pinned").unwrap();
         assert!(pinned.synced);
         assert_eq!(pinned.sync_rev, 7);

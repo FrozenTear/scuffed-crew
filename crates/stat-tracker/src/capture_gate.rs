@@ -212,10 +212,10 @@ pub struct GateState {
     /// real confirmed zero, so the flag is not the value.
     #[serde(default)]
     pub has_confirmed_floor: [bool; GATE_COLS],
-    /// The accepted value was stored while another column was held down, so
-    /// the capture was a different player's row. A later lower read may
-    /// replace it even after the shifted number repeated. Missing on an
-    /// older save means not a row shift.
+    /// The accepted value was stored while an adjacent column was held down,
+    /// so the capture was a different player's row or a neighboring cell.
+    /// Two later reads of the same lower number may replace it. One low read
+    /// keeps the value. Missing on an older save means not a row shift.
     #[serde(default)]
     pub row_shift: [bool; GATE_COLS],
 }
@@ -569,12 +569,15 @@ pub fn apply_gate_with_trust(
     let replacing = state.low_trust && trusted && !suspect.iter().any(|&s| s);
 
     for col in 0..GATE_COLS {
-        // A confirmed value stays. A row-shift high may be replaced by this
-        // read. An unconfirmed high comes down only when this raw read
-        // equals the previous raw read, so one low read cannot replace it.
-        let matched_low =
-            replacing && unconfirmed[col] && !prev_raw_suspect[col] && prev_raw[col] == cur[col];
-        let revise_down = matched_low || row_shift[col];
+        // A confirmed value stays. An unconfirmed high, and a row-shift high,
+        // come down only when this raw read equals the previous raw read, so
+        // one low read cannot replace either of them.
+        let clean_match = trusted
+            && !suspect.iter().any(|&flag| flag)
+            && !prev_raw_suspect[col]
+            && prev_raw[col] == cur[col];
+        let matched_low = replacing && unconfirmed[col] && clean_match;
+        let revise_down = matched_low || (row_shift[col] && clean_match);
         if cur[col] < prev_acc[col] && revise_down {
             // Below the value a fallback moved off a confirmed column, or a
             // wide column that is just the latched number with its last
@@ -658,14 +661,41 @@ pub fn apply_gate_with_trust(
         }
     }
 
-    // A kill column that rose past JUMP_MAX while another column was held
-    // down is a different player's row. Keep that tag while the drop is
-    // still held, so a later read of the real row can replace the high.
+    // A kill column that rose past JUMP_MAX is a row shift when it sits in
+    // the same adjacent run of cells as a column held down this frame: the
+    // next cell, or the next risen cell along that run. A drop on the far
+    // side of the board does not tag it. Keep the tag while any drop is
+    // still held, so two later reads of the real row can replace the high.
     let decreased = holds.iter().any(|h| h.kind == HoldKind::Monotonic);
+    let dropped: Vec<usize> = holds
+        .iter()
+        .filter(|hold| hold.kind == HoldKind::Monotonic)
+        .map(|hold| hold.col)
+        .collect();
+    let rose = |col: usize| {
+        is_kill_col(col)
+            && out[col] > prev_acc[col]
+            && cur[col].saturating_sub(prev_acc[col]) > JUMP_MAX[col]
+    };
+    let mut beside_drop = [false; GATE_COLS];
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for col in 0..GATE_COLS {
+            if beside_drop[col] || !rose(col) {
+                continue;
+            }
+            let touches = (0..GATE_COLS).any(|other| {
+                other.abs_diff(col) == 1 && (dropped.contains(&other) || beside_drop[other])
+            });
+            if touches {
+                beside_drop[col] = true;
+                grew = true;
+            }
+        }
+    }
     for col in 0..GATE_COLS {
-        let rose =
-            out[col] > prev_acc[col] && cur[col].saturating_sub(prev_acc[col]) > JUMP_MAX[col];
-        if decreased && is_kill_col(col) && rose {
+        if beside_drop[col] {
             row_shift[col] = true;
         } else if out[col] < prev_acc[col] {
             row_shift[col] = false;
@@ -1940,10 +1970,10 @@ mod tests {
 
     #[test]
     fn a_row_shift_high_can_fall_and_a_matched_high_cannot() {
-        // Elims drop while assists jump past the limit: the assists came
-        // from another row. Two more reads of that high still do not lock
-        // it. The real assists replace it. A matched assists with no row
-        // shift stays.
+        // Elims drop while assists and deaths jump past the limit. Assists
+        // sit next to that drop, and deaths sit next to assists, so both are
+        // one shifted run. Two reads of the real row replace it. One does
+        // not. A matched assists with no row shift stays.
         let prev = state(c(15, 10, 7, 7000, 1500, 3000));
         let shifted = apply_gate(
             Some((prev, secs(30))),
@@ -1953,7 +1983,15 @@ mod tests {
         );
         assert_eq!(shifted.accepted.elims, 15, "the dropped elims stay");
         assert_eq!(shifted.accepted.assists, 19);
-        assert!(shifted.state.row_shift[1]);
+        assert_eq!(shifted.accepted.deaths, 13);
+        assert!(
+            shifted.state.row_shift[1],
+            "assists sit next to the elims drop"
+        );
+        assert!(
+            shifted.state.row_shift[2],
+            "deaths continue that same adjacent run"
+        );
         let again = apply_gate(
             Some((shifted.state, secs(10))),
             c(9, 19, 13, 8100, 1600, 3200),
@@ -1961,14 +1999,30 @@ mod tests {
             false,
         );
         assert!(again.state.row_shift[1], "a repeated shift stays a shift");
-        let real = apply_gate(
+        let once = apply_gate(
             Some((again.state, secs(20))),
             c(16, 11, 7, 8200, 1700, 3300),
             CLEAN,
             false,
         );
-        assert_eq!(real.accepted.assists, 11, "the real row replaces the shift");
-        assert_eq!(real.accepted.deaths, 7);
+        assert_eq!(once.accepted.assists, 19, "one lower read keeps the shift");
+        assert_eq!(once.accepted.deaths, 13, "one lower read keeps the shift");
+        assert!(unsure_fields(&once.holds).contains(&"a"));
+        assert!(unsure_fields(&once.holds).contains(&"d"));
+        let real = apply_gate(
+            Some((once.state, secs(20))),
+            c(16, 11, 7, 8300, 1700, 3300),
+            CLEAN,
+            false,
+        );
+        assert_eq!(
+            real.accepted.assists, 11,
+            "the second read replaces the shift"
+        );
+        assert_eq!(
+            real.accepted.deaths, 7,
+            "the second read replaces the shift"
+        );
         let matched = apply_gate(
             Some((state(c(16, 11, 7, 8200, 1700, 3300)), secs(20))),
             c(16, 11, 7, 8300, 1700, 3300),
@@ -1983,6 +2037,49 @@ mod tests {
         );
         assert_eq!(held.accepted.assists, 11, "two matching reads cannot fall");
         assert!(unsure_fields(&held.holds).contains(&"a"));
+    }
+
+    #[test]
+    fn a_row_shift_stays_on_one_low_read() {
+        // Elims drop and the next cell, assists, jumps. That is a row shift.
+        // One later read of 1 keeps 19 and flags assists.
+        let prev = state(c(15, 10, 7, 7000, 1500, 3000));
+        let shifted = apply_gate(
+            Some((prev, secs(30))),
+            c(9, 19, 7, 8000, 1600, 3200),
+            CLEAN,
+            false,
+        );
+        assert!(shifted.state.row_shift[1]);
+        assert_eq!(shifted.accepted.assists, 19);
+        let one = apply_gate(
+            Some((shifted.state, secs(20))),
+            c(15, 1, 7, 8100, 1600, 3200),
+            CLEAN,
+            false,
+        );
+        assert_eq!(one.accepted.assists, 19, "one read of 1 keeps the shift");
+        assert!(unsure_fields(&one.holds).contains(&"a"));
+        assert!(one.unlatches.is_empty());
+    }
+
+    #[test]
+    fn a_drop_far_from_a_rise_is_not_a_row_shift() {
+        // Mitigation falls in the same frame elims jump. Those columns are
+        // not adjacent, so the elims rise is not tagged as a row shift.
+        let prev = state(c(10, 4, 2, 3000, 800, 2000));
+        let out = apply_gate(
+            Some((prev, secs(30))),
+            c(20, 4, 2, 3200, 800, 100),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.mitigation, 2000, "the mitigation drop is held");
+        assert!(
+            !out.state.row_shift.iter().any(|&tagged| tagged),
+            "a far drop does not tag the rise: {:?}",
+            out.state.row_shift
+        );
     }
 
     #[test]
