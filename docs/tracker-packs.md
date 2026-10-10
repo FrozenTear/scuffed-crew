@@ -121,8 +121,9 @@ archive:
 
 `name` must be `heroes-v1.tar`. `version` must equal the `version` of the
 `heroes-v1.tar` entry in `PACKS_DIR/manifest.json`. `files` lists every
-archive member except `manifest.json` itself, once each, with its lowercase
-SHA-256 and byte length. A file in the archive that is not listed, or a listed
+regular file in the archive except `manifest.json` itself, once each, with its
+lowercase SHA-256 and byte length. Do not list the `special/` directory entry:
+the tracker skips directory entries, so listing one fails the pack. A file in the archive that is not listed, or a listed
 file that is missing, fails the pack.
 
 The tracker checks the downloaded file's size and sha256 against
