@@ -200,26 +200,447 @@ fn fuzzy_match_hero(text: &str) -> Option<String> {
     best_hero.map(|h| h.to_string())
 }
 
+/// One row of the hero name table: a pack file, its display name, and its role.
+///
+/// The new reader and the tracker both use this table. Pack files are the
+/// names inside `heroes-v1.tar` (`wrecking-ball.png`). Display names are what
+/// a saved game stores (`Wrecking Ball`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeroName {
+    pub file: &'static str,
+    pub display: &'static str,
+    pub role: HeroRole,
+}
+
+/// Every hero file in the pack, with the name and role a save should store.
+pub const HERO_NAMES: &[HeroName] = &[
+    HeroName {
+        file: "ana.png",
+        display: "Ana",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "anran.png",
+        display: "Anran",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "ashe.png",
+        display: "Ashe",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "baptiste.png",
+        display: "Baptiste",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "bastion.png",
+        display: "Bastion",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "brigitte.png",
+        display: "Brigitte",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "cassidy.png",
+        display: "Cassidy",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "dmon.png",
+        display: "D.Mon",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "doctrine.png",
+        display: "Doctrine",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "domina.png",
+        display: "Domina",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "doomfist.png",
+        display: "Doomfist",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "dva.png",
+        display: "D.Va",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "echo.png",
+        display: "Echo",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "emre.png",
+        display: "Emre",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "freja.png",
+        display: "Freja",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "genji.png",
+        display: "Genji",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "hanzo.png",
+        display: "Hanzo",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "hazard.png",
+        display: "Hazard",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "illari.png",
+        display: "Illari",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "jetpack-cat.png",
+        display: "Jetpack Cat",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "junker-queen.png",
+        display: "Junker Queen",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "junkrat.png",
+        display: "Junkrat",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "juno.png",
+        display: "Juno",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "kiriko.png",
+        display: "Kiriko",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "lifeweaver.png",
+        display: "Lifeweaver",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "lucio.png",
+        display: "Lúcio",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "mauga.png",
+        display: "Mauga",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "mei.png",
+        display: "Mei",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "mercy.png",
+        display: "Mercy",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "mizuki.png",
+        display: "Mizuki",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "moira.png",
+        display: "Moira",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "orisa.png",
+        display: "Orisa",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "pharah.png",
+        display: "Pharah",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "ramattra.png",
+        display: "Ramattra",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "reaper.png",
+        display: "Reaper",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "reinhardt.png",
+        display: "Reinhardt",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "roadhog.png",
+        display: "Roadhog",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "shion.png",
+        display: "Shion",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "sierra.png",
+        display: "Sierra",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "sigma.png",
+        display: "Sigma",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "sojourn.png",
+        display: "Sojourn",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "soldier-76.png",
+        display: "Soldier: 76",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "sombra.png",
+        display: "Sombra",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "symmetra.png",
+        display: "Symmetra",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "torbjorn.png",
+        display: "Torbjörn",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "tracer.png",
+        display: "Tracer",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "vendetta.png",
+        display: "Vendetta",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "venture.png",
+        display: "Venture",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "widowmaker.png",
+        display: "Widowmaker",
+        role: HeroRole::Damage,
+    },
+    HeroName {
+        file: "winston.png",
+        display: "Winston",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "wrecking-ball.png",
+        display: "Wrecking Ball",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "wuyang.png",
+        display: "Wuyang",
+        role: HeroRole::Support,
+    },
+    HeroName {
+        file: "zarya.png",
+        display: "Zarya",
+        role: HeroRole::Tank,
+    },
+    HeroName {
+        file: "zenyatta.png",
+        display: "Zenyatta",
+        role: HeroRole::Support,
+    },
+];
+
+/// Empty or unknown scoreboard slots in the hero pack. A match against one
+/// of these is not a hero.
+pub const HERO_PACK_PLACEHOLDERS: &[&str] = &[
+    "special/placeholder_01.png",
+    "special/placeholder_02.png",
+    "special/placeholder_03.png",
+    "special/placeholder_04.png",
+    "special/placeholder_05.png",
+    "special/placeholder_06.png",
+    "special/placeholder_07.png",
+    "special/placeholder_08.png",
+    "special/placeholder_09.png",
+    "special/placeholder_10.png",
+    "special/placeholder_11.png",
+    "special/placeholder_12.png",
+    "special/placeholder_13.png",
+];
+
+/// Every file in the hero pack besides `manifest.json`.
+///
+/// Hero icons sit next to the manifest. The 13 placeholder icons sit in
+/// `special/` and are not heroes.
+pub const HERO_PACK_FILES: &[&str] = &[
+    "ana.png",
+    "anran.png",
+    "ashe.png",
+    "baptiste.png",
+    "bastion.png",
+    "brigitte.png",
+    "cassidy.png",
+    "dmon.png",
+    "doctrine.png",
+    "domina.png",
+    "doomfist.png",
+    "dva.png",
+    "echo.png",
+    "emre.png",
+    "freja.png",
+    "genji.png",
+    "hanzo.png",
+    "hazard.png",
+    "illari.png",
+    "jetpack-cat.png",
+    "junker-queen.png",
+    "junkrat.png",
+    "juno.png",
+    "kiriko.png",
+    "lifeweaver.png",
+    "lucio.png",
+    "mauga.png",
+    "mei.png",
+    "mercy.png",
+    "mizuki.png",
+    "moira.png",
+    "orisa.png",
+    "pharah.png",
+    "ramattra.png",
+    "reaper.png",
+    "reinhardt.png",
+    "roadhog.png",
+    "shion.png",
+    "sierra.png",
+    "sigma.png",
+    "sojourn.png",
+    "soldier-76.png",
+    "sombra.png",
+    "symmetra.png",
+    "torbjorn.png",
+    "tracer.png",
+    "vendetta.png",
+    "venture.png",
+    "widowmaker.png",
+    "winston.png",
+    "wrecking-ball.png",
+    "wuyang.png",
+    "zarya.png",
+    "zenyatta.png",
+    "special/placeholder_01.png",
+    "special/placeholder_02.png",
+    "special/placeholder_03.png",
+    "special/placeholder_04.png",
+    "special/placeholder_05.png",
+    "special/placeholder_06.png",
+    "special/placeholder_07.png",
+    "special/placeholder_08.png",
+    "special/placeholder_09.png",
+    "special/placeholder_10.png",
+    "special/placeholder_11.png",
+    "special/placeholder_12.png",
+    "special/placeholder_13.png",
+];
+
+/// File name without a directory or `.png`. `special/placeholder_01.png` is
+/// `placeholder_01`. A display name is left as written.
+pub fn pack_file_stem(raw: &str) -> &str {
+    let raw = raw.trim();
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    base.strip_suffix(".png")
+        .or_else(|| base.strip_suffix(".PNG"))
+        .unwrap_or(base)
+}
+
+/// The table row for a pack file name or stem (`wrecking-ball.png`,
+/// `wrecking-ball`). Display names are not pack keys.
+pub fn hero_for_pack_file(raw: &str) -> Option<&'static HeroName> {
+    let stem = pack_file_stem(raw);
+    HERO_NAMES
+        .iter()
+        .find(|hero| pack_file_stem(hero.file) == stem)
+}
+
+/// True when this read is an empty or unknown slot, not a hero.
+///
+/// Covers the 13 pack placeholders, a `?placeholder` / `?skull` / `?empty`
+/// class, and a stem that starts with `placeholder`, `skull`, or `empty`.
+pub fn is_placeholder_hero(raw: &str) -> bool {
+    let stem = pack_file_stem(raw);
+    if stem.is_empty() {
+        return false;
+    }
+    if HERO_PACK_PLACEHOLDERS
+        .iter()
+        .any(|path| pack_file_stem(path) == stem)
+    {
+        return true;
+    }
+    let bare = stem.trim_start_matches('?');
+    let lower = bare.to_ascii_lowercase();
+    ["placeholder", "skull", "empty"].iter().any(|prefix| {
+        lower == *prefix
+            || lower.starts_with(&format!("{prefix}_"))
+            || lower.starts_with(&format!("{prefix}-"))
+    })
+}
+
 /// Map a reader pack key, portrait stem, or alias to the canonical display name.
 ///
 /// Pack files are kebab-case (`wrecking-ball`, `soldier-76`, `dva`). Portrait
 /// stems use underscores. Dots and accents fold, so `D.Va`, `Lúcio`,
 /// `Torbjörn`, and `Soldier: 76` are the stored names. `None` when the key
-/// is not a known hero.
+/// is not a known hero. A placeholder icon is not a hero.
 pub fn hero_key_to_name(raw: &str) -> Option<&'static str> {
-    let key = fold_hero_key(raw);
+    if is_placeholder_hero(raw) {
+        return None;
+    }
+    let key = fold_hero_key(pack_file_stem(raw));
     if key.is_empty() {
         return None;
     }
-    if let Some(hero) = catalog_hero(&key) {
-        return Some(hero.display_name());
-    }
-    match key.as_str() {
-        "dmon" => Some("D.Mon"),
-        "shion" => Some("Shion"),
-        "jetpackcat" => Some("Jetpack Cat"),
-        _ => None,
-    }
+    HERO_NAMES
+        .iter()
+        .find(|hero| {
+            fold_hero_key(pack_file_stem(hero.file)) == key || fold_hero_key(hero.display) == key
+        })
+        .map(|hero| hero.display)
 }
 
 /// Canonicalize a hero identifier to its display name.
@@ -282,26 +703,22 @@ pub fn resolve_hero_query(raw: Option<&str>) -> Result<Option<&'static str>, ()>
 /// Current-season role for a hero name.
 ///
 /// Matching folds case, spaces, punctuation, and common Latin accents, so
-/// `Lucio` / `Lúcio`, `Torbjorn` / `Torbjörn`, and `soldier-76` all hit.
-/// Names that match [`crate::stats::Hero`] use that variant's role. Three
-/// names are on [`HEROES`] and not on that enum yet: D.Mon (Tank), Shion
-/// (Damage), Jetpack Cat (Support). An empty or blank name is `None`.
+/// `Lucio` / `Lúcio`, `Torbjorn` / `Torbjörn`, and `soldier-76` all hit the
+/// same [`HERO_NAMES`] row. An empty, blank, or placeholder name is `None`.
 pub fn role_for_hero_name(name: &str) -> Option<HeroRole> {
-    let key = fold_hero_key(name);
-    if key.is_empty() {
+    let key = fold_hero_key(pack_file_stem(name));
+    if key.is_empty() || is_placeholder_hero(name) {
         return None;
     }
-    if let Some(hero) = catalog_hero(&key) {
-        return Some(hero.role());
-    }
-    match key.as_str() {
-        "dmon" => Some(HeroRole::Tank),
-        "shion" => Some(HeroRole::Damage),
-        "jetpackcat" => Some(HeroRole::Support),
-        _ => None,
-    }
+    HERO_NAMES
+        .iter()
+        .find(|hero| {
+            fold_hero_key(pack_file_stem(hero.file)) == key || fold_hero_key(hero.display) == key
+        })
+        .map(|hero| hero.role)
 }
 
+#[cfg(test)]
 fn catalog_hero(key: &str) -> Option<crate::stats::Hero> {
     crate::stats::Hero::ALL
         .iter()
@@ -414,6 +831,55 @@ mod tests {
         assert_eq!(canonical_hero("wrecking-ball"), "Wrecking Ball");
         assert_eq!(role_for_hero_name("Wrecking Ball"), Some(HeroRole::Tank));
         assert_eq!(role_for_hero_name("wrecking-ball"), Some(HeroRole::Tank));
+    }
+
+    /// The pack file list and the name table are one roster. A file is either
+    /// a named hero or one of the 13 placeholder icons.
+    #[test]
+    fn every_hero_pack_file_is_a_named_hero_or_a_known_placeholder() {
+        assert_eq!(HERO_PACK_PLACEHOLDERS.len(), 13);
+        let mut named = 0usize;
+        let mut placeholders = 0usize;
+        for path in HERO_PACK_FILES {
+            let in_table = HERO_NAMES.iter().any(|hero| hero.file == *path);
+            let placeholder = HERO_PACK_PLACEHOLDERS.contains(path);
+            assert!(
+                in_table || placeholder,
+                "{path} is not in the name table and is not a known placeholder"
+            );
+            assert!(
+                !(in_table && placeholder),
+                "{path} is both a hero and a placeholder"
+            );
+            if in_table {
+                named += 1;
+                assert!(!is_placeholder_hero(path), "{path}");
+                let row = hero_for_pack_file(path).unwrap_or_else(|| panic!("{path}"));
+                assert_eq!(row.file, *path);
+                assert_eq!(hero_key_to_name(pack_file_stem(path)), Some(row.display));
+                assert_eq!(role_for_hero_name(path), Some(row.role));
+            } else {
+                placeholders += 1;
+                assert!(is_placeholder_hero(path), "{path}");
+                assert!(hero_key_to_name(path).is_none(), "{path}");
+                assert!(hero_for_pack_file(path).is_none(), "{path}");
+            }
+        }
+        assert_eq!(named, HERO_NAMES.len());
+        assert_eq!(placeholders, 13);
+        for hero in HERO_NAMES {
+            assert!(
+                HERO_PACK_FILES.contains(&hero.file),
+                "{} is missing from the pack file list",
+                hero.file
+            );
+        }
+        for path in HERO_PACK_PLACEHOLDERS {
+            assert!(
+                HERO_PACK_FILES.contains(path),
+                "{path} is missing from the pack file list"
+            );
+        }
     }
 
     /// D.Mon (added 2026-08-18, WL-5): the career panel prints "D.MON", the

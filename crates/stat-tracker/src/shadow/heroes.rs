@@ -611,6 +611,33 @@ fn add_template(by: &mut HashMap<String, Vec<KernelPair>>, class: String, path: 
     }
 }
 
+/// Top-level placeholder, skull, and empty icons are not hero classes.
+fn template_class(stem: &str) -> String {
+    match special_row_class(stem) {
+        Some(RowClass::Skull) => "?skull".to_string(),
+        Some(RowClass::Empty) => "?empty".to_string(),
+        Some(_) => "?placeholder".to_string(),
+        None => stem.to_string(),
+    }
+}
+
+/// Placeholder, skull, and empty reads name no hero.
+fn special_row_class(name: &str) -> Option<RowClass> {
+    if !scuffed_types::is_placeholder_hero(name) {
+        return None;
+    }
+    let bare = scuffed_types::pack_file_stem(name)
+        .trim_start_matches('?')
+        .to_ascii_lowercase();
+    if bare == "skull" || bare.starts_with("skull_") || bare.starts_with("skull-") {
+        Some(RowClass::Skull)
+    } else if bare == "empty" || bare.starts_with("empty_") || bare.starts_with("empty-") {
+        Some(RowClass::Empty)
+    } else {
+        Some(RowClass::Placeholder)
+    }
+}
+
 /// Loaded template set: one entry per class, each with one or more kernels.
 #[derive(Debug, Clone)]
 pub struct HeroTemplates {
@@ -641,10 +668,10 @@ impl HeroTemplates {
         };
         for p in pngs(dir) {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                add_template(&mut by, stem.to_string(), &p);
+                add_template(&mut by, template_class(stem), &p);
             }
         }
-        let heroes = by.len();
+        let heroes = by.keys().filter(|name| !name.starts_with('?')).count();
         if heroes == 0 {
             return None;
         }
@@ -722,12 +749,7 @@ impl HeroTemplates {
         let class = if !ok {
             RowClass::Unknown
         } else {
-            match best.as_str() {
-                "?placeholder" => RowClass::Placeholder,
-                "?skull" => RowClass::Skull,
-                "?empty" => RowClass::Empty,
-                _ => RowClass::Hero,
-            }
+            special_row_class(&best).unwrap_or(RowClass::Hero)
         };
         HeroRead {
             row,
@@ -1097,6 +1119,21 @@ mod tests {
             (RowClass::Placeholder, None, "?placeholder")
         );
         assert!(!r.suspect);
+    }
+
+    #[test]
+    fn a_top_level_placeholder_file_is_not_a_hero() {
+        let dir = template_dir(&[1]);
+        portrait(500, 74, Some(YELLOW))
+            .save(dir.path().join("placeholder_07.png"))
+            .unwrap();
+        let tpl = load(&dir);
+        assert_eq!(tpl.hero_count(), 1);
+        let q = prep_rgba(&portrait(500, 74, Some(YELLOW)), false).unwrap();
+        let r = tpl.read_patch(0, &q);
+        assert_eq!(r.class, RowClass::Placeholder);
+        assert!(r.hero.is_none());
+        assert_ne!(r.best, "placeholder_07");
     }
 
     #[test]

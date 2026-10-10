@@ -476,9 +476,11 @@ pub fn assemble(
         }
         let name = format!("r{}.hero", h.row);
         if let Some(f) = board.fields.iter_mut().find(|f| f.name == name) {
-            match (h.class, &h.hero) {
-                (RowClass::Hero, Some(hero)) if !h.suspect => {
-                    f.value = Some(Value::Text(hero.clone()));
+            match (h.class, h.hero.as_deref()) {
+                (RowClass::Hero, Some(hero))
+                    if !h.suspect && !scuffed_types::is_placeholder_hero(hero) =>
+                {
+                    f.value = Some(Value::Text(hero.to_string()));
                     f.confidence = h.score;
                     f.suspect = false;
                 }
@@ -487,6 +489,9 @@ pub fn assemble(
                     f.confidence = h.score;
                     f.suspect = false;
                 }
+                // A placeholder or skull is not a hero read. Leave the field
+                // unread so the career panel or portrait path is used.
+                (RowClass::Placeholder | RowClass::Skull, _) if !h.suspect => {}
                 _ => f.confidence = h.score,
             }
         }
@@ -613,6 +618,26 @@ mod tests {
             assert!(s.contains(&f.to_string()));
         }
         assert!(!s.contains(&"r0.e".to_string()));
+    }
+
+    #[test]
+    fn a_placeholder_row_is_not_saved_as_a_hero() {
+        let rows = [
+            hero(0, RowClass::Placeholder, Some("placeholder_07"), false),
+            HeroRead {
+                row: 1,
+                class: RowClass::Hero,
+                hero: Some("placeholder_13".into()),
+                best: "placeholder_13".into(),
+                score: 0.9,
+                lead: 0.4,
+                second: "ana".into(),
+                suspect: false,
+            },
+        ];
+        let b = assemble(5, Some(&digits_board(10)), Some(&rows));
+        assert!(b.get("r0.hero").unwrap().value.is_none());
+        assert!(b.get("r1.hero").unwrap().value.is_none());
     }
 
     #[test]

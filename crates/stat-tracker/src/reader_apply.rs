@@ -146,6 +146,12 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     };
     let hero_name = format!("r{index}.hero");
     let hero = match take_text(board, &hero_name, &mut suspect, "hero") {
+        // A placeholder icon is an empty or unknown slot. It is not a hero
+        // read, so the career panel or portrait hero already on the snapshot
+        // stays.
+        Some(value) if scuffed_types::is_placeholder_hero(&value) => {
+            canonical_board_hero(&ocr.hero)
+        }
         Some(value) => {
             used_cv = true;
             canonical_board_hero(&value)
@@ -839,6 +845,42 @@ mod tests {
         assert_eq!(quiet.elims, 21);
         assert_eq!(quiet.recognizer, RECOGNIZER_ID);
         assert!(quiet.suspect_fields.is_empty());
+    }
+
+    fn set_hero(board: &mut crate::shadow::BoardRead, value: &str) {
+        let hero = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "r0.hero")
+            .unwrap();
+        hero.value = Some(Value::Text(value.into()));
+        hero.confidence = 0.95;
+        hero.suspect = false;
+    }
+
+    #[test]
+    fn a_placeholder_match_falls_back_to_career_or_portrait() {
+        let mut board = confident_board(5, 0);
+        set_hero(&mut board, "placeholder_07");
+
+        let mut career = ocr();
+        career.hero = "Wrecking Ball".into();
+        let saved = merge_saved(&career, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert_ne!(saved.hero, "placeholder_07");
+        assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
+        assert_eq!(saved.elims, 21);
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+
+        let mut portrait = ocr();
+        portrait.hero = "wrecking_ball".into();
+        let saved = merge_saved(&portrait, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
+        assert!(!saved.suspect_fields.iter().any(|name| name == "hero"));
+
+        set_hero(&mut board, "special/placeholder_13.png");
+        let saved = merge_saved(&career, identified(0, 5), Some(&board));
+        assert_eq!(saved.hero, "Wrecking Ball");
     }
 
     #[test]

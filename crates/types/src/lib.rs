@@ -11,8 +11,9 @@ pub mod strategy;
 pub use api::*;
 pub use auth::*;
 pub use heroes::{
-    HEROES, canonical_hero, find_hero, hero_key_to_name, match_hero_in_text, resolve_hero_query,
-    role_for_hero_name,
+    HERO_NAMES, HERO_PACK_FILES, HERO_PACK_PLACEHOLDERS, HEROES, HeroName, canonical_hero,
+    find_hero, hero_for_pack_file, hero_key_to_name, is_placeholder_hero, match_hero_in_text,
+    pack_file_stem, resolve_hero_query, role_for_hero_name,
 };
 pub use nostr::*;
 pub use org::*;
