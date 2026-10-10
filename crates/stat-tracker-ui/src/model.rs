@@ -72,6 +72,23 @@ impl Outcome {
     }
 }
 
+/// Games-tab label while the session is still the open game.
+pub const IN_PROGRESS_LABEL: &str = "In progress";
+
+/// Small note under live stats. Those numbers update until the game closes.
+pub const NOT_FINAL_NOTE: &str = "not final";
+
+/// Compact/expanded Games card uses the in-progress layout only for the
+/// open session. A closed game, including one whose result is still unknown,
+/// keeps the normal card.
+pub fn game_card_in_progress(
+    session_id: &str,
+    outcome: Outcome,
+    live_session: Option<&str>,
+) -> bool {
+    !session_id.is_empty() && outcome == Outcome::Unknown && live_session == Some(session_id)
+}
+
 /// Toggleable role chips. No chip on = every role (same as unset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoleFilter {
@@ -467,6 +484,23 @@ mod tests {
         let cest = FixedOffset::east_opt(2 * 3600).unwrap();
         assert_eq!(hm_in(at, &cest), "00:15");
         assert_eq!(hm_in(at, &Utc), "22:15");
+    }
+
+    #[test]
+    fn in_progress_card_is_only_the_open_unknown_session() {
+        use super::{IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, game_card_in_progress};
+
+        assert!(game_card_in_progress("s1", Outcome::Unknown, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Win, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, Some("s2")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, None));
+        assert!(!game_card_in_progress("", Outcome::Unknown, Some("")));
+        assert_eq!(IN_PROGRESS_LABEL, "In progress");
+        assert_eq!(NOT_FINAL_NOTE, "not final");
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2014}'));
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2013}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2014}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2013}'));
     }
 
     #[test]

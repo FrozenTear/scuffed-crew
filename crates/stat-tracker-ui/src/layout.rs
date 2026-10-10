@@ -45,6 +45,58 @@ pub fn settings_columns(available: f32) -> usize {
     columns_fit(available, MIN_SETTINGS_CARD, GRID_GAP).clamp(1, 2)
 }
 
+/// Preferred window size on a normal landscape display.
+pub const WINDOW_PREF_W: f32 = 1280.0;
+pub const WINDOW_PREF_H: f32 = 860.0;
+/// Smallest window the layout still scrolls in.
+pub const WINDOW_MIN_W: f32 = 720.0;
+pub const WINDOW_MIN_H: f32 = 480.0;
+
+/// One settings column stays readable. Two columns stop at two cards plus the gap.
+pub fn settings_pane_max(available: f32) -> f32 {
+    if !available.is_finite() || available <= 0.0 {
+        return 0.0;
+    }
+    let cap = if settings_columns(available) <= 1 {
+        720.0
+    } else {
+        MIN_SETTINGS_CARD * 2.0 + GRID_GAP
+    };
+    available.min(cap)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowFit {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Fit the GUI window to the display.
+///
+/// A tall portrait screen (1080x1920) keeps a width that fits and uses the
+/// available height. A landscape screen keeps the preferred 1280x860 when
+/// that fits.
+pub fn fit_window(display_w: f32, display_h: f32) -> WindowFit {
+    const MARGIN: f32 = 48.0;
+    if !(display_w.is_finite() && display_h.is_finite()) || display_w < 1.0 || display_h < 1.0 {
+        return WindowFit {
+            width: WINDOW_PREF_W,
+            height: WINDOW_PREF_H,
+        };
+    }
+    let max_w = (display_w - MARGIN).max(display_w.min(WINDOW_MIN_W));
+    let max_h = (display_h - MARGIN).max(display_h.min(WINDOW_MIN_H));
+    let portrait = display_h > display_w;
+    WindowFit {
+        width: WINDOW_PREF_W.min(max_w),
+        height: if portrait {
+            max_h
+        } else {
+            WINDOW_PREF_H.min(max_h)
+        },
+    }
+}
+
 pub fn heroes_columns(available: f32) -> usize {
     columns_fit(available, MIN_CARD, GRID_GAP).clamp(4, 6)
 }
@@ -142,6 +194,39 @@ mod tests {
         assert_eq!(settings_columns(972.0), 2);
         assert_eq!(settings_columns(1048.0), 2);
         assert_eq!(settings_columns(10_000.0), 2);
+    }
+
+    #[test]
+    fn portrait_1080x1920_uses_the_available_height() {
+        let fit = fit_window(1080.0, 1920.0);
+        assert!(fit.width <= 1080.0, "width {}", fit.width);
+        assert!(fit.width >= 720.0, "width {}", fit.width);
+        assert!(fit.height > WINDOW_PREF_H, "height {}", fit.height);
+        assert!(fit.height <= 1920.0, "height {}", fit.height);
+        assert!(fit.height > 1600.0, "height {}", fit.height);
+        let content = content_width_for_window(fit.width);
+        assert_eq!(settings_columns(content), 1, "content {content}");
+        let pane = settings_pane_max(content);
+        assert!(pane <= 720.0, "pane {pane}");
+        assert!(pane <= content);
+    }
+
+    #[test]
+    fn landscape_keeps_the_preferred_window_and_two_settings_columns() {
+        let fit = fit_window(1920.0, 1080.0);
+        assert!((fit.width - WINDOW_PREF_W).abs() < f32::EPSILON);
+        assert!((fit.height - WINDOW_PREF_H).abs() < f32::EPSILON);
+        let content = content_width_for_window(fit.width);
+        assert_eq!(settings_columns(content), 2);
+        let pane = settings_pane_max(content);
+        assert!((pane - (MIN_SETTINGS_CARD * 2.0 + GRID_GAP)).abs() < 1.0);
+    }
+
+    #[test]
+    fn missing_display_uses_the_preferred_window() {
+        let fit = fit_window(0.0, 0.0);
+        assert_eq!(fit.width, WINDOW_PREF_W);
+        assert_eq!(fit.height, WINDOW_PREF_H);
     }
 
     #[test]

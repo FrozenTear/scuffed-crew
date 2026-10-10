@@ -1,8 +1,9 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
 use iced::widget::{column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
@@ -262,11 +263,44 @@ pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
 }
 
 pub fn window_settings() -> window::Settings {
+    let fit = match current_display_size() {
+        Some((width, height)) => crate::layout::fit_window(width, height),
+        None => crate::layout::fit_window(0.0, 0.0),
+    };
     window::Settings {
-        size: iced::Size::new(1280.0, 860.0),
-        min_size: Some(iced::Size::new(960.0, 640.0)),
+        size: iced::Size::new(fit.width, fit.height),
+        min_size: Some(iced::Size::new(
+            crate::layout::WINDOW_MIN_W.min(fit.width),
+            crate::layout::WINDOW_MIN_H.min(fit.height),
+        )),
         ..window::Settings::default()
     }
+}
+
+/// Primary monitor size in px, when GTK has a display.
+fn current_display_size() -> Option<(f32, f32)> {
+    let display = gtk::gdk::Display::default()?;
+    let monitor = display.primary_monitor().or_else(|| display.monitor(0))?;
+    let rect = monitor.geometry();
+    let width = rect.width();
+    let height = rect.height();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some((width as f32, height as f32))
+}
+
+fn live_game_session_now(
+    data_dir: &Path,
+    window_secs: u64,
+    fixture: bool,
+    now: DateTime<Utc>,
+    process_running: bool,
+) -> Option<String> {
+    if fixture {
+        return None;
+    }
+    overlay::in_progress_session_id(data_dir, window_secs, now, process_running)
 }
 
 pub struct TrackerApp {
@@ -332,6 +366,8 @@ pub struct TrackerApp {
     overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
     pub game_running: bool,
+    /// Open session shown as the Games in-progress card. `None` once it closes.
+    pub live_game_session: Option<String>,
     pub overlay_hotkey: OverlayHotkey,
     companion_toggle_mtime: Option<SystemTime>,
     pub setup: crate::setup_guide::GuideUi,
@@ -420,11 +456,21 @@ impl TrackerApp {
         };
         let live = cli.fixture.is_none();
         let (window_id, open) = window::open(window_settings());
-        let session_key = overlay::live_session_key(
+        let process_running =
+            cli.fixture.is_some() || overlay::process_is_running(&saved_config.game_process_names);
+        let session_key = overlay::resolve_live_session_key(
             &cli.data_dir,
-            &saved_config.game_process_names,
             cli.fixture.is_some(),
             saved_config.session_window_secs,
+            now,
+            process_running,
+        );
+        let live_game_session = live_game_session_now(
+            &cli.data_dir,
+            saved_config.session_window_secs,
+            cli.fixture.is_some(),
+            now,
+            process_running,
         );
         let overlay_hold = overlay::reconcile_hold(
             OverlayHold::from_persisted(seasons::load_overlay_hidden_key(&cli.data_dir)),
@@ -506,6 +552,7 @@ impl TrackerApp {
             overlay_child: None,
             overlay_spawn_blocked: false,
             game_running,
+            live_game_session,
             overlay_hotkey,
             companion_toggle_mtime: None,
             setup,
@@ -579,11 +626,22 @@ impl TrackerApp {
     }
 
     fn apply_overlay_policy(&mut self) {
-        let key = overlay::live_session_key(
+        let now = Utc::now();
+        let process_running = self.fixture.is_some()
+            || overlay::process_is_running(&self.saved_config.game_process_names);
+        let key = overlay::resolve_live_session_key(
             &self.data_dir,
-            &self.saved_config.game_process_names,
             self.fixture.is_some(),
             self.saved_config.session_window_secs,
+            now,
+            process_running,
+        );
+        self.live_game_session = live_game_session_now(
+            &self.data_dir,
+            self.saved_config.session_window_secs,
+            self.fixture.is_some(),
+            now,
+            process_running,
         );
         let next = overlay::reconcile_hold(self.overlay_hold.clone(), key.as_deref());
         if next != self.overlay_hold {
@@ -1690,11 +1748,20 @@ impl TrackerApp {
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
+        let settings_screen = self.screen == Screen::Settings;
 
         // Sidebar is a fixed width. The remaining pane flexes with the window
-        // (rev 3). Header chips live in that pane — no left-pinned 1400 cap
-        // and no empty right band. Column counts come from `responsive`.
-        let mut content = column![header].spacing(16).width(Fill);
+        // (rev 3). Header chips live in that pane. Column counts come from
+        // `responsive`. Settings keeps the header and scrolls the form in the
+        // leftover height. Other screens scroll the whole pane.
+        let mut content = column![header]
+            .spacing(16)
+            .width(Fill)
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            });
         if let Some(t) = &self.toast {
             content = content.push(widgets::toast_bar(t));
         }
@@ -1708,15 +1775,35 @@ impl TrackerApp {
                 Screen::Settings => crate::settings::view(self, size.width),
             })
             .width(Fill)
-            .height(Length::Shrink),
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            }),
         );
 
-        let main = container(content).width(Fill).padding(Padding {
-            top: PAGE_PAD_Y,
-            bottom: PAGE_PAD_Y,
-            left: PAGE_PAD_X,
-            right: PAGE_PAD_X,
-        });
+        let main = container(content)
+            .width(Fill)
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            })
+            .padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: PAGE_PAD_X,
+            });
+
+        let page_body: Element<'_, Message> = if settings_screen {
+            container(main).width(Fill).height(Fill).into()
+        } else {
+            iced::widget::scrollable(main)
+                .width(Fill)
+                .height(Fill)
+                .into()
+        };
 
         let chrome = row![
             container(nav)
@@ -1728,7 +1815,7 @@ impl TrackerApp {
                     left: PAGE_PAD_X,
                     right: 8.0,
                 }),
-            iced::widget::scrollable(main).width(Fill).height(Fill),
+            page_body,
         ]
         .spacing(0)
         .width(Fill)

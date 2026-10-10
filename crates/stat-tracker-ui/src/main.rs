@@ -12,6 +12,10 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.version {
+        println!("{}", stat_tracker_ui::update::gui_version_line());
+        return Ok(());
+    }
     if cli.help {
         print!("{}", Cli::help_text());
         return Ok(());

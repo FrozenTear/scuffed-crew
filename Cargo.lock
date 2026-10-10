@@ -10955,6 +10955,7 @@ dependencies = [
  "evdev",
  "image",
  "leptess",
+ "libc",
  "libwayshot",
  "rayon",
  "reqwest 0.12.28",
