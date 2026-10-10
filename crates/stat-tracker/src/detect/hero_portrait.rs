@@ -1223,11 +1223,19 @@ mod team_size_tests {
             super::classify_scoreboard_preflight(&death, 6, false),
             super::ScoreboardPreflight::NotAScoreboard
         );
-        // Same pitches on a real table stay a team-size reject.
+    }
+
+    #[test]
+    fn death_screen_pitch_on_a_table_is_team_size_unsure() {
+        let death = scan(2, Some(0.0586), Some(0.0963));
         assert_eq!(
             super::classify_scoreboard_preflight(&death, 6, true),
             super::ScoreboardPreflight::TeamSizeUncertain
         );
+    }
+
+    #[test]
+    fn settled_pitch_stays_a_board_when_the_table_detector_misses() {
         // A settled pitch is a board even when the table detector misses
         // (empty, grey, and low-contrast boards). The table check does not
         // block a frame main would accept.

@@ -828,17 +828,59 @@ const BANNER_MODE_WORDS: &[&str] = &[
 /// Map text from a Tab banner read.
 ///
 /// The banner is `icon MODE | MAP TIME`. The map is the text after the first
-/// `|`. Icon junk and the mode word are on the left and are not matched.
-/// This split happens before glyph folding, which would turn `|` into `i`
-/// and glue it onto the map (`|ILIOS` becomes a word the matcher misses).
-/// With no bar, a mode word in the first few tokens is skipped the same way,
-/// and so is the junk in front of it.
+/// real `|`. A leading `|` is icon junk (`| CONTROL | ILIOS`), and the mode
+/// word after that split is dropped too. This split happens before glyph
+/// folding, which would turn `|` into `i` and glue it onto the map
+/// (`|ILIOS` becomes a word the matcher misses). A trailing clock
+/// (`05:12`, or glued on as `ILIOS05:12`) is not part of the name. With no
+/// bar, a mode word in the first few tokens is skipped the same way, and so
+/// is the junk in front of it.
 fn tab_banner_map_text(text: &str) -> &str {
-    let text = text.trim();
-    if let Some((_, right)) = text.split_once('|') {
-        return right.trim();
+    let text = text.trim().trim_start_matches('|').trim();
+    let map_side = if let Some((_, right)) = text.split_once('|') {
+        strip_leading_mode(right.trim().trim_start_matches('|').trim())
+    } else {
+        strip_icon_and_mode(text)
+    };
+    strip_trailing_clock(map_side)
+}
+
+/// Drop a mode word that survived the bar split, and a bar glued to it.
+fn strip_leading_mode(text: &str) -> &str {
+    let Some(tok) = text.split_whitespace().next() else {
+        return text;
+    };
+    if !mode_token(tok) {
+        return text;
     }
-    strip_icon_and_mode(text)
+    let Some(rel) = text.find(tok) else {
+        return text;
+    };
+    let after = text[rel + tok.len()..]
+        .trim_start()
+        .trim_start_matches('|')
+        .trim();
+    if after.is_empty() { text } else { after }
+}
+
+/// `05:12` at the end of the map side, with or without a space before it.
+fn strip_trailing_clock(text: &str) -> &str {
+    let text = text.trim_end();
+    let b = text.as_bytes();
+    let n = b.len();
+    if n < 4 || !b[n - 1].is_ascii_digit() || !b[n - 2].is_ascii_digit() || b[n - 3] != b':' {
+        return text;
+    }
+    let mut start = n - 3;
+    let mut hour_digits = 0u8;
+    while start > 0 && b[start - 1].is_ascii_digit() && hour_digits < 2 {
+        start -= 1;
+        hour_digits += 1;
+    }
+    if hour_digits == 0 {
+        return text;
+    }
+    text[..start].trim_end()
 }
 
 fn mode_token(tok: &str) -> bool {
@@ -2143,6 +2185,30 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn lijiang_alias_spellings_are_not_a_near_tie() {
+        // "luang tower" clears the long-name floor on both Lijiang keys, and
+        // the two scores sit inside the margin. They are one canonical map,
+        // so the read is not held as a tie between them.
+        let text = normalize_ocr_glyphs("luang tower");
+        let liang = normalized_levenshtein(&text, &normalize_ocr_glyphs("liang tower"));
+        let lulang = normalized_levenshtein(&text, &normalize_ocr_glyphs("lulang tower"));
+        assert!(liang >= map_fuzzy_threshold(10), "{liang}");
+        assert!(lulang >= map_fuzzy_threshold(11), "{lulang}");
+        assert!(
+            (liang - lulang).abs() < MAP_FUZZY_MARGIN,
+            "liang {liang} lulang {lulang}"
+        );
+        assert_eq!(
+            match_map_in_text("Luang tower").as_deref(),
+            Some("Lijiang Tower")
+        );
+        assert_eq!(
+            match_map_in_text("Liang tower").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
     fn tab_banner_matches_the_map_side_and_ignores_the_timer() {
         // The crop used to include the start of the match timer, so the read
         // was `CONTROL | ILIOS TIM` and the folded bar glued onto the name.
@@ -2165,6 +2231,26 @@ mod hero_map_name_tests {
         );
         assert_eq!(match_map_in_text("CONTROL | TIM"), None);
         assert_eq!(match_map_in_text("TIM"), None);
+    }
+
+    #[test]
+    fn ilios_clock_reads_match_ilios() {
+        for raw in [
+            "ILIOS 05:12",
+            "CONTROL | ILIOS 05:12",
+            "CONTROL | ILIOS05:12",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn leading_junk_bar_and_mode_word_leave_the_map_text() {
+        assert_eq!(tab_banner_map_text("| CONTROL | ILIOS"), "ILIOS");
+        assert_eq!(
+            match_map_in_text("| CONTROL | ILIOS").as_deref(),
+            Some("Ilios")
+        );
     }
 
     #[test]
