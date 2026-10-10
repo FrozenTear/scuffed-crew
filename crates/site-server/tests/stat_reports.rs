@@ -3,10 +3,13 @@
 //! Fixtures are synthetic 1x1 PNGs and short text. Nothing here is a game capture.
 
 use std::io::{Cursor, Read, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
 use chrono::{Duration, Utc};
 use flate2::Compression;
@@ -558,6 +561,15 @@ fn bundle_with_duplicate_nested_key() -> Vec<u8> {
     ])
 }
 
+/// A fresh client address per request, so the per-IP governor on
+/// POST /api/stat-reports never throttles tests that are not about it.
+fn next_peer() -> [u8; 4] {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let [_, a, b, c] = n.to_be_bytes();
+    [10, a, b, c]
+}
+
 async fn send(
     app: &axum::Router,
     method: Method,
@@ -565,7 +577,21 @@ async fn send(
     token: Option<&str>,
     body: Option<Vec<u8>>,
 ) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    send_from(app, next_peer(), method, uri, token, body).await
+}
+
+async fn send_from(
+    app: &axum::Router,
+    peer: [u8; 4],
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<Vec<u8>>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(ConnectInfo(SocketAddr::from((peer, 44000))));
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -775,6 +801,64 @@ async fn auth_required() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// POST /api/stat-reports has its own per-IP governor (burst 8, then 1 every
+/// 10s). Other client IPs and the read routes are not throttled by it.
+#[tokio::test]
+async fn upload_is_rate_limited_per_client_ip() {
+    let h = harness().await;
+    let peer = [203, 0, 113, 40];
+    for i in 0..8 {
+        let (status, _) = send_from(
+            &h.app,
+            peer,
+            Method::POST,
+            "/api/stat-reports",
+            Some(MEMBER_TOKEN),
+            Some(b"not a zip".to_vec()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "request {i}");
+    }
+    let (status, body) = send_from(
+        &h.app,
+        peer,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"], "rate_limited");
+    assert!(body["retry_after"].as_u64().unwrap() >= 1, "{body}");
+    assert_eq!(zip_count(&h.reports_dir), 0);
+
+    let (status, _) = send_from(
+        &h.app,
+        peer,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the list route is not throttled");
+
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "another client IP has its own bucket"
+    );
 }
 
 #[tokio::test]
