@@ -15,6 +15,27 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.4
+
+This alpha adds a timing line to the tracker log, so a frame-rate drop while the tracker runs can be traced to the screen grab or to the reading.
+
+### Highlights
+
+- Once a minute while the game is open, `daemon.log` gets one `capture timing` line. It shows how long screen grabs, poll checks, and scoreboard reads took.
+- Nothing else changes. Captures, reads, and uploads work as in alpha.3.
+
+The line lists the capture backend (`x11`, `wayshot`, or `portal`) and, for each stage, the count, the typical time, the longest time, and the total for that minute (#224). Nothing is logged while nothing is captured, for example with the game closed. If you see a frame-rate drop, send that line with your report.
+
+Stable installs are not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.4/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.4 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.3
 
 This alpha keeps a bad scoreboard read from wiping a stat you already had. A faded map name gets one brighter try, and a match that is still going shows on the Games tab with a note that the numbers are not final.
