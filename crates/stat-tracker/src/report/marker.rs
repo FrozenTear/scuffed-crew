@@ -1,64 +1,82 @@
 //! Crash marker (report-bundle spec section 7).
 //!
-//! At startup the daemon writes `{data_dir}/run.marker` with its pid and
-//! start time. A clean shutdown (SIGTERM, Ctrl+C, a normal return from
+//! At startup the daemon writes `{data_dir}/run.marker` with its pid, its
+//! start time, and `last_seen`, the last time it was known to be alive. A
+//! [`MarkerHeartbeat`] rewrites `last_seen` once a minute by writing a temp
+//! file and renaming it over the marker, so a crash mid-write leaves the
+//! previous copy. A clean shutdown (SIGTERM, Ctrl+C, a normal return from
 //! `main`, or the GUI's update restart, which stops the daemon with SIGTERM)
 //! drops [`RunMarkerGuard`], which removes the file. A crash (SIGKILL, abort,
-//! a panic that unwinds `main`, power loss) leaves it behind.
+//! a panic that unwinds `main`, power loss) leaves it.
 //!
 //! The next start finds that stale marker. When its pid is not running, or is
 //! running but is not a `scuffed-stat-tracker` process (pids are reused), the
-//! marker is moved to `{data_dir}/last_crash.marker` (overwritten) with one
-//! WARN line. A marker whose pid is a live tracker is left alone: another
-//! daemon owns it.
+//! marker is moved to `{data_dir}/last_crash.marker` (overwritten), keeping
+//! the old `last_seen`, with one WARN line. A marker whose pid is a live
+//! tracker is left alone: another daemon owns it.
 //!
-//! The marker holds only a pid and a timestamp. It is never uploaded. The app
-//! uses it for `system.last_exit` and to set the crash report's log window.
+//! The marker holds only the pid, the start time, and `last_seen`. It is
+//! never uploaded. The app uses it for `system.last_exit`, and `last_seen`
+//! sets the crash report's log window.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
 pub const RUN_MARKER: &str = "run.marker";
 pub const LAST_CRASH_MARKER: &str = "last_crash.marker";
 
+/// How often the daemon rewrites `last_seen`.
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunMarker {
     pub pid: u32,
     pub started_at: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+fn rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 impl RunMarker {
     pub fn format(&self) -> String {
         format!(
-            "pid={}\nstarted_at={}\n",
+            "pid={}\nstarted_at={}\nlast_seen={}\n",
             self.pid,
-            self.started_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+            rfc3339(self.started_at),
+            rfc3339(self.last_seen)
         )
     }
 
-    /// `None` unless both lines are present and valid.
+    /// `None` unless all three lines are present and valid.
     pub fn parse(text: &str) -> Option<Self> {
         let mut pid = None;
         let mut started_at = None;
+        let mut last_seen = None;
+        let time = |v: &str| {
+            DateTime::parse_from_rfc3339(v.trim())
+                .ok()
+                .map(|t| t.with_timezone(&Utc))
+        };
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else {
                 continue;
             };
             match k.trim() {
                 "pid" => pid = v.trim().parse::<u32>().ok(),
-                "started_at" => {
-                    started_at = DateTime::parse_from_rfc3339(v.trim())
-                        .ok()
-                        .map(|t| t.with_timezone(&Utc))
-                }
+                "started_at" => started_at = time(v),
+                "last_seen" => last_seen = time(v),
                 _ => {}
             }
         }
         Some(Self {
             pid: pid?,
             started_at: started_at?,
+            last_seen: last_seen?,
         })
     }
 }
@@ -109,7 +127,7 @@ pub fn recover_stale_run_marker(
     match marker {
         Some(m) => tracing::warn!(
             pid = m.pid,
-            started_at = %m.started_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            last_seen = %rfc3339(m.last_seen),
             "the last tracker run did not exit cleanly; its marker is now last_crash.marker"
         ),
         None => tracing::warn!(
@@ -119,34 +137,91 @@ pub fn recover_stale_run_marker(
     Ok(StaleMarker::Moved { marker })
 }
 
+/// State shared by the guard and the heartbeat. The lock orders a final
+/// heartbeat write against the guard's removal, so a write can never bring
+/// the file back after a clean shutdown removed it.
+#[derive(Debug)]
+struct Shared {
+    path: PathBuf,
+    marker: RunMarker,
+    stopped: bool,
+}
+
+/// Write `marker` to `path` through a temp file and a rename.
+fn write_atomic(path: &Path, marker: &RunMarker) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, marker.format())?;
+    crate::fs_mode::tighten_private_file(&tmp);
+    std::fs::rename(&tmp, path)
+}
+
 /// Removes `run.marker` on drop when the file still names this process and
 /// the thread is not unwinding from a panic.
 #[derive(Debug)]
 pub struct RunMarkerGuard {
-    path: PathBuf,
-    pid: u32,
+    shared: Arc<Mutex<Shared>>,
+}
+
+/// Rewrites `last_seen` in this run's marker. Cheap to clone.
+#[derive(Debug, Clone)]
+pub struct MarkerHeartbeat {
+    shared: Arc<Mutex<Shared>>,
+}
+
+impl MarkerHeartbeat {
+    /// Set `last_seen` to `now`. Does nothing after the guard removed the
+    /// marker, or when the file no longer names this process.
+    pub fn touch(&self, now: DateTime<Utc>) -> io::Result<()> {
+        let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if s.stopped || !file_names(&s.path, s.marker.pid) {
+            return Ok(());
+        }
+        let next = RunMarker {
+            last_seen: now,
+            ..s.marker
+        };
+        write_atomic(&s.path, &next)?;
+        s.marker = next;
+        Ok(())
+    }
+
+    /// Touch every `interval` until the guard is dropped. The daemon runs
+    /// this with [`HEARTBEAT_INTERVAL`].
+    pub async fn run(self, interval: std::time::Duration) {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // the first tick is immediate; the file is fresh
+        loop {
+            tick.tick().await;
+            if self.shared.lock().map(|s| s.stopped).unwrap_or(true) {
+                return;
+            }
+            if let Err(e) = self.touch(Utc::now()) {
+                tracing::warn!(error = %e, "could not update run.marker");
+            }
+        }
+    }
+}
+
+fn file_names(path: &Path, pid: u32) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| RunMarker::parse(&t))
+        .is_some_and(|m| m.pid == pid)
 }
 
 impl RunMarkerGuard {
+    pub fn heartbeat(&self) -> MarkerHeartbeat {
+        MarkerHeartbeat {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     /// Remove the marker now. Same owner check as drop.
     pub fn finish(self) {
         drop(self);
-    }
-
-    fn remove_if_owner(&self) {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return;
-        };
-        match RunMarker::parse(&text) {
-            Some(m) if m.pid == self.pid => {
-                if let Err(e) = std::fs::remove_file(&self.path)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    tracing::warn!(error = %e, "could not remove run.marker");
-                }
-            }
-            _ => tracing::warn!("run.marker no longer names this process; not removing it"),
-        }
     }
 }
 
@@ -156,20 +231,32 @@ impl Drop for RunMarkerGuard {
         if std::thread::panicking() {
             return;
         }
-        self.remove_if_owner();
+        let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        s.stopped = true;
+        if !file_names(&s.path, s.marker.pid) {
+            if s.path.exists() {
+                tracing::warn!("run.marker no longer names this process; not removing it");
+            }
+            return;
+        }
+        if let Err(e) = std::fs::remove_file(&s.path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %e, "could not remove run.marker");
+        }
     }
 }
 
-/// Write `run.marker` for `pid`, owner-only.
+/// Write `run.marker`, owner-only.
 pub fn write_run_marker(data_dir: &Path, marker: RunMarker) -> io::Result<RunMarkerGuard> {
     let path = run_marker_path(data_dir);
-    let tmp = data_dir.join(format!("{RUN_MARKER}.tmp"));
-    std::fs::write(&tmp, marker.format())?;
-    crate::fs_mode::tighten_private_file(&tmp);
-    std::fs::rename(&tmp, &path)?;
+    write_atomic(&path, &marker)?;
     Ok(RunMarkerGuard {
-        path,
-        pid: marker.pid,
+        shared: Arc::new(Mutex::new(Shared {
+            path,
+            marker,
+            stopped: false,
+        })),
     })
 }
 
@@ -177,47 +264,28 @@ pub fn write_run_marker(data_dir: &Path, marker: RunMarker) -> io::Result<RunMar
 /// Call after the pid guard is held, so a second daemon never gets here.
 pub fn start_run(data_dir: &Path) -> io::Result<(StaleMarker, RunMarkerGuard)> {
     let stale = recover_stale_run_marker(data_dir, crate::proc_id::pid_is_live_tracker)?;
+    let now = Utc::now();
     let guard = write_run_marker(
         data_dir,
         RunMarker {
             pid: std::process::id(),
-            started_at: Utc::now(),
+            started_at: now,
+            last_seen: now,
         },
     )?;
     Ok((stale, guard))
 }
 
-/// `last_crash.marker` as the app reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LastCrash {
-    /// Pid and start time of the run that did not exit cleanly. `None` when
-    /// the marker text was unreadable.
-    pub marker: Option<RunMarker>,
-    /// When the next daemon start found the stale marker (the file's
-    /// modification time). This is the closest time the tracker has to the
-    /// crash itself.
-    pub detected_at: Option<DateTime<Utc>>,
+/// `last_crash.marker`: the run that did not exit cleanly. `None` inside
+/// when the marker text was unreadable.
+pub fn read_last_crash(data_dir: &Path) -> Option<Option<RunMarker>> {
+    let text = std::fs::read_to_string(last_crash_marker_path(data_dir)).ok()?;
+    Some(RunMarker::parse(&text))
 }
 
-impl LastCrash {
-    /// Time the crash report's second log window ends at: when the stale
-    /// marker was found, else the crashed run's start time.
-    pub fn window_anchor(&self) -> Option<DateTime<Utc>> {
-        self.detected_at.or(self.marker.map(|m| m.started_at))
-    }
-}
-
-pub fn read_last_crash(data_dir: &Path) -> Option<LastCrash> {
-    let path = last_crash_marker_path(data_dir);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let detected_at = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(DateTime::<Utc>::from);
-    Some(LastCrash {
-        marker: RunMarker::parse(&text),
-        detected_at,
-    })
+/// `last_seen` of the crashed run, which sets the crash log window.
+pub fn last_crash_seen(data_dir: &Path) -> Option<DateTime<Utc>> {
+    read_last_crash(data_dir).flatten().map(|m| m.last_seen)
 }
 
 /// Remove `last_crash.marker` (the member answered No, or sent the report).
@@ -273,7 +341,6 @@ pub fn last_exit_with(data_dir: &Path, is_live_tracker: impl Fn(u32) -> bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
     struct Buf(Arc<Mutex<Vec<u8>>>);
@@ -307,12 +374,15 @@ mod tests {
         (out, text)
     }
 
+    fn t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
     fn marker(pid: u32) -> RunMarker {
         RunMarker {
             pid,
-            started_at: DateTime::parse_from_rfc3339("2026-10-11T10:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            started_at: t("2026-10-11T10:00:00Z"),
+            last_seen: t("2026-10-11T10:41:00Z"),
         }
     }
 
@@ -333,11 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn marker_text_round_trips_and_holds_only_pid_and_time() {
+    fn marker_text_round_trips_and_holds_only_pid_and_times() {
         let m = marker(4242);
-        assert_eq!(m.format(), "pid=4242\nstarted_at=2026-10-11T10:00:00Z\n");
+        assert_eq!(
+            m.format(),
+            "pid=4242\nstarted_at=2026-10-11T10:00:00Z\nlast_seen=2026-10-11T10:41:00Z\n"
+        );
         assert_eq!(RunMarker::parse(&m.format()), Some(m));
-        assert_eq!(RunMarker::parse("pid=1\n"), None);
+        assert_eq!(
+            RunMarker::parse("pid=1\nstarted_at=2026-10-11T10:00:00Z\n"),
+            None
+        );
         assert_eq!(RunMarker::parse("garbage"), None);
     }
 
@@ -349,6 +425,44 @@ mod tests {
         guard.finish();
         assert!(!run_marker_path(dir.path()).exists());
         assert_eq!(last_exit(dir.path()), LastExit::Clean);
+    }
+
+    #[test]
+    fn heartbeat_rewrites_last_seen_and_never_revives_a_removed_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = write_run_marker(dir.path(), marker(std::process::id())).unwrap();
+        let beat = guard.heartbeat();
+        beat.touch(t("2026-10-11T11:00:00Z")).unwrap();
+        let now = RunMarker::parse(&std::fs::read_to_string(run_marker_path(dir.path())).unwrap())
+            .unwrap();
+        assert_eq!(now.last_seen, t("2026-10-11T11:00:00Z"));
+        assert_eq!(now.started_at, marker(0).started_at, "start time is kept");
+        assert!(!dir.path().join("run.marker.tmp").exists());
+        guard.finish();
+        beat.touch(t("2026-10-11T11:01:00Z")).unwrap();
+        assert!(
+            !run_marker_path(dir.path()).exists(),
+            "a heartbeat after shutdown must not bring the marker back"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn heartbeat_task_ticks_once_per_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = write_run_marker(dir.path(), marker(std::process::id())).unwrap();
+        let task = tokio::spawn(guard.heartbeat().run(HEARTBEAT_INTERVAL));
+        let read = || {
+            RunMarker::parse(&std::fs::read_to_string(run_marker_path(dir.path())).unwrap())
+                .unwrap()
+                .last_seen
+        };
+        let before = read();
+        tokio::time::sleep(HEARTBEAT_INTERVAL + std::time::Duration::from_secs(1)).await;
+        assert!(read() > before, "last_seen moved within one interval");
+        drop(guard);
+        tokio::time::sleep(HEARTBEAT_INTERVAL * 2).await;
+        assert!(task.is_finished(), "the task stops after the guard drops");
+        assert!(!run_marker_path(dir.path()).exists());
     }
 
     #[test]
@@ -377,15 +491,14 @@ mod tests {
         );
         assert!(!run_marker_path(dir.path()).exists());
         let moved = std::fs::read_to_string(last_crash_marker_path(dir.path())).unwrap();
-        assert_eq!(moved, marker(u32::MAX).format());
+        assert_eq!(moved, marker(u32::MAX).format(), "old last_seen is kept");
         assert_eq!(log.matches("WARN").count(), 1, "{log}");
         assert_eq!(log.lines().count(), 1, "{log}");
         assert_eq!(last_exit(dir.path()), LastExit::Crashed);
-        let crash = read_last_crash(dir.path()).unwrap();
-        assert_eq!(crash.marker, Some(marker(u32::MAX)));
-        assert!(crash.window_anchor().is_some());
+        assert_eq!(last_crash_seen(dir.path()), Some(marker(0).last_seen));
         dismiss_last_crash(dir.path()).unwrap();
         assert_eq!(last_exit(dir.path()), LastExit::Clean);
+        assert_eq!(last_crash_seen(dir.path()), None);
     }
 
     #[test]
@@ -403,7 +516,10 @@ mod tests {
             recover_stale_run_marker(dir.path(), crate::proc_id::pid_is_live_tracker).unwrap()
         });
         assert!(matches!(out, StaleMarker::Moved { .. }), "{out:?}");
-        assert!(last_crash_marker_path(dir.path()).exists());
+        assert_eq!(
+            std::fs::read_to_string(last_crash_marker_path(dir.path())).unwrap(),
+            marker(pid).format()
+        );
         assert_eq!(log.matches("WARN").count(), 1, "{log}");
     }
 
@@ -444,6 +560,8 @@ mod tests {
         let (out, log) = with_log(|| recover_stale_run_marker(dir.path(), |_| true).unwrap());
         assert_eq!(out, StaleMarker::Moved { marker: None });
         assert_eq!(log.matches("WARN").count(), 1, "{log}");
+        assert_eq!(read_last_crash(dir.path()), Some(None));
+        assert_eq!(last_crash_seen(dir.path()), None);
     }
 
     #[test]

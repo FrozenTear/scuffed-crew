@@ -439,8 +439,16 @@ async fn main() -> anyhow::Result<()> {
     // daemon never reaches here. A stale run.marker becomes
     // last_crash.marker with one WARN. The guard removes run.marker when
     // `main` returns (SIGTERM, Ctrl+C, normal exit); a crash leaves it.
+    // `last_seen` is rewritten once a minute until then.
     let _run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
-        Ok((_, guard)) => Some(guard),
+        Ok((_, guard)) => {
+            tokio::spawn(
+                guard
+                    .heartbeat()
+                    .run(stat_tracker::report::marker::HEARTBEAT_INTERVAL),
+            );
+            Some(guard)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "could not write run.marker; crash reports will not see this run");
             None

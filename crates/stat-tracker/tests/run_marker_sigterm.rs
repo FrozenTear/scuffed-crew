@@ -30,7 +30,7 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
     let data_dir = root.path().join("data").join("scuffed-stat-tracker");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&data_dir).unwrap();
-    let stale = "pid=4294967295\nstarted_at=2026-10-11T10:00:00Z\n";
+    let stale = "pid=4294967295\nstarted_at=2026-10-11T10:00:00Z\nlast_seen=2026-10-11T10:41:00Z\n";
     std::fs::write(data_dir.join("run.marker"), stale).unwrap();
 
     let log_path = root.path().join("daemon.out");
@@ -60,7 +60,10 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
     if waited.is_err() {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("daemon never wrote run.marker; output:\n{}", read(&log_path));
+        panic!(
+            "daemon never wrote run.marker; output:\n{}",
+            read(&log_path)
+        );
     }
 
     assert_eq!(
@@ -91,7 +94,10 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
     };
     let out = read(&log_path);
     assert!(status.success(), "exit {status:?}; output:\n{out}");
-    assert!(!marker.exists(), "SIGTERM removes run.marker; output:\n{out}");
+    assert!(
+        !marker.exists(),
+        "SIGTERM removes run.marker; output:\n{out}"
+    );
     assert!(
         !data_dir.join("daemon.pid").exists(),
         "clean shutdown removes daemon.pid; output:\n{out}"

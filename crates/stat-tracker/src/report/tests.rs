@@ -31,9 +31,7 @@ const SELF_NAME: &str = "QXSelfName";
 const FIELD_NAME: &str = "QXFieldOnly";
 
 fn t(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .unwrap()
-        .with_timezone(&Utc)
+    DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
 
 fn ctx() -> ScrubContext {
@@ -66,13 +64,19 @@ fn system() -> SystemInfo {
 
 fn line(ts: &str, target: &str, rest: &str) -> String {
     // Same shape as the daemon's tracing writer, colour codes included.
-    format!("\x1b[2m{ts}\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2m{target}\x1b[0m\x1b[2m:\x1b[0m {rest}\n")
+    format!(
+        "\x1b[2m{ts}\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2m{target}\x1b[0m\x1b[2m:\x1b[0m {rest}\n"
+    )
 }
 
 /// Session 12:00:00 to 12:10:00, so the window is 11:58:00 to 12:12:00.
 fn seed_logs(dir: &std::path::Path) {
     let mut old = String::new();
-    old.push_str(&line("2026-10-09T11:50:00.000001Z", "x", "QXBEFOREWINDOW line"));
+    old.push_str(&line(
+        "2026-10-09T11:50:00.000001Z",
+        "x",
+        "QXBEFOREWINDOW line",
+    ));
     old.push_str(&line(
         "2026-10-09T11:59:00.000001Z",
         "stat_tracker::sync",
@@ -91,14 +95,22 @@ fn seed_logs(dir: &std::path::Path) {
     cur.push_str(&line(mid, "x", &format!("posting to {URL} failed")));
     cur.push_str(&line(mid, "x", &format!("opened {HOME_PATH}/x.db")));
     cur.push_str(&line(mid, "x", &format!("silverblue {VAR_HOME_PATH}/y")));
-    cur.push_str(&line(mid, "x", &format!("account {ACCOUNT} on {HOSTNAME} ok")));
+    cur.push_str(&line(
+        mid,
+        "x",
+        &format!("account {ACCOUNT} on {HOSTNAME} ok"),
+    ));
     cur.push_str(&line(mid, "x", &format!("tag {BATTLETAG} joined")));
     cur.push_str(&line(
         mid,
         "x",
         &format!("scoreboard names {OTHER_1} {OTHER_2} self {SELF_NAME}"),
     ));
-    cur.push_str(&line(mid, "x", &format!("misread {MISREAD} and short {SHORT}")));
+    cur.push_str(&line(
+        mid,
+        "x",
+        &format!("misread {MISREAD} and short {SHORT}"),
+    ));
     cur.push_str(&line(
         mid,
         "stat_tracker::shadow",
@@ -110,7 +122,11 @@ fn seed_logs(dir: &std::path::Path) {
         "scuffed_stat_tracker",
         "capture timing grabs=60 grab_ms_p50=3",
     ));
-    cur.push_str(&line("2026-10-09T12:20:00.000001Z", "x", "QXAFTERWINDOW line"));
+    cur.push_str(&line(
+        "2026-10-09T12:20:00.000001Z",
+        "x",
+        "QXAFTERWINDOW line",
+    ));
     std::fs::write(dir.join("daemon.log"), cur).unwrap();
 }
 
@@ -218,27 +234,75 @@ fn section_9_log_fixture_scrubs_everything() {
 fn empty_window_writes_the_placeholder_line() {
     let dir = tempfile::tempdir().unwrap();
     seed_logs(dir.path());
-    let window = LogWindow::log_only(t("2030-01-01T00:00:00Z"), None);
+    let window = LogWindow::log_only(t("2030-01-01T00:00:00Z"));
     let report = bundle::build_log_report(&input(dir.path(), window)).unwrap();
     assert_eq!(report.log_text, "[no log lines in window]\n");
     // No log files at all behaves the same.
     let empty = tempfile::tempdir().unwrap();
-    let window = LogWindow::log_only(t("2026-10-09T12:05:00Z"), None);
+    let window = LogWindow::log_only(t("2026-10-09T12:05:00Z"));
     let report = bundle::build_log_report(&input(empty.path(), window)).unwrap();
     assert_eq!(report.log_text, "[no log lines in window]\n");
 }
 
 #[test]
-fn crash_window_adds_the_30_minutes_before_the_marker() {
+fn crash_window_26_hours_after_last_seen() {
+    // last_seen 2026-10-09T10:00Z, report built 26 hours later.
     let dir = tempfile::tempdir().unwrap();
-    seed_logs(dir.path());
-    // Built a day later; the crash anchor at 12:07 pulls the 11:37..12:07
-    // lines back in.
-    let window = LogWindow::log_only(t("2026-10-10T12:00:00Z"), Some(t("2026-10-09T12:07:00Z")));
+    std::fs::write(
+        dir.path().join("last_crash.marker"),
+        "pid=4242\nstarted_at=2026-10-09T08:00:00Z\nlast_seen=2026-10-09T10:00:00Z\n",
+    )
+    .unwrap();
+    let mut raw = String::new();
+    for (ts, tag) in [
+        ("2026-10-09T08:00:00Z", "qxstart_out"), // start time is not an edge
+        ("2026-10-09T09:29:59Z", "qxbefore_out"),
+        ("2026-10-09T09:30:00Z", "qxcrash_first_in"),
+        ("2026-10-09T09:59:00Z", "qxcrash_in"),
+        ("2026-10-09T10:01:30Z", "qxafter_seen_in"),
+        ("2026-10-09T10:02:01Z", "qxgap_out_1"),
+        ("2026-10-09T22:00:00Z", "qxgap_out_2"),
+        ("2026-10-10T11:29:59Z", "qxgap_out_3"),
+        ("2026-10-10T11:30:00Z", "qxbuild_first_in"),
+        ("2026-10-10T11:59:00Z", "qxbuild_in"),
+    ] {
+        raw.push_str(&line(ts, "x", tag));
+    }
+    std::fs::write(dir.path().join("daemon.log"), raw).unwrap();
+
+    let built = t("2026-10-10T12:00:00Z");
+    let seen = super::marker::last_crash_seen(dir.path());
+    assert_eq!(seen, Some(t("2026-10-09T10:00:00Z")));
+    let window = LogWindow::for_log_only(built, true, seen);
     let report = bundle::build_log_report(&input(dir.path(), window)).unwrap();
-    assert!(report.log_text.contains("capture timing"));
-    assert!(report.log_text.contains("sync with token [sync-token]"));
-    assert!(!report.log_text.contains("QXAFTERWINDOW"));
+    let log = &report.log_text;
+    for tag in [
+        "qxcrash_first_in",
+        "qxcrash_in",
+        "qxafter_seen_in",
+        "qxbuild_first_in",
+        "qxbuild_in",
+    ] {
+        assert!(log.contains(tag), "{tag} missing:\n{log}");
+    }
+    for tag in [
+        "qxstart_out",
+        "qxbefore_out",
+        "qxgap_out_1",
+        "qxgap_out_2",
+        "qxgap_out_3",
+    ] {
+        assert!(!log.contains(tag), "{tag} kept:\n{log}");
+    }
+    // A performance report ignores the marker.
+    let perf = LogWindow::for_log_only(built, false, seen);
+    let mut inp = input(dir.path(), perf);
+    inp.category = LogOnlyCategory::Performance;
+    let log = bundle::build_log_report(&inp).unwrap().log_text;
+    assert!(
+        !log.contains("qxcrash_in") && log.contains("qxbuild_in"),
+        "{log}"
+    );
 }
 
 const SYSTEM_KEYS: &[&str] = &[
@@ -267,7 +331,9 @@ fn sorted(list: &[&str]) -> Vec<String> {
 }
 
 fn is_sha256(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Section 2 rules for a bundle_version 2 log-only manifest, read from the
@@ -317,9 +383,7 @@ fn check_log_only_manifest(m: &Value) {
     let s = &m["system"];
     assert_eq!(keys(s), sorted(SYSTEM_KEYS));
     assert!(["x11", "wayland", "unknown"].contains(&s["session_type"].as_str().unwrap()));
-    assert!(
-        ["x11", "wayshot", "portal", "none"].contains(&s["capture_backend"].as_str().unwrap())
-    );
+    assert!(["x11", "wayshot", "portal", "none"].contains(&s["capture_backend"].as_str().unwrap()));
     assert!(s["cpu_threads"].as_u64().unwrap() >= 1);
     assert!(s["ocr_threads"].as_u64().unwrap() >= 1);
     assert!(["ocr-v1", "new"].contains(&s["reader"].as_str().unwrap()));
@@ -332,7 +396,11 @@ fn check_log_only_manifest(m: &Value) {
     assert!(m["game"].is_null());
     assert_eq!(keys(&m["reads"]), sorted(READ_KEYS));
     for k in READ_KEYS {
-        assert!(m["reads"][k].is_null(), "reads.{k}");
+        assert_eq!(
+            m["reads"][k],
+            serde_json::json!({"value": null, "confidence": null, "suspect": true, "ocr_v1": null}),
+            "reads.{k}"
+        );
     }
     assert_eq!(m["corrections"], serde_json::json!({}));
     assert_eq!(
@@ -375,12 +443,15 @@ fn manifest_matches_section_2_for_every_log_only_category() {
         let m: Value = serde_json::from_str(&report.manifest_json).unwrap();
         check_log_only_manifest(&m);
         assert_eq!(m["reason"]["category"], category.as_str());
-        assert_eq!(m["consent"]["training"], false, "training is off by default");
+        assert_eq!(
+            m["consent"]["training"], false,
+            "training is off by default"
+        );
         assert_eq!(m["system"]["last_exit"], "crashed");
         assert_eq!(m["system"]["update_channel"], "prerelease");
         assert_eq!(m["app_version"], bundle::APP_VERSION);
     }
-    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z"), None));
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
     inp.training = true;
     let m: Value =
         serde_json::from_str(&bundle::build_log_report(&inp).unwrap().manifest_json).unwrap();
@@ -390,10 +461,10 @@ fn manifest_matches_section_2_for_every_log_only_category() {
 #[test]
 fn bad_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z"), None));
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
     inp.resolution.width = 0;
     assert!(bundle::build_log_report(&inp).is_err());
-    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z"), None));
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
     inp.ui_scale = Some(250.0);
     assert!(bundle::build_log_report(&inp).is_err());
 }
@@ -482,7 +553,10 @@ fn zip_fixture_dates_entries_hashes_and_bom() {
 
     let entries = unzip(&report.bytes);
     let manifest = &entries[0].1;
-    assert!(!manifest.starts_with(&[0xEF, 0xBB, 0xBF]), "manifest has a BOM");
+    assert!(
+        !manifest.starts_with(&[0xEF, 0xBB, 0xBF]),
+        "manifest has a BOM"
+    );
     assert_eq!(manifest, report.manifest_json.as_bytes());
     let log = &entries[1].1;
     assert!(!log.starts_with(&[0xEF, 0xBB, 0xBF]));
@@ -513,13 +587,12 @@ fn server_validator_accepts_log_only_manifest() {
         LogOnlyCategory::Performance,
         LogOnlyCategory::Other,
     ] {
-        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z"), None));
+        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
         inp.category = category;
         let report = bundle::build_log_report(&inp).unwrap();
-        let checked = scuffed_types::stat_report::parse_bundle_manifest(
-            report.manifest_json.as_bytes(),
-        )
-        .unwrap_or_else(|e| panic!("{}: {e}", category.as_str()));
+        let checked =
+            scuffed_types::stat_report::parse_bundle_manifest(report.manifest_json.as_bytes())
+                .unwrap_or_else(|e| panic!("{}: {e}", category.as_str()));
         assert_eq!(checked.reason_category, category.as_str());
         assert_eq!(checked.files.len(), 1);
     }

@@ -130,18 +130,42 @@ impl LogWindow {
         }
     }
 
-    /// `crash`, `performance`, or `other` report: the 30 minutes before the
-    /// report is built, plus the 30 minutes before `crash_at` when a crash
-    /// marker exists and that window differs.
-    pub fn log_only(built_at: DateTime<Utc>, crash_at: Option<DateTime<Utc>>) -> Self {
-        let span = Duration::minutes(30);
-        let mut ranges = vec![(built_at - span, built_at)];
-        if let Some(at) = crash_at
-            && at != built_at
-        {
-            ranges.push((at - span, at));
+    /// `performance` or `other` report, or a `crash` report with no crash
+    /// marker: the 30 minutes before the report is built.
+    pub fn log_only(built_at: DateTime<Utc>) -> Self {
+        Self {
+            ranges: vec![(built_at - Duration::minutes(30), built_at)],
         }
-        Self { ranges }
+    }
+
+    /// `crash` report with a crash marker: 30 minutes before the marker's
+    /// `last_seen` through 2 minutes after it, plus the 30 minutes before
+    /// the build. When the two overlap, a line in either is kept (their
+    /// union). The marker's start time is not an edge.
+    pub fn crash(built_at: DateTime<Utc>, last_seen: DateTime<Utc>) -> Self {
+        let mut w = Self::log_only(built_at);
+        w.ranges.insert(
+            0,
+            (
+                last_seen - Duration::minutes(30),
+                last_seen + Duration::minutes(2),
+            ),
+        );
+        w
+    }
+
+    /// Section 6 window for a log-only report built at `built_at`.
+    /// `crash_last_seen` is the crash marker's `last_seen`, used only for a
+    /// `crash` report.
+    pub fn for_log_only(
+        built_at: DateTime<Utc>,
+        is_crash: bool,
+        crash_last_seen: Option<DateTime<Utc>>,
+    ) -> Self {
+        match crash_last_seen {
+            Some(seen) if is_crash => Self::crash(built_at, seen),
+            _ => Self::log_only(built_at),
+        }
     }
 
     pub fn contains(&self, t: DateTime<Utc>) -> bool {
@@ -161,9 +185,8 @@ static TOKEN_RUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9_.\-]{24,}").expect("token regex"));
 static BASE64_RUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("base64 regex"));
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex")
-});
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex"));
 static HOME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
 // Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
@@ -537,29 +560,50 @@ mod tests {
     fn each_placeholder_row() {
         let c = ctx();
         let cases = [
-            ("tok sct_FAKEsyncTOKEN0123456789abcdef end", "tok [sync-token] end"),
+            (
+                "tok sct_FAKEsyncTOKEN0123456789abcdef end",
+                "tok [sync-token] end",
+            ),
             ("auth: BEARER abc.def", "auth: BEARER [sync-token]"),
             ("auth: bearer\tabc.def", "auth: bearer\t[sync-token]"),
             (
                 "run ABCDEFGHIJKLMNOPQRSTUVWX_y-z.0 end",
                 "run [sync-token] end",
             ),
-            ("b64 QUJDREVGR0hJSktMTU5PUFFSU1RVVldY+/== end", "b64 [sync-token] end"),
+            (
+                "b64 QUJDREVGR0hJSktMTU5PUFFSU1RVVldY+/== end",
+                "b64 [sync-token] end",
+            ),
             (
                 "url https://crew.example.test/api/stats?x=1 and http://CREW.example.test:8443/a",
                 "url [server-url] and [server-url]",
             ),
-            ("bare host crew.example.test here", "bare host [server-url] here"),
-            ("other https://other.example/x stays", "other https://other.example/x stays"),
+            (
+                "bare host crew.example.test here",
+                "bare host [server-url] here",
+            ),
+            (
+                "other https://other.example/x stays",
+                "other https://other.example/x stays",
+            ),
             ("p /home/qxuser/.local/share", "p [home]/.local/share"),
             ("p /var/home/someone/x", "p [home]/x"),
             ("p /Users/someone/x", "p [home]/x"),
-            ("user qxuser and /mnt/qxuser/x", "user [user] and /mnt/[user]/x"),
+            (
+                "user qxuser and /mnt/qxuser/x",
+                "user [user] and /mnt/[user]/x",
+            ),
             ("not qxusers", "not qxusers"),
             ("on qxhost-box today", "on [host] today"),
             ("tag Ünïcødé#12345 end", "tag [battletag] end"),
-            ("self QXSelf here and qxself", "self [player] here and [player]"),
-            ("names QXOther QX0ther Jo", "names [player] [player] [player]"),
+            (
+                "self QXSelf here and qxself",
+                "self [player] here and [player]",
+            ),
+            (
+                "names QXOther QX0ther Jo",
+                "names [player] [player] [player]",
+            ),
             ("Joined is not Jo", "Joined is not [player]"),
         ];
         for (input, want) in cases {
@@ -609,14 +653,37 @@ mod tests {
         assert!(w.contains(t("2026-10-09T12:12:00Z")));
         assert!(!w.contains(t("2026-10-09T12:12:01Z")));
 
-        let w = LogWindow::log_only(t("2026-10-09T12:00:00Z"), Some(t("2026-10-08T09:00:00Z")));
-        assert_eq!(w.ranges().len(), 2);
+        let w = LogWindow::log_only(t("2026-10-09T12:00:00Z"));
         assert!(w.contains(t("2026-10-09T11:30:00Z")));
         assert!(!w.contains(t("2026-10-09T11:29:59Z")));
-        assert!(w.contains(t("2026-10-08T08:45:00Z")));
-        assert!(!w.contains(t("2026-10-08T09:00:01Z")));
-        let same = LogWindow::log_only(t("2026-10-09T12:00:00Z"), Some(t("2026-10-09T12:00:00Z")));
-        assert_eq!(same.ranges().len(), 1);
+        assert!(!w.contains(t("2026-10-09T12:00:01Z")));
+
+        // Crash: last_seen - 30 min ..= last_seen + 2 min, plus the build window.
+        let w = LogWindow::crash(t("2026-10-09T12:00:00Z"), t("2026-10-08T09:00:00Z"));
+        assert!(w.contains(t("2026-10-08T08:30:00Z")));
+        assert!(!w.contains(t("2026-10-08T08:29:59Z")));
+        assert!(w.contains(t("2026-10-08T09:02:00Z")));
+        assert!(!w.contains(t("2026-10-08T09:02:01Z")));
+        assert!(w.contains(t("2026-10-09T11:30:00Z")));
+        assert!(!w.contains(t("2026-10-09T11:29:59Z")));
+        // Overlapping windows: a line in either is kept.
+        let w = LogWindow::crash(t("2026-10-09T12:00:00Z"), t("2026-10-09T11:50:00Z"));
+        assert!(w.contains(t("2026-10-09T11:20:00Z")));
+        assert!(w.contains(t("2026-10-09T11:59:00Z")));
+        assert!(!w.contains(t("2026-10-09T11:19:59Z")));
+
+        assert_eq!(
+            LogWindow::for_log_only(
+                t("2026-10-09T12:00:00Z"),
+                false,
+                Some(t("2026-10-08T09:00:00Z"))
+            ),
+            LogWindow::log_only(t("2026-10-09T12:00:00Z"))
+        );
+        assert_eq!(
+            LogWindow::for_log_only(t("2026-10-09T12:00:00Z"), true, None),
+            LogWindow::log_only(t("2026-10-09T12:00:00Z"))
+        );
     }
 
     #[test]
@@ -624,7 +691,7 @@ mod tests {
         let t = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let w = LogWindow::log_only(t, None);
+        let w = LogWindow::log_only(t);
         let raw = "no timestamp here\n2020-01-01T00:00:00Z INFO x: old\n";
         assert_eq!(scrub_log(&ctx(), &w, raw), "[no log lines in window]\n");
     }
@@ -635,7 +702,7 @@ mod tests {
         let t = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let out = scrub_log(&ctx(), &LogWindow::log_only(t, None), raw);
+        let out = scrub_log(&ctx(), &LogWindow::log_only(t), raw);
         assert_eq!(out, "2026-10-09T11:59:00.123456Z  INFO x: hi\n");
     }
 
@@ -649,7 +716,7 @@ mod tests {
         for i in 0..12_000 {
             raw.push_str(&format!("{line} n{i}\n"));
         }
-        let out = scrub_log(&ScrubContext::default(), &LogWindow::log_only(t, None), &raw);
+        let out = scrub_log(&ScrubContext::default(), &LogWindow::log_only(t), &raw);
         assert!(out.len() <= LOG_MAX_BYTES);
         assert!(out.starts_with(LOG_CUT_NOTE));
         assert!(out.trim_end().ends_with("n11999"));

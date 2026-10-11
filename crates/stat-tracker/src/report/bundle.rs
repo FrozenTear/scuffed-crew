@@ -9,7 +9,7 @@
 //! use those same bytes.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -77,7 +77,10 @@ impl SessionType {
         display: Option<&str>,
     ) -> Self {
         let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-        match xdg_session_type.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        match xdg_session_type
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             Some("x11") => return Self::X11,
             Some("wayland") => return Self::Wayland,
             _ => {}
@@ -197,12 +200,11 @@ impl LogReportInput {
         names: Vec<String>,
         built_at: DateTime<Utc>,
     ) -> Self {
-        let crash_at = match category {
-            LogOnlyCategory::Crash => {
-                marker::read_last_crash(&config.data_dir).and_then(|c| c.window_anchor())
-            }
-            _ => None,
-        };
+        let window = LogWindow::for_log_only(
+            built_at,
+            category == LogOnlyCategory::Crash,
+            marker::last_crash_seen(&config.data_dir),
+        );
         let mut scrub = ScrubContext::from_config(config);
         scrub.names = names;
         Self {
@@ -213,7 +215,7 @@ impl LogReportInput {
             system: SystemInfo::collect(config, capture_backend, daemon_running),
             training: false,
             scrub,
-            window: LogWindow::log_only(built_at, crash_at),
+            window,
             log_dir: config.data_dir.clone(),
         }
     }
@@ -315,18 +317,39 @@ struct SystemJson {
     last_exit: &'static str,
 }
 
-/// The nine `reads` keys, each `null` in a log-only report.
+/// A read with no value: `value`, `confidence`, and `ocr_v1` null, and
+/// `suspect` true (a null value is always suspect).
+#[derive(Serialize)]
+struct EmptyRead {
+    value: Option<()>,
+    confidence: Option<()>,
+    suspect: bool,
+    ocr_v1: Option<()>,
+}
+
+impl Default for EmptyRead {
+    fn default() -> Self {
+        Self {
+            value: None,
+            confidence: None,
+            suspect: true,
+            ocr_v1: None,
+        }
+    }
+}
+
+/// The nine `reads` keys of a log-only report, each an [`EmptyRead`].
 #[derive(Serialize, Default)]
 struct NullReads {
-    mode: Option<()>,
-    result: Option<()>,
-    hero: Option<()>,
-    e: Option<()>,
-    a: Option<()>,
-    d: Option<()>,
-    dmg: Option<()>,
-    h: Option<()>,
-    mit: Option<()>,
+    mode: EmptyRead,
+    result: EmptyRead,
+    hero: EmptyRead,
+    e: EmptyRead,
+    a: EmptyRead,
+    d: EmptyRead,
+    dmg: EmptyRead,
+    h: EmptyRead,
+    mit: EmptyRead,
 }
 
 #[derive(Serialize)]

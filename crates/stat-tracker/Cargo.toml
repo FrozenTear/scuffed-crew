@@ -50,6 +50,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 ab_glyph = "0.2"
+tokio = { version = "1", features = ["test-util"] }
 
 [[bin]]
 name = "scuffed-stat-tracker"

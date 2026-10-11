@@ -21,7 +21,7 @@ pub use bundle::{
     LogOnlyCategory, LogReportInput, ReportError, ReportFile, ReportZip, Resolution, SessionType,
     SystemInfo, build_log_report,
 };
-pub use marker::{LastCrash, LastExit};
+pub use marker::{LastExit, MarkerHeartbeat, RunMarker};
 pub use scrub::{LogWindow, ScrubContext};
 
 /// True when `daemon.pid` names a live tracker (`system.daemon_running`).
