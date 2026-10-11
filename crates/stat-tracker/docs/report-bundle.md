@@ -58,7 +58,7 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 
 - `map`, `mode`, and `result` are strings or `null`.
 - `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
-- In a `crash` or `performance` report, `game` is `null`, and so is every value in `reads` (the nine keys stay present).
+- In a `crash` or `performance` report, `game` is `null`. `reads` keeps its usual shape: all nine keys, each an object with `value`, `confidence`, and `ocr_v1` set to `null` and `suspect` set to `true` (a null value is always suspect, as below). A read is never JSON `null` as a whole.
 - `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. The log window in section 6 is measured from the session around this time.
 
 `reads` is one object per field. The keys come from the `suspect_fields` names map. The map is fixed:
@@ -84,7 +84,7 @@ Each read has:
 - `suspect`: `true` or `false`.
 - `ocr_v1`: the Tesseract value as a string, or `null` when Tesseract did not read that field.
 
-For `e`, `a`, `d`, `dmg`, `h`, and `mit`, the primary read is the matcher (`RECOGNIZER_ID`) when it ran. `ocr_v1` is the Tesseract value beside it. `suspect` is `true` when the matcher's own suspect rule flags the cell (for `cv-v3` that includes confidence below 0.35), when the matcher and `ocr-v1` disagree, or when the value is `null`. When the matcher did not run, `value` copies `ocr_v1`, `confidence` is `null`, and `suspect` follows the tracker's existing flag for that cell.
+For `e`, `a`, `d`, `dmg`, `h`, and `mit`, the primary read is the matcher (`RECOGNIZER_ID`) when it ran. `ocr_v1` is the Tesseract value beside it. `suspect` is `true` when the matcher's own suspect rule flags the cell (for `cv-v5` that includes confidence below 0.35), when the matcher and `ocr-v1` disagree, or when the value is `null`. When the matcher did not run, `value` copies `ocr_v1`, `confidence` is `null`, and `suspect` follows the tracker's existing flag for that cell.
 
 For `mode`, `result`, and `hero`, the matcher does not read the field. `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
 
@@ -343,7 +343,7 @@ Both boxes can be off. That is the default. The zip then has blanked crops and t
 
 The log in the zip is `log.txt`. It is not the raw `daemon.log`. The app reads `{data_dir}/daemon.log` and `{data_dir}/daemon.log.1`, keeps the lines inside this game's time window, scrubs them, and writes those lines only.
 
-The window is the whole session: from 120 seconds before the first stored capture to 120 seconds after the last stored capture. For a `crash` or `performance` report there is no session, so the window is the 30 minutes before the report is built. A `crash` report also keeps the 30 minutes before the crash marker's time, when the marker exists and those two windows differ. A line with no timestamp is left out. A line outside the window is left out. The `capture timing` lines the daemon writes once a minute are kept like any other line. They carry no names. Every name the reader produced inside the window is in scope, not only names from the single frame in the zip.
+The window is the whole session: from 120 seconds before the first stored capture to 120 seconds after the last stored capture. For a `performance` report, or a `crash` report with no crash marker, there is no session, so the window is the 30 minutes before the report is built. A `crash` report with a crash marker uses the 30 minutes before the marker's `last_seen` through 2 minutes after it, so the lines just before the stop are always included even when the report is built a day later. It also keeps the 30 minutes before the report is built when that window does not overlap. The marker's start time is not a window edge. A line with no timestamp is left out. A line outside the window is left out. The `capture timing` lines the daemon writes once a minute are kept like any other line. They carry no names. Every name the reader produced inside the window is in scope, not only names from the single frame in the zip.
 
 The app drops name fields from the reader's log lines. A field that holds a player name is not copied into `log.txt`. It also scrubs name text, because a name can sit in the message rather than in a field. The scrub list is every name read in the window: other players, the configured player, misreads, and short names of one or two characters.
 
@@ -374,7 +374,7 @@ The GUI has two ways in:
 - **Report** on a game card (in the Games tab and the game detail view). It builds a game report for that session. The category list starts at `wrong_stats` and leaves out `crash` and `performance`.
 - **Report a problem** in the app menu and in Settings. It builds a `crash` or `performance` report (the member picks one), or `other`. It has no game and no crops.
 
-Crash marker: when the daemon starts, it writes `{data_dir}/run.marker` with its start time and pid. A clean shutdown (SIGTERM, a normal exit, or an update restart) removes it. When the daemon starts and finds an old marker whose pid is not running, or is running but is not a `scuffed-stat-tracker` process (pids are reused), the last run did not exit cleanly. It moves the marker to `{data_dir}/last_crash.marker` (one file, overwritten) and logs one WARN line. The next time the app opens, if `last_crash.marker` exists and is newer than the last report or dismissal, the app asks once: "The tracker stopped unexpectedly. Send a report?" Yes opens Report a problem with `crash` picked. No or Send removes the marker. The marker holds only a timestamp and a pid. It is never uploaded as a file. Its time only sets the log window.
+Crash marker: when the daemon starts, it writes `{data_dir}/run.marker` with its pid, its start time, and `last_seen`, the last time it was known to be alive. While running it rewrites `last_seen` once a minute (an atomic replace of the file, so a crash mid-write leaves the previous copy). A clean shutdown (SIGTERM, a normal exit, or an update restart) removes it. When the daemon starts and finds an old marker whose pid is not running, or is running but is not a `scuffed-stat-tracker` process (pids are reused), the last run did not exit cleanly. It moves the marker to `{data_dir}/last_crash.marker` (one file, overwritten) and logs one WARN line. The next time the app opens, if `last_crash.marker` exists and is newer than the last report or dismissal, the app asks once: "The tracker stopped unexpectedly. Send a report?" Yes opens Report a problem with `crash` picked. No or Send removes the marker. The marker holds only the pid, the start time, and `last_seen`. It is never uploaded as a file. `last_seen` sets the crash log window (section 6). The app shows the stop as "around `last_seen`", which is at most a minute before the real stop.
 
 Both ways open a preview built by reading the zip that would be sent.
 
@@ -483,13 +483,14 @@ Revision 2 fixtures, required:
 
 - Version: a `bundle_version` 1 manifest without `system` passes. A `bundle_version` 1 manifest with `system`, or with category `crash` or `performance`, is a 400. Version 3 is a 400.
 - `system`: every key present passes. A missing key, an unknown key, `cpu_threads` 0, or a `session_type` outside the list is a 400.
-- Log-only: a `crash` report with `game: null`, null reads, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
+- Log-only: a `crash` report with `game: null`, nine read objects whose `value`, `confidence`, and `ocr_v1` are null and `suspect` is true, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
 - `team_size: null` passes on a game report.
 - A `crop` path other than `crops/scoreboard.png` or `crops/frame.png` is a 400.
 - Sync token: a create with a valid tracker sync token stores the report under the token's member and counts toward that member's daily cap together with session uploads. The same token on list, download, manifest, delete, and withdraw is 401. A token whose member is suspended or inactive is 403. An unknown token is 401, also while reports are off.
-- Crash marker: the daemon removes `run.marker` on SIGTERM. Starting with a stale `run.marker` (dead pid) produces `last_crash.marker` and one WARN line. A live pid in `run.marker` does not.
+- Crash marker: the daemon removes `run.marker` on SIGTERM. While running it rewrites `last_seen` at least once a minute. Starting with a stale `run.marker` (dead pid, or a live pid that is not the tracker) produces `last_crash.marker` with the old `last_seen` and one WARN line. A live tracker pid in `run.marker` does not.
+- Crash window: with a `last_crash.marker` whose `last_seen` is 26 hours before the report, `log.txt` holds lines from 30 minutes before that `last_seen` and from the 30 minutes before the build, and no lines from between those windows.
 
-Reports-off fixture, required: with reports switched off, each report route returns 503 and the body `{"error":"reports_disabled"}`. Nothing is stored. On that response the app shows "Reports are off right now", the saved zip is still on disk, and no automatic retry is queued. A later upload happens only when the member tries again by hand.
+Reports-off fixture, required: with reports switched off, each report route returns 503 to a caller with a valid credential (a site session, or the sync token on create) and the body `{"error":"reports_disabled"}`. Nothing is stored. On that response the app shows "Reports are off right now", the saved zip is still on disk, and no automatic retry is queued. A later upload happens only when the member tries again by hand.
 
 ## 10. Out of scope and open questions
 
