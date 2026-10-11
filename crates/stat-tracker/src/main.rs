@@ -3669,9 +3669,11 @@ fn analyze_frame(
     // dropped it to 0.77) used to return no row at all, so every later Tab of
     // that game was rejected as "player row not found" and the slow full-board
     // OCR ran each time. The hero still comes from the career panel.
-    let brightness_row_idx = player_match
-        .map(|(_, _, idx)| idx)
-        .or_else(|| detect::hero_portrait::detect_player_row(&scoreboard, team_size));
+    let brightness_row_idx = detect::hero_portrait::resolve_player_row(
+        player_match.map(|(_, _, idx)| idx),
+        &scoreboard,
+        team_size,
+    );
 
     let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
 

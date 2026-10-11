@@ -52,10 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         None => println!("portrait: no highlighted player row matched"),
     }
-    let brightness_row_idx = player_match
-        .as_ref()
-        .map(|(_, _, idx)| *idx)
-        .or_else(|| detect::hero_portrait::detect_player_row(&scoreboard, team_size));
+    let brightness_row_idx = detect::hero_portrait::resolve_player_row(
+        player_match.as_ref().map(|(_, _, idx)| *idx),
+        &scoreboard,
+        team_size,
+    );
 
     // Career-panel hero title (plain text) and top-bar map label — both read
     // from dedicated regions outside the scoreboard crop.
