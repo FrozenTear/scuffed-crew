@@ -110,6 +110,24 @@ fn form_after_disk_reload(
     next
 }
 
+/// True when `after` differs from `before` only in `update_channel`.
+///
+/// Only this app reads that key, so the save does not need a tracker restart.
+fn only_update_channel_changed(before: &Config, after: &Config) -> bool {
+    if before.update_channel == after.update_channel {
+        return false;
+    }
+    let mut same = before.clone();
+    same.update_channel.clone_from(&after.update_channel);
+    same == *after
+}
+
+/// True when the save flipped the alpha updates opt-in, so the update check
+/// must run again on the new channel.
+fn update_channel_switched(before: &Config, after: &Config) -> bool {
+    before.wants_prerelease_updates() != after.wants_prerelease_updates()
+}
+
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
     if daemon_up {
         SETTINGS_SAVED_RESTART
@@ -946,6 +964,8 @@ impl TrackerApp {
                             return Task::none();
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
+                        let gui_only = only_update_channel_changed(&self.saved_config, &config);
+                        let recheck = update_channel_switched(&self.saved_config, &config);
                         self.saved_config = config;
                         self.config_unreadable = false;
                         self.health_status = self.health_now();
@@ -953,8 +973,17 @@ impl TrackerApp {
                         self.settings = SettingsForm::from_config(&self.saved_config);
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.toast = Some(toast_after_successful_save(daemon_up).into());
+                        self.toast =
+                            Some(toast_after_successful_save(daemon_up && !gui_only).into());
                         self.toast_shown_at = None;
+                        if recheck {
+                            // `check_for_update` reads the channel from config.toml,
+                            // which now holds the new value.
+                            return Task::perform(
+                                update::check_for_update(),
+                                Message::UpdateChecked,
+                            );
+                        }
                     }
                     Err(SettingsSaveError::Blocked(message)) => {
                         self.toast = Some(message);
@@ -2115,6 +2144,56 @@ mod tests {
         assert!(super::SETTINGS_SAVE_REFUSED.contains("not saved"));
         assert!(super::toast_if_config_unreadable(false).is_none());
         assert!(super::SETTINGS_SAVED_RESTART.contains("Restart the tracker"));
+    }
+
+    #[test]
+    fn alpha_updates_save_rechecks_and_needs_no_tracker_restart() {
+        use crate::settings::{SettingsForm, SettingsToggle};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = "\
+# keep this comment
+data_dir = \"/tmp/sst-alpha-save\"
+player_name = \"the streamer\"
+";
+        std::fs::write(&path, raw).expect("seed");
+        let snapshot = Config::parse_file_contents(raw).expect("parse");
+        let mut form = SettingsForm::from_config_and_shadow(
+            &snapshot,
+            Config::shadow_control(snapshot.shadow_recognizer, None),
+        );
+        form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
+        let saved = super::save_settings_form(&path, false, &snapshot, &form, || Ok(()))
+            .expect("save writes");
+        let super::SettingsFileSave::Saved(written) = saved else {
+            panic!("expected a write, got {saved:?}");
+        };
+        let on_disk = std::fs::read_to_string(&path).expect("file");
+        assert!(on_disk.contains("# keep this comment"), "{on_disk}");
+        assert!(
+            on_disk.contains("update_channel = \"prerelease\""),
+            "{on_disk}"
+        );
+        assert!(
+            Config::parse_file_contents(&on_disk)
+                .expect("reparse")
+                .wants_prerelease_updates(),
+            "the next update check reads prerelease from disk"
+        );
+        assert!(super::update_channel_switched(&snapshot, &written));
+        assert!(super::only_update_channel_changed(&snapshot, &written));
+        assert_eq!(super::toast_after_successful_save(false), "Settings saved");
+
+        let mut other = written.clone();
+        other.debug_ocr = !other.debug_ocr;
+        assert!(!super::only_update_channel_changed(&written, &other));
+        assert!(!super::update_channel_switched(&written, &other));
+        assert!(!super::only_update_channel_changed(&written, &written));
+
+        let mut respelled = written.clone();
+        respelled.update_channel = "PRERELEASE".into();
+        assert!(!super::update_channel_switched(&written, &respelled));
     }
 
     #[test]

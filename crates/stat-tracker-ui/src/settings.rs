@@ -4,7 +4,8 @@
 //! pane, Save as a full-width footer strip. Does not invent daemon config keys.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
-//! The new reader switch writes `reader`.
+//! The new reader switch writes `reader`. The alpha updates switch writes
+//! `update_channel`.
 
 use iced::widget::{
     Row, button, checkbox, column, container, row, scrollable, space, text, text_input,
@@ -55,6 +56,7 @@ pub enum SettingsToggle {
     OverlayHotkey,
     ShadowRecognizer,
     NewReader,
+    PrereleaseUpdates,
 }
 
 /// Scoreboard number reader the Settings control can select.
@@ -121,6 +123,16 @@ A field it is not sure about keeps the old read and is marked unsure.";
 pub(crate) const NEW_READER_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
 
+pub(crate) const PRERELEASE_UPDATES_LABEL: &str = "Get alpha updates";
+
+pub(crate) const PRERELEASE_UPDATES_HINT: &str = "\
+Offer test builds (alphas and release candidates) as updates. They may have bugs. \
+Turn off to get only stable releases.";
+
+/// Only this app reads `update_channel`. Save checks for updates again.
+pub(crate) const PRERELEASE_UPDATES_APPLIES: &str =
+    "This app checks again when you save. No restart needed.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
     pub capture_output: String,
@@ -140,6 +152,8 @@ pub struct SettingsForm {
     pub shadow: ShadowRecognizerControl,
     /// `reader = "new"`. Independent of the extra-log checkbox.
     pub new_reader: bool,
+    /// `update_channel = "prerelease"`. Read by this app's update check only.
+    pub prerelease_updates: bool,
 }
 
 impl Default for SettingsForm {
@@ -182,6 +196,7 @@ impl SettingsForm {
             overlay_hotkey_enabled: true,
             shadow,
             new_reader: config.reader.is_new(),
+            prerelease_updates: config.wants_prerelease_updates(),
         }
     }
 
@@ -230,13 +245,16 @@ impl SettingsForm {
                 self.set_scoreboard_reader(ScoreboardReader::from_file_flag(value));
             }
             SettingsToggle::NewReader => self.new_reader = value,
+            SettingsToggle::PrereleaseUpdates => self.prerelease_updates = value,
         }
     }
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
-    /// `finished_game_close_secs`, `update_channel`, `setup_completed`, and
-    /// `reader_pack_url`. `shadow_recognizer` comes from the form's persisted
-    /// reader (the file value). An env lock never writes true by itself.
+    /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
+    /// `shadow_recognizer` comes from the form's persisted reader (the file
+    /// value). An env lock never writes true by itself. `update_channel`
+    /// keeps the file's spelling while the checkbox matches it, and becomes
+    /// `prerelease` or `stable` when the checkbox was flipped.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -254,7 +272,7 @@ impl SettingsForm {
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
-            update_channel: base.update_channel.clone(),
+            update_channel: update_channel_for(base, self.prerelease_updates),
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
             reader: if self.new_reader {
@@ -263,6 +281,18 @@ impl SettingsForm {
                 stat_tracker::config::ReaderSetting::OcrV1
             },
         }
+    }
+}
+
+/// `update_channel` to save. An unchanged checkbox keeps `base`'s raw value,
+/// so a save that touches nothing else leaves the file byte for byte.
+pub fn update_channel_for(base: &Config, prerelease: bool) -> String {
+    if prerelease == base.wants_prerelease_updates() {
+        base.update_channel.clone()
+    } else if prerelease {
+        "prerelease".to_string()
+    } else {
+        "stable".to_string()
     }
 }
 
@@ -583,6 +613,7 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     if !demo {
         body = body.push(action_btn("Copy command", false, Message::CopyUpdateCmd));
     }
+    body = body.push(prerelease_updates_block(app));
 
     settings_card("Tracker service", body.into())
 }
@@ -853,6 +884,21 @@ fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     body = body.push(new_reader_block(app));
     body = body.push(shadow_reader_block(app));
     settings_card("Scoreboard reading", body.into())
+}
+
+fn prerelease_updates_block(app: &TrackerApp) -> Element<'_, Message> {
+    column![
+        checkbox(app.settings.prerelease_updates)
+            .label(PRERELEASE_UPDATES_LABEL)
+            .on_toggle(|v| Message::SettingsToggle(SettingsToggle::PrereleaseUpdates, v))
+            .size(16)
+            .text_size(SIZE_BODY)
+            .style(checkbox_style),
+        hint(PRERELEASE_UPDATES_HINT),
+        hint(PRERELEASE_UPDATES_APPLIES),
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn new_reader_block(app: &TrackerApp) -> Element<'_, Message> {
@@ -1188,6 +1234,7 @@ mod tests {
             overlay_hotkey_enabled: true,
             shadow: Config::shadow_control(false, None),
             new_reader: false,
+            prerelease_updates: false,
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());
@@ -1733,5 +1780,132 @@ token = \"not-a-real-token\"
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn alpha_updates_checkbox_maps_to_update_channel_both_ways() {
+        let mut base = base();
+        let form = SettingsForm::from_config_and_shadow(&base, Config::shadow_control(false, None));
+        assert!(!form.prerelease_updates, "default is stable");
+        assert!(form.to_config(&base).update_channel.is_empty());
+
+        for raw in ["prerelease", "PreRelease", " prerelease "] {
+            base.update_channel = raw.to_string();
+            let form =
+                SettingsForm::from_config_and_shadow(&base, Config::shadow_control(false, None));
+            assert!(form.prerelease_updates, "{raw:?} is the opt-in");
+            assert_eq!(
+                form.to_config(&base).update_channel,
+                raw,
+                "unchanged keeps spelling"
+            );
+        }
+
+        base.update_channel.clear();
+        let mut form =
+            SettingsForm::from_config_and_shadow(&base, Config::shadow_control(false, None));
+        form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
+        let on = form.to_config(&base);
+        assert_eq!(on.update_channel, "prerelease");
+        assert!(on.wants_prerelease_updates());
+
+        let mut form =
+            SettingsForm::from_config_and_shadow(&on, Config::shadow_control(false, None));
+        assert!(form.prerelease_updates);
+        form.set_toggle(SettingsToggle::PrereleaseUpdates, false);
+        let off = form.to_config(&on);
+        assert_eq!(off.update_channel, "stable");
+        assert!(!off.wants_prerelease_updates());
+
+        base.update_channel = "beta".to_string();
+        let form = SettingsForm::from_config_and_shadow(&base, Config::shadow_control(false, None));
+        assert!(!form.prerelease_updates, "anything else is stable");
+        assert_eq!(form.to_config(&base).update_channel, "beta");
+    }
+
+    #[test]
+    fn alpha_updates_toggle_preserves_every_other_key() {
+        let raw = "\
+# hand-edited tracker config
+data_dir = \"/tmp/sst-alpha-toggle\"
+player_name = \"the streamer\"
+session_window_secs = 900
+finished_game_close_secs = 240
+debug_ocr = true
+ocr_threads = 2
+shadow_recognizer = true  # keep this comment
+reader = \"new\"
+setup_completed = true
+game_process_names = [\"Overwatch.exe\"]
+
+[auto_detect]
+enabled = false
+poll_interval_secs = 8
+cooldown_secs = 60
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+";
+        let mut text = raw.to_string();
+        for (on, word) in [
+            (true, "prerelease"),
+            (false, "stable"),
+            (true, "prerelease"),
+        ] {
+            let loaded = Config::parse_file_contents(&text).expect("parse");
+            let mut form = SettingsForm::from_config_and_shadow(
+                &loaded,
+                Config::shadow_control(loaded.shadow_recognizer, None),
+            );
+            assert_eq!(form.prerelease_updates, !on);
+            form.set_toggle(SettingsToggle::PrereleaseUpdates, on);
+            let next = form.to_config(&loaded);
+            let mut rest = next.clone();
+            rest.update_channel.clone_from(&loaded.update_channel);
+            assert_eq!(rest, loaded, "only update_channel may change");
+
+            text = Config::text_for_save(Some(&text), &next).expect("save");
+            assert!(
+                text.contains(&format!("update_channel = \"{word}\"")),
+                "{text}"
+            );
+            let read = Config::parse_file_contents(&text).expect("reload");
+            assert_eq!(read.wants_prerelease_updates(), on);
+            assert_eq!(read.data_dir, loaded.data_dir);
+            assert_eq!(read.ocr_threads, Some(2));
+            assert_eq!(read.finished_game_close_secs, 240);
+            assert_eq!(read.session_window_secs, 900);
+            assert!(read.debug_ocr);
+            assert!(read.shadow_recognizer);
+            assert!(read.reader.is_new());
+            assert!(read.setup_completed);
+            assert!(!read.auto_detect.enabled);
+            assert_eq!(read.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(
+                read.sync.as_ref().map(|s| s.token.as_str()),
+                Some("not-a-real-token")
+            );
+            for line in raw.lines() {
+                assert!(text.contains(line), "lost {line:?}:\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn alpha_updates_copy_is_plain_and_does_not_ask_for_a_restart() {
+        for copy in [
+            PRERELEASE_UPDATES_LABEL,
+            PRERELEASE_UPDATES_HINT,
+            PRERELEASE_UPDATES_APPLIES,
+        ] {
+            assert!(!copy.contains('—'), "{copy}");
+            assert!(!copy.contains('–'), "{copy}");
+        }
+        assert_eq!(PRERELEASE_UPDATES_LABEL, "Get alpha updates");
+        assert!(PRERELEASE_UPDATES_HINT.contains("alphas and release candidates"));
+        assert!(PRERELEASE_UPDATES_HINT.contains("only stable releases"));
+        assert!(PRERELEASE_UPDATES_APPLIES.contains("No restart needed"));
+        assert!(!PRERELEASE_UPDATES_HINT.contains("Restart"));
     }
 }
