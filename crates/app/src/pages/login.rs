@@ -299,6 +299,10 @@ fn percent_decode(raw: &str) -> Option<String> {
         match bytes[i] {
             b'%' => {
                 let hex = raw.get(i + 1..i + 3)?;
+                // `from_str_radix` also takes a sign (`%+1`). Only two hex digits.
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
                 out.push(u8::from_str_radix(hex, 16).ok()?);
                 i += 3;
             }
@@ -382,7 +386,9 @@ pub(crate) fn redirect_to_login_return_if_needed(loading: bool, logged_in: bool)
             return;
         };
         let path = window.location().pathname().unwrap_or_default();
-        if is_login_route(&path) {
+        // On `/login` the form takes the path itself. On `/link` the member is
+        // finishing a device link, and leaving would drop it.
+        if is_login_route(&path) || path == super::link::LOGIN_RETURN_PATH || path == "/link/" {
             return;
         }
         if let Some(route) = take_login_return() {
@@ -1111,6 +1117,7 @@ mod tests {
             None
         );
         assert_eq!(login_return_from_search("?return=%2"), None);
+        assert_eq!(login_return_from_search("?return=%+2Freports"), None);
         assert_eq!(login_return_from_search("?return=%2Flogin"), None);
     }
 

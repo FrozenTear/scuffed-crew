@@ -970,7 +970,7 @@ pub(crate) fn download_failure_copy(status: Option<u16>) -> &'static str {
 /// A plain link or form would navigate to the API route, so a 404 or 401 left
 /// the app on a raw JSON page. The fetch keeps the officer on this page and
 /// shows the failure under the button. `Err(None)` is a network failure.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 async fn save_report_zip(path: &str, filename: &str) -> Result<(), Option<u16>> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -1013,7 +1013,7 @@ async fn save_report_zip(path: &str, filename: &str) -> Result<(), Option<u16>> 
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(feature = "web", target_arch = "wasm32")))]
 async fn save_report_zip(_path: &str, _filename: &str) -> Result<(), Option<u16>> {
     Err(None)
 }

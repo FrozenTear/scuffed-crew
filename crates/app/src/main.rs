@@ -67,7 +67,11 @@ fn App() -> Element {
         let state = auth();
         // A page such as `/admin/reports` that sent the user to login comes
         // next. `/link` wins when both are set, as on the password form.
-        if !pages::redirect_after_login_if_needed(state.loading, state.is_logged_in()) {
+        if pages::redirect_after_login_if_needed(state.loading, state.is_logged_in()) {
+            // Same as the password form: when `/link` wins, the other path is
+            // dropped, so it cannot pull the member off `/link` after the jump.
+            pages::forget_login_return();
+        } else {
             pages::redirect_to_login_return_if_needed(state.loading, state.is_logged_in());
         }
     });
