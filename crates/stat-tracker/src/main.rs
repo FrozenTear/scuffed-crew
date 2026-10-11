@@ -3311,6 +3311,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
                         let (signal, phase, accolade_map, end_reel, stability, result_read) = tokio::task::spawn_blocking(move || {
+                            let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
@@ -3375,6 +3376,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     POLL_DUMP_KEEP,
                                 );
                             }
+                            stat_tracker::perf::record(
+                                stat_tracker::perf::Stage::PollAnalyze,
+                                analyze_started.elapsed(),
+                            );
                             (signal, phase, accolade_map, end_reel, stability, result_read)
                         }).await.unwrap_or_else(|_| {
                             (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None)
@@ -4264,7 +4269,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         let session_map_known = session_map.is_some();
         let shadow_on = ctx.shadow.is_some();
         let analysis = tokio::task::spawn_blocking(move || {
-            analyze_frame(
+            let started = Instant::now();
+            let analysis = analyze_frame(
                 img,
                 matcher,
                 player_name_owned,
@@ -4272,7 +4278,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 allow_banner_recovery,
                 session_map_known,
                 shadow_on,
-            )
+            );
+            stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
+            analysis
         })
         .await?;
         let analysis = match analysis {
