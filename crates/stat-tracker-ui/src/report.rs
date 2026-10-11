@@ -626,7 +626,10 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     body = body.push(status_block(d));
     body = body.push(actions(d));
 
-    shell(scrollable(body).height(Fill).width(Fill).into(), 620.0)
+    shell(
+        scrollable(body).height(Length::Shrink).width(Fill).into(),
+        620.0,
+    )
 }
 
 fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
@@ -659,7 +662,7 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
         Some(Ok(zip)) => {
             col = col.push(
                 text(format!(
-                    "One zip, {} in total. No screenshots. The log is scrubbed: your name, \
+                    "One zip, {} compressed. No screenshots. The log is scrubbed: your name, \
                      the sync token, the site address, your home folder, account name, and \
                      hostname are replaced.",
                     size_text(zip.bytes.len() as u64)
@@ -716,7 +719,7 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
 
 fn file_line<'a>(path: &str, bytes: u64, sha256: &str) -> Element<'a, Message> {
     column![
-        text(format!("{path}  ({})", size_text(bytes)))
+        text(format!("{path}, {}", size_text(bytes)))
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT),
@@ -733,9 +736,9 @@ fn size_text(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} bytes")
     } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB ({bytes} bytes)", bytes as f64 / 1024.0)
+        format!("{bytes} bytes, {:.1} KB", bytes as f64 / 1024.0)
     } else {
-        format!("{:.1} MB ({bytes} bytes)", bytes as f64 / (1024.0 * 1024.0))
+        format!("{bytes} bytes, {:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -847,31 +850,42 @@ fn actions(d: &ReportDialog) -> Element<'_, Message> {
                 .style(theme::ghost_btn())
                 .on_press(msg(ReportMessage::CancelSave)),
         );
-        let mut save =
-            btn(if d.saving { "Saving..." } else { "Save anyway" }, TEXT).style(theme::chip(true));
-        if d.can_save() {
-            save = save.on_press(msg(ReportMessage::Save));
-        }
-        return out.push(save).into();
+        let label = if d.saving { "Saving..." } else { "Save anyway" };
+        return out
+            .push(action_btn(label, true, d.can_save(), ReportMessage::Save))
+            .into();
     }
     if !d.sent() {
-        let mut save = btn("Save report", TEXT).style(theme::ghost_btn());
-        if d.can_save() {
-            save = save.on_press(msg(ReportMessage::Save));
-        }
+        let save = action_btn("Save report", false, d.can_save(), ReportMessage::Save);
         let failed = matches!(d.send, SendState::Done(SendOutcome::Failed(_)));
         let label = match d.send {
             SendState::Sending => "Sending...",
             _ if failed => "Send again",
             _ => "Send",
         };
-        let mut send = btn(label, TEXT).style(theme::chip(true));
-        if d.can_send() {
-            send = send.on_press(msg(ReportMessage::Send));
-        }
+        let send = action_btn(label, true, d.can_send(), ReportMessage::Send);
         out = out.push(save).push(send);
     }
     out.into()
+}
+
+/// A disabled button is drawn flat with dim text, so it does not look
+/// pressable. Only an enabled primary button gets the accent fill.
+fn action_btn(
+    label: &str,
+    primary: bool,
+    enabled: bool,
+    on_press: ReportMessage,
+) -> iced::widget::Button<'_, Message> {
+    if !enabled {
+        return btn(label, TEXT_3).style(theme::chip(false));
+    }
+    let style = if primary {
+        theme::chip(true)
+    } else {
+        theme::chip(false)
+    };
+    btn(label, TEXT).style(style).on_press(msg(on_press))
 }
 
 fn shell<'a>(body: Element<'a, Message>, max_height: f32) -> Element<'a, Message> {
