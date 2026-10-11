@@ -9,6 +9,7 @@ pub mod mapcrops;
 pub mod ocr;
 pub mod packs;
 pub mod parse;
+pub mod perf;
 pub mod proc_id;
 pub mod reader_apply;
 pub mod sandbox;

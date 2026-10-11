@@ -150,12 +150,18 @@ pub async fn capture_screen_output(
     backend: &CaptureBackend,
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    match backend {
-        CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
-        CaptureBackend::X11 => x11::capture_with_output(output_name).await,
-        CaptureBackend::Portal => portal::capture().await,
-        CaptureBackend::None => Err("no capture backend available".into()),
+    let started = std::time::Instant::now();
+    let (name, result) = match backend {
+        CaptureBackend::Wayshot => ("wayshot", wayshot::capture_with_output(output_name).await),
+        CaptureBackend::X11 => ("x11", x11::capture_with_output(output_name).await),
+        CaptureBackend::Portal => ("portal", portal::capture().await),
+        CaptureBackend::None => return Err("no capture backend available".into()),
+    };
+    if result.is_ok() {
+        crate::perf::set_backend(name);
+        crate::perf::record(crate::perf::Stage::Capture, started.elapsed());
     }
+    result
 }
 
 /// List capture targets for the backend already selected by detect_backend.
