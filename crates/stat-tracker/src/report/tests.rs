@@ -211,8 +211,9 @@ fn section_9_log_fixture_scrubs_everything() {
         "Authorization: Bearer [sync-token]",
         "blob [sync-token] end",
         "posting to [server-url] failed",
-        "opened [home]/x.db",
-        "silverblue [home]/y",
+        // Only the home prefix is replaced; the folders under it stay.
+        "opened [home]/.local/share/scuffed-stat-tracker/x.db",
+        "silverblue [home]/.config/y",
         "account [user] on [host] ok",
         "tag [battletag] joined",
         "scoreboard names [player] [player] self [player]",
@@ -629,5 +630,8 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
     }
     assert!(out.contains("OCR result"), "the message stays:\n{out}");
     assert!(out.contains("map=Busan"), "non-text fields stay:\n{out}");
-    assert!(out.contains("confidence=81"), "non-text fields stay:\n{out}");
+    assert!(
+        out.contains("confidence=81"),
+        "non-text fields stay:\n{out}"
+    );
 }

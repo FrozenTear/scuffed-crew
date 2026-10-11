@@ -442,8 +442,7 @@ pub fn drop_name_fields(line: &str) -> String {
     for caps in FIELD_START_RE.captures_iter(line) {
         let key = caps.get(1).expect("key group");
         let whole = caps.get(0).expect("whole");
-        let drop = NAME_FIELD_KEYS.contains(&key.as_str())
-            || OCR_TEXT_KEYS.contains(&key.as_str());
+        let drop = NAME_FIELD_KEYS.contains(&key.as_str()) || OCR_TEXT_KEYS.contains(&key.as_str());
         fields.push((whole.start(), whole.end(), drop));
     }
     if !fields.iter().any(|f| f.2) {
@@ -650,8 +649,12 @@ mod tests {
             drop_name_fields(spaced),
             "t DEBUG x: player name found via substring in row row=2"
         );
+        // Raw OCR text is dropped on every line (it can hold names), so
+        // only the message stays.
         let plain = "t INFO x: outcome read text=VICTORY";
-        assert_eq!(drop_name_fields(plain), plain);
+        assert_eq!(drop_name_fields(plain), "t INFO x: outcome read");
+        let kept = "t INFO x: outcome read outcome=Victory";
+        assert_eq!(drop_name_fields(kept), kept);
     }
 
     #[test]
