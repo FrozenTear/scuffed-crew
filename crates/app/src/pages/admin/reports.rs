@@ -1,7 +1,7 @@
 //! Officer list of tracker bug reports (`/admin/reports`).
 //!
-//! Non-officers hit the same officer check as the admin layout. Download uses
-//! `GET /api/stat-reports/{id}` from PR 189. The zip is not rendered here.
+//! Non-officers hit the same officer check as the admin layout. Download
+//! fetches the zip and saves it as a file. The zip is not rendered here.
 
 use chrono::Utc;
 use dioxus::prelude::*;
@@ -58,6 +58,7 @@ pub fn AdminReports() -> Element {
                 .unwrap_or_default(),
             retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
             rows,
+            truncated: list.as_ref().is_some_and(|list| list.truncated),
             on_retry: move |_| {
                 refresh += 1;
             },

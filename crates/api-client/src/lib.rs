@@ -85,17 +85,21 @@ impl ClientError {
     }
 }
 
-/// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
-/// toasts explain the failure instead of only showing the status code.
-/// `Retry-After` delay-seconds. HTTP-dates and non-positive values are ignored.
+/// `Retry-After` delay-seconds. HTTP-dates, zero, and waits over
+/// [`scuffed_types::MAX_SHOWN_RETRY_SECONDS`] are ignored, the same range the
+/// JSON `retry_after` uses.
 pub(crate) fn parse_retry_after_header(header: Option<&str>) -> Option<u64> {
     let raw = header?.trim();
     if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    raw.parse::<u64>().ok().filter(|seconds| *seconds >= 1)
+    raw.parse::<u64>()
+        .ok()
+        .filter(|seconds| (1..=scuffed_types::MAX_SHOWN_RETRY_SECONDS).contains(seconds))
 }
 
+/// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
+/// toasts explain the failure instead of only showing the status code.
 fn format_http_error(status: u16, body: &str) -> String {
     if let Some(msg) = scuffed_types::too_many_requests_message(status, body) {
         return msg;
@@ -466,5 +470,17 @@ mod tests {
             None
         );
         assert_eq!(ClientError::http(429, "x", None).retry_after_header(), None);
+        assert_eq!(
+            ClientError::http(429, "x", Some("3600")).retry_after_header(),
+            Some(3600)
+        );
+        assert_eq!(
+            ClientError::http(429, "x", Some("3601")).retry_after_header(),
+            None
+        );
+        assert_eq!(
+            ClientError::http(429, "x", Some("99999999999999999999999")).retry_after_header(),
+            None
+        );
     }
 }

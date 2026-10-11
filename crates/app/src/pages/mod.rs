@@ -54,6 +54,7 @@ pub use link::LinkDevice;
 pub(crate) use link::redirect_after_login_if_needed;
 pub use login::Login;
 pub(crate) use login::capture_initial_login_banner;
+pub(crate) use login::{redirect_to_login_return_if_needed, remember_login_return};
 pub use match_detail::MatchDetail;
 pub use member_profile::MemberProfile;
 pub use members::Members;

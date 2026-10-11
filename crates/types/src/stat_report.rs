@@ -141,9 +141,16 @@ pub struct StatReportListItem {
     pub zip_sha256: Option<String>,
 }
 
+/// Most reports one list response carries. The DB query reads one more row so
+/// the route can tell that older reports were left out.
+pub const STAT_REPORT_LIST_LIMIT: usize = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatReportList {
     pub reports: Vec<StatReportListItem>,
+    /// True when older reports exist past [`STAT_REPORT_LIST_LIMIT`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]

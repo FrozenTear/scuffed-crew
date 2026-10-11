@@ -1,7 +1,7 @@
 //! Member and officer views for tracker bug reports.
 //!
-//! List and withdraw shapes are the shared types from PR 198. The withdraw
-//! request body is not in those types, so it stays here. Officer-only JSON
+//! List and withdraw shapes come from `scuffed_types`. The withdraw request
+//! body is not in those types, so it stays here. Officer-only JSON
 //! keys are omitted for a member. `Option` fields accept that omission.
 //!
 //! The page never renders report contents (reason text, manifest, images, or
@@ -61,11 +61,21 @@ pub(crate) const COPY_UNUSABLE: &str = "This report cannot be changed from this 
 pub(crate) const COPY_DISABLED: &str = "Reports are off right now.";
 pub(crate) const COPY_RATE_LIMIT_WAIT: &str = scuffed_types::TRY_AGAIN_LATER;
 pub(crate) const COPY_OFFICER_SIGN_IN: &str = "Sign in to view reports.";
+pub(crate) const COPY_TRUNCATED: &str =
+    "Showing the newest 1000 reports. Older reports are not listed here.";
+pub(crate) const COPY_DOWNLOADING: &str = "Downloading";
+pub(crate) const COPY_DOWNLOAD_SIGN_IN: &str = "Sign in again to download this report.";
+pub(crate) const COPY_DOWNLOAD_GONE: &str = "This report is no longer available.";
+pub(crate) const COPY_DOWNLOAD_FAILED: &str =
+    "Could not download the report. Try again in a moment.";
 pub(crate) const OFFICER_REPORTS_PATH: &str = "/admin/reports";
+pub(crate) const MY_REPORTS_PATH: &str = "/reports";
 
 pub(crate) const MY_REPORTS_RETRY_ID: &str = "my-reports-retry";
 pub(crate) const OFFICER_REPORTS_RETRY_ID: &str = "officer-reports-retry";
 pub(crate) const CONFIRM_DIALOG_ID: &str = "report-confirm-dialog";
+/// Focus lands here after a delete removes the row that opened the dialog.
+pub(crate) const MY_REPORTS_HEADING_ID: &str = "my-reports-heading";
 pub(crate) const CONFIRM_FORM_ID: &str = "report-confirm-form";
 pub(crate) const CONFIRM_CANCEL_ID: &str = "report-confirm-cancel";
 pub(crate) const CONFIRM_SUBMIT_ID: &str = "report-confirm-submit";
@@ -164,6 +174,9 @@ pub(crate) struct ReportMutation {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct ConfirmGate {
     pending: Option<PendingReportAction>,
+    /// The confirmed request is running. The dialog stays up (its buttons
+    /// disabled) until [`Self::finish`], and a second confirm returns nothing.
+    sending: bool,
 }
 
 impl ConfirmGate {
@@ -179,18 +192,31 @@ impl ConfirmGate {
                 report_id: report_id.to_string(),
                 return_focus_id: opener_focus_id(intent, report_id),
             });
+            self.sending = false;
         }
     }
 
     pub(crate) fn cancel(&mut self) {
         self.pending = None;
+        self.sending = false;
     }
 
-    /// Dialog confirm. This is the only call that returns a request.
+    /// Dialog confirm. This is the only call that returns a request, and it
+    /// returns it once. The dialog stays open until [`Self::finish`].
     #[must_use]
     pub(crate) fn confirm(&mut self) -> Option<ReportMutation> {
-        let pending = self.pending.take()?;
-        mutation_for(pending.intent, &pending.report_id)
+        if self.sending {
+            return None;
+        }
+        let pending = self.pending.as_ref()?;
+        let mutation = mutation_for(pending.intent, &pending.report_id)?;
+        self.sending = true;
+        Some(mutation)
+    }
+
+    /// The confirmed request finished. Closes the dialog.
+    pub(crate) fn finish(&mut self) {
+        self.cancel();
     }
 }
 
@@ -236,7 +262,7 @@ pub(crate) fn mutation_for(intent: ReportIntent, report_id: &str) -> Option<Repo
     Some(ReportMutation { intent, path })
 }
 
-/// Officer download. `GET /api/stat-reports/{id}` from PR 189.
+/// Officer download route for one report.
 pub(crate) fn download_action(report_id: &str) -> Option<String> {
     if !is_report_id(report_id) {
         return None;
@@ -357,11 +383,10 @@ pub(crate) fn is_reports_disabled(status: Option<u16>, body: &str) -> bool {
 
 /// Training consent does not expire. Any other report whose `expires_at` is
 /// strictly before `now` is already due, so the client hides it as well.
+/// Same rule as the server's list filter: no expiry, or an expiry still ahead.
+/// It only matters for a page left open across an expiry.
 pub(crate) fn report_is_current(row: &StatReportListItem, now: DateTime<Utc>) -> bool {
-    if row.training_consent {
-        return true;
-    }
-    !row.expires_at.is_some_and(|expires_at| expires_at < now)
+    row.expires_at.is_none_or(|expires_at| expires_at > now)
 }
 
 pub(crate) fn without_expired(
@@ -377,7 +402,10 @@ pub(crate) fn without_expired(
 /// A plain-text body with no usable wait returns `None`.
 /// [`scuffed_types::json_retry_after`] drops waits outside `1..=3600`, arrays, and null.
 pub(crate) fn retry_after_seconds(body: &str, header_seconds: Option<u64>) -> Option<u64> {
-    scuffed_types::json_retry_after(body).or_else(|| header_seconds.filter(|seconds| *seconds >= 1))
+    scuffed_types::json_retry_after(body).or_else(|| {
+        header_seconds
+            .filter(|seconds| (1..=scuffed_types::MAX_SHOWN_RETRY_SECONDS).contains(seconds))
+    })
 }
 
 pub(crate) fn rate_limit_sentence(seconds: Option<u64>) -> String {
@@ -570,6 +598,11 @@ fn static_copy() -> &'static [&'static str] {
         COPY_DISABLED,
         COPY_RATE_LIMIT_WAIT,
         COPY_OFFICER_SIGN_IN,
+        COPY_TRUNCATED,
+        COPY_DOWNLOADING,
+        COPY_DOWNLOAD_SIGN_IN,
+        COPY_DOWNLOAD_GONE,
+        COPY_DOWNLOAD_FAILED,
         "Too many requests. Try again in 12 seconds.",
         "Too many requests. Try again in 1 second.",
         "My reports",
@@ -615,6 +648,7 @@ pub(crate) fn MyReportsBody(
     #[props(default)] error_body: String,
     #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
+    #[props(default)] truncated: bool,
     pending: Option<PendingReportAction>,
     busy: bool,
     #[props(default)] on_retry: EventHandler<()>,
@@ -627,7 +661,7 @@ pub(crate) fn MyReportsBody(
     rsx! {
         style { {REPORTS_CSS} }
         main { class: "reports-page",
-            h1 { "My reports" }
+            h1 { id: MY_REPORTS_HEADING_ID, tabindex: "-1", "My reports" }
             if screen != MemberScreen::Disabled {
                 p { class: "reports-intro", "{COPY_INTRO_MINE}" }
             }
@@ -635,7 +669,12 @@ pub(crate) fn MyReportsBody(
                 MemberScreen::Loading => rsx! { p { class: "reports-status", "{COPY_LOADING_MINE}" } },
                 MemberScreen::SignIn => rsx! {
                     p { class: "reports-status", "{COPY_SIGN_IN}" }
-                    a { href: "/login", class: "report-btn", "Sign in" }
+                    a {
+                        href: "{login_return_href(MY_REPORTS_PATH)}",
+                        class: "report-btn",
+                        onclick: move |_| remember_login_return(MY_REPORTS_PATH),
+                        "Sign in"
+                    }
                 },
                 MemberScreen::Membership => rsx! {
                     p { class: "reports-status", "{COPY_MEMBERSHIP}" }
@@ -649,7 +688,7 @@ pub(crate) fn MyReportsBody(
                 MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
                 MemberScreen::Disabled => rsx! { p { class: "reports-status", "{COPY_DISABLED}" } },
                 MemberScreen::Ready => rsx! {
-                    div { class: "reports-scroll",
+                    div { class: "reports-scroll", inert: show_dialog,
                         table { class: "reports-table",
                             thead {
                                 tr {
@@ -667,6 +706,9 @@ pub(crate) fn MyReportsBody(
                                 }
                             }
                         }
+                    }
+                    if truncated {
+                        p { class: "reports-sub", "{COPY_TRUNCATED}" }
                     }
                 },
             }
@@ -826,6 +868,7 @@ pub(crate) fn OfficerReportsBody(
     #[props(default)] error_body: String,
     #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
+    #[props(default)] truncated: bool,
     #[props(default)] on_retry: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -896,8 +939,119 @@ pub(crate) fn OfficerReportsBody(
                             }
                         }
                     }
+                    if truncated {
+                        p { class: "reports-sub", "{COPY_TRUNCATED}" }
+                    }
                 }
             },
+        }
+    }
+}
+
+/// Same name the server puts in `Content-Disposition`.
+pub(crate) fn download_filename(report_id: &str) -> String {
+    format!("stat-report-{report_id}.zip")
+}
+
+/// Sentence for a failed download. `None` is a network failure.
+pub(crate) fn download_failure_copy(status: Option<u16>) -> &'static str {
+    match status {
+        Some(401) => COPY_DOWNLOAD_SIGN_IN,
+        Some(403) => COPY_FORBIDDEN,
+        Some(404) => COPY_DOWNLOAD_GONE,
+        Some(429) => COPY_RATE_LIMIT_WAIT,
+        Some(503) => COPY_DISABLED,
+        _ => COPY_DOWNLOAD_FAILED,
+    }
+}
+
+/// Fetch the zip and hand it to the browser as a file.
+///
+/// A plain link or form would navigate to the API route, so a 404 or 401 left
+/// the app on a raw JSON page. The fetch keeps the officer on this page and
+/// shows the failure under the button. `Err(None)` is a network failure.
+#[cfg(target_arch = "wasm32")]
+async fn save_report_zip(path: &str, filename: &str) -> Result<(), Option<u16>> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = web_sys::window().ok_or(None)?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("GET");
+    opts.set_mode(web_sys::RequestMode::SameOrigin);
+    opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
+    let request = web_sys::Request::new_with_str_and_init(path, &opts).map_err(|_| None)?;
+    let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|_| None)?
+        .dyn_into()
+        .map_err(|_| None)?;
+    if !response.ok() {
+        return Err(Some(response.status()));
+    }
+    let blob: web_sys::Blob = JsFuture::from(response.blob().map_err(|_| None)?)
+        .await
+        .map_err(|_| None)?
+        .dyn_into()
+        .map_err(|_| None)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| None)?;
+    let anchor: web_sys::HtmlAnchorElement = window
+        .document()
+        .ok_or(None)?
+        .create_element("a")
+        .map_err(|_| None)?
+        .dyn_into()
+        .map_err(|_| None)?;
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+    anchor.click();
+    // The browser reads the blob after the click returns. Release it later.
+    wasm_bindgen_futures::spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(60_000).await;
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_report_zip(_path: &str, _filename: &str) -> Result<(), Option<u16>> {
+    Err(None)
+}
+
+#[component]
+fn ReportDownload(path: String, filename: String, control_id: String, label: String) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut failure = use_signal(|| None::<&'static str>);
+    let start = move |_| {
+        if busy() {
+            return;
+        }
+        busy.set(true);
+        failure.set(None);
+        let path = path.clone();
+        let filename = filename.clone();
+        spawn(async move {
+            if let Err(status) = save_report_zip(&path, &filename).await {
+                failure.set(Some(download_failure_copy(status)));
+            }
+            busy.set(false);
+        });
+    };
+    rsx! {
+        span { class: "reports-actions",
+            label { r#for: "{control_id}", class: "report-control-label", "{label}" }
+            button {
+                r#type: "button",
+                id: "{control_id}",
+                name: "download-report",
+                class: "report-btn",
+                disabled: busy(),
+                onclick: start,
+                if busy() { "{COPY_DOWNLOADING}" } else { "Download" }
+            }
+        }
+        if let Some(message) = failure() {
+            span { class: "reports-sub reports-error", role: "status", "{message}" }
         }
     }
 }
@@ -926,18 +1080,11 @@ fn officer_row(row: &StatReportListItem) -> Element {
             }
             td {
                 if let Some(action) = download {
-                    form {
-                        method: "get",
-                        action: "{action}",
-                        label { r#for: "{download_id}", class: "report-control-label", "{download_label}" }
-                        button {
-                            r#type: "submit",
-                            id: "{download_id}",
-                            name: "download-report",
-                            value: "1",
-                            class: "report-btn",
-                            "Download"
-                        }
+                    ReportDownload {
+                        path: action,
+                        filename: download_filename(&row.id),
+                        control_id: download_id,
+                        label: download_label,
                     }
                 } else {
                     span { "{COPY_UNUSABLE}" }
@@ -1422,12 +1569,49 @@ mod tests {
         let signed_out_html = html_of(signed_out);
         assert!(signed_out_html.contains(COPY_SIGN_IN), "{signed_out_html}");
         assert!(
-            signed_out_html.contains("href=\"/login\""),
+            signed_out_html.contains("href=\"/login?return=/reports\""),
             "{signed_out_html}"
         );
         for html in [&loading_html, &empty_html, &failed_html, &signed_out_html] {
             assert_plain(html);
         }
+    }
+
+    #[test]
+    fn download_failures_have_plain_sentences() {
+        assert_eq!(download_failure_copy(Some(401)), COPY_DOWNLOAD_SIGN_IN);
+        assert_eq!(download_failure_copy(Some(403)), COPY_FORBIDDEN);
+        assert_eq!(download_failure_copy(Some(404)), COPY_DOWNLOAD_GONE);
+        assert_eq!(download_failure_copy(Some(503)), COPY_DISABLED);
+        assert_eq!(download_failure_copy(Some(500)), COPY_DOWNLOAD_FAILED);
+        assert_eq!(download_failure_copy(None), COPY_DOWNLOAD_FAILED);
+        assert_eq!(
+            download_filename(REPORT_A),
+            format!("stat-report-{REPORT_A}.zip")
+        );
+    }
+
+    #[test]
+    fn a_cut_list_says_older_reports_are_not_listed() {
+        fn view() -> Element {
+            rsx! {
+                OfficerReportsBody {
+                    screen: OfficerScreen::Ready,
+                    rows: vec![row(REPORT_A, true, None)],
+                    truncated: true,
+                }
+            }
+        }
+        assert!(html_of(view).contains(COPY_TRUNCATED));
+        fn full() -> Element {
+            rsx! {
+                OfficerReportsBody {
+                    screen: OfficerScreen::Ready,
+                    rows: vec![row(REPORT_A, true, None)],
+                }
+            }
+        }
+        assert!(!html_of(full).contains(COPY_TRUNCATED));
     }
 
     #[test]
@@ -1450,11 +1634,9 @@ mod tests {
         assert!(html.contains("m-100"), "{html}");
         assert!(html.contains("Member id"), "{html}");
         assert!(html.contains("Download"), "{html}");
-        assert!(
-            html.contains(&format!("action=\"/api/stat-reports/{REPORT_A}\"")),
-            "{html}"
-        );
-        assert!(html.contains("method=\"get\""), "{html}");
+        // The download is a fetch from a button, not a form that leaves the app.
+        assert!(!html.contains("<form"), "{html}");
+        assert!(html.contains("type=\"button\""), "{html}");
         assert!(!html.contains("QXNAME"), "{html}");
         assert!(!html.contains("wrong_stats"), "{html}");
         assert!(!html.contains("9.9.9"), "{html}");
@@ -1532,6 +1714,16 @@ mod tests {
             None,
         );
         assert_eq!(over_hour, COPY_RATE_LIMIT_WAIT);
+        assert_eq!(retry_after_seconds("not json", Some(3601)), None);
+        assert_eq!(
+            visible_load_error(
+                COPY_ERROR_MINE,
+                Some(429),
+                r#"{"error":"rate_limited","retry_after":3601}"#,
+                Some(3601),
+            ),
+            COPY_RATE_LIMIT_WAIT
+        );
         let header_only = retry_after_seconds("not json", Some(4));
         assert_eq!(header_only, Some(4));
         assert_eq!(
@@ -1609,14 +1801,15 @@ mod tests {
             Some(crate::routes::Route::AdminReports {})
         );
         assert_eq!(
-            super::super::login::route_after_sign_in(
+            super::super::login::destination_after_sign_in(
                 true,
+                false,
                 Some(crate::routes::Route::AdminReports {})
             ),
             crate::routes::Route::AdminReports {}
         );
         assert_eq!(
-            super::super::login::route_after_sign_in(true, None),
+            super::super::login::destination_after_sign_in(true, false, None),
             crate::routes::Route::Home {}
         );
         assert!(
@@ -1691,6 +1884,10 @@ mod tests {
         }
         let html = html_of(open);
         assert!(html.contains("id=\"report-confirm-dialog\""), "{html}");
+        assert!(
+            html.contains("inert"),
+            "the table behind the dialog is inert: {html}"
+        );
         assert!(html.contains("tabindex=\"-1\""), "{html}");
         assert!(
             html.contains(&format!("id=\"{}\"", control_id("delete", REPORT_A))),
@@ -1843,7 +2040,7 @@ mod tests {
     }
 
     #[test]
-    fn past_expiry_is_hidden_unless_training_consent() {
+    fn expiry_at_or_before_now_is_hidden_like_the_server() {
         let now = at(2026, 10, 9, 12, 0);
         let past = row(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1874,16 +2071,18 @@ mod tests {
         let member_rows = without_expired(member_rows, now);
         let member_ids: Vec<_> = member_rows.iter().map(|row| row.id.as_str()).collect();
         assert!(!member_ids.contains(&past.id.as_str()));
+        // Same rule as the server: an expiry at or before now is hidden, even
+        // with training consent (withdraw is what sets that expiry).
         assert_eq!(
             member_ids,
             vec![
                 future.id.as_str(),
-                boundary.id.as_str(),
                 missing.id.as_str(),
-                training_past.id.as_str(),
                 training_open.id.as_str(),
             ]
         );
+        assert!(!member_ids.contains(&boundary.id.as_str()));
+        assert!(!member_ids.contains(&training_past.id.as_str()));
         assert_eq!(
             apply_own_filter(MemberScreen::Ready, &PreparedRows::Rows(member_rows), true),
             MemberScreen::Ready
@@ -1920,7 +2119,7 @@ mod tests {
                 None,
                 Some(without_expired(vec![training_past], now).len())
             ),
-            OfficerScreen::Ready
+            OfficerScreen::Empty
         );
     }
 
@@ -1946,6 +2145,8 @@ mod tests {
             format!("/api/stat-reports/{REPORT_A}/withdraw")
         );
         assert!(gate.confirm().is_none());
+        assert!(gate.pending().is_some(), "dialog stays up while sending");
+        gate.finish();
 
         gate.arm(ReportIntent::Withdraw, "not-a-report-id");
         assert!(gate.pending().is_none());
@@ -1962,6 +2163,7 @@ mod tests {
             }
         }
         let html = html_of(closed);
+        assert!(!html.contains("inert"), "no inert without a dialog: {html}");
         assert!(html.contains("Withdraw consent"), "{html}");
         assert!(!html.contains(CONFIRM_FORM_ID), "{html}");
         assert!(

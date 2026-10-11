@@ -193,6 +193,8 @@ const ADMIN_CSS: &str = r#"
 pub fn AdminLayout() -> Element {
     let auth = use_auth();
     let mut nav_open = use_signal(|| false);
+    // A signed-out visit comes back to this page after sign-in.
+    let return_path = use_route::<Route>().to_string();
 
     // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
     use_document_keydown(move |evt| {
@@ -237,6 +239,11 @@ pub fn AdminLayout() -> Element {
                 Link {
                     to: Route::Login {},
                     style: "color:var(--accent);margin-top:0.5rem;",
+                    onclick: move |_| {
+                        if !auth().is_logged_in() {
+                            crate::pages::remember_login_return(&return_path);
+                        }
+                    },
                     "Sign in"
                 }
                 if cfg!(debug_assertions) {

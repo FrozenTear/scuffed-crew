@@ -408,19 +408,24 @@ fn navigate_to_link() {
 }
 
 /// After a full-page sign-in (OAuth lands on `/`), follow the return flag.
-/// Host tests have no browser path, so this does nothing there.
-pub(crate) fn redirect_after_login_if_needed(loading: bool, logged_in: bool) {
+/// Returns true when it navigated to `/link`. Host tests have no browser path,
+/// so this does nothing there.
+pub(crate) fn redirect_after_login_if_needed(loading: bool, logged_in: bool) -> bool {
     let Some(path) = browser_pathname() else {
-        return;
+        return false;
     };
     match link_return_action(loading, logged_in, &path) {
-        LinkReturn::Hold => {}
+        LinkReturn::Hold => false,
         LinkReturn::Clear => {
             let _ = take_return_to_link();
+            false
         }
         LinkReturn::Follow => {
             if take_return_to_link() {
                 navigate_to_link();
+                true
+            } else {
+                false
             }
         }
     }

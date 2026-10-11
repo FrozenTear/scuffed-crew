@@ -10,10 +10,11 @@ use crate::layouts::{focus_element, use_document_keydown};
 use crate::state::use_auth;
 
 use super::stat_reports::{
-    CONFIRM_DIALOG_ID, COPY_DELETED, COPY_WITHDRAWN, ConfirmGate, ListedError, MyReportsBody,
-    PreparedRows, ReportIntent, StatReportList, StatReportWithdrawn, WithdrawTrainingBody,
-    apply_own_filter, apply_reports_switch, confirm_escape_closes, is_reports_disabled,
-    member_screen, mutation_failure_copy, prepare_member_rows, without_expired,
+    CONFIRM_CANCEL_ID, COPY_DELETED, COPY_WITHDRAWN, ConfirmGate, ListedError,
+    MY_REPORTS_HEADING_ID, MyReportsBody, PreparedRows, ReportIntent, StatReportList,
+    StatReportWithdrawn, WithdrawTrainingBody, apply_own_filter, apply_reports_switch,
+    confirm_escape_closes, is_reports_disabled, member_screen, mutation_failure_copy,
+    prepare_member_rows, without_expired,
 };
 
 #[component]
@@ -38,7 +39,7 @@ pub fn MyReports() -> Element {
             }
         }
     });
-    let me = use_resource(|| async move { ApiClient::web().get_me().await });
+    let mut me = use_resource(|| async move { ApiClient::web().get_me().await });
     let mut gate = use_signal(ConfirmGate::default);
     let mut busy = use_signal(|| false);
     let mut switched_off = use_signal(|| false);
@@ -83,7 +84,7 @@ pub fn MyReports() -> Element {
 
     use_effect(move || {
         if gate.read().pending().is_some() {
-            focus_element(CONFIRM_DIALOG_ID);
+            focus_element(CONFIRM_CANCEL_ID);
         }
     });
     use_document_keydown(move |evt| {
@@ -135,13 +136,10 @@ pub fn MyReports() -> Element {
             .read()
             .pending()
             .map(|action| action.return_focus_id.clone());
-        let mutation = gate.write().confirm();
-        if let Some(id) = return_id {
-            focus_element(&id);
-        }
-        let Some(mutation) = mutation else {
+        let Some(mutation) = gate.write().confirm() else {
             return;
         };
+        // The dialog stays up with its buttons disabled until this finishes.
         busy.set(true);
         spawn(async move {
             let client = ApiClient::web();
@@ -156,17 +154,28 @@ pub fn MyReports() -> Element {
                     .map(|body| body.deleted),
             };
             busy.set(false);
+            gate.write().finish();
             match outcome {
                 Ok(deleted_now) => {
-                    let message = match mutation.intent {
-                        ReportIntent::Delete => COPY_DELETED,
-                        ReportIntent::Withdraw if deleted_now => COPY_DELETED,
-                        ReportIntent::Withdraw => COPY_WITHDRAWN,
+                    let removed = mutation.intent == ReportIntent::Delete || deleted_now;
+                    let message = if removed {
+                        COPY_DELETED
+                    } else {
+                        COPY_WITHDRAWN
                     };
                     toast.show(Toast::success(message));
+                    // A deleted row and its button are gone after the refresh.
+                    if removed {
+                        focus_element(MY_REPORTS_HEADING_ID);
+                    } else if let Some(id) = &return_id {
+                        focus_element(id);
+                    }
                     refresh += 1;
                 }
                 Err(err) => {
+                    if let Some(id) = &return_id {
+                        focus_element(id);
+                    }
                     let body = err.http_body().unwrap_or("");
                     if is_reports_disabled(err.http_status(), body) {
                         switched_off.set(true);
@@ -183,6 +192,8 @@ pub fn MyReports() -> Element {
         });
     };
     let on_retry = move |_| {
+        // A failed `/api/auth/me` also lands on the error screen. Retry both.
+        me.restart();
         refresh += 1;
     };
 
@@ -196,6 +207,7 @@ pub fn MyReports() -> Element {
                 .unwrap_or_default(),
             retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
             rows,
+            truncated: list.as_ref().is_some_and(|list| list.truncated),
             pending,
             busy: busy(),
             on_retry,
