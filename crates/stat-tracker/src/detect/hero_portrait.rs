@@ -147,6 +147,14 @@ impl PortraitMatcher {
     }
 }
 
+/// The member's own team 1 row from the highlight alone, without a portrait
+/// match. The portrait only names the hero; the career panel can do that, so
+/// a portrait below the match threshold (the ult-charge ring can overlap it)
+/// must not throw away a row the highlight already found.
+pub fn detect_player_row(scoreboard: &DynamicImage, team_size: usize) -> Option<usize> {
+    detect_player_row_inner(scoreboard, team_size)
+}
+
 /// Detect which row in team 1 is the player's own row.
 /// OW2 highlights the player's row with a slightly lighter/brighter background.
 ///

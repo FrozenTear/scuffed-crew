@@ -3664,7 +3664,14 @@ fn analyze_frame(
     let portrait_match = player_match
         .as_ref()
         .map(|(name, conf, _)| (name.clone(), *conf));
-    let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
+    // The highlighted row stands on its own. A portrait below the match
+    // threshold (2026-10-11: the ult-charge ring over Wrecking Ball's portrait
+    // dropped it to 0.77) used to return no row at all, so every later Tab of
+    // that game was rejected as "player row not found" and the slow full-board
+    // OCR ran each time. The hero still comes from the career panel.
+    let brightness_row_idx = player_match
+        .map(|(_, _, idx)| idx)
+        .or_else(|| detect::hero_portrait::detect_player_row(&scoreboard, team_size));
 
     let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
 
