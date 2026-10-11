@@ -761,7 +761,8 @@ pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opti
 
         // Try substring match first (handles "FROZEN" inside "L7 mRoE FROZEN")
         if cell_text.contains(&name_lower) {
-            tracing::debug!(row = i, text = %cell_text, "player name found via substring in row");
+            // `name` so the report log scrub drops the field (report-bundle §6).
+            tracing::debug!(row = i, name = %cell_text, "player name found via substring in row");
             return Some(i);
         }
 

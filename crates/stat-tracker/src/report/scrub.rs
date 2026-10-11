@@ -1,0 +1,657 @@
+//! Log scrub for report bundles (report-bundle spec section 6).
+//!
+//! Pure functions. [`ScrubContext`] holds the secrets and names to remove,
+//! [`scrub_text`] replaces them with the section 6 placeholders, and
+//! [`scrub_log`] keeps only the timestamped lines inside a [`LogWindow`],
+//! drops reader name fields, and scrubs what is left.
+//!
+//! Every rule finds its matches on the original text. Matches are then taken
+//! longest first. A shorter match that overlaps a longer one is merged into
+//! it, so no part of a matched secret survives beside a placeholder.
+
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use chrono::{DateTime, Duration, Utc};
+use regex::Regex;
+
+pub const PH_SYNC_TOKEN: &str = "[sync-token]";
+pub const PH_SERVER_URL: &str = "[server-url]";
+pub const PH_HOME: &str = "[home]";
+pub const PH_USER: &str = "[user]";
+pub const PH_HOST: &str = "[host]";
+pub const PH_BATTLETAG: &str = "[battletag]";
+pub const PH_PLAYER: &str = "[player]";
+
+/// `log.txt` body when the window holds no line.
+pub const NO_LINES_IN_WINDOW: &str = "[no log lines in window]";
+
+/// Most bytes of scrubbed log kept in `log.txt`. The newest lines win. The
+/// whole bundle must stay under 10 MB uncompressed (section 8).
+pub const LOG_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// First line of `log.txt` when older lines were cut to fit [`LOG_MAX_BYTES`].
+pub const LOG_CUT_NOTE: &str = "[older log lines cut to fit the size cap]";
+
+/// Log field keys whose value is a player name. The field is dropped from
+/// `log.txt`, key and value, not only scrubbed.
+pub const NAME_FIELD_KEYS: &[&str] = &[
+    "name",
+    "names",
+    "player",
+    "players",
+    "player_name",
+    "self_name",
+    "nick",
+    "nickname",
+    "battletag",
+    "row_name",
+];
+
+/// On a line whose message is about a player name, these generic keys also
+/// hold the name text (older daemons logged the matched cell as `text`).
+const NAME_LINE_EXTRA_KEYS: &[&str] = &["text", "read", "cell", "cell_text"];
+
+/// Values the scrub removes. Empty strings and `None` are ignored.
+#[derive(Debug, Clone, Default)]
+pub struct ScrubContext {
+    /// Configured sync token, removed on exact match.
+    pub sync_token: Option<String>,
+    /// Configured server URL. Any URL on its host is removed too.
+    pub server_url: Option<String>,
+    /// Home directory of the account running the app.
+    pub home_dir: Option<PathBuf>,
+    /// Account (login) name.
+    pub account_name: Option<String>,
+    /// Machine hostname.
+    pub hostname: Option<String>,
+    /// Configured player name, with or without the `#` discriminator.
+    pub player_name: Option<String>,
+    /// Every other name read in the window: other players, misreads, and
+    /// short names of one or two characters.
+    pub names: Vec<String>,
+}
+
+impl ScrubContext {
+    /// Context for this machine and this config: sync token and URL, player
+    /// name, home directory, account name, and hostname. `names` starts
+    /// empty; the caller adds the names read in the window.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        let home_dir = dirs::home_dir();
+        let account_name = std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                home_dir
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
+        Self {
+            sync_token: config.sync.as_ref().map(|s| s.token.clone()),
+            server_url: config.sync.as_ref().map(|s| s.server_url.clone()),
+            home_dir,
+            account_name,
+            hostname: local_hostname(),
+            player_name: config.player_name.clone(),
+            names: Vec::new(),
+        }
+    }
+}
+
+/// Kernel hostname, or `None` when it cannot be read.
+pub fn local_hostname() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Time ranges whose lines go into `log.txt`. Bounds are inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogWindow {
+    ranges: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+impl LogWindow {
+    /// Game report: 120 seconds before the first stored capture to 120
+    /// seconds after the last one.
+    pub fn session(first_capture: DateTime<Utc>, last_capture: DateTime<Utc>) -> Self {
+        let pad = Duration::seconds(120);
+        let (a, b) = if first_capture <= last_capture {
+            (first_capture, last_capture)
+        } else {
+            (last_capture, first_capture)
+        };
+        Self {
+            ranges: vec![(a - pad, b + pad)],
+        }
+    }
+
+    /// `crash`, `performance`, or `other` report: the 30 minutes before the
+    /// report is built, plus the 30 minutes before `crash_at` when a crash
+    /// marker exists and that window differs.
+    pub fn log_only(built_at: DateTime<Utc>, crash_at: Option<DateTime<Utc>>) -> Self {
+        let span = Duration::minutes(30);
+        let mut ranges = vec![(built_at - span, built_at)];
+        if let Some(at) = crash_at
+            && at != built_at
+        {
+            ranges.push((at - span, at));
+        }
+        Self { ranges }
+    }
+
+    pub fn contains(&self, t: DateTime<Utc>) -> bool {
+        self.ranges.iter().any(|(a, b)| *a <= t && t <= *b)
+    }
+
+    pub fn ranges(&self) -> &[(DateTime<Utc>, DateTime<Utc>)] {
+        &self.ranges
+    }
+}
+
+static ANSI_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("ansi regex"));
+static BEARER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bbearer\s+([^\s,;]+)").expect("bearer regex"));
+static TOKEN_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9_.\-]{24,}").expect("token regex"));
+static BASE64_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("base64 regex"));
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex")
+});
+static HOME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
+// Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
+// would otherwise leave its first letters behind beside the placeholder.
+static BATTLETAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{M}\p{N}_]{2,}#[0-9]{4,8}").expect("battletag regex"));
+static FIELD_START_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_.]*)=").expect("field regex"));
+
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    start: usize,
+    end: usize,
+    placeholder: &'static str,
+}
+
+/// Replace every section 6 value in `text` with its placeholder.
+pub fn scrub_text(ctx: &ScrubContext, text: &str) -> String {
+    Scrubber::new(ctx).scrub(text)
+}
+
+/// One literal rule, compiled once per bundle.
+struct Literal {
+    re: Regex,
+    whole_token: bool,
+    placeholder: &'static str,
+}
+
+/// [`ScrubContext`] with its literal patterns compiled.
+pub struct Scrubber {
+    literals: Vec<Literal>,
+    server_host: Option<String>,
+}
+
+impl Scrubber {
+    pub fn new(ctx: &ScrubContext) -> Self {
+        let mut literals = Vec::new();
+        let mut add = |needle: &str, ignore_case: bool, whole_token: bool, ph: &'static str| {
+            let needle = needle.trim();
+            if needle.is_empty() {
+                return;
+            }
+            let pattern = format!(
+                "{}{}",
+                if ignore_case { "(?i)" } else { "" },
+                regex::escape(needle)
+            );
+            if let Ok(re) = Regex::new(&pattern) {
+                literals.push(Literal {
+                    re,
+                    whole_token,
+                    placeholder: ph,
+                });
+            }
+        };
+        if let Some(tok) = non_empty(ctx.sync_token.as_deref()) {
+            add(tok, false, false, PH_SYNC_TOKEN);
+        }
+        let server_host = non_empty(ctx.server_url.as_deref()).and_then(url_host);
+        if let Some(url) = non_empty(ctx.server_url.as_deref()) {
+            add(url, true, false, PH_SERVER_URL);
+        }
+        if let Some(host) = &server_host {
+            add(host, true, true, PH_SERVER_URL);
+        }
+        if let Some(home) = ctx.home_dir.as_deref() {
+            let home = home.to_string_lossy();
+            let home = home.trim_end_matches('/');
+            if home.len() > 1 {
+                add(home, false, false, PH_HOME);
+            }
+        }
+        if let Some(user) = non_empty(ctx.account_name.as_deref()) {
+            add(user, true, true, PH_USER);
+        }
+        if let Some(host) = non_empty(ctx.hostname.as_deref()) {
+            add(host, true, true, PH_HOST);
+        }
+        let mut names: Vec<&str> = ctx.names.iter().map(String::as_str).collect();
+        if let Some(player) = non_empty(ctx.player_name.as_deref()) {
+            names.push(player);
+            // The configured name is scrubbed without its discriminator too.
+            if let Some((bare, _)) = player.split_once('#') {
+                names.push(bare);
+            }
+        }
+        for name in names {
+            add(name, true, true, PH_PLAYER);
+        }
+        Self {
+            literals,
+            server_host,
+        }
+    }
+
+    pub fn scrub(&self, text: &str) -> String {
+        let mut spans = Vec::new();
+        let push_re = |re: &Regex, ph: &'static str, out: &mut Vec<Span>| {
+            for m in re.find_iter(text) {
+                out.push(Span {
+                    start: m.start(),
+                    end: m.end(),
+                    placeholder: ph,
+                });
+            }
+        };
+        // Only the credential after the word is replaced.
+        for caps in BEARER_RE.captures_iter(text) {
+            let m = caps.get(1).expect("credential group");
+            spans.push(Span {
+                start: m.start(),
+                end: m.end(),
+                placeholder: PH_SYNC_TOKEN,
+            });
+        }
+        push_re(&TOKEN_RUN_RE, PH_SYNC_TOKEN, &mut spans);
+        push_re(&BASE64_RUN_RE, PH_SYNC_TOKEN, &mut spans);
+        if let Some(host) = &self.server_host {
+            for m in URL_RE.find_iter(text) {
+                if url_host(m.as_str()).is_some_and(|h| h.eq_ignore_ascii_case(host)) {
+                    spans.push(Span {
+                        start: m.start(),
+                        end: m.end(),
+                        placeholder: PH_SERVER_URL,
+                    });
+                }
+            }
+        }
+        push_re(&HOME_RE, PH_HOME, &mut spans);
+        push_re(&BATTLETAG_RE, PH_BATTLETAG, &mut spans);
+        for lit in &self.literals {
+            push_literal(text, lit, &mut spans);
+        }
+        apply_spans(text, spans)
+    }
+}
+
+fn non_empty(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Every occurrence of the literal. With `whole_token`, the characters on
+/// each side must not be letters, digits, or underscores.
+fn push_literal(text: &str, lit: &Literal, out: &mut Vec<Span>) {
+    for m in lit.re.find_iter(text) {
+        if lit.whole_token {
+            let before = text[..m.start()].chars().next_back();
+            let after = text[m.end()..].chars().next();
+            let first = m.as_str().chars().next();
+            let last = m.as_str().chars().next_back();
+            // A boundary only matters next to a word character in the match.
+            if first.is_some_and(is_word_char) && before.is_some_and(is_word_char) {
+                continue;
+            }
+            if last.is_some_and(is_word_char) && after.is_some_and(is_word_char) {
+                continue;
+            }
+        }
+        out.push(Span {
+            start: m.start(),
+            end: m.end(),
+            placeholder: lit.placeholder,
+        });
+    }
+}
+
+/// Longest match first. A match overlapping an accepted one is merged into
+/// it and keeps the longer match's placeholder.
+fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
+    spans.sort_by(|a, b| {
+        (b.end - b.start)
+            .cmp(&(a.end - a.start))
+            .then(a.start.cmp(&b.start))
+    });
+    let mut accepted: Vec<Span> = Vec::new();
+    for s in spans {
+        if s.start == s.end {
+            continue;
+        }
+        let mut merged = s;
+        let mut placeholder = None;
+        accepted.retain(|a| {
+            let overlaps = a.start < merged.end && merged.start < a.end;
+            if overlaps {
+                placeholder.get_or_insert(a.placeholder);
+                merged.start = merged.start.min(a.start);
+                merged.end = merged.end.max(a.end);
+            }
+            !overlaps
+        });
+        if let Some(ph) = placeholder {
+            merged.placeholder = ph;
+        }
+        accepted.push(merged);
+    }
+    accepted.sort_by_key(|s| s.start);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for s in accepted {
+        out.push_str(&text[at..s.start]);
+        out.push_str(s.placeholder);
+        at = s.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Lowercase host of `url`, without port or user info.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next()?
+    } else {
+        authority.split(':').next()?
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Remove terminal colour codes the log writer adds.
+pub fn strip_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+    ANSI_RE.replace_all(line, "")
+}
+
+/// Leading RFC 3339 timestamp of a daemon log line.
+pub fn line_timestamp(line: &str) -> Option<DateTime<Utc>> {
+    let first = line.split_whitespace().next()?;
+    DateTime::parse_from_rfc3339(first)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// Drop name fields (key and value) from one log line.
+pub fn drop_name_fields(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let name_line = lower.contains("player name") || lower.contains("name read");
+    let mut fields: Vec<(usize, usize, bool)> = Vec::new(); // (start, value_start, drop)
+    for caps in FIELD_START_RE.captures_iter(line) {
+        let key = caps.get(1).expect("key group");
+        let whole = caps.get(0).expect("whole");
+        let drop = NAME_FIELD_KEYS.contains(&key.as_str())
+            || (name_line && NAME_LINE_EXTRA_KEYS.contains(&key.as_str()));
+        fields.push((whole.start(), whole.end(), drop));
+    }
+    if !fields.iter().any(|f| f.2) {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    let mut i = 0;
+    while i < fields.len() {
+        let (start, value_start, drop) = fields[i];
+        if start < at {
+            // Inside a quoted value we already skipped.
+            i += 1;
+            continue;
+        }
+        if !drop {
+            i += 1;
+            continue;
+        }
+        let end = if line[value_start..].starts_with('"') {
+            quoted_end(line, value_start)
+        } else {
+            fields
+                .iter()
+                .map(|f| f.0)
+                .find(|&s| s > value_start)
+                .unwrap_or(line.len())
+        };
+        out.push_str(&line[at..start]);
+        at = end;
+        i += 1;
+    }
+    out.push_str(&line[at..]);
+    out
+}
+
+/// End (exclusive) of a Debug-quoted value that opens at `open`.
+fn quoted_end(line: &str, open: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    line.len()
+}
+
+/// `log.txt` body: lines of `raw` (oldest first) inside `window`, colour
+/// codes removed, name fields dropped, values scrubbed. Lines with no
+/// timestamp are left out. Ends with a newline.
+pub fn scrub_log(ctx: &ScrubContext, window: &LogWindow, raw: &str) -> String {
+    let scrubber = Scrubber::new(ctx);
+    let mut kept: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let line = strip_ansi(line);
+        let Some(t) = line_timestamp(&line) else {
+            continue;
+        };
+        if !window.contains(t) {
+            continue;
+        }
+        let line = drop_name_fields(&line);
+        kept.push(scrubber.scrub(line.trim_end()));
+    }
+    if kept.is_empty() {
+        return format!("{NO_LINES_IN_WINDOW}\n");
+    }
+    let mut total: usize = kept.iter().map(|l| l.len() + 1).sum();
+    let mut first = 0;
+    let budget = LOG_MAX_BYTES - LOG_CUT_NOTE.len() - 1;
+    if total > LOG_MAX_BYTES {
+        while total > budget && first < kept.len() {
+            total -= kept[first].len() + 1;
+            first += 1;
+        }
+    }
+    let mut out = String::with_capacity(total + LOG_CUT_NOTE.len() + 1);
+    if first > 0 {
+        out.push_str(LOG_CUT_NOTE);
+        out.push('\n');
+    }
+    for line in &kept[first..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// `daemon.log.1` then `daemon.log` from `data_dir`, oldest first. A missing
+/// file is skipped. Bytes that are not UTF-8 are replaced.
+pub fn read_daemon_logs(data_dir: &Path) -> String {
+    let mut out = String::new();
+    for name in ["daemon.log.1", "daemon.log"] {
+        if let Ok(bytes) = std::fs::read(data_dir.join(name)) {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ScrubContext {
+        ScrubContext {
+            sync_token: Some("sct_FAKEsyncTOKEN0123456789abcdef".into()),
+            server_url: Some("https://crew.example.test/".into()),
+            home_dir: Some(PathBuf::from("/home/qxuser")),
+            account_name: Some("qxuser".into()),
+            hostname: Some("qxhost-box".into()),
+            player_name: Some("QXSelf#24680".into()),
+            names: vec!["QXOther".into(), "QX0ther".into(), "Jo".into()],
+        }
+    }
+
+    #[test]
+    fn each_placeholder_row() {
+        let c = ctx();
+        let cases = [
+            ("tok sct_FAKEsyncTOKEN0123456789abcdef end", "tok [sync-token] end"),
+            ("auth: BEARER abc.def", "auth: BEARER [sync-token]"),
+            ("auth: bearer\tabc.def", "auth: bearer\t[sync-token]"),
+            (
+                "run ABCDEFGHIJKLMNOPQRSTUVWX_y-z.0 end",
+                "run [sync-token] end",
+            ),
+            ("b64 QUJDREVGR0hJSktMTU5PUFFSU1RVVldY+/== end", "b64 [sync-token] end"),
+            (
+                "url https://crew.example.test/api/stats?x=1 and http://CREW.example.test:8443/a",
+                "url [server-url] and [server-url]",
+            ),
+            ("bare host crew.example.test here", "bare host [server-url] here"),
+            ("other https://other.example/x stays", "other https://other.example/x stays"),
+            ("p /home/qxuser/.local/share", "p [home]/.local/share"),
+            ("p /var/home/someone/x", "p [home]/x"),
+            ("p /Users/someone/x", "p [home]/x"),
+            ("user qxuser and /mnt/qxuser/x", "user [user] and /mnt/[user]/x"),
+            ("not qxusers", "not qxusers"),
+            ("on qxhost-box today", "on [host] today"),
+            ("tag Ünïcødé#12345 end", "tag [battletag] end"),
+            ("self QXSelf here and qxself", "self [player] here and [player]"),
+            ("names QXOther QX0ther Jo", "names [player] [player] [player]"),
+            ("Joined is not Jo", "Joined is not [player]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn longer_match_wins_and_overlaps_merge() {
+        let c = ctx();
+        // Home path contains the account name: the longer home match wins.
+        assert_eq!(scrub_text(&c, "/home/qxuser"), "[home]");
+        // BattleTag of the configured player: whole tag goes.
+        assert_eq!(scrub_text(&c, "QXSelf#24680 joined"), "[battletag] joined");
+        // Placeholders are not scrubbed again.
+        let c2 = ScrubContext {
+            names: vec!["player".into(), "home".into()],
+            ..ctx()
+        };
+        assert_eq!(scrub_text(&c2, "player /home/x"), "[player] [home]");
+    }
+
+    #[test]
+    fn name_fields_are_dropped() {
+        let line = "2026-10-09T12:00:00.000001Z  INFO stat_tracker: player_name fetched from server player_name=QXSelf#24680 other=1";
+        assert_eq!(
+            drop_name_fields(line),
+            "2026-10-09T12:00:00.000001Z  INFO stat_tracker: player_name fetched from server other=1"
+        );
+        let quoted = r#"t INFO x: row read name="QX Name \"q\" x=1" row=3"#;
+        assert_eq!(drop_name_fields(quoted), "t INFO x: row read row=3");
+        let spaced = "t DEBUG x: player name found via substring in row row=2 text=qx other name";
+        assert_eq!(
+            drop_name_fields(spaced),
+            "t DEBUG x: player name found via substring in row row=2"
+        );
+        let plain = "t INFO x: outcome read text=VICTORY";
+        assert_eq!(drop_name_fields(plain), plain);
+    }
+
+    #[test]
+    fn window_rules() {
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let w = LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z"));
+        assert!(w.contains(t("2026-10-09T11:58:00Z")));
+        assert!(!w.contains(t("2026-10-09T11:57:59Z")));
+        assert!(w.contains(t("2026-10-09T12:12:00Z")));
+        assert!(!w.contains(t("2026-10-09T12:12:01Z")));
+
+        let w = LogWindow::log_only(t("2026-10-09T12:00:00Z"), Some(t("2026-10-08T09:00:00Z")));
+        assert_eq!(w.ranges().len(), 2);
+        assert!(w.contains(t("2026-10-09T11:30:00Z")));
+        assert!(!w.contains(t("2026-10-09T11:29:59Z")));
+        assert!(w.contains(t("2026-10-08T08:45:00Z")));
+        assert!(!w.contains(t("2026-10-08T09:00:01Z")));
+        let same = LogWindow::log_only(t("2026-10-09T12:00:00Z"), Some(t("2026-10-09T12:00:00Z")));
+        assert_eq!(same.ranges().len(), 1);
+    }
+
+    #[test]
+    fn empty_window_and_untimed_lines() {
+        let t = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let w = LogWindow::log_only(t, None);
+        let raw = "no timestamp here\n2020-01-01T00:00:00Z INFO x: old\n";
+        assert_eq!(scrub_log(&ctx(), &w, raw), "[no log lines in window]\n");
+    }
+
+    #[test]
+    fn ansi_is_stripped_before_the_timestamp_parse() {
+        let raw = "\x1b[2m2026-10-09T11:59:00.123456Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mx\x1b[0m\x1b[2m:\x1b[0m hi";
+        let t = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let out = scrub_log(&ctx(), &LogWindow::log_only(t, None), raw);
+        assert_eq!(out, "2026-10-09T11:59:00.123456Z  INFO x: hi\n");
+    }
+
+    #[test]
+    fn oversized_log_keeps_the_newest_lines() {
+        let t = DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let line = format!("2026-10-09T11:59:00Z INFO x: {}", "a b ".repeat(100));
+        let mut raw = String::new();
+        for i in 0..12_000 {
+            raw.push_str(&format!("{line} n{i}\n"));
+        }
+        let out = scrub_log(&ScrubContext::default(), &LogWindow::log_only(t, None), &raw);
+        assert!(out.len() <= LOG_MAX_BYTES);
+        assert!(out.starts_with(LOG_CUT_NOTE));
+        assert!(out.trim_end().ends_with("n11999"));
+    }
+}

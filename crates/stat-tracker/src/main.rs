@@ -217,7 +217,13 @@ fn unlink_pid_file_if_owner(path: &std::path::Path, owner: u32) -> bool {
             return false;
         }
     };
-    match text.trim().parse::<u32>() {
+    // The file is `pid\nstart_ticks\n` (see `proc_id::format_pid_record`).
+    // Parsing the whole trimmed text as one u32 failed on that second line,
+    // so every clean shutdown logged "not a pid" and left the file behind.
+    match stat_tracker::proc_id::parse_pid_record(&text)
+        .map(|rec| rec.pid)
+        .ok_or(())
+    {
         Ok(pid) if pid == owner => match std::fs::remove_file(path) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -428,6 +434,18 @@ async fn main() -> anyhow::Result<()> {
     if maybe_vacuum(&config.data_dir).await? {
         return Ok(());
     }
+
+    // Crash marker (report-bundle §7). Taken after the pid guard, so a live
+    // daemon never reaches here. A stale run.marker becomes
+    // last_crash.marker with one WARN. The guard removes run.marker when
+    // `main` returns (SIGTERM, Ctrl+C, normal exit); a crash leaves it.
+    let _run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
+        Ok((_, guard)) => Some(guard),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not write run.marker; crash reports will not see this run");
+            None
+        }
+    };
 
     // Log rotate, prune old pre-vacuum backups, auto-vacuum if store is bloated.
     // Must run before open_store (single-writer SurrealKV).
@@ -6099,6 +6117,21 @@ mod tests {
         std::fs::write(&path, owner.to_string()).unwrap();
         assert!(unlink_pid_file_if_owner(&path, owner));
         assert!(!path.exists(), "own pid file should be removed");
+
+        // The record acquire_pid_guard writes: pid plus start ticks.
+        std::fs::write(
+            &path,
+            stat_tracker::proc_id::format_pid_record(owner, Some(999_888)),
+        )
+        .unwrap();
+        assert!(unlink_pid_file_if_owner(&path, owner));
+        assert!(
+            !path.exists(),
+            "a two-line pid record of this process is removed on shutdown"
+        );
+        std::fs::write(&path, "not a pid\n").unwrap();
+        assert!(!unlink_pid_file_if_owner(&path, owner));
+        assert!(path.exists(), "a file that is not a pid record stays");
 
         let replacement = 7777u32;
         std::fs::write(&path, replacement.to_string()).unwrap();
