@@ -437,10 +437,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Crash marker (report-bundle §7). Taken after the pid guard, so a live
     // daemon never reaches here. A stale run.marker becomes
-    // last_crash.marker with one WARN. The guard removes run.marker when
-    // `main` returns (SIGTERM, Ctrl+C, normal exit); a crash leaves it.
-    // `last_seen` is rewritten once a minute until then.
-    let _run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
+    // last_crash.marker with one WARN. run.marker is removed only when the
+    // main loop returns Ok (SIGTERM, Ctrl+C, a normal exit). A panic or an
+    // error return (e.g. keyboard devices lost) leaves it, so the next start
+    // offers a crash report. `last_seen` is rewritten once a minute until then.
+    let run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
         Ok((_, guard)) => {
             tokio::spawn(
                 guard
@@ -503,7 +504,13 @@ async fn main() -> anyhow::Result<()> {
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
         use_new_reader: config.uses_new_reader(),
     });
-    run_loop(ctx).await
+    let result = run_loop(ctx).await;
+    if result.is_ok()
+        && let Some(guard) = run_marker
+    {
+        guard.finish();
+    }
+    result
 }
 
 /// Handle flags that must run before ANY initialization (version/help probes

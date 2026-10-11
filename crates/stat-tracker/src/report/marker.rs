@@ -219,18 +219,10 @@ impl RunMarkerGuard {
         }
     }
 
-    /// Remove the marker now. Same owner check as drop.
+    /// Clean shutdown: stop the heartbeat and remove the marker, but only
+    /// when it still names this process. The daemon calls this only when its
+    /// main loop returned `Ok` (SIGTERM, Ctrl+C, a normal exit).
     pub fn finish(self) {
-        drop(self);
-    }
-}
-
-impl Drop for RunMarkerGuard {
-    fn drop(&mut self) {
-        // A panic that reaches here is a crash, not a clean exit.
-        if std::thread::panicking() {
-            return;
-        }
         let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
         s.stopped = true;
         if !file_names(&s.path, s.marker.pid) {
@@ -244,6 +236,18 @@ impl Drop for RunMarkerGuard {
         {
             tracing::warn!(error = %e, "could not remove run.marker");
         }
+    }
+}
+
+impl Drop for RunMarkerGuard {
+    /// Stop the heartbeat and leave the marker. Any exit that did not go
+    /// through [`Self::finish`] is not clean: a panic, or an error return
+    /// such as "keyboard devices lost" (exit 1, restarted by systemd). Those
+    /// are the "tracking stopped" cases a crash report is for, so the next
+    /// start must find the marker and offer one.
+    fn drop(&mut self) {
+        let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        s.stopped = true;
     }
 }
 
@@ -459,10 +463,30 @@ mod tests {
         let before = read();
         tokio::time::sleep(HEARTBEAT_INTERVAL + std::time::Duration::from_secs(1)).await;
         assert!(read() > before, "last_seen moved within one interval");
-        drop(guard);
+        guard.finish();
         tokio::time::sleep(HEARTBEAT_INTERVAL * 2).await;
-        assert!(task.is_finished(), "the task stops after the guard drops");
+        assert!(task.is_finished(), "the task stops after a clean finish");
         assert!(!run_marker_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn an_exit_without_finish_leaves_the_marker_as_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = write_run_marker(dir.path(), marker(std::process::id())).unwrap();
+        let beat = guard.heartbeat();
+        // An error return from the main loop drops the guard without finish.
+        drop(guard);
+        assert!(
+            run_marker_path(dir.path()).exists(),
+            "an error exit is not clean, so the marker stays"
+        );
+        let kept = std::fs::read_to_string(run_marker_path(dir.path())).unwrap();
+        beat.touch(t("2026-10-11T12:00:00Z")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(run_marker_path(dir.path())).unwrap(),
+            kept,
+            "the heartbeat stops at the drop, so last_seen stays at the last beat"
+        );
     }
 
     #[test]
@@ -470,7 +494,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = write_run_marker(dir.path(), marker(std::process::id())).unwrap();
         std::fs::write(run_marker_path(dir.path()), marker(7).format()).unwrap();
-        drop(guard);
+        guard.finish();
         assert!(run_marker_path(dir.path()).exists());
     }
 
