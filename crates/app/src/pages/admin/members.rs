@@ -221,6 +221,9 @@ pub fn AdminMembers() -> Element {
     let mut stats_data: Signal<Option<AttendanceStats>> = use_signal(|| None);
     let mut stats_loading = use_signal(|| false);
     let mut stats_error: Signal<Option<String>> = use_signal(|| None);
+    // In-flight stats fetch. Reopening or closing cancels it, so a slow
+    // response for one member never lands in another member's modal.
+    let mut stats_task: Signal<Option<dioxus::dioxus_core::Task>> = use_signal(|| None);
 
     // Game accounts modal
     let mut accts_modal = ModalController::<Member>::new();
@@ -410,12 +413,15 @@ pub fn AdminMembers() -> Element {
     // --- Stats handlers ---
 
     let mut open_stats = move |member: Member| {
+        if let Some(task) = stats_task.take() {
+            task.cancel();
+        }
         stats_data.set(None);
         stats_error.set(None);
         stats_loading.set(true);
         let mid = member.id.clone();
         stats_modal.show(member);
-        spawn(async move {
+        let task = spawn(async move {
             match ApiClient::web()
                 .fetch::<AttendanceStats>(&format!("/api/members/{mid}/attendance/stats"))
                 .await
@@ -425,9 +431,13 @@ pub fn AdminMembers() -> Element {
             }
             stats_loading.set(false);
         });
+        stats_task.set(Some(task));
     };
 
     let mut on_stats_close = move |_| {
+        if let Some(task) = stats_task.take() {
+            task.cancel();
+        }
         stats_modal.close();
     };
 
@@ -1285,6 +1295,27 @@ mod tests {
             admin_avatar_upload_url("a b/c+d"),
             "/api/upload/avatar?member_id=a%20b%2Fc%2Bd"
         );
+    }
+
+    #[test]
+    fn stats_modal_cancels_the_previous_fetch() {
+        // The fetch is a spawned task, so this guards the wiring in source.
+        // Split so this test does not contain the code it is looking for.
+        let src = include_str!("members.rs");
+        let cancel = format!("stats_task.{}", "take()");
+        for handler in ["open_stats", "on_stats_close"] {
+            let start = format!("let mut {handler} = {}", "move |");
+            let body = src
+                .split(start.as_str())
+                .nth(1)
+                .and_then(|rest| rest.split("\n    };").next())
+                .unwrap_or_else(|| panic!("{handler} not found"));
+            assert!(
+                body.contains(&cancel),
+                "{handler} must cancel the in-flight stats fetch"
+            );
+        }
+        assert!(src.contains(&format!("stats_task.{}", "set(Some(task))")));
     }
 
     #[test]
