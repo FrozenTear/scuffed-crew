@@ -68,10 +68,10 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         serde_json::to_string(body).map_err(|e| ClientError::Network(format!("Serialize: {e}")))?;
 
     let request = build_json_request(method, &url, &json_body)?;
-    let (status, text, _) = do_fetch(&request).await?;
+    let (status, text, retry_after) = do_fetch(&request).await?;
 
     if status >= 400 {
-        return Err(ClientError::Http { status, body: text });
+        return Err(ClientError::http(status, text, retry_after.as_deref()));
     }
 
     crate::decode_body(&text)
@@ -87,10 +87,10 @@ pub async fn get<T: serde::de::DeserializeOwned>(
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text, _) = do_fetch(&request).await?;
+    let (status, text, retry_after) = do_fetch(&request).await?;
 
     if status >= 400 {
-        return Err(ClientError::Http { status, body: text });
+        return Err(ClientError::http(status, text, retry_after.as_deref()));
     }
 
     crate::decode_body(&text)
@@ -103,10 +103,10 @@ pub async fn post_empty(base_url: &str, path: &str) -> Result<(), ClientError> {
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text, _) = do_fetch(&request).await?;
+    let (status, text, retry_after) = do_fetch(&request).await?;
 
     if status >= 400 {
-        return Err(ClientError::Http { status, body: text });
+        return Err(ClientError::http(status, text, retry_after.as_deref()));
     }
 
     Ok(())
@@ -166,10 +166,10 @@ pub async fn delete(base_url: &str, path: &str) -> Result<(), ClientError> {
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, text, _) = do_fetch(&request).await?;
+    let (status, text, retry_after) = do_fetch(&request).await?;
 
     if status >= 400 {
-        return Err(ClientError::Http { status, body: text });
+        return Err(ClientError::http(status, text, retry_after.as_deref()));
     }
 
     Ok(())

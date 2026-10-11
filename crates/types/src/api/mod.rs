@@ -39,6 +39,10 @@ pub struct ApiError {
     pub details: Option<String>,
 }
 
+/// Longest wait, in seconds, a client shows as "Try again in N seconds".
+/// Anything longer reads "Try again later", from the body or the header.
+pub const MAX_SHOWN_RETRY_SECONDS: u64 = 3600;
+
 /// Seconds from a governor JSON body's `retry_after`.
 ///
 /// `{"error":"rate_limited","retry_after":N}` yields `N` when `N` is a JSON
@@ -52,12 +56,12 @@ pub fn json_retry_after(body: &str) -> Option<u64> {
     match value.get("retry_after")? {
         serde_json::Value::Number(number) => number
             .as_u64()
-            .filter(|seconds| (1..=3600).contains(seconds)),
+            .filter(|seconds| (1..=MAX_SHOWN_RETRY_SECONDS).contains(seconds)),
         serde_json::Value::String(text) => text
             .trim()
             .parse::<u64>()
             .ok()
-            .filter(|seconds| (1..=3600).contains(seconds)),
+            .filter(|seconds| (1..=MAX_SHOWN_RETRY_SECONDS).contains(seconds)),
         _ => None,
     }
 }

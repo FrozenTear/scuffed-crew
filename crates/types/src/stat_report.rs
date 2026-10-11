@@ -116,7 +116,7 @@ pub struct StatReportDeleted {
 /// Members receive id, time, size, and the three consent flags. Officer-only
 /// fields are omitted for a member (`skip_serializing_if`). Free text is one
 /// of those fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatReportListItem {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -141,9 +141,16 @@ pub struct StatReportListItem {
     pub zip_sha256: Option<String>,
 }
 
+/// Most reports one list response carries. The DB query reads one more row so
+/// the route can tell that older reports were left out.
+pub const STAT_REPORT_LIST_LIMIT: usize = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatReportList {
     pub reports: Vec<StatReportListItem>,
+    /// True when older reports exist past [`STAT_REPORT_LIST_LIMIT`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]

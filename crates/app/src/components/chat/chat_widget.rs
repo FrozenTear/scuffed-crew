@@ -273,7 +273,11 @@ async fn provision_auth_token(relay_url: &str) -> Result<AuthTokenResponse, Stri
         )
         .await
         .map_err(|e| match e {
-            ClientError::Http { status, body } => chat_api_error_copy(status, &body),
+            ClientError::Http {
+                status,
+                body,
+                retry_after: _,
+            } => chat_api_error_copy(status, &body),
             other => other.to_string(),
         })
 }
@@ -294,7 +298,11 @@ async fn send_officer_message(
         .await
     {
         Ok(r) => Ok(r),
-        Err(ClientError::Http { status: 400, body }) => {
+        Err(ClientError::Http {
+            status: 400,
+            body,
+            retry_after: _,
+        }) => {
             if body.contains("External key") {
                 return Err(chat_api_error_copy(400, &body));
             }
@@ -304,11 +312,19 @@ async fn send_officer_message(
                 .await
             {
                 Ok(r) => Ok(r),
-                Err(ClientError::Http { status, body }) => Err(chat_api_error_copy(status, &body)),
+                Err(ClientError::Http {
+                    status,
+                    body,
+                    retry_after: _,
+                }) => Err(chat_api_error_copy(status, &body)),
                 Err(e) => Err(e.to_string()),
             }
         }
-        Err(ClientError::Http { status, body }) => Err(chat_api_error_copy(status, &body)),
+        Err(ClientError::Http {
+            status,
+            body,
+            retry_after: _,
+        }) => Err(chat_api_error_copy(status, &body)),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -323,7 +339,11 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
         .await
     {
         Ok(r) => r,
-        Err(ClientError::Http { status: 400, body }) => {
+        Err(ClientError::Http {
+            status: 400,
+            body,
+            retry_after: _,
+        }) => {
             if body.contains("External key") {
                 return Err(chat_api_error_copy(400, &body));
             }
@@ -332,11 +352,19 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
                 .post_json::<_, DecryptMessageResponse>("/api/chat/decrypt", &req)
                 .await
                 .map_err(|e| match e {
-                    ClientError::Http { status, body } => chat_api_error_copy(status, &body),
+                    ClientError::Http {
+                        status,
+                        body,
+                        retry_after: _,
+                    } => chat_api_error_copy(status, &body),
                     other => other.to_string(),
                 })?
         }
-        Err(ClientError::Http { status, body }) => return Err(chat_api_error_copy(status, &body)),
+        Err(ClientError::Http {
+            status,
+            body,
+            retry_after: _,
+        }) => return Err(chat_api_error_copy(status, &body)),
         Err(e) => return Err(e.to_string()),
     };
     let group_id = resp

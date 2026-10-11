@@ -1540,6 +1540,60 @@ async fn expired_reports_are_hidden_from_list_and_download() {
 }
 
 #[tokio::test]
+async fn a_list_past_the_limit_is_cut_and_marked_truncated() {
+    let h = harness().await;
+    let limit = scuffed_types::STAT_REPORT_LIST_LIMIT;
+    let base = Utc::now() - Duration::hours(1);
+    for i in 0..=limit {
+        h.state
+            .db
+            .insert_stat_report(&scuffed_db::types::NewStatReport {
+                id: format!("{i:032x}"),
+                member_id: "membermember".into(),
+                created_at: base + Duration::milliseconds(i as i64),
+                reason_category: "other".into(),
+                reason_text: String::new(),
+                app_version: "0.0.0".into(),
+                recognizer_matcher: "cv-v5".into(),
+                recognizer_ocr: "ocr-v1".into(),
+                training_consent: true,
+                own_name_included: false,
+                glyphs_included: false,
+                size_bytes: 1,
+                zip_sha256: "0".repeat(64),
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    for token in [MEMBER_TOKEN, OFFICER_TOKEN] {
+        let (status, list) =
+            send(&h.app, Method::GET, "/api/stat-reports", Some(token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = list["reports"].as_array().unwrap();
+        assert_eq!(rows.len(), limit, "{token}");
+        assert_eq!(list["truncated"], json!(true), "{token}");
+        // Newest first, so the oldest row (id 0) is the one left out.
+        assert!(
+            rows.iter()
+                .all(|row| row["id"] != json!(format!("{:032x}", 0)))
+        );
+    }
+
+    let small = harness().await;
+    let (status, list) = send(
+        &small.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.get("truncated").is_none(), "{list}");
+}
+
+#[tokio::test]
 async fn download_sets_attachment_and_nosniff_headers() {
     let h = harness().await;
     let (status, created) = send(

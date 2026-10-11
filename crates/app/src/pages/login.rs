@@ -165,7 +165,12 @@ fn body_error_or(body: &str, fallback: &str) -> String {
 /// `Try again in N s` for a usable wait. Any other 429 is
 /// `Too many requests. Try again later.`
 fn client_rate_limit_message(err: &scuffed_api_client::ClientError) -> Option<String> {
-    let scuffed_api_client::ClientError::Http { status, body } = err else {
+    let scuffed_api_client::ClientError::Http {
+        status,
+        body,
+        retry_after: _,
+    } = err
+    else {
         return None;
     };
     scuffed_types::too_many_requests_message(*status, body)
@@ -183,9 +188,11 @@ fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
         scuffed_api_client::ClientError::Http { status: 409, .. } => {
             "Could not create account. Try a different username.".into()
         }
-        scuffed_api_client::ClientError::Http { status: 400, body } => {
-            body_error_or(body, "Check your input")
-        }
+        scuffed_api_client::ClientError::Http {
+            status: 400,
+            body,
+            retry_after: _,
+        } => body_error_or(body, "Check your input"),
         scuffed_api_client::ClientError::Http { status: 403, .. } => {
             "Registration is currently closed".into()
         }
@@ -236,10 +243,35 @@ fn login_banner_from_search(search: &str) -> Option<&'static str> {
     login_error_banner(login_error_code(search))
 }
 
-/// Where a successful sign-in goes. `/link` arms the return flag with no code.
-fn destination_after_sign_in(is_member: bool, return_to_link: bool) -> Route {
+/// Same-origin route to open after sign-in. Rejects off-site and login loops.
+pub(crate) fn safe_return_route(raw: &str) -> Option<Route> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || !raw.starts_with('/')
+        || raw.starts_with("//")
+        || raw.contains('\\')
+        || raw.contains("://")
+    {
+        return None;
+    }
+    let path = raw.split(['?', '#']).next().unwrap_or(raw);
+    match Route::from_str(path).ok()? {
+        Route::NotFound { .. } | Route::Login {} => None,
+        route => Some(route),
+    }
+}
+
+/// Where a successful sign-in goes: `/link` first, then a remembered
+/// in-app return path, then Home for members and Apply for everyone else.
+pub(crate) fn destination_after_sign_in(
+    is_member: bool,
+    return_to_link: bool,
+    return_to: Option<Route>,
+) -> Route {
     if return_to_link {
         Route::LinkDevice {}
+    } else if let Some(route) = return_to {
+        route
     } else if is_member {
         Route::Home {}
     } else {
@@ -247,10 +279,176 @@ fn destination_after_sign_in(is_member: bool, return_to_link: bool) -> Route {
     }
 }
 
-/// Read the `/link` return, then clear it.
+fn login_return_from_search(search: &str) -> Option<String> {
+    let query = search.strip_prefix('?').unwrap_or(search);
+    let value = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "return").then_some(value)
+    })?;
+    let path = percent_decode(value.trim())?;
+    safe_return_route(&path).map(|route| route.to_string())
+}
+
+/// `%2Fadmin%2Freports` becomes `/admin/reports`. A broken escape or bytes that
+/// are not UTF-8 give `None`, so the value is dropped rather than guessed.
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = raw.get(i + 1..i + 3)?;
+                // `from_str_radix` also takes a sign (`%+1`). Only two hex digits.
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn login_return_from_browser_url(url: &str) -> Option<String> {
+    let without_hash = url.split_once('#').map(|(path, _)| path).unwrap_or(url);
+    let (path, search) = without_hash.split_once('?').unwrap_or((without_hash, ""));
+    if !is_login_route(path) {
+        return None;
+    }
+    login_return_from_search(search)
+}
+
+/// In-tab copy of the return path. Host tests read this one. Wasm also writes
+/// `sessionStorage`, because Discord and Google sign-in leave the app and come
+/// back on `/` with fresh memory (the `/link` flag does the same).
+static LOGIN_RETURN: Mutex<Option<String>> = Mutex::new(None);
+
+const LOGIN_RETURN_STORAGE_KEY: &str = "scuffed.login-return";
+
+/// A stored path older than this is dropped. An abandoned OAuth sign-in must
+/// not send a sign-in much later in the same tab to that page.
+const LOGIN_RETURN_MAX_AGE_MS: f64 = 15.0 * 60.0 * 1000.0;
+
+fn login_return_lock() -> std::sync::MutexGuard<'static, Option<String>> {
+    LOGIN_RETURN.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Remember a safe in-app path. The next successful sign-in opens it once.
+pub(crate) fn remember_login_return(path: &str) {
+    if let Some(route) = safe_return_route(path) {
+        let path = route.to_string();
+        store_login_return(&path);
+        *login_return_lock() = Some(path);
+    }
+}
+
+fn remember_login_return_from_url(url: &str) {
+    if let Some(path) = login_return_from_browser_url(url) {
+        remember_login_return(&path);
+    }
+}
+
+/// Drop a remembered path that no sign-in used. The login page calls this on
+/// an in-app unmount, so leaving `/login` without signing in does not send a
+/// later, unrelated sign-in to that path. A full-page OAuth jump does not
+/// unmount, so the stored copy survives it.
+pub(crate) fn forget_login_return() {
+    *login_return_lock() = None;
+    let _ = take_stored_login_return();
+}
+
+pub(crate) fn take_login_return() -> Option<Route> {
+    let memory = login_return_lock().take();
+    let stored = take_stored_login_return();
+    safe_return_route(&memory.or(stored)?)
+}
+
+/// After a full-page sign-in (OAuth lands on `/`), open the remembered path.
+/// Called from the app root next to the `/link` return. Host tests have no
+/// browser, so this does nothing there.
+pub(crate) fn redirect_to_login_return_if_needed(loading: bool, logged_in: bool) {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        if loading || !logged_in {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let path = window.location().pathname().unwrap_or_default();
+        // On `/login` the form takes the path itself. On `/link` the member is
+        // finishing a device link, and leaving would drop it.
+        if is_login_route(&path) || path == super::link::LOGIN_RETURN_PATH || path == "/link/" {
+            return;
+        }
+        if let Some(route) = take_login_return() {
+            let target = route.to_string();
+            if target != path {
+                let _ = window.location().set_href(&target);
+            }
+        }
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        let _ = (loading, logged_in);
+    }
+}
+
+fn store_login_return(path: &str) {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        if let Some(storage) = session_storage() {
+            let value = format!("{}|{path}", js_sys::Date::now());
+            let _ = storage.set_item(LOGIN_RETURN_STORAGE_KEY, &value);
+        }
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        let _ = path;
+    }
+}
+
+fn take_stored_login_return() -> Option<String> {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        let storage = session_storage()?;
+        let value = storage.get_item(LOGIN_RETURN_STORAGE_KEY).ok().flatten();
+        let _ = storage.remove_item(LOGIN_RETURN_STORAGE_KEY);
+        stored_return_if_fresh(&value?, js_sys::Date::now())
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        None
+    }
+}
+
+/// `"<saved ms>|<path>"` from storage, when it is younger than the max age.
+fn stored_return_if_fresh(value: &str, now_ms: f64) -> Option<String> {
+    let (saved, path) = value.split_once('|')?;
+    let saved: f64 = saved.parse().ok()?;
+    let age = now_ms - saved;
+    ((0.0..=LOGIN_RETURN_MAX_AGE_MS).contains(&age)).then(|| path.to_string())
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+fn session_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.session_storage().ok().flatten()
+}
+
+/// Read the `/link` return and the remembered return path, then clear both.
 ///
 /// `honor_link_return` is false for a sign-in that never goes back to `/link`
-/// (register). That still clears a flag left in the tab.
+/// or to a return path (register). That still clears what was left in the tab.
 fn route_after_credentials(is_member: bool, honor_link_return: bool) -> Route {
     let return_to_link = if honor_link_return {
         super::link::take_return_to_link()
@@ -258,7 +456,9 @@ fn route_after_credentials(is_member: bool, honor_link_return: bool) -> Route {
         false
     };
     super::link::clear_return_to_link();
-    destination_after_sign_in(is_member, return_to_link)
+    let return_to = take_login_return();
+    let return_to = if honor_link_return { return_to } else { None };
+    destination_after_sign_in(is_member, return_to_link, return_to)
 }
 
 /// Banner for a browser URL in the shape `history.current_route()` returns
@@ -321,6 +521,7 @@ fn capture_login_banner_from_url(url: &str) {
         return;
     }
     *slot = LoginBannerSlot::Ready(login_banner_from_browser_url(url));
+    remember_login_return_from_url(url);
 }
 
 fn initial_browser_url() -> String {
@@ -381,6 +582,9 @@ pub fn Login() -> Element {
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
     let nav = use_navigator();
+    // A successful sign-in takes the path before it navigates away, so this
+    // only clears a path nobody used.
+    use_drop(forget_login_return);
 
     let setup = use_resource(|| async move {
         ApiClient::web()
@@ -782,6 +986,7 @@ mod tests {
         scuffed_api_client::ClientError::Http {
             status,
             body: body.to_string(),
+            retry_after: None,
         }
     }
 
@@ -862,12 +1067,94 @@ mod tests {
 
     #[test]
     fn sign_in_from_link_returns_to_link_without_a_query() {
-        assert_eq!(destination_after_sign_in(true, true), Route::LinkDevice {});
-        assert_eq!(destination_after_sign_in(false, true), Route::LinkDevice {});
+        assert_eq!(
+            destination_after_sign_in(true, true, None),
+            Route::LinkDevice {}
+        );
+        assert_eq!(
+            destination_after_sign_in(false, true, None),
+            Route::LinkDevice {}
+        );
         assert_eq!(Route::LinkDevice {}.to_string(), "/link");
         assert!(!Route::LinkDevice {}.to_string().contains('?'));
-        assert_eq!(destination_after_sign_in(true, false), Route::Home {});
-        assert_eq!(destination_after_sign_in(false, false), Route::Apply {});
+        assert_eq!(destination_after_sign_in(true, false, None), Route::Home {});
+        assert_eq!(
+            destination_after_sign_in(false, false, None),
+            Route::Apply {}
+        );
+    }
+
+    #[test]
+    fn link_return_beats_a_remembered_path_and_the_path_beats_home() {
+        let reports = Some(Route::AdminReports {});
+        assert_eq!(
+            destination_after_sign_in(true, true, reports.clone()),
+            Route::LinkDevice {}
+        );
+        assert_eq!(
+            destination_after_sign_in(true, false, reports.clone()),
+            Route::AdminReports {}
+        );
+        assert_eq!(
+            destination_after_sign_in(false, false, reports),
+            Route::AdminReports {}
+        );
+    }
+
+    #[test]
+    fn return_query_is_percent_decoded_and_still_checked() {
+        assert_eq!(
+            login_return_from_search("?return=%2Fadmin%2Freports"),
+            Some("/admin/reports".into())
+        );
+        assert_eq!(
+            login_return_from_search("?return=/reports"),
+            Some("/reports".into())
+        );
+        assert_eq!(login_return_from_search("?return=%2F%2Fevil.example"), None);
+        assert_eq!(
+            login_return_from_search("?return=https%3A%2F%2Fevil.example"),
+            None
+        );
+        assert_eq!(login_return_from_search("?return=%2"), None);
+        assert_eq!(login_return_from_search("?return=%+2Freports"), None);
+        assert_eq!(login_return_from_search("?return=%2Flogin"), None);
+    }
+
+    #[test]
+    fn a_stored_return_expires_after_fifteen_minutes() {
+        let saved = 1_000_000.0;
+        assert_eq!(
+            stored_return_if_fresh("1000000|/admin/reports", saved + 60_000.0),
+            Some("/admin/reports".into())
+        );
+        assert_eq!(
+            stored_return_if_fresh(
+                "1000000|/admin/reports",
+                saved + LOGIN_RETURN_MAX_AGE_MS + 1.0
+            ),
+            None
+        );
+        assert_eq!(
+            stored_return_if_fresh("1000000|/reports", saved - 1.0),
+            None
+        );
+        assert_eq!(stored_return_if_fresh("garbage", saved), None);
+    }
+
+    #[test]
+    fn leaving_login_forgets_an_unused_return_path() {
+        remember_login_return("/admin/reports");
+        forget_login_return();
+        assert_eq!(take_login_return(), None);
+    }
+
+    #[test]
+    fn register_clears_a_remembered_path_and_goes_to_apply() {
+        super::super::link::clear_return_to_link();
+        remember_login_return("/admin/reports");
+        assert_eq!(route_after_credentials(false, false), Route::Apply {});
+        assert_eq!(take_login_return(), None);
     }
 
     #[test]

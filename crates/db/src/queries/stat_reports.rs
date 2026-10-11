@@ -127,6 +127,8 @@ impl Database {
         .await
     }
 
+    /// Newest reports first, at most [`scuffed_types::STAT_REPORT_LIST_LIMIT`]
+    /// plus one row. The extra row tells the route that the list was cut.
     pub async fn list_stat_reports_for_member(&self, member_id: &str) -> DbResult<Vec<StatReport>> {
         let member_id = member_id.to_string();
         with_timeout(async {
@@ -134,7 +136,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM stat_report WHERE member_id = $member_id \
-                     ORDER BY created_at DESC LIMIT 1000",
+                     ORDER BY created_at DESC LIMIT 1001",
                 )
                 .bind(("member_id", member_id))
                 .await?;
@@ -144,11 +146,13 @@ impl Database {
         .await
     }
 
+    /// Every member's reports, newest first. Same one-row overshoot as
+    /// [`Self::list_stat_reports_for_member`].
     pub async fn list_stat_reports(&self) -> DbResult<Vec<StatReport>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM stat_report ORDER BY created_at DESC LIMIT 1000")
+                .query("SELECT * FROM stat_report ORDER BY created_at DESC LIMIT 1001")
                 .await?;
             let rows: Vec<DbStatReport> = result.take(0)?;
             Ok(rows.into_iter().map(db_to_report).collect())

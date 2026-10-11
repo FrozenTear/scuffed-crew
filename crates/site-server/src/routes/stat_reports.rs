@@ -309,13 +309,18 @@ pub async fn list_stat_reports(
         tracing::error!(%error, "stat report list failed");
         err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
     })?;
-    let rows: Vec<_> = rows.into_iter().filter(report_is_current).collect();
+    let truncated = rows.len() > scuffed_types::STAT_REPORT_LIST_LIMIT;
+    let rows: Vec<_> = rows
+        .into_iter()
+        .take(scuffed_types::STAT_REPORT_LIST_LIMIT)
+        .filter(report_is_current)
+        .collect();
     let reports = if officer {
         rows.iter().map(officer_item).collect()
     } else {
         rows.iter().map(member_item).collect()
     };
-    Ok(Json(StatReportList { reports }))
+    Ok(Json(StatReportList { reports, truncated }))
 }
 
 /// GET /api/stat-reports/{id}
