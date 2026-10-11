@@ -180,6 +180,29 @@ printf '%s\n' "$rc" | grep -F '## Requirements & install' >/dev/null \
   || fail "rc tag did not print the footer"
 pass "rc tag with no changelog section still prints the footer"
 
+# Alpha is not an rc. A missing section still fails the notes build.
+set +e
+alpha_missing="$(bash "$NOTES" --tag stat-tracker-v9.9.9-alpha.1 --changelog "$TMP/empty.md" --skip-commits 2>"$TMP/alpha-missing.err")"
+alpha_missing_code=$?
+set -e
+[[ "$alpha_missing_code" -ne 0 ]] || fail "alpha tag with no changelog section exited 0"
+[[ -z "$alpha_missing" ]] || fail "alpha tag with no section still printed notes"
+grep -q 'no ## 9.9.9-alpha.1 section' "$TMP/alpha-missing.err" \
+  || fail "alpha missing-section error was: $(cat "$TMP/alpha-missing.err")"
+pass "alpha tag with no changelog section exits 1"
+
+PINNED_ALPHA='curl --proto '"'"'=https'"'"' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.1/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.1 bash'
+alpha_body="$(bash "$NOTES" --tag stat-tracker-v0.5.0-alpha.1 --skip-commits)"
+printf '%s\n' "$alpha_body" | grep -F "$PINNED_ALPHA" >/dev/null \
+  || fail "generated 0.5.0-alpha.1 notes missing the pinned curl"
+printf '%s\n' "$alpha_body" | grep -F "$MAIN_URL" >/dev/null \
+  && fail "generated 0.5.0-alpha.1 notes fetch bootstrap.sh from main"
+printf '%s\n' "$alpha_body" | grep -q $'\u2014' \
+  && fail "generated 0.5.0-alpha.1 notes contain an em dash"
+printf '%s\n' "$alpha_body" | grep -q $'\u2013' \
+  && fail "generated 0.5.0-alpha.1 notes contain an en dash"
+pass "generated 0.5.0-alpha.1 body pins the tag"
+
 # The footer itself has neither dash. An rc tag is the lenient path that
 # still renders that footer when the changelog section is absent.
 printf '%s\n' "$rc" | grep -q $'\u2014' && fail "footer contains an em dash"

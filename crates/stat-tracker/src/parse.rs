@@ -125,6 +125,8 @@ pub fn read_scoreboard(
             edited_at: None,
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+            suspect_fields: Vec::new(),
         },
     })
 }
@@ -217,11 +219,54 @@ fn best_word_score(text: &str, pattern: &str) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-/// Deathmatch maps are kept in the local store and never uploaded.
-/// Only a trusted map read (top bar, accolade, or an already trusted
-/// session) may divert a capture. A fuzzy board read must not.
+/// Modes kept in the local store and never uploaded.
+///
+/// Deathmatch and Practice were already local. Workshop, Elimination,
+/// Capture the Flag, Payload Race, Assault, and Stadium stay local too,
+/// until there is a decision on whether those games count.
+const UNTRACKED_MODES: &[&str] = &[
+    "Deathmatch",
+    "Practice",
+    "Workshop",
+    "Elimination",
+    "Capture the Flag",
+    "Payload Race",
+    "Assault",
+    "Stadium",
+];
+
+/// True when `mode` is one of [`UNTRACKED_MODES`], ignoring ASCII case.
+pub fn mode_is_untracked(mode: &str) -> bool {
+    let mode = mode.trim();
+    UNTRACKED_MODES
+        .iter()
+        .any(|name| mode.eq_ignore_ascii_case(name))
+}
+
+/// Deathmatch, practice, and the other [`UNTRACKED_MODES`] maps are kept
+/// in the local store and never uploaded. Only a trusted map read (top
+/// bar, accolade, or an already trusted session) may divert a capture. A
+/// fuzzy board read must not.
+///
+/// Practice Range is not a game. With no table entry the name used to
+/// canonicalize to nothing, the row kept an empty map, and that empty map
+/// was uploaded. The Practice bucket keeps it out of uploads.
 pub fn map_is_untracked(name: &str) -> bool {
-    map_mode(name) == Some("Deathmatch")
+    map_mode(name).is_some_and(mode_is_untracked)
+}
+
+/// Reason recorded when an untracked map is kept out of uploads.
+pub fn untracked_close_reason(name: &str) -> &'static str {
+    match map_mode(name) {
+        Some("Practice") => "practice: not tracked",
+        Some("Workshop") => "workshop: not tracked",
+        Some("Elimination") => "elimination: not tracked",
+        Some("Capture the Flag") => "capture the flag: not tracked",
+        Some("Payload Race") => "payload race: not tracked",
+        Some("Assault") => "assault: not tracked",
+        Some("Stadium") => "stadium: not tracked",
+        _ => "deathmatch: not tracked",
+    }
 }
 
 /// Mode sent for a row. A known map wins, including a manual map correction.
@@ -289,14 +334,23 @@ pub fn review_suspect_fields(map_name: &str, game_mode: &str, hero: &str) -> Vec
     fields
 }
 
-/// A stats row is uploaded only when neither the map nor the mode is Deathmatch.
+/// A stats row is uploaded only when neither the map nor the mode is in
+/// [`UNTRACKED_MODES`].
 pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
-    !map_is_untracked(map_name) && !game_mode.eq_ignore_ascii_case("Deathmatch")
+    !map_is_untracked(map_name) && !mode_is_untracked(game_mode)
 }
 
 /// Mode stored on a row, from the canonical map that was actually kept.
 pub fn stored_game_mode(canonical: &str) -> String {
     map_mode(canonical).unwrap_or("").to_string()
+}
+
+/// A row with a blank map, mode, or hero must not be uploaded.
+///
+/// Whitespace-only counts as blank. Hero `Unknown` is a real stored value
+/// and is not blank.
+pub fn upload_identity_blank(map_name: &str, game_mode: &str, hero: &str) -> bool {
+    map_name.trim().is_empty() || game_mode.trim().is_empty() || hero.trim().is_empty()
 }
 
 /// Extract the six stats from one OCR'd row. Columns are positional:
@@ -754,9 +808,119 @@ pub fn canonical_map(name: &str) -> Option<String> {
     match_map_in_text(name)
 }
 
+/// Mode word printed on the Tab banner, before the `|` and the map name.
+/// None of these is a map key. A longer banner phrase still starts with one
+/// of them (`PAYLOAD RACE`, `CAPTURE THE FLAG`).
+const BANNER_MODE_WORDS: &[&str] = &[
+    "CONTROL",
+    "ESCORT",
+    "HYBRID",
+    "PUSH",
+    "FLASHPOINT",
+    "CLASH",
+    "ASSAULT",
+    "ELIMINATION",
+    "DEATHMATCH",
+    "PAYLOAD",
+    "CAPTURE",
+];
+
+/// Map text from a Tab banner read.
+///
+/// The banner is `icon MODE | MAP TIME`. The map is the text after the first
+/// real `|`. A leading `|` is icon junk (`| CONTROL | ILIOS`), and the mode
+/// word after that split is dropped too. This split happens before glyph
+/// folding, which would turn `|` into `i` and glue it onto the map
+/// (`|ILIOS` becomes a word the matcher misses). A trailing clock
+/// (`05:12`, or glued on as `ILIOS05:12`) is not part of the name. With no
+/// bar, a mode word in the first few tokens is skipped the same way, and so
+/// is the junk in front of it.
+fn tab_banner_map_text(text: &str) -> &str {
+    let text = text.trim().trim_start_matches('|').trim();
+    let map_side = if let Some((_, right)) = text.split_once('|') {
+        strip_leading_mode(right.trim().trim_start_matches('|').trim())
+    } else {
+        strip_icon_and_mode(text)
+    };
+    strip_trailing_clock(map_side)
+}
+
+/// Drop a mode word that survived the bar split, and a bar glued to it.
+fn strip_leading_mode(text: &str) -> &str {
+    let Some(tok) = text.split_whitespace().next() else {
+        return text;
+    };
+    if !mode_token(tok) {
+        return text;
+    }
+    let Some(rel) = text.find(tok) else {
+        return text;
+    };
+    let after = text[rel + tok.len()..]
+        .trim_start()
+        .trim_start_matches('|')
+        .trim();
+    if after.is_empty() { text } else { after }
+}
+
+/// `05:12` at the end of the map side, with or without a space before it.
+fn strip_trailing_clock(text: &str) -> &str {
+    let text = text.trim_end();
+    let b = text.as_bytes();
+    let n = b.len();
+    if n < 4 || !b[n - 1].is_ascii_digit() || !b[n - 2].is_ascii_digit() || b[n - 3] != b':' {
+        return text;
+    }
+    let mut start = n - 3;
+    let mut hour_digits = 0u8;
+    while start > 0 && b[start - 1].is_ascii_digit() && hour_digits < 2 {
+        start -= 1;
+        hour_digits += 1;
+    }
+    if hour_digits == 0 {
+        return text;
+    }
+    text[..start].trim_end()
+}
+
+fn mode_token(tok: &str) -> bool {
+    let bare = tok.trim_matches(|c: char| !c.is_ascii_alphabetic());
+    BANNER_MODE_WORDS
+        .iter()
+        .any(|word| bare.eq_ignore_ascii_case(word))
+}
+
+/// Drop icon junk and a following mode word. The map name is what remains.
+/// A string with no mode word is returned unchanged, so `King's Row` is kept.
+fn strip_icon_and_mode(text: &str) -> &str {
+    let mut offset = 0usize;
+    for (seen, tok) in text.split_whitespace().enumerate() {
+        if seen >= 4 {
+            break;
+        }
+        let Some(rel) = text[offset..].find(tok) else {
+            break;
+        };
+        let start = offset + rel;
+        if mode_token(tok) {
+            let after = text[start + tok.len()..].trim_start();
+            if !after.is_empty() {
+                return after;
+            }
+            break;
+        }
+        offset = start + tok.len();
+    }
+    text
+}
+
 /// Match a map name from arbitrary OCR text (e.g. the top-bar map label).
+///
+/// See [`tab_banner_map_text`]: only the map side of a Tab banner is matched,
+/// case-insensitively, against the known map list.
 pub fn match_map_in_text(text: &str) -> Option<String> {
-    let lines: Vec<&str> = text
+    let label = tab_banner_map_text(text);
+    let lines: Vec<&str> = label
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -799,15 +963,12 @@ pub fn outcome_from_board_header(raw_text: &str) -> crate::detect::MatchOutcome 
 }
 
 fn guess_role(hero: &str) -> String {
-    match hero.to_lowercase().as_str() {
-        "d.mon" | "dmon" | "d.va" | "dva" | "doomfist" | "domina" | "junker queen"
-        | "junker_queen" | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
-        | "winston" | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "jetpack cat" | "juno"
-        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "sombra"
-        | "wuyang" | "zenyatta" => "Support".to_string(),
-        _ => "Damage".to_string(),
-    }
+    // The role follows the canonical hero, including a pack key such as
+    // `wrecking-ball`. An unknown key is not Damage: that used to file every
+    // missed name under the Damage column.
+    scuffed_types::role_for_hero_name(hero)
+        .map(|role| role.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 const MAPS: &[(&str, &str)] = &[
@@ -838,6 +999,14 @@ const MAPS: &[(&str, &str)] = &[
     ("Paraiso", "paraiso"),
     ("Paraiso", "paraíso"),
     ("Neon Junction", "neon junction"),
+    // "antarctica" starts with "antarctic", so the short control-map key
+    // used to store Ecopoint: Antarctica as Antarctic Peninsula. The
+    // peninsula's own word is checked first. The full "antarctica" token,
+    // and "ecopoint", are the arena map. A bare "antarctic" stays the
+    // control map. Both names stay in the table.
+    ("Antarctic Peninsula", "peninsula"),
+    ("Ecopoint: Antarctica", "ecopoint"),
+    ("Ecopoint: Antarctica", "antarctica"),
     ("Antarctic Peninsula", "antarctic"),
     ("Busan", "busan"),
     ("Ilios", "ilios"),
@@ -859,10 +1028,53 @@ const MAPS: &[(&str, &str)] = &[
     ("Suravasa", "suravasa"),
     ("Aatlis", "aatlis"),
     ("Hanaoka", "hanaoka"),
+    // "anubis" alone is Throne of Anubis. "temple" has to win first, or
+    // Temple of Anubis is stored as the clash map. Both names stay.
+    ("Temple of Anubis", "temple"),
+    ("Throne of Anubis", "throne"),
     ("Throne of Anubis", "anubis"),
+    // Assault left Quick Play, and these five are still in custom games
+    // and arcade. Temple of Anubis is one of them; the others had no entry.
+    ("Hanamura", "hanamura"),
+    ("Horizon Lunar Colony", "horizon"),
+    ("Horizon Lunar Colony", "lunar colony"),
+    ("Paris", "paris"),
+    ("Volskaya Industries", "volskaya"),
+    // Arena maps. Ecopoint: Antarctica is one of them; the short
+    // "antarctic" key above must not claim it.
+    ("Black Forest", "black forest"),
+    ("Castillo", "castillo"),
+    ("Necropolis", "necropolis"),
+    // Stadium maps that are not a sub-area of a map already stored here.
+    // A name that contains an existing key (Oasis University, Busan
+    // Sanctuary) still stores as that map, so those rows do not split.
+    ("Arena Victoriae", "victoriae"),
+    ("Gogadoro", "gogadoro"),
+    ("Wuxing University - Water College", "wuxing"),
+    ("Wuxing University - Water College", "water college"),
+    ("Place Lacroix", "lacroix"),
+    ("Redwood Dam", "redwood"),
+    ("Serenza", "serenza"),
+    ("Powder Keg Mine", "powder keg"),
+    ("Thames District", "thames"),
+    ("Ayutthaya", "ayutthaya"),
+    // Workshop layouts. The full phrase is the key so "workshop" alone
+    // cannot pick one of them.
+    ("Workshop Chamber", "workshop chamber"),
+    ("Workshop Expanse", "workshop expanse"),
+    ("Workshop Green Screen", "workshop green"),
+    ("Workshop Island", "workshop island"),
+    // Training. Practice Range is not a game: see `map_is_untracked`.
+    ("Practice Range", "practice range"),
+    ("Practice Range", "practice"),
+    ("Mastery Course", "mastery"),
+    ("Tutorial", "tutorial"),
     // Deathmatch only. Kept in the local store. Never uploaded.
     // A trusted read is required before a capture is diverted.
     ("Château Guillard", "guillard"),
+    ("Kanezaka", "kanezaka"),
+    ("Malevento", "malevento"),
+    ("Petra", "petra"),
 ];
 
 /// Fold OCR-ambiguous glyphs and Latin diacritics so a mangled map name still
@@ -933,7 +1145,25 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
         "Colosseo" | "Esperanca" | "New Queen Street" | "Runasapi" => Some("Push"),
         "Aatlis" | "New Junk City" | "Suravasa" => Some("Flashpoint"),
         "Hanaoka" | "Throne of Anubis" => Some("Clash"),
-        "Château Guillard" => Some("Deathmatch"),
+        "Hanamura"
+        | "Horizon Lunar Colony"
+        | "Paris"
+        | "Temple of Anubis"
+        | "Volskaya Industries" => Some("Assault"),
+        "Black Forest" | "Castillo" | "Ecopoint: Antarctica" | "Necropolis" => Some("Elimination"),
+        "Ayutthaya" => Some("Capture the Flag"),
+        "Powder Keg Mine" | "Thames District" => Some("Payload Race"),
+        "Arena Victoriae"
+        | "Gogadoro"
+        | "Place Lacroix"
+        | "Redwood Dam"
+        | "Serenza"
+        | "Wuxing University - Water College" => Some("Stadium"),
+        "Workshop Chamber" | "Workshop Expanse" | "Workshop Green Screen" | "Workshop Island" => {
+            Some("Workshop")
+        }
+        "Mastery Course" | "Practice Range" | "Tutorial" => Some("Practice"),
+        "Château Guillard" | "Kanezaka" | "Malevento" | "Petra" => Some("Deathmatch"),
         _ => None,
     }
 }
@@ -947,6 +1177,12 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
 pub(crate) fn map_fuzzy_threshold(len: usize) -> f64 {
     if len <= 6 { 0.80 } else { 0.85 }
 }
+
+/// Lead the best fuzzy map must hold over the next different map. A smaller
+/// gap is a tie, and the read stays unknown. Exact whole-word hits do not
+/// use this: Temple of Anubis and Throne of Anubis still resolve by table
+/// order when the key is present.
+const MAP_FUZZY_MARGIN: f64 = 0.05;
 
 const GRIMSVOTN_NAME: &str = "Watchpoint: Grímsvötn";
 const GIBRALTAR_NAME: &str = "Watchpoint: Gibraltar";
@@ -966,7 +1202,10 @@ fn map_from_normalized(text: &str, allow_fuzzy: bool) -> Option<String> {
         return Some(name.to_string());
     }
     for &(display_name, pattern) in MAPS {
-        if text.contains(&normalize_ocr_glyphs(pattern)) {
+        // Whole word or phrase. A short key must not fire inside a longer
+        // word: "paris" inside "comparison", "petra" inside "competra",
+        // "practice" inside "inpractice".
+        if contains_map_key(text, pattern) {
             return Some(display_name.to_string());
         }
     }
@@ -1021,9 +1260,9 @@ fn score_watchpoint_tail(tail: &str) -> (f64, f64) {
 
 /// Bare or ambiguous "watchpoint" is not Gibraltar. A following word is
 /// fuzzy-matched against Grímsvötn and Gibraltar; one side has to clear the
-/// long-name threshold and beat the other. `6` folds to `o` only here, so
-/// Route 66 is left alone. The next two tokens are also joined, so
-/// "GRIMS VOTN" can still hit Grímsvötn.
+/// long-name threshold and lead the other by [`MAP_FUZZY_MARGIN`]. `6` folds
+/// to `o` only here, so Route 66 is left alone. The next two tokens are also
+/// joined, so "GRIMS VOTN" can still hit Grímsvötn.
 fn resolve_watchpoint(text: &str) -> WatchpointFamily {
     // Fold first so an accented letter stays inside its word. Splitting on
     // every non-ASCII byte used to break "Grímsvötn" into two tokens.
@@ -1054,13 +1293,41 @@ fn resolve_watchpoint(text: &str) -> WatchpointFamily {
         best_gib = best_gib.max(gib);
     }
     let threshold = map_fuzzy_threshold("grimsvotn".chars().count());
-    if best_grim >= threshold && best_grim > best_gib {
+    if best_grim >= threshold && best_grim - best_gib >= MAP_FUZZY_MARGIN {
         WatchpointFamily::Named(GRIMSVOTN_NAME)
-    } else if best_gib >= threshold && best_gib > best_grim {
+    } else if best_gib >= threshold && best_gib - best_grim >= MAP_FUZZY_MARGIN {
         WatchpointFamily::Named(GIBRALTAR_NAME)
     } else {
         WatchpointFamily::Undecided
     }
+}
+
+/// `pattern` is a map key. It matches only when every character of the key
+/// is bounded by a non-alphanumeric edge, so a shorter key cannot hide
+/// inside a longer word.
+fn contains_map_key(text: &str, pattern: &str) -> bool {
+    let pattern = normalize_ocr_glyphs(pattern);
+    if pattern.is_empty() {
+        return false;
+    }
+    let mut rest = text;
+    while let Some(at) = rest.find(&pattern) {
+        let before_ok = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after = at + pattern.len();
+        let after_ok = rest[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        let step = rest[at..].chars().next().map(char::len_utf8).unwrap_or(1);
+        rest = &rest[at + step..];
+    }
+    false
 }
 
 fn find_map(lines: &[&str]) -> Option<String> {
@@ -1068,6 +1335,23 @@ fn find_map(lines: &[&str]) -> Option<String> {
     map_from_normalized(&text, true)
 }
 
+/// Score for an OCR tail cut off the end of a long map name (`GRiMsVO` for
+/// Grímsvötn). Short keys stay on the whole-word rule. The score is the
+/// average of a full match and the covered fraction, so two missing letters
+/// on a 9-letter name clear the long-name floor and a stub does not.
+fn prefix_truncation_score(word: &str, pattern: &str) -> f64 {
+    let n = pattern.chars().count();
+    let k = word.chars().count();
+    if n <= 6 || k < 6 || k >= n || !pattern.starts_with(word) {
+        return 0.0;
+    }
+    (n + k) as f64 / (2.0 * n as f64)
+}
+
+/// Closest map at or above [`map_fuzzy_threshold`], when it leads the next
+/// different display name by [`MAP_FUZZY_MARGIN`]. Below the floor, or inside
+/// that margin, the map is unknown. Aliases of one display name (Lijiang's
+/// `liang` / `lulang` keys) only raise that name's score.
 fn fuzzy_match_map(text: &str) -> Option<String> {
     // `text` is expected to already be glyph-normalized by the caller.
     let text = normalize_ocr_glyphs(text);
@@ -1075,37 +1359,70 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
 
     let mut best_map: Option<&str> = None;
     let mut best_score: f64 = 0.0;
+    let mut second_score: f64 = 0.0;
 
     for &(display_name, pattern) in MAPS {
         let pattern = normalize_ocr_glyphs(pattern);
         let pattern_parts: Vec<&str> = pattern.split_whitespace().collect();
         let threshold = map_fuzzy_threshold(pattern.chars().filter(|c| !c.is_whitespace()).count());
+        let mut pattern_best = 0.0;
 
         if pattern_parts.len() == 1 {
             for &word in &words {
-                let score = normalized_levenshtein(word, &pattern);
-                if score > best_score && score >= threshold {
-                    best_score = score;
-                    best_map = Some(display_name);
+                let token = word.trim_matches(|c: char| !c.is_alphanumeric());
+                if token.is_empty() {
+                    continue;
+                }
+                let score = normalized_levenshtein(token, &pattern)
+                    .max(prefix_truncation_score(token, &pattern));
+                if score > pattern_best {
+                    pattern_best = score;
                 }
             }
         } else {
             for window in words.windows(pattern_parts.len()) {
                 let candidate = window.join(" ");
                 let score = normalized_levenshtein(&candidate, &pattern);
-                if score > best_score && score >= threshold {
-                    best_score = score;
-                    best_map = Some(display_name);
+                if score > pattern_best {
+                    pattern_best = score;
                 }
             }
         }
+
+        if pattern_best < threshold {
+            continue;
+        }
+        // A second key for the map already in front only improves its score.
+        if best_map == Some(display_name) {
+            if pattern_best > best_score {
+                best_score = pattern_best;
+            }
+            continue;
+        }
+        if best_map.is_none() || pattern_best > best_score {
+            if best_map.is_some() {
+                second_score = second_score.max(best_score);
+            }
+            best_score = pattern_best;
+            best_map = Some(display_name);
+        } else if pattern_best > second_score {
+            second_score = pattern_best;
+        }
     }
 
-    if let Some(map_name) = best_map {
-        tracing::debug!(map = map_name, score = best_score, "fuzzy matched map name");
+    let map_name = best_map?;
+    if best_score - second_score < MAP_FUZZY_MARGIN {
+        tracing::debug!(
+            map = map_name,
+            score = best_score,
+            runner_up = second_score,
+            "fuzzy map match held: top scores are too close"
+        );
+        return None;
     }
 
-    best_map.map(|m| m.to_string())
+    tracing::debug!(map = map_name, score = best_score, "fuzzy matched map name");
+    Some(map_name.to_string())
 }
 
 #[cfg(test)]
@@ -1423,16 +1740,19 @@ mod tests {
     }
 
     /// Season 5 (2026-10-06): Doctrine is Support, Sombra moved to Support.
-    /// An unknown name still falls through to Damage. Roadhog stays Tank.
+    /// An unknown name is Unknown, not Damage. Roadhog stays Tank.
     #[test]
-    fn season5_roles_and_damage_fallback() {
+    fn season5_roles_and_unknown_names_are_not_damage() {
         assert_eq!(guess_role("Doctrine"), "Support");
         assert_eq!(guess_role("doctrine"), "Support");
         assert_eq!(guess_role("Sombra"), "Support");
         assert_eq!(guess_role("sombra"), "Support");
         assert_eq!(guess_role("Roadhog"), "Tank");
-        assert_eq!(guess_role("NotAHero"), "Damage");
-        assert_eq!(guess_role(""), "Damage");
+        assert_eq!(guess_role("Wrecking Ball"), "Tank");
+        assert_eq!(guess_role("wrecking-ball"), "Tank");
+        assert_eq!(guess_role("NotAHero"), "Unknown");
+        assert_eq!(guess_role(""), "Unknown");
+        assert_ne!(guess_role("NotAHero"), "Damage");
     }
 
     /// Site role lookup and the role stamped on a captured game stay aligned.
@@ -1865,6 +2185,99 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn lijiang_alias_spellings_are_not_a_near_tie() {
+        // "luang tower" clears the long-name floor on both Lijiang keys, and
+        // the two scores sit inside the margin. They are one canonical map,
+        // so the read is not held as a tie between them.
+        let text = normalize_ocr_glyphs("luang tower");
+        let liang = normalized_levenshtein(&text, &normalize_ocr_glyphs("liang tower"));
+        let lulang = normalized_levenshtein(&text, &normalize_ocr_glyphs("lulang tower"));
+        assert!(liang >= map_fuzzy_threshold(10), "{liang}");
+        assert!(lulang >= map_fuzzy_threshold(11), "{lulang}");
+        assert!(
+            (liang - lulang).abs() < MAP_FUZZY_MARGIN,
+            "liang {liang} lulang {lulang}"
+        );
+        assert_eq!(
+            match_map_in_text("Luang tower").as_deref(),
+            Some("Lijiang Tower")
+        );
+        assert_eq!(
+            match_map_in_text("Liang tower").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn tab_banner_matches_the_map_side_and_ignores_the_timer() {
+        // The crop used to include the start of the match timer, so the read
+        // was `CONTROL | ILIOS TIM` and the folded bar glued onto the name.
+        for raw in [
+            "CONTROL | ILIOS TIM",
+            "control | ilios tim",
+            "Control | Ilios Tim",
+            "CONTROL|ILIOS TIM",
+            "CONTROL |ILIOS TIM",
+            "Q CONTROL | ILIOS TIM",
+            "@@ CONTROL | ILIOS TIM",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+        // No bar: junk before the mode word is not a map, even when that
+        // junk is itself a map name earlier in the table than Ilios.
+        assert_eq!(
+            match_map_in_text("BUSAN CONTROL ILIOS TIM").as_deref(),
+            Some("Ilios")
+        );
+        assert_eq!(match_map_in_text("CONTROL | TIM"), None);
+        assert_eq!(match_map_in_text("TIM"), None);
+    }
+
+    #[test]
+    fn ilios_clock_reads_match_ilios() {
+        for raw in [
+            "ILIOS 05:12",
+            "CONTROL | ILIOS 05:12",
+            "CONTROL | ILIOS05:12",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn leading_junk_bar_and_mode_word_leave_the_map_text() {
+        assert_eq!(tab_banner_map_text("| CONTROL | ILIOS"), "ILIOS");
+        assert_eq!(
+            match_map_in_text("| CONTROL | ILIOS").as_deref(),
+            Some("Ilios")
+        );
+    }
+
+    #[test]
+    fn tab_banner_keeps_anubis_and_antarctica_apart() {
+        for (raw, display) in [
+            ("ASSAULT | TEMPLE OF ANUBIS", "Temple of Anubis"),
+            ("xqz assault | temple of anubis", "Temple of Anubis"),
+            ("CLASH | THRONE OF ANUBIS", "Throne of Anubis"),
+            ("clash | throne of anubis", "Throne of Anubis"),
+            ("CLASH | ANUBIS", "Throne of Anubis"),
+            ("ELIMINATION | ECOPOINT: ANTARCTICA", "Ecopoint: Antarctica"),
+            ("elimination | ecopoint: antarctica", "Ecopoint: Antarctica"),
+            ("ELIMINATION | ANTARCTICA", "Ecopoint: Antarctica"),
+            ("CONTROL | ANTARCTIC PENINSULA", "Antarctic Peninsula"),
+            ("control | antarctic peninsula", "Antarctic Peninsula"),
+            ("CONTROL | ANTARCTIC", "Antarctic Peninsula"),
+            (
+                "OASIS ELIMINATION ECOPOINT: ANTARCTICA",
+                "Ecopoint: Antarctica",
+            ),
+            ("FLASHPOINT NEW JUNK CITY", "New Junk City"),
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some(display), "{raw}");
+        }
+    }
+
+    #[test]
     fn lijiang_ocr_aliases_do_not_steal_other_maps() {
         let liang = normalize_ocr_glyphs("liang tower");
         let lulang = normalize_ocr_glyphs("lulang tower");
@@ -1961,6 +2374,209 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn anubis_and_antarctica_names_stay_on_their_own_maps() {
+        // Stored spellings of the maps that were already in the table do
+        // not move. Esperanca and Paraiso stay unaccented.
+        assert_eq!(canonical_map("Esperanca").as_deref(), Some("Esperanca"));
+        assert_eq!(canonical_map("Esperança").as_deref(), Some("Esperanca"));
+        assert_eq!(canonical_map("Paraiso").as_deref(), Some("Paraiso"));
+        assert_eq!(canonical_map("Paraíso").as_deref(), Some("Paraiso"));
+        assert_eq!(
+            canonical_map("Throne of Anubis").as_deref(),
+            Some("Throne of Anubis")
+        );
+        assert_eq!(
+            canonical_map("Antarctic Peninsula").as_deref(),
+            Some("Antarctic Peninsula")
+        );
+
+        for (raw, display, mode) in [
+            ("Temple of Anubis", "Temple of Anubis", "Assault"),
+            ("TEMPLE OF ANUBIS", "Temple of Anubis", "Assault"),
+            ("temple of anubis", "Temple of Anubis", "Assault"),
+            ("Throne of Anubis", "Throne of Anubis", "Clash"),
+            ("THRONE OF ANUBIS", "Throne of Anubis", "Clash"),
+            ("ANUBIS", "Throne of Anubis", "Clash"),
+            (
+                "Ecopoint: Antarctica",
+                "Ecopoint: Antarctica",
+                "Elimination",
+            ),
+            (
+                "ECOPOINT: ANTARCTICA",
+                "Ecopoint: Antarctica",
+                "Elimination",
+            ),
+            ("ANTARCTICA", "Ecopoint: Antarctica", "Elimination"),
+            ("ECOPOINT", "Ecopoint: Antarctica", "Elimination"),
+            ("Antarctic Peninsula", "Antarctic Peninsula", "Control"),
+            ("ANTARCTIC PENINSULA", "Antarctic Peninsula", "Control"),
+            ("ANTARCTIC", "Antarctic Peninsula", "Control"),
+        ] {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(name, display, "{raw}");
+            assert_eq!(map_mode(&name), Some(mode), "{raw}");
+            assert_eq!(
+                exact_map_in_text(raw).as_deref(),
+                Some(display),
+                "accolade {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_missing_from_the_ocr_table_canonicalize_with_their_mode() {
+        // Assault, Elimination, Capture the Flag, Payload Race, Workshop,
+        // and Stadium stay local. `tracked` is false for every one of them.
+        let cases = [
+            ("Hanamura", "Hanamura", "Assault", false),
+            ("HANAMURA", "Hanamura", "Assault", false),
+            (
+                "Horizon Lunar Colony",
+                "Horizon Lunar Colony",
+                "Assault",
+                false,
+            ),
+            ("HORIZON", "Horizon Lunar Colony", "Assault", false),
+            ("LUNAR COLONY", "Horizon Lunar Colony", "Assault", false),
+            ("Paris", "Paris", "Assault", false),
+            ("PARIS", "Paris", "Assault", false),
+            (
+                "Volskaya Industries",
+                "Volskaya Industries",
+                "Assault",
+                false,
+            ),
+            ("VOLSKAYA", "Volskaya Industries", "Assault", false),
+            ("Black Forest", "Black Forest", "Elimination", false),
+            ("Castillo", "Castillo", "Elimination", false),
+            ("Necropolis", "Necropolis", "Elimination", false),
+            ("Ayutthaya", "Ayutthaya", "Capture the Flag", false),
+            ("Arena Victoriae", "Arena Victoriae", "Stadium", false),
+            ("VICTORIAE", "Arena Victoriae", "Stadium", false),
+            ("Gogadoro", "Gogadoro", "Stadium", false),
+            (
+                "Wuxing University - Water College",
+                "Wuxing University - Water College",
+                "Stadium",
+                false,
+            ),
+            (
+                "WUXING",
+                "Wuxing University - Water College",
+                "Stadium",
+                false,
+            ),
+            (
+                "WATER COLLEGE",
+                "Wuxing University - Water College",
+                "Stadium",
+                false,
+            ),
+            ("Place Lacroix", "Place Lacroix", "Stadium", false),
+            ("LACROIX", "Place Lacroix", "Stadium", false),
+            ("Redwood Dam", "Redwood Dam", "Stadium", false),
+            ("REDWOOD", "Redwood Dam", "Stadium", false),
+            ("Serenza", "Serenza", "Stadium", false),
+            ("Powder Keg Mine", "Powder Keg Mine", "Payload Race", false),
+            ("POWDER KEG MINES", "Powder Keg Mine", "Payload Race", false),
+            ("Thames District", "Thames District", "Payload Race", false),
+            ("THAMES", "Thames District", "Payload Race", false),
+            ("Workshop Chamber", "Workshop Chamber", "Workshop", false),
+            ("Workshop Expanse", "Workshop Expanse", "Workshop", false),
+            (
+                "Workshop Green Screen",
+                "Workshop Green Screen",
+                "Workshop",
+                false,
+            ),
+            ("Workshop Island", "Workshop Island", "Workshop", false),
+            ("Kanezaka", "Kanezaka", "Deathmatch", false),
+            ("Malevento", "Malevento", "Deathmatch", false),
+            ("Petra", "Petra", "Deathmatch", false),
+            ("Practice Range", "Practice Range", "Practice", false),
+            ("PRACTICE RANGE", "Practice Range", "Practice", false),
+            ("PRACTICE", "Practice Range", "Practice", false),
+            ("Mastery Course", "Mastery Course", "Practice", false),
+            ("Tutorial", "Tutorial", "Practice", false),
+        ];
+        for (raw, display, mode, tracked) in cases {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(name, display, "{raw}");
+            assert_eq!(map_mode(&name), Some(mode), "{raw}");
+            assert_eq!(map_is_untracked(&name), !tracked, "{raw}");
+            assert_eq!(stats_row_is_tracked(&name, mode), tracked, "{raw}");
+        }
+        // Hanaoka is not Hanamura. Paraiso is not Paris.
+        assert_eq!(canonical_map("Hanaoka").as_deref(), Some("Hanaoka"));
+        assert_eq!(canonical_map("HANAOKA").as_deref(), Some("Hanaoka"));
+        assert_eq!(canonical_map("Paraiso").as_deref(), Some("Paraiso"));
+        assert_eq!(canonical_map("PARAISO").as_deref(), Some("Paraiso"));
+        assert!(!stats_row_is_tracked("Hanamura", "Assault"));
+        assert!(!stats_row_is_tracked("Practice Range", "Practice"));
+        assert!(!stats_row_is_tracked("Busan", "Practice"));
+        assert!(stats_row_is_tracked("Busan", "Control"));
+        assert!(stats_row_is_tracked("King's Row", "Hybrid"));
+    }
+
+    #[test]
+    fn arcade_and_stadium_modes_stay_local() {
+        for (map, mode) in [
+            ("Hanamura", "Assault"),
+            ("Temple of Anubis", "Assault"),
+            ("Black Forest", "Elimination"),
+            ("Ecopoint: Antarctica", "Elimination"),
+            ("Ayutthaya", "Capture the Flag"),
+            ("Powder Keg Mine", "Payload Race"),
+            ("Thames District", "Payload Race"),
+            ("Workshop Chamber", "Workshop"),
+            ("Arena Victoriae", "Stadium"),
+            ("Place Lacroix", "Stadium"),
+            ("Château Guillard", "Deathmatch"),
+            ("Practice Range", "Practice"),
+        ] {
+            assert_eq!(map_mode(map), Some(mode), "{map}");
+            assert!(map_is_untracked(map), "{map}");
+            assert!(!stats_row_is_tracked(map, mode), "{map}");
+            assert!(
+                review_suspect_fields(map, mode, "Ana").is_empty(),
+                "{map} is a known map with a mode, so the review hold does not keep it"
+            );
+            assert!(
+                !stats_row_is_tracked("Busan", mode),
+                "{mode} on another map stays local"
+            );
+        }
+    }
+
+    #[test]
+    fn short_map_keys_match_whole_words_and_do_not_block_a_real_upload() {
+        // "paris" is a letter run inside "comparison".
+        assert_eq!(canonical_map("comparison"), None);
+        assert_eq!(canonical_map("COMPARISON").as_deref(), None);
+        let ilios = canonical_map("Ilios comparison").expect("ilios");
+        assert_eq!(ilios, "Ilios");
+        assert!(stats_row_is_tracked(&ilios, &stored_game_mode(&ilios)));
+
+        // "petra" inside a longer word must not become the deathmatch map.
+        assert_eq!(canonical_map("competra"), None);
+        let kings = canonical_map("King's Row competra").expect("kings");
+        assert_eq!(kings, "King's Row");
+        assert!(stats_row_is_tracked(&kings, "Hybrid"));
+
+        // "practice" inside a longer word must not become Practice Range.
+        assert_eq!(canonical_map("inpractice"), None);
+        let busan = canonical_map("Busan inpractice").expect("busan");
+        assert_eq!(busan, "Busan");
+        assert!(stats_row_is_tracked(&busan, "Control"));
+
+        // The keys still match when they are the whole word.
+        assert_eq!(canonical_map("PARIS").as_deref(), Some("Paris"));
+        assert_eq!(canonical_map("PETRA").as_deref(), Some("Petra"));
+        assert_eq!(canonical_map("PRACTICE").as_deref(), Some("Practice Range"));
+    }
+
+    #[test]
     fn glyph_mangled_map_names_resolve() {
         // ILIOS is three capital I's — the most OCR-mangled name in the pool.
         // Field 07-17: an Ilios game registered no map on any reader. Each of
@@ -1976,6 +2592,63 @@ mod hero_map_name_tests {
         // Busan with a V-for-A (not a glyph fold — needs the looser short-name
         // fuzzy threshold: BUSVN↔BUSAN scores 0.80).
         assert_eq!(match_map_in_text("BUSVN").as_deref(), Some("Busan"));
+    }
+
+    #[test]
+    fn fuzzy_map_holds_junk_and_close_scores_and_keeps_canonical_names() {
+        // Below the floor: not the closest name.
+        for raw in ["PARXQ", "BUSXY", "TIM", "zzzzz", "not-a-map", "qqqqq"] {
+            assert_eq!(match_map_in_text(raw), None, "{raw}");
+            assert_eq!(exact_map_in_text(raw), None, "{raw}");
+        }
+        // One edit still clears the short-name floor and has no close second.
+        assert_eq!(match_map_in_text("PARIZ").as_deref(), Some("Paris"));
+        assert_eq!(match_map_in_text("BUSVN").as_deref(), Some("Busan"));
+
+        // Oasis and Paris both score 0.80 on these. Antarctic and Antarctica
+        // tie, or lead by less than the margin. Either way the map is unknown.
+        for raw in ["oaris", "pasis", "antarcticx", "antarctia"] {
+            assert_eq!(match_map_in_text(raw), None, "{raw}");
+        }
+
+        // Timer digits stuck on the end of the banner name.
+        for raw in [
+            "ILIOS 0",
+            "ILIOS 7/M",
+            "CONTROL | ILIOS 0",
+            "CONTROL | ILIOS 7/M",
+            "CONTROL|ILIOS 0",
+        ] {
+            assert_eq!(match_map_in_text(raw).as_deref(), Some("Ilios"), "{raw}");
+        }
+        // I/L fold, and a single u/i swap that still clears the floor alone.
+        assert_eq!(match_map_in_text("ILios").as_deref(), Some("Ilios"));
+        assert_eq!(match_map_in_text("iuios").as_deref(), Some("Ilios"));
+        // A long name clipped before the last letters. Two missing glyphs
+        // clear the floor; a stub does not. The canonical spelling keeps
+        // the accents.
+        for raw in ["GRiMsVO", "GRiMsVO™", "WATCHPOINT: GRiMsVO™"] {
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some("Watchpoint: Grímsvötn"),
+                "{raw}"
+            );
+        }
+        assert_eq!(match_map_in_text("GRIMS"), None);
+        assert_eq!(match_map_in_text("GRIMSV"), None);
+
+        // #201: a short key does not match inside a longer word.
+        for raw in ["comparison", "parisian", "inparis", "COMPARISON"] {
+            assert_eq!(canonical_map(raw), None, "{raw}");
+        }
+        assert_eq!(canonical_map("PARIS").as_deref(), Some("Paris"));
+
+        let grim = canonical_map("GRIMSVOTN").expect("grimsvotn");
+        assert_eq!(grim, "Watchpoint: Grímsvötn");
+        assert!(grim.contains('í') && grim.contains('ö'), "{grim}");
+        let chateau = canonical_map("Chateau Guillard").expect("chateau");
+        assert_eq!(chateau, "Château Guillard");
+        assert!(chateau.contains('â'), "{chateau}");
     }
 
     #[test]

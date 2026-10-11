@@ -8,7 +8,8 @@ use crate::components::{
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::state::use_auth;
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
+use scuffed_types::AttendanceStats;
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 
 // --- Types ---
@@ -45,15 +46,6 @@ struct ModerationAction {
     reason: String,
     is_active: bool,
     created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AttendanceStats {
-    total_events: u32,
-    attended: u32,
-    absent: u32,
-    excused: u32,
-    attendance_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +135,52 @@ fn avatar_upload_failure_message(status: u16) -> String {
         403 => "You don't have permission to change this member's avatar.".to_string(),
         404 => "That member no longer exists.".to_string(),
         other => format!("Upload failed: HTTP {other}"),
+    }
+}
+
+/// User-facing copy for a failed attendance stats fetch. Never includes the
+/// raw serde error (field names, column numbers).
+fn attendance_stats_load_message(err: &ClientError) -> String {
+    if err.http_status() == Some(429) {
+        let body = match err {
+            ClientError::Http { body, .. } => body.as_str(),
+            _ => "",
+        };
+        return match scuffed_types::json_retry_after(body) {
+            Some(seconds) => attendance_retry_after_message(seconds),
+            None => "Too many requests. Try again later.".to_string(),
+        };
+    }
+    match err {
+        ClientError::Deserialize(_) => "Attendance stats could not be read. Try again.",
+        ClientError::Http { status: 403, .. } => {
+            "You don't have permission to view this member's attendance."
+        }
+        ClientError::Http { status: 404, .. } => "That member no longer exists.",
+        ClientError::Network(_) | ClientError::Http { .. } => {
+            "Could not load attendance stats. Try again."
+        }
+    }
+    .to_string()
+}
+
+fn attendance_retry_after_message(seconds: u64) -> String {
+    if seconds == 1 {
+        "Too many requests. Try again in 1 second.".to_string()
+    } else {
+        format!("Too many requests. Try again in {seconds} seconds.")
+    }
+}
+
+#[component]
+fn AttendanceStatsError(message: String) -> Element {
+    rsx! {
+        p {
+            class: "empty-state",
+            role: "alert",
+            style: "color: var(--danger);",
+            "{message}"
+        }
     }
 }
 
@@ -383,7 +421,7 @@ pub fn AdminMembers() -> Element {
                 .await
             {
                 Ok(data) => stats_data.set(Some(data)),
-                Err(e) => stats_error.set(Some(e.to_string())),
+                Err(e) => stats_error.set(Some(attendance_stats_load_message(&e))),
             }
             stats_loading.set(false);
         });
@@ -885,25 +923,36 @@ pub fn AdminMembers() -> Element {
                         if stats_loading() {
                             p { class: "admin-loading", "Loading..." }
                         } else if let Some(err) = stats_error() {
-                            p { class: "empty-state", style: "color: var(--danger);",
-                                "Failed to load attendance stats: {err}"
-                            }
+                            AttendanceStatsError { message: err }
                         } else if let Some(stats) = stats_data() {
-                            div { class: "summary-cards",
-                                SummaryCard { value: stats.total_events.to_string(), label: "Total Events" }
-                                SummaryCard { value: stats.attended.to_string(), label: "Attended" }
-                                SummaryCard { value: stats.absent.to_string(), label: "Absent" }
-                                SummaryCard { value: stats.excused.to_string(), label: "Excused" }
-                            }
-                            div {
-                                style: "text-align:center;margin-top:1rem;",
-                                span {
-                                    style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
-                                    "{stats.attendance_rate:.1}%"
-                                }
-                                div {
-                                    style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
-                                    "Attendance Rate"
+                            {
+                                let total = stats.total.to_string();
+                                let attended = stats.attended.to_string();
+                                let absent = stats.no_show.to_string();
+                                let excused = stats.excused.to_string();
+                                let rate = format!("{:.1}%", stats.attendance_rate());
+                                let no_events = stats.total == 0;
+                                rsx! {
+                                    div { class: "summary-cards",
+                                        SummaryCard { value: total, label: "Total Events" }
+                                        SummaryCard { value: attended, label: "Attended" }
+                                        SummaryCard { value: absent, label: "Absent" }
+                                        SummaryCard { value: excused, label: "Excused" }
+                                    }
+                                    if no_events {
+                                        p { class: "empty-state", "No events recorded for this member." }
+                                    }
+                                    div {
+                                        style: "text-align:center;margin-top:1rem;",
+                                        span {
+                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
+                                            "{rate}"
+                                        }
+                                        div {
+                                            style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
+                                            "Attendance Rate"
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -1236,6 +1285,108 @@ mod tests {
             admin_avatar_upload_url("a b/c+d"),
             "/api/upload/avatar?member_id=a%20b%2Fc%2Bd"
         );
+    }
+
+    #[test]
+    fn attendance_stats_load_message_hides_serde_text() {
+        let raw =
+            ClientError::Deserialize("missing field `total_events` at line 1 column 83".into());
+        let msg = attendance_stats_load_message(&raw);
+        assert_eq!(msg, "Attendance stats could not be read. Try again.");
+        assert!(!msg.contains("total_events"));
+        assert!(!msg.contains("missing field"));
+        assert!(!msg.contains("Deserialization"));
+
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 403,
+                body: r#"{"error":"Can only view your own attendance stats"}"#.into(),
+                retry_after: None,
+            }),
+            "You don't have permission to view this member's attendance."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Network("connection reset".into())),
+            "Could not load attendance stats. Try again."
+        );
+    }
+
+    fn render(view: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn attendance_stats_429_names_the_wait_and_alerts() {
+        let limited = ClientError::Http {
+            status: 429,
+            body: r#"{"error":"rate_limited","retry_after":12}"#.into(),
+            retry_after: None,
+        };
+        assert_eq!(limited.http_status(), Some(429));
+        let wait = attendance_stats_load_message(&limited);
+        assert_eq!(wait, "Too many requests. Try again in 12 seconds.");
+        assert!(!wait.contains('\u{2014}'), "{wait}");
+
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: "Too Many Requests".into(),
+                retry_after: None,
+            }),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":3601}"#.into(),
+                retry_after: None,
+            }),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 500,
+                body: r#"{"error":"rate_limited","retry_after":9}"#.into(),
+                retry_after: None,
+            }),
+            "Could not load attendance stats. Try again."
+        );
+
+        fn view() -> Element {
+            rsx! {
+                AttendanceStatsError {
+                    message: "Too many requests. Try again in 12 seconds.".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("role=\"alert\""), "{html}");
+        assert!(html.contains(&wait), "{html}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    #[test]
+    fn attendance_stats_429_one_second_is_singular_and_two_are_plural() {
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":1}"#.into(),
+                retry_after: None,
+            }),
+            "Too many requests. Try again in 1 second."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 429,
+                body: r#"{"error":"rate_limited","retry_after":2}"#.into(),
+                retry_after: None,
+            }),
+            "Too many requests. Try again in 2 seconds."
+        );
+        assert!(!attendance_retry_after_message(1).contains('\u{2014}'));
+        assert!(!attendance_retry_after_message(2).contains('\u{2014}'));
     }
 
     #[test]

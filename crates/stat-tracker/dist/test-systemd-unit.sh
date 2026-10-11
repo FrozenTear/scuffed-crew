@@ -210,6 +210,7 @@ stage_pkg() {
     chmod +x "$pkg/bin/scuffed-stat-tracker" "$pkg/bin/stat-tracker-gui"
     cp "$TEMPLATE" "$UNIT" "$SESSION_UNIT" "$pkg/assets/"
     cp "$INSTALL" "$pkg/install.sh"
+    cp "$DIST/install-paths.sh" "$pkg/install-paths.sh"
     cp "$UNINSTALL" "$pkg/uninstall.sh"
     cp "$HELPER" "$UNIT_LIB" "$pkg/"
     chmod +x "$pkg/install.sh" "$pkg/uninstall.sh" "$pkg/import-session-env.sh"

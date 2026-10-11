@@ -2,6 +2,7 @@
 //!
 //! The upload is checked against the manifest, then PNG ancillary chunks are
 //! stripped and the stored zip is rebuilt so those chunks are not kept.
+//! Entries under `debug/mapcrops/` are dropped and are not stored.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
@@ -88,6 +89,10 @@ pub fn accept_bundle(input: &[u8]) -> Result<AcceptedBundle, BundleReject> {
             return Err(BundleReject::Invalid("duplicate zip entry".into()));
         }
     }
+
+    // Map-label crops are local diagnostics. Drop them before the manifest
+    // check so a stored report zip never keeps `debug/mapcrops/`.
+    entries.retain(|name, _| !is_mapcrop_entry(name));
 
     let Some(manifest_bytes) = entries.get("manifest.json").cloned() else {
         return Err(BundleReject::Invalid("manifest.json is missing".into()));
@@ -253,6 +258,17 @@ fn read_capped(reader: &mut impl Read, cap: u64) -> Result<Vec<u8>, BundleReject
     Ok(out)
 }
 
+/// `debug/mapcrops` and anything under it. Case and slash style do not matter.
+fn is_mapcrop_entry(path: &str) -> bool {
+    let segs: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect();
+    segs.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("debug") && pair[1].eq_ignore_ascii_case("mapcrops")
+    })
+}
+
 fn safe_entry_name(path: &str) -> bool {
     if path.is_empty() || path.len() > 128 || path.ends_with('/') {
         return false;
@@ -292,4 +308,144 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn entry_names(bytes: &[u8]) -> Vec<String> {
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect()
+    }
+
+    fn log_manifest(log: &[u8]) -> Vec<u8> {
+        let cell = || {
+            serde_json::json!({
+                "value": "Ana",
+                "confidence": null,
+                "suspect": false,
+                "ocr_v1": "Ana"
+            })
+        };
+        let manifest = serde_json::json!({
+            "bundle_version": 1,
+            "app_version": "0.0.0",
+            "recognizers": { "matcher": "cv-v3", "ocr": "ocr-v1" },
+            "resolution": { "width": 1920, "height": 1080 },
+            "ui_scale": null,
+            "reason": { "category": "wrong_map", "text": "" },
+            "session_id": "sessreport",
+            "game": {
+                "map": "Busan",
+                "mode": "Control",
+                "result": "Defeat",
+                "team_size": 5,
+                "captured_at": "2026-10-09T12:00:00Z"
+            },
+            "reads": {
+                "mode": cell(),
+                "result": cell(),
+                "hero": cell(),
+                "e": cell(),
+                "a": cell(),
+                "d": cell(),
+                "dmg": cell(),
+                "h": cell(),
+                "mit": cell()
+            },
+            "corrections": {},
+            "consent": {
+                "training": false,
+                "own_name_included": false,
+                "glyphs_included": false
+            },
+            "files": [{
+                "path": "log.txt",
+                "sha256": sha256_hex(log),
+                "bytes": log.len(),
+                "role": "log",
+                "screen_class": null
+            }]
+        });
+        serde_json::to_vec(&manifest).unwrap()
+    }
+
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, bytes) in files {
+            writer.start_file(*name, opts).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_report_bundle_built_while_mapcrops_exist_has_no_mapcrops_entries() {
+        let log = b"synthetic log line\n";
+        let crop1: &[u8] = b"local-mapcrop-1";
+        let crop2: &[u8] = b"local-mapcrop-2";
+        let manifest = log_manifest(log);
+        let input = stored_zip(&[
+            ("manifest.json", &manifest),
+            ("log.txt", log),
+            ("debug/mapcrops/sessreport-1920x1080-1.png", crop1),
+            ("debug/mapcrops/sessreport-1920x1080-2.png", crop2),
+        ]);
+        let input_names = entry_names(&input);
+        assert!(
+            input_names.iter().any(|name| name.contains("mapcrops")),
+            "{input_names:?}"
+        );
+
+        let accepted = match accept_bundle(&input) {
+            Ok(bundle) => bundle,
+            Err(BundleReject::TooLarge) => panic!("report bundle was too large"),
+            Err(BundleReject::Invalid(reason)) => panic!("report bundle rejected: {reason}"),
+        };
+        let names = entry_names(&accepted.bytes);
+        assert!(names.iter().any(|name| name == "log.txt"), "{names:?}");
+        assert!(
+            names.iter().any(|name| name == "manifest.json"),
+            "{names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.to_ascii_lowercase().contains("mapcrops")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_lists_a_mapcrop_is_file_missing() {
+        let log = b"synthetic log line\n";
+        let crop: &[u8] = b"local-mapcrop";
+        let mut manifest: serde_json::Value = serde_json::from_slice(&log_manifest(log)).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": "debug/mapcrops/sessreport-1920x1080-1.png",
+                "sha256": sha256_hex(crop),
+                "bytes": crop.len(),
+                "role": "crop",
+                "screen_class": "tab"
+            }));
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let input = stored_zip(&[
+            ("manifest.json", manifest_bytes.as_slice()),
+            ("log.txt", log),
+            ("debug/mapcrops/sessreport-1920x1080-1.png", crop),
+        ]);
+        match accept_bundle(&input) {
+            Err(BundleReject::Invalid(reason)) => assert_eq!(reason, "file missing"),
+            Ok(_) => panic!("a listed mapcrop was stored"),
+            Err(BundleReject::TooLarge) => panic!("report bundle was too large"),
+        }
+    }
 }

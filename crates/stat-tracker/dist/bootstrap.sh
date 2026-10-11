@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download a prebuilt Linux x86_64 release and run its in-tarball installer.
 #
-# Fresh install (stable entrypoint — older GUIs curl this too):
+# Fresh install (stable entrypoint, older GUIs curl this too):
 #   curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 #
 # That `main` copy only resolves the release tag, then re-execs bootstrap.sh
@@ -11,18 +11,17 @@
 # Pin the script URL itself (what the GUI copies when it knows the version).
 # The tag must be assigned on bash, not curl: `VAR=x curl | bash` does not
 # export VAR into bash.
-#   TAG=stat-tracker-v0.4.24
+#   TAG=stat-tracker-v0.5.0-alpha.3
 #   curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
 #     | STAT_TRACKER_TAG="$TAG" bash
 #
 # Env:
 #   STAT_TRACKER_REPO   default FrozenTear/scuffed-crew
 #   STAT_TRACKER_TAG    optional release tag (default: latest with matching asset)
-#   STAT_TRACKER_CHANNEL stable|prerelease — which release channel to install
-#                       when no tag is pinned (default: stable). If unset and a
-#                       prerelease newer than the latest stable exists, an
-#                       interactive terminal is prompted (default: stable);
-#                       without a tty the stable release is used silently.
+#   STAT_TRACKER_CHANNEL stable|prerelease: which release channel to install
+#                       when no tag is pinned (default: stable). An alpha or rc
+#                       is not offered unless this is prerelease. Pin
+#                       STAT_TRACKER_TAG to install one release by tag.
 #   STAT_TRACKER_PREFIX install prefix passed as PREFIX to install.sh (default ~/.local)
 #   STAT_TRACKER_DIR    extract directory (default: mktemp -d, removed after install)
 #   STAT_TRACKER_BOOTSTRAP_PINNED
@@ -38,6 +37,14 @@
 #                       test hook (URL dest). Unsupported for real installs.
 #   STAT_TRACKER_BOOTSTRAP_LIB_ONLY
 #                       source this file to load functions and return.
+#
+# Uninstall a user-level bootstrap install. install.sh writes
+# install-manifest.txt. uninstall.sh removes exactly those paths.
+#   bash bootstrap.sh --uninstall
+#   bash bootstrap.sh --uninstall --purge
+# A pacman/AUR or apt/dpkg owner of the GUI binary is left in place.
+# The script prints `sudo pacman -R <pkg>` or `sudo apt remove <pkg>`.
+# An AppImage is a script install, not a package.
 set -euo pipefail
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
@@ -96,6 +103,128 @@ fetch_to() {
     curl_https -o "$dest" "$url"
 }
 
+# Newest stable tag, then a newer prerelease tag, one per line (blank if none).
+# A prerelease suffix counts even when GitHub left the flag off. Drafts and
+# releases without $1's asset are skipped. JSON release list on stdin.
+choose_release_tags() {
+    python3 -c '
+import json,sys
+releases=json.load(sys.stdin)
+name=sys.argv[1]
+
+def version_of(tag):
+    if tag.startswith("stat-tracker-v"):
+        return tag[len("stat-tracker-v"):]
+    if tag.startswith("v"):
+        return tag[1:]
+    return tag
+
+def is_digits(piece):
+    return bool(piece) and piece.isascii() and piece.isdigit()
+
+def parse(ver):
+    ver=ver.strip()
+    if not ver or any(ch.isspace() for ch in ver):
+        return None
+    ver=ver.split("+",1)[0]
+    pre_ids=[]
+    if "-" in ver:
+        core, pre = ver.split("-",1)
+        if pre=="":
+            return None
+        for piece in pre.split("."):
+            if piece=="" or any(ch.isspace() for ch in piece):
+                return None
+            if is_digits(piece):
+                pre_ids.append((0, int(piece)))
+            else:
+                pre_ids.append((1, piece))
+    else:
+        core=ver
+    parts=core.split(".")
+    if len(parts)<2 or len(parts)>3:
+        return None
+    try:
+        nums=[int(p) for p in parts]
+    except ValueError:
+        return None
+    while len(nums)<3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2], tuple(pre_ids))
+
+def newer(left, right):
+    if left[:3]!=right[:3]:
+        return left[:3]>right[:3]
+    lp, rp = left[3], right[3]
+    if not lp and rp:
+        return True
+    if lp and not rp:
+        return False
+    for x,y in zip(lp, rp):
+        if x!=y:
+            return x>y
+    return len(lp)>len(rp)
+
+stable=None
+pre=None
+for r in releases:
+    if r.get("draft"):
+        continue
+    if not any(a.get("name")==name for a in r.get("assets") or []):
+        continue
+    tag=r.get("tag_name") or ""
+    ver=parse(version_of(tag))
+    if ver is None:
+        continue
+    flagged=bool(r.get("prerelease")) or bool(ver[3])
+    if flagged:
+        if pre is None or newer(ver, pre[0]):
+            pre=(ver, tag)
+    else:
+        if stable is None or newer(ver, stable[0]):
+            stable=(ver, tag)
+if stable is None and pre is None:
+    sys.stderr.write("no published release with asset %s\n" % name)
+    sys.exit(1)
+stable_tag=stable[1] if stable else ""
+pre_tag=""
+if pre is not None and (stable is None or newer(pre[0], stable[0])):
+    pre_tag=pre[1]
+print(stable_tag)
+print(pre_tag)
+' "$1"
+}
+
+# Print the tag to install. $3 empty means stable. Does not prompt.
+pick_release_tag() {
+    local stable_tag="$1" pre_tag="$2" channel="${3:-}"
+    case "$channel" in
+        prerelease)
+            if [[ -n "$pre_tag" ]]; then
+                printf '%s\n' "$pre_tag"
+            else
+                info "No prerelease newer than stable; using ${stable_tag}."
+                printf '%s\n' "$stable_tag"
+            fi
+            ;;
+        stable|"")
+            if [[ -n "$stable_tag" ]]; then
+                printf '%s\n' "$stable_tag"
+            elif [[ -z "$channel" ]]; then
+                warn "No stable release ships ${ASSET_NAME}; falling back to prerelease ${pre_tag}."
+                printf '%s\n' "$pre_tag"
+            else
+                error "no stable release with asset ${ASSET_NAME} (prerelease ${pre_tag} exists, set STAT_TRACKER_CHANNEL=prerelease or pin STAT_TRACKER_TAG)"
+                return 1
+            fi
+            ;;
+        *)
+            error "invalid STAT_TRACKER_CHANNEL='${channel}' (expected 'stable' or 'prerelease')"
+            return 1
+            ;;
+    esac
+}
+
 # Resolve asset download URL plus optional sha256 and minisign companions.
 resolve_release() {
     local json url tag
@@ -105,75 +234,14 @@ resolve_release() {
     else
         info "Fetching latest GitHub releases for ${REPO}…"
         json="$(curl_https "${GH_HEADERS[@]}" "${API}?per_page=20")"
-        # Two candidates that ship our asset: the newest stable, and the newest
-        # prerelease that is newer than it (list is newest-first; drafts skipped).
-        local stable_tag pre_tag chosen channel
-        { read -r stable_tag; read -r pre_tag; } < <(python3 -c '
-import json,sys
-releases=json.load(sys.stdin)
-name=sys.argv[1]
-stable=pre=""
-for r in releases:
-    if r.get("draft"):
-        continue
-    if not any(a.get("name")==name for a in r.get("assets") or []):
-        continue
-    if r.get("prerelease"):
-        if not pre:
-            pre=r.get("tag_name","")
-    else:
-        stable=r.get("tag_name","")
-        break
-if not (stable or pre):
-    sys.stderr.write("no published release with asset %s\n" % name)
-    sys.exit(1)
-print(stable)
-print(pre)
-' "$ASSET_NAME" <<<"$json")
+        # Newest stable that ships our asset, and a prerelease only when it
+        # is newer than that stable. Drafts are skipped. No prompt.
+        local stable_tag pre_tag chosen
+        { read -r stable_tag; read -r pre_tag; } < <(choose_release_tags "$ASSET_NAME" <<<"$json")
         if [[ -z "$stable_tag" && -z "$pre_tag" ]]; then
             exit 1
         fi
-
-        channel="${STAT_TRACKER_CHANNEL:-}"
-        # Prompt only with a real controlling terminal (curl|bash keeps stdin
-        # busy, so talk to /dev/tty; opening it is the only reliable tty test).
-        if [[ -z "$channel" && -n "$pre_tag" && -n "$stable_tag" ]] \
-            && { exec 3<>/dev/tty; } 2>/dev/null; then
-            local reply=""
-            printf '%b' "${YLW}[bootstrap]${NC} Prerelease ${pre_tag} is available (stable: ${stable_tag}). Install [s]table or [p]rerelease? [S/p] " >&3
-            IFS= read -r reply <&3 || reply=""
-            exec 3>&-
-            case "$reply" in
-                [pP]*) channel=prerelease ;;
-                *)     channel=stable ;;
-            esac
-        fi
-
-        case "$channel" in
-            prerelease)
-                if [[ -n "$pre_tag" ]]; then
-                    chosen="$pre_tag"
-                else
-                    info "No prerelease newer than stable; using ${stable_tag}."
-                    chosen="$stable_tag"
-                fi
-                ;;
-            stable|"")
-                if [[ -n "$stable_tag" ]]; then
-                    chosen="$stable_tag"
-                elif [[ -z "${STAT_TRACKER_CHANNEL:-}" ]]; then
-                    warn "No stable release ships ${ASSET_NAME}; falling back to prerelease ${pre_tag}."
-                    chosen="$pre_tag"
-                else
-                    error "no stable release with asset ${ASSET_NAME} (prerelease ${pre_tag} exists — set STAT_TRACKER_CHANNEL=prerelease or pin STAT_TRACKER_TAG)"
-                    exit 1
-                fi
-                ;;
-            *)
-                error "invalid STAT_TRACKER_CHANNEL='${STAT_TRACKER_CHANNEL}' (expected 'stable' or 'prerelease')"
-                exit 1
-                ;;
-        esac
+        chosen="$(pick_release_tag "$stable_tag" "$pre_tag" "${STAT_TRACKER_CHANNEL:-}")"
 
         # Reduce the list to the chosen release object for the extractor below.
         json="$(python3 -c '
@@ -264,7 +332,7 @@ verify_release_signature() {
     pub="$(configured_minisign_pub)"
     sig_url="${SIG_URL:-}"
     # No key configured: sha256 is the only check. A configured key must not
-    # fall back when the .minisig asset is missing — that would let a stripped
+    # fall back when the .minisig asset is missing, that would let a stripped
     # signature downgrade the install to a same-origin checksum.
     if [[ -z "${pub//[[:space:]]/}" ]]; then
         warn_signature_fallback
@@ -306,9 +374,9 @@ minisign_key_configured() {
     [[ -n "${pub//[[:space:]]/}" ]]
 }
 
-# sha256 of the tarball. With a minisign public key configured, a missing
-# .sha256 asset or a missing sha256sum is a hard failure. With no key, both
-# stay warnings (today's same-origin checksum is optional).
+# sha256 of the tarball. A missing .sha256 asset stops the install.
+# A missing sha256sum is a hard failure when a minisign public key is
+# configured, and a warning otherwise.
 verify_release_checksum() {
     local asset="$1"
     local sha_url="${SHA_URL:-}"
@@ -316,17 +384,16 @@ verify_release_checksum() {
     dir="$(cd "$(dirname "$asset")" && pwd)"
     name="$(basename "$asset")"
     sumfile="${dir}/${name}.sha256"
-    if minisign_key_configured; then
-        if [[ -z "$sha_url" ]]; then
-            error "A minisign public key is configured, but this release has no .sha256 asset. Refusing to install."
-            exit 1
-        fi
-        if ! command -v sha256sum >/dev/null 2>&1; then
+    if [[ -z "$sha_url" ]]; then
+        error "This release has no .sha256 asset. Refusing to install."
+        exit 1
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if minisign_key_configured; then
             error "A minisign public key is configured, but sha256sum is not installed. Refusing to install."
             exit 1
         fi
-    elif [[ -z "$sha_url" ]] || ! command -v sha256sum >/dev/null 2>&1; then
-        warn "No .sha256 asset or sha256sum missing — skipping integrity check."
+        warn "sha256sum is not installed, skipping the integrity check."
         return 0
     fi
     info "Verifying sha256…"
@@ -502,6 +569,17 @@ if [[ "${STAT_TRACKER_BOOTSTRAP_LIB_ONLY:-}" == 1 ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
+if [[ "${1:-}" == "--uninstall" ]]; then
+    shift
+    _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ ! -f "$_here/uninstall.sh" || ! -f "$_here/install-paths.sh" ]]; then
+        error "uninstall.sh and install-paths.sh must sit next to bootstrap.sh"
+        exit 1
+    fi
+    export PREFIX="${STAT_TRACKER_PREFIX:-${PREFIX:-$HOME/.local}}"
+    exec bash "$_here/uninstall.sh" "$@"
+fi
+
 CHANNEL="${STAT_TRACKER_CHANNEL:-}"
 case "$CHANNEL" in
     ""|stable|prerelease) ;;
@@ -567,5 +645,16 @@ info "Running in-tarball installer (PREFIX=$PREFIX)…"
 # Pass SKIP_INTEGRATION through so a throwaway-PREFIX smoke test can install
 # binaries only without polluting the real $HOME (desktop entry + systemd unit).
 PREFIX="$PREFIX" SKIP_INTEGRATION="${SKIP_INTEGRATION:-}" bash "$STAGE/install.sh"
+
+# install.sh records every file it wrote. Fail if that manifest is missing
+# so a later uninstall is not left guessing.
+# shellcheck source=install-paths.sh
+source "$STAGE/install-paths.sh"
+_manifest="$(install_path_named "$HOME" "$PREFIX" manifest install-manifest.txt || true)"
+if [[ -z "${_manifest}" || ! -f "$_manifest" ]]; then
+    error "install.sh did not write the install manifest"
+    exit 1
+fi
+info "Recorded install manifest → $_manifest"
 
 info "Done. Launch with: stat-tracker-gui"

@@ -228,15 +228,28 @@ fn forbidden(error: &str) -> Box<Response> {
     )
 }
 
-/// Shared daemon-token auth for upload, daemon-config, and token-check.
+/// Whether a successful daemon-token check stamps `last_used_at`.
+#[derive(Clone, Copy)]
+enum DaemonLookup {
+    /// Upload, daemon-config, and token-check.
+    StampLastUsed,
+    /// Pack downloads. The lookup is a read.
+    ReadOnly,
+}
+
+/// Shared daemon-token auth for upload, daemon-config, token-check, and packs.
 ///
 /// `validate_daemon_token` sets `last_used_at` when the token is accepted.
-/// That write already happens on the upload path. Rejected tokens, including
+/// That write already happens on the upload path. Pack downloads pass
+/// [`DaemonLookup::ReadOnly`] and do not write. Rejected tokens, including
 /// revoked and expired ones, do not update `last_used_at`.
+///
+/// The raw bearer value is hashed and then dropped. It is not logged.
 async fn authenticate_daemon(
     parts: &mut Parts,
     state: &AppState,
     unauthorized_mode: DaemonUnauthorized,
+    lookup: DaemonLookup,
 ) -> Result<DaemonUser, Box<Response>> {
     let auth_header = parts
         .headers
@@ -245,10 +258,11 @@ async fn authenticate_daemon(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| unauthorized(unauthorized_mode.missing()))?;
 
-    let member_id = state
-        .db
-        .validate_daemon_token(auth_header)
-        .await
+    let lookup_result = match lookup {
+        DaemonLookup::StampLastUsed => state.db.validate_daemon_token(auth_header).await,
+        DaemonLookup::ReadOnly => state.db.lookup_daemon_token(auth_header).await,
+    };
+    let member_id = lookup_result
         .map_err(|_e| internal_error())?
         .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?;
 
@@ -283,9 +297,14 @@ impl FromRequestParts<AppState> for DaemonUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authenticate_daemon(parts, state, DaemonUnauthorized::Distinct)
-            .await
-            .map_err(|err| *err)
+        authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Distinct,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)
     }
 }
 
@@ -303,9 +322,39 @@ impl FromRequestParts<AppState> for OpaqueDaemonUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let DaemonUser { member } = authenticate_daemon(parts, state, DaemonUnauthorized::Opaque)
-            .await
-            .map_err(|err| *err)?;
+        let DaemonUser { member } = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Opaque,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
         Ok(OpaqueDaemonUser { member })
+    }
+}
+
+/// Daemon token auth for recognizer pack downloads.
+///
+/// Same member checks as [`DaemonUser`]. Missing, unknown, revoked, and
+/// expired tokens share the token-check 401 body. The lookup does not write.
+pub struct PackDaemonUser;
+
+impl FromRequestParts<AppState> for PackDaemonUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Opaque,
+            DaemonLookup::ReadOnly,
+        )
+        .await
+        .map(|_| PackDaemonUser)
+        .map_err(|err| *err)
     }
 }

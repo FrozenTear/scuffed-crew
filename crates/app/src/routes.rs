@@ -12,6 +12,8 @@ pub enum Route {
         Setup {},
         #[route("/login")]
         Login {},
+        #[route("/link")]
+        LinkDevice {},
         #[route("/")]
         Home {},
         #[route("/members")]
@@ -177,5 +179,14 @@ mod tests {
             Route::AdminReports {}
         );
         assert_eq!(Route::AdminReports {}.to_string(), "/admin/reports");
+    }
+
+    #[test]
+    fn link_route_drops_a_code_query() {
+        let parsed = Route::from_str("/link?code=ABCD").expect("link route");
+        assert_eq!(parsed, Route::LinkDevice {});
+        assert_eq!(parsed.to_string(), "/link");
+        assert!(!parsed.to_string().contains('?'));
+        assert!(!parsed.to_string().contains("ABCD"));
     }
 }

@@ -112,9 +112,19 @@ PY
 # True when the unit's ReadWritePaths already covers this absolute path.
 data_dir_covered_by_unit() {
     local path="$1" home="$2" runtime="${XDG_RUNTIME_DIR:-}" root
+    local data_root config_root prefix
+    data_root="$home/.local/share/scuffed-stat-tracker"
+    config_root="$home/.config/scuffed-stat-tracker"
+    if declare -F install_path_named >/dev/null 2>&1; then
+        prefix="${PREFIX:-$home/.local}"
+        data_root="$(install_path_named "$home" "$prefix" data scuffed-stat-tracker)" \
+            || data_root="$home/.local/share/scuffed-stat-tracker"
+        config_root="$(install_path_named "$home" "$prefix" config scuffed-stat-tracker)" \
+            || config_root="$home/.config/scuffed-stat-tracker"
+    fi
     for root in \
-        "$home/.local/share/scuffed-stat-tracker" \
-        "$home/.config/scuffed-stat-tracker" \
+        "$data_root" \
+        "$config_root" \
         ${runtime:+"$runtime"}
     do
         [[ -n "$root" ]] || continue

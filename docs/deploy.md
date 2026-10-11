@@ -477,6 +477,18 @@ and the server is restarted.
 `scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
 the same way it includes uploads.
 
+## Recognizer asset packs
+
+Hero icons and other recognizer packs are game art. Do not commit them, do not
+attach them to a release, and do not put them in fixtures. Compose mounts the
+named volume `packs-data` read-only at `/app/data/packs` and sets `PACKS_DIR`
+to that path. The directory is outside SurrealDB and outside the web root.
+How to fill the volume: [tracker-packs.md](tracker-packs.md).
+
+If `PACKS_DIR` is unset or the directory cannot be read, the site still starts.
+`GET /api/tracker/packs` and `GET /api/tracker/packs/{name}` return 503
+`{"error":"packs_disabled"}`. `packs-data` is not in `scripts/backup.sh`.
+
 ## Backups
 
 `scripts/backup.sh` stores the SurrealDB export, data volumes, and

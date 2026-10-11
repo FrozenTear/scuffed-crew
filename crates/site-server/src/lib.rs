@@ -3,10 +3,14 @@ pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
 pub mod leaderboard_cache;
+pub mod link_attempts;
+pub mod link_cleanup;
+pub mod link_poll;
 pub mod login_lockout;
 pub mod membership_policy;
 pub mod nostr_rate_limit;
 pub mod notifications;
+pub mod packs;
 pub mod rate_limit;
 pub mod routes;
 pub mod seed;
@@ -21,6 +25,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header},
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
@@ -139,6 +144,32 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
+    // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
+    // 10s). Filling this bucket does not block uploads or token-check.
+    // The governor calls `rate_limited_response` for the JSON 429.
+    let pack_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid pack governor config"),
+    );
+    let pack_routes = Router::new()
+        .route("/api/tracker/packs", get(routes::packs::list_packs))
+        .route(
+            "/api/tracker/packs/{name}",
+            get(routes::packs::download_pack),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::packs::require_packs,
+        ))
+        .layer(
+            GovernorLayer::new(pack_governor_config)
+                .error_handler(rate_limit::governor_error_response),
+        );
+
     // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
     // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
     // aggregates made DoS amplification cheap.
@@ -213,6 +244,53 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
+    // Device-link sign-in. Three buckets so a poll loop cannot starve start,
+    // and guessing a user code cannot starve the device. Wrong-code guesses
+    // have a second, stricter limit inside the handlers. Poll refills one
+    // cell per second (see `link_poll`) so three devices can sit on the
+    // 5 second interval for the whole code lifetime.
+    let link_period = 30;
+    let link_start_routes = Router::new()
+        .route("/api/link/start", post(routes::link::start))
+        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+        .layer(
+            GovernorLayer::new(std::sync::Arc::new(
+                GovernorConfigBuilder::default()
+                    .key_extractor(key_extractor.clone())
+                    .per_second(link_period)
+                    .burst_size(routes::link::LINK_START_BURST)
+                    .finish()
+                    .expect("valid device link start governor"),
+            ))
+            .error_handler(rate_limit::governor_error_response),
+        )
+        .layer(middleware::from_fn(routes::link::no_store_link));
+    let link_poll_routes = Router::new()
+        .route("/api/link/poll", post(routes::link::poll))
+        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::link::limit_link_poll,
+        ))
+        .layer(middleware::from_fn(routes::link::no_store_link));
+    let link_user_routes = Router::new()
+        .route("/api/link/lookup", post(routes::link::lookup))
+        .route("/api/link/approve", post(routes::link::approve))
+        .route("/api/link/deny", post(routes::link::deny))
+        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+        .layer(
+            GovernorLayer::new(std::sync::Arc::new(
+                GovernorConfigBuilder::default()
+                    .key_extractor(key_extractor)
+                    .per_second(link_period)
+                    .burst_size(routes::link::LINK_USER_BURST)
+                    .finish()
+                    .expect("valid device link user governor"),
+            ))
+            .error_handler(rate_limit::governor_error_response),
+        )
+        .layer(middleware::from_fn(routes::link::no_store_link));
+
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
     let dev_mode = scuffed_db::in_memory_dev_from_env();
@@ -236,8 +314,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Upload routes carry their own (dedicated) rate limiter
         .merge(upload_routes)
         .merge(token_check_routes)
+        .merge(pack_routes)
         // Public aggregate routes (dedicated rate limiter — HS-DR P1)
         .merge(public_routes)
+        .merge(link_start_routes)
+        .merge(link_poll_routes)
+        .merge(link_user_routes)
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
@@ -669,6 +751,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        // Outermost: strip link codes from the query before TraceLayer logs the URI.
+        .layer(middleware::from_fn(routes::link::strip_link_query_secrets))
         .with_state(state)
 }
 

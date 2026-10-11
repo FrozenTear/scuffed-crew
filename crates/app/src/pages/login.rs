@@ -261,11 +261,18 @@ pub(crate) fn safe_return_route(raw: &str) -> Option<Route> {
     }
 }
 
-pub(crate) fn route_after_sign_in(is_member: bool, return_to: Option<Route>) -> Route {
-    if let Some(route) = return_to {
-        return route;
-    }
-    if is_member {
+/// Where a successful sign-in goes: `/link` first, then a remembered
+/// in-app return path, then Home for members and Apply for everyone else.
+fn destination_after_sign_in(
+    is_member: bool,
+    return_to_link: bool,
+    return_to: Option<Route>,
+) -> Route {
+    if return_to_link {
+        Route::LinkDevice {}
+    } else if let Some(route) = return_to {
+        route
+    } else if is_member {
         Route::Home {}
     } else {
         Route::Apply {}
@@ -313,6 +320,27 @@ fn remember_login_return_from_url(url: &str) {
 pub(crate) fn take_login_return() -> Option<Route> {
     let path = login_return_lock().take()?;
     safe_return_route(&path)
+}
+
+/// Same rule without the `/link` flag.
+pub(crate) fn route_after_sign_in(is_member: bool, return_to: Option<Route>) -> Route {
+    destination_after_sign_in(is_member, false, return_to)
+}
+
+/// Read the `/link` return and the remembered return path, then clear both.
+///
+/// `honor_link_return` is false for a sign-in that never goes back to `/link`
+/// or to a return path (register). That still clears what was left in the tab.
+fn route_after_credentials(is_member: bool, honor_link_return: bool) -> Route {
+    let return_to_link = if honor_link_return {
+        super::link::take_return_to_link()
+    } else {
+        false
+    };
+    super::link::clear_return_to_link();
+    let return_to = take_login_return();
+    let return_to = if honor_link_return { return_to } else { None };
+    destination_after_sign_in(is_member, return_to_link, return_to)
 }
 
 /// Banner for a browser URL in the shape `history.current_route()` returns
@@ -480,20 +508,18 @@ pub fn Login() -> Element {
                 .await
             {
                 Ok(_) => {
-                    match client.get_me().await {
-                        Ok(me) => {
-                            let is_member = me.member.is_some();
-                            auth.set(AuthState {
-                                user: Some(me_to_user_info(&me)),
-                                loading: false,
-                            });
-                            // Align with register / Nostr: bare accounts go to Apply.
-                            nav.replace(route_after_sign_in(is_member, take_login_return()));
-                        }
-                        Err(_) => {
-                            nav.replace(route_after_sign_in(true, take_login_return()));
-                        }
+                    let me = client.get_me().await;
+                    let is_member = me.as_ref().map(|me| me.member.is_some()).unwrap_or(true);
+                    // Take and clear before auth updates, so the app effect
+                    // cannot spend a stale flag on a full-page jump.
+                    let route = route_after_credentials(is_member, true);
+                    if let Ok(me) = me {
+                        auth.set(AuthState {
+                            user: Some(me_to_user_info(&me)),
+                            loading: false,
+                        });
                     }
+                    nav.replace(route);
                 }
                 Err(e) => {
                     error.set(Some(login_failure_message(&e)));
@@ -533,15 +559,17 @@ pub fn Login() -> Element {
                 .await
             {
                 Ok(_) => {
+                    // Register never returns to `/link`. Drop a flag left in the tab
+                    // before auth updates, or the app effect would follow it.
+                    let route = route_after_credentials(false, false);
                     if let Ok(me) = client.get_me().await {
                         auth.set(AuthState {
                             user: Some(me_to_user_info(&me)),
                             loading: false,
                         });
                     }
-                    // New accounts exist to join. A report return path does not apply.
-                    let _ = take_login_return();
-                    nav.replace(Route::Apply {});
+                    // New accounts go straight to the application.
+                    nav.replace(route);
                 }
                 Err(e) => {
                     error.set(Some(register_failure_message(&e)));
@@ -558,20 +586,16 @@ pub fn Login() -> Element {
             match nostr_login_flow().await {
                 Ok(()) => {
                     let client = ApiClient::web();
-                    match client.get_me().await {
-                        Ok(me) => {
-                            let is_member = me.member.is_some();
-                            auth.set(AuthState {
-                                user: Some(me_to_user_info(&me)),
-                                loading: false,
-                            });
-                            // New/bare users go straight to the application funnel.
-                            nav.replace(route_after_sign_in(is_member, take_login_return()));
-                        }
-                        Err(_) => {
-                            nav.replace(route_after_sign_in(true, take_login_return()));
-                        }
+                    let me = client.get_me().await;
+                    let is_member = me.as_ref().map(|me| me.member.is_some()).unwrap_or(true);
+                    let route = route_after_credentials(is_member, true);
+                    if let Ok(me) = me {
+                        auth.set(AuthState {
+                            user: Some(me_to_user_info(&me)),
+                            loading: false,
+                        });
                     }
+                    nav.replace(route);
                 }
                 Err(msg) => {
                     error.set(Some(msg));
@@ -918,6 +942,75 @@ mod tests {
             scuffed_types::chat_api_error_copy(429, lockout),
             "too many login attempts"
         );
+    }
+
+    #[test]
+    fn sign_in_from_link_returns_to_link_without_a_query() {
+        assert_eq!(
+            destination_after_sign_in(true, true, None),
+            Route::LinkDevice {}
+        );
+        assert_eq!(
+            destination_after_sign_in(false, true, None),
+            Route::LinkDevice {}
+        );
+        assert_eq!(Route::LinkDevice {}.to_string(), "/link");
+        assert!(!Route::LinkDevice {}.to_string().contains('?'));
+        assert_eq!(destination_after_sign_in(true, false, None), Route::Home {});
+        assert_eq!(
+            destination_after_sign_in(false, false, None),
+            Route::Apply {}
+        );
+    }
+
+    #[test]
+    fn link_return_beats_a_remembered_path_and_the_path_beats_home() {
+        let reports = Some(Route::AdminReports {});
+        assert_eq!(
+            destination_after_sign_in(true, true, reports.clone()),
+            Route::LinkDevice {}
+        );
+        assert_eq!(
+            destination_after_sign_in(true, false, reports.clone()),
+            Route::AdminReports {}
+        );
+        assert_eq!(
+            destination_after_sign_in(false, false, reports),
+            Route::AdminReports {}
+        );
+    }
+
+    #[test]
+    fn register_clears_a_remembered_path_and_goes_to_apply() {
+        super::super::link::clear_return_to_link();
+        remember_login_return("/admin/reports");
+        assert_eq!(route_after_credentials(false, false), Route::Apply {});
+        assert_eq!(take_login_return(), None);
+    }
+
+    #[test]
+    fn sign_in_clears_the_link_flag_when_it_is_used_or_skipped() {
+        super::super::link::clear_return_to_link();
+
+        super::super::link::arm_return_to_link();
+        assert!(super::super::link::return_to_link_pending());
+        assert_eq!(route_after_credentials(true, true), Route::LinkDevice {});
+        assert!(
+            !super::super::link::return_to_link_pending(),
+            "following /link consumes the flag"
+        );
+
+        super::super::link::arm_return_to_link();
+        assert_eq!(route_after_credentials(true, false), Route::Home {});
+        assert!(
+            !super::super::link::return_to_link_pending(),
+            "a sign-in that stays off /link drops the flag"
+        );
+
+        super::super::link::arm_return_to_link();
+        assert_eq!(route_after_credentials(false, false), Route::Apply {});
+        assert!(!super::super::link::return_to_link_pending());
+        assert!(!Route::Apply {}.to_string().contains('?'));
     }
 
     #[test]

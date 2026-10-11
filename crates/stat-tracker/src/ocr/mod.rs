@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use image::{DynamicImage, ImageEncoder};
 use rayon::prelude::*;
 
-use crate::detect::hero_portrait::detect_team_size;
+use crate::detect::hero_portrait::{ScoreboardPreflight, detect_team_size};
 
 /// Cached column offset from a previous successful calibration (keyed by board
 /// size + team size). Avoids re-running ~300 probe OCRs when the layout is stable.
@@ -266,6 +267,66 @@ pub fn recognize_region(
     let png_buf = encode_png(&preprocess::prepare(img))?;
     let (text, _conf) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
     Ok(text)
+}
+
+// Stretch retries this thread has OCR'd, and the microseconds of the latest
+// one. Tests read them to prove a non-Tab frame never starts the second pass.
+// Thread-local so parallel tests do not count each other's retries.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MAP_LABEL_RETRY_RUNS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static MAP_LABEL_RETRY_LAST_US: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Read the Tab top-bar map label from a full frame.
+///
+/// `preflight` is the capture path's existing scoreboard result. The stretch
+/// retry runs only for [`ScoreboardPreflight::Ready`]. This function does not
+/// scan the board again.
+///
+/// The first pass is [`recognize_region`] on [`preprocess::crop_map_name`],
+/// the same preprocess a fully lit label already uses. A label caught mid
+/// fade-in is dim grey. The white mask drops it, and Tesseract returns junk.
+/// That miss is retried once, on a brightness stretch inverted to
+/// black-on-white. The stretch uses the channel mean only. A crop whose
+/// brightness range or bright-pixel coverage is too low to hold a label is
+/// not stretched. The first read is what comes back unless the retry matches
+/// a map.
+pub fn recognize_map_label(frame: &DynamicImage, preflight: ScoreboardPreflight) -> String {
+    read_map_crop(
+        &preprocess::crop_map_name(frame),
+        matches!(preflight, ScoreboardPreflight::Ready(_)),
+    )
+}
+
+/// First read of a map-name crop, then at most one stretch retry.
+///
+/// `on_tab` is the scoreboard preflight. A gameplay frame, a menu, or any
+/// other non-Tab image keeps the first read and does not pay for the retry.
+pub(crate) fn read_map_crop(crop: &DynamicImage, on_tab: bool) -> String {
+    let first = recognize_region(crop).unwrap_or_default();
+    if crate::parse::match_map_in_text(&first).is_some() || !on_tab {
+        return first;
+    }
+    let Some(retry) = preprocess::map_label_retry_image(crop) else {
+        return first;
+    };
+    let started = Instant::now();
+    let second = recognize_prepared(&retry, "7", None).unwrap_or_default();
+    let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    tracing::debug!(elapsed_us, "map label stretch retry");
+    #[cfg(test)]
+    {
+        MAP_LABEL_RETRY_RUNS.with(|runs| runs.set(runs.get() + 1));
+        MAP_LABEL_RETRY_LAST_US.with(|last| last.set(elapsed_us));
+    }
+    if crate::parse::match_map_in_text(&second).is_some() {
+        second
+    } else {
+        first
+    }
 }
 
 /// OCR a multi-line screen region (phase headers like "BAN HEROES 13" or
@@ -1030,5 +1091,289 @@ mod tests {
     #[test]
     fn better_offset_tie_without_anchor_prefers_smaller_magnitude() {
         assert_eq!(better_offset((-0.20, 4), (-0.05, 4), None), (-0.05, 4));
+    }
+}
+
+/// Synthetic map-label pictures shared by the OCR tests and the stretch tests.
+#[cfg(test)]
+pub(crate) mod map_label_fixtures {
+    use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    use super::preprocess::{crop_scoreboard, game_rect_16_9};
+    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
+
+    /// Subset of DejaVu Sans Bold. Licence: `fixtures/map-label/LICENSE`.
+    pub(crate) const SANS_BOLD: &[u8] =
+        include_bytes!("../../fixtures/map-label/DejaVuSans-Bold.subset.ttf");
+
+    pub(crate) const LIJIANG: &str = "Lijiang Tower";
+    pub(crate) const GRIMSVOTN: &str = "Watchpoint: Gr\u{00ed}msv\u{00f6}tn";
+    /// 102 / 255 is about 40% brightness.
+    pub(crate) const FADED: u8 = 102;
+    pub(crate) const LIT: u8 = 236;
+
+    /// Values 40 through 52. Peak-to-peak stays under the stretch floor.
+    pub(crate) fn low_noise(w: u32, h: u32) -> DynamicImage {
+        let mut img = RgbImage::new(w, h);
+        let mut state = 0x1234_5678u32;
+        for px in img.pixels_mut() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let v = 40 + ((state >> 16) % 13) as u8;
+            *px = Rgb([v, v, v]);
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    pub(crate) fn brightness_range(img: &DynamicImage) -> u8 {
+        let rgb = img.to_rgb8();
+        let mut min_v = 255u8;
+        let mut max_v = 0u8;
+        for px in rgb.pixels() {
+            let v = ((u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3) as u8;
+            min_v = min_v.min(v);
+            max_v = max_v.max(v);
+        }
+        max_v.saturating_sub(min_v)
+    }
+
+    /// One line of synthetic top-bar text. Not a captured frame.
+    pub(crate) fn draw_label(text: &str, ink: u8) -> DynamicImage {
+        let font = FontRef::try_from_slice(SANS_BOLD).expect("bundled sans bold");
+        let scale = PxScale::from(48.0);
+        let scaled = font.as_scaled(scale);
+        let width = 1200u32;
+        let height = 88u32;
+        let bg = [18u8, 20, 28];
+        let mut img = RgbImage::from_pixel(width, height, Rgb(bg));
+        let mut cursor = 20.0f32;
+        let baseline = 14.0 + scaled.ascent();
+        for ch in text.chars() {
+            let id = font.glyph_id(ch);
+            let mut glyph = id.with_scale(scale);
+            glyph.position = point(cursor, baseline);
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|dx, dy, cov| {
+                    if cov <= 0.0 {
+                        return;
+                    }
+                    let x = (bounds.min.x + dx as f32).round() as i32;
+                    let y = (bounds.min.y + dy as f32).round() as i32;
+                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+                        return;
+                    }
+                    let dest = img.get_pixel_mut(x as u32, y as u32);
+                    let cov = cov.clamp(0.0, 1.0);
+                    for channel in 0..3 {
+                        let from = f32::from(dest.0[channel]);
+                        let to = f32::from(ink);
+                        dest.0[channel] = (from + (to - from) * cov).round() as u8;
+                    }
+                });
+            }
+            cursor += scaled.h_advance(id);
+        }
+        assert!(
+            cursor < width as f32 - 8.0,
+            "{text} ran off the crop at {cursor}"
+        );
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// 1080p stand-in. `tab` paints a bright header with six dark labels inside
+    /// the scoreboard window, which is enough for the preflight to say Ready.
+    /// The map-name window holds a bright block so a stretch would be legal.
+    pub(crate) fn frame_1080(tab: bool) -> DynamicImage {
+        let (w, h) = (1920u32, 1080u32);
+        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 22]));
+        let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+        let mx = gx + (gw as f64 * 0.68) as u32;
+        let my = gy + (gh as f64 * 0.022) as u32;
+        for py in my..my + 24 {
+            for px in mx..mx + 120 {
+                img.put_pixel(px, py, Rgb([102, 102, 102]));
+            }
+        }
+        if tab {
+            let bx = gx + (gw as f64 * 0.175) as u32;
+            let by = gy + (gh as f64 * 0.15) as u32;
+            let bw = (gw as f64 * 0.65) as u32;
+            let bh = (gh as f64 * 0.70) as u32;
+            // Cover the whole header scan (0.5% to 2.5% of the board). A dark
+            // row left in that band would count as ink across every column.
+            let y0 = by;
+            let y1 = by + (bh as f64 * 0.030) as u32;
+            for py in y0..y1 {
+                for px in bx..bx + bw {
+                    img.put_pixel(px, py, Rgb([230, 230, 230]));
+                }
+            }
+            // Six dark labels in the stat area, spaced past the letter merge.
+            let origin = bx + (bw as f64 * 0.40) as u32;
+            for i in 0..6u32 {
+                let x0 = origin + i * 36;
+                for py in y0..y1 {
+                    for px in x0..x0 + 4 {
+                        img.put_pixel(px, py, Rgb([20, 20, 20]));
+                    }
+                }
+            }
+        }
+        let frame = DynamicImage::ImageRgb8(img);
+        let ready = matches!(
+            preflight_scoreboard(&crop_scoreboard(&frame)).0,
+            ScoreboardPreflight::Ready(_)
+        );
+        assert_eq!(ready, tab, "synthetic frame tab={tab}");
+        frame
+    }
+}
+
+#[cfg(test)]
+mod map_label_ocr_tests {
+    use super::map_label_fixtures::{self, FADED, GRIMSVOTN, LIJIANG, LIT};
+    use super::preprocess::{self, MAP_LABEL_MIN_RANGE, crop_scoreboard};
+    use super::{
+        MAP_LABEL_RETRY_LAST_US, MAP_LABEL_RETRY_RUNS, read_map_crop, recognize_map_label,
+        recognize_prepared, recognize_region,
+    };
+    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
+    use crate::parse::match_map_in_text;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn assert_no_map(img: &DynamicImage) {
+        assert!(
+            preprocess::map_label_retry_image(img).is_none(),
+            "stretch ran on a crop that cannot hold a label"
+        );
+        let before = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
+        let raw = read_map_crop(img, true);
+        assert_eq!(
+            MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get),
+            before,
+            "stretch OCR ran"
+        );
+        assert!(match_map_in_text(&raw).is_none(), "got a map from {raw:?}");
+    }
+
+    #[test]
+    fn faded_map_labels_read_from_the_stretched_image() {
+        for (text, want) in [
+            ("CONTROL | LIJIANG TOWER", LIJIANG),
+            ("ESCORT | WATCHPOINT: GRIMSVOTN", GRIMSVOTN),
+        ] {
+            let img = map_label_fixtures::draw_label(text, FADED);
+            assert!(
+                map_label_fixtures::brightness_range(&img) >= MAP_LABEL_MIN_RANGE,
+                "{text} range collapsed"
+            );
+            let first = recognize_region(&img).unwrap_or_default();
+            if match_map_in_text(&first).is_some() {
+                eprintln!("dim {text} matched on the first read ({first:?}); skipping that check");
+            }
+            let retry = preprocess::map_label_retry_image(&img).expect("stretch");
+            let started = std::time::Instant::now();
+            let raw = recognize_prepared(&retry, "7", None).expect("retry ocr");
+            let elapsed_us = started.elapsed().as_micros();
+            eprintln!("map label stretch retry {text:?}: {elapsed_us} us");
+            assert_eq!(
+                match_map_in_text(&raw).as_deref(),
+                Some(want),
+                "{text} read {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_brightness_map_labels_stay_on_the_first_read() {
+        for (text, want) in [
+            ("CONTROL | LIJIANG TOWER", LIJIANG),
+            ("ESCORT | WATCHPOINT: GRIMSVOTN", GRIMSVOTN),
+        ] {
+            let img = map_label_fixtures::draw_label(text, LIT);
+            let first = recognize_region(&img).expect("full brightness ocr");
+            assert_eq!(
+                match_map_in_text(&first).as_deref(),
+                Some(want),
+                "first read of {text} changed: {first:?}"
+            );
+            let before = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
+            let raw = read_map_crop(&img, true);
+            assert_eq!(raw, first, "{text} left the full-brightness path");
+            assert_eq!(
+                MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get),
+                before,
+                "a matching first read still retried"
+            );
+        }
+    }
+
+    #[test]
+    fn junk_label_stays_unknown() {
+        let img = map_label_fixtures::draw_label("ZZZQQQ NOTAMAP", FADED);
+        let first = recognize_region(&img).unwrap_or_default();
+        let raw = read_map_crop(&img, true);
+        assert!(
+            match_map_in_text(&raw).is_none(),
+            "junk read as a map: {raw:?}"
+        );
+        assert_eq!(raw, first, "retry replaced a non-matching first read");
+    }
+
+    #[test]
+    fn flat_grey_blank_and_noise_bars_return_no_map() {
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 48, Rgb([90, 90, 90])));
+        let blank = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 48, Rgb([0, 0, 0])));
+        let noise = map_label_fixtures::low_noise(320, 48);
+        assert!(map_label_fixtures::brightness_range(&noise) < MAP_LABEL_MIN_RANGE);
+        assert_no_map(&flat);
+        assert_no_map(&blank);
+        assert_no_map(&noise);
+
+        let mut speck = RgbImage::from_pixel(320, 48, Rgb([0, 0, 0]));
+        for (x, y) in [(10u32, 10u32), (11, 10), (10, 11), (12, 12)] {
+            speck.put_pixel(x, y, Rgb([255, 255, 255]));
+        }
+        let speck = DynamicImage::ImageRgb8(speck);
+        assert!(map_label_fixtures::brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
+        assert_no_map(&speck);
+    }
+
+    #[test]
+    fn a_non_scoreboard_frame_never_retries() {
+        let gameplay = map_label_fixtures::frame_1080(false);
+        let tab = map_label_fixtures::frame_1080(true);
+        let gameplay_preflight = preflight_scoreboard(&crop_scoreboard(&gameplay)).0;
+        let tab_preflight = preflight_scoreboard(&crop_scoreboard(&tab)).0;
+        assert!(
+            !matches!(gameplay_preflight, ScoreboardPreflight::Ready(_)),
+            "gameplay stand-in was classified Ready"
+        );
+        assert!(
+            matches!(tab_preflight, ScoreboardPreflight::Ready(_)),
+            "Tab stand-in was not Ready"
+        );
+        let before = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
+        let raw = recognize_map_label(&gameplay, gameplay_preflight);
+        assert_eq!(
+            MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get),
+            before,
+            "gameplay frame started a stretch retry: {raw:?}"
+        );
+        assert!(
+            match_map_in_text(&raw).is_none(),
+            "gameplay frame produced a map: {raw:?}"
+        );
+
+        let tab_raw = recognize_map_label(&tab, tab_preflight);
+        let runs = MAP_LABEL_RETRY_RUNS.with(std::cell::Cell::get);
+        assert!(
+            runs > before,
+            "Tab frame did not retry a miss ({tab_raw:?})"
+        );
+        let elapsed_us = MAP_LABEL_RETRY_LAST_US.with(std::cell::Cell::get);
+        eprintln!("map label stretch retry on Tab frame: {elapsed_us} us");
+        assert!(elapsed_us > 0, "retry timing was not recorded");
     }
 }

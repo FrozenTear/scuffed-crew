@@ -12,6 +12,8 @@ data/secrets.env
 data/uploads/
 # Tracker bug-report zips (REPORTS_DIR default). Not the web root.
 data/reports/
+# Recognizer asset packs (PACKS_DIR). Game art must not be committed.
+data/packs/
 dist/
 # Exception: prebuilt-release installer sources (not app SPA output)
 !crates/stat-tracker/dist/

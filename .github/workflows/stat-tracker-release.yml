@@ -268,6 +268,7 @@ jobs:
       - name: Packaging unit checks (OpenSSL deny + isolated lib dirs)
         run: |
           bash crates/stat-tracker/dist/test-packaging.sh
+          bash crates/stat-tracker/dist/test-uninstall-paths.sh
           bash crates/stat-tracker/dist/test-desktop-entry.sh
           bash crates/stat-tracker/dist/test-systemd-unit.sh
           bash crates/stat-tracker/dist/test-release-notes.sh
@@ -299,6 +300,7 @@ jobs:
           bash crates/stat-tracker/dist/stage-release-assets.sh "${STAGE}/assets"
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
           cp crates/stat-tracker/dist/uninstall.sh "${STAGE}/uninstall.sh"
+          cp crates/stat-tracker/dist/install-paths.sh "${STAGE}/install-paths.sh"
           # Session import helper + ExecStart rewriter. install.sh sources
           # systemd-unit.sh and installs import-session-env.sh under PREFIX.
           cp crates/stat-tracker/dist/import-session-env.sh "${STAGE}/import-session-env.sh"
@@ -334,9 +336,9 @@ jobs:
             TAG="stat-tracker-manual-${GITHUB_SHA::8}"
             EXTRA_FLAGS="--draft --target ${GITHUB_SHA}"
           fi
-          # RCs are not production releases: pre-release badge, never "Latest".
+          # Alphas and RCs are not production releases: pre-release badge, never "Latest".
           case "${TAG}" in
-            *-rc*) EXTRA_FLAGS="${EXTRA_FLAGS} --prerelease" ;;
+            *-rc*|*-alpha*) EXTRA_FLAGS="${EXTRA_FLAGS} --prerelease" ;;
           esac
           bash crates/stat-tracker/dist/release-notes.sh --tag "${TAG}" > release-notes.md
           gh release create "${TAG}" ${EXTRA_FLAGS} \

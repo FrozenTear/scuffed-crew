@@ -464,6 +464,11 @@ fn check_file(
     if !valid_rel_path(&file.path) {
         return Err("file path is not allowed".into());
     }
+    // Local map-label crops are never a report file. Listing one is the
+    // same outcome as a missing file: 400, nothing stored.
+    if is_debug_mapcrop_path(&file.path) {
+        return Err("file missing".into());
+    }
     if !is_sha256_hex(&file.sha256) {
         return Err("file sha256 is not 64 lowercase hex characters".into());
     }
@@ -587,6 +592,16 @@ fn check_opt_label(label: &str, value: Option<&str>) -> Result<(), String> {
         check_short(label, value, 0, 64)?;
     }
     Ok(())
+}
+
+fn is_debug_mapcrop_path(path: &str) -> bool {
+    let segs: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect();
+    segs.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("debug") && pair[1].eq_ignore_ascii_case("mapcrops")
+    })
 }
 
 fn valid_rel_path(path: &str) -> bool {
@@ -767,6 +782,14 @@ mod tests {
         v["bundle_version"] = serde_json::json!(2);
         let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
         assert!(err.contains("bundle_version"), "{err}");
+    }
+
+    #[test]
+    fn a_listed_mapcrop_is_file_missing() {
+        let mut v = sample();
+        v["files"][1]["path"] = serde_json::json!("debug/mapcrops/sess-1920x1080-1.png");
+        let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
+        assert_eq!(err, "file missing");
     }
 
     #[test]

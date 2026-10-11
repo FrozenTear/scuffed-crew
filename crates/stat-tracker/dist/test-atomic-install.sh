@@ -57,6 +57,7 @@ printf 'old-lib\n' > "$PKG/lib/scuffed-stat-tracker/ocr/liblept.so.5"
 printf '[Desktop Entry]\nName=test\n' > "$PKG/assets/scuffed-stat-tracker.desktop"
 printf '[Unit]\nDescription=test\n' > "$PKG/assets/scuffed-stat-tracker.service"
 cp "$INSTALL" "$PKG/install.sh"
+cp "$DIST/install-paths.sh" "$PKG/install-paths.sh"
 cp "$DIST/uninstall.sh" "$PKG/uninstall.sh"
 
 HOME="$HOME_DIR" PREFIX="$PREFIX" SKIP_INTEGRATION=1 \

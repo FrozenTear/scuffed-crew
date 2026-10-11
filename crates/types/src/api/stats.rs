@@ -34,6 +34,14 @@ pub struct StatsUploadEntry {
     /// badge on the site. Defaulted so older daemons keep uploading.
     #[serde(default)]
     pub edited: bool,
+    /// Recognizer stored on the local row. The tracker sends it. Older
+    /// clients omit it, and that deserializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognizer: Option<String>,
+    /// Flat names this row was not sure about. Omitted when empty so a
+    /// confident or ocr-v1 row does not add the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspect_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,10 +181,10 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 
 /// `POST /api/stats/upload` as the server reads it.
 ///
-/// [`StatsUploadRequest`] is the body the desktop tracker builds. That struct
-/// has no `recognizer` or `suspect_fields` field, so current and 0.4.x clients
-/// keep emitting the same JSON. This type accepts that JSON plus an optional
-/// `recognizer` and `suspect_fields` on each object in `matches`. The values
+/// [`StatsUploadRequest`] is the body the desktop tracker builds. It sends
+/// `recognizer` from the stored row and omits `suspect_fields` when that list
+/// is empty. 0.4.x clients omit both. This type accepts that JSON plus an
+/// optional `recognizer` and `suspect_fields` on each object in `matches`. The values
 /// are per match because one sync batch can carry games captured under
 /// different readers.
 ///
@@ -345,6 +353,8 @@ mod tests {
                     .unwrap()
                     .with_timezone(&chrono::Utc),
                 edited: false,
+                recognizer: Some(RECOGNIZER_OCR_V1.into()),
+                suspect_fields: Vec::new(),
             }],
             deleted_sessions: vec![],
         }
@@ -420,18 +430,18 @@ mod tests {
     fn old_shape_upload_body_deserializes_without_recognizer() {
         let current = serde_json::to_string(&sample_request()).unwrap();
         assert!(
-            !current.contains("recognizer"),
-            "the tracker request type must not emit recognizer: {current}"
+            current.contains("\"recognizer\":\"ocr-v1\""),
+            "the tracker request type sends the stored recognizer: {current}"
         );
         assert!(
             !current.contains("suspect_fields"),
-            "the tracker request type must not emit suspect_fields: {current}"
+            "an empty suspect list is omitted: {current}"
         );
         let body: StatsUploadBody = serde_json::from_str(&current).unwrap();
-        assert!(matches!(
+        assert_eq!(
             body.matches[0].recognizer,
-            RecognizerInput::Absent
-        ));
+            RecognizerInput::Value(RECOGNIZER_OCR_V1.into())
+        );
         assert!(matches!(
             body.matches[0].suspect_fields,
             SuspectFieldsInput::Absent
@@ -460,10 +470,16 @@ mod tests {
         assert_eq!(old.matches[0].entry.session_id, "");
         assert_eq!(old.matches[0].entry.elims, 0);
         assert!(!old.matches[0].entry.edited);
+        assert_eq!(old.matches[0].entry.recognizer, None);
+        let bare: StatsUploadEntry = serde_json::from_str(
+            r#"{"hero":"Ana","map_name":"Oasis","game_mode":"control","role":"Support","outcome":"victory","played_at":"2026-07-01T20:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.recognizer, None);
         assert!(old.deleted_sessions.is_empty());
 
-        // The tracker struct still ignores a recognizer key, so a newer
-        // client body remains readable by code that only knows the old type.
+        // A body that also carries recognizer and suspect_fields still
+        // decodes the rest of the match. Unknown keys stay ignored.
         let mut with_id: serde_json::Value = serde_json::from_str(&current).unwrap();
         with_id["matches"][0]["recognizer"] = serde_json::json!("cv-v1");
         with_id["matches"][0]["suspect_fields"] = serde_json::json!(["hero", "dmg"]);

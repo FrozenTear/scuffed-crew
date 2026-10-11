@@ -28,7 +28,8 @@ async fn do_fetch(request: &Request) -> Result<(u16, String, Option<String>), Cl
         .get("retry-after")
         .ok()
         .flatten()
-        .filter(|value| !value.trim().is_empty());
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let text = JsFuture::from(
         resp.text()
             .map_err(|e| ClientError::Network(format!("{e:?}")))?,
@@ -117,6 +118,29 @@ pub async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     body: &B,
 ) -> Result<T, ClientError> {
     json_request("POST", base_url, path, body).await
+}
+
+pub async fn post_json_observed<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, crate::ObservedError> {
+    let url = format!("{base_url}{path}");
+    let json_body = serde_json::to_string(body)
+        .map_err(|e| crate::ObservedError::Network(format!("Serialize: {e}")))?;
+    let request = build_json_request("POST", &url, &json_body)
+        .map_err(|err| crate::ObservedError::from_client(err, None))?;
+    let (status, text, retry_after) = do_fetch(&request)
+        .await
+        .map_err(|err| crate::ObservedError::from_client(err, None))?;
+    if status >= 400 {
+        return Err(crate::ObservedError::Http {
+            status,
+            body: text,
+            retry_after,
+        });
+    }
+    crate::decode_body(&text).map_err(|err| crate::ObservedError::from_client(err, None))
 }
 
 pub async fn put_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(

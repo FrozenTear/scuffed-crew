@@ -1,12 +1,13 @@
 //! CG-4 Lane C: hero-source authority for scoreboard captures.
 //!
 //! Career-panel title is always authoritative when present. Portrait template
-//! matching may **confirm** the current accepted hero, but may **switch** only
-//! when career-panel has never succeeded this game **and** ≥2 consecutive
-//! identical portrait matches land at confidence ≥ [`PORTRAIT_SWITCH_MIN_CONF`].
-//! That blocks the 07-22 field failure (portrait Illari 0.836 mid–Wrecking Ball
+//! matching is ignored below [`PORTRAIT_SWITCH_MIN_CONF`] (a live Tab guessed
+//! Sierra or Tracer at 0.77). At or above that floor it may **confirm** the
+//! current accepted hero, and may **switch** only when career-panel has never
+//! succeeded this game **and** ≥2 consecutive identical matches land. That
+//! blocks the 07-22 field failure (portrait Illari 0.836 mid-Wrecking Ball
 //! game while career-panel was unreadable) without blocking real career-panel
-//! swaps (e.g. Ramattra→Reinhardt).
+//! swaps (e.g. Ramattra to Reinhardt).
 
 use serde::{Deserialize, Serialize};
 
@@ -60,17 +61,18 @@ pub fn resolve_hero(
     let mut next = state.clone();
 
     if let Some(hero) = career {
-        let hero = hero.to_string();
+        let hero = canonicalize(hero);
         next.career_ever_ok = true;
         next.accepted_hero = Some(hero.clone());
         next.portrait_pending = None;
         return (hero, HeroSource::CareerPanel, next);
     }
 
-    if let Some((raw, conf)) = portrait {
+    if let Some((raw, conf)) = portrait.filter(|(_, conf)| *conf >= PORTRAIT_SWITCH_MIN_CONF) {
         let hero = canonicalize(raw);
 
-        // Confirm: same as currently accepted — always allow portrait to re-assert.
+        // Confirm: same as currently accepted, and only at the trust floor.
+        // A 0.77 guess must not re-assert or override.
         if next.accepted_hero.as_deref() == Some(hero.as_str()) {
             next.portrait_pending = None;
             return (hero, HeroSource::Portrait, next);
@@ -99,7 +101,7 @@ pub fn resolve_hero(
 
         // No accepted hero yet and streak not met — do not write a one-off
         // portrait (would open a fake segment). Prefer OCR text if known.
-        let ocr = ocr_text.to_string();
+        let ocr = canonicalize(ocr_text);
         if !ocr.is_empty() && ocr != "Unknown" {
             return (ocr, HeroSource::OcrText, next);
         }
@@ -110,9 +112,11 @@ pub fn resolve_hero(
     next.portrait_pending = None;
     if let Some(prev) = next.accepted_hero.clone() {
         // Prefer held authority over thrashing OCR after career/portrait established.
+        let prev = canonicalize(&prev);
+        next.accepted_hero = Some(prev.clone());
         return (prev, HeroSource::Held, next);
     }
-    (ocr_text.to_string(), HeroSource::OcrText, next)
+    (canonicalize(ocr_text), HeroSource::OcrText, next)
 }
 
 #[cfg(test)]
@@ -148,7 +152,22 @@ mod tests {
     }
 
     #[test]
-    fn portrait_confirms_current_hero() {
+    fn career_panel_beats_a_confident_portrait() {
+        let (h, src, next) = resolve_hero(
+            Some("Wrecking Ball"),
+            Some(("tracer", 0.95)),
+            "Tracer",
+            &HeroAuthState::default(),
+            canon_map,
+        );
+        assert_eq!(h, "Wrecking Ball");
+        assert_eq!(src, HeroSource::CareerPanel);
+        assert!(next.career_ever_ok);
+        assert!(next.portrait_pending.is_none());
+    }
+
+    #[test]
+    fn portrait_confirms_current_hero_at_the_trust_floor() {
         let st = HeroAuthState {
             career_ever_ok: true,
             accepted_hero: Some("Wrecking Ball".into()),
@@ -156,7 +175,7 @@ mod tests {
         };
         let (h, src, next) = resolve_hero(
             None,
-            Some(("wrecking_ball", 0.75)),
+            Some(("wrecking_ball", PORTRAIT_SWITCH_MIN_CONF)),
             "Illari",
             &st,
             canon_map,
@@ -164,6 +183,30 @@ mod tests {
         assert_eq!(h, "Wrecking Ball");
         assert_eq!(src, HeroSource::Portrait);
         assert_eq!(next.accepted_hero.as_deref(), Some("Wrecking Ball"));
+    }
+
+    #[test]
+    fn portrait_below_the_trust_floor_does_not_override() {
+        let st = HeroAuthState {
+            career_ever_ok: false,
+            accepted_hero: Some("Wrecking Ball".into()),
+            portrait_pending: Some(("Sierra".into(), 1)),
+        };
+        let (h, src, next) = resolve_hero(None, Some(("sierra", 0.77)), "Tracer", &st, canon_map);
+        assert_eq!(h, "Wrecking Ball");
+        assert_eq!(src, HeroSource::Held);
+        assert!(next.portrait_pending.is_none());
+
+        let (same, same_src, same_next) = resolve_hero(
+            None,
+            Some(("wrecking_ball", 0.77)),
+            "Tracer",
+            &st,
+            canon_map,
+        );
+        assert_eq!(same, "Wrecking Ball");
+        assert_eq!(same_src, HeroSource::Held);
+        assert!(same_next.portrait_pending.is_none());
     }
 
     #[test]

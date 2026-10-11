@@ -10932,6 +10932,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower_governor",
@@ -10945,8 +10946,9 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.4.24"
+version = "0.5.0-alpha.3"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "ashpd",
  "chrono",
@@ -10954,6 +10956,7 @@ dependencies = [
  "evdev",
  "image",
  "leptess",
+ "libc",
  "libwayshot",
  "rayon",
  "reqwest 0.12.28",
