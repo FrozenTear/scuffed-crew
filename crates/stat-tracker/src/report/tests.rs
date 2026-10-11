@@ -571,14 +571,8 @@ fn zip_fixture_dates_entries_hashes_and_bom() {
     assert_eq!(report.files[0].sha256, bundle::sha256_hex(log));
 }
 
-/// The real server validator on this build's output.
-///
-/// Ignored until the bundle_version 2 validator (`claude/report-v2-server`)
-/// is on this branch's base: today's `scuffed_types::parse_bundle_manifest`
-/// accepts only version 1 and requires a `game` object, so it rejects every
-/// v2 log-only manifest. Remove the `#[ignore]` when that lands.
+/// The real server validator (`scuffed_types`, #229) on this build's output.
 #[test]
-#[ignore = "needs the bundle_version 2 validator from claude/report-v2-server"]
 fn server_validator_accepts_log_only_manifest() {
     let dir = tempfile::tempdir().unwrap();
     seed_logs(dir.path());
