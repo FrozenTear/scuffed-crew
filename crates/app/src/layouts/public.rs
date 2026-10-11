@@ -713,6 +713,11 @@ pub fn PublicLayout() -> Element {
                                 "Settings"
                             }
                             Link {
+                                to: Route::MyReports {},
+                                onclick: move |_| account_open.set(false),
+                                "My reports"
+                            }
+                            Link {
                                 to: Route::DmInbox {},
                                 onclick: move |_| account_open.set(false),
                                 "DMs"
@@ -849,6 +854,11 @@ pub fn PublicLayout() -> Element {
                     "Settings"
                 }
                 Link {
+                    to: Route::MyReports {},
+                    onclick: move |_| close_mobile_nav(mobile_open),
+                    "My reports"
+                }
+                Link {
                     to: Route::DmInbox {},
                     onclick: move |_| close_mobile_nav(mobile_open),
                     "DMs"
@@ -933,6 +943,15 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[test]
+    fn account_menu_links_my_reports() {
+        let src = include_str!("public.rs");
+        assert!(
+            src.matches("Route::MyReports").count() >= 2,
+            "desktop and mobile account menus should link My reports"
+        );
     }
 
     #[test]
@@ -1123,6 +1142,22 @@ mod tests {
         assert!(
             focus_at < set_at,
             "focus the hamburger before the closed render sets inert: {body}"
+        );
+    }
+
+    #[test]
+    fn my_reports_closes_the_mobile_menu_through_one_helper() {
+        let src = include_str!("public.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
+        let sheet = prod
+            .split("nav-overlay-sheet")
+            .nth(2)
+            .expect("mobile sheet");
+        assert!(sheet.contains("My reports"));
+        assert!(sheet.contains("close_mobile_nav(mobile_open)"));
+        assert!(
+            !sheet.contains("mobile_open.set(false)"),
+            "My reports must not add another mobile_open.set(false)"
         );
     }
 

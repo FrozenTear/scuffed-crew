@@ -165,17 +165,19 @@ mod tests {
     #[test]
     fn dm_errors_map_412_403_503_and_otherwise_keep_the_string() {
         assert_eq!(
-            classify_dm_client_error(&ClientError::Http {
-                status: 412,
-                body: r#"{"error":"Server-managed Nostr key required for DMs"}"#.into(),
-            }),
+            classify_dm_client_error(&ClientError::http(
+                412,
+                r#"{"error":"Server-managed Nostr key required for DMs"}"#,
+                None,
+            )),
             DmLoadFailure::IdentitySettings
         );
 
-        let forbidden = classify_dm_client_error(&ClientError::Http {
-            status: 403,
-            body: r#"{"error":"Not an org member"}"#.into(),
-        });
+        let forbidden = classify_dm_client_error(&ClientError::http(
+            403,
+            r#"{"error":"Not an org member"}"#,
+            None,
+        ));
         assert_eq!(forbidden, DmLoadFailure::Membership);
         assert!(
             !forbidden.message().contains("server-managed"),
@@ -183,17 +185,16 @@ mod tests {
         );
 
         // Old bug: any body mentioning server_managed, including 403, became the identity banner.
-        let forbidden_body = classify_dm_client_error(&ClientError::Http {
-            status: 403,
-            body: "server_managed".into(),
-        });
+        let forbidden_body =
+            classify_dm_client_error(&ClientError::http(403, "server_managed", None));
         assert_eq!(forbidden_body, DmLoadFailure::Membership);
 
         assert_eq!(
-            classify_dm_client_error(&ClientError::Http {
-                status: 503,
-                body: r#"{"error":"Relay not configured"}"#.into(),
-            }),
+            classify_dm_client_error(&ClientError::http(
+                503,
+                r#"{"error":"Relay not configured"}"#,
+                None,
+            )),
             DmLoadFailure::RelayConfig
         );
         assert!(
@@ -202,10 +203,11 @@ mod tests {
                 .contains("server-managed")
         );
 
-        let other = classify_dm_client_error(&ClientError::Http {
-            status: 400,
-            body: r#"{"error":"server_managed"}"#.into(),
-        });
+        let other = classify_dm_client_error(&ClientError::http(
+            400,
+            r#"{"error":"server_managed"}"#,
+            None,
+        ));
         match other {
             DmLoadFailure::Other(message) => {
                 assert!(message.contains("server_managed"), "{message}");

@@ -65,7 +65,15 @@ fn App() -> Element {
     // The flag is only the path `/link`. It never carries a device code.
     use_effect(move || {
         let state = auth();
-        pages::redirect_after_login_if_needed(state.loading, state.is_logged_in());
+        // A page such as `/admin/reports` that sent the user to login comes
+        // next. `/link` wins when both are set, as on the password form.
+        if pages::redirect_after_login_if_needed(state.loading, state.is_logged_in()) {
+            // Same as the password form: when `/link` wins, the other path is
+            // dropped, so it cannot pull the member off `/link` after the jump.
+            pages::forget_login_return();
+        } else {
+            pages::redirect_to_login_return_if_needed(state.loading, state.is_logged_in());
+        }
     });
 
     // Redirect to first-boot setup when no admin exists yet.

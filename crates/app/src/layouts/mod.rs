@@ -19,7 +19,7 @@ use dioxus::prelude::*;
 /// the process off `wasm32`. Native tests that mount these layouts skip the
 /// listener entirely; they do not build a closure and then look for a window.
 #[cfg(target_arch = "wasm32")]
-fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
+pub(crate) fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
     use std::rc::Rc;
 
     use wasm_bindgen::JsCast;
@@ -67,9 +67,9 @@ fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
 /// Desktop still has a window; this stub is the non-wasm build, not a missing window.
 /// Escape handlers in the public and admin layouts therefore do not run here.
 #[cfg(not(target_arch = "wasm32"))]
-fn use_document_keydown(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
+pub(crate) fn use_document_keydown(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
 
-fn focus_element(id: &str) {
+pub(crate) fn focus_element(id: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;

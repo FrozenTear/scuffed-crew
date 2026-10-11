@@ -87,7 +87,16 @@ const PAGE_CSS: &str = r#"
         font-size: 1.8rem;
         color: var(--text);
         letter-spacing: 2px;
-        margin: 0 0 2rem;
+        margin: 0 0 0.75rem;
+    }
+    .profile-edit-reports {
+        margin: 0 0 1.5rem;
+    }
+    .profile-edit-reports a {
+        color: var(--accent);
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-decoration: none;
     }
     .profile-edit-section {
         margin-bottom: 2.5rem;
@@ -310,6 +319,9 @@ pub fn ProfileSettings() -> Element {
 
         main { class: "profile-edit-page",
             h1 { "Edit Profile" }
+            p { class: "profile-edit-reports",
+                Link { to: Route::MyReports {}, "My reports" }
+            }
 
             if let Some(err) = load_error() {
                 p { class: "profile-edit-status", "{err}" }

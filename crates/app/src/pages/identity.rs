@@ -20,7 +20,16 @@ const PAGE_CSS: &str = r#"
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
-        margin: 0 0 2rem;
+        margin: 0 0 0.75rem;
+    }
+    .identity-reports-link {
+        margin: 0 0 1.5rem;
+    }
+    .identity-reports-link a {
+        color: var(--accent);
+        font-weight: 600;
+        font-size: 0.9rem;
+        text-decoration: none;
     }
     .identity-section {
         background: var(--surface);
@@ -412,6 +421,9 @@ pub fn IdentitySettings() -> Element {
 
         main { class: "identity-page",
             h1 { class: "identity-page-title", "Nostr Identity" }
+            p { class: "identity-reports-link",
+                Link { to: Route::MyReports {}, "My reports" }
+            }
 
             div { class: "identity-section",
                 h2 { "Identity Status" }

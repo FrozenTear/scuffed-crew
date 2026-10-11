@@ -1332,6 +1332,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 403,
                 body: r#"{"error":"Can only view your own attendance stats"}"#.into(),
+                retry_after: None,
             }),
             "You don't have permission to view this member's attendance."
         );
@@ -1352,6 +1353,7 @@ mod tests {
         let limited = ClientError::Http {
             status: 429,
             body: r#"{"error":"rate_limited","retry_after":12}"#.into(),
+            retry_after: None,
         };
         assert_eq!(limited.http_status(), Some(429));
         let wait = attendance_stats_load_message(&limited);
@@ -1362,6 +1364,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
                 body: "Too Many Requests".into(),
+                retry_after: None,
             }),
             "Too many requests. Try again later."
         );
@@ -1369,6 +1372,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
                 body: r#"{"error":"rate_limited","retry_after":3601}"#.into(),
+                retry_after: None,
             }),
             "Too many requests. Try again later."
         );
@@ -1376,6 +1380,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 500,
                 body: r#"{"error":"rate_limited","retry_after":9}"#.into(),
+                retry_after: None,
             }),
             "Could not load attendance stats. Try again."
         );
@@ -1399,6 +1404,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
                 body: r#"{"error":"rate_limited","retry_after":1}"#.into(),
+                retry_after: None,
             }),
             "Too many requests. Try again in 1 second."
         );
@@ -1406,6 +1412,7 @@ mod tests {
             attendance_stats_load_message(&ClientError::Http {
                 status: 429,
                 body: r#"{"error":"rate_limited","retry_after":2}"#.into(),
+                retry_after: None,
             }),
             "Too many requests. Try again in 2 seconds."
         );
