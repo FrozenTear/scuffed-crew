@@ -12,6 +12,7 @@ pub mod parse;
 pub mod perf;
 pub mod proc_id;
 pub mod reader_apply;
+pub mod report;
 pub mod sandbox;
 pub mod setup;
 pub mod shadow;

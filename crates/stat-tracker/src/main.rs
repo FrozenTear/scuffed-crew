@@ -217,7 +217,13 @@ fn unlink_pid_file_if_owner(path: &std::path::Path, owner: u32) -> bool {
             return false;
         }
     };
-    match text.trim().parse::<u32>() {
+    // The file is `pid\nstart_ticks\n` (see `proc_id::format_pid_record`).
+    // Parsing the whole trimmed text as one u32 failed on that second line,
+    // so every clean shutdown logged "not a pid" and left the file behind.
+    match stat_tracker::proc_id::parse_pid_record(&text)
+        .map(|rec| rec.pid)
+        .ok_or(())
+    {
         Ok(pid) if pid == owner => match std::fs::remove_file(path) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -429,6 +435,27 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Crash marker (report-bundle §7). Taken after the pid guard, so a live
+    // daemon never reaches here. A stale run.marker becomes
+    // last_crash.marker with one WARN. run.marker is removed only when the
+    // main loop returns Ok (SIGTERM, Ctrl+C, a normal exit). A panic or an
+    // error return (e.g. keyboard devices lost) leaves it, so the next start
+    // offers a crash report. `last_seen` is rewritten once a minute until then.
+    let run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
+        Ok((_, guard)) => {
+            tokio::spawn(
+                guard
+                    .heartbeat()
+                    .run(stat_tracker::report::marker::HEARTBEAT_INTERVAL),
+            );
+            Some(guard)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not write run.marker; crash reports will not see this run");
+            None
+        }
+    };
+
     // Log rotate, prune old pre-vacuum backups, auto-vacuum if store is bloated.
     // Must run before open_store (single-writer SurrealKV).
     if let Err(e) = storage::maintain::startup_maintenance(&config.data_dir).await {
@@ -477,7 +504,13 @@ async fn main() -> anyhow::Result<()> {
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
         use_new_reader: config.uses_new_reader(),
     });
-    run_loop(ctx).await
+    let result = run_loop(ctx).await;
+    if result.is_ok()
+        && let Some(guard) = run_marker
+    {
+        guard.finish();
+    }
+    result
 }
 
 /// Handle flags that must run before ANY initialization (version/help probes
@@ -3099,6 +3132,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // The GUI's Stop button (and systemd) send SIGTERM — shut down as
     // gracefully as Ctrl+C, with a final sync.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // From here a SIGTERM is a clean shutdown (run.marker removed). Before
+    // this line the default action still applies. Tests wait for it.
+    tracing::info!("signal handlers ready");
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file
@@ -6099,6 +6135,21 @@ mod tests {
         std::fs::write(&path, owner.to_string()).unwrap();
         assert!(unlink_pid_file_if_owner(&path, owner));
         assert!(!path.exists(), "own pid file should be removed");
+
+        // The record acquire_pid_guard writes: pid plus start ticks.
+        std::fs::write(
+            &path,
+            stat_tracker::proc_id::format_pid_record(owner, Some(999_888)),
+        )
+        .unwrap();
+        assert!(unlink_pid_file_if_owner(&path, owner));
+        assert!(
+            !path.exists(),
+            "a two-line pid record of this process is removed on shutdown"
+        );
+        std::fs::write(&path, "not a pid\n").unwrap();
+        assert!(!unlink_pid_file_if_owner(&path, owner));
+        assert!(path.exists(), "a file that is not a pid record stays");
 
         let replacement = 7777u32;
         std::fs::write(&path, replacement.to_string()).unwrap();
