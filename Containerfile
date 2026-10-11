@@ -32,15 +32,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --system --create-home scuffed
-USER scuffed
 WORKDIR /app
 
 COPY --from=builder /build/target/release/scuffed-server ./scuffed-server
 COPY --from=builder /build/dist/ ./dist/
+COPY scripts/site-entrypoint.sh ./site-entrypoint.sh
+RUN chmod 0755 ./scuffed-server ./site-entrypoint.sh
 
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:3000/api/health || exit 1
 
-ENTRYPOINT ["./scuffed-server"]
+# Root so the entrypoint can chown the reports volume, then drop to scuffed.
+ENTRYPOINT ["/app/site-entrypoint.sh"]

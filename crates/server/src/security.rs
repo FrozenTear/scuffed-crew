@@ -1,9 +1,15 @@
 //! Security response headers, including the site Content-Security-Policy.
 //!
-//! The site policy is enforcing (`Content-Security-Policy`). `script-src`
-//! allows `'self'`, `'wasm-unsafe-eval'`, and hashes of inline boot scripts.
-//! It does not allow `'unsafe-eval'`. The desktop canvas bridge is not served
-//! by this process.
+//! The site policy is enforcing (`Content-Security-Policy`) by default.
+//! `script-src` allows `'self'`, `'wasm-unsafe-eval'`, and hashes of inline
+//! boot scripts. It does not allow `'unsafe-eval'`. The desktop canvas bridge
+//! is not served by this process.
+//!
+//! `CSP_ENFORCE=0` (also `false` / `no` / `off`) is the rollback switch: the
+//! same policy is sent as `Content-Security-Policy-Report-Only`, with no
+//! rebuild. Use it when an admin-set external image or an extra relay breaks
+//! under enforcement, then add the origin to `CSP_IMG_SRC` or
+//! `CSP_EXTRA_CONNECT_SRC` and remove the switch.
 //!
 //! `frame-ancestors`, `object-src`, `base-uri`, and `form-action` are always
 //! present. `X-Frame-Options: DENY` is sent as well.
@@ -24,7 +30,7 @@ const CSP_REPORT_ONLY_HEADER: HeaderName =
 pub struct SecurityConfig {
     /// When true, responses send `Content-Security-Policy`. When false, they
     /// send `Content-Security-Policy-Report-Only`. [`SecurityPolicy::from_env`]
-    /// always sets this true.
+    /// sets this true unless `CSP_ENFORCE` turns it off ([`enforce_from_env`]).
     pub enforce: bool,
     /// `NOSTR_RELAY_URL`. Browser chat opens a WebSocket to this origin when
     /// the team channel URL is `ws://` or `wss://`.
@@ -57,7 +63,7 @@ impl SecurityPolicy {
     /// when the process is serving a built bundle).
     pub fn from_env() -> Self {
         Self::from_config(SecurityConfig {
-            enforce: true,
+            enforce: enforce_from_env(std::env::var("CSP_ENFORCE").ok().as_deref()),
             nostr_relay_url: std::env::var("NOSTR_RELAY_URL").ok(),
             extra_connect_src: std::env::var("CSP_EXTRA_CONNECT_SRC").ok(),
             extra_img_src: std::env::var("CSP_IMG_SRC").ok(),
@@ -162,6 +168,16 @@ impl SecurityPolicy {
 /// enforcing `Content-Security-Policy` (the `/uploads` sandbox on non-images)
 /// is left in place. When enforcing, a response that already has an enforcing
 /// CSP keeps it so the upload sandbox is not replaced by the page policy.
+/// Enforce unless `CSP_ENFORCE` is `0`, `false`, `no`, or `off` (any case,
+/// trimmed). Unset, empty, or any other value enforces, so a typo cannot turn
+/// enforcement off.
+pub fn enforce_from_env(value: Option<&str>) -> bool {
+    let off = value
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| matches!(v.as_str(), "0" | "false" | "no" | "off"));
+    !off
+}
+
 pub async fn apply(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -176,6 +192,8 @@ pub async fn apply(
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
+    // One value. `insert` replaces a copy the upload layer already set.
+    // Caddy must not send this header as well (deploy/Caddyfile).
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -490,6 +508,20 @@ mod tests {
         );
     }
 
+    fn assert_nosniff_once(response: &axum::response::Response, label: &str) {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(header::X_CONTENT_TYPE_OPTIONS)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values,
+            ["nosniff"],
+            "{label}: X-Content-Type-Options nosniff must appear exactly once, got {values:?}"
+        );
+    }
+
     fn test_policy(enforce: bool) -> SecurityPolicy {
         SecurityPolicy::from_config(SecurityConfig {
             enforce,
@@ -664,13 +696,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
-        assert_eq!(
-            health
-                .headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff"),
-            "global security layer sets nosniff on every response, including ones ServeDir would return"
+        assert_nosniff_once(
+            &health,
+            "global security layer sets nosniff once on every response, including ones ServeDir would return",
         );
         let report = health
             .headers()
@@ -695,12 +723,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            png.headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff")
-        );
+        assert_nosniff_once(&png, "upload png stacked with the security layer");
         assert_eq!(
             png.headers()
                 .get(header::CONTENT_DISPOSITION)
@@ -722,12 +745,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            html.headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff")
-        );
+        assert_nosniff_once(&html, "upload html stacked with the security layer");
         assert_eq!(
             html.headers()
                 .get(header::CONTENT_DISPOSITION)
@@ -775,6 +793,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_nosniff_once(&health, "enforcing security layer");
         assert_enforced_csp_has_no_string_eval(health.headers());
         let enforced = health
             .headers()
@@ -792,6 +811,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_nosniff_once(&html, "enforcing upload sandbox");
         assert_eq!(
             html.headers()
                 .get(CSP_ENFORCE_HEADER)
@@ -800,6 +820,26 @@ mod tests {
             "enforcing page CSP must not replace the upload sandbox"
         );
         assert!(html.headers().get(CSP_REPORT_ONLY_HEADER).is_none());
+    }
+
+    #[test]
+    fn csp_enforce_is_on_unless_explicitly_switched_off() {
+        for on in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("yes"),
+            Some("typo"),
+        ] {
+            assert!(enforce_from_env(on), "{on:?} must enforce");
+        }
+        for off in ["0", "false", "no", "off", " OFF ", "False"] {
+            assert!(
+                !enforce_from_env(Some(off)),
+                "{off:?} must switch to report-only"
+            );
+        }
     }
 
     #[tokio::test]
@@ -865,6 +905,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_nosniff_once(&response, "html shell");
         let csp = response
             .headers()
             .get(CSP_REPORT_ONLY_HEADER)

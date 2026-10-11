@@ -47,6 +47,11 @@ impl PortraitMatcher {
         self.references.is_empty()
     }
 
+    #[cfg(test)]
+    fn from_references(references: HashMap<String, RgbImage>) -> Self {
+        Self { references }
+    }
+
     pub fn match_portrait(&self, crop: &DynamicImage) -> Option<(String, f64)> {
         if self.references.is_empty() {
             return None;
@@ -71,8 +76,9 @@ impl PortraitMatcher {
         // MAD ranges from 0 (identical) to 255 (maximum difference)
         let confidence = 1.0 - (best_score / 255.0);
 
-        // Reject matches below threshold
-        if confidence < 0.70 {
+        // Same floor as a portrait switch. A live Tab guessed Sierra or Tracer
+        // at 0.77, and that guess overrode the new reader. Below 0.85 is not a hero.
+        if !portrait_confidence_is_trusted(confidence) {
             tracing::debug!(best_score, confidence, "portrait match below threshold");
             return None;
         }
@@ -355,8 +361,8 @@ pub struct RowScan {
 
 impl RowScan {
     /// Cheap non-OCR scoreboard preflight: a real scoreboard always renders
-    /// 5-6 rows of white text in the team-1 band at a known pitch (~7.4%
-    /// for 6v6, ~8.3% for 5v5), so at least three dips at a plausible pitch
+    /// 5-6 rows of white text in the team-1 band at a known pitch (about 7.5%
+    /// to 7.9% for 6v6, about 8.3% to 9.0% for 5v5), so at least three dips at a plausible pitch
     /// must be present. Menus, transitions, black frames, and gameplay
     /// scenes lack this periodic structure and are rejected before any
     /// Tesseract or portrait-template work runs.
@@ -368,22 +374,30 @@ impl RowScan {
     }
 
     /// 5v5 or 6v6 from the row pitch; defaults to 5 when no pitch was
-    /// measurable. Threshold sits between the measured 5v5 (~8.3%) and
-    /// 6v6 (~7.4%) pitches. See [`RowScan::checked_team_size`] for which
-    /// pitch is used. When that returns `None` (the pitches contradict each
-    /// other), this falls back to the old rule (spectral pitch, else dip
-    /// pitch) so offline callers still get a size. The capture path rejects
-    /// that frame instead.
+    /// measurable. See [`RowScan::checked_team_size`]. When that returns
+    /// `None` (the pitches contradict, or a pitch sits in the no-guess
+    /// band), this asks the same check for the spectral pitch, else the
+    /// dip pitch, so offline callers still get a size. A pitch that check
+    /// will not classify leaves the documented default of 5. The capture
+    /// path rejects that frame instead.
     pub fn team_size(&self) -> usize {
-        self.checked_team_size().unwrap_or_else(|| {
-            match self.spectral_pitch.or(self.median_pitch) {
-                Some(p) if p < TEAM_SIZE_PITCH_SPLIT => 6,
-                _ => 5,
-            }
-        })
+        if let Some(size) = self.checked_team_size() {
+            return size;
+        }
+        let Some(pitch) = self.spectral_pitch.or(self.median_pitch) else {
+            return 5;
+        };
+        Self {
+            dip_count: self.dip_count,
+            median_pitch: None,
+            spectral_pitch: Some(pitch),
+        }
+        .checked_team_size()
+        .unwrap_or(5)
     }
 
-    /// 5v5 or 6v6 only when the row pitch says so without contradiction.
+    /// 5v5 or 6v6 only when the row pitch says so without contradiction
+    /// and without landing in the no-guess band.
     ///
     /// A pitch outside [`ROW_PITCH_PLAUSIBLE`] matches neither layout and
     /// is ignored. Dip spacing overshoots when a sparse row fails to make
@@ -395,37 +409,117 @@ impl RowScan {
     /// 6v6 table was cut one slot off, and 60 of 72 cells were wrong, 20 of
     /// them at confidence 90 or more (Scuffed Vision baseline, PR 158).
     ///
+    /// The 0.080/0.083 band is provisional, pending native 1440p 5v5
+    /// boards. Highest real 6v6 so far: dip 0.07937 (four 1080p boards)
+    /// and spectral 0.07672. At 1440p the 6v6 dip runs 0.0725 to 0.0775.
+    /// Weakest real 5v5 PC board so far: spectral 0.0847, dip 0.0866.
+    /// `wiki_scoreboard.png` at 414p measured 0.08304 on both pitches.
+    ///
     /// - No pitch measured at all: 5, the documented default, as before.
-    /// - Both pitches plausible: they must agree on the layout, or the size
-    ///   is unknown.
-    /// - One plausible: that one decides.
+    /// - A plausible pitch strictly below [`TEAM_SIZE_6V6_PITCH_MAX`] is 6.
+    /// - A plausible pitch strictly above [`TEAM_SIZE_5V5_PITCH_MIN`] is 5.
+    /// - A plausible pitch on the closed interval between those two
+    ///   constants is not a size. If either measured pitch lands there,
+    ///   the size is unknown.
+    /// - Both pitches plausible and outside the band: they must agree, or
+    ///   the size is unknown.
+    /// - One pitch outside the band, the other missing or implausible:
+    ///   that one decides.
     /// - Pitches measured but none plausible: unknown.
     pub fn checked_team_size(&self) -> Option<usize> {
         if self.spectral_pitch.is_none() && self.median_pitch.is_none() {
             return Some(5);
         }
-        let plausible = |p: Option<f64>| p.filter(|p| ROW_PITCH_PLAUSIBLE.contains(p));
-        let layout = |p: f64| if p < TEAM_SIZE_PITCH_SPLIT { 6 } else { 5 };
-        match (
-            plausible(self.spectral_pitch).map(layout),
-            plausible(self.median_pitch).map(layout),
-        ) {
-            (Some(a), Some(b)) if a == b => Some(a),
-            (Some(_), Some(_)) => None,
-            (Some(a), None) | (None, Some(a)) => Some(a),
+        // `Some(None)` is a plausible pitch inside the no-guess band.
+        // `None` is missing or outside [`ROW_PITCH_PLAUSIBLE`].
+        let vote = |p: Option<f64>| -> Option<Option<usize>> {
+            let p = p.filter(|p| ROW_PITCH_PLAUSIBLE.contains(p))?;
+            let side = if p < TEAM_SIZE_6V6_PITCH_MAX {
+                Some(6)
+            } else if p > TEAM_SIZE_5V5_PITCH_MIN {
+                Some(5)
+            } else {
+                None
+            };
+            Some(side)
+        };
+        match (vote(self.spectral_pitch), vote(self.median_pitch)) {
+            (Some(Some(a)), Some(Some(b))) if a == b => Some(a),
+            (Some(Some(_)), Some(Some(_))) => None,
+            (Some(None), _) | (_, Some(None)) => None,
+            (Some(Some(a)), None) | (None, Some(Some(a))) => Some(a),
             (None, None) => None,
         }
     }
 }
 
-/// Row pitch (fraction of crop height) between the two layouts: 6v6 below,
-/// 5v5 at or above.
-const TEAM_SIZE_PITCH_SPLIT: f64 = 0.079;
+/// Row pitch strictly below this (fraction of crop height) is 6v6.
+///
+/// Used only by [`RowScan::checked_team_size`]. The 0.080/0.083 band is
+/// provisional, pending native 1440p 5v5 boards. The closed interval from
+/// here through [`TEAM_SIZE_5V5_PITCH_MIN`] is a no-guess band.
+const TEAM_SIZE_6V6_PITCH_MAX: f64 = 0.080;
 
-/// Row pitches that can be a real 6v6 (about 0.074) or 5v5 (about 0.083)
-/// scoreboard, with about 15% of margin on each side. 0.101 and 0.102, the
-/// two misleading pitches measured so far, fall outside.
+/// Row pitch strictly above this (fraction of crop height) is 5v5.
+///
+/// Used only by [`RowScan::checked_team_size`]. See
+/// [`TEAM_SIZE_6V6_PITCH_MAX`].
+const TEAM_SIZE_5V5_PITCH_MIN: f64 = 0.083;
+
+/// Row pitches that can be a real 6v6 (about 0.0725 to 0.0794) or 5v5
+/// (about 0.083 to 0.090) scoreboard, with room on each side. 0.101 and
+/// 0.102, the two misleading pitches measured so far, fall outside.
 const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
+
+/// What the capture preflight decided, before any OCR.
+///
+/// A frame the row dips or the header labels accept, and whose pitch settles,
+/// is a board. The table check does not override that. It runs only when the
+/// pitch fails or the two pitches disagree, and then only picks the log line:
+/// no table is [`ScoreboardPreflight::NotAScoreboard`], a table is
+/// [`ScoreboardPreflight::TeamSizeUncertain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreboardPreflight {
+    /// Neither row dips nor header labels, or the pitch failed and there is
+    /// no table.
+    NotAScoreboard,
+    /// Row dips or header labels are present, the pitch does not settle 5v5
+    /// or 6v6, and a table is present.
+    TeamSizeUncertain,
+    /// Row pitch settled on this team size (5 or 6).
+    Ready(usize),
+}
+
+/// Same accept path as before the table detector: row dips or header labels,
+/// then a settled pitch. `table_present` (from
+/// [`crate::ocr::preprocess::scoreboard_table_present`], layout and brightness
+/// only) is consulted only when [`RowScan::checked_team_size`] is `None`.
+/// `header_labels` is the count from
+/// [`crate::ocr::preprocess::header_label_groups`].
+pub fn classify_scoreboard_preflight(
+    scan: &RowScan,
+    header_labels: usize,
+    table_present: bool,
+) -> ScoreboardPreflight {
+    let rows = scan.looks_like_scoreboard();
+    let header = (3..=10).contains(&header_labels);
+    if !rows && !header {
+        return ScoreboardPreflight::NotAScoreboard;
+    }
+    match scan.checked_team_size() {
+        Some(n) => ScoreboardPreflight::Ready(n),
+        None if table_present => ScoreboardPreflight::TeamSizeUncertain,
+        None => ScoreboardPreflight::NotAScoreboard,
+    }
+}
+
+/// Run the capture preflight on one scoreboard crop.
+pub fn preflight_scoreboard(board: &DynamicImage) -> (ScoreboardPreflight, RowScan) {
+    let scan = scan_rows(board);
+    let labels = crate::ocr::preprocess::header_label_groups(board).len();
+    let table = crate::ocr::preprocess::scoreboard_table_present(board);
+    (classify_scoreboard_preflight(&scan, labels, table), scan)
+}
 
 /// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
 ///
@@ -434,7 +528,10 @@ const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 /// gaps. Instead we measure saturation across the name strip per scanline: every
 /// row — occupied or empty — has white text that dips saturation once per row,
 /// so the dip-to-dip pitch reveals the row count regardless of empty slots or
-/// team colors. 6v6 rows are tighter (~7.4% of crop height) than 5v5 (~8.3%).
+/// team colors. 6v6 rows are tighter (about 7.5% to 7.9% of crop height)
+/// than 5v5 (about 8.3% to 9.0%). [`RowScan::checked_team_size`] returns
+/// no size for the no-guess band between those layouts. This returns the
+/// offline size from [`RowScan::team_size`].
 pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
     scan_rows(scoreboard).team_size()
 }
@@ -531,9 +628,10 @@ const SPECTRAL_MIN_STRENGTH: f64 = 0.12;
 
 /// Row pitch (fraction of crop height) from the strongest DFT component of
 /// the smoothed team-1 saturation profile, scanning periods that span the
-/// 6v6 (~7.4%) to 5v5 (~8.3%) row pitches with margin. The peak must be
-/// interior — a maximum at the range edge means the spectrum is just decaying
-/// (no row periodicity) — and strong enough relative to band variance.
+/// 6v6 (about 7.5% to 7.9%) to 5v5 (about 8.3% to 9.0%) row pitches with
+/// margin. The peak must be interior: a maximum at the range edge means the
+/// spectrum is just decaying (no row periodicity), and it must be strong
+/// enough relative to band variance.
 fn spectral_pitch(band: &[f64], crop_h: u32) -> Option<f64> {
     let n = band.len();
     let p_lo = ((crop_h as f64 * 0.055) as usize).max(4);
@@ -579,6 +677,11 @@ fn spectral_pitch(band: &[f64], crop_h: u32) -> Option<f64> {
         return None;
     }
     Some((p_lo + best_idx) as f64 / crop_h as f64)
+}
+
+/// At 0.85 the portrait is trusted. Just below that it is not.
+fn portrait_confidence_is_trusted(confidence: f64) -> bool {
+    confidence >= crate::hero_auth::PORTRAIT_SWITCH_MIN_CONF
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
@@ -1092,10 +1195,10 @@ mod team_size_tests {
             Some(6)
         );
         assert_eq!(
-            scan(5, Some(0.083), Some(0.0835)).checked_team_size(),
+            scan(5, Some(0.084), Some(0.0845)).checked_team_size(),
             Some(5)
         );
-        assert_eq!(scan(5, Some(0.083), None).checked_team_size(), Some(5));
+        assert_eq!(scan(5, Some(0.084), None).checked_team_size(), Some(5));
         assert_eq!(scan(6, None, Some(0.074)).checked_team_size(), Some(6));
     }
 
@@ -1119,10 +1222,317 @@ mod team_size_tests {
     }
 
     #[test]
+    fn death_screen_pitch_without_a_table_is_not_a_scoreboard() {
+        // Death screen with killfeed and HUD. The row scan logged
+        // dip_count=2, dip_pitch=0.0586, spectral_pitch=0.0963. Header
+        // labels in the 3..=10 band used to skip the "not a scoreboard"
+        // path and reject it as an unsettled 5v5-vs-6v6 pitch.
+        let death = scan(2, Some(0.0586), Some(0.0963));
+        assert!(!death.looks_like_scoreboard());
+        assert_eq!(death.checked_team_size(), None);
+        assert_eq!(
+            super::classify_scoreboard_preflight(&death, 6, false),
+            super::ScoreboardPreflight::NotAScoreboard
+        );
+    }
+
+    #[test]
+    fn death_screen_pitch_on_a_table_is_team_size_unsure() {
+        let death = scan(2, Some(0.0586), Some(0.0963));
+        assert_eq!(
+            super::classify_scoreboard_preflight(&death, 6, true),
+            super::ScoreboardPreflight::TeamSizeUncertain
+        );
+    }
+
+    #[test]
+    fn settled_pitch_stays_a_board_when_the_table_detector_misses() {
+        // A settled pitch is a board even when the table detector misses
+        // (empty, grey, and low-contrast boards). The table check does not
+        // block a frame main would accept.
+        let board = scan(6, Some(0.074), Some(0.0742));
+        assert_eq!(
+            super::classify_scoreboard_preflight(&board, 0, false),
+            super::ScoreboardPreflight::Ready(6)
+        );
+        assert_eq!(
+            super::classify_scoreboard_preflight(&board, 6, true),
+            super::ScoreboardPreflight::Ready(6)
+        );
+        // Header labels and no measurable pitch: main's default size is 5.
+        // A missed table must not turn that into a reject.
+        let grey = scan(0, None, None);
+        assert!(!grey.looks_like_scoreboard());
+        assert_eq!(
+            super::classify_scoreboard_preflight(&grey, 6, false),
+            super::ScoreboardPreflight::Ready(5)
+        );
+        // Neither signal: not a board, table or not.
+        assert_eq!(
+            super::classify_scoreboard_preflight(&grey, 0, true),
+            super::ScoreboardPreflight::NotAScoreboard
+        );
+    }
+
+    /// Rows of `row` colour with a near-white name line and no stat digits.
+    fn row_board(row: [u8; 3], text: [u8; 3], bg: [u8; 3]) -> image::DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb(bg));
+        let y0s = [40u32, 76, 112, 148, 184];
+        for y_mid in y0s {
+            for y in y_mid.saturating_sub(8)..y_mid + 8 {
+                for x in (0.06 * w as f64) as u32..(0.55 * w as f64) as u32 {
+                    let px = if (y_mid..y_mid + 3).contains(&y) {
+                        text
+                    } else {
+                        row
+                    };
+                    img.put_pixel(x, y, image::Rgb(px));
+                }
+            }
+        }
+        image::DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn empty_grey_and_low_contrast_boards_still_count() {
+        use super::ScoreboardPreflight;
+        use crate::ocr::preprocess::scoreboard_table_present;
+
+        // Empty ban-style board: row bars and name ink, no stat digits.
+        // The table detector misses it. The pitch still settles 6v6.
+        let empty = row_board([40, 110, 220], [240, 240, 240], [16, 18, 28]);
+        assert!(
+            !scoreboard_table_present(&empty),
+            "empty rows should miss the table detector"
+        );
+        let (pre, scan) = super::preflight_scoreboard(&empty);
+        assert_eq!(pre, ScoreboardPreflight::Ready(6), "{scan:?}");
+
+        // Desaturated grey board: header labels, no saturation dips.
+        // Main accepts this as size 5. A flat grey body has no darker gap,
+        // so the table detector says no.
+        let (w, h) = (800u32, 480u32);
+        let mut grey = image::RgbImage::from_pixel(w, h, image::Rgb([150, 150, 150]));
+        for i in 0..6 {
+            let x0 = (w as f64 * (0.42 + i as f64 * 0.08)) as u32;
+            for y in (h as f64 * 0.006) as u32..(h as f64 * 0.022) as u32 {
+                for x in x0..x0 + 6 {
+                    grey.put_pixel(x, y, image::Rgb([16, 16, 16]));
+                }
+            }
+        }
+        let grey = image::DynamicImage::ImageRgb8(grey);
+        assert!(!scoreboard_table_present(&grey));
+        let (pre, scan) = super::preflight_scoreboard(&grey);
+        assert_eq!(pre, ScoreboardPreflight::Ready(5), "{scan:?}");
+
+        // Low-contrast replay: muted rows, no bright header, no stat digits.
+        let replay = row_board([96, 84, 84], [148, 146, 144], [60, 62, 64]);
+        assert!(!scoreboard_table_present(&replay));
+        let (pre, scan) = super::preflight_scoreboard(&replay);
+        assert_eq!(pre, ScoreboardPreflight::Ready(6), "{scan:?}");
+    }
+
+    #[test]
     fn only_implausible_pitches_are_unknown() {
         let s = scan(3, Some(0.11), Some(0.05));
         assert_eq!(s.checked_team_size(), None);
-        assert_eq!(s.team_size(), 6);
+        // 0.05 is not a row pitch, so the offline fallback stays at the
+        // documented default of 5.
+        assert_eq!(s.team_size(), 5);
         assert_eq!(scan(2, Some(0.12), None).checked_team_size(), None);
+    }
+
+    /// Slot height over crop height for one team size, from the same integer
+    /// layout `crop_player_row` uses.
+    fn layout_pitch(frame_w: u32, frame_h: u32, team_size: usize) -> (u32, u32, f64) {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(frame_w, frame_h));
+        let board = crate::ocr::preprocess::crop_scoreboard(&img);
+        let slot = crate::ocr::preprocess::row_slot_height(board.height(), team_size);
+        let pitch = slot as f64 / board.height() as f64;
+        (board.height(), slot, pitch)
+    }
+
+    #[test]
+    fn pitch_split_sits_between_layout_five_and_six() {
+        let (h1080, six_px_1080, six_1080) = layout_pitch(1920, 1080, 6);
+        let (_, five_px_1080, five_1080) = layout_pitch(1920, 1080, 5);
+        let (h1440, six_px_1440, six_1440) = layout_pitch(2560, 1440, 6);
+        let (_, five_px_1440, five_1440) = layout_pitch(2560, 1440, 5);
+        let (h4k, six_px_4k, six_4k) = layout_pitch(3840, 2160, 6);
+        let (_, five_px_4k, five_4k) = layout_pitch(3840, 2160, 5);
+
+        assert_eq!((h1080, six_px_1080, five_px_1080), (756, 58, 68));
+        assert_eq!((h1440, six_px_1440, five_px_1440), (1007, 77, 90));
+        assert_eq!((h4k, six_px_4k, five_px_4k), (1512, 116, 136));
+
+        // Layout slots stay on their own side of the no-guess band.
+        // 1080p and 1440p 5v5 here are the crop math, not measured boards.
+
+        // Real 5v5 slot at 1080p (68/756) and 1440p (90/1007), both pitches
+        // agreeing, the way the capture check reads a board.
+        let five_1080_board = scan(5, Some(five_1080), Some(five_1080));
+        assert_eq!(five_1080_board.checked_team_size(), Some(5));
+        assert_eq!(five_1080_board.team_size(), 5);
+        let five_1440_board = scan(5, Some(five_1440), Some(five_1440));
+        assert_eq!(five_1440_board.checked_team_size(), Some(5));
+        assert_eq!(five_1440_board.team_size(), 5);
+        let five_4k_board = scan(5, Some(five_4k), Some(five_4k));
+        assert_eq!(five_4k_board.checked_team_size(), Some(5));
+        assert_eq!(
+            scan(6, Some(six_1080), Some(six_1080)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(six_1440), Some(six_1440)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(six_4k), Some(six_4k)).checked_team_size(),
+            Some(6)
+        );
+
+        // Measured 1080p 6v6. The old 0.079 split put 0.0794 on the 5v5 side.
+        let measured = scan(6, Some(0.0794), Some(0.0794));
+        assert_eq!(measured.checked_team_size(), Some(6));
+        assert_eq!(measured.team_size(), 6);
+        let straddle = scan(6, Some(0.0788), Some(0.0794));
+        assert_eq!(straddle.checked_team_size(), Some(6));
+        assert_eq!(straddle.team_size(), 6);
+    }
+
+    #[test]
+    fn measured_pitch_band_does_not_guess() {
+        // The 0.080/0.083 band is provisional, pending native 1440p 5v5
+        // boards. Highest real 6v6: dip 0.07937 (four 1080p boards),
+        // spectral 0.07672. At 1440p the 6v6 dip runs 0.0725 to 0.0775.
+        assert_eq!(
+            scan(6, Some(0.07937), Some(0.07937)).checked_team_size(),
+            Some(6)
+        );
+        // Weakest real 5v5 PC board: spectral 0.0847, dip 0.0866.
+        // Synthetic pitches only. No scoreboard image.
+        assert_eq!(
+            scan(5, Some(0.0866), Some(0.0847)).checked_team_size(),
+            Some(5)
+        );
+        assert_eq!(
+            scan(6, Some(0.07672), Some(0.07672)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(0.0725), Some(0.0725)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(6, Some(0.0775), Some(0.0775)).checked_team_size(),
+            Some(6)
+        );
+
+        // Closed band: both edges and the middle are unknown, including
+        // when only one pitch was measured.
+        for pitch in [0.080, 0.0815, 0.083] {
+            assert_eq!(
+                scan(5, Some(pitch), Some(pitch)).checked_team_size(),
+                None,
+                "{pitch}"
+            );
+            assert_eq!(
+                scan(5, Some(pitch), None).checked_team_size(),
+                None,
+                "{pitch}"
+            );
+            assert_eq!(
+                scan(5, None, Some(pitch)).checked_team_size(),
+                None,
+                "{pitch}"
+            );
+        }
+        // One pitch on the band and one just outside still does not guess.
+        assert_eq!(scan(5, Some(0.083), Some(0.0835)).checked_team_size(), None);
+
+        // The only real 5v5 Tab board so far, wiki_scoreboard.png at 414p.
+        assert_eq!(
+            scan(5, Some(0.08304), Some(0.08304)).checked_team_size(),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn wiki_scoreboard_png_is_five_when_present() {
+        let roots = [
+            format!(
+                "{}/test-data/wiki_scoreboard.png",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            format!(
+                "{}/testdata/wiki_scoreboard.png",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        ];
+        let Some(path) = roots.iter().find(|p| std::path::Path::new(p).is_file()) else {
+            return;
+        };
+        let img = image::open(path).unwrap_or_else(|err| panic!("open {path}: {err}"));
+        let scan = super::scan_rows(&crate::ocr::preprocess::crop_scoreboard(&img));
+        assert_eq!(scan.checked_team_size(), Some(5), "{path}: {scan:?}");
+    }
+}
+
+#[cfg(test)]
+mod portrait_floor_tests {
+    use super::{PortraitMatcher, portrait_confidence_is_trusted};
+    use image::{DynamicImage, Rgb, RgbImage};
+    use std::collections::HashMap;
+
+    fn solid(value: u8) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([value, value, value])))
+    }
+
+    #[test]
+    fn portrait_matcher_rejects_a_low_confidence_guess() {
+        let mut references = HashMap::new();
+        references.insert("sierra".into(), solid(128).to_rgb8());
+        let matcher = PortraitMatcher::from_references(references);
+        let weak = solid(128 + 59);
+        let confidence = 1.0 - (59.0 / 255.0);
+        assert!(
+            (0.70..0.85).contains(&confidence),
+            "synthetic pair should sit near 0.77, got {confidence}"
+        );
+        assert!(
+            matcher.match_portrait(&weak).is_none(),
+            "0.77 must not override the new reader"
+        );
+        let trusted = matcher
+            .match_portrait(&solid(128 + 30))
+            .expect("about 0.88 is a portrait");
+        assert_eq!(trusted.0, "sierra");
+        assert!(trusted.1 >= 0.85, "{}", trusted.1);
+        let same = matcher.match_portrait(&solid(128)).expect("identical crop");
+        assert_eq!(same.0, "sierra");
+        assert!(same.1 > 0.99, "{}", same.1);
+    }
+
+    #[test]
+    fn portrait_matcher_accepts_the_floor_and_rejects_just_below() {
+        assert!(portrait_confidence_is_trusted(0.85));
+        assert!(!portrait_confidence_is_trusted(0.85_f64.next_down()));
+        let mut references = HashMap::new();
+        references.insert("sierra".into(), solid(128).to_rgb8());
+        let matcher = PortraitMatcher::from_references(references);
+        // A flat image's confidence is 1 - delta/255. Delta 38 is the first
+        // step at or above 0.85. Delta 39 is the step just below.
+        let at_floor = 1.0 - (38.0 / 255.0);
+        let just_below = 1.0 - (39.0 / 255.0);
+        assert!(at_floor >= 0.85, "{at_floor}");
+        assert!(just_below < 0.85, "{just_below}");
+        let accepted = matcher
+            .match_portrait(&solid(128 + 38))
+            .expect("the 0.85 step is a portrait");
+        assert_eq!(accepted.0, "sierra");
+        assert!((accepted.1 - at_floor).abs() < 1e-9, "{}", accepted.1);
+        assert!(matcher.match_portrait(&solid(128 + 39)).is_none());
     }
 }

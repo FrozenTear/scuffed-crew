@@ -49,6 +49,7 @@ jobs:
       - name: Packaging scripts
         run: |
           bash dist/test-packaging.sh
+          bash dist/test-uninstall-paths.sh
           bash dist/test-desktop-entry.sh
           bash dist/test-systemd-unit.sh
           bash dist/test-release-notes.sh

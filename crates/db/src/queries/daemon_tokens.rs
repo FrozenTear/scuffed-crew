@@ -40,6 +40,11 @@ fn db_to_token(db: DbDaemonToken) -> DaemonToken {
     }
 }
 
+/// Active, unexpired daemon token. Shared by the stamp and the read-only lookup.
+const ACTIVE_DAEMON_SQL: &str =
+    "SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true \
+     AND (expires_at IS NONE OR expires_at > time::now())";
+
 impl Database {
     pub async fn create_daemon_token(
         &self,
@@ -73,10 +78,7 @@ impl Database {
             let token_hash = hash_session_token(raw_token);
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true \
-                     AND (expires_at IS NONE OR expires_at > time::now())",
-                )
+                .query(ACTIVE_DAEMON_SQL)
                 .bind(("tok", token_hash.clone()))
                 .await?;
             let tokens: Vec<DbDaemonToken> = result.take(0)?;
@@ -89,6 +91,23 @@ impl Database {
             } else {
                 Ok(None)
             }
+        })
+        .await
+    }
+
+    /// Same match as [`Database::validate_daemon_token`] without writing `last_used_at`.
+    ///
+    /// Pack downloads use this so a file fetch does not touch the database.
+    pub async fn lookup_daemon_token(&self, raw_token: &str) -> DbResult<Option<String>> {
+        with_timeout(async {
+            let token_hash = hash_session_token(raw_token);
+            let mut result = self
+                .client
+                .query(ACTIVE_DAEMON_SQL)
+                .bind(("tok", token_hash))
+                .await?;
+            let tokens: Vec<DbDaemonToken> = result.take(0)?;
+            Ok(tokens.into_iter().next().map(|tok| tok.member_id))
         })
         .await
     }

@@ -109,18 +109,38 @@ impl Bucket {
         }
     }
 
-    /// Refill lazily by elapsed time, then try to spend one token. Returns
-    /// `true` (and deducts) if a token was available, `false` otherwise.
-    fn try_spend(&mut self, class: RateClass, now: Instant) -> bool {
+    /// Refill lazily by elapsed time, then try to spend one token.
+    ///
+    /// `Ok(())` means a token was deducted. `Err(secs)` means the bucket is
+    /// empty and `secs` is the whole seconds until one token (at least 1).
+    fn try_spend(&mut self, class: RateClass, now: Instant) -> Result<(), u64> {
         let elapsed = now.duration_since(self.last).as_secs_f64();
         self.tokens = (self.tokens + elapsed * class.refill_per_sec()).min(class.capacity());
         self.last = now;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            true
+            Ok(())
         } else {
-            false
+            Err(secs_until_token(self.tokens, class.refill_per_sec()))
         }
+    }
+}
+
+/// Whole seconds until `tokens` reaches 1 at `refill_per_sec`. Always at least 1.
+fn secs_until_token(tokens: f64, refill_per_sec: f64) -> u64 {
+    if !refill_per_sec.is_finite() || refill_per_sec <= 0.0 {
+        return 1;
+    }
+    let deficit = (1.0 - tokens).max(0.0);
+    let raw = deficit / refill_per_sec;
+    if !raw.is_finite() || raw <= 1.0 {
+        return 1;
+    }
+    let ceil = raw.ceil();
+    if ceil >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        ceil as u64
     }
 }
 
@@ -155,12 +175,13 @@ impl NostrRateLimiter {
     /// Try to spend one token from `member_id`'s bucket for the given
     /// [`RateClass`].
     ///
-    /// Returns `true` if the bucket had a token (the caller may proceed, a
-    /// token is deducted) or `false` if that class is currently throttled
-    /// (nothing is deducted). A first-seen member/class starts with a full
-    /// bucket. The two classes are fully independent: exhausting one never
-    /// affects the other.
-    pub fn check(&self, member_id: &str, class: RateClass) -> bool {
+    /// Returns `Ok(())` if the bucket had a token (the caller may proceed, a
+    /// token is deducted). Returns `Err(secs)` if that class is currently
+    /// throttled: nothing is deducted, and `secs` is the whole seconds until
+    /// one token is available (at least 1). A first-seen member/class starts
+    /// with a full bucket. The two classes are fully independent: exhausting
+    /// one never affects the other.
+    pub fn check(&self, member_id: &str, class: RateClass) -> Result<(), u64> {
         let now = Instant::now();
         // Recover from a poisoned lock rather than panicking: a limiter panic
         // must never take down the secret-op routes.
@@ -182,9 +203,9 @@ mod tests {
         let rl = NostrRateLimiter::new();
         // A full interactive bucket (30) allows 30 interactive ops, then throttles.
         for _ in 0..30 {
-            assert!(rl.check("m1", RateClass::Interactive));
+            assert!(rl.check("m1", RateClass::Interactive).is_ok());
         }
-        assert!(!rl.check("m1", RateClass::Interactive));
+        assert_eq!(rl.check("m1", RateClass::Interactive).unwrap_err(), 1);
     }
 
     #[test]
@@ -192,9 +213,10 @@ mod tests {
         let rl = NostrRateLimiter::new();
         // A full key-op bucket (5) allows 5 key ops, then throttles.
         for _ in 0..5 {
-            assert!(rl.check("m1", RateClass::KeyOp));
+            assert!(rl.check("m1", RateClass::KeyOp).is_ok());
         }
-        assert!(!rl.check("m1", RateClass::KeyOp));
+        // One token every 60 seconds, so a just-empty bucket waits 60 seconds.
+        assert_eq!(rl.check("m1", RateClass::KeyOp).unwrap_err(), 60);
     }
 
     #[test]
@@ -202,11 +224,11 @@ mod tests {
         let rl = NostrRateLimiter::new();
         // Exhaust one member's key-op budget.
         for _ in 0..5 {
-            assert!(rl.check("m1", RateClass::KeyOp));
+            assert!(rl.check("m1", RateClass::KeyOp).is_ok());
         }
-        assert!(!rl.check("m1", RateClass::KeyOp));
-        // A different member is unaffected — the bucket is keyed on member id.
-        assert!(rl.check("m2", RateClass::KeyOp));
+        assert!(rl.check("m1", RateClass::KeyOp).is_err());
+        // A different member is unaffected. The bucket is keyed on member id.
+        assert!(rl.check("m2", RateClass::KeyOp).is_ok());
     }
 
     #[test]
@@ -214,13 +236,13 @@ mod tests {
         let rl = NostrRateLimiter::new();
         // Drain the interactive bucket completely.
         for _ in 0..30 {
-            assert!(rl.check("m1", RateClass::Interactive));
+            assert!(rl.check("m1", RateClass::Interactive).is_ok());
         }
-        assert!(!rl.check("m1", RateClass::Interactive));
-        // The key-op bucket is a separate budget — identity-critical key ops
+        assert!(rl.check("m1", RateClass::Interactive).is_err());
+        // The key-op bucket is a separate budget. Identity-critical key ops
         // must still go through even when chat traffic has saturated interactive.
         for _ in 0..5 {
-            assert!(rl.check("m1", RateClass::KeyOp));
+            assert!(rl.check("m1", RateClass::KeyOp).is_ok());
         }
     }
 
@@ -229,12 +251,12 @@ mod tests {
         let rl = NostrRateLimiter::new();
         // Drain the key-op bucket completely.
         for _ in 0..5 {
-            assert!(rl.check("m1", RateClass::KeyOp));
+            assert!(rl.check("m1", RateClass::KeyOp).is_ok());
         }
-        assert!(!rl.check("m1", RateClass::KeyOp));
+        assert!(rl.check("m1", RateClass::KeyOp).is_err());
         // Interactive traffic is a separate budget and stays fully available.
         for _ in 0..30 {
-            assert!(rl.check("m1", RateClass::Interactive));
+            assert!(rl.check("m1", RateClass::Interactive).is_ok());
         }
     }
 }

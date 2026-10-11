@@ -15,6 +15,82 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.3
+
+This alpha keeps a bad scoreboard read from wiping a stat you already had. A faded map name gets one brighter try, and a match that is still going shows on the Games tab with a note that the numbers are not final.
+
+### Highlights
+
+- Heroes land on the right name and role. Wrecking Ball is a Tank, including a one-time fix of games you already saved.
+- Settings fits a tall portrait screen, and the form scrolls inside the window.
+- Install stops when the checksum file is missing. `stat-tracker-gui --version` prints the tracker version and exits.
+- The hero reader pack is chosen by name and swapped in safely. Sign-in and server errors say what happened, and the pack you already have stays put.
+
+The new reader falls back one field at a time to the old reader (#214). A stat never drops because of a single bad read. If eliminations were 11 and one frame reads them as 1, the saved value stays 11.
+
+Dim or faded map names, such as Lijiang Tower, get one brightened retry on scoreboard frames (#218).
+
+On the Games tab, an open match shows In progress with the live stats and a note that they are not final (#217). When the match closes, the card goes back to the usual outcome. Settings uses the available height on a tall portrait display. `bootstrap.sh` refuses the install if the `.sha256` file is missing. The desktop app accepts `--version` and `-V`. The hero pack file is selected by name. The live heroes directory is swapped into place, and the previous pack is left alone if the download fails. A 401 says the sync token is not valid and to sign in again from Settings. A 403 says the site refused the reader pack. Check you're signed in with a member account. The installed pack was left in place. A 503 that says packs are not set up yet says the tracker still works and to try again later. Each game saves two local map-name images under `debug/mapcrops` so later checks can compare them with what was read. Those images stay on this machine. They are never uploaded and they are not included in reports.
+
+Stable installs are not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.3/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.3 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
+## 0.5.0-alpha.2
+
+This build is the next alpha. Signed-in members get the hero icon pack from the Scuffed Crew server.
+
+### Highlights
+
+- The tracker downloads that pack for signed-in members and checks it before using it, so hero names use the new reader for everyone.
+- In the setup guide, Enter and Escape no longer act while you type in a box.
+- The sync paused message has a small wording fix.
+
+The New reader (alpha) switch still stays off until you turn it on. With this pack, hero names from that reader no longer need a file you copied into the data folder yourself.
+
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.2/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.2 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
+## 0.5.0-alpha.1
+
+This build is an alpha. You can turn on a new scoreboard reader in Settings, and it stays off until you do.
+
+### Highlights
+
+- Settings has a New reader (alpha) switch (`reader` in config.toml). It stays off until you turn it on. When it is on, it reads numbers, the map, Victory or Defeat, and heroes. A field it is not sure about keeps the old reader's value, and the Games tab marks that field unsure.
+- Hero names: the new reader needs the hero icon pack. In this alpha the pack isn't downloaded for you yet, so hero names come from the old reader unless the pack is already in your tracker's data folder. A members-only download comes in alpha.2.
+- The first launch opens a setup guide: a screen capture check, Overwatch settings, sync sign-in by a code or a pasted token, and the reader pack.
+- Settings can remove the tracker's own files and services. If a package manager installed this copy, Settings shows that package's remove command instead. Saved games are removed only if you tick that option.
+
+The tracker reads `reader` when it starts, so restart it after you save. `ocr-v1` is the default when the key is missing. `new` stores the new reader's value for each field it read confidently on your own row, and keeps the old value for the rest. The map and mode already chosen for the game stay, including a Deathmatch game, which stays on this machine. If the new reader names a different map, Games marks the map unsure. If it cannot find the board, cannot tell the team size, finds the columns but reads no numbers, is not sure which row is yours, or does not replace any field, the game stays tagged with the old reader. A field it never tried is not marked unsure. Editing an unsure field clears the mark. Game start, game end, and the checks that hold a bad number do not change. Uploads send the reader name stored on the game, not whatever the switch says now.
+
+Hero icon templates live in the data folder under `templates/heroes/`. Without them the new reader does not name heroes, and those names stay with the old reader.
+
+The Extra number reader (test) switch is still there. It only writes a private log and does not change saved games or uploads on its own.
+
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.1/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.1 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.4.24
 
 Release notes now show inside the desktop app. The extra number reader,
@@ -642,12 +718,12 @@ Esperanca accept both plain and accented live names (Paraíso /
 Esperança) and classify as Hybrid / Push.
 
 0.4.12 shipped cheap outcome-only poll during end_reel_wake (#87).
-Still on prior polish / packaging from 0.4.1–0.4.12.
+Still on prior polish / packaging from 0.4.1-0.4.12.
 
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -668,12 +744,12 @@ does not wake end-reel. Tab-reject Victory adopt is out of scope
 (follow-up).
 
 0.4.11 shipped end-reel / POTG false-wake tighten (#85). Still on
-prior polish / packaging from 0.4.1–0.4.11.
+prior polish / packaging from 0.4.1-0.4.11.
 
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -699,7 +775,7 @@ unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -716,7 +792,7 @@ Or extract the tarball and run `./install.sh`. Pin with
 POTG nameplate title-card wake (#83): a Play of the Game **nameplate**
 title card (gold battletag + white title, color gate) holds full ~4s
 poll cadence for 45s. Letterbox / highlight end-reel path is unchanged.
-Phrase OCR is optional and log-only — the cheap color gate wakes.
+Phrase OCR is optional and log-only, the cheap color gate wakes.
 Calibrated on a real 2560×1440 card.
 
 0.4.9 already shipped on-hit poll debug PNGs (#80) and POTG / end-reel
@@ -725,7 +801,7 @@ letterbox wake (#81). Confirm rules are unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -751,7 +827,7 @@ Victory/Defeat window is sampled. Confirm rules are unchanged.
 Daemon OCR / capture / sync / store schema are unchanged. In-app
 Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
 Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
-overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1-0.4.3 are
 unchanged.
 
 ### Install
@@ -774,7 +850,7 @@ toast if wl-clipboard is missing.
 Daemon OCR / capture / sync / store schema are unchanged. Settings
 Maps-level polish (0.4.7), Maps-grammar Seasons grid (0.4.6),
 Settings/Maps/Games polish (0.4.5), companion overlay hotkey (0.4.4),
-and packaging hotfixes 0.4.1–0.4.3 are unchanged.
+and packaging hotfixes 0.4.1-0.4.3 are unchanged.
 
 ### Install
 
@@ -792,7 +868,7 @@ pane, full-width Save footer, denser surface cards. Companion hotkey
 setting is unchanged.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging
-hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), Settings/Maps/Games
+hotfixes 0.4.1-0.4.3, companion overlay hotkey (0.4.4), Settings/Maps/Games
 polish (0.4.5), and Maps-grammar Seasons grid (0.4.6) are unchanged.
 
 ### Install
@@ -806,14 +882,14 @@ Or extract the tarball and run `./install.sh`. Pin with
 
 ## 0.4.6
 
-Seasons Maps-grammar grid (#74): season cards use the same 2–4 column
+Seasons Maps-grammar grid (#74): season cards use the same 2-4 column
 layout as Maps, with a big WR, win/loss stripe, and FillPortion bar.
 
-Settings denser cards (#74): surface cards with a 1–2 column field grid.
+Settings denser cards (#74): surface cards with a 1-2 column field grid.
 Companion hotkey setting is unchanged.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging
-hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), and prior
+hotfixes 0.4.1-0.4.3, companion overlay hotkey (0.4.4), and prior
 Settings/Maps/Games polish (0.4.5) are unchanged.
 
 ### Install
@@ -834,11 +910,11 @@ Split-game dedupe (#71): reuse an unfinished same-map/hero session within
 ~20 min instead of opening a second empty Games card. Tab debounce and the
 1800s session grouping window are unchanged.
 
-Maps visual polish (#72): compact 2–4 column map cards with a WR bar and
+Maps visual polish (#72): compact 2-4 column map cards with a WR bar and
 win/loss stripe.
 
 Daemon OCR / capture / sync / store schema are unchanged. Packaging hotfixes
-0.4.1–0.4.3 and the companion overlay hotkey (0.4.4) are unchanged.
+0.4.1-0.4.3 and the companion overlay hotkey (0.4.4) are unchanged.
 
 ### Install
 
@@ -856,7 +932,7 @@ Companion overlay show/hide hotkey (#68). **Settings → Companion**: enable
 click-through (`KeyboardInteractivity::None`); Esc does not apply.
 
 The **main GUI process** reads `/dev/input` with **evdev** (same path as
-daemon Tab capture — not X11 `XGrabKey`). Needs the `input` group or seat
+daemon Tab capture, not X11 `XGrabKey`). Needs the `input` group or seat
 `uaccess`, same as Tab. OverlayHold is the same as the tray / header
 **Hide / show overlay**: hide sticks until the game ends; the shortcut
 shows the overlay again mid-session if you press it while hidden.
@@ -921,7 +997,7 @@ quits when there is no tray.
 - Optional Ayatana AppIndicator package on distros that ship it
   (Debian/Ubuntu: `libayatana-appindicator3-1`, Fedora:
   `libayatana-appindicator-gtk3`, Arch: `libayatana-appindicator`).
-- AerynOS may not ship it — the main window still works.
+- AerynOS may not ship it, the main window still works.
 
 Daemon OCR / capture / sync / store schema are unchanged. OpenSSL packaging
 from 0.4.1 is unchanged.

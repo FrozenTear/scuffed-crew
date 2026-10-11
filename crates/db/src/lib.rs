@@ -14,6 +14,7 @@ pub use client::{
     resolve_database_boot_mode, resolve_database_boot_mode_from_env, surrealdb_url_from_env,
     Database, DatabaseBootMode, DbConfig, SurrealAuthMode, PRODUCTION_WITHOUT_DATABASE_URL,
 };
+pub use queries::stat_reports::{retention_deadline, utc_day_start};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;
 pub use types::*;

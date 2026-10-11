@@ -198,16 +198,17 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	header X-Content-Type-Options "nosniff"
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 	reverse_proxy 127.0.0.1:HOST_PORT   # from data/secrets.env on the VPS
 }
 ```
 
+`X-Content-Type-Options: nosniff` is set by scuffed-server. Do not add `header X-Content-Type-Options "nosniff"` in Caddy. A second line is sent beside the origin header. If the live host file still has that line, delete it and reload Caddy.
+
 Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
 
-`deploy/Caddyfile` is the repo template. Changing it does not edit the live host file (often `/etc/caddy/Caddyfile`). Copy this block there and reload Caddy yourself.
+`deploy/Caddyfile` is the repo template. Changing it does not edit the live host file (often `/etc/caddy/Caddyfile`). Copy this block there, drop any leftover `X-Content-Type-Options` line, and reload Caddy yourself.
 
 ```bash
 # on VPS
@@ -245,6 +246,13 @@ Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
 sockets). `script-src` does not allow `'unsafe-eval'`. Leave CSP off the Caddy
 block so a second policy does not intersect. `CSP_EXTRA_CONNECT_SRC` and
 `CSP_IMG_SRC` add relay or image origins without a code change.
+
+If something breaks under the enforcing policy (an admin-set external image,
+a second chat relay), set `CSP_ENFORCE=0` in `data/secrets.env` and recreate
+the app container (`./scripts/update.sh`). The same policy is then sent as
+`Content-Security-Policy-Report-Only`, so the browser console names the
+blocked origin. Add that origin to `CSP_IMG_SRC` or `CSP_EXTRA_CONNECT_SRC`,
+then remove `CSP_ENFORCE=0` to enforce again.
 
 > **Optional: cache the ICS feeds at the edge.** `/api/calendar/all.ics` and
 > `/api/calendar/team/{id}` run a full event list plus a settings read per hit,
@@ -454,6 +462,38 @@ it does not control. Those members must republish from their own client.
 
 The confirmed run is audit-logged. Unset `NIP05_REPUBLISH_ENABLED` and restart
 once you are done — leaving it armed serves no purpose.
+
+## Tracker bug reports
+
+Member bug-report zips stay on disk. They are not rows in SurrealDB and they
+are not under the web root. Compose sets `REPORTS_DIR` to `/app/data/reports`
+and mounts the named volume `reports-data` there.
+
+The image entrypoint (`scripts/site-entrypoint.sh`) creates that directory,
+gives it to the container user `scuffed`, and sets mode 0700 before the server
+process starts. A fresh named volume is often owned by root, which is why the
+entrypoint does this instead of starting the binary directly.
+
+If the directory is missing or not writable when the server starts, stat
+reports turn themselves off. The log line is `stat reports disabled: ...` and
+the rest of the site keeps serving. Every report route then returns 503
+with body `{"error":"reports_disabled"}` until the directory can be written
+and the server is restarted.
+
+`scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
+the same way it includes uploads.
+
+## Recognizer asset packs
+
+Hero icons and other recognizer packs are game art. Do not commit them, do not
+attach them to a release, and do not put them in fixtures. Compose mounts the
+named volume `packs-data` read-only at `/app/data/packs` and sets `PACKS_DIR`
+to that path. The directory is outside SurrealDB and outside the web root.
+How to fill the volume: [tracker-packs.md](tracker-packs.md).
+
+If `PACKS_DIR` is unset or the directory cannot be read, the site still starts.
+`GET /api/tracker/packs` and `GET /api/tracker/packs/{name}` return 503
+`{"error":"packs_disabled"}`. `packs-data` is not in `scripts/backup.sh`.
 
 ## Backups
 

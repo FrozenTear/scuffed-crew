@@ -72,6 +72,23 @@ impl Outcome {
     }
 }
 
+/// Games-tab label while the session is still the open game.
+pub const IN_PROGRESS_LABEL: &str = "In progress";
+
+/// Small note under live stats. Those numbers update until the game closes.
+pub const NOT_FINAL_NOTE: &str = "not final";
+
+/// Compact/expanded Games card uses the in-progress layout only for the
+/// open session. A closed game, including one whose result is still unknown,
+/// keeps the normal card.
+pub fn game_card_in_progress(
+    session_id: &str,
+    outcome: Outcome,
+    live_session: Option<&str>,
+) -> bool {
+    !session_id.is_empty() && outcome == Outcome::Unknown && live_session == Some(session_id)
+}
+
 /// Toggleable role chips. No chip on = every role (same as unset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoleFilter {
@@ -224,6 +241,11 @@ pub struct Game {
     /// Server message when this game was refused on upload. `None` when the
     /// row is synced or still queued.
     pub upload_reject: Option<String>,
+    /// Flat names the new reader was not sure about.
+    pub suspect_fields: Vec<String>,
+    /// True when this row has already been uploaded. A blank map on a
+    /// synced row was stored by an older build. It is not a local hold.
+    pub synced: bool,
 }
 
 /// Label for a game the server refused. The detail line is the server message.
@@ -265,11 +287,67 @@ impl Game {
                 .map(|(i, s)| SegmentView::from_segment(i as u32, s))
                 .collect(),
             upload_reject: m.upload_rejection().map(str::to_string),
+            suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
+            synced: m.synced,
         }
+    }
+
+    pub fn field_unsure(&self, name: &str) -> bool {
+        self.suspect_fields.iter().any(|field| field == name)
     }
 
     pub fn display_hero(&self) -> String {
         display_hero_name(&self.hero)
+    }
+
+    /// Title for a missing map. The stored string stays empty so a blank
+    /// read is not shown as a map name.
+    pub fn display_map(&self) -> String {
+        let trimmed = self.map_name.trim();
+        if trimmed.is_empty() {
+            "Map needed".into()
+        } else {
+            self.map_name.clone()
+        }
+    }
+
+    /// `map`, `mode`, and `hero` names from the server suspect list.
+    /// Empty when this game can be uploaded.
+    pub fn review_fields(&self) -> Vec<&'static str> {
+        stat_tracker::parse::review_suspect_fields(&self.map_name, "", &self.hero)
+    }
+
+    pub fn needs_review(&self) -> bool {
+        !self.review_fields().is_empty()
+    }
+
+    /// Unsynced and missing a map or hero. The game has not been uploaded.
+    pub fn held_locally(&self) -> bool {
+        self.needs_review() && !self.synced
+    }
+
+    /// Banner for a missing map or hero.
+    ///
+    /// A game that is still queued says it stays on this machine. A game
+    /// that already uploaded must not say that. Picking a value re-queues
+    /// the row so the site can be corrected.
+    pub fn review_notice(&self) -> Option<&'static str> {
+        if !self.needs_review() {
+            return None;
+        }
+        if self.synced {
+            let fields = self.review_fields();
+            let map = fields
+                .iter()
+                .any(|field| *field == "map" || *field == "mode");
+            let hero = fields.contains(&"hero");
+            return Some(match (map, hero) {
+                (true, false) => "Map is missing. Pick one to fix it on the site.",
+                (false, true) => "Hero is missing. Pick one to fix it on the site.",
+                _ => "Map and hero are missing. Pick them to fix this game on the site.",
+            });
+        }
+        Some("Needs review. This game stays on this machine until you pick the missing fields.")
     }
 
     pub fn has_stat_line(&self) -> bool {
@@ -409,12 +487,136 @@ mod tests {
     }
 
     #[test]
+    fn in_progress_card_is_only_the_open_unknown_session() {
+        use super::{IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, game_card_in_progress};
+
+        assert!(game_card_in_progress("s1", Outcome::Unknown, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Win, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, Some("s2")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, None));
+        assert!(!game_card_in_progress("", Outcome::Unknown, Some("")));
+        assert_eq!(IN_PROGRESS_LABEL, "In progress");
+        assert_eq!(NOT_FINAL_NOTE, "not final");
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2014}'));
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2013}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2014}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2013}'));
+    }
+
+    #[test]
     fn unknown_hero_label() {
         assert_eq!(display_hero_name(""), "Unknown hero");
         assert_eq!(display_hero_name("   "), "Unknown hero");
         assert_eq!(display_hero_name("Unknown"), "Unknown hero");
         assert_eq!(display_hero_name("unknown"), "Unknown hero");
         assert_eq!(display_hero_name("Ana"), "Ana");
+    }
+
+    #[test]
+    fn field_unsure_uses_flat_names() {
+        let mut game = super::Game {
+            session_id: "s".into(),
+            hero: "Ana".into(),
+            map_name: "Busan".into(),
+            role: super::Role::Support,
+            outcome: super::Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: vec!["dmg".into(), "hero".into()],
+            synced: false,
+        };
+        assert!(game.field_unsure("dmg"));
+        assert!(game.field_unsure("hero"));
+        assert!(!game.field_unsure("e"));
+        game.suspect_fields.clear();
+        assert!(!game.field_unsure("dmg"));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::{Game, GameOcr, Outcome, Role};
+    use chrono::Utc;
+
+    fn game(hero: &str, map: &str) -> Game {
+        Game {
+            session_id: "s".into(),
+            hero: hero.into(),
+            map_name: map.into(),
+            role: Role::Support,
+            outcome: Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: Vec::new(),
+            synced: false,
+        }
+    }
+
+    #[test]
+    fn blank_map_and_unknown_hero_need_a_pick() {
+        let blank = game("Ana", "");
+        assert_eq!(blank.display_map(), "Map needed");
+        assert_eq!(blank.review_fields(), vec!["map", "mode"]);
+        assert!(blank.needs_review());
+
+        let unknown = game("Unknown", "Busan");
+        assert_eq!(unknown.review_fields(), vec!["hero"]);
+        assert!(unknown.needs_review());
+
+        let ready = game("Ana", "King's Row");
+        assert!(ready.review_fields().is_empty());
+        assert!(!ready.needs_review());
+        assert_eq!(ready.display_map(), "King's Row");
+        assert_eq!(
+            blank.review_notice(),
+            Some(
+                "Needs review. This game stays on this machine until you pick the missing fields."
+            )
+        );
+        assert!(blank.held_locally());
+    }
+
+    #[test]
+    fn synced_blank_map_does_not_say_the_game_stays_on_this_machine() {
+        let mut blank = game("Ana", "");
+        blank.synced = true;
+        let notice = blank
+            .review_notice()
+            .expect("a synced blank map still offers a pick");
+        assert_eq!(notice, "Map is missing. Pick one to fix it on the site.");
+        assert!(!notice.contains("stays on this machine"));
+        assert!(!notice.contains("Needs review"));
+        assert!(!notice.contains('—') && !notice.contains('–'));
+        assert!(!blank.held_locally());
+        assert!(blank.needs_review());
+
+        let mut hero = game("Unknown", "Busan");
+        hero.synced = true;
+        assert_eq!(
+            hero.review_notice(),
+            Some("Hero is missing. Pick one to fix it on the site.")
+        );
+        assert!(!hero.held_locally());
     }
 }
 

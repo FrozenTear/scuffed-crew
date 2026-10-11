@@ -1070,18 +1070,402 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
     }
 }
 
+/// Top-bar map label, as fractions of the 16:9 playfield. Top-right, above
+/// the scoreboard (for example "WATCHPOINT: GIBRALTAR").
+const MAP_NAME_X_RATIO: f64 = 0.68;
+const MAP_NAME_Y_RATIO: f64 = 0.022;
+const MAP_NAME_W_RATIO: f64 = 0.27;
+const MAP_NAME_H_RATIO: f64 = 0.040;
+
+/// Pixel rectangle of the top-bar map-name label, in full-frame coordinates.
+///
+/// `None` when that rectangle is empty or does not fit inside the frame. The
+/// ratios match [`crop_map_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapNameRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+pub fn map_name_rect(frame_w: u32, frame_h: u32) -> Option<MapNameRect> {
+    let (gx, gy, gw, gh) = game_rect_16_9(frame_w, frame_h);
+    if gw == 0 || gh == 0 || frame_w == 0 || frame_h == 0 {
+        return None;
+    }
+    let x = gx + (gw as f64 * MAP_NAME_X_RATIO) as u32;
+    let y = gy + (gh as f64 * MAP_NAME_Y_RATIO) as u32;
+    let w = (gw as f64 * MAP_NAME_W_RATIO) as u32;
+    let h = (gh as f64 * MAP_NAME_H_RATIO) as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let x_end = x.checked_add(w)?;
+    let y_end = y.checked_add(h)?;
+    if x_end > frame_w || y_end > frame_h {
+        return None;
+    }
+    Some(MapNameRect { x, y, w, h })
+}
+
 /// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
 ///
-/// This sits ABOVE the scoreboard crop, so scoreboard OCR never sees it. White
-/// text on a dark bar — pass to `recognize_region`.
+/// This sits above the scoreboard crop, so scoreboard OCR never sees it. White
+/// text on a dark bar. `recognize_map_label` crops this window from the frame.
+///
+/// The full 0.27-wide window still reaches the match timer (`ILIOS` read as
+/// `ILIOS TIM`). A fixed slice off that window also cuts long names
+/// (`WATCHPOINT: GRIMSVOTN` came back as `GRiMsVO`). The right edge moves
+/// left only when a timer-sized ink run sits past a gap wider than letter
+/// and word spacing. No such gap, and the full window stays, so the longest
+/// name still fits at 1440p and 1080p.
 pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let (gx, gy, gw, gh) = game_rect_16_9(w, h);
-    let x = gx + (gw as f64 * 0.68) as u32;
-    let y = gy + (gh as f64 * 0.022) as u32;
-    let cw = ((gw as f64 * 0.27) as u32).min(w.saturating_sub(x));
-    let ch = ((gh as f64 * 0.040) as u32).min(h.saturating_sub(y));
-    img.crop_imm(x, y, cw, ch)
+    let (x, y, cw_full, ch) = match map_name_rect(w, h) {
+        Some(r) => (r.x, r.y, r.w, r.h),
+        None => {
+            let x = gx + (gw as f64 * MAP_NAME_X_RATIO) as u32;
+            let y = gy + (gh as f64 * MAP_NAME_Y_RATIO) as u32;
+            let cw = ((gw as f64 * MAP_NAME_W_RATIO) as u32).min(w.saturating_sub(x));
+            let ch = ((gh as f64 * MAP_NAME_H_RATIO) as u32).min(h.saturating_sub(y));
+            (x, y, cw, ch)
+        }
+    };
+    let trim = if cw_full == 0 {
+        0
+    } else {
+        map_name_timer_trim(img, x, y, cw_full, ch, gh).min(cw_full.saturating_sub(1))
+    };
+    img.crop_imm(x, y, cw_full.saturating_sub(trim), ch)
+}
+
+/// Full map-label box, with no timer trim and no pixel change.
+///
+/// The reader still uses [`crop_map_name`]. A saved crop uses this so the
+/// PNG is the native rectangle, including the clock when it sits in the box.
+pub fn crop_map_label_box(img: &DynamicImage) -> Option<DynamicImage> {
+    let rect = map_name_rect(img.width(), img.height())?;
+    Some(img.crop_imm(rect.x, rect.y, rect.w, rect.h))
+}
+
+/// Whether the map-label box has text worth saving.
+///
+/// A flat bar saves nothing. The floor is under a mid fade-in (luma near
+/// 107), so a faint label still counts. This is not the reader trim, which
+/// still treats luma 170 as ink.
+pub fn map_label_has_text(img: &DynamicImage) -> bool {
+    let Some(rect) = map_name_rect(img.width(), img.height()) else {
+        return false;
+    };
+    // Below a fade-in near 107, above a dark empty bar.
+    const SAVE_LUMA: u16 = 100;
+    // A flat fill, dark or bright, has almost no spread.
+    const FLAT_SPREAD: u16 = 24;
+    const MIN_INK: u32 = 8;
+    let rgb = img.crop_imm(rect.x, rect.y, rect.w, rect.h).to_rgb8();
+    let mut min_l = 255u16;
+    let mut max_l = 0u16;
+    let mut ink = 0u32;
+    for px in rgb.pixels() {
+        let luma = (u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3;
+        min_l = min_l.min(luma);
+        max_l = max_l.max(luma);
+        if luma >= SAVE_LUMA {
+            ink += 1;
+        }
+    }
+    max_l.saturating_sub(min_l) >= FLAT_SPREAD && ink >= MIN_INK
+}
+
+/// How much of the map-name window is the match timer, in pixels.
+///
+/// Ink columns merge across gaps up to about 1.2% of the game height (letter
+/// and word spacing). A later run is the timer when that gap is wider and the
+/// run is narrower than the name, or when the hole is at least 6% of the
+/// window (a short name with the clock far to the right).
+fn map_name_timer_trim(img: &DynamicImage, x: u32, y: u32, cw: u32, ch: u32, gh: u32) -> u32 {
+    if cw < 8 || ch < 4 || gh == 0 {
+        return 0;
+    }
+    let rgb = img.crop_imm(x, y, cw, ch).to_rgb8();
+    let ink: Vec<bool> = (0..cw)
+        .map(|col| {
+            (0..ch)
+                .filter(|&row| {
+                    let p = rgb.get_pixel(col, row).0;
+                    let luma = (u16::from(p[0]) + u16::from(p[1]) + u16::from(p[2])) / 3;
+                    luma >= 170
+                })
+                .count()
+                >= 2
+        })
+        .collect();
+    let merge = ((gh as f64) * 0.012).round().max(3.0) as u32;
+    let runs = ink_runs(&ink, merge);
+    let Some((last_i, &(last_s, last_e))) = runs.iter().enumerate().next_back() else {
+        return 0;
+    };
+    if last_i == 0 {
+        return 0;
+    }
+    let prev_e = runs[last_i - 1].1;
+    let gap = last_s.saturating_sub(prev_e);
+    if gap <= merge {
+        return 0;
+    }
+    let timer_w = last_e.saturating_sub(last_s);
+    let left_span = prev_e.saturating_sub(runs[0].0);
+    let shorter_than_name = left_span > 0 && timer_w.saturating_mul(2) < left_span;
+    let wide_hole = gap as f64 >= cw as f64 * 0.06;
+    if shorter_than_name || wide_hole {
+        cw.saturating_sub(last_s)
+    } else {
+        0
+    }
+}
+
+/// Ink runs, bridging holes of at most `merge` columns.
+fn ink_runs(ink: &[bool], merge: u32) -> Vec<(u32, u32)> {
+    let mut runs = Vec::new();
+    let mut start: Option<u32> = None;
+    let mut last: Option<u32> = None;
+    for (i, on) in ink.iter().copied().enumerate() {
+        let i = i as u32;
+        if on {
+            if start.is_none() {
+                start = Some(i);
+            }
+            last = Some(i);
+        } else if let (Some(s), Some(end)) = (start, last)
+            && i - end > merge
+        {
+            runs.push((s, end + 1));
+            start = None;
+            last = None;
+        }
+    }
+    if let (Some(s), Some(end)) = (start, last) {
+        runs.push((s, end + 1));
+    }
+    runs
+}
+
+/// Peak-to-peak channel-mean brightness below this is not a map label.
+///
+/// Flat grey and a black bar are 0. The low-amplitude noise bar in the tests
+/// stays at or under 16. A glyph at about 40% brightness (102) on the dark
+/// top bar (about 22) clears 70, so 24 sits in that gap. Stretching a narrower
+/// range would lift noise up to ink and OCR would guess a name.
+pub(crate) const MAP_LABEL_MIN_RANGE: u8 = 24;
+
+/// Minimum share of pixels in the bright half of the crop's own range.
+///
+/// Glyphs on a Tab label are well above this. A blank bar with a few hot
+/// pixels is not. Stretching those pixels would turn specks into a guess.
+pub(crate) const MAP_LABEL_MIN_TEXT_COVERAGE: f64 = 0.005;
+
+/// Channel-mean brightness. Hue is not read, so a tint and a grey of the
+/// same mean stretch to the same value.
+fn channel_mean(r: u8, g: u8, b: u8) -> u8 {
+    ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8
+}
+
+/// Stretch a crop so its darkest pixel is 0 and its brightest is 255.
+///
+/// Returns `None` when the brightness range or the bright-pixel coverage is
+/// too low to be a label. The caller must not OCR a stretch in that case.
+/// Brightness is the channel mean. Saturation and hue are not used.
+pub(crate) fn contrast_stretch_brightness(img: &DynamicImage) -> Option<GrayImage> {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let rgb = img.to_rgb8();
+    let mut gray = GrayImage::new(w, h);
+    let mut min_v = 255u8;
+    let mut max_v = 0u8;
+    for (x, y, px) in rgb.enumerate_pixels() {
+        let v = channel_mean(px.0[0], px.0[1], px.0[2]);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+        gray.put_pixel(x, y, Luma([v]));
+    }
+    let range = max_v.saturating_sub(min_v);
+    if range < MAP_LABEL_MIN_RANGE {
+        tracing::debug!(range, "map label brightness range too low to stretch");
+        return None;
+    }
+    let total = (w as usize).saturating_mul(h as usize);
+    let mid = u16::from(min_v) + u16::from(range) / 2;
+    let text = gray.pixels().filter(|px| u16::from(px.0[0]) >= mid).count();
+    let coverage = text as f64 / total as f64;
+    if coverage < MAP_LABEL_MIN_TEXT_COVERAGE {
+        tracing::debug!(coverage, "map label text coverage too low to stretch");
+        return None;
+    }
+    let span = u16::from(range);
+    for px in gray.pixels_mut() {
+        px.0[0] = ((u16::from(px.0[0].saturating_sub(min_v)) * 255) / span) as u8;
+    }
+    Some(gray)
+}
+
+/// Second-pass image for a faded Tab map label: the brightness stretch,
+/// inverted to black text on white, then the same narrow-crop upscale as
+/// [`prepare`]. `None` when [`contrast_stretch_brightness`] refuses the crop.
+pub(crate) fn map_label_retry_image(img: &DynamicImage) -> Option<GrayImage> {
+    let mut gray = contrast_stretch_brightness(img)?;
+    for px in gray.pixels_mut() {
+        px.0[0] = 255 - px.0[0];
+    }
+    if gray.width() < 1280 {
+        gray = nearest_2x_upscale(&gray);
+    }
+    Some(add_white_border(&gray, 8))
+}
+
+/// True when `board` (a [`crop_scoreboard`] result) has a Tab table: a bright
+/// header bar, two stacks of wide flat rows, and a darker gap between the
+/// stacks. Brightness and layout only. Team hue is ignored, so purple, yellow,
+/// or any other recolour still counts. A death cam with a killfeed and HUD
+/// does not.
+pub fn scoreboard_table_present(board: &DynamicImage) -> bool {
+    let Some(m) = measure_table(&board.to_rgb8()) else {
+        return false;
+    };
+    // Header: light bar. Each stack: most scanlines are one brightness.
+    // The VS gap sits between the stacks and is darker than both.
+    let present = m.header_median >= 150.0
+        && m.header_bright >= 0.40
+        && m.team1_flat >= 0.50
+        && m.team2_flat >= 0.50
+        && m.gap_luma + 15.0 < m.team1_luma
+        && m.gap_luma + 15.0 < m.team2_luma;
+    tracing::debug!(
+        header_median = m.header_median,
+        header_bright = m.header_bright,
+        team1_flat = m.team1_flat,
+        team2_flat = m.team2_flat,
+        team1_luma = m.team1_luma,
+        team2_luma = m.team2_luma,
+        gap_luma = m.gap_luma,
+        table = present,
+        "scoreboard table check"
+    );
+    present
+}
+
+struct TableMeasure {
+    header_median: f64,
+    header_bright: f64,
+    team1_flat: f64,
+    team2_flat: f64,
+    team1_luma: f64,
+    team2_luma: f64,
+    gap_luma: f64,
+}
+
+fn measure_table(rgb: &RgbImage) -> Option<TableMeasure> {
+    let (w, h) = rgb.dimensions();
+    if w < 32 || h < 32 {
+        return None;
+    }
+    let (header_median, header_bright) = region_header(rgb, 0.28, 0.97, 0.0, 0.030)?;
+    let (team1_flat, team1_luma) = region_stack(rgb, 0.12, 0.90, 0.10, 0.46)?;
+    let gap_luma = region_median(rgb, 0.12, 0.90, 0.500, 0.555)?;
+    let (team2_flat, team2_luma) = region_stack(rgb, 0.12, 0.90, 0.62, 0.90)?;
+    Some(TableMeasure {
+        header_median,
+        header_bright,
+        team1_flat,
+        team2_flat,
+        team1_luma,
+        team2_luma,
+        gap_luma,
+    })
+}
+
+fn region_px(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = rgb.dimensions();
+    let xa = (w as f64 * x0).round() as u32;
+    let xb = (w as f64 * x1).round() as u32;
+    let ya = (h as f64 * y0).round() as u32;
+    let yb = (h as f64 * y1).round() as u32;
+    if xb <= xa || yb <= ya || xa >= w || ya >= h {
+        return None;
+    }
+    Some((xa, xb.min(w), ya, yb.min(h)))
+}
+
+fn px_luma(px: [u8; 3]) -> u8 {
+    ((px[0] as u16 + px[1] as u16 + px[2] as u16) / 3) as u8
+}
+
+fn median_u8(values: &mut [u8]) -> u8 {
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+fn region_samples(rgb: &RgbImage, x0: u32, x1: u32, y0: u32, y1: u32) -> Vec<u8> {
+    let mut values = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            values.push(px_luma(rgb.get_pixel(x, y).0));
+        }
+    }
+    values
+}
+
+/// Median luma of the header window, and the fraction of pixels at luma >= 140.
+fn region_header(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(f64, f64)> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let mut values = region_samples(rgb, xa, xb, ya, yb);
+    if values.is_empty() {
+        return None;
+    }
+    let bright = values.iter().filter(|&&v| v >= 140).count() as f64 / values.len() as f64;
+    Some((median_u8(&mut values) as f64, bright))
+}
+
+/// Fraction of scanlines whose pixels sit near that line's median, and the
+/// median luma of the whole window. A team row is flat across the table.
+/// A death cam is not.
+fn region_stack(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(f64, f64)> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let width = (xb - xa) as usize;
+    if width == 0 || yb <= ya {
+        return None;
+    }
+    let mut flat = 0u32;
+    let mut all = Vec::with_capacity(width * (yb - ya) as usize);
+    for y in ya..yb {
+        let mut line = Vec::with_capacity(width);
+        for x in xa..xb {
+            line.push(px_luma(rgb.get_pixel(x, y).0));
+        }
+        let med = {
+            let mut sorted = line.clone();
+            median_u8(&mut sorted)
+        };
+        let close = line.iter().filter(|&&v| v.abs_diff(med) <= 36).count();
+        if close as f64 / width as f64 >= 0.62 {
+            flat += 1;
+        }
+        all.extend(line);
+    }
+    let rows = (yb - ya) as f64;
+    Some((flat as f64 / rows, median_u8(&mut all) as f64))
+}
+
+fn region_median(rgb: &RgbImage, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<f64> {
+    let (xa, xb, ya, yb) = region_px(rgb, x0, x1, y0, y1)?;
+    let mut values = region_samples(rgb, xa, xb, ya, yb);
+    if values.is_empty() {
+        return None;
+    }
+    Some(median_u8(&mut values) as f64)
 }
 
 /// Crop the right-side career panel's hero-name title (e.g. "MOIRA").
@@ -1121,7 +1505,7 @@ pub fn crop_player_row(
         (1, row_index - team_size)
     };
 
-    let row_h = (team2_start - team1_start) / (team_size as u32 + 1);
+    let row_h = row_slot_height(h, team_size);
 
     let base_y = if team == 0 { team1_start } else { team2_start };
     let y = base_y + (team_row as u32 * row_h);
@@ -1132,6 +1516,17 @@ pub fn crop_player_row(
     }
 
     Some(scoreboard.crop_imm(0, y, w, actual_h))
+}
+
+/// Pixel height of one scoreboard row slot.
+///
+/// The band from the header to team 2, divided into `team_size` rows plus
+/// the one-row gap. [`crop_player_row`] crops with this height. Dividing by
+/// the crop height is the row pitch the team-size check compares.
+pub(crate) fn row_slot_height(crop_h: u32, team_size: usize) -> u32 {
+    let team1_start = (crop_h as f64 * HEADER_RATIO) as u32;
+    let team2_start = (crop_h as f64 * TEAM2_START_RATIO) as u32;
+    (team2_start - team1_start) / (team_size as u32 + 1)
 }
 
 /// Extract a stat cell from a player row using dynamic column boundaries.
@@ -2397,5 +2792,408 @@ mod uncapped_retry_tests {
         for h in [20, 27, 39, 44, 48, 60] {
             assert!(prepare_cell_binary_uncapped(&blank(h)).is_none(), "h={h}");
         }
+    }
+}
+
+#[cfg(test)]
+mod map_name_rect_tests {
+    use super::{
+        HEADER_RATIO, NAME_COL_W, NAME_COL_W_6V6, NAME_COL_X, NAME_COL_X_6V6, SCOREBOARD_H_RATIO,
+        SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, crop_map_label_box,
+        game_rect_16_9, map_name_rect,
+    };
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn overlaps(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
+        let (ax, ay, aw, ah) = a;
+        let (bx, by, bw, bh) = b;
+        ax < bx.saturating_add(bw)
+            && bx < ax.saturating_add(aw)
+            && ay < by.saturating_add(bh)
+            && by < ay.saturating_add(ah)
+    }
+
+    /// Name column inside the scoreboard crop. `x_ratio` / `w_ratio` are the
+    /// 5v5 or 6v6 name-cell fractions of that crop.
+    fn name_area(frame_w: u32, frame_h: u32, x_ratio: f64, w_ratio: f64) -> (u32, u32, u32, u32) {
+        let (gx, gy, gw, gh) = game_rect_16_9(frame_w, frame_h);
+        let bx = gx + (gw as f64 * SCOREBOARD_X_RATIO) as u32;
+        let by = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
+        let bw = (gw as f64 * SCOREBOARD_W_RATIO) as u32;
+        let bh = (gh as f64 * SCOREBOARD_H_RATIO) as u32;
+        let x = bx + (bw as f64 * x_ratio) as u32;
+        let y = by + (bh as f64 * HEADER_RATIO) as u32;
+        let w = (bw as f64 * w_ratio) as u32;
+        let h = bh.saturating_sub(y.saturating_sub(by));
+        (x, y, w, h)
+    }
+
+    #[test]
+    fn map_label_stays_inside_the_box_at_1080p_1440p_and_ultrawide() {
+        for (w, h, label) in [
+            (1920, 1080, "1080p"),
+            (2560, 1440, "1440p"),
+            (3440, 1440, "21:9"),
+        ] {
+            let rect = map_name_rect(w, h).unwrap_or_else(|| panic!("{label}: region missing"));
+            let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+            let top_bar_bottom = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
+            assert!(rect.x >= gx, "{label}: left of the playfield");
+            assert!(
+                rect.x.saturating_add(rect.w) <= gx.saturating_add(gw),
+                "{label}: past the playfield"
+            );
+            assert!(rect.y >= gy, "{label}: above the playfield");
+            assert!(
+                rect.y.saturating_add(rect.h) <= top_bar_bottom,
+                "{label}: map crop y {}..{} crosses the scoreboard at {top_bar_bottom}",
+                rect.y,
+                rect.y + rect.h
+            );
+            let crop_box = (rect.x, rect.y, rect.w, rect.h);
+            let names_5 = name_area(w, h, NAME_COL_X, NAME_COL_W);
+            let names_6 = name_area(w, h, NAME_COL_X_6V6, NAME_COL_W_6V6);
+            let name_top = names_5.1.min(names_6.1);
+            assert!(
+                rect.y.saturating_add(rect.h) <= name_top,
+                "{label}: map crop ends at {} and the name row starts at {name_top}",
+                rect.y + rect.h
+            );
+            assert!(
+                !overlaps(crop_box, names_5),
+                "{label}: reaches 5v5 names {names_5:?}"
+            );
+            assert!(
+                !overlaps(crop_box, names_6),
+                "{label}: reaches 6v6 names {names_6:?}"
+            );
+
+            let map = [10, 220, 30];
+            let name = [240, 20, 20];
+            let mut img = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+            for y in rect.y..rect.y + rect.h {
+                for x in rect.x..rect.x + rect.w {
+                    img.put_pixel(x, y, Rgb(map));
+                }
+            }
+            for (nx, ny, nw, nh) in [names_5, names_6] {
+                for y in ny..ny.saturating_add(nh).min(h) {
+                    for x in nx..nx.saturating_add(nw).min(w) {
+                        img.put_pixel(x, y, Rgb(name));
+                    }
+                }
+            }
+            let crop = crop_map_label_box(&DynamicImage::ImageRgb8(img))
+                .unwrap_or_else(|| panic!("{label}: box missing"))
+                .to_rgb8();
+            assert!(
+                crop.width() <= rect.w && crop.height() <= rect.h,
+                "{label}: crop {}x{} is outside the map-label box {}x{}",
+                crop.width(),
+                crop.height(),
+                rect.w,
+                rect.h
+            );
+            assert_eq!(
+                (crop.width(), crop.height()),
+                (rect.w, rect.h),
+                "{label}: a solid label should keep the whole box"
+            );
+            assert!(
+                crop.pixels().all(|px| px.0 == map),
+                "{label}: crop left the map-label box or reached a name row"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod map_and_table_tests {
+    use super::{crop_map_name, game_rect_16_9, header_label_groups, scoreboard_table_present};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn full_map_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+        let x = gx + (gw as f64 * 0.68) as u32;
+        let y = gy + (gh as f64 * 0.022) as u32;
+        let cw = (gw as f64 * 0.27) as u32;
+        let ch = (gh as f64 * 0.040) as u32;
+        (x, y, cw, ch)
+    }
+
+    #[test]
+    fn map_name_crop_keeps_the_full_window_when_there_is_no_timer() {
+        for (w, h) in [
+            (2560u32, 1440u32),
+            (1920, 1080),
+            (3840, 2160),
+            (2560, 1080),
+            (3440, 1440),
+        ] {
+            let (x, y, cw, ch) = full_map_rect(w, h);
+            let mut frame = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+            frame.put_pixel(x, y, Rgb([255, 0, 0]));
+            frame.put_pixel(x + cw - 1, y, Rgb([0, 255, 0]));
+            let crop = crop_map_name(&DynamicImage::ImageRgb8(frame)).to_rgb8();
+            assert_eq!(crop.dimensions(), (cw, ch), "{w}x{h}");
+            assert_eq!(crop.get_pixel(0, 0).0, [255, 0, 0], "{w}x{h} left");
+            assert_eq!(crop.get_pixel(cw - 1, 0).0, [0, 255, 0], "{w}x{h} right");
+        }
+        // Ultrawide uses the 16:9 game width, not the full frame.
+        assert_eq!(game_rect_16_9(2560, 1080).2, 1920);
+    }
+
+    /// `WATCHPOINT: GRIMSVOTN` drawn into the old 10% trim zone, then a timer
+    /// past a wide gap. Returns the frame, the crop x, the last name pixel,
+    /// and the timer's first pixel.
+    fn draw_long_name_and_timer(w: u32, h: u32) -> (RgbImage, u32, u32, u32) {
+        let (x, y, cw, ch) = full_map_rect(w, h);
+        let gh = game_rect_16_9(w, h).3;
+        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 22]));
+        let merge = ((gh as f64) * 0.012).round().max(3.0) as u32;
+        let letter_gap = 2u32;
+        let word_gap = (merge / 2).max(2);
+        let timer_gap = merge + 4;
+        let timer_w = 16u32;
+        let text = "WATCHPOINT: GRIMSVOTN";
+        let n = text.chars().filter(|c| *c != ' ').count() as u32;
+        let gaps = (n - 2) * letter_gap + word_gap;
+        let name_end = x + cw - timer_gap - timer_w;
+        let max_total = name_end.saturating_sub(x + 4);
+        let letter_w = max_total.saturating_sub(gaps) / n;
+        assert!(letter_w >= 3, "{w}x{h} letter {letter_w}");
+        let total = n * letter_w + gaps;
+        let mut cursor = name_end - total;
+        let y0 = y + ch / 5;
+        let y1 = (y + ch * 4 / 5).min(y + ch);
+        let mut last_name_x = cursor;
+        let chars: Vec<char> = text.chars().collect();
+        for (i, glyph) in chars.iter().copied().enumerate() {
+            if glyph == ' ' {
+                cursor += word_gap;
+                continue;
+            }
+            for py in y0..y1 {
+                for px in cursor..cursor + letter_w {
+                    img.put_pixel(px, py, Rgb([236, 236, 236]));
+                }
+            }
+            last_name_x = cursor + letter_w - 1;
+            cursor += letter_w;
+            if chars.get(i + 1).is_some_and(|next| *next != ' ') {
+                cursor += letter_gap;
+            }
+        }
+        let timer_x = last_name_x + 1 + timer_gap;
+        assert!(timer_x + timer_w <= x + cw, "{w}x{h} timer past the window");
+        let old_trim = (69.0_f64 * game_rect_16_9(w, h).2 as f64 / 2560.0).round() as u32;
+        assert!(
+            last_name_x >= x + cw - old_trim,
+            "{w}x{h} name ends at {last_name_x}, old trim starts at {}",
+            x + cw - old_trim
+        );
+        for py in y0..y1 {
+            for px in timer_x..timer_x + timer_w {
+                img.put_pixel(px.min(w - 1), py, Rgb([236, 236, 236]));
+            }
+        }
+        (img, x, last_name_x, timer_x)
+    }
+
+    #[test]
+    fn longest_map_name_fits_and_the_timer_is_cut() {
+        for (w, h) in [(2560u32, 1440u32), (1920, 1080), (3840, 2160)] {
+            let (frame, x, last_name_x, timer_x) = draw_long_name_and_timer(w, h);
+            let crop = crop_map_name(&DynamicImage::ImageRgb8(frame));
+            let right = x + crop.width();
+            assert!(
+                right > last_name_x,
+                "{w}x{h} clipped WATCHPOINT: GRIMSVOTN at {right}, name ends {last_name_x}"
+            );
+            assert!(
+                right <= timer_x,
+                "{w}x{h} timer at {timer_x} still inside the crop ending {right}"
+            );
+        }
+    }
+
+    /// Synthetic Tab table. Rows are flat fills (any team colour) with a
+    /// bright header and a dark gap where team 2 starts. No captured pixels.
+    fn table_crop(team_a: [u8; 3], team_b: [u8; 3], rows: usize, pitch: f64) -> DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = RgbImage::from_pixel(w, h, Rgb([16, 18, 28]));
+        let header_h = (h as f64 * 0.028) as u32;
+        for y in 0..header_h {
+            for x in 0..w {
+                let label = x > w * 3 / 10 && (x / 14) % 6 == 0;
+                let v = if label { 24 } else { 228 };
+                img.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let wf = w as f64;
+        let hf = h as f64;
+        for team in 0..2 {
+            let colour = if team == 0 { team_a } else { team_b };
+            let base = if team == 0 { 0.045 } else { 0.575 };
+            for row in 0..rows {
+                let y0 = ((base + row as f64 * pitch) * hf) as u32;
+                let y1 = y0 + (pitch * 0.80 * hf) as u32;
+                for y in y0..y1.min(h) {
+                    for x in (0.05 * wf) as u32..(0.95 * wf) as u32 {
+                        let n = ((x + y) % 7) as i16 - 3;
+                        let ch = |c: u8| (c as i16 + n).clamp(0, 255) as u8;
+                        img.put_pixel(x, y, Rgb([ch(colour[0]), ch(colour[1]), ch(colour[2])]));
+                    }
+                    let name_x0 = (0.18 * wf) as u32;
+                    let name_x1 = (0.32 * wf) as u32;
+                    for x in name_x0..name_x1 {
+                        if (x + y) % 3 == 0 {
+                            img.put_pixel(x, y, Rgb([240, 240, 240]));
+                        }
+                    }
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// Gameplay stand-in: a varied scene, a bright strip with six dark glyphs
+    /// where the header-label counter looks, and a small HUD chip. Not a table.
+    fn death_screen_crop() -> DynamicImage {
+        let (w, h) = (800u32, 480u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x.wrapping_mul(13).wrapping_add(y.wrapping_mul(29)) % 180) as u8;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([v.saturating_add(30), v / 2 + 20, 40 + (x % 90) as u8]),
+                );
+            }
+        }
+        let header_h = (h as f64 * 0.030) as u32;
+        for y in 0..header_h {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([210, 210, 214]));
+            }
+        }
+        for i in 0..6 {
+            let x0 = (w as f64 * (0.42 + i as f64 * 0.08)) as u32;
+            let y0 = (h as f64 * 0.006) as u32;
+            let y1 = (h as f64 * 0.024) as u32;
+            for y in y0..y1 {
+                for x in x0..x0 + 5 {
+                    img.put_pixel(x.min(w - 1), y, Rgb([18, 18, 18]));
+                }
+            }
+        }
+        for y in h - 28..h {
+            for x in 16..160 {
+                img.put_pixel(x, y, Rgb([20, 180, 70]));
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn recoloured_tables_count_and_a_death_screen_does_not() {
+        let purple = [140, 60, 200];
+        let yellow = [230, 200, 40];
+        let cases = [
+            ("blue/red 6", [40, 110, 220], [200, 50, 50], 6usize, 0.075),
+            ("purple/yellow 6", purple, yellow, 6, 0.075),
+            ("yellow/purple 6", yellow, purple, 6, 0.075),
+            ("purple/yellow 5", purple, yellow, 5, 0.087),
+            ("grey endorse", [150, 150, 150], [120, 120, 120], 6, 0.075),
+        ];
+        for (name, a, b, rows, pitch) in cases {
+            assert!(
+                scoreboard_table_present(&table_crop(a, b, rows, pitch)),
+                "{name} should be a table"
+            );
+        }
+
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(800, 480, Rgb(purple)));
+        assert!(
+            !scoreboard_table_present(&flat),
+            "a flat team colour with no header or gap is not a table"
+        );
+
+        let death = death_screen_crop();
+        let groups = header_label_groups(&death).len();
+        assert!(
+            (3..=10).contains(&groups),
+            "the stand-in header glyphs should fool the label counter, got {groups}"
+        );
+        assert!(
+            !scoreboard_table_present(&death),
+            "a death screen with killfeed glyphs and a HUD chip is not a table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod map_label_stretch_tests {
+    use super::{MAP_LABEL_MIN_RANGE, contrast_stretch_brightness};
+    use crate::ocr::map_label_fixtures::{brightness_range, low_noise};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn solid(w: u32, h: u32, colour: [u8; 3]) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb(colour)))
+    }
+
+    #[test]
+    fn stretch_uses_channel_mean_and_ignores_hue() {
+        // Left half is the dark bar. Right half is one grey and one tint
+        // whose channel means are both 102. Hue must not split them.
+        let mut img = RgbImage::new(40, 20);
+        for y in 0..20 {
+            for x in 0..40 {
+                let colour = if x < 20 {
+                    [18, 18, 18]
+                } else if y < 10 {
+                    [102, 102, 102]
+                } else {
+                    [255, 51, 0]
+                };
+                img.put_pixel(x, y, Rgb(colour));
+            }
+        }
+        let stretched =
+            contrast_stretch_brightness(&DynamicImage::ImageRgb8(img)).expect("label-sized range");
+        assert_eq!(stretched.get_pixel(4, 4).0[0], 0, "dark bar");
+        assert_eq!(stretched.get_pixel(30, 4).0[0], 255, "grey");
+        assert_eq!(
+            stretched.get_pixel(30, 14).0[0],
+            255,
+            "same mean, different hue"
+        );
+    }
+
+    #[test]
+    fn flat_blank_and_low_noise_are_not_stretched() {
+        let flat = solid(320, 48, [90, 90, 90]);
+        let blank = solid(320, 48, [0, 0, 0]);
+        let noise = low_noise(320, 48);
+        assert_eq!(brightness_range(&flat), 0);
+        assert_eq!(brightness_range(&blank), 0);
+        assert!(
+            brightness_range(&noise) < MAP_LABEL_MIN_RANGE,
+            "noise range {} must stay under the gate",
+            brightness_range(&noise)
+        );
+        assert!(contrast_stretch_brightness(&flat).is_none());
+        assert!(contrast_stretch_brightness(&blank).is_none());
+        assert!(contrast_stretch_brightness(&noise).is_none());
+
+        // Wide range, almost no bright pixels. Coverage is the gate here.
+        let mut speck = RgbImage::from_pixel(320, 48, Rgb([0, 0, 0]));
+        for (x, y) in [(10, 10), (11, 10), (10, 11), (12, 12)] {
+            speck.put_pixel(x, y, Rgb([255, 255, 255]));
+        }
+        let speck = DynamicImage::ImageRgb8(speck);
+        assert!(brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
+        assert!(contrast_stretch_brightness(&speck).is_none());
     }
 }

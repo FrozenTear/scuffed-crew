@@ -12,7 +12,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::{SeasonSelect, use_stats_season};
+use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
@@ -141,7 +141,11 @@ pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
 pub(super) const MIN_GAMES: u32 = 3;
 
 /// Caption shown wherever the min-games gate/muting applies.
-pub(super) const MIN_GAMES_NOTE: &str = "min 3 games — smaller samples muted";
+pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
+
+/// Platform line on `/stats`. Linux supports Wayland and X11. No other OS builds.
+const TRACKER_PLATFORM_COPY: &str =
+    "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -1028,6 +1032,15 @@ pub fn Stats() -> Element {
 
     let mut page_cursor = use_signal(|| Option::<String>::None);
     let mut cursor_history: Signal<Vec<Option<String>>> = use_signal(|| vec![None]);
+    // History pagination belongs to one season window. Restart it whenever the
+    // resolved season moves, including a pick synced from another tab. Page 1
+    // is left alone so a season change does not refetch it twice.
+    use_season_change(season, move || {
+        if page_cursor.peek().is_some() || cursor_history.peek().len() > 1 {
+            page_cursor.set(None);
+            cursor_history.set(vec![None]);
+        }
+    });
 
     let matches = use_api_with::<MatchPage>(move || {
         let base = match page_cursor() {
@@ -1090,12 +1103,7 @@ pub fn Stats() -> Element {
                         seasons_error: season.seasons_error(),
                         on_retry: move |_| season.retry(),
                         value: season.selected_id(),
-                        onchange: move |s: Option<String>| {
-                            season.choose(s);
-                            // History pagination belongs to one window — restart it.
-                            page_cursor.set(None);
-                            cursor_history.set(vec![None]);
-                        },
+                        onchange: move |s: Option<String>| season.choose(s),
                     }
                     button {
                         class: "density-toggle",
@@ -1165,7 +1173,7 @@ pub fn Stats() -> Element {
                     }
                     p {
                         "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
-                        "It runs on Linux / Wayland only — there is no Windows or macOS build."
+                        {TRACKER_PLATFORM_COPY}
                     }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
@@ -1440,6 +1448,57 @@ mod header_layout_tests {
 }
 
 #[cfg(test)]
+mod tracker_platform_copy_tests {
+    use super::TRACKER_PLATFORM_COPY;
+
+    /// The install blurb on `/stats`, from the heading through the curl command.
+    fn tracker_download_blurb(src: &str) -> &str {
+        let start = src
+            .find("Get the Stat Tracker")
+            .expect("stats page heading");
+        let rest = &src[start..];
+        let end = rest.find("tracker-install").expect("install command");
+        &rest[..end]
+    }
+
+    #[test]
+    fn stats_page_names_wayland_and_x11_without_an_em_dash() {
+        assert_eq!(
+            TRACKER_PLATFORM_COPY,
+            "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build."
+        );
+        assert!(TRACKER_PLATFORM_COPY.contains("Wayland"));
+        assert!(TRACKER_PLATFORM_COPY.contains("X11"));
+        assert!(
+            !TRACKER_PLATFORM_COPY.contains('—'),
+            "{TRACKER_PLATFORM_COPY}"
+        );
+        assert!(
+            !TRACKER_PLATFORM_COPY.contains('–'),
+            "{TRACKER_PLATFORM_COPY}"
+        );
+
+        let src = include_str!("mod.rs");
+        let blurb = tracker_download_blurb(src);
+        assert!(
+            blurb.contains("TRACKER_PLATFORM_COPY"),
+            "the /stats install blurb must render the platform line: {blurb}"
+        );
+        // Built at runtime so this test file does not itself contain the old phrase.
+        let wayland_only = ["Wayland", "only"].join(" ");
+        assert!(
+            !blurb.contains(&wayland_only),
+            "the /stats install blurb still limits the tracker to one display server: {blurb}"
+        );
+        assert!(!blurb.contains('—'), "{blurb}");
+        assert!(
+            !src.contains(&wayland_only),
+            "crates/app stats page still limits the tracker to one display server"
+        );
+    }
+}
+
+#[cfg(test)]
 mod map_mode_tests {
     use super::map_game_mode;
 
@@ -1465,5 +1524,19 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::MIN_GAMES_NOTE;
+
+    #[test]
+    fn min_games_note_has_no_em_or_en_dash() {
+        assert!(
+            !MIN_GAMES_NOTE.contains('\u{2014}') && !MIN_GAMES_NOTE.contains('\u{2013}'),
+            "{MIN_GAMES_NOTE}"
+        );
+        assert_eq!(MIN_GAMES_NOTE, "min 3 games. Smaller samples muted.");
     }
 }

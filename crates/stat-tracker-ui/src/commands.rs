@@ -82,6 +82,38 @@ pub fn save_edit(
     edit_match(data_dir, &game.session_id, form.diff(game))
 }
 
+/// Queue a map picked from [`stat_tracker::parse::known_map_names`].
+/// The daemon derives the mode from that name.
+pub fn pick_map(data_dir: &Path, session_id: &str, map: &str) -> Result<(), String> {
+    if !stat_tracker::parse::map_is_known(map) {
+        return Err("Pick a map from the list".into());
+    }
+    edit_match(
+        data_dir,
+        session_id,
+        MatchEdit {
+            map_name: Some(map.to_string()),
+            ..MatchEdit::default()
+        },
+    )
+}
+
+/// Queue a hero picked from the canonical hero list.
+/// The daemon derives the role. `Unknown` is not in the list.
+pub fn pick_hero(data_dir: &Path, session_id: &str, hero: &str) -> Result<(), String> {
+    if !scuffed_types::HEROES.contains(&hero) {
+        return Err("Pick a hero from the list".into());
+    }
+    edit_match(
+        data_dir,
+        session_id,
+        MatchEdit {
+            hero: Some(hero.to_string()),
+            ..MatchEdit::default()
+        },
+    )
+}
+
 /// Newest queued command (tests / docs). Empty if the directory is missing.
 pub fn queued(data_dir: &Path) -> Vec<StoreCommand> {
     read_commands(data_dir)
@@ -127,6 +159,8 @@ mod tests {
             ocr: GameOcr::default(),
             segments: Vec::new(),
             upload_reject: None,
+            suspect_fields: Vec::new(),
+            synced: false,
         }
     }
 
@@ -210,6 +244,38 @@ mod tests {
         let err = save_edit(&dir, &g, &form).unwrap_err();
         assert!(err.contains("No changes"));
         assert!(queued(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pick_map_and_hero_queue_the_canonical_names() {
+        let dir = tmp();
+        let map = stat_tracker::parse::known_map_names()
+            .into_iter()
+            .find(|name| *name == "Paraiso")
+            .expect("Paraiso");
+        assert_eq!(map, "Paraiso");
+        pick_map(&dir, "sess-t1", map).unwrap();
+        pick_hero(&dir, "sess-t1", "Ana").unwrap();
+        assert!(pick_map(&dir, "sess-t1", "Paraíso").is_err());
+        assert!(pick_hero(&dir, "sess-t1", "Unknown").is_err());
+        let cmds = queued(&dir);
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
+            StoreCommand::EditMatch { session_id, edit } => {
+                assert_eq!(session_id, "sess-t1");
+                assert_eq!(edit.map_name.as_deref(), Some("Paraiso"));
+                assert!(edit.hero.is_none());
+            }
+            other => panic!("map pick: {other:?}"),
+        }
+        match &cmds[1] {
+            StoreCommand::EditMatch { edit, .. } => {
+                assert_eq!(edit.hero.as_deref(), Some("Ana"));
+                assert!(edit.map_name.is_none());
+            }
+            other => panic!("hero pick: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -109,6 +109,44 @@ pub async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     json_request(reqwest::Method::POST, base_url, path, body, token).await
 }
 
+pub async fn post_json_observed<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+    token: Option<&str>,
+) -> Result<T, crate::ObservedError> {
+    let url = format!("{base_url}{path}");
+    let client = client();
+    let mut req = client.post(&url).json(body);
+    if let Some(tok) = token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| crate::ObservedError::Network(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| crate::ObservedError::Network(e.to_string()))?;
+    if status >= 400 {
+        return Err(crate::ObservedError::Http {
+            status,
+            body: text,
+            retry_after,
+        });
+    }
+    crate::decode_body(&text).map_err(|err| crate::ObservedError::from_client(err, None))
+}
+
 pub async fn put_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     base_url: &str,
     path: &str,

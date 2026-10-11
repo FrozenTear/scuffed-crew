@@ -569,6 +569,35 @@ pub fn use_stats_season() -> StatsSeason {
     }
 }
 
+/// Whether the resolved filter moved off the last settled one.
+/// Pending is not a filter, so a list reload that settles back on the same
+/// season is not a change. The first settled value is not a change either.
+fn season_moved(last: Option<&ResolvedSeason>, now: &ResolvedSeason) -> bool {
+    *now != ResolvedSeason::Pending && last.is_some_and(|last| last != now)
+}
+
+/// Run `on_change` after the resolved season filter moves, whatever moved it:
+/// this tab's picker or another tab's `stats-season-v2` write. Not on mount.
+///
+/// Use it for state that belongs to one season window, such as a history
+/// page cursor. It runs as an effect, so a fetch that read the old state
+/// with the new season has already restarted once; resetting that state
+/// restarts it again and `use_resource` cancels the stale request.
+pub fn use_season_change(season: StatsSeason, mut on_change: impl FnMut() + 'static) {
+    let last = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(None::<ResolvedSeason>)));
+    use_effect(move || {
+        let now = season.resolved();
+        if now == ResolvedSeason::Pending {
+            return;
+        }
+        let moved = season_moved(last.borrow().as_ref(), &now);
+        *last.borrow_mut() = Some(now);
+        if moved {
+            on_change();
+        }
+    });
+}
+
 type SeasonRows = (
     Resource<Option<Vec<Season>>>,
     Signal<u64>,
@@ -732,6 +761,7 @@ mod tests {
             const { std::cell::RefCell::new(Vec::new()) };
         static EFFECT_PATHS: std::cell::RefCell<Vec<String>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        static SEASON_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     fn during_season_four() -> Vec<SeasonChoice<'static>> {
@@ -1754,6 +1784,10 @@ mod tests {
             );
         }
         assert!(
+            stats.contains("use_season_change(season,"),
+            "my stats history paging must restart on any season move"
+        );
+        assert!(
             stats.contains("season.fetch_path(role::my_roles_path())"),
             "my stats role request must use the resolved filter"
         );
@@ -1913,6 +1947,66 @@ mod tests {
             "{:?}",
             render_paths()
         );
+    }
+
+    #[test]
+    fn season_moved_ignores_pending_and_the_first_value() {
+        let all = ResolvedSeason::All;
+        let s3 = ResolvedSeason::Id("season-3".into());
+        let s4 = ResolvedSeason::Id("season-4".into());
+        assert!(!season_moved(None, &all));
+        assert!(!season_moved(Some(&s3), &s3));
+        assert!(!season_moved(Some(&s3), &ResolvedSeason::Pending));
+        assert!(season_moved(Some(&s3), &s4));
+        assert!(season_moved(Some(&all), &s4));
+        assert!(season_moved(Some(&s4), &all));
+    }
+
+    fn change_probe() -> Element {
+        let season = use_stats_season();
+        TEST_PROBE.with(|slot| slot.set(Some(season)));
+        use_season_change(season, || {
+            SEASON_CHANGES.with(|count| count.set(count.get() + 1));
+        });
+        rsx! {}
+    }
+
+    fn season_changes() -> usize {
+        SEASON_CHANGES.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn season_change_fires_for_local_picks_and_other_tab_writes() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        SEASON_CHANGES.with(|count| count.set(0));
+        put_v2("season-3");
+        set_seasons(vec![
+            season_row("season-4", "Season 4", true),
+            season_row("season-3", "Season 3", false),
+        ]);
+        let mut dom = VirtualDom::new(change_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        // Pending -> season-3 on load is the first settled value, not a move.
+        assert_eq!(season_changes(), 0);
+
+        choose(&mut dom, Some("season-3"));
+        assert_eq!(season_changes(), 0, "same season is not a move");
+        choose(&mut dom, None);
+        assert_eq!(season_changes(), 1);
+
+        // Another tab picks Current season: this tab never called choose.
+        put_v2(CURRENT_SEASON);
+        fire_storage(&mut dom, Some("stats-ui-density"));
+        assert_eq!(season_changes(), 1, "unrelated key keeps the pick");
+        fire_storage(&mut dom, Some(STATS_SEASON_KEY));
+        assert_eq!(season_changes(), 2);
+
+        // A write that resolves to the season already shown is not a move.
+        put_v2("season-4");
+        fire_storage(&mut dom, Some(STATS_SEASON_KEY));
+        assert_eq!(season_changes(), 2);
     }
 
     #[test]

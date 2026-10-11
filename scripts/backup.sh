@@ -197,6 +197,10 @@ if UPLOADS_PATH="$(resolve_volume uploads-data)"; then
     BACKUP_PATHS+=("${UPLOADS_PATH}")
     echo "Including uploads volume from ${UPLOADS_PATH}"
 fi
+if REPORTS_PATH="$(resolve_volume reports-data)"; then
+    BACKUP_PATHS+=("${REPORTS_PATH}")
+    echo "Including reports volume from ${REPORTS_PATH}"
+fi
 if STRFRY_PATH="$(resolve_volume strfry-data)"; then
     BACKUP_PATHS+=("${STRFRY_PATH}")
     echo "Including strfry volume from ${STRFRY_PATH}"

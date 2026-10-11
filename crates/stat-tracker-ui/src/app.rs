@@ -1,8 +1,9 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
 use iced::widget::{column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
@@ -154,6 +155,14 @@ pub enum Message {
     ToggleEdit,
     EditField(EditField, String),
     SaveEdit,
+    PickMap {
+        session_id: String,
+        map: String,
+    },
+    PickHero {
+        session_id: String,
+        hero: String,
+    },
     ResolveSegment {
         session_id: String,
         segment: u32,
@@ -183,6 +192,12 @@ pub enum Message {
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
+    OpenUninstall,
+    DismissUninstall,
+    ToggleUninstallData(bool),
+    ConfirmUninstall,
+    UninstallFinished(Result<crate::uninstall::UninstallReport, String>),
+    CopyUninstallCmd,
     RunUpdate,
     UpdateFinished(Result<String, String>),
     WindowOpened(window::Id),
@@ -199,6 +214,7 @@ pub enum Message {
         version: String,
     },
     ShowOlderReleases(notes::NotesSurface),
+    Setup(crate::setup_guide::SetupMessage),
 }
 
 struct NotesDialog {
@@ -247,11 +263,44 @@ pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
 }
 
 pub fn window_settings() -> window::Settings {
+    let fit = match current_display_size() {
+        Some((width, height)) => crate::layout::fit_window(width, height),
+        None => crate::layout::fit_window(0.0, 0.0),
+    };
     window::Settings {
-        size: iced::Size::new(1280.0, 860.0),
-        min_size: Some(iced::Size::new(960.0, 640.0)),
+        size: iced::Size::new(fit.width, fit.height),
+        min_size: Some(iced::Size::new(
+            crate::layout::WINDOW_MIN_W.min(fit.width),
+            crate::layout::WINDOW_MIN_H.min(fit.height),
+        )),
         ..window::Settings::default()
     }
+}
+
+/// Primary monitor size in px, when GTK has a display.
+fn current_display_size() -> Option<(f32, f32)> {
+    let display = gtk::gdk::Display::default()?;
+    let monitor = display.primary_monitor().or_else(|| display.monitor(0))?;
+    let rect = monitor.geometry();
+    let width = rect.width();
+    let height = rect.height();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some((width as f32, height as f32))
+}
+
+fn live_game_session_now(
+    data_dir: &Path,
+    window_secs: u64,
+    fixture: bool,
+    now: DateTime<Utc>,
+    process_running: bool,
+) -> Option<String> {
+    if fixture {
+        return None;
+    }
+    overlay::in_progress_session_id(data_dir, window_secs, now, process_running)
 }
 
 pub struct TrackerApp {
@@ -298,6 +347,8 @@ pub struct TrackerApp {
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
     notes_seen: NotesSeen,
+    uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
+    uninstall_busy: bool,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -315,8 +366,11 @@ pub struct TrackerApp {
     overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
     pub game_running: bool,
+    /// Open session shown as the Games in-progress card. `None` once it closes.
+    pub live_game_session: Option<String>,
     pub overlay_hotkey: OverlayHotkey,
     companion_toggle_mtime: Option<SystemTime>,
+    pub setup: crate::setup_guide::GuideUi,
 }
 
 impl TrackerApp {
@@ -357,6 +411,9 @@ impl TrackerApp {
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games);
+        let config_existed = Config::config_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         let (saved_config, config_unreadable) = match Config::load() {
             Ok(config) => (config, false),
             Err(e) => {
@@ -399,11 +456,21 @@ impl TrackerApp {
         };
         let live = cli.fixture.is_none();
         let (window_id, open) = window::open(window_settings());
-        let session_key = overlay::live_session_key(
+        let process_running =
+            cli.fixture.is_some() || overlay::process_is_running(&saved_config.game_process_names);
+        let session_key = overlay::resolve_live_session_key(
             &cli.data_dir,
-            &saved_config.game_process_names,
             cli.fixture.is_some(),
             saved_config.session_window_secs,
+            now,
+            process_running,
+        );
+        let live_game_session = live_game_session_now(
+            &cli.data_dir,
+            saved_config.session_window_secs,
+            cli.fixture.is_some(),
+            now,
+            process_running,
         );
         let overlay_hold = overlay::reconcile_hold(
             OverlayHold::from_persisted(seasons::load_overlay_hidden_key(&cli.data_dir)),
@@ -415,6 +482,15 @@ impl TrackerApp {
             tracing::warn!(error = %e, "failed to persist overlay hold");
         }
         let game_running = session_key.is_some();
+        let setup = crate::setup_guide::GuideUi::startup(
+            cli.fixture.is_none()
+                && crate::setup_guide::should_auto_open(
+                    config_existed,
+                    saved_config.setup_completed,
+                ),
+            &saved_config,
+            installed_version.as_deref(),
+        );
         let mut app = Self {
             live_status,
             health_status,
@@ -460,6 +536,8 @@ impl TrackerApp {
             dialog_show_older: false,
             notes_dialog,
             notes_seen,
+            uninstall_dialog: None,
+            uninstall_busy: false,
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -474,8 +552,10 @@ impl TrackerApp {
             overlay_child: None,
             overlay_spawn_blocked: false,
             game_running,
+            live_game_session,
             overlay_hotkey,
             companion_toggle_mtime: None,
+            setup,
         };
 
         if let Some(err) = overlay::reconcile_companion(
@@ -523,7 +603,11 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.notes_dialog.is_some() {
+        if self.uninstall_dialog.is_some() {
+            subs.push(iced::event::listen_with(uninstall_dialog_escape));
+        } else if self.setup.open {
+            subs.push(iced::event::listen_with(setup_guide_keys));
+        } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
         }
         Subscription::batch(subs)
@@ -542,11 +626,22 @@ impl TrackerApp {
     }
 
     fn apply_overlay_policy(&mut self) {
-        let key = overlay::live_session_key(
+        let now = Utc::now();
+        let process_running = self.fixture.is_some()
+            || overlay::process_is_running(&self.saved_config.game_process_names);
+        let key = overlay::resolve_live_session_key(
             &self.data_dir,
-            &self.saved_config.game_process_names,
             self.fixture.is_some(),
             self.saved_config.session_window_secs,
+            now,
+            process_running,
+        );
+        self.live_game_session = live_game_session_now(
+            &self.data_dir,
+            self.saved_config.session_window_secs,
+            self.fixture.is_some(),
+            now,
+            process_running,
         );
         let next = overlay::reconcile_hold(self.overlay_hold.clone(), key.as_deref());
         if next != self.overlay_hold {
@@ -722,6 +817,24 @@ impl TrackerApp {
                     );
                 }
                 self.editing = false;
+                Task::none()
+            }
+            Message::PickMap { session_id, map } => {
+                self.toast = Some(
+                    match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
+                        Ok(()) => "Map saved".into(),
+                        Err(e) => format!("Could not save map: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::PickHero { session_id, hero } => {
+                self.toast = Some(
+                    match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
+                        Ok(()) => "Hero saved".into(),
+                        Err(e) => format!("Could not save hero: {e}"),
+                    },
+                );
                 Task::none()
             }
             Message::RetryUpload(session_id) => {
@@ -1085,6 +1198,117 @@ impl TrackerApp {
                 update::open_release_page(&url);
                 Task::none()
             }
+            Message::OpenUninstall => {
+                let exe = std::env::current_exe().unwrap_or_default();
+                let Some(home) =
+                    dirs::home_dir().filter(|home| crate::uninstall::home_is_usable(home))
+                else {
+                    self.toast =
+                        Some("Could not find your home folder. Nothing was removed.".into());
+                    self.toast_shown_at = Some(SystemTime::now());
+                    return Task::none();
+                };
+                let owner = crate::uninstall::probe_package_owner(&exe);
+                let mut dialog = crate::uninstall::open_dialog(&exe, &home, owner, &self.data_dir);
+                if let crate::uninstall::UninstallDialog::Confirm { appimage, .. } = &mut dialog
+                    && appimage.is_none()
+                {
+                    *appimage = crate::uninstall::appimage_override(
+                        &exe,
+                        std::env::var_os("APPIMAGE").map(PathBuf::from),
+                    );
+                }
+                self.uninstall_dialog = Some(dialog);
+                self.uninstall_busy = false;
+                Task::none()
+            }
+            Message::DismissUninstall => {
+                if !self.uninstall_busy {
+                    self.uninstall_dialog = None;
+                }
+                Task::none()
+            }
+            Message::ToggleUninstallData(delete_data) => {
+                if let Some(crate::uninstall::UninstallDialog::Confirm {
+                    delete_data: slot, ..
+                }) = &mut self.uninstall_dialog
+                {
+                    *slot = delete_data;
+                }
+                Task::none()
+            }
+            Message::ConfirmUninstall => {
+                let Some(crate::uninstall::UninstallDialog::Confirm {
+                    home,
+                    prefix,
+                    delete_data,
+                    data_dir,
+                    appimage,
+                    ..
+                }) = self.uninstall_dialog.clone()
+                else {
+                    return Task::none();
+                };
+                if self.uninstall_busy {
+                    return Task::none();
+                }
+                self.uninstall_busy = true;
+                let req = crate::uninstall::UninstallRequest {
+                    home: home.clone(),
+                    prefix: prefix.clone(),
+                    data_dir,
+                    appimage,
+                    delete_data,
+                    origin: crate::uninstall::InstallOrigin::Bootstrap { prefix },
+                    systemctl: PathBuf::from("systemctl"),
+                };
+                Task::perform(uninstall_from_app(req), Message::UninstallFinished)
+            }
+            Message::UninstallFinished(result) => {
+                self.uninstall_busy = false;
+                match result {
+                    Ok(report) if report.skipped => {
+                        self.toast = Some("Nothing was removed.".into());
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                    Ok(_) => {
+                        overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
+                        iced::exit()
+                    }
+                    Err(err) => {
+                        self.toast = Some(err);
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                }
+            }
+            Message::CopyUninstallCmd => {
+                let command = match &self.uninstall_dialog {
+                    Some(crate::uninstall::UninstallDialog::Manual {
+                        command: Some(command),
+                        ..
+                    }) => command.clone(),
+                    _ => return Task::none(),
+                };
+                match crate::clipboard::copy_text(&command) {
+                    Ok(backend) => {
+                        self.toast = Some(format!(
+                            "Copied the uninstall command via {}.",
+                            backend.label()
+                        ));
+                        self.toast_shown_at = Some(SystemTime::now());
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.toast = Some(format!(
+                            "Copied via the app clipboard. If paste is empty, {e}"
+                        ));
+                        self.toast_shown_at = Some(SystemTime::now());
+                        iced::clipboard::write(command)
+                    }
+                }
+            }
             Message::CopyUpdateCmd => {
                 let cmd = update::install_command_for(
                     self.update.as_ref().map(|i| i.latest.as_str()),
@@ -1162,6 +1386,201 @@ impl TrackerApp {
             }
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
+            Message::Setup(message) => self.on_setup(message),
+        }
+    }
+
+    fn on_setup(&mut self, message: crate::setup_guide::SetupMessage) -> Task<Message> {
+        use crate::setup_guide::SetupMessage as Step;
+        match message {
+            Step::Open => {
+                self.setup.reopen(&self.saved_config);
+                Task::none()
+            }
+            Step::Skip => {
+                let patch = self.setup.skip();
+                self.persist_setup_patch(patch);
+                Task::none()
+            }
+            Step::SkipStep => {
+                if let Some(patch) = self.setup.skip_step() {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::Back => {
+                self.setup.back();
+                Task::none()
+            }
+            Step::Next => {
+                if let Some(patch) = self.setup.continue_step() {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::SyncUrl(value) => {
+                self.setup.set_sync_url(value);
+                Task::none()
+            }
+            Step::PasteToken(value) => {
+                self.setup.set_paste_token(value);
+                Task::none()
+            }
+            Step::TogglePaste => {
+                self.setup.toggle_paste();
+                Task::none()
+            }
+            Step::RequestCapture => self.spawn_guide_capture(false),
+            Step::CaptureReady(result) => {
+                self.setup.capture_ready(result);
+                Task::none()
+            }
+            Step::RequestTab => self.spawn_guide_capture(true),
+            Step::TabReady(result) => {
+                self.setup.tab_ready(result);
+                Task::none()
+            }
+            Step::ConfirmScoreboard => {
+                self.setup.confirm_scoreboard();
+                Task::none()
+            }
+            Step::SignIn => {
+                let Some((base, label, version)) = self.setup.begin_sign_in() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    crate::setup_guide::start_link(base, label, version),
+                    |result| Message::Setup(Step::LinkStarted(result)),
+                )
+            }
+            Step::LinkStarted(result) => {
+                self.setup.link_started(result);
+                Task::none()
+            }
+            Step::PollReady(result) => {
+                if let Some(patch) = self.setup.poll_ready(result) {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::CheckToken => {
+                let Some((base, token)) = self.setup.begin_check() else {
+                    return Task::none();
+                };
+                Task::perform(crate::setup_guide::check_token(base, token), |result| {
+                    Message::Setup(Step::TokenChecked(result))
+                })
+            }
+            Step::TokenChecked(result) => {
+                if let Some(patch) = self.setup.token_checked(result) {
+                    self.persist_setup_patch(patch);
+                }
+                Task::none()
+            }
+            Step::OpenSite => {
+                if let Some(url) = self.setup.prepare_site_url() {
+                    update::open_release_page(&url);
+                }
+                Task::none()
+            }
+            Step::DownloadPack => {
+                let Some(sync) = self.saved_config.sync.clone().filter(|sync| {
+                    !sync.token.trim().is_empty() && !sync.server_url.trim().is_empty()
+                }) else {
+                    self.setup.pack_needs_sign_in();
+                    return Task::none();
+                };
+                if !self.setup.begin_pack_fetch() {
+                    return Task::none();
+                }
+                let dir = self.saved_config.data_dir.clone();
+                Task::perform(
+                    async move {
+                        stat_tracker::packs::sync_reader_packs(
+                            &sync.server_url,
+                            &sync.token,
+                            &dir,
+                            stat_tracker::packs::PACK_MAX_BYTES,
+                        )
+                        .await
+                        .guide_result()
+                    },
+                    |result| Message::Setup(Step::PackReady(result)),
+                )
+            }
+            Step::PackReady(result) => {
+                self.setup.download_ready(result);
+                Task::none()
+            }
+        }
+    }
+
+    fn spawn_guide_capture(&mut self, tab: bool) -> Task<Message> {
+        let started = if tab {
+            self.setup.begin_tab()
+        } else {
+            self.setup.begin_capture()
+        };
+        if !started {
+            return Task::none();
+        }
+        let backend = match capture::backend_ready(self.backend) {
+            Ok(backend) => backend,
+            Err(_) => {
+                let message = crate::setup_guide::CAPTURE_FAILED.to_string();
+                if tab {
+                    self.setup.tab_ready(Err(message));
+                } else {
+                    self.setup.capture_ready(Err(message));
+                }
+                return Task::none();
+            }
+        };
+        let output = settings::nonempty(&self.settings.capture_output);
+        Task::perform(
+            crate::setup_guide::capture_test_frame(backend, output),
+            move |result| {
+                if tab {
+                    Message::Setup(crate::setup_guide::SetupMessage::TabReady(result))
+                } else {
+                    Message::Setup(crate::setup_guide::SetupMessage::CaptureReady(result))
+                }
+            },
+        )
+    }
+
+    fn persist_setup_patch(&mut self, patch: stat_tracker::config::SetupDiskPatch) {
+        if self.fixture.is_some() {
+            return;
+        }
+        if self.config_unreadable {
+            self.show_refused_toast();
+            return;
+        }
+        let path = match Config::config_path() {
+            Ok(path) => path,
+            Err(_) => {
+                self.toast = Some(crate::setup_guide::SAVE_FAILED.to_string());
+                return;
+            }
+        };
+        match Config::apply_setup_patch(&path, &patch) {
+            Ok(fresh) => {
+                if patch.setup_completed.is_some() {
+                    self.saved_config.setup_completed = fresh.setup_completed;
+                }
+                if patch.sync.is_some() {
+                    self.saved_config.sync = fresh.sync.clone();
+                    if let Some(sync) = &fresh.sync {
+                        self.settings.sync_url = sync.server_url.clone();
+                        self.settings.sync_token = sync.token.clone();
+                    }
+                    self.health_status = self.health_now();
+                }
+            }
+            Err(_) => {
+                self.toast = Some(crate::setup_guide::SAVE_FAILED.to_string());
+            }
         }
     }
 
@@ -1224,6 +1643,12 @@ impl TrackerApp {
         }
 
         let mut tasks = Vec::new();
+        if let Some((url, code)) = self.setup.poll_request_if_due(std::time::Instant::now()) {
+            tasks.push(Task::perform(
+                crate::setup_guide::poll_link(url, code),
+                |result| Message::Setup(crate::setup_guide::SetupMessage::PollReady(result)),
+            ));
+        }
 
         self.tick_count = self.tick_count.saturating_add(1);
         if self.fixture.is_none() && self.tick_count.is_multiple_of(10) {
@@ -1323,11 +1748,20 @@ impl TrackerApp {
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
+        let settings_screen = self.screen == Screen::Settings;
 
         // Sidebar is a fixed width. The remaining pane flexes with the window
-        // (rev 3). Header chips live in that pane — no left-pinned 1400 cap
-        // and no empty right band. Column counts come from `responsive`.
-        let mut content = column![header].spacing(16).width(Fill);
+        // (rev 3). Header chips live in that pane. Column counts come from
+        // `responsive`. Settings keeps the header and scrolls the form in the
+        // leftover height. Other screens scroll the whole pane.
+        let mut content = column![header]
+            .spacing(16)
+            .width(Fill)
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            });
         if let Some(t) = &self.toast {
             content = content.push(widgets::toast_bar(t));
         }
@@ -1341,15 +1775,35 @@ impl TrackerApp {
                 Screen::Settings => crate::settings::view(self, size.width),
             })
             .width(Fill)
-            .height(Length::Shrink),
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            }),
         );
 
-        let main = container(content).width(Fill).padding(Padding {
-            top: PAGE_PAD_Y,
-            bottom: PAGE_PAD_Y,
-            left: PAGE_PAD_X,
-            right: PAGE_PAD_X,
-        });
+        let main = container(content)
+            .width(Fill)
+            .height(if settings_screen {
+                Fill
+            } else {
+                Length::Shrink
+            })
+            .padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: PAGE_PAD_X,
+            });
+
+        let page_body: Element<'_, Message> = if settings_screen {
+            container(main).width(Fill).height(Fill).into()
+        } else {
+            iced::widget::scrollable(main)
+                .width(Fill)
+                .height(Fill)
+                .into()
+        };
 
         let chrome = row![
             container(nav)
@@ -1361,7 +1815,7 @@ impl TrackerApp {
                     left: PAGE_PAD_X,
                     right: 8.0,
                 }),
-            iced::widget::scrollable(main).width(Fill).height(Fill),
+            page_body,
         ]
         .spacing(0)
         .width(Fill)
@@ -1372,7 +1826,7 @@ impl TrackerApp {
             .height(Fill)
             .style(theme::page_background);
 
-        if let Some(dialog) = &self.notes_dialog {
+        let with_notes = if let Some(dialog) = &self.notes_dialog {
             // `notes::dialog` includes the backdrop and is opaque, so a press
             // on the scrim or the card does not reach Update now underneath.
             stack![
@@ -1384,6 +1838,25 @@ impl TrackerApp {
             .into()
         } else {
             page.into()
+        };
+        let with_guide = if self.setup.open {
+            stack![with_notes, crate::setup_guide::view(&self.setup)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            with_notes
+        };
+        if let Some(dialog) = &self.uninstall_dialog {
+            stack![
+                with_guide,
+                crate::uninstall::view(dialog, self.uninstall_busy)
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            with_guide
         }
     }
 
@@ -1435,6 +1908,33 @@ fn live_status_for(games: &[Game]) -> String {
     }
 }
 
+fn uninstall_dialog_escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
+}
+
+async fn uninstall_from_app(
+    req: crate::uninstall::UninstallRequest,
+) -> Result<crate::uninstall::UninstallReport, String> {
+    match daemon::stop_daemon(&req.data_dir).await {
+        Ok(()) => {}
+        Err(err) if err == "Tracker is not running" => {}
+        Err(_) => {
+            return Err("Could not stop the tracker. Nothing was removed.".into());
+        }
+    }
+    if daemon::daemon_running(&req.data_dir).is_some() {
+        return Err("The tracker is still running. Nothing was removed.".into());
+    }
+    crate::uninstall::apply(&req)
+}
+
 fn notes_dialog_escape(
     event: iced::Event,
     _status: iced::event::Status,
@@ -1443,7 +1943,49 @@ fn notes_dialog_escape(
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
-    notes::escape_closes_notes(&key).then_some(Message::DismissNotes)
+    foreground_key_message(false, true, &key)
+}
+
+fn setup_guide_keys(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    // The guide is open, so Escape must not dismiss notes underneath it.
+    // A text field that already took the key keeps it.
+    guide_shortcut(status, true, true, &key)
+}
+
+/// Escape and Enter drive the guide unless a text input already handled them.
+pub fn guide_shortcut(
+    status: iced::event::Status,
+    guide_open: bool,
+    notes_open: bool,
+    key: &iced::keyboard::Key,
+) -> Option<Message> {
+    if guide_open && status == iced::event::Status::Captured {
+        return None;
+    }
+    foreground_key_message(guide_open, notes_open, key)
+}
+
+/// While the setup guide is open it owns Escape and Enter.
+pub fn foreground_key_message(
+    guide_open: bool,
+    notes_open: bool,
+    key: &iced::keyboard::Key,
+) -> Option<Message> {
+    if guide_open {
+        return crate::setup_guide::guide_key_action(key).map(Message::Setup);
+    }
+    if notes_open && notes::escape_closes_notes(key) {
+        Some(Message::DismissNotes)
+    } else {
+        None
+    }
 }
 
 fn notes_dialog_for(
@@ -1501,7 +2043,7 @@ fn health_status_for(
         if !url.is_empty()
             && let Err(e) = stat_tracker::config::validate_sync_server_url(url)
         {
-            return format!("Sync paused — {}", e.message());
+            return format!("Sync paused: {}", e.message());
         }
         if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
             return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
@@ -1520,6 +2062,40 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn setup_guide_keys_do_not_dismiss_notes_underneath() {
+        use iced::keyboard::Key;
+        use iced::keyboard::key::Named;
+
+        let escape = Key::Named(Named::Escape);
+        let enter = Key::Named(Named::Enter);
+        match super::foreground_key_message(true, true, &escape) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Skip)) => {}
+            other => panic!("escape should skip the guide, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Captured, true, true, &escape) {
+            None => {}
+            other => panic!("a focused text input keeps escape, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Captured, true, true, &enter) {
+            None => {}
+            other => panic!("a focused text input keeps enter, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Ignored, true, true, &enter) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
+            other => panic!("enter should continue the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(true, true, &enter) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
+            other => panic!("enter should continue the guide, got {other:?}"),
+        }
+        match super::foreground_key_message(false, true, &escape) {
+            Some(super::Message::DismissNotes) => {}
+            other => panic!("escape should close notes when the guide is closed, got {other:?}"),
+        }
+        assert!(super::foreground_key_message(false, true, &enter).is_none());
+    }
 
     #[test]
     fn save_toasts_have_no_em_or_en_dash() {
@@ -1828,9 +2404,11 @@ token = \"secret-token-must-stay\"
         std::fs::write(dir.join("live_snapshot.json"), b"{}").unwrap();
         let paused = super::health_status_for(&dir, &[], Some(("http://example.com", "tok")));
         assert!(
-            paused.starts_with("Sync paused"),
+            paused.starts_with("Sync paused:"),
             "existing cleartext config must be visible in tracker health, got {paused}"
         );
+        assert!(!paused.contains('—'), "{paused}");
+        assert!(!paused.contains('–'), "{paused}");
         assert!(paused.contains("https"), "{paused}");
         assert_eq!(
             super::health_status_for(&dir, &[], Some(("https://crew.example", "tok"))),

@@ -6,6 +6,7 @@ use axum::{
     extract::{Query, State},
     http::{StatusCode, header},
     response::IntoResponse,
+    response::Response,
     response::sse::{Event, KeepAlive, Sse},
 };
 use rand::RngCore;
@@ -27,6 +28,30 @@ use crate::extractors::{OfficerUser, OrgMember};
 use crate::nostr_rate_limit::RateClass;
 use crate::state::AppState;
 
+/// Handler error for the secret-touching Nostr routes.
+///
+/// Ordinary failures stay `(status, JSON {error})`. The per-member limiter
+/// uses the shared JSON 429: `{"error":"rate_limited","retry_after":N}`.
+pub enum NostrHandlerError {
+    Status(StatusCode, Json<ErrorResponse>),
+    Limited(Box<Response>),
+}
+
+impl From<(StatusCode, Json<ErrorResponse>)> for NostrHandlerError {
+    fn from(value: (StatusCode, Json<ErrorResponse>)) -> Self {
+        Self::Status(value.0, value.1)
+    }
+}
+
+impl IntoResponse for NostrHandlerError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status, body) => (status, body).into_response(),
+            Self::Limited(response) => *response,
+        }
+    }
+}
+
 /// Enforce the per-member rate limit for a secret-touching Nostr op
 /// (DR1-NOSTR-006). Each [`RateClass`] has its own independent per-member
 /// bucket, so exhausting one class never throttles the other. Returns `429`
@@ -35,18 +60,12 @@ fn enforce_nostr_rate_limit(
     state: &AppState,
     member_id: &str,
     class: RateClass,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if state.nostr_rate_limiter.check(member_id, class) {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error:
-                    "Too many Nostr key/message operations — please slow down and retry shortly."
-                        .into(),
-            }),
-        ))
+) -> Result<(), NostrHandlerError> {
+    match state.nostr_rate_limiter.check(member_id, class) {
+        Ok(()) => Ok(()),
+        Err(secs) => Err(NostrHandlerError::Limited(Box::new(
+            crate::rate_limit::rate_limited_response(secs),
+        ))),
     }
 }
 
@@ -301,7 +320,7 @@ pub async fn nostr_challenge(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<ChallengeRequest>,
-) -> Result<Json<ChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ChallengeResponse>, NostrHandlerError> {
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     let pubkey_hex = resolve_pubkey_hex(&body.pubkey).map_err(|_e| {
@@ -354,7 +373,7 @@ pub async fn nostr_verify(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<VerifyRequest>,
-) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<scuffed_db::Member>, NostrHandlerError> {
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     // 1. Verify the challenge token
@@ -375,7 +394,8 @@ pub async fn nostr_verify(
             Json(ErrorResponse {
                 error: "Token was not issued for your account".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     // 3. Reject non-ephemeral event kinds (must be 22242 / NIP-42 AUTH)
@@ -385,7 +405,8 @@ pub async fn nostr_verify(
             Json(ErrorResponse {
                 error: "Event must use ephemeral kind 22242".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     // 4. Verify event content matches the challenge
@@ -395,7 +416,8 @@ pub async fn nostr_verify(
             Json(ErrorResponse {
                 error: "Event content does not match the challenge".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     // 5. Verify event ID and signature
@@ -429,7 +451,8 @@ pub async fn nostr_verify(
             Json(ErrorResponse {
                 error: "challenge already used".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     let pubkey_hex = body.signed_event.pubkey.to_hex();
@@ -454,7 +477,8 @@ pub async fn nostr_verify(
             Json(ErrorResponse {
                 error: "Nostr pubkey is already linked to another member".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     // 7. Update member's nostr_pubkey
@@ -566,8 +590,8 @@ pub async fn nostr_export_backup(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<ExportBackupRequest>,
-) -> Result<Json<ExportBackupResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
+) -> Result<Json<ExportBackupResponse>, NostrHandlerError> {
+    // Expensive NIP-49 (Argon2) op. Bound it per member (DR1-NOSTR-006).
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::KeyOp)?;
 
     // Align the backup password floor with the account password policy
@@ -580,7 +604,8 @@ pub async fn nostr_export_backup(
             Json(ErrorResponse {
                 error: format!("Password must be at least {MIN_PASSWORD_LEN} characters"),
             }),
-        ));
+        )
+            .into());
     }
 
     if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
@@ -589,7 +614,8 @@ pub async fn nostr_export_backup(
             Json(ErrorResponse {
                 error: "Key backup is only available for server-managed keys".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     let mut secret_hex = state
@@ -654,8 +680,8 @@ pub async fn nostr_import_key(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<ImportKeyRequest>,
-) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
-    // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
+) -> Result<Json<scuffed_db::Member>, NostrHandlerError> {
+    // Expensive NIP-49 (Argon2) op. Bound it per member (DR1-NOSTR-006).
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::KeyOp)?;
 
     // Refuse to silently destroy a server-managed key (DR1-NOSTR-003). Importing
@@ -670,7 +696,8 @@ pub async fn nostr_import_key(
                         server-managed secret."
                     .into(),
             }),
-        ));
+        )
+            .into());
     }
 
     let mut secret_hex = Zeroizing::new(
@@ -1796,7 +1823,7 @@ pub async fn dm_send(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<DmSendRequest>,
-) -> Result<Json<DmSendResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<DmSendResponse>, NostrHandlerError> {
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     let recipient = body.recipient_pubkey.trim().to_lowercase();
@@ -1815,7 +1842,8 @@ pub async fn dm_send(
             Json(ErrorResponse {
                 error: "Message content must not be empty".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     let (relay_url, sender_pubkey, sender_blob) =
@@ -1828,7 +1856,8 @@ pub async fn dm_send(
             Json(ErrorResponse {
                 error: "Cannot DM yourself".into(),
             }),
-        ));
+        )
+            .into());
     }
 
     // NIP-17 DMs use a single conversation context as the `h` tag. Use the same
@@ -1876,7 +1905,8 @@ pub async fn dm_send(
             Json(ErrorResponse {
                 error: "Relay rejected or failed to accept the message".into(),
             }),
-        ));
+        )
+            .into());
     }
     tracing::info!("Published DM gift wrap {gift_wrap_id}");
 

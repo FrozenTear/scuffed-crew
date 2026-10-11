@@ -15,20 +15,30 @@ pub struct Cli {
     pub seasons_url: Option<String>,
     pub companion: bool,
     pub help: bool,
+    pub version: bool,
 }
 
 impl Cli {
     pub fn parse() -> Self {
+        Self::parse_args(std::env::args().skip(1))
+    }
+
+    pub fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         let mut data_dir = None;
         let mut fixture = None;
         let mut seasons_url = None;
         let mut companion = false;
         let mut help = false;
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut version = false;
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_string())
+            .collect();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
                 "-h" | "--help" => help = true,
+                "-V" | "--version" => version = true,
                 "--data-dir" => {
                     if let Some(v) = args.get(i + 1) {
                         data_dir = Some(PathBuf::from(v));
@@ -91,11 +101,12 @@ impl Cli {
             seasons_url,
             companion,
             help,
+            version,
         }
     }
 
     pub fn help_text() -> &'static str {
-        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14)
+        "stat-tracker-gui, Scuffed Crew tracker (Iced 0.14)
 
 USAGE:
   cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]
@@ -113,6 +124,25 @@ OPTIONS:
                         (default: $SCUFFED_SERVER or config sync URL).
                         Cached to <data-dir>/seasons.json. Ignored when --fixture is set.
   -h, --help            Show this help
+  -V, --version         Print the tracker version and exit
 "
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+
+    #[test]
+    fn version_flag_is_recognized() {
+        let cli = Cli::parse_args(["--version"]);
+        assert!(cli.version);
+        assert!(!cli.help);
+        let short = Cli::parse_args(["-V"]);
+        assert!(short.version);
+        let help = Cli::help_text();
+        assert!(help.contains("--version"));
+        assert!(!help.contains('\u{2014}'));
+        assert!(!help.contains('\u{2013}'));
     }
 }
