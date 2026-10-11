@@ -15,11 +15,28 @@ use scuffed_types::api::{
     SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
     UpdateMemberSettingsRequest, resolve_recognizer, resolve_suspect_fields,
 };
+use scuffed_types::{hero_key_to_name, role_for_hero_name};
 
 use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
+
+/// Store a known hero under its display name, with the role from the hero
+/// table.
+///
+/// 0.5.0-alpha.1 and alpha.2 trackers on the new reader send the pack key
+/// (`wrecking-ball`, `ana`) as the hero and guess the role from it, which
+/// gives Damage for hyphenated tanks and supports. Leaderboards and hero
+/// stats group on the exact string, so `ana` and `Ana` split. A name that is
+/// not a known hero (including `Unknown`) is stored as sent.
+fn normalize_hero(hero: String, role: String) -> (String, String) {
+    let Some(display) = hero_key_to_name(&hero) else {
+        return (hero, role);
+    };
+    let role = role_for_hero_name(display).map_or(role, |r| r.to_string());
+    (display.to_string(), role)
+}
 
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 pub async fn upload_stats(
@@ -78,14 +95,15 @@ pub async fn upload_stats(
         .filter(|(e, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
         .map(|(e, (recognizer, suspect_fields))| {
             let e = e.entry;
+            let (hero, role) = normalize_hero(e.hero, e.role);
             PersonalMatch {
                 id: String::new(),
                 member_id: daemon.member.id.clone(),
                 session_id: e.session_id,
-                hero: e.hero,
+                hero,
                 map_name: e.map_name,
                 game_mode: e.game_mode,
-                role: e.role,
+                role,
                 outcome: e.outcome,
                 elims: e.elims,
                 deaths: e.deaths,
@@ -754,6 +772,58 @@ mod tests {
             .await
             .unwrap();
         (state, member.id, token)
+    }
+
+    #[test]
+    fn normalize_hero_maps_pack_keys_to_display_name_and_table_role() {
+        use super::normalize_hero;
+        let n = |hero: &str, role: &str| normalize_hero(hero.into(), role.into());
+        assert_eq!(
+            n("wrecking-ball", "Damage"),
+            ("Wrecking Ball".into(), "Tank".into())
+        );
+        assert_eq!(
+            n("junker-queen", "Damage"),
+            ("Junker Queen".into(), "Tank".into())
+        );
+        assert_eq!(n("ana", "Support"), ("Ana".into(), "Support".into()));
+        assert_eq!(
+            n("soldier-76", "Damage"),
+            ("Soldier: 76".into(), "Damage".into())
+        );
+        assert_eq!(n("Ana", "Support"), ("Ana".into(), "Support".into()));
+    }
+
+    #[test]
+    fn normalize_hero_keeps_unknown_heroes_as_sent() {
+        use super::normalize_hero;
+        let n = |hero: &str, role: &str| normalize_hero(hero.into(), role.into());
+        assert_eq!(n("Unknown", "Damage"), ("Unknown".into(), "Damage".into()));
+        assert_eq!(
+            n("not-a-hero", "Support"),
+            ("not-a-hero".into(), "Support".into())
+        );
+        assert_eq!(n("", "Tank"), ("".into(), "Tank".into()));
+    }
+
+    #[tokio::test]
+    async fn upload_stores_pack_key_hero_as_display_name_and_table_role() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let mut entry = match_object("sess-pack-key", 5);
+        entry["hero"] = "wrecking-ball".into();
+        entry["role"] = "Damage".into();
+        let (status, _) = post_raw(app, &token, serde_json::json!({ "matches": [entry] })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Wrecking Ball");
+        assert_eq!(rows[0].role, "Tank");
     }
 
     #[tokio::test]

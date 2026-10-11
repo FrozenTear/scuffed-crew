@@ -12,7 +12,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::{SeasonSelect, use_stats_season};
+use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
@@ -1032,6 +1032,15 @@ pub fn Stats() -> Element {
 
     let mut page_cursor = use_signal(|| Option::<String>::None);
     let mut cursor_history: Signal<Vec<Option<String>>> = use_signal(|| vec![None]);
+    // History pagination belongs to one season window. Restart it whenever the
+    // resolved season moves, including a pick synced from another tab. Page 1
+    // is left alone so a season change does not refetch it twice.
+    use_season_change(season, move || {
+        if page_cursor.peek().is_some() || cursor_history.peek().len() > 1 {
+            page_cursor.set(None);
+            cursor_history.set(vec![None]);
+        }
+    });
 
     let matches = use_api_with::<MatchPage>(move || {
         let base = match page_cursor() {
@@ -1094,12 +1103,7 @@ pub fn Stats() -> Element {
                         seasons_error: season.seasons_error(),
                         on_retry: move |_| season.retry(),
                         value: season.selected_id(),
-                        onchange: move |s: Option<String>| {
-                            season.choose(s);
-                            // History pagination belongs to one window — restart it.
-                            page_cursor.set(None);
-                            cursor_history.set(vec![None]);
-                        },
+                        onchange: move |s: Option<String>| season.choose(s),
                     }
                     button {
                         class: "density-toggle",

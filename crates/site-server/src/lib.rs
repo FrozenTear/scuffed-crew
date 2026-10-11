@@ -124,6 +124,20 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
+    // Stat-report bundles are up to 10 MB, read in full before the daily cap
+    // is checked, then inflated to validate every PNG. Same per-IP budget as
+    // avatar and image uploads (burst 8, then 1 every 10s), own bucket. Only
+    // POST /api/stat-reports is behind it; the list, download and withdraw
+    // routes are not.
+    let stat_report_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid stat-report governor config"),
+    );
+
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
@@ -495,7 +509,13 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stat-reports",
             post(routes::stat_reports::create_stat_report)
-                .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(10 * 1024 * 1024))
+                // Outer layer, so a throttled request is refused before
+                // the body is read.
+                .layer(
+                    GovernorLayer::new(stat_report_governor_config)
+                        .error_handler(rate_limit::governor_error_response),
+                )
                 .get(routes::stat_reports::list_stat_reports),
         )
         .route(
