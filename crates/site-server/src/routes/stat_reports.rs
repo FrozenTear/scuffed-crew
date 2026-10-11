@@ -1,6 +1,8 @@
 //! Tracker bug-report HTTP routes.
 //!
-//! `POST /api/stat-reports` stores a zip for a signed-in member.
+//! `POST /api/stat-reports` stores a zip for a signed-in member, or for the
+//! member that owns the tracker sync token sent as `Authorization: Bearer`.
+//! Every other route here is session-only, so a sync token there is a 401.
 //! `GET /api/stat-reports` lists the caller's rows, or every row for an officer.
 //! `GET /api/stat-reports/{id}` and `GET /api/stat-reports/{id}/manifest` are
 //! officer-only. `DELETE` is the owner or an officer. `POST .../withdraw` and
@@ -27,7 +29,7 @@ use scuffed_types::{
 };
 use uuid::Uuid;
 
-use crate::extractors::{OfficerUser, OrgMember};
+use crate::extractors::{OfficerUser, OrgMember, ReportCreator};
 use crate::routes::audit_log::audit;
 use crate::stat_reports::{
     BundleReject, accept_bundle, ensure_reports_dir, is_report_id, remove_report_files,
@@ -136,12 +138,19 @@ async fn load_owned(
 }
 
 /// POST /api/stat-reports
+///
+/// The one report route that also takes the tracker sync token
+/// ([`ReportCreator`]). Auth runs as an extractor, before `configured`, so a
+/// missing or unknown credential is 401 even while reports are off. The
+/// report is stored under the credential's member, and the daily cap counts
+/// that member's rows whichever credential sent them.
 pub async fn create_stat_report(
     State(state): State<AppState>,
-    member: OrgMember,
+    creator: ReportCreator,
     body: Bytes,
 ) -> Result<(StatusCode, Json<StatReportCreated>), (StatusCode, Json<ErrorResponse>)> {
     configured(&state)?;
+    let member = &creator.member;
     if body.len() as u64 > MAX_BUNDLE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "Bundle is too large"));
     }
@@ -149,7 +158,7 @@ pub async fn create_stat_report(
     let start = utc_day_start(Utc::now());
     let stored = state
         .db
-        .count_stat_reports_since(&member.member.id, start)
+        .count_stat_reports_since(&member.id, start)
         .await
         .map_err(|error| {
             tracing::error!(%error, "stat report count failed");
@@ -191,7 +200,7 @@ pub async fn create_stat_report(
 
     let row = NewStatReport {
         id: id.clone(),
-        member_id: member.member.id.clone(),
+        member_id: member.id.clone(),
         created_at,
         reason_category: accepted.manifest.reason_category.clone(),
         reason_text: accepted.manifest.reason_text.clone(),
@@ -215,7 +224,7 @@ pub async fn create_stat_report(
 
     let stored = state
         .db
-        .count_stat_reports_since(&member.member.id, start)
+        .count_stat_reports_since(&member.id, start)
         .await
         .map_err(|error| {
             tracing::error!(%error, "stat report recount failed");
@@ -244,13 +253,14 @@ pub async fn create_stat_report(
 
     audit(
         &state.db,
-        &member.member.id,
+        &member.id,
         AuditAction::CreatedStatReport,
         AuditTargetType::StatReport,
         &id,
         Some(&format!(
-            "training={training} size={}",
-            accepted.bytes.len()
+            "training={training} size={} credential={}",
+            accepted.bytes.len(),
+            creator.credential.as_str()
         )),
     )
     .await;

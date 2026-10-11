@@ -58,8 +58,8 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 
 - `map`, `mode`, and `result` are strings or `null`.
 - `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
-- In a `crash` or `performance` report, `game` is `null`. `reads` keeps its usual shape: all nine keys, each an object with `value`, `confidence`, and `ocr_v1` set to `null` and `suspect` set to `true` (a null value is always suspect, as below). A read is never JSON `null` as a whole.
-- `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. The log window in section 6 is measured from the session around this time.
+- In a `crash` or `performance` report, `game` is `null`. An `other` report (bundle version 2) may also have `game: null`; it is then a log-only report and follows the same rules as `crash` and `performance` (this section and section 7). An `other` report with a game follows the game report rules. `reads` keeps its usual shape: all nine keys, each an object with `value`, `confidence`, and `ocr_v1` set to `null` and `suspect` set to `true` (a null value is always suspect, as below). A read is never JSON `null` as a whole.
+- `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. For a game report, the log window in section 6 is measured from the session around this time. Crash and performance reports have no `game` object; their window follows section 6.
 
 `reads` is one object per field. The keys come from the `suspect_fields` names map. The map is fixed:
 
@@ -120,7 +120,7 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 - `role`: `log`, `crop`, `own_name`, or `glyph`.
 - `screen_class`: the screen class from section 4 for a `crop`, otherwise `null`.
 
-There is exactly one `log` entry, and its path is `log.txt`. A `crash` or `performance` report has no `crop`, `own_name`, or `glyph` entry, and its consent `own_name_included` and `glyphs_included` are `false`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters from the operating system's cryptographic random source, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
+There is exactly one `log` entry, and its path is `log.txt`. A log-only report (`crash`, `performance`, or `other` with `game: null`) has no `crop`, `own_name`, or `glyph` entry, and its consent `own_name_included` and `glyphs_included` are `false`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters from the operating system's cryptographic random source, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
 
 `debug/mapcrops/` is local only. Those files are never listed in `files`, and the zip does not contain them. If a manifest lists a path under `debug/mapcrops/`, the server responds 400 with `file missing` and stores nothing.
 
@@ -400,7 +400,7 @@ If the server has reports switched off, upload gets 503 with `{"error":"reports_
 
 ## 8. API contract
 
-This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. How the desktop app obtains a site session is still open.
+This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. The desktop app does not hold a site session. It sends with the tracker's sync token (create only, below), and Send is disabled when the tracker is not linked (section 7).
 
 Create accepts either of two credentials. Every other report route accepts only the site session.
 
@@ -483,6 +483,7 @@ Revision 2 fixtures, required:
 
 - Version: a `bundle_version` 1 manifest without `system` passes. A `bundle_version` 1 manifest with `system`, or with category `crash` or `performance`, is a 400. Version 3 is a 400.
 - `system`: every key present passes. A missing key, an unknown key, `cpu_threads` 0, or a `session_type` outside the list is a 400.
+- Log-only `other`: a version 2 `other` report with `game: null` follows the log-only rules below. A version 1 `other` report still needs a game.
 - Log-only: a `crash` report with `game: null`, nine read objects whose `value`, `confidence`, and `ocr_v1` are null and `suspect` is true, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
 - `team_size: null` passes on a game report.
 - A `crop` path other than `crops/scoreboard.png` or `crops/frame.png` is a 400.

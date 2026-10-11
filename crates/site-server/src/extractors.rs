@@ -358,3 +358,77 @@ impl FromRequestParts<AppState> for PackDaemonUser {
         .map_err(|err| *err)
     }
 }
+
+/// Which credential a [`ReportCreator`] presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportCredential {
+    /// Site session (cookie, or a session token as `Authorization: Bearer`).
+    Session,
+    /// Tracker sync token as `Authorization: Bearer`.
+    SyncToken,
+}
+
+impl ReportCredential {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::SyncToken => "sync_token",
+        }
+    }
+}
+
+/// Auth for `POST /api/stat-reports` only (report-bundle spec section 8).
+///
+/// Tries the site session first, with the same checks as [`OrgMember`]. If
+/// that is a 401 and the request carries `Authorization: Bearer`, the value
+/// is tried as the tracker sync token through the same path stats sync uses
+/// ([`authenticate_daemon`]): hashed, matched against active unexpired
+/// `daemon_token` rows, then the owner must be an active member who is not
+/// suspended or banned (403 otherwise). A non-401 session failure (403 not a
+/// member, inactive, suspended; 500) is returned as is.
+///
+/// Every other report route keeps [`OrgMember`] / [`OfficerUser`], so a sync
+/// token there fails the session lookup and is a 401.
+pub struct ReportCreator {
+    pub member: Member,
+    pub credential: ReportCredential,
+}
+
+impl FromRequestParts<AppState> for ReportCreator {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let session_reject = match OrgMember::from_request_parts(parts, state).await {
+            Ok(org) => {
+                return Ok(ReportCreator {
+                    member: org.member,
+                    credential: ReportCredential::Session,
+                });
+            }
+            Err(reject) => reject,
+        };
+        let has_bearer = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Bearer "));
+        if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
+            return Err(session_reject.into_response());
+        }
+        let DaemonUser { member } = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Opaque,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
+        Ok(ReportCreator {
+            member,
+            credential: ReportCredential::SyncToken,
+        })
+    }
+}
