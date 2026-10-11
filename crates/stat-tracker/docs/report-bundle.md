@@ -59,7 +59,7 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 - `map`, `mode`, and `result` are strings or `null`.
 - `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
 - In a `crash` or `performance` report, `game` is `null`. `reads` keeps its usual shape: all nine keys, each an object with `value`, `confidence`, and `ocr_v1` set to `null` and `suspect` set to `true` (a null value is always suspect, as below). A read is never JSON `null` as a whole.
-- `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. The log window in section 6 is measured from the session around this time.
+- `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. For a game report, the log window in section 6 is measured from the session around this time. Crash and performance reports have no `game` object; their window follows section 6.
 
 `reads` is one object per field. The keys come from the `suspect_fields` names map. The map is fixed:
 
@@ -400,7 +400,7 @@ If the server has reports switched off, upload gets 503 with `{"error":"reports_
 
 ## 8. API contract
 
-This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. How the desktop app obtains a site session is still open.
+This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. The desktop app does not hold a site session. It sends with the tracker's sync token (create only, below), and Send is disabled when the tracker is not linked (section 7).
 
 Create accepts either of two credentials. Every other report route accepts only the site session.
 
