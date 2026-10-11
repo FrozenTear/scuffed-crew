@@ -163,12 +163,13 @@ if ! curl -fsS --max-time 2 "${SURREAL_URL}/health" >/dev/null 2>&1 \
     fi
     if [[ -n "${CID}" ]]; then
         echo "Host Surreal URL unreachable; exporting via podman exec (${CID})..."
-        podman exec "${CID}" surreal export \
-            --conn "http://127.0.0.1:8000" \
-            --user "${ROOT_USER}" \
-            --pass "${ROOT_PASS}" \
-            --ns "${SURREAL_NS}" \
-            --db "${SURREAL_DB}" \
+        # The image keeps the binary at /surreal (not on PATH) and has no
+        # shell. The password goes in the environment, not on the command line.
+        podman exec -e SURREAL_PASS="${ROOT_PASS}" "${CID}" /surreal export \
+            --endpoint "http://127.0.0.1:8000" \
+            --username "${ROOT_USER}" \
+            --namespace "${SURREAL_NS}" \
+            --database "${SURREAL_DB}" \
             "/tmp/scuffed-export.surql"
         podman cp "${CID}:/tmp/scuffed-export.surql" "${EXPORT_FILE}"
         export_via_podman=1
@@ -176,12 +177,11 @@ if ! curl -fsS --max-time 2 "${SURREAL_URL}/health" >/dev/null 2>&1 \
 fi
 
 if [[ "${export_via_podman}" -eq 0 ]]; then
-    surreal export \
-        --conn "${SURREAL_URL}" \
-        --user "${ROOT_USER}" \
-        --pass "${ROOT_PASS}" \
-        --ns "${SURREAL_NS}" \
-        --db "${SURREAL_DB}" \
+    SURREAL_PASS="${ROOT_PASS}" surreal export \
+        --endpoint "${SURREAL_URL}" \
+        --username "${ROOT_USER}" \
+        --namespace "${SURREAL_NS}" \
+        --database "${SURREAL_DB}" \
         "${EXPORT_FILE}"
 fi
 

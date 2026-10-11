@@ -162,13 +162,30 @@ if [[ -n "${EXPORT_FILE}" ]]; then
             SURREAL_DB="${SURREALDB_DB:-main}"
 
             echo "Importing into ${SURREAL_NS}/${SURREAL_DB}..."
-            surreal import \
-                --conn "${SURREAL_URL}" \
-                --user "${ROOT_USER}" \
-                --pass "${ROOT_PASS}" \
-                --ns "${SURREAL_NS}" \
-                --db "${SURREAL_DB}" \
-                "${EXPORT_FILE}"
+            if command -v surreal >/dev/null 2>&1; then
+                SURREAL_PASS="${ROOT_PASS}" surreal import \
+                    --endpoint "${SURREAL_URL}" \
+                    --username "${ROOT_USER}" \
+                    --namespace "${SURREAL_NS}" \
+                    --database "${SURREAL_DB}" \
+                    "${EXPORT_FILE}"
+            else
+                # Same fallback as backup.sh: no surreal on the host, so import
+                # inside the running container (binary at /surreal, no shell).
+                CID="$(podman ps --format '{{.Names}}' 2>/dev/null | grep -i surreal | head -1 || true)"
+                if [[ -z "${CID}" ]]; then
+                    echo "error: no surreal binary on the host and no running SurrealDB container" >&2
+                    exit 1
+                fi
+                echo "No surreal on the host; importing via podman exec (${CID})..."
+                podman cp "${EXPORT_FILE}" "${CID}:/tmp/scuffed-import.surql"
+                podman exec -e SURREAL_PASS="${ROOT_PASS}" "${CID}" /surreal import \
+                    --endpoint "http://127.0.0.1:8000" \
+                    --username "${ROOT_USER}" \
+                    --namespace "${SURREAL_NS}" \
+                    --database "${SURREAL_DB}" \
+                    "/tmp/scuffed-import.surql"
+            fi
             echo "Import complete."
         fi
     fi

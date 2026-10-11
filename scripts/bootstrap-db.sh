@@ -22,10 +22,13 @@ ROOT_PASS="${SURREALDB_ROOT_PASSWORD:?Set SURREALDB_ROOT_PASSWORD}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Bootstrapping SurrealDB at ${SURREAL_URL}..."
-surreal import \
-    --conn "${SURREAL_URL}" \
-    --user "${ROOT_USER}" \
-    --pass "${ROOT_PASS}" \
-    "${SCRIPT_DIR}/bootstrap-db.surql"
+# `surreal import` in surreal 3 only takes files from `surreal export`
+# (they start with OPTION IMPORT). This file is hand-written DEFINE
+# statements, so it runs through `surreal sql`. The file sets its own NS/DB.
+SURREAL_PASS="${ROOT_PASS}" surreal sql \
+    --endpoint "${SURREAL_URL}" \
+    --username "${ROOT_USER}" \
+    --hide-welcome \
+    < "${SCRIPT_DIR}/bootstrap-db.surql"
 
 echo "Done. Remember to change the app user password in bootstrap-db.surql for production."

@@ -1,9 +1,8 @@
 -- Bootstrap SurrealDB for the Scuffed Crew deployment.
 -- Run once with root credentials after first starting SurrealDB.
 --
--- Usage: surreal import --conn http://localhost:8000 \
---          --user root --pass <root-pass> \
---          scripts/bootstrap-db.surql
+-- Usage: scripts/bootstrap-db.sh [http://localhost:8000]
+--        (runs this file through `surreal sql`; `surreal import` only takes exports)
 
 -- Create namespace
 DEFINE NAMESPACE IF NOT EXISTS scuffed_crew;
