@@ -591,3 +591,43 @@ fn server_validator_accepts_log_only_manifest() {
         assert_eq!(checked.files.len(), 1);
     }
 }
+
+/// The daemon's own OCR log lines carry other players' names in fields that
+/// are not called `name`. A log-only report has no name list, so the fields
+/// themselves must go. Shapes copied from main.rs:4435 and match_end.rs.
+#[test]
+fn real_ocr_text_fields_are_dropped_without_a_name_list() {
+    use super::scrub::{ScrubContext, scrub_log};
+    let unknown = ["QXSTRANGER", "QXOTHERTEAM", "QXPOTGHERO", "QXACCOLADE"];
+    let raw = [
+        line(
+            "2026-10-09T12:05:00.000000Z",
+            "scuffed_stat_tracker",
+            "OCR result confidence=81 text_preview=QXSTRANGER 12 4 3 QXOTHERTEAM 9 2",
+        ),
+        line(
+            "2026-10-09T12:05:01.000000Z",
+            "stat_tracker::detect::match_end",
+            "end-reel title OCR matched text=PLAY OF THE GAME QXPOTGHERO context=\"potg\"",
+        ),
+        line(
+            "2026-10-09T12:05:02.000000Z",
+            "stat_tracker::detect::match_end",
+            "map read from accolade screen map=Busan raw=QXACCOLADE BUSAN",
+        ),
+        line(
+            "2026-10-09T12:05:03.000000Z",
+            "stat_tracker::detect::match_end",
+            "no result word in region ocr_text=QXSTRANGER context=\"end title\"",
+        ),
+    ]
+    .concat();
+    let window = LogWindow::log_only(t("2026-10-09T12:06:00Z"));
+    let out = scrub_log(&ScrubContext::default(), &window, &raw);
+    for name in unknown {
+        assert!(!out.contains(name), "{name} survived:\n{out}");
+    }
+    assert!(out.contains("OCR result"), "the message stays:\n{out}");
+    assert!(out.contains("map=Busan"), "non-text fields stay:\n{out}");
+    assert!(out.contains("confidence=81"), "non-text fields stay:\n{out}");
+}

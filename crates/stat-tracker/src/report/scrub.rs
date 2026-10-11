@@ -48,9 +48,21 @@ pub const NAME_FIELD_KEYS: &[&str] = &[
     "row_name",
 ];
 
-/// On a line whose message is about a player name, these generic keys also
-/// hold the name text (older daemons logged the matched cell as `text`).
-const NAME_LINE_EXTRA_KEYS: &[&str] = &["text", "read", "cell", "cell_text"];
+/// Log field keys whose value is raw OCR text. The daemon logs these on
+/// lines that are not about names, but the text can hold player names: the
+/// full-frame Tab read (`text_preview`, mostly the name column), the POTG
+/// and end-title reads (`text`, `ocr_text`), and the accolade screen
+/// (`raw`). There is no game in a log-only report, so no name list exists
+/// to scrub them with. They are always dropped, key and value.
+pub const OCR_TEXT_KEYS: &[&str] = &[
+    "text",
+    "text_preview",
+    "ocr_text",
+    "raw",
+    "read",
+    "cell",
+    "cell_text",
+];
 
 /// Values the scrub removes. Empty strings and `None` are ignored.
 #[derive(Debug, Clone, Default)]
@@ -426,14 +438,12 @@ pub fn line_timestamp(line: &str) -> Option<DateTime<Utc>> {
 
 /// Drop name fields (key and value) from one log line.
 pub fn drop_name_fields(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    let name_line = lower.contains("player name") || lower.contains("name read");
     let mut fields: Vec<(usize, usize, bool)> = Vec::new(); // (start, value_start, drop)
     for caps in FIELD_START_RE.captures_iter(line) {
         let key = caps.get(1).expect("key group");
         let whole = caps.get(0).expect("whole");
         let drop = NAME_FIELD_KEYS.contains(&key.as_str())
-            || (name_line && NAME_LINE_EXTRA_KEYS.contains(&key.as_str()));
+            || OCR_TEXT_KEYS.contains(&key.as_str());
         fields.push((whole.start(), whole.end(), drop));
     }
     if !fields.iter().any(|f| f.2) {
