@@ -1232,7 +1232,7 @@ fn dialog_shell<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
         .into()
 }
 
-fn checkbox_style(
+pub(crate) fn checkbox_style(
     _theme: &iced::Theme,
     status: iced::widget::checkbox::Status,
 ) -> iced::widget::checkbox::Style {

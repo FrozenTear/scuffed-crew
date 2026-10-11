@@ -31,6 +31,7 @@ pub mod overlay;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
 pub mod overview;
+pub mod report;
 pub mod seasons;
 pub mod settings;
 pub mod setup_guide;
