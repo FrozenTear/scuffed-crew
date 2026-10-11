@@ -18,15 +18,18 @@ services:
       - surrealdb-data:/data
     networks:
       - internal
-    # Minimal image: no curl. `is-ready` was unreliable. `version` only checks
-    # the binary is runnable so compose providers that require a healthcheck
-    # still get a "healthy" status. Server listens within ~1s of start.
+    # Minimal image: no curl or shell. `is-ready` asks the running server, so
+    # this checks the database and not only the binary. The surreal CLI waits
+    # about 5s on exit after it has answered (measured on 3.0.5, with `version`
+    # too). An older 5s timeout therefore failed every check and the container
+    # sat at "unhealthy" while the database was fine. That is also why
+    # `is-ready` once looked unreliable. Keep the timeout well above 5s.
     healthcheck:
-      test: ["CMD", "/surreal", "version"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 30s
+      timeout: 20s
       retries: 3
-      start_period: 5s
+      start_period: 20s
     restart: unless-stopped
 
   strfry:
