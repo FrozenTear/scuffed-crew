@@ -11,8 +11,13 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-/// Spec bundle version. Any other value is rejected.
-pub const BUNDLE_VERSION: u64 = 1;
+/// Bundle version the tracker writes today (spec revision 2).
+pub const BUNDLE_VERSION: u64 = 2;
+
+/// Oldest bundle version a reader accepts. Version 1 is spec revision 1: no
+/// `system` object and no `crash` or `performance` category. Readers accept
+/// `MIN_BUNDLE_VERSION..=BUNDLE_VERSION` and reject anything else.
+pub const MIN_BUNDLE_VERSION: u64 = 1;
 
 /// Compressed request body and total uncompressed size, in bytes.
 pub const MAX_BUNDLE_BYTES: u64 = 10 * 1024 * 1024;
@@ -38,8 +43,23 @@ const REASON_CATEGORIES: &[&str] = &[
     "wrong_mode",
     "wrong_result",
     "missed_game",
+    "crash",
+    "performance",
     "other",
 ];
+
+/// Categories that are not about one game. They need bundle version 2 and
+/// carry `game: null`, null reads, `session_id` `none`, and only `log.txt`.
+const LOG_ONLY_CATEGORIES: &[&str] = &["crash", "performance"];
+
+/// `session_id` for a report that has no game session.
+const NO_SESSION: &str = "none";
+
+const SESSION_TYPES: &[&str] = &["x11", "wayland", "unknown"];
+const CAPTURE_BACKENDS: &[&str] = &["x11", "wayshot", "portal", "none"];
+const READERS: &[&str] = &["ocr-v1", "new"];
+const UPDATE_CHANNELS: &[&str] = &["stable", "prerelease"];
+const LAST_EXITS: &[&str] = &["clean", "crashed", "unknown"];
 
 const SCREEN_CLASSES: &[&str] = &[
     "scoreboard",
@@ -162,8 +182,14 @@ struct RawManifest {
     resolution: RawResolution,
     ui_scale: Option<f64>,
     reason: RawReason,
+    /// Optional, version 2 only. Absent is the only way to leave it out;
+    /// `null` is rejected.
+    #[serde(default, deserialize_with = "present")]
+    system: Option<RawSystem>,
     session_id: String,
-    game: RawGame,
+    /// Required key. `null` only in a report without a game.
+    #[serde(deserialize_with = "nullable")]
+    game: Option<RawGame>,
     reads: RawReads,
     corrections: BTreeMap<String, String>,
     consent: RawConsent,
@@ -193,15 +219,35 @@ struct RawReason {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawSystem {
+    session_type: String,
+    capture_backend: String,
+    cpu_threads: u32,
+    ocr_threads: u32,
+    reader: String,
+    #[allow(dead_code)]
+    shadow_recognizer: bool,
+    update_channel: String,
+    #[allow(dead_code)]
+    daemon_running: bool,
+    last_exit: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct RawGame {
     map: Option<String>,
     mode: Option<String>,
     result: Option<String>,
-    team_size: u32,
+    /// Required key. `null` means the app could not tell 5v5 from 6v6.
+    #[serde(deserialize_with = "nullable")]
+    team_size: Option<u32>,
     captured_at: DateTime<Utc>,
 }
 
+/// All nine keys are required, and each is an object. A read is never JSON
+/// `null` as a whole, not even in a report without a game.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawReads {
@@ -354,8 +400,9 @@ impl<'de> Visitor<'de> for JsonVisitor {
 }
 
 fn check_manifest(raw: RawManifest, value: Value) -> Result<CheckedManifest, String> {
-    if raw.bundle_version != BUNDLE_VERSION {
-        return Err("bundle_version must be 1".into());
+    let version = raw.bundle_version;
+    if !(MIN_BUNDLE_VERSION..=BUNDLE_VERSION).contains(&version) {
+        return Err("bundle_version must be 1 or 2".into());
     }
     check_short("app_version", &raw.app_version, 1, 32)?;
     check_short("recognizers.matcher", &raw.recognizers.matcher, 1, 64)?;
@@ -374,8 +421,21 @@ fn check_manifest(raw: RawManifest, value: Value) -> Result<CheckedManifest, Str
     {
         return Err("ui_scale is out of range".into());
     }
-    if !REASON_CATEGORIES.contains(&raw.reason.category.as_str()) {
+    let category = raw.reason.category.as_str();
+    if !REASON_CATEGORIES.contains(&category) {
         return Err("reason.category is not a known category".into());
+    }
+    let log_only_category = LOG_ONLY_CATEGORIES.contains(&category);
+    if version < 2 {
+        if raw.system.is_some() {
+            return Err("system needs bundle_version 2".into());
+        }
+        if log_only_category {
+            return Err("reason.category crash and performance need bundle_version 2".into());
+        }
+    }
+    if let Some(system) = &raw.system {
+        check_system(system)?;
     }
     if raw.reason.text.chars().count() > 500 {
         return Err("reason.text is longer than 500 characters".into());
@@ -384,22 +444,51 @@ fn check_manifest(raw: RawManifest, value: Value) -> Result<CheckedManifest, Str
         return Err("reason.text contains a null".into());
     }
     check_short("session_id", &raw.session_id, 1, 64)?;
-    if raw.game.team_size != 5 && raw.game.team_size != 6 {
-        return Err("game.team_size must be 5 or 6".into());
+    // A report without a game: crash and performance always, and `other`
+    // from Report a problem (spec section 7) when it carries `game: null`.
+    let log_only = match &raw.game {
+        None => {
+            if !(log_only_category || (version >= 2 && category == "other")) {
+                return Err(
+                    "game may be null only in a crash, performance, or other report".into(),
+                );
+            }
+            true
+        }
+        Some(game) => {
+            if log_only_category {
+                return Err("a crash or performance report must have game null".into());
+            }
+            if let Some(size) = game.team_size
+                && size != 5
+                && size != 6
+            {
+                return Err("game.team_size must be 5, 6, or null".into());
+            }
+            check_opt_label("game.map", game.map.as_deref())?;
+            check_opt_label("game.mode", game.mode.as_deref())?;
+            check_opt_label("game.result", game.result.as_deref())?;
+            false
+        }
+    };
+    if log_only {
+        if raw.session_id != NO_SESSION {
+            return Err("a report without a game must use session_id none".into());
+        }
+        if raw.consent.own_name_included || raw.consent.glyphs_included {
+            return Err("a report without a game cannot include names or glyphs".into());
+        }
     }
-    check_opt_label("game.map", raw.game.map.as_deref())?;
-    check_opt_label("game.mode", raw.game.mode.as_deref())?;
-    check_opt_label("game.result", raw.game.result.as_deref())?;
 
-    check_read("mode", &raw.reads.mode)?;
-    check_read("result", &raw.reads.result)?;
-    check_read("hero", &raw.reads.hero)?;
-    check_read("e", &raw.reads.e)?;
-    check_read("a", &raw.reads.a)?;
-    check_read("d", &raw.reads.d)?;
-    check_read("dmg", &raw.reads.dmg)?;
-    check_read("h", &raw.reads.h)?;
-    check_read("mit", &raw.reads.mit)?;
+    check_read("mode", &raw.reads.mode, log_only)?;
+    check_read("result", &raw.reads.result, log_only)?;
+    check_read("hero", &raw.reads.hero, log_only)?;
+    check_read("e", &raw.reads.e, log_only)?;
+    check_read("a", &raw.reads.a, log_only)?;
+    check_read("d", &raw.reads.d, log_only)?;
+    check_read("dmg", &raw.reads.dmg, log_only)?;
+    check_read("h", &raw.reads.h, log_only)?;
+    check_read("mit", &raw.reads.mit, log_only)?;
 
     if raw.corrections.len() > READ_KEYS.len() {
         return Err("corrections has too many keys".into());
@@ -428,6 +517,9 @@ fn check_manifest(raw: RawManifest, value: Value) -> Result<CheckedManifest, Str
     let mut declared: u64 = 0;
     for file in &raw.files {
         let role = check_file(file, &raw.consent, &mut glyph_ids)?;
+        if log_only && role != FileRole::Log {
+            return Err("a report without a game lists only log.txt".into());
+        }
         if !paths.insert(file.path.clone()) {
             return Err("duplicate file path".into());
         }
@@ -571,7 +663,42 @@ fn reject_glyph_fields(file: &RawFile) -> Result<(), String> {
     Ok(())
 }
 
-fn check_read(name: &str, read: &RawRead) -> Result<(), String> {
+fn check_system(system: &RawSystem) -> Result<(), String> {
+    let pick = |label: &str, value: &str, allowed: &[&str]| {
+        if allowed.contains(&value) {
+            Ok(())
+        } else {
+            Err(format!("system.{label} is not a known value"))
+        }
+    };
+    pick("session_type", &system.session_type, SESSION_TYPES)?;
+    pick("capture_backend", &system.capture_backend, CAPTURE_BACKENDS)?;
+    pick("reader", &system.reader, READERS)?;
+    pick("update_channel", &system.update_channel, UPDATE_CHANNELS)?;
+    pick("last_exit", &system.last_exit, LAST_EXITS)?;
+    if system.cpu_threads == 0 {
+        return Err("system.cpu_threads must be positive".into());
+    }
+    if system.ocr_threads == 0 {
+        return Err("system.ocr_threads must be positive".into());
+    }
+    Ok(())
+}
+
+/// In a report without a game, every read is the empty-read object:
+/// `value`, `confidence`, and `ocr_v1` null and `suspect` true (spec
+/// section 2), so a game read cannot ride along in a crash report.
+fn check_read(name: &str, read: &RawRead, log_only: bool) -> Result<(), String> {
+    if log_only
+        && (read.value.is_some()
+            || read.confidence.is_some()
+            || read.ocr_v1.is_some()
+            || !read.suspect)
+    {
+        return Err(format!(
+            "reads.{name} must be an empty suspect read in a report without a game"
+        ));
+    }
     if let Some(value) = &read.value {
         check_short(&format!("{name}.value"), value, 0, 64)?;
     }
@@ -653,6 +780,26 @@ fn is_glyph_id(id: &str) -> bool {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Required key whose value may be `null`. Unlike a bare `Option` field, a
+/// missing key is a schema error.
+fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Optional key that, when present, is not `null`. Use with
+/// `#[serde(default)]`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn absent_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -785,10 +932,285 @@ mod tests {
 
     #[test]
     fn other_version_is_rejected() {
+        for version in [0, 3] {
+            let mut v = sample();
+            v["bundle_version"] = serde_json::json!(version);
+            let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
+            assert!(err.contains("bundle_version"), "{version}: {err}");
+        }
+    }
+
+    fn parse(v: &serde_json::Value) -> Result<CheckedManifest, String> {
+        parse_bundle_manifest(&serde_json::to_vec(v).unwrap())
+    }
+
+    fn system() -> serde_json::Value {
+        serde_json::json!({
+            "session_type": "x11",
+            "capture_backend": "x11",
+            "cpu_threads": 16,
+            "ocr_threads": 4,
+            "reader": "new",
+            "shadow_recognizer": false,
+            "update_channel": "prerelease",
+            "daemon_running": true,
+            "last_exit": "clean"
+        })
+    }
+
+    /// The spec section 2 revision-2 example.
+    fn sample_v2() -> serde_json::Value {
         let mut v = sample();
         v["bundle_version"] = serde_json::json!(2);
-        let err = parse_bundle_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(err.contains("bundle_version"), "{err}");
+        v["recognizers"]["matcher"] = serde_json::json!("cv-v5");
+        v["system"] = system();
+        v
+    }
+
+    /// Spec section 9 log-only fixture: a crash report with no game.
+    fn crash_v2(category: &str) -> serde_json::Value {
+        let mut v = sample_v2();
+        v["reason"] = serde_json::json!({ "category": category, "text": "it stopped" });
+        v["system"]["last_exit"] = serde_json::json!("crashed");
+        v["session_id"] = serde_json::json!("none");
+        v["game"] = serde_json::Value::Null;
+        for key in READ_KEYS {
+            v["reads"][*key] = serde_json::json!({
+                "value": null, "confidence": null, "suspect": true, "ocr_v1": null
+            });
+        }
+        v["corrections"] = serde_json::json!({});
+        v["files"] = serde_json::json!([v["files"][0].clone()]);
+        v
+    }
+
+    #[test]
+    fn v1_without_system_passes() {
+        let checked = parse(&sample()).unwrap();
+        assert_eq!(checked.reason_category, "wrong_stats");
+    }
+
+    #[test]
+    fn v1_with_system_or_log_only_category_is_rejected() {
+        let mut with_system = sample();
+        with_system["system"] = system();
+        let err = parse(&with_system).unwrap_err();
+        assert!(err.contains("system"), "{err}");
+
+        for category in ["crash", "performance"] {
+            let mut v = crash_v2(category);
+            v["bundle_version"] = serde_json::json!(1);
+            v.as_object_mut().unwrap().remove("system");
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("bundle_version 2"), "{category}: {err}");
+        }
+    }
+
+    #[test]
+    fn v2_spec_example_passes() {
+        let checked = parse(&sample_v2()).unwrap();
+        assert_eq!(checked.matcher, "cv-v5");
+        assert_eq!(checked.files.len(), 2);
+    }
+
+    #[test]
+    fn v2_without_system_passes() {
+        let mut v = sample_v2();
+        v.as_object_mut().unwrap().remove("system");
+        parse(&v).unwrap();
+    }
+
+    #[test]
+    fn system_rejects_missing_unknown_null_and_out_of_range_values() {
+        let mut missing = sample_v2();
+        missing["system"]
+            .as_object_mut()
+            .unwrap()
+            .remove("last_exit");
+        assert!(parse(&missing).unwrap_err().contains("schema"));
+
+        let mut unknown = sample_v2();
+        unknown["system"]["hostname"] = serde_json::json!("box");
+        assert!(parse(&unknown).unwrap_err().contains("schema"));
+
+        let mut null = sample_v2();
+        null["system"] = serde_json::Value::Null;
+        assert!(parse(&null).unwrap_err().contains("schema"));
+
+        let mut zero = sample_v2();
+        zero["system"]["cpu_threads"] = serde_json::json!(0);
+        assert!(parse(&zero).unwrap_err().contains("cpu_threads"));
+
+        let mut zero_ocr = sample_v2();
+        zero_ocr["system"]["ocr_threads"] = serde_json::json!(0);
+        assert!(parse(&zero_ocr).unwrap_err().contains("ocr_threads"));
+
+        let mut negative = sample_v2();
+        negative["system"]["cpu_threads"] = serde_json::json!(-1);
+        assert!(parse(&negative).is_err());
+
+        for (key, bad) in [
+            ("session_type", "mir"),
+            ("capture_backend", "pipewire"),
+            ("reader", "cv-v5"),
+            ("update_channel", "nightly"),
+            ("last_exit", "killed"),
+        ] {
+            let mut v = sample_v2();
+            v["system"][key] = serde_json::json!(bad);
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains(key), "{key}: {err}");
+        }
+
+        let mut wrong_type = sample_v2();
+        wrong_type["system"]["daemon_running"] = serde_json::json!("yes");
+        assert!(parse(&wrong_type).unwrap_err().contains("schema"));
+
+        // Every listed enum value passes.
+        for (key, values) in [
+            ("session_type", SESSION_TYPES),
+            ("capture_backend", CAPTURE_BACKENDS),
+            ("reader", READERS),
+            ("update_channel", UPDATE_CHANNELS),
+            ("last_exit", LAST_EXITS),
+        ] {
+            for value in values {
+                let mut v = sample_v2();
+                v["system"][key] = serde_json::json!(value);
+                parse(&v).unwrap_or_else(|e| panic!("{key}={value}: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn crash_and_performance_log_only_reports_pass() {
+        for category in ["crash", "performance"] {
+            let checked = parse(&crash_v2(category)).unwrap();
+            assert_eq!(checked.reason_category, category);
+            assert_eq!(checked.files.len(), 1);
+            assert_eq!(checked.files[0].role, FileRole::Log);
+        }
+        // A read that is JSON null as a whole is invalid, even here.
+        let mut null_read = crash_v2("crash");
+        null_read["reads"]["dmg"] = serde_json::Value::Null;
+        assert!(parse(&null_read).unwrap_err().contains("schema"));
+        // A null value is always suspect.
+        let mut not_suspect = crash_v2("performance");
+        not_suspect["reads"]["hero"]["suspect"] = serde_json::json!(false);
+        assert!(parse(&not_suspect).unwrap_err().contains("reads.hero"));
+    }
+
+    #[test]
+    fn crash_report_with_a_crop_or_name_consent_is_rejected() {
+        let mut crop = crash_v2("crash");
+        crop["files"] = sample()["files"].clone();
+        let err = parse(&crop).unwrap_err();
+        assert!(err.contains("only log.txt"), "{err}");
+
+        let mut own = crash_v2("crash");
+        own["consent"]["own_name_included"] = serde_json::json!(true);
+        let err = parse(&own).unwrap_err();
+        assert!(err.contains("names or glyphs"), "{err}");
+
+        let mut glyphs = crash_v2("performance");
+        glyphs["consent"]["glyphs_included"] = serde_json::json!(true);
+        let err = parse(&glyphs).unwrap_err();
+        assert!(err.contains("names or glyphs"), "{err}");
+    }
+
+    #[test]
+    fn crash_report_needs_null_game_null_reads_and_session_none() {
+        let mut game = crash_v2("crash");
+        game["game"] = sample()["game"].clone();
+        assert!(parse(&game).unwrap_err().contains("game null"));
+
+        let mut read = crash_v2("crash");
+        read["reads"]["e"] = sample()["reads"]["e"].clone();
+        assert!(parse(&read).unwrap_err().contains("reads.e"));
+
+        let mut session = crash_v2("crash");
+        session["session_id"] = serde_json::json!("sess-example");
+        assert!(parse(&session).unwrap_err().contains("session_id"));
+
+        // The nine keys stay present even when null.
+        let mut missing = crash_v2("crash");
+        missing["reads"].as_object_mut().unwrap().remove("mit");
+        assert!(parse(&missing).unwrap_err().contains("schema"));
+
+        // `game` is a required key, null or not.
+        let mut absent = crash_v2("crash");
+        absent.as_object_mut().unwrap().remove("game");
+        assert!(parse(&absent).unwrap_err().contains("schema"));
+    }
+
+    #[test]
+    fn game_report_needs_a_game_and_read_objects() {
+        let mut no_game = sample_v2();
+        no_game["game"] = serde_json::Value::Null;
+        assert!(parse(&no_game).unwrap_err().contains("game may be null"));
+
+        let mut null_read = sample_v2();
+        null_read["reads"]["hero"] = serde_json::Value::Null;
+        assert!(parse(&null_read).unwrap_err().contains("schema"));
+    }
+
+    #[test]
+    fn other_without_a_game_is_log_only_on_v2() {
+        let v2 = crash_v2("other");
+        parse(&v2).unwrap();
+
+        let mut with_crop = crash_v2("other");
+        with_crop["files"] = sample()["files"].clone();
+        assert!(parse(&with_crop).unwrap_err().contains("only log.txt"));
+
+        let mut v1 = crash_v2("other");
+        v1["bundle_version"] = serde_json::json!(1);
+        v1.as_object_mut().unwrap().remove("system");
+        assert!(parse(&v1).unwrap_err().contains("game may be null"));
+    }
+
+    #[test]
+    fn team_size_null_passes_on_both_versions() {
+        for mut v in [sample(), sample_v2()] {
+            v["game"]["team_size"] = serde_json::Value::Null;
+            parse(&v).unwrap();
+        }
+        let mut bad = sample_v2();
+        bad["game"]["team_size"] = serde_json::json!(4);
+        assert!(parse(&bad).unwrap_err().contains("team_size"));
+
+        let mut missing = sample_v2();
+        missing["game"].as_object_mut().unwrap().remove("team_size");
+        assert!(parse(&missing).unwrap_err().contains("schema"));
+    }
+
+    #[test]
+    fn v2_crop_paths_are_exactly_scoreboard_and_frame() {
+        for path in [
+            "crops/cell-e-1.png",
+            "crops/Scoreboard.png",
+            "crops/frame2.png",
+        ] {
+            let mut v = sample_v2();
+            v["files"][1]["path"] = serde_json::json!(path);
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("crop path"), "{path}: {err}");
+        }
+        let mut frame = sample_v2();
+        frame["files"][1]["path"] = serde_json::json!("crops/frame.png");
+        parse(&frame).unwrap();
+    }
+
+    #[test]
+    fn v2_duplicate_key_inside_system_is_rejected() {
+        let text = serde_json::to_string(&sample_v2()).unwrap();
+        let text = text.replacen(
+            "\"cpu_threads\":16",
+            "\"cpu_threads\":16,\"cpu_threads\":8",
+            1,
+        );
+        let err = parse_bundle_manifest(text.as_bytes()).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]
