@@ -161,7 +161,15 @@ pub async fn create_stat_report(
             "Daily report limit reached",
         ));
     }
-    let accepted = accept_bundle(&body).map_err(map_bundle)?;
+    // Inflating and checking every PNG is CPU work, so keep it off the
+    // async workers.
+    let accepted = tokio::task::spawn_blocking(move || accept_bundle(&body))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "stat report bundle check failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+        })?
+        .map_err(map_bundle)?;
 
     ensure_reports_dir(&state.reports_dir)
         .await
