@@ -483,8 +483,9 @@ pub fn category_label(category: LogOnlyCategory) -> &'static str {
 fn category_hint(category: LogOnlyCategory) -> &'static str {
     match category {
         LogOnlyCategory::Crash => {
-            "The tracker stopped or closed by itself. The log covers the 30 minutes before \
-             it stopped and the last 30 minutes."
+            "The tracker stopped or closed by itself. The log covers the last 30 minutes. \
+             After a crash the app noticed, it also covers the 30 minutes before the stop and \
+             2 minutes after."
         }
         LogOnlyCategory::Performance => {
             "Low FPS, stutter, or the tracker using a lot of CPU. The log covers the last \

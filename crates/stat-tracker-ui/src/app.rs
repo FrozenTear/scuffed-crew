@@ -1835,6 +1835,21 @@ impl TrackerApp {
     }
 
     fn on_tick(&mut self) -> Task<Message> {
+        // Checked before the rest of the tick, whose tray and hotkey paths
+        // return early, so a typing pause always rebuilds on this tick.
+        let report = if self
+            .report_dialog_mut()
+            .and_then(|d| d.text_edited_at)
+            .is_some_and(|at| at.elapsed() >= crate::report::TEXT_REBUILD_DELAY)
+        {
+            self.rebuild_report()
+        } else {
+            Task::none()
+        };
+        Task::batch([report, self.tick_rest()])
+    }
+
+    fn tick_rest(&mut self) -> Task<Message> {
         self.expire_refused_toast();
         if self.fixture.is_none() {
             let mtime = snapshot::snapshot_mtime(&self.data_dir);
@@ -1873,13 +1888,6 @@ impl TrackerApp {
         }
 
         let mut tasks = Vec::new();
-        if self
-            .report_dialog_mut()
-            .and_then(|d| d.text_edited_at)
-            .is_some_and(|at| at.elapsed() >= crate::report::TEXT_REBUILD_DELAY)
-        {
-            tasks.push(self.rebuild_report());
-        }
         if let Some((url, code)) = self.setup.poll_request_if_due(std::time::Instant::now()) {
             tasks.push(Task::perform(
                 crate::setup_guide::poll_link(url, code),
