@@ -3132,6 +3132,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // The GUI's Stop button (and systemd) send SIGTERM — shut down as
     // gracefully as Ctrl+C, with a final sync.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // From here a SIGTERM is a clean shutdown (run.marker removed). Before
+    // this line the default action still applies. Tests wait for it.
+    tracing::info!("signal handlers ready");
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file

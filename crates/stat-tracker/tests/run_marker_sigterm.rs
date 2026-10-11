@@ -78,6 +78,24 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
         .collect();
     assert_eq!(warns.len(), 1, "one WARN line; output:\n{out}");
 
+    // run.marker is written early in startup, before run_loop installs the
+    // SIGTERM handler. A signal in that gap takes the default action (killed
+    // by signal 15), so wait until the daemon says the handlers are in place.
+    let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for("signal handlers ready", Duration::from_secs(60), || {
+            read(&log_path).contains("signal handlers ready")
+        });
+    }));
+    if ready.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "daemon never reached the run loop; output:
+{}",
+            read(&log_path)
+        );
+    }
+
     // SAFETY: plain kill(2) on the child we spawned.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
     let start = Instant::now();
