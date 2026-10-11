@@ -1,14 +1,14 @@
 # Tracker issue report bundles
 
-This document is the contract. The tracker app, the API, and the site all build against it. This change adds the document only. There is no app, API, or site behaviour in this change.
+This document is the contract. The tracker app, the API, and the site all build against it.
 
-Status: HOLD-MERGE. Do not merge until the spec is accepted.
+Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
 ## 1. Purpose
 
-A member sends a report so we can fix a tracker problem. The report contains a scrubbed log and debug crops from one game.
+A member sends a report so we can fix a tracker problem. A game report contains a scrubbed log and debug crops from one game. A crash or performance report contains a scrubbed log and the `system` object, and no crops (section 7).
 
 Consent is recorded in the manifest, in the `consent` object. Sending the report records consent to use it for the fix. Training is a separate flag in that same object. The training box is off by default, so `training` is false unless the member ticks it. A report recorded with `training` false is deleted after 30 days. A report recorded with `training` true may be kept for training until the member deletes it or withdraws that consent.
 
@@ -34,13 +34,13 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 
 ### Manifest fields
 
-`bundle_version` is the integer `1`. A reader rejects any other version.
+`bundle_version` is the integer `2`. A reader accepts `1` and `2` and rejects any other version. Version 1 is revision 1 of this document: it has no `system` object and no `crash` or `performance` category. A version 1 manifest that carries either is invalid. The app writes `2`.
 
 `app_version` is the tracker version string of the build that made the zip, from 1 to 32 characters.
 
 `recognizers` has two ids:
 
-- `matcher` is the `RECOGNIZER_ID` constant compiled into that build. On the revision this spec was written against, that constant is `cv-v3`. When the constant changes, the field reports the new id. It is not a second copy that someone updates by hand.
+- `matcher` is the `RECOGNIZER_ID` constant compiled into that build (`crates/stat-tracker/src/shadow/digits.rs`). On 2026-10-11 that constant is `cv-v5`. When the constant changes, the field reports the new id. It is not a second copy that someone updates by hand, and the server does not require a particular id.
 - `ocr` is the string `ocr-v1`. That is the Tesseract read the tracker already stores.
 
 `resolution` is the capture size in pixels, `width` and `height`, both positive integers. It is the full frame, not the 16:9 playfield inside it.
@@ -49,15 +49,16 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 
 `reason` is the member's category plus free text:
 
-- `category` is one of `wrong_stats`, `wrong_hero`, `wrong_map`, `wrong_mode`, `wrong_result`, `missed_game`, `other`.
+- `category` is one of `wrong_stats`, `wrong_hero`, `wrong_map`, `wrong_mode`, `wrong_result`, `missed_game`, `crash`, `performance`, `other`. `crash` and `performance` are not about one game. They need `bundle_version` 2.
 - `text` is a string of 0 to 500 characters. It may be empty. Before it is written into the manifest, it is scrubbed with the same rules as the log. The free-text box tells the member not to type other players' names (section 7).
 
-`session_id` is the local session id, 1 to 64 characters. If the game has none, the value is `none`.
+`session_id` is the local session id, 1 to 64 characters. If the game has none, the value is `none`. A `crash` or `performance` report uses `none`.
 
 `game` holds the match context:
 
 - `map`, `mode`, and `result` are strings or `null`.
-- `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped.
+- `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
+- In a `crash` or `performance` report, `game` is `null`, and so is every value in `reads` (the nine keys stay present).
 - `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. The log window in section 6 is measured from the session around this time.
 
 `reads` is one object per field. The keys come from the `suspect_fields` names map. The map is fixed:
@@ -87,6 +88,22 @@ For `e`, `a`, `d`, `dmg`, `h`, and `mit`, the primary read is the matcher (`RECO
 
 For `mode`, `result`, and `hero`, the matcher does not read the field. `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
 
+`system` is optional and only allowed in `bundle_version` 2. The app includes it on every report it writes. It describes the tracker setup, not the person. Every key is required when the object is present, and unknown keys are invalid:
+
+| Key | Type | Example |
+| --- | --- | --- |
+| `session_type` | `x11`, `wayland`, or `unknown` | `x11` |
+| `capture_backend` | `x11`, `wayshot`, `portal`, or `none` | `x11` |
+| `cpu_threads` | positive integer, the machine's available parallelism | `16` |
+| `ocr_threads` | positive integer, the OCR worker count in use | `4` |
+| `reader` | `ocr-v1` or `new` | `new` |
+| `shadow_recognizer` | boolean, the Extra number reader setting | `false` |
+| `update_channel` | `stable` or `prerelease` | `prerelease` |
+| `daemon_running` | boolean, whether the daemon answered when the report was built | `true` |
+| `last_exit` | `clean`, `crashed`, or `unknown` | `crashed` |
+
+`last_exit` comes from the crash marker in section 7. There is no hostname, user name, GPU serial, path, or display name in `system`, and the app does not add one.
+
 `corrections` is the member's edits, if any. Keys are a subset of the nine names above. Values are strings of 1 to 64 characters. An empty object means the member changed nothing. A correction does not replace the original read. The original stays in `reads`.
 
 `consent` has three booleans:
@@ -103,7 +120,7 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 - `role`: `log`, `crop`, `own_name`, or `glyph`.
 - `screen_class`: the screen class from section 4 for a `crop`, otherwise `null`.
 
-There is exactly one `log` entry, and its path is `log.txt`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters from the operating system's cryptographic random source, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
+There is exactly one `log` entry, and its path is `log.txt`. A `crash` or `performance` report has no `crop`, `own_name`, or `glyph` entry, and its consent `own_name_included` and `glyphs_included` are `false`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters from the operating system's cryptographic random source, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
 
 `debug/mapcrops/` is local only. Those files are never listed in `files`, and the zip does not contain them. If a manifest lists a path under `debug/mapcrops/`, the server responds 400 with `file missing` and stores nothing.
 
@@ -140,15 +157,26 @@ Hashes below are the right width and are not digests of a real file. `app_versio
 
 ```json
 {
-  "bundle_version": 1,
+  "bundle_version": 2,
   "app_version": "0.0.0",
   "recognizers": {
-    "matcher": "cv-v3",
+    "matcher": "cv-v5",
     "ocr": "ocr-v1"
   },
   "resolution": { "width": 2560, "height": 1440 },
   "ui_scale": null,
   "reason": { "category": "wrong_stats", "text": "elims looked high" },
+  "system": {
+    "session_type": "x11",
+    "capture_backend": "x11",
+    "cpu_threads": 16,
+    "ocr_threads": 4,
+    "reader": "new",
+    "shadow_recognizer": false,
+    "update_channel": "prerelease",
+    "daemon_running": true,
+    "last_exit": "clean"
+  },
   "session_id": "sess-example",
   "game": {
     "map": "Busan",
@@ -199,7 +227,7 @@ Every image in the zip is a lossless PNG at native resolution. Native means one 
 
 Colour type is 8-bit truecolour RGB, or 8-bit RGBA when a glyph crop needs a mask. Interlace is off. All metadata is stripped. The only chunks allowed are `IHDR`, `IDAT`, `IEND`, and `PLTE` when a palette image cannot be avoided. The app should write RGB or RGBA and not a palette. Text chunks, EXIF, time chunks, colour profiles, and physical-pixel chunks are removed. The PNG magic bytes are `89 50 4E 47 0D 0A 1A 0A`.
 
-The main scoreboard image is `crops/scoreboard.png`: the scoreboard rectangle cut from the blanked frame. The app may also include `crops/frame.png`, the full blanked frame, when the zip still fits the size cap in section 8. If the full frame would make the zip too big, the app leaves it out and says so in the preview. It does not shrink the frame to fit. On a scoreboard frame, `crops/frame.png` fills every pixel outside the scoreboard rectangle with the solid colour. That covers side panels and the part of the chat band (x 0 to 340, y 620 to 855 of the playfield) that falls outside the rectangle. Inside the rectangle, name cells are filled and hero portraits and digit columns stay as they are. Suspect digit cells may be included as further 1:1 crops taken from the blanked frame, and only from the digit columns, so they cannot contain a name.
+The main scoreboard image is `crops/scoreboard.png`: the scoreboard rectangle cut from the blanked frame. The app may also include `crops/frame.png`, the full blanked frame, when the zip still fits the size cap in section 8. If the full frame would make the zip too big, the app leaves it out and says so in the preview. It does not shrink the frame to fit. On a scoreboard frame, `crops/frame.png` fills every pixel outside the scoreboard rectangle with the solid colour. That covers side panels and the part of the chat band (x 0 to 340, y 620 to 855 of the playfield) that falls outside the rectangle. Inside the rectangle, name cells are filled and hero portraits and digit columns stay as they are. Revision 1 also allowed extra 1:1 crops of suspect digit cells. The validator only accepts `crops/scoreboard.png` and `crops/frame.png` for role `crop`, so those extra crops were a 400. Revision 2 drops them: a `crop` path is exactly one of those two. A later revision can add a cell-crop path with its own validator change.
 
 Blanking runs on the full frame first. Crops are cut from that blanked frame. The only images cut from the unblanked frame are the own-name crop and the glyph crops, and only when their boxes are ticked.
 
@@ -315,7 +343,7 @@ Both boxes can be off. That is the default. The zip then has blanked crops and t
 
 The log in the zip is `log.txt`. It is not the raw `daemon.log`. The app reads `{data_dir}/daemon.log` and `{data_dir}/daemon.log.1`, keeps the lines inside this game's time window, scrubs them, and writes those lines only.
 
-The window is the whole session: from 120 seconds before the first stored capture to 120 seconds after the last stored capture. A line with no timestamp is left out. A line outside the window is left out. Every name the reader produced inside the window is in scope, not only names from the single frame in the zip.
+The window is the whole session: from 120 seconds before the first stored capture to 120 seconds after the last stored capture. For a `crash` or `performance` report there is no session, so the window is the 30 minutes before the report is built. A `crash` report also keeps the 30 minutes before the crash marker's time, when the marker exists and those two windows differ. A line with no timestamp is left out. A line outside the window is left out. The `capture timing` lines the daemon writes once a minute are kept like any other line. They carry no names. Every name the reader produced inside the window is in scope, not only names from the single frame in the zip.
 
 The app drops name fields from the reader's log lines. A field that holds a player name is not copied into `log.txt`. It also scrubs name text, because a name can sit in the message rather than in a field. The scrub list is every name read in the window: other players, the configured player, misreads, and short names of one or two characters.
 
@@ -341,7 +369,14 @@ If the window has no lines, `log.txt` still exists and contains the single line 
 
 ## 7. Flow
 
-The GUI has a Send report action. It opens a preview built by reading the zip that would be saved.
+The GUI has two ways in:
+
+- **Report** on a game card (in the Games tab and the game detail view). It builds a game report for that session. The category list starts at `wrong_stats` and leaves out `crash` and `performance`.
+- **Report a problem** in the app menu and in Settings. It builds a `crash` or `performance` report (the member picks one), or `other`. It has no game and no crops.
+
+Crash marker: when the daemon starts, it writes `{data_dir}/run.marker` with its start time and pid. A clean shutdown (SIGTERM, a normal exit, or an update restart) removes it. When the daemon starts and finds an old marker whose pid is not running, or is running but is not a `scuffed-stat-tracker` process (pids are reused), the last run did not exit cleanly. It moves the marker to `{data_dir}/last_crash.marker` (one file, overwritten) and logs one WARN line. The next time the app opens, if `last_crash.marker` exists and is newer than the last report or dismissal, the app asks once: "The tracker stopped unexpectedly. Send a report?" Yes opens Report a problem with `crash` picked. No or Send removes the marker. The marker holds only a timestamp and a pid. It is never uploaded as a file. Its time only sets the log window.
+
+Both ways open a preview built by reading the zip that would be sent.
 
 The preview lists every file: path, size in bytes, and sha256. It shows every image in that zip, including an own-name crop or a glyph crop when those boxes are on. The preview states each image's true pixel size. The on-screen fit may scale the display. A 1:1 view is available so the member can see the pixels that will be sent. The preview does not show a frame that was dropped, and it does not show an unblanked copy.
 
@@ -355,11 +390,11 @@ The free-text box has a hint beside it: do not type other players' names. Scrubb
 
 Changing a box rebuilds the zip and reloads the preview from the new zip before the member can save. The member can read the scrubbed log text in the preview.
 
-Until the API endpoint exists, the preview does not upload. Save report writes that same zip to `XDG_DOWNLOAD_DIR`. The app reads that key from `$XDG_CONFIG_HOME/user-dirs.dirs`, or from `$HOME/.config/user-dirs.dirs` when `XDG_CONFIG_HOME` is unset. If the key is missing or the directory cannot be created, the app uses `$HOME/Downloads`. The file name is `scuffed-report-<UTC timestamp>.zip`, with the timestamp as `YYYYMMDDTHHMMSSZ`. If that name is already there, the app appends `-2`, `-3`, and so on. It does not overwrite an older report in silence. The home path is not stored inside the zip.
+The preview has **Send** and **Save report**. Send uploads that same zip (section 8). Save report writes that same zip to `XDG_DOWNLOAD_DIR`. The app reads that key from `$XDG_CONFIG_HOME/user-dirs.dirs`, or from `$HOME/.config/user-dirs.dirs` when `XDG_CONFIG_HOME` is unset. If the key is missing or the directory cannot be created, the app uses `$HOME/Downloads`. The file name is `scuffed-report-<UTC timestamp>.zip`, with the timestamp as `YYYYMMDDTHHMMSSZ`. If that name is already there, the app appends `-2`, `-3`, and so on. It does not overwrite an older report in silence. The home path is not stored inside the zip.
 
-A saved zip may be handed to an officer before upload exists. The file is the preview zip, already blanked and scrubbed. Before the save, the app says that this is a private report, that the member should give it only to an officer, and that they should not post it in a public channel. Once the file has left the PC, the app cannot delete the copy they gave away. The same warning says that.
+A saved zip may be handed to an officer, for example when Send fails or the tracker is not linked. The file is the preview zip, already blanked and scrubbed. Before the save, the app says that this is a private report, that the member should give it only to an officer, and that they should not post it in a public channel. Once the file has left the PC, the app cannot delete the copy they gave away. The same warning says that.
 
-When the endpoint exists, the same preview gains an upload action that POSTs that same zip. Save report can remain as a local copy. Upload does not ship until the site has a My reports page with a Delete button and a Withdraw button for the member's own reports (section 8). The app does not send the zip anywhere else in the meantime.
+Send POSTs the zip to the server the tracker is linked to, and nowhere else. On success the preview shows the report id, its expiry, and a link to the site's My reports page (`/reports`), where the member can delete it or withdraw training consent. The app keeps no copy after a successful send, unless the member also pressed Save report. If the tracker is not linked (no sync token), Send is disabled and the preview says to link the tracker in Settings or to use Save report. A 401 says the link is no longer valid and to link again. A 429 shows the daily cap message with the `Retry-After` wait when there is one. Any other failure keeps the preview open and says the report was not sent. The app does not retry on its own.
 
 If the server has reports switched off, upload gets 503 with `{"error":"reports_disabled"}` (section 8). The app shows "Reports are off right now". It keeps the saved bundle. It does not retry on its own. The member can try the upload again by hand later.
 
@@ -367,7 +402,12 @@ If the server has reports switched off, upload gets 503 with `{"error":"reports_
 
 This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. How the desktop app obtains a site session is still open.
 
-`POST` a zip with signed-in member auth. That is the site session for an org member (`OrgMember`), the same kind of session the site already uses. It is not the daemon sync token. The sync token stays out of the bundle. Until the app can hold that session, it only saves the zip locally, as in section 7.
+Create accepts either of two credentials. Every other report route accepts only the site session.
+
+- The site session for an org member (`OrgMember`), the same session the site already uses.
+- The tracker's sync token, sent as `Authorization: Bearer <token>` (the same header the tracker uses for stats sync). The server resolves it to the member that owns it and applies the same membership checks as the session: an inactive, suspended, or banned member gets 403. The sync token authorizes `POST /api/stat-reports` and nothing else on this API. List, download, the manifest read, delete, and withdraw answer 401 to a sync token. The token goes only in that header. It is never in the zip, the manifest, the free text, or a file name, and the log scrub (section 6) still replaces it.
+
+A report sent with the sync token is stored exactly like one sent with the session: the member id is the token's owner, and the daily cap counts both together. Officers see the member id, as for any report. Hiding it from officers is a later option, not part of this revision.
 
 Routes:
 
@@ -381,7 +421,7 @@ Routes:
 | Withdraw training | `POST /api/stat-reports/{id}/withdraw` | Owning member |
 | Withdraw training | `PATCH /api/stat-reports/{id}` | Owning member |
 
-`PATCH` does the same thing as `POST .../withdraw`. The My reports page is part of this contract. It has a Delete button and a Withdraw button for the member's own reports, wired to the delete route and to either withdraw route. Those buttons exist before the app's upload action ships. A member can still save a zip locally before the page exists.
+`PATCH` does the same thing as `POST .../withdraw`. The My reports page is part of this contract. It has a Delete button and a Withdraw button for the member's own reports, wired to the delete route and to either withdraw route. That page is on main (#192).
 
 Officer means `OfficerUser` (officer or admin). A member who is not an officer gets 403 on the zip bytes and on the manifest route. Ids are unguessable. A create response returns the id, the training flag, and `expires_at`. It does not echo the zip. The manifest route returns the stored manifest, after the hash recompute below.
 
@@ -389,9 +429,9 @@ Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncomp
 
 The server checks the zip again. It does not trust the client. It responds 400 for a bad manifest, a path that escapes the zip, a repeated JSON key, JPEG magic (`FF D8 FF`), a file named as JPEG, or a PNG that is not a real 8-bit image (bad magic, bad CRC, interlace, or a critical chunk other than `IHDR`, `IDAT`, `IEND`, or `PLTE`). On that failure it stores nothing. It does not keep the last value of a repeated key. If a manifest lists a path under `debug/mapcrops/`, the server responds 400 with `file missing` and stores nothing.
 
-Text, EXIF, time, colour profile, and physical-pixel chunks are stripped. The server rebuilds each PNG, rebuilds the zip, and recomputes each file `sha256`, the byte sizes, and the zip `sha256`. The stored manifest uses those recomputed hashes. A missing or bad session is 401. A signed-in user who is not a member is 403.
+Text, EXIF, time, colour profile, and physical-pixel chunks are stripped. The server rebuilds each PNG, rebuilds the zip, and recomputes each file `sha256`, the byte sizes, and the zip `sha256`. The stored manifest uses those recomputed hashes. A missing or bad credential is 401. A signed-in user who is not a member is 403.
 
-When reports are switched off, every report route returns 503. The body is exactly `{"error":"reports_disabled"}`. That covers create, list, download, the manifest read, delete, and both withdraw routes. The server stores nothing for that response. It does not answer 401, 404, or 200 instead.
+When reports are switched off, every report route returns 503 to an authenticated caller. The body is exactly `{"error":"reports_disabled"}`. That covers create, list, download, the manifest read, delete, and both withdraw routes. The server stores nothing for that response. It does not answer 404 or 200 instead. Authentication runs first, so a request with no valid credential is still 401 while reports are off. Revision 1 said reports-off never answers 401, which contradicted the 401 rule above.
 
 Storage is private. The zip bytes sit outside the database and outside the git repo. They are not placed in the public upload directory and they are not served as static files. The database may store metadata only: id, member id, received time, training flag, expiry, byte size, zip sha256, reason category, app version, and recognizer ids. Free text is stored with that metadata for officers, not in a public response. Image bytes and log bytes are not columns in the database.
 
@@ -439,18 +479,28 @@ Name rebuild fixture, required: seed at least three fake names. Each name is at 
 
 Repeat-report fixture: use the same session and the same seeded names, each with more than two wrong letters. Build two bundles with the glyph box on. Each name contributes the same two letters in both zips. The two zips together do not contain a third letter from that name. Ids and order may differ.
 
+Revision 2 fixtures, required:
+
+- Version: a `bundle_version` 1 manifest without `system` passes. A `bundle_version` 1 manifest with `system`, or with category `crash` or `performance`, is a 400. Version 3 is a 400.
+- `system`: every key present passes. A missing key, an unknown key, `cpu_threads` 0, or a `session_type` outside the list is a 400.
+- Log-only: a `crash` report with `game: null`, null reads, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
+- `team_size: null` passes on a game report.
+- A `crop` path other than `crops/scoreboard.png` or `crops/frame.png` is a 400.
+- Sync token: a create with a valid tracker sync token stores the report under the token's member and counts toward that member's daily cap together with session uploads. The same token on list, download, manifest, delete, and withdraw is 401. A token whose member is suspended or inactive is 403. An unknown token is 401, also while reports are off.
+- Crash marker: the daemon removes `run.marker` on SIGTERM. Starting with a stale `run.marker` (dead pid) produces `last_crash.marker` and one WARN line. A live pid in `run.marker` does not.
+
 Reports-off fixture, required: with reports switched off, each report route returns 503 and the body `{"error":"reports_disabled"}`. Nothing is stored. On that response the app shows "Reports are off right now", the saved zip is still on disk, and no automatic retry is queued. A later upload happens only when the member tries again by hand.
 
 ## 10. Out of scope and open questions
 
 Out of scope for this change, and out of scope for the first build unless a later spec says otherwise:
 
-- Implementing the button, the blanker, the endpoint, or the My reports page. This document is the contract they must follow. Upload still waits on that page (section 7).
+- Uploading anything the member did not see in the preview.
 - Training a model, building a dataset, or a labelling tool.
 - Blur, pixelation, JPEG, or downscaling as a substitute for the solid fill.
 - Sending a frame the classifier is not sure about.
 - Putting another player's whole name in the bundle.
-- Using the daemon sync token as report auth.
+- Using the sync token for any report route other than create.
 - Keeping reports on Contabo as a long-term archive.
 - Windows or macOS capture.
 - Committing real game captures as fixtures.
@@ -462,6 +512,6 @@ Open questions:
 - The 6v6 portrait width and digit start need the same synthetic check: the portrait rectangle must cover the portrait, and the digit rectangle must cover every digit, with the name fill in between and no shared pixel.
 - UI scale is not read from the game. Until it is, the field stays whatever the member types, or `null`.
 - The private directory path is chosen by the API. The routes, the 10 MB cap, 413, and 400 for a repeated JSON key are fixed in section 8.
-- The desktop app does not have a site login today. Report upload waits on that. Local Save report does not.
+- Hiding the member id from officers. USER chose to keep it for now (2026-10-11). It can become an option later.
 - A single glyph cut from a rare name can still be recognisable. The box stays off by default, and a report keeps at most 2 glyphs from any one name, shuffled, with random ids. Dropping glyphs entirely would not change the rest of this contract.
 - Training copies need a disk that has backups before anyone relies on them. Contabo is not that disk.
