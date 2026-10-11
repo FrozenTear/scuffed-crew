@@ -966,7 +966,7 @@ async fn daily_cap_is_five_successful_stores() {
 async fn rejects_bad_manifest_extra_file_traversal_and_non_png() {
     let h = harness().await;
 
-    let bad = bundle_with(false, tiny_png(), false, None, Some(2));
+    let bad = bundle_with(false, tiny_png(), false, None, Some(3));
     let (status, _) = send(
         &h.app,
         Method::POST,
@@ -1444,7 +1444,7 @@ async fn daily_cap_is_checked_before_the_zip_is_parsed() {
         .await;
         assert_eq!(status, StatusCode::CREATED);
     }
-    let bad = bundle_with(false, tiny_png(), false, None, Some(2)).bytes;
+    let bad = bundle_with(false, tiny_png(), false, None, Some(3)).bytes;
     let (status, _) = send(
         &h.app,
         Method::POST,
@@ -1918,4 +1918,389 @@ async fn reports_disable_when_the_directory_cannot_be_opened() {
     assert!(reports_dir_conflicts(&linked, &uploads));
     assert!(!reports_dir_conflicts(&reports, &uploads));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- Revision 2: tracker sync token on create, v2 manifests ----
+
+const MEMBER_SYNC: &str = "report-member-sync-token-0123456789";
+const OTHER_SYNC: &str = "report-other-sync-token-0123456789";
+const OFFICER_SYNC: &str = "report-officer-sync-token-0123456789";
+
+async fn seed_sync_token(h: &Harness, member_id: &str, raw: &str) {
+    h.state
+        .db
+        .create_daemon_token(member_id, raw, "tracker")
+        .await
+        .expect("seed sync token");
+}
+
+fn system_block() -> Value {
+    json!({
+        "session_type": "wayland",
+        "capture_backend": "portal",
+        "cpu_threads": 16,
+        "ocr_threads": 4,
+        "reader": "new",
+        "shadow_recognizer": false,
+        "update_channel": "prerelease",
+        "daemon_running": true,
+        "last_exit": "crashed"
+    })
+}
+
+/// Spec section 9 log-only fixture: `game: null`, nine empty suspect read
+/// objects, session `none`, only `log.txt`, both name consents false.
+fn log_only_manifest(category: &str, log: &[u8]) -> Value {
+    let empty = json!({ "value": null, "confidence": null, "suspect": true, "ocr_v1": null });
+    let reads: serde_json::Map<String, Value> =
+        ["mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit"]
+            .iter()
+            .map(|k| (k.to_string(), empty.clone()))
+            .collect();
+    json!({
+        "bundle_version": 2,
+        "app_version": "0.0.0",
+        "recognizers": { "matcher": "cv-v5", "ocr": "ocr-v1" },
+        "resolution": { "width": 1920, "height": 1080 },
+        "ui_scale": null,
+        "reason": { "category": category, "text": "it stopped" },
+        "system": system_block(),
+        "session_id": "none",
+        "game": null,
+        "reads": reads,
+        "corrections": {},
+        "consent": { "training": false, "own_name_included": false, "glyphs_included": false },
+        "files": [log_file_entry(log)]
+    })
+}
+
+fn crash_bundle() -> Built {
+    let log = b"[no log lines in window]\n".to_vec();
+    zip_manifest(log_only_manifest("crash", &log), vec![("log.txt", log)])
+}
+
+async fn post_report(h: &Harness, token: &str, body: Vec<u8>) -> (StatusCode, Value) {
+    send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn sync_token_create_stores_under_its_member_and_shares_the_daily_cap() {
+    let h = harness().await;
+    seed_sync_token(&h, "membermember", MEMBER_SYNC).await;
+
+    let (status, body) = post_report(&h, MEMBER_SYNC, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let row = h.state.db.get_stat_report(&id).await.unwrap().unwrap();
+    assert_eq!(row.member_id, "membermember");
+
+    // The member's own session list shows it, the other member's does not.
+    let (_, mine) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(mine["reports"].as_array().unwrap().len(), 1);
+    let (_, theirs) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OTHER_TOKEN),
+        None,
+    )
+    .await;
+    assert!(theirs["reports"].as_array().unwrap().is_empty());
+
+    // One cap per member: mix session and sync-token uploads up to five.
+    for n in 1..DAILY_REPORT_CAP {
+        let token = if n % 2 == 0 {
+            MEMBER_SYNC
+        } else {
+            MEMBER_TOKEN
+        };
+        let (status, body) = post_report(&h, token, valid_bundle(false).bytes).await;
+        assert_eq!(status, StatusCode::CREATED, "upload {n}: {body}");
+    }
+    for token in [MEMBER_SYNC, MEMBER_TOKEN] {
+        let (status, _) = post_report(&h, token, valid_bundle(false).bytes).await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "over the cap via {token}"
+        );
+    }
+    assert_eq!(zip_count(&h.reports_dir), DAILY_REPORT_CAP as usize);
+
+    // Another member's cap is untouched.
+    let (status, _) = post_report(&h, OTHER_TOKEN, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Accepted sync-token auth stamps last_used_at, same as stats upload.
+    let tokens = h.state.db.list_daemon_tokens("membermember").await.unwrap();
+    assert!(tokens.iter().all(|t| t.last_used_at.is_some()));
+}
+
+#[tokio::test]
+async fn sync_token_is_401_on_every_report_route_but_create() {
+    let h = harness().await;
+    seed_sync_token(&h, "membermember", MEMBER_SYNC).await;
+    seed_sync_token(&h, "officermember", OFFICER_SYNC).await;
+
+    let (status, body) = post_report(&h, MEMBER_TOKEN, valid_bundle(true).bytes).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let routes = [
+        (Method::GET, "/api/stat-reports".to_string()),
+        (Method::GET, format!("/api/stat-reports/{id}")),
+        (Method::GET, format!("/api/stat-reports/{id}/manifest")),
+        (Method::DELETE, format!("/api/stat-reports/{id}")),
+        (Method::POST, format!("/api/stat-reports/{id}/withdraw")),
+        (Method::PATCH, format!("/api/stat-reports/{id}")),
+    ];
+    // The owner's token and an officer's token: neither opens a read,
+    // delete, or withdraw.
+    for token in [MEMBER_SYNC, OFFICER_SYNC] {
+        for (method, path) in &routes {
+            let (status, _) = send(&h.app, method.clone(), path, Some(token), None).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} via {token}"
+            );
+        }
+    }
+
+    // Nothing changed: the row is still there with training on.
+    let row = h.state.db.get_stat_report(&id).await.unwrap().unwrap();
+    assert!(row.training_consent);
+    assert_eq!(zip_count(&h.reports_dir), 1);
+}
+
+#[tokio::test]
+async fn sync_token_of_a_suspended_banned_or_inactive_member_is_403() {
+    let h = harness().await;
+    seed_sync_token(&h, "othermember", OTHER_SYNC).await;
+    seed_sync_token(&h, "officermember", OFFICER_SYNC).await;
+    seed_sync_token(&h, "membermember", MEMBER_SYNC).await;
+
+    h.state
+        .db
+        .create_moderation_action(
+            "othermember",
+            scuffed_db::ModerationActionType::Suspension,
+            "test",
+            "officermember",
+            None,
+        )
+        .await
+        .unwrap();
+    let (status, _) = post_report(&h, OTHER_SYNC, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "suspended");
+
+    h.state
+        .db
+        .create_moderation_action(
+            "membermember",
+            scuffed_db::ModerationActionType::Ban,
+            "test",
+            "officermember",
+            None,
+        )
+        .await
+        .unwrap();
+    let (status, _) = post_report(&h, MEMBER_SYNC, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "banned");
+
+    h.state
+        .db
+        .client
+        .query("UPDATE member:officermember SET is_active = false")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (status, _) = post_report(&h, OFFICER_SYNC, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "inactive");
+
+    assert!(h.state.db.list_stat_reports().await.unwrap().is_empty());
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn unknown_sync_token_is_401_also_while_reports_are_off() {
+    let h = harness_enabled(false).await;
+    seed_sync_token(&h, "membermember", MEMBER_SYNC).await;
+
+    let (status, _) = post_report(&h, "not-a-real-sync-token", valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        None,
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A valid sync token is authenticated first, then gets the 503.
+    let (status, body) = post_report(&h, MEMBER_SYNC, crash_bundle().bytes).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, json!({"error": "reports_disabled"}));
+
+    // A sync token on a session-only route is still 401, not 503.
+    let (status, _) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_SYNC),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    assert!(h.state.db.list_stat_reports().await.unwrap().is_empty());
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn unknown_sync_token_is_401_while_reports_are_on() {
+    let h = harness().await;
+    let (status, _) = post_report(&h, "not-a-real-sync-token", valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn v2_crash_bundle_with_only_a_log_stores() {
+    let h = harness().await;
+    seed_sync_token(&h, "membermember", MEMBER_SYNC).await;
+
+    for token in [MEMBER_SYNC, MEMBER_TOKEN] {
+        let (status, body) = post_report(&h, token, crash_bundle().bytes).await;
+        assert_eq!(status, StatusCode::CREATED, "via {token}: {body}");
+    }
+    let (status, body) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["reports"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r["reason_category"] == "crash"));
+    assert!(rows.iter().all(|r| r["recognizer_matcher"] == "cv-v5"));
+
+    let id = rows[0]["id"].as_str().unwrap();
+    let (status, manifest) = send(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}/manifest"),
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(manifest["bundle_version"], 2);
+    assert_eq!(manifest["game"], Value::Null);
+    assert_eq!(manifest["system"]["last_exit"], "crashed");
+
+    // Performance stores too.
+    let log = b"capture timing line\n".to_vec();
+    let perf = zip_manifest(
+        log_only_manifest("performance", &log),
+        vec![("log.txt", log)],
+    );
+    let (status, body) = post_report(&h, MEMBER_TOKEN, perf.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn v2_log_only_bundle_with_a_crop_or_name_consent_is_400() {
+    let h = harness().await;
+    let log = b"synthetic log line\n".to_vec();
+    let png = tiny_png();
+
+    let mut with_crop = log_only_manifest("crash", &log);
+    with_crop["files"].as_array_mut().unwrap().push(json!({
+        "path": "crops/scoreboard.png",
+        "sha256": sha256_hex(&png),
+        "bytes": png.len(),
+        "role": "crop",
+        "screen_class": "scoreboard"
+    }));
+    let built = zip_manifest(
+        with_crop,
+        vec![("log.txt", log.clone()), ("crops/scoreboard.png", png)],
+    );
+    let (status, _) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut own = log_only_manifest("crash", &log);
+    own["consent"]["own_name_included"] = json!(true);
+    let built = zip_manifest(own, vec![("log.txt", log.clone())]);
+    let (status, _) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A read that is JSON null as a whole is a 400, even in a crash report.
+    let mut null_read = log_only_manifest("crash", &log);
+    null_read["reads"]["e"] = Value::Null;
+    let built = zip_manifest(null_read, vec![("log.txt", log.clone())]);
+    let (status, _) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Version 1 cannot carry the crash category or the system object.
+    let mut v1 = log_only_manifest("crash", &log);
+    v1["bundle_version"] = json!(1);
+    v1.as_object_mut().unwrap().remove("system");
+    let built = zip_manifest(v1, vec![("log.txt", log)]);
+    let (status, _) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn v1_manifest_and_v2_game_manifest_with_null_team_size_store() {
+    let h = harness().await;
+
+    let (status, body) = post_report(&h, MEMBER_TOKEN, valid_bundle(false).bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "v1: {body}");
+
+    let log = b"synthetic log line\n".to_vec();
+    let png = tiny_png();
+    let mut v2 = manifest_shell(
+        false,
+        false,
+        vec![
+            log_file_entry(&log),
+            json!({
+                "path": "crops/frame.png",
+                "sha256": sha256_hex(&png),
+                "bytes": png.len(),
+                "role": "crop",
+                "screen_class": "scoreboard"
+            }),
+        ],
+    );
+    v2["bundle_version"] = json!(2);
+    v2["system"] = system_block();
+    v2["game"]["team_size"] = Value::Null;
+    let built = zip_manifest(v2, vec![("log.txt", log), ("crops/frame.png", png)]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "v2: {body}");
 }

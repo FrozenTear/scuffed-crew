@@ -824,7 +824,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE member_id ON stat_report TYPE string;
         DEFINE FIELD OVERWRITE created_at ON stat_report TYPE datetime;
         DEFINE FIELD OVERWRITE reason_category ON stat_report TYPE string
-            ASSERT $value IN ['wrong_stats', 'wrong_hero', 'wrong_map', 'wrong_mode', 'wrong_result', 'missed_game', 'other'];
+            ASSERT $value IN ['wrong_stats', 'wrong_hero', 'wrong_map', 'wrong_mode', 'wrong_result', 'missed_game', 'crash', 'performance', 'other'];
         DEFINE FIELD OVERWRITE reason_text ON stat_report TYPE string;
         DEFINE FIELD OVERWRITE app_version ON stat_report TYPE string;
         DEFINE FIELD OVERWRITE recognizer_matcher ON stat_report TYPE string;
