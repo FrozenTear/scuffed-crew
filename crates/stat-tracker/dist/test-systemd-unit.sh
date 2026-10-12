@@ -188,10 +188,14 @@ grep -qx 'WAYLAND_DISPLAY=wayland-1' "$ENV_FILE" \
     || fail "session.env missing after systemctl failure"
 pass "systemctl failure still writes session.env"
 
-# Restore a recording systemctl for the installer tests.
+# Restore a recording systemctl for the installer tests. The daemon unit
+# reads as running only when FAKE_ACTIVE=1.
 cat > "$FAKE_CTL" << EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
+case "\$*" in
+    *is-active*) [ "\${FAKE_ACTIVE-}" = 1 ] || exit 3 ;;
+esac
 printf 'ENV WAYLAND_DISPLAY=%s\n' "\${WAYLAND_DISPLAY-}" >> "$LOG"
 printf 'ENV DISPLAY=%s\n' "\${DISPLAY-}" >> "$LOG"
 printf 'ENV XDG_CURRENT_DESKTOP=%s\n' "\${XDG_CURRENT_DESKTOP-}" >> "$LOG"
@@ -283,6 +287,19 @@ fi
 [[ ! -e "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
     || fail "install with no config.toml wrote a data_dir drop-in"
 pass "custom PREFIX ExecStart=$DAEMON_BIN"
+
+# An upgrade over a running daemon restarts it (systemd otherwise keeps the
+# old, deleted binary running), after the reload and the session import.
+grep -q 'try-restart' "$LOG" && fail "stopped daemon was restarted: $(cat "$LOG")"
+FAKE_ACTIVE=1 run_install "$HOME_DIR" "$PREFIX"
+grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \
+    || fail "running daemon was not restarted: $(cat "$LOG")"
+reload_at="$(grep -n -- '--user daemon-reload' "$LOG" | head -1 | cut -d: -f1)"
+import_at="$(grep -n -- 'import-environment' "$LOG" | head -1 | cut -d: -f1)"
+restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
+[[ -n "$reload_at" && -n "$import_at" && "$reload_at" -lt "$restart_at" && "$import_at" -lt "$restart_at" ]] \
+    || fail "restart ran before the reload or the session import: $(cat "$LOG")"
+pass "upgrade restarts a running daemon, and only a running one"
 
 # Spaced PREFIX is quoted in the unit.
 PREFIX_SPACE="$TMP/my prefix"
