@@ -71,7 +71,7 @@ pub const NOTICE_BAND: (u32, u32) = (740, 900);
 /// Bumped whenever a table in this module changes. Kits store it, and a kit
 /// written under another table is never reported (it is blanked again or
 /// refused).
-pub const BLANK_TABLE_VERSION: u32 = 4;
+pub const BLANK_TABLE_VERSION: u32 = 5;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -454,15 +454,40 @@ pub fn blanked_scoreboard(frame: &DynamicImage, layout: TeamLayout) -> RgbImage 
 pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout) -> RgbImage {
     let (w, h) = src.dimensions();
     let mut out = RgbImage::from_pixel(w, h, FILL);
+    // Portrait cells are opaque art and are copied as they are. The table
+    // rows behind the digits are translucent, so the game world shows
+    // through them, in-world nameplates included (QC1-7). In a digit cell only
+    // the digit glyphs are kept: they are drawn near-white on top of the row,
+    // while anything behind the row is tinted by its purple or yellow colour.
+    let digits_from = frac(w, NAME_COLUMNS_6V6.digits_start);
     for r in kept_rects(w, h, layout) {
         let r = r.clipped(w, h);
+        let digit_cell = r.x >= digits_from;
         for py in r.y..r.y + r.h {
             for px in r.x..r.x + r.w {
-                out.put_pixel(px, py, *src.get_pixel(px, py));
+                let p = *src.get_pixel(px, py);
+                if !digit_cell || is_glyph(p) {
+                    out.put_pixel(px, py, p);
+                }
             }
         }
     }
     out
+}
+
+/// Darkest channel a kept digit-cell pixel may have. White digits and the
+/// dim grey zeros (about 172,170,172 on the member's boards) are above it.
+pub const GLYPH_MIN: u8 = 120;
+
+/// Widest channel spread a kept digit-cell pixel may have. Glyphs are drawn
+/// neutral on top of the row; anything behind the translucent row takes its
+/// purple or yellow tint and is far less neutral (QC1-7).
+pub const GLYPH_MAX_SPREAD: u8 = 28;
+
+/// A digit glyph pixel: bright and neutral.
+pub fn is_glyph(p: Rgb<u8>) -> bool {
+    let (lo, hi) = (*p.0.iter().min().unwrap(), *p.0.iter().max().unwrap());
+    lo >= GLYPH_MIN && hi - lo <= GLYPH_MAX_SPREAD
 }
 
 /// Blank a rank screen frame for the `outcome` class ([`outcome_regions`]).
@@ -589,14 +614,17 @@ mod tests {
                     }
                 }
                 let kept = kept_rects(orig_sb.2, orig_sb.3, layout);
+                let digits_from = frac(orig_sb.2, NAME_COLUMNS_6V6.digits_start);
                 for p in &kept {
                     for y in p.y..p.y + p.h {
                         for x in p.x..p.x + p.w {
-                            assert_eq!(
-                                out.get_pixel(x, y),
-                                orig.get_pixel(orig_sb.0 + x, orig_sb.1 + y),
-                                "{w}x{h} {ts} kept px {x},{y}"
-                            );
+                            let src = *orig.get_pixel(orig_sb.0 + x, orig_sb.1 + y);
+                            let got = *out.get_pixel(x, y);
+                            if p.x < digits_from || is_glyph(src) {
+                                assert_eq!(got, src, "{w}x{h} {ts} kept px {x},{y}");
+                            } else {
+                                assert_eq!(got, FILL, "{w}x{h} {ts} non-glyph px {x},{y}");
+                            }
                         }
                     }
                 }
@@ -673,6 +701,72 @@ mod tests {
         for r in kept_rects(cw, ch, TeamLayout::Six) {
             assert!(r.x >= frac(cw, PORTRAIT_START), "{r:?}");
             assert!(!r.intersects(&band), "{r:?}");
+        }
+    }
+
+    /// Alpha-blend `top` over `under` with `alpha` in 0..=255.
+    fn blend(under: Rgb<u8>, top: Rgb<u8>, alpha: u16) -> Rgb<u8> {
+        let mix =
+            |u: u8, t: u8| ((u16::from(t) * alpha + u16::from(u) * (255 - alpha)) / 255) as u8;
+        Rgb([
+            mix(under.0[0], top.0[0]),
+            mix(under.0[1], top.0[1]),
+            mix(under.0[2], top.0[2]),
+        ])
+    }
+
+    #[test]
+    fn world_text_behind_a_translucent_row_is_flattened_and_digits_stay() {
+        // QC1-7: a nameplate (red, white) and a white world label behind the
+        // purple team-1 and yellow team-2 rows, plus a white digit drawn on top.
+        let (cw, ch) = (1664, 1007);
+        let purple = Rgb([110, 20, 120]);
+        let yellow = Rgb([200, 160, 20]);
+        let mut src = RgbImage::from_pixel(cw, ch, Rgb([40, 40, 40]));
+        let kept = kept_rects(cw, ch, TeamLayout::Six);
+        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
+        let cells: Vec<_> = kept.iter().filter(|r| r.x >= digits_from).collect();
+        let team1 = cells.first().unwrap();
+        let team2 = cells.last().unwrap();
+        let world = [
+            Rgb([255, 255, 255]),
+            Rgb([255, 60, 60]),
+            Rgb([250, 250, 250]),
+        ];
+        for (cell, tint) in [(team1, purple), (team2, yellow)] {
+            for y in cell.y..cell.y + cell.h {
+                for x in cell.x..cell.x + cell.w {
+                    // World text behind the row on the left half, the row
+                    // tint at about 70 % opacity over it.
+                    let behind = if x < cell.x + cell.w / 2 {
+                        world[(x as usize) % 3]
+                    } else {
+                        Rgb([40, 40, 40])
+                    };
+                    src.put_pixel(x, y, blend(behind, tint, 180));
+                }
+            }
+            // A white digit and a dim grey zero drawn on top of the row.
+            for y in cell.y + 5..cell.y + 15 {
+                for x in cell.x + cell.w - 20..cell.x + cell.w - 10 {
+                    src.put_pixel(x, y, Rgb([255, 255, 255]));
+                }
+                for x in cell.x + cell.w - 40..cell.x + cell.w - 30 {
+                    src.put_pixel(x, y, Rgb([172, 170, 172]));
+                }
+            }
+        }
+        let out = allowlist_crop(&src, TeamLayout::Six);
+        for cell in [team1, team2] {
+            for y in cell.y..cell.y + cell.h {
+                for x in cell.x..cell.x + cell.w / 2 {
+                    assert_eq!(*out.get_pixel(x, y), FILL, "world text kept at {x},{y}");
+                }
+            }
+            assert_eq!(
+                *out.get_pixel(cell.x + cell.w - 15, cell.y + 10),
+                Rgb([255, 255, 255])
+            );
         }
     }
 
