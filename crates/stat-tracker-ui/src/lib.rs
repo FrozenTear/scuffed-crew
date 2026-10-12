@@ -23,6 +23,7 @@ pub mod fixtures;
 pub mod games;
 pub mod heroes;
 pub mod hotkey;
+pub mod instance;
 pub mod layout;
 pub mod maps;
 pub mod model;

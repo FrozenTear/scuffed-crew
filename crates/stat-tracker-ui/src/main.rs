@@ -1,6 +1,7 @@
 use iced::Font;
 use stat_tracker_ui::app::TrackerApp;
 use stat_tracker_ui::cli::Cli;
+use stat_tracker_ui::instance;
 use stat_tracker_ui::theme;
 
 fn main() -> anyhow::Result<()> {
@@ -20,6 +21,30 @@ fn main() -> anyhow::Result<()> {
         print!("{}", Cli::help_text());
         return Ok(());
     }
+
+    // One GUI per session (#234). The companion overlay is a child process
+    // of the GUI, and fixture runs are dev screenshots next to the real GUI,
+    // so neither takes the lock. Keep the lock file open until exit.
+    let _instance_lock = if cli.companion || cli.fixture.is_some() {
+        None
+    } else {
+        let lock = instance::lock_path(std::env::var_os("XDG_RUNTIME_DIR"), &cli.data_dir);
+        match instance::claim(&lock) {
+            Ok(instance::Claim::Primary(file)) => Some(file),
+            Ok(instance::Claim::Secondary) => {
+                tracing::info!(lock = %lock.display(), "tracker GUI already running; asking it to show");
+                if let Err(e) = instance::request_show(&cli.data_dir) {
+                    tracing::warn!(error = %e, "could not ask the running GUI to show");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                // Never block a launch on the lock itself.
+                tracing::warn!(error = %e, lock = %lock.display(), "single-instance lock unavailable; starting anyway");
+                None
+            }
+        }
+    };
 
     // tray-icon on Linux needs GTK before the menu is built. Failure is fine
     // — the Iced window still runs. AppIndicator is probed in `tray::try_create`;

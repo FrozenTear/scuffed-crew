@@ -1198,6 +1198,32 @@ mod tests {
     }
 
     #[test]
+    fn four_part_prerelease_orders_between_alphas() {
+        let a5 = parse_semver("0.5.0-alpha.5").unwrap();
+        let a51 = parse_semver("0.5.0-alpha.5.1").unwrap();
+        let a6 = parse_semver("0.5.0-alpha.6").unwrap();
+        assert!(a5 < a51, "alpha.5 < alpha.5.1");
+        assert!(a51 < a6, "alpha.5.1 < alpha.6");
+        assert!(a51 < parse_semver("0.5.0").unwrap());
+        assert!(is_newer("0.5.0-alpha.5.1", "0.5.0-alpha.5"));
+        assert!(!is_newer("0.5.0-alpha.5", "0.5.0-alpha.5.1"));
+
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-alpha.5.1", true, "point fix"),
+            gh_release("stat-tracker-v0.5.0-alpha.5", true, "alpha.5"),
+        ];
+        let offered =
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-alpha.5", &releases)
+                .expect("alpha.5 sees alpha.5.1 on the prerelease channel");
+        assert_eq!(offered.latest, "0.5.0-alpha.5.1");
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-alpha.5.1", &releases)
+                .is_none()
+        );
+        assert!(select_newer_release("0.5.0-alpha.5", &releases).is_none());
+    }
+
+    #[test]
     fn resolve_prefers_env_then_compile_then_daemon() {
         assert_eq!(
             resolve_current_version(Some("0.3.3"), Some("0.2.0"), Some("0.1.9")).as_deref(),

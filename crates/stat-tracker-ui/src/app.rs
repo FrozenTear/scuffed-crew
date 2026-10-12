@@ -2061,6 +2061,10 @@ impl TrackerApp {
             return self.apply_tray(action);
         }
 
+        if crate::instance::consume_show(&self.data_dir) {
+            return self.show_window();
+        }
+
         if hotkey::consume_toggle(&self.data_dir, &mut self.companion_toggle_mtime) {
             return self.toggle_overlay();
         }
