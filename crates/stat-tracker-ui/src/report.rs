@@ -1455,6 +1455,7 @@ mod tests {
             manifest_json: "{}".into(),
             files: Vec::new(),
             log_text: String::new(),
+            images: Vec::new(),
         })));
         assert!(d.can_send());
         d.game_category = Some(GameCategory::WrongStats);
