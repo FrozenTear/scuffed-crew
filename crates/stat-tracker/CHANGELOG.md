@@ -15,6 +15,29 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.5
+
+This alpha adds a Report a problem button that sends the tracker log to the site, and keeps your scoreboard row when the hero portrait cannot be matched.
+
+### Highlights
+
+- **Report a problem** is in the sidebar and in Settings. Pick Crash, Performance, or Other and add a note. Before anything leaves your computer, you see the exact log and files that would be sent. Send uses the tracker's existing site link. You can also save the zip to your Downloads folder instead.
+- If the tracker stopped by itself, the app asks on the next start whether you want to report it.
+- Your own row on the scoreboard is found again when the hero portrait does not match, for example while the ult ring covers it. Before, every later Tab read failed with "player row not found" and the game kept its early stats.
+- Settings has a **Get alpha updates** toggle, so you no longer need to edit config.toml to get alphas.
+
+The report log covers the last 30 minutes. After a crash the app noticed, it also covers the 30 minutes before the stop and 2 minutes after. Your sync token, player name, account name, computer name, home folder path, and OCR text are taken out of the log before it is shown. Officers see who sent a report. A site allows 5 reports per member per day. Nothing is retried on its own (#230, #232).
+
+Stable installs are not offered this alpha. The desktop app skips it until Settings → Get alpha updates is on (or config.toml has `update_channel = "prerelease"`). bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.5/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.5 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.4
 
 This alpha adds a timing line to the tracker log, so a frame-rate drop while the tracker runs can be traced to the screen grab or to the reading.
