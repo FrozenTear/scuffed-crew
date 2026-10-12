@@ -188,10 +188,14 @@ grep -qx 'WAYLAND_DISPLAY=wayland-1' "$ENV_FILE" \
     || fail "session.env missing after systemctl failure"
 pass "systemctl failure still writes session.env"
 
-# Restore a recording systemctl for the installer tests.
+# Restore a recording systemctl for the installer tests. The daemon unit
+# reads as running only when FAKE_ACTIVE=1.
 cat > "$FAKE_CTL" << EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
+case "\$*" in
+    *is-active*) [ "\${FAKE_ACTIVE-}" = 1 ] || exit 3 ;;
+esac
 printf 'ENV WAYLAND_DISPLAY=%s\n' "\${WAYLAND_DISPLAY-}" >> "$LOG"
 printf 'ENV DISPLAY=%s\n' "\${DISPLAY-}" >> "$LOG"
 printf 'ENV XDG_CURRENT_DESKTOP=%s\n' "\${XDG_CURRENT_DESKTOP-}" >> "$LOG"
@@ -283,6 +287,60 @@ fi
 [[ ! -e "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
     || fail "install with no config.toml wrote a data_dir drop-in"
 pass "custom PREFIX ExecStart=$DAEMON_BIN"
+
+# An upgrade over a running daemon restarts it (systemd otherwise keeps the
+# old, deleted binary running), after the reload and the session import.
+grep -q 'try-restart' "$LOG" && fail "stopped daemon was restarted: $(cat "$LOG")"
+FAKE_ACTIVE=1 run_install "$HOME_DIR" "$PREFIX"
+grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \
+    || fail "running daemon was not restarted: $(cat "$LOG")"
+reload_at="$(grep -n -- '--user daemon-reload' "$LOG" | head -1 | cut -d: -f1)"
+import_at="$(grep -n -- 'import-environment' "$LOG" | head -1 | cut -d: -f1)"
+restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
+[[ -n "$reload_at" && -n "$import_at" && "$reload_at" -lt "$restart_at" && "$import_at" -lt "$restart_at" ]] \
+    || fail "restart ran before the reload or the session import: $(cat "$LOG")"
+pass "upgrade restarts a running daemon, and only a running one"
+
+# The source-build installer (crates/stat-tracker/install.sh) has the same
+# restart call. Stage it in a fake repo whose `cargo` writes stub binaries.
+SRC_REPO="$TMP/src-repo"
+mkdir -p "$SRC_REPO/crates/stat-tracker" "$TMP/fake-bin"
+cp "$ROOT/install.sh" "$SRC_REPO/crates/stat-tracker/install.sh"
+cp -r "$ROOT/dist" "$ROOT/assets" "$SRC_REPO/crates/stat-tracker/"
+cat > "$TMP/fake-bin/cargo" << FAKECARGO
+#!/bin/sh
+mkdir -p "$SRC_REPO/target/release"
+for b in scuffed-stat-tracker stat-tracker-gui; do
+    printf '%s\n' '#!/bin/sh' "echo \$b 0.0.0" > "$SRC_REPO/target/release/\$b"
+    chmod +x "$SRC_REPO/target/release/\$b"
+done
+FAKECARGO
+chmod +x "$TMP/fake-bin/cargo"
+run_source_install() {
+    rm -f "$LOG"
+    env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+        -u XDG_RUNTIME_DIR \
+        PATH="$TMP/fake-bin:$PATH" \
+        HOME="$1" \
+        PREFIX="$2" \
+        SCUFFED_PROC_ROOT="$PROC" \
+        SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+        bash "$SRC_REPO/crates/stat-tracker/install.sh" > /dev/null 2>&1 \
+        || fail "source install failed"
+}
+SRC_HOME="$TMP/home-src"
+mkdir -p "$SRC_HOME"
+run_source_install "$SRC_HOME" "$TMP/opt/src"
+grep -q 'try-restart' "$LOG" && fail "source install restarted a stopped daemon: $(cat "$LOG")"
+FAKE_ACTIVE=1 run_source_install "$SRC_HOME" "$TMP/opt/src"
+grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \
+    || fail "source install did not restart a running daemon: $(cat "$LOG")"
+reload_at="$(grep -n -- '--user daemon-reload' "$LOG" | head -1 | cut -d: -f1)"
+import_at="$(grep -n -- 'import-environment' "$LOG" | head -1 | cut -d: -f1)"
+restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
+[[ -n "$reload_at" && -n "$import_at" && "$reload_at" -lt "$restart_at" && "$import_at" -lt "$restart_at" ]] \
+    || fail "source install restarted before the reload or the session import: $(cat "$LOG")"
+pass "source-build install restarts a running daemon, and only a running one"
 
 # Spaced PREFIX is quoted in the unit.
 PREFIX_SPACE="$TMP/my prefix"

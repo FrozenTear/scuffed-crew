@@ -398,6 +398,25 @@ mod tests {
             .expect("sleep binary")
     }
 
+    /// Spawn a just-copied binary. Another test thread's fork can still hold
+    /// the copy's write fd until its own exec, which fails this exec with
+    /// ETXTBSY ("Text file busy"); retry until that fd is gone.
+    fn spawn_retrying_busy(bin: &Path) -> std::process::Child {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(bin).arg("30").spawn() {
+                Ok(child) => return child,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("spawn {}: {e}", bin.display()),
+            }
+        }
+    }
+
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -554,9 +573,17 @@ mod tests {
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join(crate::proc_id::DAEMON_BIN);
         std::fs::copy(sleep_bin(), &fake).unwrap();
-        let child = Child(std::process::Command::new(&fake).arg("30").spawn().unwrap());
+        let child = Child(spawn_retrying_busy(&fake));
         let pid = child.0.id();
-        assert!(crate::proc_id::pid_is_live_tracker(pid));
+        // The child can still show the test binary in /proc for a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::proc_id::pid_is_live_tracker(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake tracker never showed as live"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let text = marker(pid).format();
         std::fs::write(run_marker_path(dir.path()), &text).unwrap();
         let (out, log) = with_log(|| {

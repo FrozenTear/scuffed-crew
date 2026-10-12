@@ -231,7 +231,11 @@ else
     if ! "$HELPER_DEST"; then
         warn "session environment was not imported; the oneshot retries when the daemon starts"
     fi
-    info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
+    # After the session import, so a restarted daemon starts with it.
+    if [[ "$(restart_running_daemon "$SYSTEMCTL_BIN")" == restarted ]]; then
+        info "Restarted the running tracker service on the new version (a game in progress is not kept)"
+    fi
+    info "Installed systemd service → $SYSTEMD_DIR (this installer does not enable or disable it)"
     info "ExecStart=$DAEMON_EXEC"
     INSTALLED_UNITS=1
 fi
