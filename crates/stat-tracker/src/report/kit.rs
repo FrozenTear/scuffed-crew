@@ -11,7 +11,9 @@
 //! - `reads.json`: the reads of the capture `scoreboard.png` came from.
 //!
 //! The newest [`KEEP`] sessions are kept. The directory is private (0700,
-//! files 0600) and every file is replaced atomically.
+//! files 0600) and every file is replaced atomically. `reads.json` carries
+//! the hash of the `scoreboard.png` it was written with, and [`load`] only
+//! returns a matching pair: the app reads a kit while the daemon replaces it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -60,6 +62,12 @@ pub struct KitReads {
     /// from another table is not reported ([`load`] drops its scoreboard).
     #[serde(default)]
     pub blank_table: u32,
+    /// SHA-256 (hex) of the `scoreboard.png` written together with these
+    /// reads. The daemon replaces the two files one after the other, so a
+    /// reader in another process can land between the two renames; [`load`]
+    /// only returns a pair whose hash matches.
+    #[serde(default)]
+    pub scoreboard_sha256: String,
     /// Keyed by the manifest read keys (`mode`, `result`, `hero`, `e`, `a`,
     /// `d`, `dmg`, `h`, `mit`).
     pub reads: BTreeMap<String, KitRead>,
@@ -115,6 +123,7 @@ impl KitReads {
             mode: text(&after.game_mode),
             result: text(&after.outcome),
             blank_table: blank::BLANK_TABLE_VERSION,
+            scoreboard_sha256: String::new(),
             recognizer: if after.recognizer.is_empty() {
                 "ocr-v1".to_string()
             } else {
@@ -150,6 +159,20 @@ pub fn kit_root(data_dir: &Path) -> PathBuf {
 
 pub fn session_dir(data_dir: &Path, session_id: &str) -> Option<PathBuf> {
     safe_session(session_id).map(|s| kit_root(data_dir).join(s))
+}
+
+/// Serialises kit writes in this process: accepted captures hand their kit
+/// to blocking tasks, and those can finish out of order.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read_reads(dir: &Path) -> Option<KitReads> {
+    fs::read(dir.join(READS_JSON))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 fn private_dir(dir: &Path) -> io::Result<()> {
@@ -211,14 +234,21 @@ pub fn record_scoreboard(
     };
     let board = blank::blanked_scoreboard(frame, layout, own_row);
     let png = encode_png(&board)?;
-    let json = serde_json::to_vec_pretty(reads).map_err(io::Error::other)?;
+    let mut reads = reads.clone();
+    reads.scoreboard_sha256 = super::bundle::sha256_hex(&png);
+    let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
+    let _guard = write_lock();
+    // An older capture that finishes late never replaces a newer one.
+    if read_reads(&dir).is_some_and(|cur| cur.captured_at > reads.captured_at) {
+        return Ok(());
+    }
     let new_session = !dir.exists();
     private_dir(&kit_root(data_dir))?;
     private_dir(&dir)?;
     write_private(&dir, SCOREBOARD_PNG, &png)?;
     write_private(&dir, READS_JSON, &json)?;
     if new_session {
-        prune(data_dir, KEEP);
+        prune_locked(data_dir, KEEP);
     }
     Ok(())
 }
@@ -262,6 +292,7 @@ pub fn record_outcome_png(data_dir: &Path, session_id: &str, png: &[u8]) -> io::
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
+    let _guard = write_lock();
     private_dir(&kit_root(data_dir))?;
     private_dir(&dir)?;
     write_private(&dir, OUTCOME_PNG, png)
@@ -302,33 +333,48 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Kit::default();
     };
-    let reads: Option<KitReads> = fs::read(dir.join(READS_JSON))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
-    // A scoreboard blanked under an older table (or with no stamp) is never
-    // reported: the table may have missed names (spec section 4, rev 3).
-    let current = reads
-        .as_ref()
-        .is_some_and(|r| r.blank_table == blank::BLANK_TABLE_VERSION);
-    if !current {
-        return Kit::default();
+    // The daemon may be between the two renames of a pair: read again.
+    for _ in 0..3 {
+        let Some(reads) = read_reads(&dir) else {
+            return Kit::default();
+        };
+        // A scoreboard blanked under an older table (or with no stamp) is
+        // never reported: the table may have missed names (section 4).
+        if reads.blank_table != blank::BLANK_TABLE_VERSION {
+            return Kit::default();
+        }
+        let Ok(png) = fs::read(dir.join(SCOREBOARD_PNG)) else {
+            return Kit::default();
+        };
+        if reads.scoreboard_sha256.is_empty()
+            || super::bundle::sha256_hex(&png) != reads.scoreboard_sha256
+        {
+            continue;
+        }
+        return Kit {
+            scoreboard_png: Some(png),
+            outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
+            reads: Some(reads),
+        };
     }
-    Kit {
-        scoreboard_png: fs::read(dir.join(SCOREBOARD_PNG)).ok(),
-        outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
-        reads,
-    }
+    Kit::default()
 }
 
 /// Delete a session's kit (the member deleted the game).
 pub fn remove(data_dir: &Path, session_id: &str) {
     if let Some(dir) = session_dir(data_dir, session_id) {
+        let _guard = write_lock();
         let _ = fs::remove_dir_all(dir);
     }
 }
 
 /// Keep the newest `keep` session kits and delete the rest.
 pub fn prune(data_dir: &Path, keep: usize) {
+    let _guard = write_lock();
+    prune_locked(data_dir, keep);
+}
+
+fn prune_locked(data_dir: &Path, keep: usize) {
     let root = kit_root(data_dir);
     let Ok(rd) = fs::read_dir(&root) else {
         return;
@@ -370,6 +416,7 @@ mod tests {
             result: None,
             recognizer: "cv-v5".into(),
             blank_table: crate::report::blank::BLANK_TABLE_VERSION,
+            scoreboard_sha256: String::new(),
             reads: r,
         }
     }
@@ -404,7 +451,9 @@ mod tests {
         for n in blank::name_rects(cw, ch, TeamLayout::Five) {
             assert_eq!(*img.get_pixel(n.x + n.w / 2, n.y + n.h / 2), blank::FILL);
         }
-        assert_eq!(kit.reads, Some(reads()));
+        let mut want = reads();
+        want.scoreboard_sha256 = crate::report::bundle::sha256_hex(&png);
+        assert_eq!(kit.reads, Some(want));
         assert!(has_kit(tmp.path(), "s-1"));
         assert_eq!(sessions(tmp.path()), vec!["s-1".to_string()]);
         #[cfg(unix)]
@@ -468,6 +517,115 @@ mod tests {
         remove(tmp.path(), "../keep");
         assert!(!session_dir(tmp.path(), "gone").unwrap().exists());
         assert_eq!(sessions(tmp.path()), vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn a_mismatched_pair_is_not_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_scoreboard(
+            tmp.path(),
+            "s-1",
+            &frame(),
+            TeamLayout::Five,
+            Some(0),
+            &reads(),
+        )
+        .unwrap();
+        assert!(has_kit(tmp.path(), "s-1"));
+        // The daemon is between the two renames: a new board, the old reads.
+        let dir = session_dir(tmp.path(), "s-1").unwrap();
+        let other = encode_png(&RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]))).unwrap();
+        fs::write(dir.join(SCOREBOARD_PNG), other).unwrap();
+        assert!(!has_kit(tmp.path(), "s-1"));
+        assert!(load(tmp.path(), "s-1").reads.is_none());
+        // A reads.json without a hash is never reported either.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(READS_JSON)).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("scoreboard_sha256");
+        fs::write(dir.join(READS_JSON), serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(!has_kit(tmp.path(), "s-1"));
+    }
+
+    #[test]
+    fn an_older_capture_never_replaces_a_newer_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let older = reads();
+        let mut newer = reads();
+        newer.captured_at = older.captured_at + chrono::Duration::seconds(5);
+        let newer_frame =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([20, 140, 90])));
+        record_scoreboard(
+            tmp.path(),
+            "s-1",
+            &newer_frame,
+            TeamLayout::Five,
+            Some(0),
+            &newer,
+        )
+        .unwrap();
+        record_scoreboard(
+            tmp.path(),
+            "s-1",
+            &frame(),
+            TeamLayout::Five,
+            Some(0),
+            &older,
+        )
+        .unwrap();
+        let kit = load(tmp.path(), "s-1");
+        assert_eq!(kit.reads.unwrap().captured_at, newer.captured_at);
+        let want = encode_png(&blank::blanked_scoreboard(
+            &newer_frame,
+            TeamLayout::Five,
+            Some(0),
+        ))
+        .unwrap();
+        assert_eq!(kit.scoreboard_png.unwrap(), want);
+    }
+
+    #[test]
+    fn concurrent_captures_leave_the_newest_matching_pair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let base = reads().captured_at;
+        let writers: Vec<_> = (0..8u8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let mut r = reads();
+                    r.captured_at = base + chrono::Duration::seconds(i64::from(i));
+                    let f = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+                        1920,
+                        1080,
+                        image::Rgb([20 * i, 100, 50]),
+                    ));
+                    record_scoreboard(&dir, "s-1", &f, TeamLayout::Five, Some(0), &r).unwrap();
+                })
+            })
+            .collect();
+        let reader = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut last = None;
+                for _ in 0..300 {
+                    let kit = load(&dir, "s-1");
+                    if let (Some(png), Some(r)) = (kit.scoreboard_png, kit.reads) {
+                        assert_eq!(super::super::bundle::sha256_hex(&png), r.scoreboard_sha256);
+                        assert!(
+                            last.is_none_or(|l| r.captured_at >= l),
+                            "kit went back in time"
+                        );
+                        last = Some(r.captured_at);
+                    }
+                }
+            })
+        };
+        for w in writers {
+            w.join().unwrap();
+        }
+        reader.join().unwrap();
+        let r = load(&dir, "s-1").reads.unwrap();
+        assert_eq!(r.captured_at, base + chrono::Duration::seconds(7));
     }
 
     #[test]

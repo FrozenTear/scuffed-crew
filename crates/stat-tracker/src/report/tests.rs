@@ -673,6 +673,7 @@ mod game {
             result: Some("Victory".into()),
             recognizer: "cv-v5".into(),
             blank_table: crate::report::blank::BLANK_TABLE_VERSION,
+            scoreboard_sha256: String::new(),
             reads: r,
         }
     }
