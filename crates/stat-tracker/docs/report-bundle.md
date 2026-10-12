@@ -266,7 +266,7 @@ Geometry, measured per board. Lengths are in the 1664 px crop of a 2560x1440 fra
 - Rows: each team's grid is fitted to the 2 px separators between rows: team 1 from the header bottom, team 2 from 556 to 576 `s`, pitch 74.5 to 75.75 `s`. A team's grid is trusted when 3 of its internal separators show, and a row is used only when the separators on both of its sides show.
 - Only 6v6 has measured geometry. Any other team size, or an unknown one, keeps nothing. A board whose geometry fails keeps nothing at all.
 
-A row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. It is copied whole only when all of these hold:
+A row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. A portrait is kept only when an earlier capture of the same game, at least 60 seconds older, matches it; with no such capture it is filled. It is copied whole only when all of these hold:
 
 - the cell matches the same row's cell on an earlier capture of the same game, taken at least a minute earlier and at most 30 minutes earlier: of the difference between the two cells, minus its 15 `s` box mean (a team colour or world shift moves the whole bar or background and cancels), no channel may be off by more than 20 at more than 20 px (x `s` squared). Text, boxes and fades drawn on one capture and not the other differ at hundreds of px. The daemon keeps the portrait cells of a game's last 8 captures in memory for this (never on disk); the first capture of a game, a hero swap, a death and a respawn keep no portrait until a matching earlier capture exists;
 - the role bar is one opaque colour: 55% of its non-icon pixels sit within 40 of their median;
@@ -296,7 +296,7 @@ Measured on 2026-10-12 with the Rust blanker:
 - 118 forged attacks: 3 leak, 278 px in all, none readable.
 - 219 further forgeries (menus, notifications, killcam banners, coloured text beside digits, chat in every channel colour): all closed, except a box drawn wholly inside one portrait.
 - Attack round 2, re-run on blank table 10 (582 forgeries with the clean board as the earlier capture): every portrait and overlay forgery copies 0 drawn px (context menus opened inside a portrait, menus mid fade-in, coloured or faded text across the portrait edge, translucent boxes, tooltips over the portrait column, panels over the role bar, text in the icon zone, chat in the bar colour, a translucent board over in-world nameplates). What is left is the digit rim residue below (53 forgeries, 4,959 px) and one 2 px sample.
-- The same 711 forgeries with the overlay also on the earlier capture (it stayed pixel-identical for a minute or more): the edge gates alone leave 178 leaking, 102,353 px (portraits and digit rims together).
+- The same forgeries with the overlay also on the earlier capture (it stayed pixel-identical for a minute or more): the edge gates alone leave 124 forgeries leaking 97,392 portrait px, besides the same digit rim residue. This is the pinned-overlay limit below.
 
 Known limits:
 
@@ -535,6 +535,10 @@ Out of scope for this change, and out of scope for the first build unless a late
 - Keeping reports on Contabo as a long-term archive.
 - Windows or macOS capture.
 - Committing real game captures as fixtures.
+
+Follow-ups:
+
+- A native-size hero pack (74 px templates for 1440p and 56 px for 1080p, each kept only when captures from different games agree, distributed by the server like the current pack) would let the portrait check match a hero reference instead of an earlier capture, and close the pinned-overlay limit in section 4. The current 95 px pack differs from board portraits by 8 to 17 levels on average, too much to see a short name over the art.
 
 Open questions:
 
