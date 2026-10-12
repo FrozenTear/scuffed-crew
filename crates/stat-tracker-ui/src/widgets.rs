@@ -82,6 +82,18 @@ pub fn sidebar(current: Screen) -> Element<'static, Message> {
     }
     col = col.push(space().height(Fill)).push(
         button(
+            text("Report a problem")
+                .size(SIZE_BODY)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_2),
+        )
+        .padding(Padding::from([10, 14]))
+        .width(Fill)
+        .style(theme::nav_btn(false))
+        .on_press(Message::Report(crate::report::ReportMessage::Open(None))),
+    );
+    col = col.push(
+        button(
             text("Uninstall")
                 .size(SIZE_BODY)
                 .font(FONT_SEMIBOLD)

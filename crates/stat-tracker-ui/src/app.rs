@@ -9,6 +9,7 @@ use iced::widget::{column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::{Config, ShadowRecognizerControl};
+use stat_tracker::report::LogOnlyCategory;
 
 use crate::aggregate::GameFilter;
 use crate::capture::{self, PreviewShot};
@@ -233,6 +234,7 @@ pub enum Message {
     },
     ShowOlderReleases(notes::NotesSurface),
     Setup(crate::setup_guide::SetupMessage),
+    Report(crate::report::ReportMessage),
 }
 
 struct NotesDialog {
@@ -367,6 +369,8 @@ pub struct TrackerApp {
     notes_seen: NotesSeen,
     uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
     uninstall_busy: bool,
+    /// Report a problem dialog, or the crash prompt shown at start.
+    report: Option<crate::report::ReportUi>,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -556,6 +560,7 @@ impl TrackerApp {
             notes_seen,
             uninstall_dialog: None,
             uninstall_busy: false,
+            report: None,
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -587,6 +592,10 @@ impl TrackerApp {
         }
         if app.tray.is_none() && app.toast.is_none() && app.fixture.is_none() {
             app.toast = Some(tray::MISSING_TRAY_TOAST.to_string());
+        }
+
+        if app.fixture.is_none() {
+            app.report = crate::report::crash_prompt(&app.data_dir);
         }
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
@@ -621,7 +630,9 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.uninstall_dialog.is_some() {
+        if self.report.is_some() {
+            subs.push(iced::event::listen_with(report_dialog_escape));
+        } else if self.uninstall_dialog.is_some() {
             subs.push(iced::event::listen_with(uninstall_dialog_escape));
         } else if self.setup.open {
             subs.push(iced::event::listen_with(setup_guide_keys));
@@ -1416,6 +1427,196 @@ impl TrackerApp {
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
             Message::Setup(message) => self.on_setup(message),
+            Message::Report(message) => self.on_report(message),
+        }
+    }
+
+    fn report_dialog_mut(&mut self) -> Option<&mut crate::report::ReportDialog> {
+        match &mut self.report {
+            Some(crate::report::ReportUi::Dialog(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    /// Start a build for the dialog's current inputs. A result for an older
+    /// generation is dropped when it lands.
+    fn rebuild_report(&mut self) -> Task<Message> {
+        let mut config = self.saved_config.clone();
+        config.data_dir = self.data_dir.clone();
+        let capture_backend = self.backend.unwrap_or(CaptureBackend::None);
+        let Some(dialog) = self.report_dialog_mut() else {
+            return Task::none();
+        };
+        dialog.text_edited_at = None;
+        let generation = dialog.bump();
+        dialog.building = Some(generation);
+        let req = crate::report::BuildRequest {
+            config,
+            category: dialog.category,
+            text: dialog.text.clone(),
+            training: dialog.training,
+            resolution: crate::report::display_resolution(),
+            capture_backend,
+        };
+        Task::perform(crate::report::build(req), move |result| {
+            Message::Report(crate::report::ReportMessage::Built(generation, result))
+        })
+    }
+
+    fn on_report(&mut self, message: crate::report::ReportMessage) -> Task<Message> {
+        use crate::report::{ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState};
+        match message {
+            ReportMessage::Open(category) => {
+                if self.report_dialog_mut().is_some_and(|d| d.busy()) {
+                    return Task::none();
+                }
+                let linked = self.saved_config.sync.is_some();
+                let category = category.unwrap_or(LogOnlyCategory::Other);
+                self.report = Some(ReportUi::Dialog(ReportDialog::new(category, linked)));
+                self.rebuild_report()
+            }
+            ReportMessage::CrashYes => {
+                let linked = self.saved_config.sync.is_some();
+                self.report = Some(ReportUi::Dialog(ReportDialog::new(
+                    LogOnlyCategory::Crash,
+                    linked,
+                )));
+                self.rebuild_report()
+            }
+            ReportMessage::CrashNo => {
+                self.dismiss_crash_marker();
+                self.report = None;
+                Task::none()
+            }
+            ReportMessage::Close => {
+                match &self.report {
+                    Some(ReportUi::Dialog(d)) if d.busy() => return Task::none(),
+                    // Escape on the prompt is not an answer; it asks again next start.
+                    _ => self.report = None,
+                }
+                Task::none()
+            }
+            ReportMessage::Category(category) => {
+                let Some(d) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                if d.category == category {
+                    return Task::none();
+                }
+                d.category = category;
+                self.rebuild_report()
+            }
+            ReportMessage::Training(on) => {
+                let Some(d) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                d.training = on;
+                self.rebuild_report()
+            }
+            ReportMessage::Text(value) => {
+                if let Some(d) = self.report_dialog_mut() {
+                    d.text = value
+                        .chars()
+                        .take(stat_tracker::report::bundle::REASON_TEXT_MAX_CHARS)
+                        .collect();
+                    d.text_edited_at = Some(std::time::Instant::now());
+                    d.bump();
+                }
+                Task::none()
+            }
+            ReportMessage::ToggleLog => {
+                if let Some(d) = self.report_dialog_mut() {
+                    d.show_log = !d.show_log;
+                }
+                Task::none()
+            }
+            ReportMessage::Built(generation, result) => {
+                if let Some(d) = self.report_dialog_mut()
+                    && d.building == Some(generation)
+                {
+                    d.building = None;
+                    if d.generation == generation {
+                        d.built = Some(result);
+                    }
+                }
+                Task::none()
+            }
+            ReportMessage::Send => {
+                let sync = self.saved_config.sync.clone();
+                let Some(d) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                let (Some(sync), Some(zip)) = (sync, d.zip()) else {
+                    return Task::none();
+                };
+                if !d.can_send() {
+                    return Task::none();
+                }
+                d.send = SendState::Sending;
+                d.confirm_save = false;
+                Task::perform(
+                    crate::report::send(sync.server_url, sync.token, zip),
+                    |outcome| Message::Report(ReportMessage::Sent(outcome)),
+                )
+            }
+            ReportMessage::Sent(outcome) => {
+                let sent = matches!(outcome, SendOutcome::Sent { .. });
+                if let Some(d) = self.report_dialog_mut() {
+                    if sent {
+                        // The app keeps no copy after a successful send.
+                        d.built = None;
+                        d.show_log = false;
+                    }
+                    d.send = SendState::Done(outcome);
+                }
+                if sent {
+                    self.dismiss_crash_marker();
+                }
+                Task::none()
+            }
+            ReportMessage::Save => {
+                let Some(d) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                if !d.can_save() {
+                    return Task::none();
+                }
+                if !d.confirm_save {
+                    d.confirm_save = true;
+                    return Task::none();
+                }
+                let Some(zip) = d.zip() else {
+                    return Task::none();
+                };
+                d.saving = true;
+                Task::perform(crate::report::save(zip), |result| {
+                    Message::Report(ReportMessage::Saved(result))
+                })
+            }
+            ReportMessage::CancelSave => {
+                if let Some(d) = self.report_dialog_mut() {
+                    d.confirm_save = false;
+                }
+                Task::none()
+            }
+            ReportMessage::Saved(result) => {
+                if let Some(d) = self.report_dialog_mut() {
+                    d.saving = false;
+                    d.confirm_save = false;
+                    d.saved = Some(result);
+                }
+                Task::none()
+            }
+            ReportMessage::OpenMyReports(url) => {
+                update::open_release_page(&url);
+                Task::none()
+            }
+        }
+    }
+
+    fn dismiss_crash_marker(&mut self) {
+        if let Err(error) = stat_tracker::report::marker::dismiss_last_crash(&self.data_dir) {
+            tracing::warn!(%error, "could not remove last_crash.marker");
         }
     }
 
@@ -1634,6 +1835,21 @@ impl TrackerApp {
     }
 
     fn on_tick(&mut self) -> Task<Message> {
+        // Checked before the rest of the tick, whose tray and hotkey paths
+        // return early, so a typing pause always rebuilds on this tick.
+        let report = if self
+            .report_dialog_mut()
+            .and_then(|d| d.text_edited_at)
+            .is_some_and(|at| at.elapsed() >= crate::report::TEXT_REBUILD_DELAY)
+        {
+            self.rebuild_report()
+        } else {
+            Task::none()
+        };
+        Task::batch([report, self.tick_rest()])
+    }
+
+    fn tick_rest(&mut self) -> Task<Message> {
         self.expire_refused_toast();
         if self.fixture.is_none() {
             let mtime = snapshot::snapshot_mtime(&self.data_dir);
@@ -1876,7 +2092,7 @@ impl TrackerApp {
         } else {
             with_notes
         };
-        if let Some(dialog) = &self.uninstall_dialog {
+        let with_uninstall = if let Some(dialog) = &self.uninstall_dialog {
             stack![
                 with_guide,
                 crate::uninstall::view(dialog, self.uninstall_busy)
@@ -1886,6 +2102,14 @@ impl TrackerApp {
             .into()
         } else {
             with_guide
+        };
+        if let Some(report) = &self.report {
+            stack![with_uninstall, crate::report::view(report)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            with_uninstall
         }
     }
 
@@ -1935,6 +2159,17 @@ fn live_status_for(games: &[Game]) -> String {
     } else {
         "Waiting for a capture".into()
     }
+}
+
+fn report_dialog_escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    notes::escape_closes_notes(&key).then_some(Message::Report(crate::report::ReportMessage::Close))
 }
 
 fn uninstall_dialog_escape(

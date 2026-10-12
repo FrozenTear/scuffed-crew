@@ -472,6 +472,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         .push(section_columns(columns))
         .push(section_card(SPANNING_SECTION, app, demo))
         .push(save_footer(demo))
+        .push(report_row())
         .push(uninstall_row());
 
     let body = col.width(Fill).max_width(settings_pane_max(content_width));
@@ -1032,6 +1033,31 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .spacing(GRID_GAP)
         .width(Fill);
     settings_card("Stored data", body.into())
+}
+
+fn report_row() -> Element<'static, Message> {
+    settings_card(
+        "Report a problem",
+        row![
+            text("Crash, low FPS, or anything else. You see the report before it is sent.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3)
+                .width(Fill),
+            button(
+                text("Report a problem")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::ghost_btn())
+            .on_press(Message::Report(crate::report::ReportMessage::Open(None))),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(GRID_GAP)
+        .into(),
+    )
 }
 
 fn uninstall_row() -> Element<'static, Message> {
