@@ -5045,10 +5045,6 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
     });
 }
 
-/// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
-/// board that OCR'd wrong but still passed every trust gate can be inspected
-/// after the fact (the capture gate holds bad cells, but the underlying crop is
-/// the only way to retune calibration). Fire-and-forget; encode off-runtime.
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
 /// accepted capture. Written off the capture path; a failure is logged and
 /// never touches the stored match.
@@ -5090,6 +5086,10 @@ fn record_report_kit(
     });
 }
 
+/// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
+/// board that OCR'd wrong but still passed every trust gate can be inspected
+/// after the fact (the capture gate holds bad cells, but the underlying crop is
+/// the only way to retune calibration). Fire-and-forget; encode off-runtime.
 fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImage>) {
     let dir = data_dir.join("debug").join("accepted");
     tokio::task::spawn_blocking(move || {

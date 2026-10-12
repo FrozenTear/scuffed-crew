@@ -56,6 +56,10 @@ pub struct KitReads {
     pub mode: Option<String>,
     pub result: Option<String>,
     pub recognizer: String,
+    /// [`blank::BLANK_TABLE_VERSION`] the scoreboard was blanked with. A kit
+    /// from another table is not reported ([`load`] drops its scoreboard).
+    #[serde(default)]
+    pub blank_table: u32,
     /// Keyed by the manifest read keys (`mode`, `result`, `hero`, `e`, `a`,
     /// `d`, `dmg`, `h`, `mit`).
     pub reads: BTreeMap<String, KitRead>,
@@ -110,6 +114,7 @@ impl KitReads {
             map: text(&after.map_name),
             mode: text(&after.game_mode),
             result: text(&after.outcome),
+            blank_table: blank::BLANK_TABLE_VERSION,
             recognizer: if after.recognizer.is_empty() {
                 "ocr-v1".to_string()
             } else {
@@ -159,7 +164,9 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 
 /// Write `bytes` to `dir/name` through a private temp file and a rename.
 fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let tmp = dir.join(format!(".{name}.tmp"));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
     {
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
@@ -276,18 +283,17 @@ pub fn sessions(data_dir: &Path) -> Vec<String> {
             let name = e.file_name().into_string().ok()?;
             safe_session(&name)?;
             let path = e.path();
-            path.join(SCOREBOARD_PNG)
-                .is_file()
-                .then(|| (modified(&path.join(SCOREBOARD_PNG)), name))
+            has_kit(data_dir, &name).then(|| (modified(&path.join(SCOREBOARD_PNG)), name))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.into_iter().map(|(_, s)| s).collect()
 }
 
-/// True when the session has a blanked scoreboard to report.
+/// True when the session has a blanked scoreboard, under the current blank
+/// table, to report.
 pub fn has_kit(data_dir: &Path, session_id: &str) -> bool {
-    session_dir(data_dir, session_id).is_some_and(|d| d.join(SCOREBOARD_PNG).is_file())
+    load(data_dir, session_id).scoreboard_png.is_some()
 }
 
 /// Read a session's kit. Missing or unreadable parts are `None`.
@@ -295,12 +301,21 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Kit::default();
     };
+    let reads: Option<KitReads> = fs::read(dir.join(READS_JSON))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    // A scoreboard blanked under an older table (or with no stamp) is never
+    // reported: the table may have missed names (spec section 4, rev 3).
+    let current = reads
+        .as_ref()
+        .is_some_and(|r| r.blank_table == blank::BLANK_TABLE_VERSION);
+    if !current {
+        return Kit::default();
+    }
     Kit {
         scoreboard_png: fs::read(dir.join(SCOREBOARD_PNG)).ok(),
         outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
-        reads: fs::read(dir.join(READS_JSON))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok()),
+        reads,
     }
 }
 
@@ -346,12 +361,19 @@ mod tests {
             mode: Some("Control".into()),
             result: None,
             recognizer: "cv-v5".into(),
+            blank_table: crate::report::blank::BLANK_TABLE_VERSION,
             reads: r,
         }
     }
 
     fn frame() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([200, 100, 50])))
+    }
+
+    /// A dark, flat frame: what the scoreboard preflight calls "not a
+    /// scoreboard", like the rank screen's dark background.
+    fn rank_like_frame() -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([24, 20, 18])))
     }
 
     #[test]
@@ -384,6 +406,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_kit_from_an_older_blank_table_is_never_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut old = reads();
+        old.blank_table = blank::BLANK_TABLE_VERSION - 1;
+        record_scoreboard(tmp.path(), "s-old", &frame(), TeamLayout::Five, &old).unwrap();
+        assert!(!has_kit(tmp.path(), "s-old"));
+        assert!(load(tmp.path(), "s-old").scoreboard_png.is_none());
+        assert!(sessions(tmp.path()).is_empty());
+        // A reads.json from before the stamp existed has no field at all.
+        let dir = session_dir(tmp.path(), "s-old").unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(READS_JSON)).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("blank_table");
+        fs::write(dir.join(READS_JSON), serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(!has_kit(tmp.path(), "s-old"));
     }
 
     #[test]
@@ -444,9 +484,12 @@ mod tests {
             Some(OutcomeSource::ResultWord),
             Some(OutcomeSource::EndTitle),
         ] {
-            assert!(rank_outcome_png(src, &frame()).is_none(), "{src:?}");
+            assert!(
+                rank_outcome_png(src, &rank_like_frame()).is_none(),
+                "{src:?}"
+            );
         }
-        assert!(rank_outcome_png(Some(OutcomeSource::RankScreen), &frame()).is_some());
+        assert!(rank_outcome_png(Some(OutcomeSource::RankScreen), &rank_like_frame()).is_some());
     }
 
     #[test]
@@ -456,14 +499,33 @@ mod tests {
         // R235-2: a Tab-held board whose title contains DRAW fires RankScreen.
         for pre in [P::Ready(5), P::Ready(6), P::TeamSizeUncertain] {
             for rows in [false, true] {
-                assert!(!rank_outcome_allowed(Some(S::RankScreen), pre, rows), "{pre:?} {rows}");
+                assert!(
+                    !rank_outcome_allowed(Some(S::RankScreen), pre, rows),
+                    "{pre:?} {rows}"
+                );
             }
         }
-        assert!(!rank_outcome_allowed(Some(S::RankScreen), P::NotAScoreboard, true));
-        for src in [None, Some(S::Banner), Some(S::ResultWord), Some(S::EndTitle)] {
-            assert!(!rank_outcome_allowed(src, P::NotAScoreboard, false), "{src:?}");
+        assert!(!rank_outcome_allowed(
+            Some(S::RankScreen),
+            P::NotAScoreboard,
+            true
+        ));
+        for src in [
+            None,
+            Some(S::Banner),
+            Some(S::ResultWord),
+            Some(S::EndTitle),
+        ] {
+            assert!(
+                !rank_outcome_allowed(src, P::NotAScoreboard, false),
+                "{src:?}"
+            );
         }
-        assert!(rank_outcome_allowed(Some(S::RankScreen), P::NotAScoreboard, false));
+        assert!(rank_outcome_allowed(
+            Some(S::RankScreen),
+            P::NotAScoreboard,
+            false
+        ));
     }
 
     /// QA harness on real frames, not in CI (members' frames never go in the
@@ -482,7 +544,9 @@ mod tests {
             if path.extension().is_none_or(|e| e != "png") {
                 continue;
             }
-            let Ok(img) = image::open(&path) else { continue };
+            let Ok(img) = image::open(&path) else {
+                continue;
+            };
             let board = crate::ocr::preprocess::crop_scoreboard(&img);
             let (pre, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
             let is_board = pre != crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
@@ -491,7 +555,11 @@ mod tests {
             let forced = rank_outcome_png(Some(OutcomeSource::RankScreen), &img);
             if is_board {
                 boards += 1;
-                assert!(forced.is_none(), "{}: scoreboard gave an outcome crop", path.display());
+                assert!(
+                    forced.is_none(),
+                    "{}: scoreboard gave an outcome crop",
+                    path.display()
+                );
             }
             if real == Some(OutcomeSource::RankScreen) && rank_outcome_png(real, &img).is_some() {
                 rank_hits += 1;
@@ -527,8 +595,12 @@ mod tests {
     fn outcome_is_the_rank_word_box() {
         use crate::detect::match_end::OutcomeSource;
         let tmp = tempfile::tempdir().unwrap();
-        let png = rank_outcome_png(Some(OutcomeSource::RankScreen), &frame()).unwrap();
+        let png = rank_outcome_png(Some(OutcomeSource::RankScreen), &rank_like_frame()).unwrap();
         record_outcome_png(tmp.path(), "s-1", &png).unwrap();
+        // An outcome alone is not a reportable kit.
+        assert!(!has_kit(tmp.path(), "s-1"));
+        assert!(load(tmp.path(), "s-1").outcome_png.is_none());
+        record_scoreboard(tmp.path(), "s-1", &frame(), TeamLayout::Five, &reads()).unwrap();
         let png = load(tmp.path(), "s-1").outcome_png.expect("outcome");
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(
@@ -538,7 +610,5 @@ mod tests {
                 1080 * 225 / 1000 - 1080 * 145 / 1000
             )
         );
-        // An outcome alone is not a reportable kit.
-        assert!(!has_kit(tmp.path(), "s-1"));
     }
 }

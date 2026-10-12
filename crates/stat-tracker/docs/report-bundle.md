@@ -264,21 +264,21 @@ Name, portrait, and digit columns are fractions of the scoreboard crop width. Ra
 
 | Column | Start | End |
 | --- | --- | --- |
-| Portrait (protected) | 0 | 200/1000 |
-| Name (blank) | 200/1000 | 450/1000 |
+| Portrait (protected) | 0 | 80/1000 |
+| Name (blank) | 80/1000 | 450/1000 |
 | Digits (protected) | 450/1000 | right edge |
 
 6v6:
 
 | Column | Start | End |
 | --- | --- | --- |
-| Portrait (protected) | 0 | 140/1000 |
-| Name (blank) | 140/1000 | 255/1000 |
+| Portrait (protected) | 0 | 80/1000 |
+| Name (blank) | 80/1000 | 255/1000 |
 | Digits (protected) | 255/1000 | right edge |
 
-The name blank is wider than the OCR name window on purpose. The OCR window stays where it is today (5v5 from 260/1000 with width 120/1000, 6v6 from 150/1000 with width 100/1000). Blanking does not use that tighter window. A name that spills past it would otherwise survive. The 6v6 digit edge sits just to the right of the measured 6v6 name window. At 260/1000 the old name window already landed on digits, so digits are protected from 255/1000.
+Revision 3 (2026-10-12) moved both name starts to 80/1000. On the member's current 6v6 boards (2560x1440, 2026-10-11 and 10-12) the hero portrait ends near 78/1000, and the level badge, rank icon, name, and title run from about 85/1000 to 215/1000, so the old 140/1000 start left most of every name visible. The badge, icon, and title are blanked with the name. No current 5v5 board has been measured, so the 5v5 blank runs from 80/1000 to the old 450/1000 digit edge and covers both layouts; a measured 5v5 board can narrow it. A 6v6 board taken for 5v5 is then still covered, since the 5v5 blank contains the 6v6 one. The name blank is wider than the OCR name window on purpose. The OCR window stays where it is today (5v5 from 260/1000 with width 120/1000, 6v6 from 150/1000 with width 100/1000). Blanking does not use that tighter window. A name that spills past it would otherwise survive. The 6v6 digit edge sits just to the right of the measured 6v6 name window. At 260/1000 the old name window already landed on digits, so digits are protected from 255/1000.
 
-Hero portrait pixels and digit-column pixels are not modified. After blanking they are byte-identical to the same rectangles before blanking, compared as raw pixels, not as a re-encoded PNG. The header row and the gap between the teams are not name rows. They are left unchanged unless another region in the active class covers them.
+`crops/scoreboard.png` is an allowlist (revision 3). The crop starts as the solid colour, and only the portrait cell and the digit cells of each player row are copied from the blanked frame. The digit cells end at the table edge, 590/1000 of the crop width (the end of the MIT column). Everything else stays filled: the name column with its badge, rank icon, name, and title, the header row, the gap between the teams, the voice icons, the hero card, and the game world behind and beside the table. In-world nameplates show there. A notice band across the whole crop width, from 740/1000 to 900/1000 of the crop height, is also filled, digit cells included. Centre-screen notices such as "YOU WERE ELIMINATED BY <name>" and "SAVED BY <name>" are drawn there over the stat columns, too faint for OCR to see. The member's boards of 2026-10-11 showed both kinds (QA finding QC1-1). The rows under the notice band lose their digit cells in the report. When the team size is unknown, a cell is kept only when it lies outside the name columns of both layouts. A kit stores the blank table version it was blanked with, and a kit from another version is never reported. Kept portrait and digit pixels are not modified. After blanking they are byte-identical to the same rectangles before blanking, compared as raw pixels, not as a re-encoded PNG. The header row and the gap between the teams are not name rows. They are left unchanged unless another region in the active class covers them.
 
 ### Other name regions
 

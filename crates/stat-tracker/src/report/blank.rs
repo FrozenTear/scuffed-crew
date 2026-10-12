@@ -31,21 +31,43 @@ pub struct RowColumns {
     pub digits_start: u32,
 }
 
-/// 5v5 columns (section 4, first table).
+/// 5v5 columns (section 4, first table). No current 5v5 board has been
+/// measured, so the blank runs from the portrait edge of the current layout
+/// to the old 5v5 digit edge and covers both layouts.
 pub const NAME_COLUMNS_5V5: RowColumns = RowColumns {
-    portrait_end: 200,
-    name_start: 200,
+    portrait_end: 80,
+    name_start: 80,
     name_end: 450,
     digits_start: 450,
 };
 
-/// 6v6 columns (section 4, second table).
+/// 6v6 columns (section 4, second table). Measured on the member's 6v6
+/// boards of 2026-10-11/12 at 2560x1440: the portrait ends near 78/1000 and
+/// the level badge, rank icon, name, and title run from about 85/1000 to
+/// 215/1000.
 pub const NAME_COLUMNS_6V6: RowColumns = RowColumns {
-    portrait_end: 140,
-    name_start: 140,
+    portrait_end: 80,
+    name_start: 80,
     name_end: 255,
     digits_start: 255,
 };
+
+/// Right edge of the stat table (end of the MIT column), in thousandths of
+/// the scoreboard crop width. Right of it are the voice icons, the hero card,
+/// and the game world, which can hold in-world nameplates.
+pub const TABLE_END: u32 = 590;
+
+/// Centre-screen notice band ("YOU WERE ELIMINATED BY <name>", "SAVED BY
+/// <name>"), in thousandths of the scoreboard crop height. The notice is drawn
+/// over the stat columns, so this band is filled across the whole width, digit
+/// cells included. Measured on the member's boards of 2026-10-11: notice rows
+/// at 791..831 and the next line below it.
+pub const NOTICE_BAND: (u32, u32) = (740, 900);
+
+/// Bumped whenever a table in this module changes. Kits store it, and a kit
+/// written under another table is never reported (it is blanked again or
+/// refused).
+pub const BLANK_TABLE_VERSION: u32 = 3;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -233,6 +255,7 @@ pub fn protected_rects(crop_w: u32, crop_h: u32, team_size: usize) -> Vec<Rect> 
     let c = columns(team_size);
     let portrait_w = frac(crop_w, c.portrait_end);
     let digits_x = frac(crop_w, c.digits_start);
+    let table_end = frac(crop_w, TABLE_END).max(digits_x);
     let mut out = Vec::new();
     for (y, h) in row_bands(crop_h, team_size) {
         out.push(Rect {
@@ -244,8 +267,79 @@ pub fn protected_rects(crop_w: u32, crop_h: u32, team_size: usize) -> Vec<Rect> 
         out.push(Rect {
             x: digits_x,
             y,
-            w: crop_w - digits_x,
+            w: table_end - digits_x,
             h,
+        });
+    }
+    out
+}
+
+/// The notice band in scoreboard-crop pixels, full width.
+pub fn notice_band(crop_w: u32, crop_h: u32) -> Rect {
+    let (y0, y1) = (frac(crop_h, NOTICE_BAND.0), frac(crop_h, NOTICE_BAND.1));
+    Rect {
+        x: 0,
+        y: y0,
+        w: crop_w,
+        h: y1 - y0,
+    }
+}
+
+/// What `crops/scoreboard.png` keeps, in scoreboard-crop pixels: the
+/// portrait and digit cells of each row, minus the notice band. Everything
+/// else is the fill colour.
+pub fn kept_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
+    let band = notice_band(crop_w, crop_h);
+    let sizes: &[usize] = match layout {
+        TeamLayout::Five => &[5],
+        TeamLayout::Six => &[6],
+        // Unknown size: keep only what both layouts protect, so no name
+        // column of either layout is kept.
+        TeamLayout::Unknown => &[5, 6],
+    };
+    let mut out = Vec::new();
+    for r in protected_rects(crop_w, crop_h, sizes[0]) {
+        for piece in subtract_rows(r, band) {
+            if sizes.len() == 1 || covered_by_all(piece, crop_w, crop_h, sizes) {
+                out.push(piece);
+            }
+        }
+    }
+    out
+}
+
+fn covered_by_all(r: Rect, crop_w: u32, crop_h: u32, sizes: &[usize]) -> bool {
+    sizes.iter().all(|&ts| {
+        name_rects(crop_w, crop_h, layout_for(ts))
+            .iter()
+            .all(|n| !n.intersects(&r))
+    })
+}
+
+fn layout_for(ts: usize) -> TeamLayout {
+    if ts == 6 {
+        TeamLayout::Six
+    } else {
+        TeamLayout::Five
+    }
+}
+
+/// `r` minus the rows of `band` (a full-width band), as up to two pieces.
+fn subtract_rows(r: Rect, band: Rect) -> Vec<Rect> {
+    let (top, bottom) = (r.y, r.y + r.h);
+    let (b0, b1) = (band.y, band.y + band.h);
+    if bottom <= b0 || top >= b1 {
+        return vec![r];
+    }
+    let mut out = Vec::new();
+    if top < b0 {
+        out.push(Rect { h: b0 - top, ..r });
+    }
+    if bottom > b1 {
+        out.push(Rect {
+            y: b1,
+            h: bottom - b1,
+            ..r
         });
     }
     out
@@ -361,10 +455,32 @@ pub fn blank_scoreboard_frame(frame: &DynamicImage, layout: TeamLayout) -> RgbIm
 
 /// `crops/scoreboard.png`: the scoreboard rectangle cut from the blanked
 /// frame.
+///
+/// Allowlist: the crop starts as the fill colour and only [`kept_rects`]
+/// (portrait and digit cells) are copied from the blanked frame. Names,
+/// titles, badges, the header, the gaps, the hero card, the game world
+/// (in-world nameplates), and the notice band all stay filled.
 pub fn blanked_scoreboard(frame: &DynamicImage, layout: TeamLayout) -> RgbImage {
     let blanked = blank_scoreboard_frame(frame, layout);
     let (x, y, w, h) = crop_scoreboard_rect(blanked.width(), blanked.height());
-    image::imageops::crop_imm(&blanked, x, y, w, h).to_image()
+    let src = image::imageops::crop_imm(&blanked, x, y, w, h).to_image();
+    allowlist_crop(&src, layout)
+}
+
+/// The allowlist step of [`blanked_scoreboard`] on an already cut scoreboard
+/// crop (the tracker's `debug/accepted` ring holds such crops).
+pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout) -> RgbImage {
+    let (w, h) = src.dimensions();
+    let mut out = RgbImage::from_pixel(w, h, FILL);
+    for r in kept_rects(w, h, layout) {
+        let r = r.clipped(w, h);
+        for py in r.y..r.y + r.h {
+            for px in r.x..r.x + r.w {
+                out.put_pixel(px, py, *src.get_pixel(px, py));
+            }
+        }
+    }
+    out
 }
 
 /// Blank a rank screen frame for the `outcome` class ([`outcome_regions`]).
@@ -420,7 +536,7 @@ mod tests {
                 NAME_COLUMNS_5V5.name_end,
                 NAME_COLUMNS_5V5.digits_start
             ),
-            (200, 200, 450, 450)
+            (80, 80, 450, 450)
         );
         assert_eq!(
             (
@@ -429,7 +545,7 @@ mod tests {
                 NAME_COLUMNS_6V6.name_end,
                 NAME_COLUMNS_6V6.digits_start
             ),
-            (140, 140, 255, 255)
+            (80, 80, 255, 255)
         );
         let ids: Vec<_> = SCOREBOARD_REGIONS
             .iter()
@@ -447,8 +563,8 @@ mod tests {
         // The doc table must hold the same numbers.
         let doc = include_str!("../../docs/report-bundle.md");
         for line in [
-            "| Name (blank) | 200/1000 | 450/1000 |",
-            "| Name (blank) | 140/1000 | 255/1000 |",
+            "| Name (blank) | 80/1000 | 450/1000 |",
+            "| Name (blank) | 80/1000 | 255/1000 |",
             "| `overlay_top` | every kept frame | 0 | 0 | 1000 | 40 | no |",
             "| `kill_feed` | scoreboard | 700 | 40 | 300 | 105 | no |",
             "| `chat_below` | scoreboard | 0 | 855 | 1000 | 145 | no |",
@@ -490,16 +606,55 @@ mod tests {
                         }
                     }
                 }
-                for p in protected_rects(orig_sb.2, orig_sb.3, ts) {
+                let kept = kept_rects(orig_sb.2, orig_sb.3, layout);
+                for p in &kept {
                     for y in p.y..p.y + p.h {
                         for x in p.x..p.x + p.w {
                             assert_eq!(
                                 out.get_pixel(x, y),
                                 orig.get_pixel(orig_sb.0 + x, orig_sb.1 + y),
-                                "{w}x{h} {ts} protected px {x},{y}"
+                                "{w}x{h} {ts} kept px {x},{y}"
                             );
                         }
                     }
+                }
+                // Allowlist: every other pixel is the fill colour.
+                for y in 0..out.height() {
+                    for x in 0..out.width() {
+                        let inside = kept
+                            .iter()
+                            .any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
+                        if !inside {
+                            assert_eq!(*out.get_pixel(x, y), FILL, "{w}x{h} {ts} px {x},{y}");
+                        }
+                    }
+                }
+                // Kept cells are only portrait and digit cells left of the
+                // table edge, never in the notice band.
+                let band = notice_band(orig_sb.2, orig_sb.3);
+                let table_end = frac(orig_sb.2, TABLE_END);
+                for r in &kept {
+                    assert!(
+                        !r.intersects(&band),
+                        "{w}x{h} {ts} {r:?} in the notice band"
+                    );
+                    assert!(
+                        r.x + r.w <= table_end,
+                        "{w}x{h} {ts} {r:?} right of the table"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_team_size_keeps_nothing_in_either_name_column() {
+        for (w, h) in SIZES {
+            let (_, _, cw, ch) = crop_scoreboard_rect(w, h);
+            let kept = kept_rects(cw, ch, TeamLayout::Unknown);
+            for layout in [TeamLayout::Five, TeamLayout::Six] {
+                for n in name_rects(cw, ch, layout) {
+                    assert!(kept.iter().all(|k| !k.intersects(&n)), "{w}x{h} {n:?}");
                 }
             }
         }
@@ -563,6 +718,42 @@ mod tests {
             for x in 0..w {
                 assert_eq!(*out.get_pixel(x, h - 1), FILL, "{w}x{h} bottom row x={x}");
                 assert_eq!(*out.get_pixel(x, 0), FILL, "{w}x{h} top row x={x}");
+            }
+        }
+    }
+
+    /// QA harness on real frames, not in CI: `SCUFFED_QA_FRAMES=<dir of full
+    /// frames> SCUFFED_QA_OUT=<private dir> cargo test -p scuffed-stat-tracker
+    /// --lib real_frames_blank -- --ignored`. Writes each frame's blanked
+    /// scoreboard (both team-size layouts) for a person to look at.
+    #[test]
+    #[ignore]
+    fn real_frames_blank_contact_sheet() {
+        let src = std::env::var("SCUFFED_QA_FRAMES").expect("set SCUFFED_QA_FRAMES");
+        let out =
+            std::path::PathBuf::from(std::env::var("SCUFFED_QA_OUT").expect("set SCUFFED_QA_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "png") {
+                continue;
+            }
+            let Ok(img) = image::open(&path) else {
+                continue;
+            };
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            // A scoreboard crop (debug/accepted) is about 1.65:1; a frame is wider.
+            let ratio = img.width() as f64 / img.height().max(1) as f64;
+            let is_crop = (ratio - 1.651).abs() < 0.02;
+            for (tag, layout) in [("5", TeamLayout::Five), ("6", TeamLayout::Six)] {
+                let blanked = if is_crop {
+                    allowlist_crop(&img.to_rgb8(), layout)
+                } else {
+                    blanked_scoreboard(&img, layout)
+                };
+                blanked
+                    .save(out.join(format!("{stem}_{tag}v{tag}.png")))
+                    .unwrap();
             }
         }
     }

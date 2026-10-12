@@ -380,7 +380,8 @@ tracker_data_name() {
     case "$1" in
         stats.surrealkv|vacuum.tmp|live_snapshot.json|live_snapshot.json.tmp|\
         matches.jsonl|commands|daemon.pid|daemon.log|daemon.log.1|debug|shadow|\
-        tessdata|active_game.json|sync_auth.json|portraits|ui_state.json)
+        tessdata|active_game.json|sync_auth.json|portraits|ui_state.json|\
+        report-kit|run.marker|last_crash.marker)
             return 0
             ;;
         stats.surrealkv.pre-vacuum-*)

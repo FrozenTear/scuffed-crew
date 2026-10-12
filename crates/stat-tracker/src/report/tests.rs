@@ -672,6 +672,7 @@ mod game {
             mode: Some("Control".into()),
             result: Some("Victory".into()),
             recognizer: "cv-v5".into(),
+            blank_table: crate::report::blank::BLANK_TABLE_VERSION,
             reads: r,
         }
     }
@@ -733,9 +734,10 @@ mod game {
             &reads(Some(5)),
         )
         .unwrap();
+        let rank = DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, Rgb([24, 20, 18])));
         let png = kit::rank_outcome_png(
             Some(crate::detect::match_end::OutcomeSource::RankScreen),
-            &frame(),
+            &rank,
         )
         .unwrap();
         kit::record_outcome_png(tmp.path(), "sess-1", &png).unwrap();
