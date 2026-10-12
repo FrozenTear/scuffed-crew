@@ -61,17 +61,10 @@ pub const PORTRAIT_START: u32 = 20;
 /// and the game world, which can hold in-world nameplates.
 pub const TABLE_END: u32 = 590;
 
-/// Centre-screen notice band ("YOU WERE ELIMINATED BY <name>", "SAVED BY
-/// <name>"), in thousandths of the scoreboard crop height. The notice is drawn
-/// over the stat columns, so this band is filled across the whole width, digit
-/// cells included. Measured on the member's boards of 2026-10-11: notice rows
-/// at 791..831 and the next line below it.
-pub const NOTICE_BAND: (u32, u32) = (740, 900);
-
 /// Bumped whenever a table in this module changes. Kits store it, and a kit
 /// written under another table is never reported (it is blanked again or
 /// refused).
-pub const BLANK_TABLE_VERSION: u32 = 7;
+pub const BLANK_TABLE_VERSION: u32 = 8;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -279,52 +272,34 @@ pub fn protected_rects(crop_w: u32, crop_h: u32, team_size: usize) -> Vec<Rect> 
     out
 }
 
-/// The notice band in scoreboard-crop pixels, full width.
-pub fn notice_band(crop_w: u32, crop_h: u32) -> Rect {
-    let (y0, y1) = (frac(crop_h, NOTICE_BAND.0), frac(crop_h, NOTICE_BAND.1));
-    Rect {
-        x: 0,
-        y: y0,
-        w: crop_w,
-        h: y1 - y0,
-    }
-}
-
 /// What `crops/scoreboard.png` keeps, in scoreboard-crop pixels: the
-/// portrait and digit cells of each row, minus the notice band. Everything
-/// else is the fill colour.
+/// portrait and digit cells of each row. Everything else is the fill colour.
 ///
-/// Digit cells are kept for `own_row` only (the member's row, index 0..2n
-/// with team 1 first, the same index `crop_player_row` takes): the table rows
-/// are translucent, and the glyph test cannot prove the world behind a row
-/// holds no name for every team colour (QC1-8). The member's row is the only
-/// row the tracker reads stats from. Other rows keep only their portrait. With
-/// no own row, or an unknown team size, no digit cell is kept.
+/// Every row keeps its portrait cell and its digit cell (USER 2026-10-12: keep
+/// everyone's numbers for training). A digit cell is painted by
+/// [`paint_digit_cell`], which keeps only digit glyphs that pass every layer;
+/// a row whose cell fails a layer shows its flat row colour with no digits.
+/// With an unknown team size no digit cell is kept. `own_row` (the member's
+/// row, index 0..2n with team 1 first) also keeps its ability icon.
 pub fn kept_rects(
     crop_w: u32,
     crop_h: u32,
     layout: TeamLayout,
-    own_row: Option<usize>,
+    _own_row: Option<usize>,
 ) -> Vec<Rect> {
-    let band = notice_band(crop_w, crop_h);
     let sizes: &[usize] = match layout {
         TeamLayout::Five => &[5],
         TeamLayout::Six => &[6],
-        // Unknown size: keep only what both layouts protect, so no name
-        // column of either layout is kept.
         TeamLayout::Unknown => &[5, 6],
     };
-    // A row cell that touches the notice band is not kept at all, so no
-    // row keeps half of its digits (QC1-3).
-    let own_row = own_row.filter(|_| sizes.len() == 1);
+    let unknown = sizes.len() > 1;
     protected_rects(crop_w, crop_h, sizes[0])
         .into_iter()
         .enumerate()
         // protected_rects gives (portrait, digits) for each row in order.
-        .filter(|(i, _)| i % 2 == 0 || own_row == Some(i / 2))
+        .filter(|(i, _)| i % 2 == 0 || !unknown)
         .map(|(_, r)| r)
-        .filter(|r| !r.intersects(&band))
-        .filter(|r| sizes.len() == 1 || covered_by_all(*r, crop_w, crop_h, sizes))
+        .filter(|r| !unknown || covered_by_all(*r, crop_w, crop_h, sizes))
         .collect()
 }
 
@@ -458,7 +433,8 @@ pub fn blank_scoreboard_frame(frame: &DynamicImage, layout: TeamLayout) -> RgbIm
 /// Allowlist: the crop starts as the fill colour and only [`kept_rects`]
 /// (portrait and digit cells) are copied from the blanked frame. Names,
 /// titles, badges, the header, the gaps, the hero card, the game world
-/// (in-world nameplates), and the notice band all stay filled.
+/// (in-world nameplates) all stay filled, and digit cells keep only glyphs
+/// that pass every layer of [`paint_digit_cell`].
 pub fn blanked_scoreboard(
     frame: &DynamicImage,
     layout: TeamLayout,
@@ -473,34 +449,200 @@ pub fn blanked_scoreboard(
 /// The allowlist step of [`blanked_scoreboard`] on an already cut scoreboard
 /// crop (the tracker's `debug/accepted` ring holds such crops).
 pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout, own_row: Option<usize>) -> RgbImage {
+    // The six stat columns, from the header labels (the same detection the
+    // reader calibrates with). Without them no digit cell is kept.
+    allowlist_crop_with_columns(src, layout, own_row, stat_column_ranges(src).as_deref())
+}
+
+/// [`allowlist_crop`] with the stat column x ranges given. `None` keeps no
+/// digit cell (fail closed).
+pub fn allowlist_crop_with_columns(
+    src: &RgbImage,
+    layout: TeamLayout,
+    own_row: Option<usize>,
+    columns: Option<&[(u32, u32)]>,
+) -> RgbImage {
     let (w, h) = src.dimensions();
     let mut out = RgbImage::from_pixel(w, h, FILL);
-    // Portrait cells are opaque art and are copied as they are. The table
-    // rows behind the digits are translucent, so the game world shows
-    // through them, in-world nameplates included (QC1-7). In a digit cell only
-    // the digit glyphs are kept: they are drawn near-white on top of the row,
-    // while anything behind the row is tinted by its purple or yellow colour.
     let digits_from = frac(w, NAME_COLUMNS_6V6.digits_start);
+    let own_rect = match (layout, own_row) {
+        (TeamLayout::Five, Some(i)) => protected_rects(w, h, 5).get(i * 2 + 1).copied(),
+        (TeamLayout::Six, Some(i)) => protected_rects(w, h, 6).get(i * 2 + 1).copied(),
+        _ => None,
+    };
     for r in kept_rects(w, h, layout, own_row) {
         let r = r.clipped(w, h);
-        let digit_cell = r.x >= digits_from;
-        // Fail closed (R236-F): the glyph test only separates digits from the
-        // world behind the row when the row tint is coloured. A digit cell
-        // whose background is near-neutral (a grey team colour, a filter) is
-        // not kept at all.
-        if digit_cell && !row_tint_is_coloured(src, r) {
+        if r.x < digits_from {
+            // Portrait cells are opaque art and are copied as they are.
+            for py in r.y..r.y + r.h {
+                for px in r.x..r.x + r.w {
+                    out.put_pixel(px, py, *src.get_pixel(px, py));
+                }
+            }
             continue;
         }
+        if let Some(cols) = columns {
+            paint_digit_cell(src, &mut out, r, cols, own_rect == Some(r));
+        }
+    }
+    out
+}
+
+/// Stat column x ranges in crop pixels, `None` when the header labels are not
+/// found.
+pub fn stat_column_ranges(src: &RgbImage) -> Option<Vec<(u32, u32)>> {
+    let board = DynamicImage::ImageRgb8(src.clone());
+    let groups = crate::ocr::preprocess::header_label_groups(&board);
+    let cols = crate::ocr::preprocess::columns_from_header_groups(&groups, src.width())?;
+    let w = f64::from(src.width());
+    Some(
+        cols.iter()
+            .map(|(start, width)| ((start * w) as u32, ((start + width) * w).ceil() as u32))
+            .collect(),
+    )
+}
+
+/// Middle band of a row where digits are drawn, in thousandths of the row
+/// height. Glyph pixels above or below it are not kept.
+pub const DIGIT_BAND: (u32, u32) = (200, 800);
+
+/// Height range of one digit blob, in thousandths of the row height.
+pub const DIGIT_BLOB_H: (u32, u32) = (120, 450);
+
+/// Glyph pixels allowed in the gaps between the stat columns before the
+/// row counts as covered by text that is not a number (a notice, a nameplate).
+pub const GAP_GLYPH_MAX: usize = 3;
+
+/// Paint one digit cell (section 4): the cell's flat median colour, then the
+/// digit glyphs that pass every layer. The flat colour is one value per cell
+/// and carries no picture of what is behind the row.
+///
+/// Layers, all of which must pass:
+/// 1. colour: the row tint is coloured ([`row_tint_is_coloured`]);
+/// 2. structure: the gaps between the stat columns hold no glyph text; words
+///    such as a notice or a nameplate cross them, numbers never do;
+/// 3. position: only pixels inside a stat column and the row's digit band;
+/// 4. glyph: bright and neutral ([`is_glyph`]);
+/// 5. shape: each kept blob is digit-sized ([`DIGIT_BLOB_H`]).
+fn paint_digit_cell(src: &RgbImage, out: &mut RgbImage, r: Rect, cols: &[(u32, u32)], own: bool) {
+    if !row_tint_is_coloured(src, r) {
+        return;
+    }
+    let tint = median_colour(src, r);
+    for py in r.y..r.y + r.h {
+        for px in r.x..r.x + r.w {
+            out.put_pixel(px, py, tint);
+        }
+    }
+    let band_y0 = r.y + frac(r.h, DIGIT_BAND.0);
+    let band_y1 = r.y + frac(r.h, DIGIT_BAND.1);
+    let first_col = cols.first().map_or(r.x, |c| c.0);
+    let last_col = cols.last().map_or(r.x, |c| c.1);
+    let in_col = |x: u32| cols.iter().any(|&(a, b)| x >= a && x < b);
+    // Structure: glyph pixels in the gaps between the columns, inside the
+    // digit band, mean text that is not a number (a notice or a nameplate).
+    // The band keeps the row's edge lines out of the count, and the range
+    // ends at the last column so the voice icon right of it does not count.
+    let mut gap = 0usize;
+    for py in band_y0..band_y1.min(r.y + r.h) {
+        for px in first_col.max(r.x)..last_col.min(r.x + r.w) {
+            if !in_col(px) && is_glyph(*src.get_pixel(px, py)) {
+                gap += 1;
+            }
+        }
+    }
+    if gap > GAP_GLYPH_MAX {
+        return;
+    }
+    // The member's own ability icon, left of the first column: glyph pixels
+    // only, and only on their own row.
+    if own {
         for py in r.y..r.y + r.h {
-            for px in r.x..r.x + r.w {
+            for px in r.x..first_col.min(r.x + r.w) {
                 let p = *src.get_pixel(px, py);
-                if !digit_cell || is_glyph(p) {
+                if is_glyph(p) {
                     out.put_pixel(px, py, p);
                 }
             }
         }
     }
-    out
+    // Position + glyph: the candidate mask.
+    let (cw, ch) = (r.w as usize, r.h as usize);
+    let mut mask = vec![false; cw * ch];
+    for py in band_y0..band_y1.min(r.y + r.h) {
+        for px in r.x..r.x + r.w {
+            if in_col(px) && is_glyph(*src.get_pixel(px, py)) {
+                mask[(py - r.y) as usize * cw + (px - r.x) as usize] = true;
+            }
+        }
+    }
+    // Shape: keep blobs of digit height only.
+    let (hmin, hmax) = (frac(r.h, DIGIT_BLOB_H.0).max(2), frac(r.h, DIGIT_BLOB_H.1));
+    let mut seen = vec![false; cw * ch];
+    for start in 0..mask.len() {
+        if !mask[start] || seen[start] {
+            continue;
+        }
+        let mut stack = vec![start];
+        let mut blob = Vec::new();
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            blob.push(i);
+            let (x, y) = (i % cw, i / cw);
+            for (dx, dy) in [
+                (-1i64, 0i64),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, 1),
+                (-1, 1),
+                (1, -1),
+            ] {
+                let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                if nx < 0 || ny < 0 || nx >= cw as i64 || ny >= ch as i64 {
+                    continue;
+                }
+                let j = ny as usize * cw + nx as usize;
+                if mask[j] && !seen[j] {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        let (y0, y1) = blob
+            .iter()
+            .fold((usize::MAX, 0), |(a, b), &i| (a.min(i / cw), b.max(i / cw)));
+        let bh = (y1 - y0 + 1) as u32;
+        // Commas and specks are shorter than a digit and are dropped.
+        if bh < hmin || bh > hmax {
+            continue;
+        }
+        for &i in &blob {
+            let (x, y) = (r.x + (i % cw) as u32, r.y + (i / cw) as u32);
+            out.put_pixel(x, y, *src.get_pixel(x, y));
+        }
+    }
+}
+
+fn median_colour(src: &RgbImage, r: Rect) -> Rgb<u8> {
+    let mut ch: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for y in r.y..r.y + r.h {
+        for x in r.x..r.x + r.w {
+            for (i, v) in src.get_pixel(x, y).0.iter().enumerate() {
+                ch[i].push(*v);
+            }
+        }
+    }
+    let mut m = [0u8; 3];
+    for (i, c) in ch.iter_mut().enumerate() {
+        if c.is_empty() {
+            return FILL;
+        }
+        c.sort_unstable();
+        m[i] = c[c.len() / 2];
+    }
+    Rgb(m)
 }
 
 /// Darkest channel a kept digit-cell pixel may have. White digits and the
@@ -657,66 +799,44 @@ mod tests {
     }
 
     #[test]
-    fn every_name_pixel_is_filled_and_protected_pixels_are_untouched() {
+    fn every_name_pixel_is_filled_and_nothing_outside_the_kept_cells_survives() {
+        // A noise frame has no header labels, so no stat columns are found:
+        // digit cells keep nothing (fail closed), portraits are copied whole.
         for (w, h) in SIZES {
             let frame = noise_frame(w, h);
-            let orig_sb = crop_scoreboard_rect(w, h);
+            let sb = crop_scoreboard_rect(w, h);
             let orig = frame.to_rgb8();
             for (ts, layout) in [(5, TeamLayout::Five), (6, TeamLayout::Six)] {
-                let own = Some(1);
-                let out = blanked_scoreboard(&frame, layout, own);
-                assert_eq!(out.dimensions(), (orig_sb.2, orig_sb.3));
-                for n in name_rects(orig_sb.2, orig_sb.3, layout) {
+                let out = blanked_scoreboard(&frame, layout, Some(1));
+                assert_eq!(out.dimensions(), (sb.2, sb.3));
+                for n in name_rects(sb.2, sb.3, layout) {
                     for y in n.y..n.y + n.h {
                         for x in n.x..n.x + n.w {
-                            assert_eq!(*out.get_pixel(x, y), FILL, "{w}x{h} {ts} name px {x},{y}");
+                            assert_eq!(*out.get_pixel(x, y), FILL, "{w}x{h} {ts} name {x},{y}");
                         }
                     }
                 }
-                let kept = kept_rects(orig_sb.2, orig_sb.3, layout, own);
-                let digits_from = frac(orig_sb.2, NAME_COLUMNS_6V6.digits_start);
-                let orig_crop = image::imageops::crop_imm(
-                    &blank_scoreboard_frame(&frame, layout),
-                    orig_sb.0,
-                    orig_sb.1,
-                    orig_sb.2,
-                    orig_sb.3,
-                )
-                .to_image();
-                for p in &kept {
-                    let coloured = row_tint_is_coloured(&orig_crop, *p);
-                    for y in p.y..p.y + p.h {
-                        for x in p.x..p.x + p.w {
-                            let src = *orig.get_pixel(orig_sb.0 + x, orig_sb.1 + y);
-                            let got = *out.get_pixel(x, y);
-                            if p.x < digits_from || (coloured && is_glyph(src)) {
-                                assert_eq!(got, src, "{w}x{h} {ts} kept px {x},{y}");
-                            } else {
-                                assert_eq!(got, FILL, "{w}x{h} {ts} non-glyph px {x},{y}");
-                            }
-                        }
-                    }
-                }
-                // Allowlist: every other pixel is the fill colour.
+                let digits_from = frac(sb.2, NAME_COLUMNS_6V6.digits_start);
+                let portraits: Vec<_> = kept_rects(sb.2, sb.3, layout, Some(1))
+                    .into_iter()
+                    .filter(|r| r.x < digits_from)
+                    .collect();
                 for y in 0..out.height() {
                     for x in 0..out.width() {
-                        let inside = kept
+                        let in_portrait = portraits
                             .iter()
                             .any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
-                        if !inside {
-                            assert_eq!(*out.get_pixel(x, y), FILL, "{w}x{h} {ts} px {x},{y}");
-                        }
+                        let want = if in_portrait {
+                            *orig.get_pixel(sb.0 + x, sb.1 + y)
+                        } else {
+                            FILL
+                        };
+                        assert_eq!(*out.get_pixel(x, y), want, "{w}x{h} {ts} px {x},{y}");
                     }
                 }
-                // Kept cells are only portrait and digit cells left of the
-                // table edge, never in the notice band.
-                let band = notice_band(orig_sb.2, orig_sb.3);
-                let table_end = frac(orig_sb.2, TABLE_END);
-                for r in &kept {
-                    assert!(
-                        !r.intersects(&band),
-                        "{w}x{h} {ts} {r:?} in the notice band"
-                    );
+                let table_end = frac(sb.2, TABLE_END);
+                for r in kept_rects(sb.2, sb.3, layout, Some(1)) {
+                    assert!(r.x >= frac(sb.2, PORTRAIT_START), "{r:?}");
                     assert!(
                         r.x + r.w <= table_end,
                         "{w}x{h} {ts} {r:?} right of the table"
@@ -736,24 +856,21 @@ mod tests {
         let (sx, sy, cw, ch) = crop_scoreboard_rect(w, h);
         let mut img = noise_frame(w, h).to_rgb8();
         let white = Rgb([255, 255, 255]);
-        let mut paint = |x0: u32, x1: u32, y0: u32, y1: u32| {
+        let spots = [
+            (364, 631, 791, 831),
+            (600, 700, 500, 540),
+            (950, 1000, 0, 60),
+            (0, PORTRAIT_START, 100, 400),
+        ];
+        for (x0, x1, y0, y1) in spots {
             for y in frac(ch, y0)..frac(ch, y1) {
                 for x in frac(cw, x0)..frac(cw, x1) {
                     img.put_pixel(sx + x, sy + y, white);
                 }
             }
-        };
-        paint(364, 631, 791, 831);
-        paint(600, 700, 500, 540);
-        paint(950, 1000, 0, 60);
-        paint(0, PORTRAIT_START, 100, 400);
+        }
         let out = blanked_scoreboard(&DynamicImage::ImageRgb8(img), TeamLayout::Six, Some(0));
-        for (x0, x1, y0, y1) in [
-            (364, 631, 791, 831),
-            (600, 700, 500, 540),
-            (950, 1000, 0, 60),
-            (0, PORTRAIT_START, 100, 400),
-        ] {
+        for (x0, x1, y0, y1) in spots {
             for y in frac(ch, y0)..frac(ch, y1) {
                 for x in frac(cw, x0)..frac(cw, x1) {
                     assert_eq!(
@@ -763,13 +880,6 @@ mod tests {
                     );
                 }
             }
-        }
-        // Every kept cell starts at the role bar or right of it, and a row
-        // that touches the band keeps nothing.
-        let band = notice_band(cw, ch);
-        for r in kept_rects(cw, ch, TeamLayout::Six, Some(0)) {
-            assert!(r.x >= frac(cw, PORTRAIT_START), "{r:?}");
-            assert!(!r.intersects(&band), "{r:?}");
         }
     }
 
@@ -784,137 +894,227 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn world_text_behind_a_translucent_row_is_flattened_and_digits_stay() {
-        // QC1-7: a nameplate (red, white) and a white world label behind the
-        // purple team-1 and yellow team-2 rows, plus a white digit and a dim
-        // zero drawn on top. Each case is the member's own row.
+    const PURPLE: Rgb<u8> = Rgb([64, 22, 64]);
+    const YELLOW: Rgb<u8> = Rgb([180, 140, 20]);
+    const WHITE: Rgb<u8> = Rgb([255, 255, 255]);
+    const DIM_ZERO: Rgb<u8> = Rgb([172, 170, 172]);
+
+    /// A 6v6 crop with flat team tints on the digit cells and the six stat
+    /// columns where the member's boards draw them (centres in per mille of
+    /// the crop width: E 300, A 335, D 372, DMG 430, H 491, MIT 555).
+    fn synthetic_board(tint1: Rgb<u8>, tint2: Rgb<u8>) -> (RgbImage, Vec<(u32, u32)>, Vec<Rect>) {
         let (cw, ch) = (1664, 1007);
-        let purple = Rgb([110, 20, 120]);
-        let yellow = Rgb([200, 160, 20]);
-        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
-        let world = [
-            Rgb([255, 255, 255]),
-            Rgb([255, 60, 60]),
-            Rgb([200, 200, 200]),
-        ];
-        for (own, tint) in [(0usize, purple), (6, yellow)] {
-            let mut src = RgbImage::from_pixel(cw, ch, Rgb([40, 40, 40]));
-            let cell = *kept_rects(cw, ch, TeamLayout::Six, Some(own))
-                .iter()
-                .find(|r| r.x >= digits_from)
-                .expect("own row digit cell");
-            for y in cell.y..cell.y + cell.h {
-                for x in cell.x..cell.x + cell.w {
-                    let behind = if x < cell.x + cell.w / 2 {
-                        world[(x as usize) % 3]
-                    } else {
-                        Rgb([40, 40, 40])
-                    };
-                    src.put_pixel(x, y, blend(behind, tint, 180));
+        let mut img = RgbImage::from_pixel(cw, ch, Rgb([30, 30, 30]));
+        let cells: Vec<Rect> = protected_rects(cw, ch, 6)
+            .into_iter()
+            .skip(1)
+            .step_by(2)
+            .collect();
+        for (i, c) in cells.iter().enumerate() {
+            let tint = if i < 6 { tint1 } else { tint2 };
+            for y in c.y..c.y + c.h {
+                for x in c.x..c.x + c.w {
+                    img.put_pixel(x, y, tint);
                 }
             }
-            for y in cell.y + 5..cell.y + 15 {
-                for x in cell.x + cell.w - 20..cell.x + cell.w - 10 {
-                    src.put_pixel(x, y, Rgb([255, 255, 255]));
-                }
-                for x in cell.x + cell.w - 40..cell.x + cell.w - 30 {
-                    src.put_pixel(x, y, Rgb([172, 170, 172]));
-                }
+        }
+        let cols = [
+            (300, 26),
+            (335, 26),
+            (372, 26),
+            (430, 48),
+            (491, 48),
+            (555, 48),
+        ]
+        .iter()
+        .map(|&(c, wd)| (frac(cw, c - wd / 2), frac(cw, c + wd / 2)))
+        .collect();
+        (img, cols, cells)
+    }
+
+    /// A digit-sized blob (a quarter of the row height, 8 px wide) centred in
+    /// column `col` of `cell`.
+    fn draw_digit(img: &mut RgbImage, cell: Rect, col: (u32, u32), colour: Rgb<u8>) -> (u32, u32) {
+        let cx = (col.0 + col.1) / 2;
+        let dh = cell.h / 4;
+        let y0 = cell.y + (cell.h - dh) / 2;
+        for y in y0..y0 + dh {
+            for x in cx - 4..cx + 4 {
+                img.put_pixel(x, y, colour);
             }
-            let out = allowlist_crop(&src, TeamLayout::Six, Some(own));
-            for y in cell.y..cell.y + cell.h {
-                for x in cell.x..cell.x + cell.w / 2 {
-                    assert_eq!(*out.get_pixel(x, y), FILL, "world text kept at {x},{y}");
-                }
+        }
+        (cx, y0 + dh / 2)
+    }
+
+    #[test]
+    fn digits_on_every_row_are_kept_on_a_coloured_board() {
+        let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+        let mut marks = Vec::new();
+        for c in &cells {
+            for (i, col) in cols.iter().enumerate() {
+                marks.push((
+                    *c,
+                    draw_digit(
+                        &mut img,
+                        *c,
+                        *col,
+                        if i % 2 == 0 { WHITE } else { DIM_ZERO },
+                    ),
+                ));
             }
-            assert_eq!(
-                *out.get_pixel(cell.x + cell.w - 15, cell.y + 10),
-                Rgb([255, 255, 255])
-            );
-            assert_eq!(
-                *out.get_pixel(cell.x + cell.w - 35, cell.y + 10),
-                Rgb([172, 170, 172])
-            );
+        }
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, Some(0), Some(&cols));
+        for (c, (x, y)) in marks {
+            let want = *img.get_pixel(x, y);
+            assert_eq!(*out.get_pixel(x, y), want, "digit lost at {x},{y} in {c:?}");
+        }
+        // The cell background is the flat row colour.
+        for (i, c) in cells.iter().enumerate() {
+            let tint = if i < 6 { PURPLE } else { YELLOW };
+            assert_eq!(*out.get_pixel(c.x + 2, c.y + 2), tint, "row {i}");
         }
     }
 
     #[test]
-    fn only_the_own_row_keeps_digit_cells() {
-        // QC1-8: other rows keep their portrait only, whatever the colours.
-        let (cw, ch) = (1664, 1007);
-        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
-        for layout in [TeamLayout::Five, TeamLayout::Six] {
-            let n = if layout == TeamLayout::Six { 12 } else { 10 };
-            for own in 0..n {
-                let digits: Vec<_> = kept_rects(cw, ch, layout, Some(own))
-                    .into_iter()
-                    .filter(|r| r.x >= digits_from)
-                    .collect();
-                assert!(digits.len() <= 1, "{layout:?} own {own}: {digits:?}");
+    fn world_text_behind_a_translucent_row_is_flattened() {
+        // QC1-7: a nameplate (white, red) and a grey world label behind the
+        // purple and yellow rows at about 70 % tint, inside the stat columns
+        // and the digit band; a white digit and a dim zero drawn on top.
+        let (cw, ch) = (1664usize, 1007usize);
+        let _ = (cw, ch);
+        for (row, tint) in [(0usize, PURPLE), (8, YELLOW)] {
+            let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+            let cell = cells[row];
+            let behind = [WHITE, Rgb([255, 60, 60]), Rgb([200, 200, 200])];
+            for (k, col) in cols.iter().enumerate().take(3) {
+                let cx = (col.0 + col.1) / 2;
+                let y0 = cell.y + cell.h * 2 / 5;
+                for y in y0..y0 + cell.h / 4 {
+                    for x in cx - 6..cx + 6 {
+                        img.put_pixel(x, y, blend(behind[k], tint, 180));
+                    }
+                }
             }
-            let none: Vec<_> = kept_rects(cw, ch, layout, None)
-                .into_iter()
-                .filter(|r| r.x >= digits_from)
-                .collect();
-            assert!(
-                none.is_empty(),
-                "{layout:?} without an own row kept {none:?}"
-            );
+            let d = draw_digit(&mut img, cell, cols[4], WHITE);
+            let z = draw_digit(&mut img, cell, cols[5], DIM_ZERO);
+            let out = allowlist_crop_with_columns(&img, TeamLayout::Six, None, Some(&cols));
+            for col in cols.iter().take(3) {
+                let cx = (col.0 + col.1) / 2;
+                let y = cell.y + cell.h / 2;
+                assert_eq!(*out.get_pixel(cx, y), tint, "world text kept in row {row}");
+            }
+            assert_eq!(*out.get_pixel(d.0, d.1), WHITE);
+            assert_eq!(*out.get_pixel(z.0, z.1), DIM_ZERO);
         }
-        assert!(
-            kept_rects(cw, ch, TeamLayout::Unknown, Some(0))
-                .iter()
-                .all(|r| r.x < digits_from),
-            "unknown team size kept a digit cell"
-        );
-        // A white nameplate behind a grey row on ANOTHER row is filled even
-        // though the glyph and tint tests would pass it (the QC1-8 forge).
-        let grey = Rgb([90, 90, 92]);
-        let mut src = RgbImage::from_pixel(cw, ch, Rgb([60, 120, 220]));
-        let other = protected_rects(cw, ch, 6)[2 * 3 + 1];
-        for y in other.y + 2..other.y + 12 {
-            for x in other.x + 10..other.x + 80 {
-                src.put_pixel(x, y, Rgb([235, 235, 235]));
+    }
+
+    #[test]
+    fn text_across_the_column_gaps_drops_the_row() {
+        // A notice or a nameplate drawn on top is a line of words: it crosses
+        // the gaps between the stat columns. That row keeps no digits; the
+        // others do.
+        let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+        let mut marks = Vec::new();
+        for c in &cells {
+            marks.push(draw_digit(&mut img, *c, cols[3], WHITE));
+        }
+        let row = cells[9];
+        let y0 = row.y + row.h * 2 / 5;
+        for y in y0..y0 + row.h / 5 {
+            for x in cols[0].0..cols[5].1 {
+                if (x / 6) % 2 == 0 {
+                    img.put_pixel(x, y, WHITE);
+                }
             }
         }
-        let _ = grey;
-        let out = allowlist_crop(&src, TeamLayout::Six, Some(0));
-        for y in other.y..other.y + other.h {
-            for x in other.x..other.x + other.w {
-                assert_eq!(*out.get_pixel(x, y), FILL, "{x},{y}");
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, None, Some(&cols));
+        for y in row.y..row.y + row.h {
+            for x in row.x..row.x + row.w {
+                assert_ne!(
+                    *out.get_pixel(x, y),
+                    WHITE,
+                    "text row kept a glyph at {x},{y}"
+                );
             }
         }
+        for (i, (x, y)) in marks.iter().enumerate() {
+            if i != 9 {
+                assert_eq!(*out.get_pixel(*x, *y), WHITE, "row {i} lost its digit");
+            }
+        }
+    }
+
+    #[test]
+    fn glyphs_outside_the_band_or_not_digit_sized_are_dropped() {
+        let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+        let cell = cells[2];
+        let d = draw_digit(&mut img, cell, cols[3], WHITE);
+        // Above the digit band, inside a column.
+        let cx = (cols[1].0 + cols[1].1) / 2;
+        for y in cell.y + 1..cell.y + cell.h / 8 {
+            for x in cx - 3..cx + 3 {
+                img.put_pixel(x, y, WHITE);
+            }
+        }
+        // A speck, and a bar taller than a digit, inside the band.
+        let sx = (cols[0].0 + cols[0].1) / 2;
+        img.put_pixel(sx, cell.y + cell.h / 2, WHITE);
+        let tx = (cols[2].0 + cols[2].1) / 2;
+        for y in cell.y + cell.h / 5..cell.y + cell.h * 4 / 5 {
+            img.put_pixel(tx, y, WHITE);
+        }
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, None, Some(&cols));
+        assert_eq!(*out.get_pixel(d.0, d.1), WHITE);
+        assert_ne!(*out.get_pixel(cx, cell.y + 3), WHITE, "above the band");
+        assert_ne!(*out.get_pixel(sx, cell.y + cell.h / 2), WHITE, "speck");
+        assert_ne!(*out.get_pixel(tx, cell.y + cell.h / 2), WHITE, "tall bar");
     }
 
     #[test]
     fn a_neutral_row_tint_keeps_no_digit_cell() {
-        // R236-F: white world text behind a grey row stays neutral and bright,
-        // so the glyph test alone would keep it. The cell is dropped instead.
-        let (cw, ch) = (1664, 1007);
+        // R236-F: white text behind a grey row stays neutral and bright, so
+        // the glyph test alone would keep it. The row keeps no glyphs.
         let grey = Rgb([90, 90, 92]);
-        let mut src = RgbImage::from_pixel(cw, ch, grey);
-        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
-        let cell = *kept_rects(cw, ch, TeamLayout::Six, Some(0))
-            .iter()
-            .find(|r| r.x >= digits_from)
-            .unwrap();
-        for y in cell.y + 2..cell.y + 12 {
-            for x in cell.x + 10..cell.x + 60 {
-                src.put_pixel(x, y, blend(Rgb([255, 255, 255]), grey, 60));
-            }
-        }
-        assert!(!row_tint_is_coloured(&src, cell));
-        let out = allowlist_crop(&src, TeamLayout::Six, Some(0));
-        for y in cell.y..cell.y + cell.h {
-            for x in cell.x..cell.x + cell.w {
-                assert_eq!(*out.get_pixel(x, y), FILL, "{x},{y}");
-            }
-        }
+        let (mut img, cols, cells) = synthetic_board(grey, grey);
+        let cell = cells[1];
+        let d = draw_digit(&mut img, cell, cols[3], blend(WHITE, grey, 60));
+        assert!(!row_tint_is_coloured(&img, cell));
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, None, Some(&cols));
+        assert_eq!(*out.get_pixel(d.0, d.1), FILL);
         // The member's real row colours pass.
         for tint in [Rgb([55, 20, 55]), Rgb([64, 31, 50]), Rgb([200, 160, 20])] {
-            let img = RgbImage::from_pixel(cw, ch, tint);
-            assert!(row_tint_is_coloured(&img, cell), "{tint:?}");
+            let flat = RgbImage::from_pixel(1664, 1007, tint);
+            assert!(row_tint_is_coloured(&flat, cell), "{tint:?}");
+        }
+    }
+
+    #[test]
+    fn without_stat_columns_no_digit_cell_is_kept() {
+        let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+        let d = draw_digit(&mut img, cells[0], cols[0], WHITE);
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, Some(0), None);
+        assert_eq!(*out.get_pixel(d.0, d.1), FILL);
+    }
+
+    #[test]
+    fn only_the_own_row_keeps_its_ability_icon() {
+        let (mut img, cols, cells) = synthetic_board(PURPLE, YELLOW);
+        let icon_x = (cells[0].x + cols[0].0) / 2;
+        for c in &cells {
+            for y in c.y + c.h / 3..c.y + c.h * 2 / 3 {
+                for x in icon_x - 5..icon_x + 5 {
+                    img.put_pixel(x, y, WHITE);
+                }
+            }
+        }
+        let out = allowlist_crop_with_columns(&img, TeamLayout::Six, Some(3), Some(&cols));
+        for (i, c) in cells.iter().enumerate() {
+            let p = *out.get_pixel(icon_x, c.y + c.h / 2);
+            if i == 3 {
+                assert_eq!(p, WHITE, "own row icon");
+            } else {
+                assert_ne!(p, WHITE, "row {i} kept an icon");
+            }
         }
     }
 
