@@ -8122,6 +8122,7 @@ mod tests {
                         confidence: 80,
                         suspect: false,
                     }),
+                    name_alternates: Vec::new(),
                     stats: values
                         .iter()
                         .map(|value| ocr::CellOcrResult {
@@ -8401,6 +8402,7 @@ mod tests {
             let rows: Vec<ocr::RowOcrResult> = (0..10)
                 .map(|i| ocr::RowOcrResult {
                     name: None,
+                    name_alternates: Vec::new(),
                     stats: ["12", "3", "4", "5,480", "950", "2,347"]
                         .iter()
                         .map(|v| ocr::CellOcrResult {
