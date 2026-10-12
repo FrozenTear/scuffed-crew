@@ -16,7 +16,9 @@ use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::hotkey::{self, OverlayHotkey};
-use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
+use crate::model::{
+    EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel, local_hm,
+};
 use crate::notes::{self, ShownRelease};
 use crate::overlay::{self, CompanionChild, OverlayHold};
 use crate::seasons::{self, SeasonCache};
@@ -140,6 +142,13 @@ fn toast_after_successful_save(daemon_up: bool) -> &'static str {
 /// Dismiss clears the toast, including the unreadable-config error.
 fn toast_after_dismiss() -> Option<String> {
     None
+}
+
+/// A toast that is not the training prompt. Replacing the text drops the
+/// action, so "Send this fix" cannot sit on a later message.
+fn show_plain_toast(toast: &mut Option<String>, action: &mut Option<Message>, text: String) {
+    *toast = Some(text);
+    *action = None;
 }
 
 fn refused_toast_expired(
@@ -342,6 +351,8 @@ pub struct TrackerApp {
     pub filter_map: Option<String>,
     pub filter_outcome: Option<Outcome>,
     pub toast: Option<String>,
+    /// Optional press on the toast. The training prompt uses this.
+    toast_action: Option<Message>,
     /// When the unreadable-config toast was shown. Cleared with the toast.
     toast_shown_at: Option<SystemTime>,
     pub settings: SettingsForm,
@@ -532,6 +543,7 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             toast: None,
+            toast_action: None,
             toast_shown_at: None,
             settings,
             saved_config,
@@ -695,6 +707,10 @@ impl TrackerApp {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // A toast action belongs to the toast that set it. Tick keeps it up.
+        if !matches!(&message, Message::Tick | Message::Report(_)) {
+            self.toast_action = None;
+        }
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
@@ -791,12 +807,19 @@ impl TrackerApp {
                 session_id,
                 outcome,
             } => {
-                self.toast = Some(
-                    match crate::commands::set_outcome(&self.data_dir, &session_id, outcome) {
-                        Ok(()) => format!("Outcome set to {}", outcome.store_label()),
-                        Err(e) => format!("Could not save outcome: {e}"),
-                    },
-                );
+                let label = outcome.store_label();
+                match crate::commands::set_outcome(&self.data_dir, &session_id, outcome) {
+                    Ok(()) => {
+                        self.toast = Some(format!("Outcome set to {label}"));
+                        self.arm_training_toast(
+                            &session_id,
+                            crate::report::GameCategory::WrongResult,
+                        );
+                    }
+                    Err(e) => {
+                        self.toast = Some(format!("Could not save outcome: {e}"));
+                    }
+                }
                 Task::none()
             }
             Message::ConfirmDelete(sid) => {
@@ -835,35 +858,47 @@ impl TrackerApp {
                 Task::none()
             }
             Message::SaveEdit => {
-                if let Some(sid) = &self.expanded
-                    && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
-                {
-                    self.toast = Some(
-                        match crate::commands::save_edit(&self.data_dir, g, &self.edit) {
-                            Ok(()) => "Stats corrected".into(),
-                            Err(e) => e,
-                        },
-                    );
+                let sid = self.expanded.clone();
+                let saved = sid.as_ref().and_then(|sid| {
+                    self.games
+                        .iter()
+                        .find(|g| &g.session_id == sid)
+                        .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
+                });
+                if let Some(sid) = sid {
+                    match saved {
+                        Some(Ok(())) => {
+                            self.toast = Some("Stats corrected".into());
+                            self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
+                        }
+                        Some(Err(e)) => self.toast = Some(e),
+                        None => {}
+                    }
                 }
                 self.editing = false;
                 Task::none()
             }
             Message::PickMap { session_id, map } => {
-                self.toast = Some(
-                    match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
-                        Ok(()) => "Map saved".into(),
-                        Err(e) => format!("Could not save map: {e}"),
-                    },
-                );
+                match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
+                    Ok(()) => {
+                        self.toast = Some("Map saved".into());
+                        self.arm_training_toast(&session_id, crate::report::GameCategory::WrongMap);
+                    }
+                    Err(e) => self.toast = Some(format!("Could not save map: {e}")),
+                }
                 Task::none()
             }
             Message::PickHero { session_id, hero } => {
-                self.toast = Some(
-                    match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
-                        Ok(()) => "Hero saved".into(),
-                        Err(e) => format!("Could not save hero: {e}"),
-                    },
-                );
+                match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
+                    Ok(()) => {
+                        self.toast = Some("Hero saved".into());
+                        self.arm_training_toast(
+                            &session_id,
+                            crate::report::GameCategory::WrongHero,
+                        );
+                    }
+                    Err(e) => self.toast = Some(format!("Could not save hero: {e}")),
+                }
                 Task::none()
             }
             Message::RetryUpload(session_id) => {
@@ -1191,6 +1226,7 @@ impl TrackerApp {
             }
             Message::DismissToast => {
                 self.toast = toast_after_dismiss();
+                self.toast_action = None;
                 self.toast_shown_at = None;
                 Task::none()
             }
@@ -1440,7 +1476,44 @@ impl TrackerApp {
 
     /// Start a build for the dialog's current inputs. A result for an older
     /// generation is dropped when it lands.
+    fn game_choices(&self) -> Vec<crate::report::GameChoice> {
+        self.games
+            .iter()
+            .map(|game| crate::report::GameChoice {
+                session_id: game.session_id.clone(),
+                label: format!(
+                    "{} · {} · {}",
+                    game.display_hero(),
+                    game.display_map(),
+                    local_hm(game.played_at)
+                ),
+                has_kit: crate::report::has_kit(&self.data_dir, &game.session_id),
+            })
+            .collect()
+    }
+
+    fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
+        self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
+            session_id: Some(session_id.to_string()),
+            category,
+            training: true,
+            choices: Vec::new(),
+        }));
+        self.toast_shown_at = None;
+    }
+
     fn rebuild_report(&mut self) -> Task<Message> {
+        if matches!(
+            &self.report,
+            Some(crate::report::ReportUi::Dialog(dialog)) if dialog.is_game()
+        ) {
+            if let Some(dialog) = self.report_dialog_mut() {
+                dialog.text_edited_at = None;
+                dialog.building = None;
+                dialog.built = None;
+            }
+            return Task::none();
+        }
         let mut config = self.saved_config.clone();
         config.data_dir = self.data_dir.clone();
         let capture_backend = self.backend.unwrap_or(CaptureBackend::None);
@@ -1475,6 +1548,33 @@ impl TrackerApp {
                 self.report = Some(ReportUi::Dialog(ReportDialog::new(category, linked)));
                 self.rebuild_report()
             }
+            ReportMessage::OpenGame {
+                session_id,
+                category,
+                training,
+                choices,
+            } => {
+                if self.report_dialog_mut().is_some_and(|d| d.busy()) {
+                    return Task::none();
+                }
+                let linked = self.saved_config.sync.is_some();
+                let mut dialog = ReportDialog::new(LogOnlyCategory::Other, linked);
+                dialog.game_category = Some(category);
+                dialog.game_session = session_id.clone();
+                dialog.training = training;
+                dialog.game_choices = if choices.is_empty() {
+                    self.game_choices()
+                } else {
+                    choices
+                };
+                if let Some(session_id) = &session_id {
+                    dialog.kit_images = crate::report::load_kit_images(&self.data_dir, session_id);
+                }
+                self.report = Some(ReportUi::Dialog(dialog));
+                self.toast = None;
+                self.toast_action = None;
+                Task::none()
+            }
             ReportMessage::CrashYes => {
                 let linked = self.saved_config.sync.is_some();
                 self.report = Some(ReportUi::Dialog(ReportDialog::new(
@@ -1500,11 +1600,63 @@ impl TrackerApp {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.category == category {
+                if d.category == category && d.game_category.is_none() {
                     return Task::none();
                 }
                 d.category = category;
+                d.game_category = None;
+                d.game_session = None;
+                d.kit_images.clear();
                 self.rebuild_report()
+            }
+            ReportMessage::GameCategory(category) => {
+                let choices = self.game_choices();
+                let session = self
+                    .report_dialog_mut()
+                    .and_then(|dialog| dialog.game_session.clone());
+                let images = if category.allows_missing_kit() {
+                    Vec::new()
+                } else {
+                    session
+                        .as_deref()
+                        .map(|session_id| {
+                            crate::report::load_kit_images(&self.data_dir, session_id)
+                        })
+                        .unwrap_or_default()
+                };
+                let Some(dialog) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                if dialog.busy() || dialog.sent() {
+                    return Task::none();
+                }
+                dialog.game_category = Some(category);
+                if dialog.game_choices.is_empty() {
+                    dialog.game_choices = choices;
+                }
+                if category.allows_missing_kit() {
+                    dialog.game_session = None;
+                }
+                dialog.kit_images = images;
+                self.rebuild_report()
+            }
+            ReportMessage::PickGame(session_id) => {
+                let images = crate::report::load_kit_images(&self.data_dir, &session_id);
+                let Some(d) = self.report_dialog_mut() else {
+                    return Task::none();
+                };
+                if d.busy() || d.sent() {
+                    return Task::none();
+                }
+                d.game_session = Some(session_id);
+                d.kit_images = images;
+                self.rebuild_report()
+            }
+            ReportMessage::ToggleImageScale => {
+                if let Some(d) = self.report_dialog_mut() {
+                    d.image_actual = !d.image_actual;
+                }
+                Task::none()
             }
             ReportMessage::Training(on) => {
                 let Some(d) = self.report_dialog_mut() else {
@@ -1830,6 +1982,7 @@ impl TrackerApp {
             SystemTime::now(),
         ) {
             self.toast = None;
+            self.toast_action = None;
             self.toast_shown_at = None;
         }
     }
@@ -1884,7 +2037,7 @@ impl TrackerApp {
             self.fixture,
             &mut self.overlay_spawn_blocked,
         ) {
-            self.toast = Some(err);
+            show_plain_toast(&mut self.toast, &mut self.toast_action, err);
         }
 
         let mut tasks = Vec::new();
@@ -1963,7 +2116,7 @@ impl TrackerApp {
             self.fixture,
             &mut self.overlay_spawn_blocked,
         ) {
-            self.toast = Some(err);
+            show_plain_toast(&mut self.toast, &mut self.toast_action, err);
         }
         Task::none()
     }
@@ -2008,7 +2161,7 @@ impl TrackerApp {
                 Length::Shrink
             });
         if let Some(t) = &self.toast {
-            content = content.push(widgets::toast_bar(t));
+            content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
         }
         content = content.push(
             responsive(|size| match self.screen {
@@ -2614,6 +2767,15 @@ token = \"secret-token-must-stay\"
             due
         ));
         assert_ne!(super::toast_after_successful_save(true), refused);
+    }
+
+    #[test]
+    fn a_later_toast_drops_the_training_action() {
+        let mut toast = Some("Outcome set to Victory".into());
+        let mut action = Some(super::Message::DismissToast);
+        super::show_plain_toast(&mut toast, &mut action, "The overlay did not start.".into());
+        assert_eq!(toast.as_deref(), Some("The overlay did not start."));
+        assert!(action.is_none());
     }
 
     #[test]

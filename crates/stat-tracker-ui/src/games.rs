@@ -64,6 +64,7 @@ fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Elemen
                 &app.edit,
                 confirm,
                 in_progress,
+                crate::report::has_kit(&app.data_dir, &g.session_id),
             ));
         } else {
             pending.push(g);
