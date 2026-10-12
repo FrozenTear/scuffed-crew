@@ -86,6 +86,22 @@ install_user_units() {
     install_data_dir_dropin "$systemd_dir" "${HOME:-}"
 }
 
+# Restart the daemon unit only when it is already running, so a running
+# tracker moves to the binary just installed (systemd keeps the old,
+# deleted binary until a restart). A stopped or never-enabled unit is left
+# alone. Prints "restarted" when it restarted the unit; never fails the
+# install.
+restart_running_daemon() {
+    local systemctl_bin="$1"
+    local unit="scuffed-stat-tracker.service"
+    if "$systemctl_bin" --user is-active --quiet "$unit" 2>/dev/null; then
+        if "$systemctl_bin" --user try-restart "$unit" 2>/dev/null; then
+            echo restarted
+        fi
+    fi
+    return 0
+}
+
 # Absolute data_dir from config.toml, or empty. Relative paths are skipped:
 # the unit cannot name them.
 data_dir_from_config() {
