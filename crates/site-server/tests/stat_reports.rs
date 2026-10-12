@@ -2304,3 +2304,75 @@ async fn v1_manifest_and_v2_game_manifest_with_null_team_size_store() {
     let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
     assert_eq!(status, StatusCode::CREATED, "v2: {body}");
 }
+
+/// v2 game report with the given `(path, screen_class)` crops.
+fn v2_crops_bundle(crops: &[(&str, &str)]) -> Built {
+    let log = b"synthetic log line\n".to_vec();
+    let png = tiny_png();
+    let mut entries = vec![log_file_entry(&log)];
+    let mut blobs = vec![("log.txt", log)];
+    for (path, class) in crops {
+        entries.push(json!({
+            "path": path,
+            "sha256": sha256_hex(&png),
+            "bytes": png.len(),
+            "role": "crop",
+            "screen_class": class
+        }));
+        blobs.push((path, png.clone()));
+    }
+    let mut manifest = manifest_shell(false, false, entries);
+    manifest["bundle_version"] = json!(2);
+    manifest["system"] = system_block();
+    zip_manifest(manifest, blobs)
+}
+
+#[tokio::test]
+async fn game_report_with_scoreboard_and_outcome_crops_stores() {
+    let h = harness().await;
+    let built = v2_crops_bundle(&[
+        ("crops/scoreboard.png", "scoreboard"),
+        ("crops/outcome.png", "outcome"),
+    ]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn outcome_crop_with_the_scoreboard_class_is_400() {
+    let h = harness().await;
+    let built = v2_crops_bundle(&[
+        ("crops/scoreboard.png", "scoreboard"),
+        ("crops/outcome.png", "scoreboard"),
+    ]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn scoreboard_or_frame_crop_with_the_outcome_class_is_400() {
+    let h = harness().await;
+    for path in ["crops/scoreboard.png", "crops/frame.png"] {
+        let built = v2_crops_bundle(&[(path, "outcome")]);
+        let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_crop_name_is_still_400_next_to_an_outcome_crop() {
+    let h = harness().await;
+    let built = v2_crops_bundle(&[
+        ("crops/outcome.png", "outcome"),
+        ("crops/foo.png", "scoreboard"),
+    ]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let built = v2_crops_bundle(&[("crops/foo.png", "outcome")]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Control: the same report without the unknown crop stores.
+    let built = v2_crops_bundle(&[("crops/outcome.png", "outcome")]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
