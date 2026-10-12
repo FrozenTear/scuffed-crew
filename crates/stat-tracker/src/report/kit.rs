@@ -179,7 +179,12 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
 pub fn encode_png(img: &RgbImage) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)
-        .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgb8,
+        )
         .map_err(io::Error::other)?;
     Ok(out)
 }
@@ -210,17 +215,35 @@ pub fn record_scoreboard(
     Ok(())
 }
 
-/// The `outcome.png` bytes for one polled frame, or `None`.
+/// Whether a polled frame may give `outcome.png` (spec section 3).
 ///
-/// `Some` only when `source` is the rank screen detector's hit on this same
-/// `frame` (the detector already held the word box still across ticks). A
-/// banner, accolade word, or end-title hit gives `None`: on those screens,
-/// and on a scoreboard, the box is not name-free (spec section 3).
+/// Only when the rank screen detector fired on this frame AND the scoreboard
+/// detector did not accept it. The rank word match is loose (a title such as
+/// "QUICKDRAW" contains DRAW), so a Tab-held scoreboard could fire it, and
+/// on a scoreboard the word box holds the member's portrait, badge, and
+/// title next to their name.
+pub fn rank_outcome_allowed(
+    source: Option<crate::detect::match_end::OutcomeSource>,
+    preflight: crate::detect::hero_portrait::ScoreboardPreflight,
+    rows_look_like_scoreboard: bool,
+) -> bool {
+    source == Some(crate::detect::match_end::OutcomeSource::RankScreen)
+        && preflight == crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
+        && !rows_look_like_scoreboard
+}
+
+/// The `outcome.png` bytes for one polled frame, or `None`
+/// ([`rank_outcome_allowed`] decides).
 pub fn rank_outcome_png(
     source: Option<crate::detect::match_end::OutcomeSource>,
     frame: &DynamicImage,
 ) -> Option<Vec<u8>> {
     if source != Some(crate::detect::match_end::OutcomeSource::RankScreen) {
+        return None;
+    }
+    let board = crate::ocr::preprocess::crop_scoreboard(frame);
+    let (preflight, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
+    if !rank_outcome_allowed(source, preflight, scan.looks_like_scoreboard()) {
         return None;
     }
     encode_png(&blank::outcome_band(frame)).ok()
@@ -293,7 +316,7 @@ pub fn prune(data_dir: &Path, keep: usize) {
         .filter(|p| p.is_dir())
         .map(|p| (modified(&p), p))
         .collect();
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
     for (_, p) in dirs.into_iter().skip(keep) {
         let _ = fs::remove_dir_all(p);
     }
@@ -350,9 +373,15 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let dir = session_dir(tmp.path(), "s-1").unwrap();
-            assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
             for f in [SCOREBOARD_PNG, READS_JSON] {
-                assert_eq!(fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
             }
         }
     }
@@ -367,7 +396,12 @@ mod tests {
             kinds.push(String::from_utf8_lossy(&png[i + 4..i + 8]).to_string());
             i += 12 + len;
         }
-        assert!(kinds.iter().all(|k| ["IHDR", "IDAT", "IEND"].contains(&k.as_str())), "{kinds:?}");
+        assert!(
+            kinds
+                .iter()
+                .all(|k| ["IHDR", "IDAT", "IEND"].contains(&k.as_str())),
+            "{kinds:?}"
+        );
     }
 
     #[test]
@@ -385,7 +419,14 @@ mod tests {
     fn only_the_newest_sessions_are_kept() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            record_scoreboard(tmp.path(), &format!("s{i}"), &frame(), TeamLayout::Five, &reads()).unwrap();
+            record_scoreboard(
+                tmp.path(),
+                &format!("s{i}"),
+                &frame(),
+                TeamLayout::Five,
+                &reads(),
+            )
+            .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
         prune(tmp.path(), 3);
@@ -409,15 +450,69 @@ mod tests {
     }
 
     #[test]
+    fn a_scoreboard_never_gives_an_outcome_crop_even_when_rank_screen_fired() {
+        use crate::detect::hero_portrait::ScoreboardPreflight as P;
+        use crate::detect::match_end::OutcomeSource as S;
+        // R235-2: a Tab-held board whose title contains DRAW fires RankScreen.
+        for pre in [P::Ready(5), P::Ready(6), P::TeamSizeUncertain] {
+            for rows in [false, true] {
+                assert!(!rank_outcome_allowed(Some(S::RankScreen), pre, rows), "{pre:?} {rows}");
+            }
+        }
+        assert!(!rank_outcome_allowed(Some(S::RankScreen), P::NotAScoreboard, true));
+        for src in [None, Some(S::Banner), Some(S::ResultWord), Some(S::EndTitle)] {
+            assert!(!rank_outcome_allowed(src, P::NotAScoreboard, false), "{src:?}");
+        }
+        assert!(rank_outcome_allowed(Some(S::RankScreen), P::NotAScoreboard, false));
+    }
+
+    /// QA harness on real frames, not in CI (members' frames never go in the
+    /// repo): `SCUFFED_QA_FRAMES=<dir> cargo test -p scuffed-stat-tracker
+    /// --lib real_frames_ -- --ignored --nocapture`. Every frame the
+    /// scoreboard detector accepts must give no outcome crop, whatever the
+    /// outcome detectors say.
+    #[test]
+    #[ignore]
+    fn real_frames_scoreboards_never_give_an_outcome_crop() {
+        use crate::detect::match_end::OutcomeSource;
+        let dir = std::env::var("SCUFFED_QA_FRAMES").expect("set SCUFFED_QA_FRAMES");
+        let (mut boards, mut rank_hits) = (0, 0);
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "png") {
+                continue;
+            }
+            let Ok(img) = image::open(&path) else { continue };
+            let board = crate::ocr::preprocess::crop_scoreboard(&img);
+            let (pre, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
+            let is_board = pre != crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
+                || scan.looks_like_scoreboard();
+            let real = crate::detect::match_end::detect_outcome_signal(&img).map(|(_, s)| s);
+            let forced = rank_outcome_png(Some(OutcomeSource::RankScreen), &img);
+            if is_board {
+                boards += 1;
+                assert!(forced.is_none(), "{}: scoreboard gave an outcome crop", path.display());
+            }
+            if real == Some(OutcomeSource::RankScreen) && rank_outcome_png(real, &img).is_some() {
+                rank_hits += 1;
+                println!("rank crop: {}", path.display());
+            }
+        }
+        println!("scoreboards checked: {boards}, rank crops: {rank_hits}");
+    }
+
+    #[test]
     fn a_real_scoreboard_frame_writes_no_outcome_crop() {
         // Q235-1: on a scoreboard the rank box holds the member's portrait,
         // badge, and title. The detectors must not call it a rank screen.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/vision-baseline");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/vision-baseline");
         let mut checked = 0;
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if !name.ends_with(".png") || !(name.contains("tab_board") || name.contains("postgame")) {
+            if !name.ends_with(".png") || !(name.contains("tab_board") || name.contains("postgame"))
+            {
                 continue;
             }
             let img = image::open(&path).unwrap();
@@ -436,7 +531,13 @@ mod tests {
         record_outcome_png(tmp.path(), "s-1", &png).unwrap();
         let png = load(tmp.path(), "s-1").outcome_png.expect("outcome");
         let img = image::load_from_memory(&png).unwrap();
-        assert_eq!((img.width(), img.height()), (1920 * 250 / 1000 - 1920 * 10 / 1000, 1080 * 225 / 1000 - 1080 * 145 / 1000));
+        assert_eq!(
+            (img.width(), img.height()),
+            (
+                1920 * 250 / 1000 - 1920 * 10 / 1000,
+                1080 * 225 / 1000 - 1080 * 145 / 1000
+            )
+        );
         // An outcome alone is not a reportable kit.
         assert!(!has_kit(tmp.path(), "s-1"));
     }

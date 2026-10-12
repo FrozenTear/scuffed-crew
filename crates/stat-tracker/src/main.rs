@@ -4831,7 +4831,14 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             save_accepted_frame(data_dir, scoreboard_img);
-            record_report_kit(data_dir, &target_session, &frame_img, team_size, &ocr_parsed, &parsed);
+            record_report_kit(
+                data_dir,
+                &target_session,
+                &frame_img,
+                team_size,
+                &ocr_parsed,
+                &parsed,
+            );
 
             // Re-derive the session's hero timeline from its RAW snapshots after
             // every capture (HS-1). A single capture can mislabel (career panel
@@ -5053,7 +5060,8 @@ fn record_report_kit(
     ocr_parsed: &storage::PersonalMatch,
     stored: &storage::PersonalMatch,
 ) {
-    let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size)) else {
+    let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
+    else {
         return;
     };
     let reads = stat_tracker::report::kit::KitReads::from_capture(
@@ -5064,11 +5072,19 @@ fn record_report_kit(
         layout,
         chrono::Utc::now(),
     );
-    let (data_dir, session_id, frame) = (data_dir.to_path_buf(), session_id.to_string(), frame.clone());
+    let (data_dir, session_id, frame) = (
+        data_dir.to_path_buf(),
+        session_id.to_string(),
+        frame.clone(),
+    );
     tokio::task::spawn_blocking(move || {
-        if let Err(e) =
-            stat_tracker::report::kit::record_scoreboard(&data_dir, &session_id, &frame, layout, &reads)
-        {
+        if let Err(e) = stat_tracker::report::kit::record_scoreboard(
+            &data_dir,
+            &session_id,
+            &frame,
+            layout,
+            &reads,
+        ) {
             tracing::debug!(error = %e, "report kit: scoreboard not written");
         }
     });

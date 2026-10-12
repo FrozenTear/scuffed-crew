@@ -60,10 +60,34 @@ pub struct PlayfieldRegion {
 
 /// Regions filled on every kept scoreboard frame, besides the name rows.
 pub const SCOREBOARD_REGIONS: [PlayfieldRegion; 4] = [
-    PlayfieldRegion { id: "overlay_top", x: 0, y: 0, w: 1000, h: 40 },
-    PlayfieldRegion { id: "overlay_bottom", x: 0, y: 960, w: 1000, h: 40 },
-    PlayfieldRegion { id: "kill_feed", x: 700, y: 40, w: 300, h: 105 },
-    PlayfieldRegion { id: "chat_below", x: 0, y: 855, w: 1000, h: 145 },
+    PlayfieldRegion {
+        id: "overlay_top",
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 40,
+    },
+    PlayfieldRegion {
+        id: "overlay_bottom",
+        x: 0,
+        y: 960,
+        w: 1000,
+        h: 40,
+    },
+    PlayfieldRegion {
+        id: "kill_feed",
+        x: 700,
+        y: 40,
+        w: 300,
+        h: 105,
+    },
+    PlayfieldRegion {
+        id: "chat_below",
+        x: 0,
+        y: 855,
+        w: 1000,
+        h: 145,
+    },
 ];
 
 /// Result word on the competitive summary (rank) screen, in thousandths of
@@ -192,7 +216,12 @@ pub fn name_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
         let x0 = frac(crop_w, c.name_start);
         let x1 = frac(crop_w, c.name_end);
         for (y, h) in row_bands(crop_h, ts) {
-            out.push(Rect { x: x0, y, w: x1 - x0, h });
+            out.push(Rect {
+                x: x0,
+                y,
+                w: x1 - x0,
+                h,
+            });
         }
     }
     out
@@ -206,8 +235,18 @@ pub fn protected_rects(crop_w: u32, crop_h: u32, team_size: usize) -> Vec<Rect> 
     let digits_x = frac(crop_w, c.digits_start);
     let mut out = Vec::new();
     for (y, h) in row_bands(crop_h, team_size) {
-        out.push(Rect { x: 0, y, w: portrait_w, h });
-        out.push(Rect { x: digits_x, y, w: crop_w - digits_x, h });
+        out.push(Rect {
+            x: 0,
+            y,
+            w: portrait_w,
+            h,
+        });
+        out.push(Rect {
+            x: digits_x,
+            y,
+            w: crop_w - digits_x,
+            h,
+        });
     }
     out
 }
@@ -230,10 +269,30 @@ fn playfield_rect(r: &PlayfieldRegion, (gx, gy, gw, gh): (u32, u32, u32, u32)) -
 fn outside_bands(frame_w: u32, frame_h: u32) -> Vec<Rect> {
     let (gx, gy, gw, gh) = game_rect_16_9(frame_w, frame_h);
     let mut out = vec![
-        Rect { x: 0, y: 0, w: gx, h: frame_h },
-        Rect { x: gx + gw, y: 0, w: frame_w.saturating_sub(gx + gw), h: frame_h },
-        Rect { x: 0, y: 0, w: frame_w, h: gy },
-        Rect { x: 0, y: gy + gh, w: frame_w, h: frame_h.saturating_sub(gy + gh) },
+        Rect {
+            x: 0,
+            y: 0,
+            w: gx,
+            h: frame_h,
+        },
+        Rect {
+            x: gx + gw,
+            y: 0,
+            w: frame_w.saturating_sub(gx + gw),
+            h: frame_h,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            w: frame_w,
+            h: gy,
+        },
+        Rect {
+            x: 0,
+            y: gy + gh,
+            w: frame_w,
+            h: frame_h.saturating_sub(gy + gh),
+        },
     ];
     out.retain(|r| r.w > 0 && r.h > 0);
     out
@@ -332,7 +391,13 @@ pub fn outcome_band(frame: &DynamicImage) -> RgbImage {
 mod tests {
     use super::*;
 
-    const SIZES: [(u32, u32); 5] = [(1920, 1080), (2560, 1440), (3440, 1440), (1920, 1200), (1280, 720)];
+    const SIZES: [(u32, u32); 5] = [
+        (1920, 1080),
+        (2560, 1440),
+        (3440, 1440),
+        (1920, 1200),
+        (1280, 720),
+    ];
 
     /// A frame where every pixel is unique-ish and never equals FILL.
     fn noise_frame(w: u32, h: u32) -> DynamicImage {
@@ -349,14 +414,27 @@ mod tests {
     fn tables_match_the_spec() {
         assert_eq!(FILL, Rgb([32, 32, 32]));
         assert_eq!(
-            (NAME_COLUMNS_5V5.portrait_end, NAME_COLUMNS_5V5.name_start, NAME_COLUMNS_5V5.name_end, NAME_COLUMNS_5V5.digits_start),
+            (
+                NAME_COLUMNS_5V5.portrait_end,
+                NAME_COLUMNS_5V5.name_start,
+                NAME_COLUMNS_5V5.name_end,
+                NAME_COLUMNS_5V5.digits_start
+            ),
             (200, 200, 450, 450)
         );
         assert_eq!(
-            (NAME_COLUMNS_6V6.portrait_end, NAME_COLUMNS_6V6.name_start, NAME_COLUMNS_6V6.name_end, NAME_COLUMNS_6V6.digits_start),
+            (
+                NAME_COLUMNS_6V6.portrait_end,
+                NAME_COLUMNS_6V6.name_start,
+                NAME_COLUMNS_6V6.name_end,
+                NAME_COLUMNS_6V6.digits_start
+            ),
             (140, 140, 255, 255)
         );
-        let ids: Vec<_> = SCOREBOARD_REGIONS.iter().map(|r| (r.id, r.x, r.y, r.w, r.h)).collect();
+        let ids: Vec<_> = SCOREBOARD_REGIONS
+            .iter()
+            .map(|r| (r.id, r.x, r.y, r.w, r.h))
+            .collect();
         assert_eq!(
             ids,
             vec![
@@ -496,8 +574,15 @@ mod tests {
             let frame = noise_frame(w, h);
             let pf = game_rect_16_9(w, h);
             let word = playfield_rect(&OUTCOME_BAND, pf);
-            for reg in SCOREBOARD_REGIONS.iter().filter(|r| r.id.starts_with("overlay_")) {
-                assert!(!playfield_rect(reg, pf).intersects(&word), "{w}x{h} {}", reg.id);
+            for reg in SCOREBOARD_REGIONS
+                .iter()
+                .filter(|r| r.id.starts_with("overlay_"))
+            {
+                assert!(
+                    !playfield_rect(reg, pf).intersects(&word),
+                    "{w}x{h} {}",
+                    reg.id
+                );
             }
             let band = outcome_band(&frame);
             let orig = frame.to_rgb8();

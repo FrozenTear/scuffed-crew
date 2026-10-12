@@ -564,6 +564,9 @@ pub struct GameReportInput {
     pub kit: super::kit::Kit,
     /// The member's edits, by read key (`hero`, `result`, `e`, ...).
     pub corrections: std::collections::BTreeMap<String, String>,
+    /// When the report was built. A missed game with no kit uses it as
+    /// `game.captured_at`.
+    pub built_at: DateTime<Utc>,
 }
 
 /// The member's edits on the newest snapshot of `session_id`, by read key.
@@ -625,15 +628,21 @@ impl GameReportInput {
             .as_ref()
             .and_then(|s| s.sessions.iter().find(|x| x.session_id == session_id));
         let window = match (session, kit.reads.as_ref()) {
-            (Some(s), _) => LogWindow::session(s.started_at.clone().into(), s.last_capture_at.clone().into()),
+            (Some(s), _) => LogWindow::session(s.started_at.into(), s.last_capture_at.into()),
             (None, Some(r)) => LogWindow::session(r.captured_at, r.captured_at),
             (None, None) => LogWindow::log_only(built_at),
         };
         let resolution = kit
             .reads
             .as_ref()
-            .map(|r| Resolution { width: r.width, height: r.height })
-            .unwrap_or(Resolution { width: 1920, height: 1080 });
+            .map(|r| Resolution {
+                width: r.width,
+                height: r.height,
+            })
+            .unwrap_or(Resolution {
+                width: 1920,
+                height: 1080,
+            });
         let mut scrub = ScrubContext::from_config(config);
         scrub.names = names;
         Ok(Self {
@@ -649,6 +658,7 @@ impl GameReportInput {
             log_dir: config.data_dir.clone(),
             kit,
             corrections,
+            built_at,
         })
     }
 }
@@ -720,12 +730,24 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         });
     }
 
-    let game = reads.map(|r| GameJson {
-        map: r.map.as_deref(),
-        mode: r.mode.as_deref(),
-        result: r.result.as_deref(),
-        team_size: r.team_size,
-        captured_at: r.captured_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    // Every game category carries a game object. A missed game with no kit
+    // has nothing read: empty fields, the build time, and empty reads.
+    let secs = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let game = Some(match reads {
+        Some(r) => GameJson {
+            map: r.map.as_deref(),
+            mode: r.mode.as_deref(),
+            result: r.result.as_deref(),
+            team_size: r.team_size,
+            captured_at: secs(r.captured_at),
+        },
+        None => GameJson {
+            map: None,
+            mode: None,
+            result: None,
+            team_size: None,
+            captured_at: secs(input.built_at),
+        },
     });
     let reads_json = match reads {
         Some(r) => {

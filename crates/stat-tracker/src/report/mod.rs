@@ -11,8 +11,8 @@
 //! returned bytes unchanged.
 
 pub mod blank;
-pub mod kit;
 pub mod bundle;
+pub mod kit;
 pub mod marker;
 pub mod scrub;
 

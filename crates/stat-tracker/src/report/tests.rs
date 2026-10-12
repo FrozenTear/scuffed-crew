@@ -635,3 +635,209 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
         "non-text fields stay:\n{out}"
     );
 }
+
+// --- Game reports ---
+
+mod game {
+    use super::*;
+    use crate::report::blank::TeamLayout;
+    use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
+    use crate::report::kit::{self, KitRead, KitReads};
+    use image::{DynamicImage, Rgb, RgbImage};
+    use std::collections::BTreeMap;
+
+    fn reads(team_size: Option<u32>) -> KitReads {
+        let mut r = BTreeMap::new();
+        for key in ["mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit"] {
+            r.insert(
+                key.to_string(),
+                KitRead {
+                    value: Some(if key == "hero" {
+                        "Ana".into()
+                    } else {
+                        "7".into()
+                    }),
+                    confidence: None,
+                    ocr_v1: Some("7".into()),
+                    suspect: key == "mit",
+                },
+            );
+        }
+        KitReads {
+            captured_at: t("2026-10-09T12:05:00Z"),
+            width: 1920,
+            height: 1080,
+            team_size,
+            map: Some("Ilios".into()),
+            mode: Some("Control".into()),
+            result: Some("Victory".into()),
+            recognizer: "cv-v5".into(),
+            reads: r,
+        }
+    }
+
+    /// A frame with a bright "name" in every name cell, so a blank miss
+    /// shows as a non-fill pixel.
+    fn frame() -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(1920, 1080, |x, y| {
+            Rgb([
+                ((x * 3 + y) % 200 + 50) as u8,
+                230,
+                ((x + y * 5) % 200 + 50) as u8,
+            ])
+        }))
+    }
+
+    fn input(dir: &std::path::Path, category: GameCategory) -> GameReportInput {
+        GameReportInput {
+            session_id: "sess-1".into(),
+            category,
+            text: format!("hero was wrong, {OTHER_1} said so"),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            ui_scale: None,
+            system: system(),
+            training: true,
+            scrub: ctx(),
+            window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
+            log_dir: dir.to_path_buf(),
+            kit: kit::load(dir, "sess-1"),
+            corrections: BTreeMap::from([("hero".to_string(), "Kiriko".to_string())]),
+            built_at: t("2026-10-09T13:00:00Z"),
+        }
+    }
+
+    fn unzip(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = BTreeMap::new();
+        for i in 0..z.len() {
+            let mut f = z.by_index(i).unwrap();
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).unwrap();
+            out.insert(f.name().to_string(), buf);
+        }
+        out
+    }
+
+    #[test]
+    fn game_report_passes_the_server_validator_with_both_crops() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(
+            tmp.path(),
+            "sess-1",
+            &frame(),
+            TeamLayout::Five,
+            &reads(Some(5)),
+        )
+        .unwrap();
+        let png = kit::rank_outcome_png(
+            Some(crate::detect::match_end::OutcomeSource::RankScreen),
+            &frame(),
+        )
+        .unwrap();
+        kit::record_outcome_png(tmp.path(), "sess-1", &png).unwrap();
+
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongHero)).unwrap();
+        let files = unzip(&zip.bytes);
+        assert_eq!(
+            files.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "crops/outcome.png",
+                "crops/scoreboard.png",
+                "log.txt",
+                "manifest.json"
+            ]
+        );
+        let checked = scuffed_types::stat_report::parse_bundle_manifest(&files["manifest.json"])
+            .expect("server validator accepts the manifest");
+        let _ = checked;
+        let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        assert_eq!(m["reason"]["category"], "wrong_hero");
+        assert_eq!(m["session_id"], "sess-1");
+        assert_eq!(m["game"]["team_size"], 5);
+        assert_eq!(m["game"]["captured_at"], "2026-10-09T12:05:00Z");
+        assert_eq!(m["reads"]["hero"]["value"], "Ana");
+        assert_eq!(m["reads"]["mit"]["suspect"], true);
+        assert_eq!(m["corrections"]["hero"], "Kiriko");
+        assert_eq!(m["consent"]["training"], true);
+        // The free text and the log are scrubbed like a log-only report.
+        let text = m["reason"]["text"].as_str().unwrap();
+        assert!(!text.contains(OTHER_1), "{text}");
+        let log = String::from_utf8(files["log.txt"].clone()).unwrap();
+        for secret in [TOKEN, OTHER_1, SELF_NAME, HOSTNAME, ACCOUNT] {
+            assert!(!log.contains(secret), "{secret} leaked into log.txt");
+        }
+        // Crops in the zip are the preview's bytes, and every name cell of
+        // the scoreboard is the fill colour.
+        assert_eq!(zip.images.len(), 2);
+        for img in &zip.images {
+            assert_eq!(files[&img.path], img.png);
+        }
+        let board = image::load_from_memory(&files["crops/scoreboard.png"])
+            .unwrap()
+            .to_rgb8();
+        for n in crate::report::blank::name_rects(board.width(), board.height(), TeamLayout::Five) {
+            for y in n.y..n.y + n.h {
+                for x in n.x..n.x + n.w {
+                    assert_eq!(*board.get_pixel(x, y), crate::report::blank::FILL);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_team_size_reports_null_and_blanks_both_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        kit::record_scoreboard(
+            tmp.path(),
+            "sess-1",
+            &frame(),
+            TeamLayout::Unknown,
+            &reads(None),
+        )
+        .unwrap();
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
+        let files = unzip(&zip.bytes);
+        scuffed_types::stat_report::parse_bundle_manifest(&files["manifest.json"]).unwrap();
+        let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        assert!(m["game"]["team_size"].is_null());
+        assert!(!files.contains_key("crops/outcome.png"));
+    }
+
+    #[test]
+    fn a_game_without_a_kit_cannot_be_reported_except_as_missed() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(build_game_report(&input(tmp.path(), GameCategory::WrongStats)).is_err());
+        let zip = build_game_report(&input(tmp.path(), GameCategory::MissedGame)).unwrap();
+        let files = unzip(&zip.bytes);
+        scuffed_types::stat_report::parse_bundle_manifest(&files["manifest.json"]).unwrap();
+        let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        assert!(m["game"]["map"].is_null());
+        assert!(m["game"]["team_size"].is_null());
+        assert_eq!(m["game"]["captured_at"], "2026-10-09T13:00:00Z");
+        assert_eq!(m["reads"]["e"]["suspect"], true);
+        assert!(m["corrections"].as_object().unwrap().is_empty());
+        assert_eq!(m["session_id"], "none");
+        assert!(zip.images.is_empty());
+    }
+
+    #[test]
+    fn categories_match_the_validator_list() {
+        let ids: Vec<_> = GameCategory::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "wrong_stats",
+                "wrong_hero",
+                "wrong_map",
+                "wrong_mode",
+                "wrong_result",
+                "missed_game",
+                "other"
+            ]
+        );
+    }
+}
