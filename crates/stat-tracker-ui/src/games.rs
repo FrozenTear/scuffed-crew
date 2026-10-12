@@ -64,6 +64,7 @@ fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Elemen
                 &app.edit,
                 confirm,
                 in_progress,
+                app.sessions_with_kit.contains(&g.session_id),
             ));
         } else {
             pending.push(g);
