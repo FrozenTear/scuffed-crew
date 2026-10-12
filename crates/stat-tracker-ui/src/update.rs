@@ -795,7 +795,7 @@ async fn download_and_run_bootstrap(
         ));
     }
     Ok(format!(
-        "Installed {tag}. Restart this window to run the new GUI. {}",
+        "Installed {tag}. {RESTART_HINT} {}",
         tail_useful(&combined)
     ))
 }
@@ -858,6 +858,22 @@ fn truncate_clean(text: &str, max_chars: usize) -> String {
     };
     let cut = cut.trim_end_matches(['.', ',', ';', ':']);
     format!("{cut}...")
+}
+
+/// Shown after a successful in-app update. True with or without a tray:
+/// the button starts the new binary and quits this one.
+pub const RESTART_HINT: &str = "Press Restart now to run the new version.";
+
+/// Label and message of the banner's first button. After a successful
+/// install it restarts the GUI, because the single-instance lock means a
+/// relaunch would only bring back this (old) process.
+pub fn primary_action(progress: &UpdateProgress, can_run: bool) -> (&'static str, Option<Message>) {
+    match progress {
+        UpdateProgress::Running => ("Installing…", None),
+        UpdateProgress::Succeeded(_) => ("Restart now", Some(Message::RestartGui)),
+        _ if can_run => ("Update now", Some(Message::RunUpdate)),
+        _ => ("Update now", None),
+    }
 }
 
 pub fn banner<'a>(
@@ -934,20 +950,12 @@ pub fn banner<'a>(
             .color(theme::ACCENT),
     );
 
-    let mut update_btn = button(
-        text(if running {
-            "Installing…"
-        } else {
-            "Update now"
-        })
-        .size(SIZE_META)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT),
-    )
-    .padding(Padding::from([8, 16]))
-    .style(theme::chip(can_run));
-    if can_run {
-        update_btn = update_btn.on_press(Message::RunUpdate);
+    let (label, on_press) = primary_action(progress, can_run);
+    let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+        .padding(Padding::from([8, 16]))
+        .style(theme::chip(on_press.is_some()));
+    if let Some(message) = on_press {
+        update_btn = update_btn.on_press(message);
     }
 
     let actions = row![
@@ -1195,6 +1203,22 @@ mod tests {
         );
         let from_alpha = select_newer_release("0.5.0-alpha.1", &with_final).expect("upgrade");
         assert_eq!(from_alpha.latest, "0.5.0");
+    }
+
+    #[test]
+    fn success_offers_restart_now() {
+        let (label, msg) = primary_action(&UpdateProgress::Succeeded("ok".into()), false);
+        assert_eq!(label, "Restart now");
+        assert!(matches!(msg, Some(Message::RestartGui)));
+        let (label, msg) = primary_action(&UpdateProgress::Idle, true);
+        assert_eq!(label, "Update now");
+        assert!(matches!(msg, Some(Message::RunUpdate)));
+        assert!(primary_action(&UpdateProgress::Idle, false).1.is_none());
+        assert!(primary_action(&UpdateProgress::Running, true).1.is_none());
+        assert!(
+            !RESTART_HINT.contains("window"),
+            "without a tray, closing the window is not a restart"
+        );
     }
 
     #[test]

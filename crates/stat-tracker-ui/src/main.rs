@@ -29,7 +29,30 @@ fn main() -> anyhow::Result<()> {
         None
     } else {
         let lock = instance::lock_path(std::env::var_os("XDG_RUNTIME_DIR"), &cli.data_dir);
-        match instance::claim(&lock) {
+        let version = stat_tracker_ui::update::daemon_package_version();
+        let claimed = match instance::claim(&lock, &version) {
+            Ok(instance::Claim::Secondary) => {
+                // Replace the running GUI on "Restart now" (--replace) or when
+                // it is an older binary (left over from an update). Otherwise
+                // just bring its window up.
+                let older = instance::read_holder(&lock).is_some_and(|holder| {
+                    instance::holder_is_older(&holder, &version, std::path::Path::new("/proc"))
+                });
+                if cli.replace || older {
+                    tracing::info!(lock = %lock.display(), older, "replacing the running tracker GUI");
+                    instance::claim_replacing(
+                        &lock,
+                        &cli.data_dir,
+                        &version,
+                        instance::REPLACE_WAIT,
+                    )
+                } else {
+                    Ok(instance::Claim::Secondary)
+                }
+            }
+            other => other,
+        };
+        match claimed {
             Ok(instance::Claim::Primary(file)) => Some(file),
             Ok(instance::Claim::Secondary) => {
                 tracing::info!(lock = %lock.display(), "tracker GUI already running; asking it to show");

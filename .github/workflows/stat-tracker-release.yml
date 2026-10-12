@@ -284,8 +284,13 @@ jobs:
                    test-systemd-unit test-release-notes test-stage-assets; do
             echo "::group::${t}.sh"
             echo "running ${t}.sh"
-            timeout 300 bash "crates/stat-tracker/dist/${t}.sh"
+            rc=0
+            timeout 300 bash "crates/stat-tracker/dist/${t}.sh" || rc=$?
             echo "::endgroup::"
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::${t}.sh failed (exit ${rc}; 124 means it timed out)"
+              exit "${rc}"
+            fi
           done
 
       - name: Assemble tarball
