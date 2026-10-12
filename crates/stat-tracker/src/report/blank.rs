@@ -71,7 +71,7 @@ pub const NOTICE_BAND: (u32, u32) = (740, 900);
 /// Bumped whenever a table in this module changes. Kits store it, and a kit
 /// written under another table is never reported (it is blanked again or
 /// refused).
-pub const BLANK_TABLE_VERSION: u32 = 5;
+pub const BLANK_TABLE_VERSION: u32 = 6;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -463,6 +463,13 @@ pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout) -> RgbImage {
     for r in kept_rects(w, h, layout) {
         let r = r.clipped(w, h);
         let digit_cell = r.x >= digits_from;
+        // Fail closed (R236-F): the glyph test only separates digits from the
+        // world behind the row when the row tint is coloured. A digit cell
+        // whose background is near-neutral (a grey team colour, a filter) is
+        // not kept at all.
+        if digit_cell && !row_tint_is_coloured(src, r) {
+            continue;
+        }
         for py in r.y..r.y + r.h {
             for px in r.x..r.x + r.w {
                 let p = *src.get_pixel(px, py);
@@ -483,6 +490,37 @@ pub const GLYPH_MIN: u8 = 120;
 /// neutral on top of the row; anything behind the translucent row takes its
 /// purple or yellow tint and is far less neutral (QC1-7).
 pub const GLYPH_MAX_SPREAD: u8 = 28;
+
+/// Smallest (max - min) / max a digit cell's median colour may have for its
+/// glyphs to be kept. The member's purple rows measure about 0.6 (55,20,55)
+/// and yellow rows about 0.9; a grey row is near 0.
+pub const ROW_TINT_MIN_CHROMA: f32 = 0.3;
+
+/// The median colour of a digit cell is clearly coloured, so anything seen
+/// through the row is tinted away from neutral.
+pub fn row_tint_is_coloured(src: &RgbImage, r: Rect) -> bool {
+    let mut ch: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for y in r.y..r.y + r.h {
+        for x in r.x..r.x + r.w {
+            let p = src.get_pixel(x, y);
+            for (i, v) in p.0.iter().enumerate() {
+                ch[i].push(*v);
+            }
+        }
+    }
+    if ch[0].is_empty() {
+        return false;
+    }
+    let med: Vec<u8> = ch
+        .iter_mut()
+        .map(|c| {
+            c.sort_unstable();
+            c[c.len() / 2]
+        })
+        .collect();
+    let (lo, hi) = (*med.iter().min().unwrap(), *med.iter().max().unwrap());
+    hi > 0 && f32::from(hi - lo) / f32::from(hi) >= ROW_TINT_MIN_CHROMA
+}
 
 /// A digit glyph pixel: bright and neutral.
 pub fn is_glyph(p: Rgb<u8>) -> bool {
@@ -615,12 +653,21 @@ mod tests {
                 }
                 let kept = kept_rects(orig_sb.2, orig_sb.3, layout);
                 let digits_from = frac(orig_sb.2, NAME_COLUMNS_6V6.digits_start);
+                let orig_crop = image::imageops::crop_imm(
+                    &blank_scoreboard_frame(&frame, layout),
+                    orig_sb.0,
+                    orig_sb.1,
+                    orig_sb.2,
+                    orig_sb.3,
+                )
+                .to_image();
                 for p in &kept {
+                    let coloured = row_tint_is_coloured(&orig_crop, *p);
                     for y in p.y..p.y + p.h {
                         for x in p.x..p.x + p.w {
                             let src = *orig.get_pixel(orig_sb.0 + x, orig_sb.1 + y);
                             let got = *out.get_pixel(x, y);
-                            if p.x < digits_from || is_glyph(src) {
+                            if p.x < digits_from || (coloured && is_glyph(src)) {
                                 assert_eq!(got, src, "{w}x{h} {ts} kept px {x},{y}");
                             } else {
                                 assert_eq!(got, FILL, "{w}x{h} {ts} non-glyph px {x},{y}");
@@ -767,6 +814,37 @@ mod tests {
                 *out.get_pixel(cell.x + cell.w - 15, cell.y + 10),
                 Rgb([255, 255, 255])
             );
+        }
+    }
+
+    #[test]
+    fn a_neutral_row_tint_keeps_no_digit_cell() {
+        // R236-F: white world text behind a grey row stays neutral and bright,
+        // so the glyph test alone would keep it. The cell is dropped instead.
+        let (cw, ch) = (1664, 1007);
+        let grey = Rgb([90, 90, 92]);
+        let mut src = RgbImage::from_pixel(cw, ch, grey);
+        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
+        let cell = *kept_rects(cw, ch, TeamLayout::Six)
+            .iter()
+            .find(|r| r.x >= digits_from)
+            .unwrap();
+        for y in cell.y + 2..cell.y + 12 {
+            for x in cell.x + 10..cell.x + 60 {
+                src.put_pixel(x, y, blend(Rgb([255, 255, 255]), grey, 60));
+            }
+        }
+        assert!(!row_tint_is_coloured(&src, cell));
+        let out = allowlist_crop(&src, TeamLayout::Six);
+        for y in cell.y..cell.y + cell.h {
+            for x in cell.x..cell.x + cell.w {
+                assert_eq!(*out.get_pixel(x, y), FILL, "{x},{y}");
+            }
+        }
+        // The member's real row colours pass.
+        for tint in [Rgb([55, 20, 55]), Rgb([64, 31, 50]), Rgb([200, 160, 20])] {
+            let img = RgbImage::from_pixel(cw, ch, tint);
+            assert!(row_tint_is_coloured(&img, cell), "{tint:?}");
         }
     }
 
