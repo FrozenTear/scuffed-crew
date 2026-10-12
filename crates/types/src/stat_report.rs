@@ -69,7 +69,13 @@ const SCREEN_CLASSES: &[&str] = &[
     "accolade",
     "party",
     "lobby",
+    "outcome",
 ];
+
+/// The only crop path that carries the `outcome` screen class, and the only
+/// class that path may carry.
+const OUTCOME_CROP_PATH: &str = "crops/outcome.png";
+const OUTCOME_CLASS: &str = "outcome";
 
 const OCR_ID: &str = "ocr-v1";
 
@@ -595,9 +601,12 @@ fn check_file(
             if !is_plain_crop_path(&file.path) {
                 return Err("crop path is not allowed".into());
             }
-            match file.screen_class.as_deref() {
-                Some(class) if SCREEN_CLASSES.contains(&class) => {}
+            let class = match file.screen_class.as_deref() {
+                Some(class) if SCREEN_CLASSES.contains(&class) => class,
                 _ => return Err("crop screen_class is not a known class".into()),
+            };
+            if (file.path == OUTCOME_CROP_PATH) != (class == OUTCOME_CLASS) {
+                return Err("crop screen_class does not match its path".into());
             }
             reject_glyph_fields(file)?;
         }
@@ -768,7 +777,7 @@ fn valid_rel_path(path: &str) -> bool {
 
 /// Crop paths the spec names. Suspect-cell files are not given names there,
 /// so they are not accepted.
-const CROP_PATHS: &[&str] = &["crops/scoreboard.png", "crops/frame.png"];
+const CROP_PATHS: &[&str] = &["crops/scoreboard.png", "crops/frame.png", OUTCOME_CROP_PATH];
 
 fn is_plain_crop_path(path: &str) -> bool {
     CROP_PATHS.contains(&path)
@@ -1199,6 +1208,45 @@ mod tests {
         let mut frame = sample_v2();
         frame["files"][1]["path"] = serde_json::json!("crops/frame.png");
         parse(&frame).unwrap();
+    }
+
+    fn with_outcome_crop(mut v: serde_json::Value) -> serde_json::Value {
+        v["files"].as_array_mut().unwrap().push(serde_json::json!({
+            "path": "crops/outcome.png",
+            "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "bytes": 500,
+            "role": "crop",
+            "screen_class": "outcome"
+        }));
+        v
+    }
+
+    #[test]
+    fn outcome_crop_with_outcome_class_is_accepted() {
+        let checked = parse(&with_outcome_crop(sample_v2())).unwrap();
+        assert_eq!(checked.files.len(), 3);
+        parse(&with_outcome_crop(sample())).unwrap();
+    }
+
+    #[test]
+    fn outcome_crop_must_carry_the_outcome_class() {
+        for class in ["scoreboard", "gameplay", "potg"] {
+            let mut v = with_outcome_crop(sample_v2());
+            v["files"][2]["screen_class"] = serde_json::json!(class);
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("screen_class"), "{class}: {err}");
+        }
+    }
+
+    #[test]
+    fn outcome_class_is_only_for_the_outcome_crop() {
+        for path in ["crops/scoreboard.png", "crops/frame.png"] {
+            let mut v = sample_v2();
+            v["files"][1]["path"] = serde_json::json!(path);
+            v["files"][1]["screen_class"] = serde_json::json!("outcome");
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("screen_class"), "{path}: {err}");
+        }
     }
 
     #[test]
