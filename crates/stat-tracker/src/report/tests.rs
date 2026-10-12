@@ -640,7 +640,7 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
 
 mod game {
     use super::*;
-    use crate::report::blank::TeamLayout;
+    use crate::report::blank::synth::{self, Layout};
     use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
     use crate::report::kit::{self, KitRead, KitReads};
     use image::{DynamicImage, Rgb, RgbImage};
@@ -678,16 +678,10 @@ mod game {
         }
     }
 
-    /// A frame with a bright "name" in every name cell, so a blank miss
-    /// shows as a non-fill pixel.
+    /// A 2560x1440 frame with a synthetic 6v6 scoreboard whose name cells
+    /// hold bright strokes, so a blank miss shows as a non-fill pixel.
     fn frame() -> DynamicImage {
-        DynamicImage::ImageRgb8(RgbImage::from_fn(1920, 1080, |x, y| {
-            Rgb([
-                ((x * 3 + y) % 200 + 50) as u8,
-                230,
-                ((x + y * 5) % 200 + 50) as u8,
-            ])
-        }))
+        synth::frame(Layout::L1, &synth::VALUES)
     }
 
     fn input(dir: &std::path::Path, category: GameCategory) -> GameReportInput {
@@ -727,15 +721,7 @@ mod game {
     fn game_report_passes_the_server_validator_with_both_crops() {
         let tmp = tempfile::tempdir().unwrap();
         seed_logs(tmp.path());
-        kit::record_scoreboard(
-            tmp.path(),
-            "sess-1",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &reads(Some(5)),
-        )
-        .unwrap();
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
         let rank = DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, Rgb([24, 20, 18])));
         let png = kit::rank_outcome_png(
             Some(crate::detect::match_end::OutcomeSource::RankScreen),
@@ -761,7 +747,7 @@ mod game {
         let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
         assert_eq!(m["reason"]["category"], "wrong_hero");
         assert_eq!(m["session_id"], "sess-1");
-        assert_eq!(m["game"]["team_size"], 5);
+        assert_eq!(m["game"]["team_size"], 6);
         assert_eq!(m["game"]["captured_at"], "2026-10-09T12:05:00Z");
         assert_eq!(m["reads"]["hero"]["value"], "Ana");
         assert_eq!(m["reads"]["mit"]["suspect"], true);
@@ -783,9 +769,9 @@ mod game {
         let board = image::load_from_memory(&files["crops/scoreboard.png"])
             .unwrap()
             .to_rgb8();
-        for n in crate::report::blank::name_rects(board.width(), board.height(), TeamLayout::Five) {
-            for y in n.y..n.y + n.h {
-                for x in n.x..n.x + n.w {
+        for (x0, y0, x1, y1) in synth::name_boxes(Layout::L1) {
+            for y in y0..y1 {
+                for x in x0..x1 {
                     assert_eq!(*board.get_pixel(x, y), crate::report::blank::FILL);
                 }
             }
@@ -793,23 +779,15 @@ mod game {
     }
 
     #[test]
-    fn unknown_team_size_reports_null_and_blanks_both_layouts() {
-        let tmp = tempfile::tempdir().unwrap();
-        kit::record_scoreboard(
-            tmp.path(),
-            "sess-1",
-            &frame(),
-            TeamLayout::Unknown,
-            None,
-            &reads(None),
-        )
-        .unwrap();
-        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
-        let files = unzip(&zip.bytes);
-        scuffed_types::stat_report::parse_bundle_manifest(&files["manifest.json"]).unwrap();
-        let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
-        assert!(m["game"]["team_size"].is_null());
-        assert!(!files.contains_key("crops/outcome.png"));
+    fn a_board_the_blanker_cannot_measure_writes_no_kit() {
+        // Unknown team size and 5v5 (no measured geometry yet) keep nothing,
+        // so no kit is written and only a missed-game report can be built.
+        for team in [None, Some(5)] {
+            let tmp = tempfile::tempdir().unwrap();
+            kit::record_scoreboard(tmp.path(), "sess-1", &frame(), team, &reads(None)).unwrap();
+            assert!(!kit::has_kit(tmp.path(), "sess-1"), "{team:?}");
+            assert!(build_game_report(&input(tmp.path(), GameCategory::WrongStats)).is_err());
+        }
     }
 
     #[test]

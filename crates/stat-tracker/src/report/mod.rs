@@ -1,5 +1,5 @@
 //! Issue report bundles (`crates/stat-tracker/docs/report-bundle.md`,
-//! revision 2).
+//! revision 4).
 //!
 //! This module covers log-only reports (`crash`, `performance`, `other`):
 //! the crash marker ([`marker`]), the log scrub ([`scrub`]), and the zip

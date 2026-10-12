@@ -5,7 +5,8 @@
 //!
 //! - `scoreboard.png`: the newest accepted scoreboard of the session, blanked
 //!   at capture time ([`super::blank::blanked_scoreboard`]). No unblanked
-//!   frame is written for reports.
+//!   frame is written for reports, and a board the blanker keeps nothing of
+//!   writes no kit.
 //! - `outcome.png`: the result word box of the competitive rank screen
 //!   ([`super::blank::outcome_band`]), when the tracker saw that screen.
 //! - `reads.json`: the reads of the capture `scoreboard.png` came from.
@@ -219,21 +220,24 @@ pub fn encode_png(img: &RgbImage) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Record an accepted scoreboard capture: blank the frame, cut the board,
-/// and replace the session's `scoreboard.png` and `reads.json`.
+/// Record an accepted scoreboard capture: cut and blank the board, and
+/// replace the session's `scoreboard.png` and `reads.json`. A board the
+/// blanker keeps nothing of (it could not be measured) writes no kit.
 pub fn record_scoreboard(
     data_dir: &Path,
     session_id: &str,
     frame: &DynamicImage,
-    layout: TeamLayout,
-    own_row: Option<usize>,
+    team_size: Option<usize>,
     reads: &KitReads,
 ) -> io::Result<()> {
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
-    let board = blank::blanked_scoreboard(frame, layout, own_row);
-    let png = encode_png(&board)?;
+    let board = blank::blanked_scoreboard(frame, team_size);
+    if !board.kept_anything() {
+        return Ok(());
+    }
+    let png = encode_png(&board.image)?;
     let mut reads = reads.clone();
     reads.scoreboard_sha256 = super::bundle::sha256_hex(&png);
     let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
@@ -408,9 +412,9 @@ mod tests {
         );
         KitReads {
             captured_at: "2026-10-12T08:00:00Z".parse().unwrap(),
-            width: 1920,
-            height: 1080,
-            team_size: Some(5),
+            width: 2560,
+            height: 1440,
+            team_size: Some(6),
             map: Some("Ilios".into()),
             mode: Some("Control".into()),
             result: None,
@@ -421,8 +425,19 @@ mod tests {
         }
     }
 
+    use crate::report::blank::synth::{self, Layout};
+
+    /// A 2560x1440 frame with a synthetic 6v6 scoreboard.
     fn frame() -> DynamicImage {
-        DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([200, 100, 50])))
+        synth::frame(Layout::L1, &synth::VALUES)
+    }
+
+    /// [`frame`] with the stat values of row 0 changed, so its blanked board
+    /// differs.
+    fn frame_variant(i: u32) -> DynamicImage {
+        let mut v = synth::VALUES;
+        v[0][0] = i;
+        synth::frame(Layout::L1, &v)
     }
 
     /// A dark, flat frame: what the scoreboard preflight calls "not a
@@ -434,22 +449,18 @@ mod tests {
     #[test]
     fn scoreboard_is_blanked_private_and_loads_back() {
         let tmp = tempfile::tempdir().unwrap();
-        record_scoreboard(
-            tmp.path(),
-            "s-1",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &reads(),
-        )
-        .unwrap();
+        record_scoreboard(tmp.path(), "s-1", &frame(), Some(6), &reads()).unwrap();
         let kit = load(tmp.path(), "s-1");
         let png = kit.scoreboard_png.expect("scoreboard");
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
-        let (_, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(1920, 1080);
+        let (_, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
         assert_eq!(img.dimensions(), (cw, ch));
-        for n in blank::name_rects(cw, ch, TeamLayout::Five) {
-            assert_eq!(*img.get_pixel(n.x + n.w / 2, n.y + n.h / 2), blank::FILL);
+        for (x0, y0, x1, y1) in synth::name_boxes(Layout::L1) {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(*img.get_pixel(x, y), blank::FILL);
+                }
+            }
         }
         let mut want = reads();
         want.scoreboard_sha256 = crate::report::bundle::sha256_hex(&png);
@@ -478,15 +489,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut old = reads();
         old.blank_table = blank::BLANK_TABLE_VERSION - 1;
-        record_scoreboard(
-            tmp.path(),
-            "s-old",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &old,
-        )
-        .unwrap();
+        record_scoreboard(tmp.path(), "s-old", &frame(), Some(6), &old).unwrap();
         assert!(!has_kit(tmp.path(), "s-old"));
         assert!(load(tmp.path(), "s-old").scoreboard_png.is_none());
         assert!(sessions(tmp.path()).is_empty());
@@ -503,15 +506,7 @@ mod tests {
     fn removing_a_session_deletes_its_kit_only() {
         let tmp = tempfile::tempdir().unwrap();
         for sid in ["keep", "gone"] {
-            record_scoreboard(
-                tmp.path(),
-                sid,
-                &frame(),
-                TeamLayout::Five,
-                Some(0),
-                &reads(),
-            )
-            .unwrap();
+            record_scoreboard(tmp.path(), sid, &frame(), Some(6), &reads()).unwrap();
         }
         remove(tmp.path(), "gone");
         remove(tmp.path(), "../keep");
@@ -522,15 +517,7 @@ mod tests {
     #[test]
     fn a_mismatched_pair_is_not_reported() {
         let tmp = tempfile::tempdir().unwrap();
-        record_scoreboard(
-            tmp.path(),
-            "s-1",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &reads(),
-        )
-        .unwrap();
+        record_scoreboard(tmp.path(), "s-1", &frame(), Some(6), &reads()).unwrap();
         assert!(has_kit(tmp.path(), "s-1"));
         // The daemon is between the two renames: a new board, the old reads.
         let dir = session_dir(tmp.path(), "s-1").unwrap();
@@ -552,34 +539,12 @@ mod tests {
         let older = reads();
         let mut newer = reads();
         newer.captured_at = older.captured_at + chrono::Duration::seconds(5);
-        let newer_frame =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([20, 140, 90])));
-        record_scoreboard(
-            tmp.path(),
-            "s-1",
-            &newer_frame,
-            TeamLayout::Five,
-            Some(0),
-            &newer,
-        )
-        .unwrap();
-        record_scoreboard(
-            tmp.path(),
-            "s-1",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &older,
-        )
-        .unwrap();
+        let newer_frame = frame_variant(9);
+        record_scoreboard(tmp.path(), "s-1", &newer_frame, Some(6), &newer).unwrap();
+        record_scoreboard(tmp.path(), "s-1", &frame(), Some(6), &older).unwrap();
         let kit = load(tmp.path(), "s-1");
         assert_eq!(kit.reads.unwrap().captured_at, newer.captured_at);
-        let want = encode_png(&blank::blanked_scoreboard(
-            &newer_frame,
-            TeamLayout::Five,
-            Some(0),
-        ))
-        .unwrap();
+        let want = encode_png(&blank::blanked_scoreboard(&newer_frame, Some(6)).image).unwrap();
         assert_eq!(kit.scoreboard_png.unwrap(), want);
     }
 
@@ -594,12 +559,8 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut r = reads();
                     r.captured_at = base + chrono::Duration::seconds(i64::from(i));
-                    let f = DynamicImage::ImageRgb8(RgbImage::from_pixel(
-                        1920,
-                        1080,
-                        image::Rgb([20 * i, 100, 50]),
-                    ));
-                    record_scoreboard(&dir, "s-1", &f, TeamLayout::Five, Some(0), &r).unwrap();
+                    let f = frame_variant(u32::from(i) + 1);
+                    record_scoreboard(&dir, "s-1", &f, Some(6), &r).unwrap();
                 })
             })
             .collect();
@@ -650,15 +611,7 @@ mod tests {
     fn unsafe_session_ids_get_no_kit() {
         let tmp = tempfile::tempdir().unwrap();
         for sid in ["", "../x", "a/b", "a b", &"x".repeat(65)] {
-            record_scoreboard(
-                tmp.path(),
-                sid,
-                &frame(),
-                TeamLayout::Five,
-                Some(0),
-                &reads(),
-            )
-            .unwrap();
+            record_scoreboard(tmp.path(), sid, &frame(), Some(6), &reads()).unwrap();
             assert!(!has_kit(tmp.path(), sid));
         }
         assert!(sessions(tmp.path()).is_empty());
@@ -669,15 +622,7 @@ mod tests {
     fn only_the_newest_sessions_are_kept() {
         let tmp = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            record_scoreboard(
-                tmp.path(),
-                &format!("s{i}"),
-                &frame(),
-                TeamLayout::Five,
-                Some(0),
-                &reads(),
-            )
-            .unwrap();
+            record_scoreboard(tmp.path(), &format!("s{i}"), &frame(), Some(6), &reads()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
         prune(tmp.path(), 3);
@@ -811,15 +756,7 @@ mod tests {
         // An outcome alone is not a reportable kit.
         assert!(!has_kit(tmp.path(), "s-1"));
         assert!(load(tmp.path(), "s-1").outcome_png.is_none());
-        record_scoreboard(
-            tmp.path(),
-            "s-1",
-            &frame(),
-            TeamLayout::Five,
-            Some(0),
-            &reads(),
-        )
-        .unwrap();
+        record_scoreboard(tmp.path(), "s-1", &frame(), Some(6), &reads()).unwrap();
         let png = load(tmp.path(), "s-1").outcome_png.expect("outcome");
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(
