@@ -2274,6 +2274,9 @@ struct FrameAnalysis {
     scoreboard: Arc<image::DynamicImage>,
     /// The player's row index, by name match or brightness highlight.
     player_row_idx: Option<usize>,
+    /// The name match behind `player_row_idx`, with the name window that
+    /// matched. `None` when the row came from the highlight alone.
+    name_match: Option<parse::NameMatch>,
     /// Detected team size (5 or 6) — portrait geometry depends on it.
     team_size: usize,
     /// The full frame, kept for the rejected-capture archive.
@@ -3697,10 +3700,10 @@ fn analyze_frame(
     // Player row: if a player name is configured, scan ALL rows (both teams)
     // for a name match — this handles replays and post-match screens where the
     // player may be on team 2. Fall back to brightness-detected row otherwise.
-    let row_idx = player_name_owned
+    let name_match = player_name_owned
         .as_deref()
-        .and_then(|name| parse::find_player_row_by_name(&rows, name))
-        .or(brightness_row_idx);
+        .and_then(|name| parse::match_player_row_by_name(&rows, name));
+    let row_idx = name_match.map(|m| m.row).or(brightness_row_idx);
 
     // Career-panel hero title. Guard against garbage OCR (happens when there
     // is no career panel — replay, post-match — by requiring the result to
@@ -3754,6 +3757,7 @@ fn analyze_frame(
         ),
         scoreboard,
         player_row_idx: row_idx,
+        name_match,
         team_size,
         frame: img,
     }))
@@ -4421,6 +4425,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         map_panel_raw,
         scoreboard: scoreboard_img,
         player_row_idx,
+        name_match,
         team_size,
         frame: frame_img,
         shadow_input,
@@ -4594,6 +4599,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 collect_portraits,
                 slot_replaceable,
                 player_row_idx.is_some(),
+                detect::hero_portrait::portrait_seed_layout_known(team_size, name_match.as_ref()),
             );
             if save_portrait && career_panel {
                 tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero: seeding one from this capture");
@@ -8192,6 +8198,7 @@ mod tests {
                         confidence: 80,
                         suspect: false,
                     }),
+                    name_alternates: Vec::new(),
                     stats: values
                         .iter()
                         .map(|value| ocr::CellOcrResult {
@@ -8219,6 +8226,7 @@ mod tests {
                 map_panel_raw: Some("BUSAN".into()),
                 scoreboard: std::sync::Arc::new(frame.clone()),
                 player_row_idx: Some(0),
+                name_match: None,
                 team_size: 5,
                 frame,
                 shadow_input: None,
@@ -8471,6 +8479,7 @@ mod tests {
             let rows: Vec<ocr::RowOcrResult> = (0..10)
                 .map(|i| ocr::RowOcrResult {
                     name: None,
+                    name_alternates: Vec::new(),
                     stats: ["12", "3", "4", "5,480", "950", "2,347"]
                         .iter()
                         .map(|v| ocr::CellOcrResult {

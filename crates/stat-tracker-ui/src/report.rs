@@ -46,13 +46,174 @@ const PRIVATE_WARNING: &str = "This is a private report. Give it only to an offi
 
 const NAME_HINT: &str = "Do not type other players' names.";
 
+/// Game-report categories from the C1 contract. `as_str` is the manifest id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameCategory {
+    WrongStats,
+    WrongHero,
+    WrongMap,
+    WrongMode,
+    WrongResult,
+    MissedGame,
+    Other,
+}
+
+impl GameCategory {
+    pub const ALL: [GameCategory; 7] = [
+        GameCategory::WrongStats,
+        GameCategory::WrongHero,
+        GameCategory::WrongMap,
+        GameCategory::WrongMode,
+        GameCategory::WrongResult,
+        GameCategory::MissedGame,
+        GameCategory::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GameCategory::WrongStats => "wrong_stats",
+            GameCategory::WrongHero => "wrong_hero",
+            GameCategory::WrongMap => "wrong_map",
+            GameCategory::WrongMode => "wrong_mode",
+            GameCategory::WrongResult => "wrong_result",
+            GameCategory::MissedGame => "missed_game",
+            GameCategory::Other => "other",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GameCategory::WrongStats => "Wrong stats",
+            GameCategory::WrongHero => "Wrong hero",
+            GameCategory::WrongMap => "Wrong map",
+            GameCategory::WrongMode => "Wrong mode",
+            GameCategory::WrongResult => "Wrong result",
+            GameCategory::MissedGame => "Missed game",
+            GameCategory::Other => "Other",
+        }
+    }
+
+    /// A missed game has no kit. Every other game category needs one.
+    pub fn allows_missing_kit(self) -> bool {
+        matches!(self, GameCategory::MissedGame)
+    }
+}
+
+/// One row in the game picker. `has_kit` is the report-kit directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameChoice {
+    pub session_id: String,
+    pub label: String,
+    pub has_kit: bool,
+}
+
+/// A kit PNG kept in memory for the preview. The handle is built once so
+/// iced can reuse the decoded raster.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KitImage {
+    pub path: String,
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub handle: iced::widget::image::Handle,
+}
+
+impl std::fmt::Debug for KitImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KitImage")
+            .field("path", &self.path)
+            .field("png_len", &self.png.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+/// `<data_dir>/report-kit/<session_id>`.
+pub fn kit_dir(data_dir: &Path, session_id: &str) -> PathBuf {
+    data_dir.join("report-kit").join(session_id)
+}
+
+/// True when the session has a blanked scoreboard picture.
+fn session_id_ok(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id.len() <= 64
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+pub fn has_kit(data_dir: &Path, session_id: &str) -> bool {
+    session_id_ok(session_id)
+        && kit_dir(data_dir, session_id)
+            .join("scoreboard.png")
+            .is_file()
+}
+
+/// Kit session ids, newest directory first.
+pub fn kit_sessions(data_dir: &Path) -> Vec<String> {
+    let root = data_dir.join("report-kit");
+    let Ok(read) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, String)> = read
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !has_kit(data_dir, &name) {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((modified, name))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Scoreboard and outcome pictures for the preview. Missing files are skipped.
+pub fn load_kit_images(data_dir: &Path, session_id: &str) -> Vec<KitImage> {
+    ["scoreboard.png", "outcome.png"]
+        .into_iter()
+        .filter_map(|name| read_kit_png(&kit_dir(data_dir, session_id).join(name), name))
+        .collect()
+}
+
+fn read_kit_png(path: &Path, name: &str) -> Option<KitImage> {
+    let png = fs::read(path).ok()?;
+    let (width, height) = image::image_dimensions(path).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(KitImage {
+        path: format!("crops/{name}"),
+        handle: iced::widget::image::Handle::from_bytes(png.clone()),
+        png,
+        width,
+        height,
+    })
+}
+
 /// Messages the dialog sends. Wrapped in [`Message::Report`].
 #[derive(Debug, Clone)]
 pub enum ReportMessage {
     /// Open the dialog, optionally with a category picked.
     Open(Option<LogOnlyCategory>),
+    /// Open on a game. Training is visible and already ticked when `training` is set.
+    OpenGame {
+        session_id: Option<String>,
+        category: GameCategory,
+        training: bool,
+        choices: Vec<GameChoice>,
+    },
     Close,
     Category(LogOnlyCategory),
+    GameCategory(GameCategory),
+    PickGame(String),
+    ToggleImageScale,
     Text(String),
     Training(bool),
     ToggleLog,
@@ -91,6 +252,14 @@ pub enum SendState {
 #[derive(Debug, Clone)]
 pub struct ReportDialog {
     pub category: LogOnlyCategory,
+    /// Set when the report is about a game. Log chips are then unselected.
+    pub game_category: Option<GameCategory>,
+    pub game_session: Option<String>,
+    pub game_choices: Vec<GameChoice>,
+    /// Kit pictures for the selected session. Not part of the zip until C1.
+    pub kit_images: Vec<KitImage>,
+    /// Draw kit pictures at their pixel size. Off fits them to the dialog.
+    pub image_actual: bool,
     pub text: String,
     pub training: bool,
     /// Last finished build. Send and Save use exactly these bytes.
@@ -116,6 +285,11 @@ impl ReportDialog {
     pub fn new(category: LogOnlyCategory, linked: bool) -> Self {
         Self {
             category,
+            game_category: None,
+            game_session: None,
+            game_choices: Vec::new(),
+            kit_images: Vec::new(),
+            image_actual: false,
             text: String::new(),
             training: false,
             built: None,
@@ -145,8 +319,14 @@ impl ReportDialog {
         }
     }
 
+    pub fn is_game(&self) -> bool {
+        self.game_category.is_some()
+    }
+
+    /// A game report cannot be sent until `build_game_report` is in the tracker.
     pub fn can_send(&self) -> bool {
-        self.linked
+        !self.is_game()
+            && self.linked
             && self.preview_current()
             && !matches!(self.send, SendState::Sending)
             && !self.sent()
@@ -157,7 +337,7 @@ impl ReportDialog {
     }
 
     pub fn can_save(&self) -> bool {
-        self.preview_current() && !self.saving && !self.sent()
+        !self.is_game() && self.preview_current() && !self.saving && !self.sent()
     }
 
     pub fn busy(&self) -> bool {
@@ -186,7 +366,7 @@ pub fn next_generation() -> u64 {
 #[derive(Debug, Clone)]
 pub enum ReportUi {
     CrashPrompt { last_seen: Option<DateTime<Utc>> },
-    Dialog(ReportDialog),
+    Dialog(Box<ReportDialog>),
 }
 
 /// Crash prompt for app start: `Some` when `last_crash.marker` exists.
@@ -584,11 +764,16 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
         chips = chips.push(chip);
     }
     body = body.push(chips);
+    body = body.push(game_row(d));
     body = body.push(
-        text(category_hint(d.category))
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        text(if let Some(category) = d.game_category {
+            game_hint(category)
+        } else {
+            category_hint(d.category)
+        })
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3),
     );
 
     let mut input = text_input("What happened? (optional)", &d.text)
@@ -631,6 +816,133 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
         scrollable(body).height(Length::Shrink).width(Fill).into(),
         620.0,
     )
+}
+
+fn game_hint(category: GameCategory) -> &'static str {
+    match category {
+        GameCategory::MissedGame => "A game the tracker never recorded. No pictures are required.",
+        _ => "The pictures are the blanked scoreboard and the result banner stored for this game.",
+    }
+}
+
+fn game_row(d: &ReportDialog) -> Element<'_, Message> {
+    let mut col = column![
+        text("About a game")
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2)
+    ]
+    .spacing(6)
+    .width(Fill);
+    // The dialog is 640px. Seven chips on one row run past the card.
+    for row in GameCategory::ALL.chunks(4) {
+        let mut chips = Row::new().spacing(6);
+        for category in row.iter().copied() {
+            let selected = d.game_category == Some(category);
+            let mut chip = btn(category.label(), if selected { TEXT } else { TEXT_2 })
+                .style(theme::chip(selected));
+            if !d.busy() && !d.sent() {
+                chip = chip.on_press(msg(ReportMessage::GameCategory(category)));
+            }
+            chips = chips.push(chip);
+        }
+        col = col.push(chips);
+    }
+    if d.game_category
+        .is_some_and(|category| !category.allows_missing_kit())
+    {
+        col = col.push(game_picker(d));
+    }
+    if !d.kit_images.is_empty() {
+        col = col.push(kit_pictures(d));
+    } else if d.is_game() && !d.game_category.is_some_and(|c| c.allows_missing_kit()) {
+        col = col.push(
+            text("No pictures for this game yet.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
+    col.into()
+}
+
+fn game_picker(d: &ReportDialog) -> Element<'_, Message> {
+    let mut col = column![].spacing(4).width(Fill);
+    if d.game_choices.is_empty() {
+        return text("No games on this PC yet.")
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3)
+            .into();
+    }
+    for choice in &d.game_choices {
+        let selected = d.game_session.as_deref() == Some(choice.session_id.as_str());
+        let enabled = choice.has_kit;
+        let mut chip = btn(
+            &choice.label,
+            if selected {
+                TEXT
+            } else if enabled {
+                TEXT_2
+            } else {
+                TEXT_3
+            },
+        )
+        .style(theme::chip(selected));
+        if enabled && !d.busy() && !d.sent() {
+            chip = chip.on_press(msg(ReportMessage::PickGame(choice.session_id.clone())));
+        }
+        col = col.push(chip);
+    }
+    col.into()
+}
+
+fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
+    let mut col = column![
+        text("Pictures on this PC. They are not in the zip until the tracker core adds them.")
+            .size(SIZE_LABEL)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
+        btn(
+            if d.image_actual {
+                "Fit to the dialog"
+            } else {
+                "Actual size"
+            },
+            TEXT,
+        )
+        .style(theme::ghost_btn())
+        .on_press(msg(ReportMessage::ToggleImageScale)),
+    ]
+    .spacing(6)
+    .width(Fill);
+    for image in &d.kit_images {
+        let widget = iced::widget::image(image.handle.clone());
+        let shown: Element<'_, Message> = if d.image_actual {
+            scrollable(
+                widget
+                    .width(Length::Fixed(image.width as f32))
+                    .height(Length::Fixed(image.height as f32)),
+            )
+            .direction(iced::widget::scrollable::Direction::Both {
+                vertical: iced::widget::scrollable::Scrollbar::default(),
+                horizontal: iced::widget::scrollable::Scrollbar::default(),
+            })
+            .width(Fill)
+            .height(Length::Fixed(320.0))
+            .into()
+        } else {
+            widget.width(Fill).into()
+        };
+        col = col.push(
+            text(format!("{} {}×{}", image.path, image.width, image.height))
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+        col = col.push(shown);
+    }
+    col.into()
 }
 
 fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
@@ -745,7 +1057,18 @@ fn size_text(bytes: u64) -> String {
 
 fn status_block(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![].spacing(6).width(Fill);
-    if !d.linked && !d.sent() {
+    if d.is_game() && !d.sent() {
+        col = col.push(
+            text(
+                "Send and Save stay off for a game report until the tracker can build that zip. \
+                 The pictures above are the ones it will include.",
+            )
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(theme::WARN),
+        );
+    }
+    if !d.linked && !d.sent() && !d.is_game() {
         col = col.push(
             text(
                 "The tracker is not linked, so Send is off. Link it in Settings, or use Save \
@@ -1096,5 +1419,45 @@ mod tests {
         assert_eq!(last_seen, Some(marker.last_seen));
         stat_tracker::report::marker::dismiss_last_crash(tmp.path()).unwrap();
         assert!(crash_prompt(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn kit_requires_a_scoreboard_and_a_game_report_does_not_send() {
+        assert_eq!(GameCategory::WrongStats.as_str(), "wrong_stats");
+        assert_eq!(GameCategory::MissedGame.as_str(), "missed_game");
+        assert!(GameCategory::MissedGame.allows_missing_kit());
+        assert!(!GameCategory::WrongStats.allows_missing_kit());
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_kit(tmp.path(), "s1"));
+        assert!(kit_sessions(tmp.path()).is_empty());
+        let dir = kit_dir(tmp.path(), "s1");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!has_kit(tmp.path(), "s1"));
+        // 1x1 PNG.
+        let png = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 248, 15, 4,
+            0, 9, 251, 3, 253, 160, 53, 14, 150, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        fs::write(dir.join("scoreboard.png"), png).unwrap();
+        assert!(has_kit(tmp.path(), "s1"));
+        assert!(!has_kit(tmp.path(), "../s1"));
+        let images = load_kit_images(tmp.path(), "s1");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path, "crops/scoreboard.png");
+        assert_eq!((images[0].width, images[0].height), (1, 1));
+        assert_eq!(kit_sessions(tmp.path()), vec!["s1".to_string()]);
+
+        let mut d = ReportDialog::new(LogOnlyCategory::Other, true);
+        d.built = Some(Ok(Arc::new(ReportZip {
+            bytes: vec![1],
+            manifest_json: "{}".into(),
+            files: Vec::new(),
+            log_text: String::new(),
+        })));
+        assert!(d.can_send());
+        d.game_category = Some(GameCategory::WrongStats);
+        assert!(!d.can_send() && !d.can_save());
     }
 }

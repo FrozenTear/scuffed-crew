@@ -294,14 +294,29 @@ pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
     .into()
 }
 
-pub fn toast_bar(msg: &str) -> Element<'static, Message> {
+pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message> {
+    let mut line = row![
+        text(msg.to_string())
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT)
+            .width(Fill)
+    ];
+    if let Some(action) = action {
+        line = line.push(
+            button(
+                text("Send this fix to help training")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([4, 10]))
+            .style(theme::chip(true))
+            .on_press(action),
+        );
+    }
     container(
-        row![
-            text(msg.to_string())
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT)
-                .width(Fill),
+        line.push(
             button(
                 text("Dismiss")
                     .size(SIZE_META)
@@ -311,7 +326,7 @@ pub fn toast_bar(msg: &str) -> Element<'static, Message> {
             .padding(Padding::from([4, 10]))
             .style(theme::ghost_btn())
             .on_press(Message::DismissToast),
-        ]
+        )
         .align_y(Alignment::Center)
         .spacing(12),
     )
@@ -681,6 +696,7 @@ pub fn expanded_game_card<'a>(
     edit: &'a EditForm,
     confirm_delete: bool,
     in_progress: bool,
+    has_kit: bool,
 ) -> Element<'a, Message> {
     let sid = game.session_id.clone();
     let result = if in_progress {
@@ -707,7 +723,7 @@ pub fn expanded_game_card<'a>(
         ),
         result,
         stat_line(game),
-        action_row(game, editing, confirm_delete),
+        action_row(game, editing, confirm_delete, has_kit),
     ]
     .spacing(10);
 
@@ -759,10 +775,32 @@ pub fn expanded_game_card<'a>(
     .into()
 }
 
-fn action_row(game: &Game, editing: bool, confirm_delete: bool) -> Element<'static, Message> {
+fn action_row(
+    game: &Game,
+    editing: bool,
+    confirm_delete: bool,
+    has_kit: bool,
+) -> Element<'static, Message> {
     let sid = game.session_id.clone();
     let sid_del = sid.clone();
+    let mut report = button(
+        text("Report this game")
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(if has_kit { TEXT } else { TEXT_3 }),
+    )
+    .padding(Padding::from([6, 14]))
+    .style(theme::ghost_btn());
+    if has_kit {
+        report = report.on_press(Message::Report(crate::report::ReportMessage::OpenGame {
+            session_id: Some(sid.clone()),
+            category: crate::report::GameCategory::WrongStats,
+            training: false,
+            choices: Vec::new(),
+        }));
+    }
     row![
+        report,
         label_text("Set outcome"),
         filter_chip(
             "Victory".into(),

@@ -557,6 +557,7 @@ mod tests {
         };
         let rows = vec![RowOcrResult {
             name: None,
+            name_alternates: Vec::new(),
             stats: vec![
                 c("12", 90),
                 c("0", 88),

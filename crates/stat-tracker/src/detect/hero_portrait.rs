@@ -13,6 +13,11 @@ pub struct PortraitMatcher {
 
 impl PortraitMatcher {
     pub fn load(portraits_dir: &Path) -> Self {
+        // Seeds cut with an older portrait grid go first, so the bundled
+        // references they shadowed are unpacked again below.
+        if let Err(e) = invalidate_stale_seeds(portraits_dir) {
+            tracing::warn!(error = %e, "could not move stale portrait seeds aside; will retry next start");
+        }
         // Unpack bundled portraits if the directory is empty or missing
         unpack_bundled(portraits_dir);
 
@@ -263,11 +268,24 @@ pub struct PortraitRect {
 /// reference rows by width keeps 1440p pixel-identical and lands 1080p on
 /// that grid.
 const PORTRAIT_REF_W: u32 = 1664;
-/// `1007 * 12 / 100` on the 1440p crop.
+/// 6v6: `1007 * 12 / 100` on the 1440p crop.
 const PORTRAIT_REF_START_Y: u32 = 120;
-/// `1007 * 7 / 100` (5v5) and `1007 * 58 / 1000` (6v6).
-const PORTRAIT_REF_PITCH_5: u32 = 70;
+/// 6v6: `1007 * 58 / 1000`.
 const PORTRAIT_REF_PITCH_6: u32 = 58;
+
+/// 5v5 row 0 top on the 1440p crop. Measured 2026-10-12 on 15 in-match
+/// boards (0, 1 and 2 perks) and one centred pre-match board: row 0 starts at
+/// y 34.1, and the layouts agree within 0.1 px. The old grid (y 120, pitch
+/// 70) put "row 0" on row 1's portrait.
+const PORTRAIT_REF_START_Y_5: u32 = 34;
+/// 5v5 row pitch, measured 88.07 (team 1) and 88.06 (team 2).
+const PORTRAIT_REF_PITCH_5: u32 = 88;
+/// 5v5 team 2 row 0 top, measured 576.0 to 576.6. The team gap is not a
+/// whole pitch (576 - 34 = 6.15 pitches), so team 2 gets its own origin.
+const PORTRAIT_REF_TEAM2_Y_5: u32 = 576;
+/// 5v5 portrait square, measured 85.5 px wide. The shared `w * 6 / 100`
+/// square (99 px) would run 13 px into the next row at the 88 px pitch.
+const PORTRAIT_REF_SIDE_5: u32 = 86;
 
 fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
     let r = PORTRAIT_REF_W as u64;
@@ -279,9 +297,14 @@ fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
 /// OW2 Tab scoreboard layout (after `crop_scoreboard`):
 /// - 5 or 6 player rows per team
 /// - Hero portrait at the left edge of each row
-/// - Rows start ~12% from top
-/// - Portrait ~leftmost 5-6% of width, square
-/// - One-row team gap between team 1 and team 2
+/// - 6v6: rows start ~12% from top, portrait ~6% of width, square, and a
+///   one-row team gap between team 1 and team 2
+/// - 5v5: the measured grid above (row 0 at y 34, pitch 88, team 2 at 576,
+///   86 px square on the 1440p crop)
+///
+/// The x origin is shared. It fits the 5v5 in-match table with no perks; the
+/// table shifts left by 28 px (1 perk) or 66 px (2 perks), which this grid
+/// does not follow.
 ///
 /// Returns None unless the full square fits in the crop. A cut-off
 /// rectangle can be saved as a hero reference, so a short board is
@@ -301,27 +324,36 @@ pub fn portrait_rect(
         return None;
     }
 
-    let side = w * 6 / 100;
+    let side = if team_size == 6 {
+        w * 6 / 100
+    } else {
+        scale_portrait_px(PORTRAIT_REF_SIDE_5, w)
+    };
     let portrait_x = w / 100;
     if side == 0 || portrait_x.saturating_add(side) > w {
         return None;
     }
 
-    // 5v5: rows take ~7% of the 1440p crop each; 6v6: ~5.8%.
-    // The team gap is one extra row of that pitch.
-    let pitch = if team_size == 6 {
-        PORTRAIT_REF_PITCH_6
-    } else {
-        PORTRAIT_REF_PITCH_5
-    };
     let team = (row_idx / team_size) as u32;
     let row_in_team = (row_idx % team_size) as u32;
-    let steps = if team == 0 {
-        row_in_team
+    let ref_y = if team_size == 6 {
+        // 6v6: ~5.8% of the 1440p crop per row; the team gap is one extra
+        // row of that pitch.
+        let steps = if team == 0 {
+            row_in_team
+        } else {
+            team_size as u32 + 1 + row_in_team
+        };
+        PORTRAIT_REF_START_Y + steps * PORTRAIT_REF_PITCH_6
     } else {
-        team_size as u32 + 1 + row_in_team
+        let origin = if team == 0 {
+            PORTRAIT_REF_START_Y_5
+        } else {
+            PORTRAIT_REF_TEAM2_Y_5
+        };
+        origin + row_in_team * PORTRAIT_REF_PITCH_5
     };
-    let y = scale_portrait_px(PORTRAIT_REF_START_Y + steps * pitch, w);
+    let y = scale_portrait_px(ref_y, w);
     if y.saturating_add(side) > h {
         return None;
     }
@@ -775,15 +807,40 @@ fn png_bytes(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
 /// Whether this capture may write a portrait reference.
 ///
 /// A save needs an identified player row (row 0 belongs to someone else when
-/// the row was not found), a slot that is empty or still a provisional
-/// stand-in, and either the career panel or `--collect-portraits`.
+/// the row was not found), a portrait grid known to fit the board layout
+/// ([`portrait_seed_layout_known`]), a slot that is empty or still a
+/// provisional stand-in, and either the career panel or `--collect-portraits`.
 pub fn should_save_portrait_crop(
     career_panel: bool,
     collect_portraits: bool,
     slot_replaceable: bool,
     player_row_known: bool,
+    layout_known: bool,
 ) -> bool {
-    player_row_known && slot_replaceable && (collect_portraits || career_panel)
+    player_row_known && layout_known && slot_replaceable && (collect_portraits || career_panel)
+}
+
+/// Whether [`portrait_rect`] is known to fit this board, so its crop may seed
+/// a hero reference.
+///
+/// 6v6 has one measured layout: always. 5v5 only when the own name matched in
+/// the in-match no-perk window
+/// ([`crate::ocr::preprocess::NAME_WINDOW_5V5_INGAME`]) and in no other
+/// window. The 5v5 grid's x fits only that layout: one or two perks shift the
+/// table 28 or 66 px left, so the square is cut or misplaced, and the centred
+/// table puts the portrait near x 323. A saved crop is never overwritten, so a
+/// misplaced one would stick. A row found only by the highlight says nothing
+/// about the layout and never seeds on 5v5.
+pub fn portrait_seed_layout_known(
+    team_size: usize,
+    name_match: Option<&crate::parse::NameMatch>,
+) -> bool {
+    if team_size >= 6 {
+        return true;
+    }
+    name_match.is_some_and(|m| {
+        m.window == crate::ocr::preprocess::NAME_WINDOW_5V5_INGAME && m.sole_window
+    })
 }
 
 /// Write `crop` only when the slot is empty or still holds a provisional
@@ -860,6 +917,95 @@ pub fn portrait_slot_is_replaceable(path: &Path) -> bool {
         Ok(bytes) => bytes_match_provisional(stem, &bytes),
         Err(_) => false,
     }
+}
+
+/// Version of the portrait grid that captured seeds are cut with.
+///
+/// - 1: alpha.5 and earlier. The 5v5 grid put "row 0" at y 120 (row 1's
+///   portrait), so a 5v5 seed could hold a teammate's hero.
+/// - 2: the measured 5v5 grid, and 5v5 seeds only from the no-perk in-match
+///   layout ([`portrait_seed_layout_known`]).
+///
+/// Bump it whenever [`portrait_rect`] moves for a layout that may seed.
+pub const SEED_GEOMETRY_VERSION: u32 = 2;
+
+/// Marker in the portraits directory holding the [`SEED_GEOMETRY_VERSION`]
+/// its captured seeds were cut with. Absent means version 1.
+const SEED_GEOMETRY_MARKER: &str = ".seed-geometry";
+
+/// Move captured seeds cut with an older portrait grid out of the reference
+/// set, once per [`SEED_GEOMETRY_VERSION`].
+///
+/// A file stays when its bytes are a bundled reference or a provisional
+/// stand-in for its stem. Every other `*.png` is a captured seed (or a file
+/// the user placed there) and moves to `invalidated-<old version>/` in the
+/// same directory; nothing is deleted. A moved slot is then missing, so the
+/// bundled reference is unpacked again where one exists and the next
+/// qualifying capture seeds it afresh. Returns how many files moved. The
+/// marker is written only after every move succeeded.
+pub fn invalidate_stale_seeds(portraits_dir: &Path) -> std::io::Result<usize> {
+    invalidate_stale_seeds_with(portraits_dir, bundled_portraits())
+}
+
+fn invalidate_stale_seeds_with(
+    portraits_dir: &Path,
+    bundled: &[(&str, &[u8])],
+) -> std::io::Result<usize> {
+    std::fs::create_dir_all(portraits_dir)?;
+    let marker = portraits_dir.join(SEED_GEOMETRY_MARKER);
+    let on_disk: u32 = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    if on_disk >= SEED_GEOMETRY_VERSION {
+        return Ok(0);
+    }
+
+    let dest = portraits_dir.join(format!("invalidated-{on_disk}"));
+    let mut moved = 0usize;
+    for entry in std::fs::read_dir(portraits_dir)? {
+        let path = entry?.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("png") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.starts_with('.') {
+            continue;
+        }
+        let bytes = std::fs::read(&path)?;
+        let is_bundled = bundled
+            .iter()
+            .any(|(name, data)| *name == stem && *data == bytes.as_slice());
+        if is_bundled || bytes_match_provisional(stem, &bytes) {
+            continue;
+        }
+        std::fs::create_dir_all(&dest)?;
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let mut target = dest.join(file_name);
+        let mut n = 1;
+        while target.exists() {
+            target = dest.join(format!("{stem}.{n}.png"));
+            n += 1;
+        }
+        std::fs::rename(&path, &target)?;
+        moved += 1;
+    }
+
+    write_bytes_atomic(&marker, format!("{SEED_GEOMETRY_VERSION}\n").as_bytes())?;
+    if moved > 0 {
+        tracing::info!(
+            moved,
+            from_version = on_disk,
+            to_version = SEED_GEOMETRY_VERSION,
+            dir = %dest.display(),
+            "moved portrait seeds cut with an older portrait grid aside; they re-seed from new captures"
+        );
+    }
+    Ok(moved)
 }
 
 /// Unpack bundled portraits into the data directory.
@@ -955,17 +1101,26 @@ mod portrait_rect_tests {
         assert_eq!(d1080, (1248, 756));
 
         // Reference grid, pinned so a 1080 fix cannot slide 1440.
-        assert_eq!(portrait_rect(d1440, 0, 5).unwrap().y, 120);
-        assert_eq!(portrait_rect(d1440, 9, 5).unwrap().y, 820);
         assert_eq!(portrait_rect(d1440, 0, 6).unwrap().y, 120);
         assert_eq!(portrait_rect(d1440, 11, 6).unwrap().y, 816);
+        assert_eq!(portrait_rect(d1440, 0, 5).unwrap().y, 34);
+        assert_eq!(portrait_rect(d1440, 5, 5).unwrap().y, 576);
+        assert_eq!(portrait_rect(d1440, 8, 5).unwrap().y, 840);
 
-        // Truncating the height pitch left these 5px and 6px high.
-        assert_eq!(portrait_rect(d1080, 9, 5).unwrap().y, 615);
+        // Truncating the height pitch left this 6px high.
         assert_eq!(portrait_rect(d1080, 11, 6).unwrap().y, 612);
+        assert_eq!(portrait_rect(d1080, 8, 5).unwrap().y, 630);
 
-        for team in [5usize, 6] {
-            for row in 0..(team * 2) {
+        // The 5v5 last row runs to y 1014.85 and the crop stops at 1007, so
+        // its square is cut at both resolutions and refused.
+        assert_eq!(portrait_rect(d1440, 9, 5), None);
+        assert_eq!(portrait_rect(d1080, 9, 5), None);
+
+        for (team, rows, full_1440, full_1080) in [
+            (6usize, 12usize, d1440.0 * 6 / 100, d1080.0 * 6 / 100),
+            (5, 9, 86, 65),
+        ] {
+            for row in 0..rows {
                 let src = portrait_rect(d1440, row, team).unwrap();
                 let dst = portrait_rect(d1080, row, team).unwrap();
                 let expect_y = ((src.y as u64 * d1080.0 as u64) + 1664 / 2) / 1664;
@@ -973,8 +1128,6 @@ mod portrait_rect_tests {
                     dst.y, expect_y as u32,
                     "team {team} row {row} must scale with board width"
                 );
-                let full_1440 = d1440.0 * 6 / 100;
-                let full_1080 = d1080.0 * 6 / 100;
                 assert_eq!(
                     (src.w, src.h),
                     (full_1440, full_1440),
@@ -991,14 +1144,54 @@ mod portrait_rect_tests {
         }
     }
 
+    /// 5v5 row bands on the 1440p crop, measured 2026-10-12 on 15 in-match
+    /// boards and one centred board (row top, exclusive bottom). Hardcoded on
+    /// purpose: deriving them from the constants would test nothing.
+    const ROWS_5V5_1440: [(f64, f64); 10] = [
+        (34.1, 119.9),
+        (122.2, 208.0),
+        (210.3, 296.1),
+        (298.3, 384.1),
+        (386.4, 472.9),
+        (576.0, 661.7),
+        (664.1, 749.8),
+        (752.1, 837.9),
+        (840.2, 925.9),
+        (928.3, 1014.3),
+    ];
+
+    #[test]
+    fn five_v_five_portraits_sit_inside_the_measured_rows() {
+        let dims = board_dims(2560, 1440);
+        for (row, (top, bottom)) in ROWS_5V5_1440.iter().enumerate() {
+            let Some(r) = portrait_rect(dims, row, 5) else {
+                assert!(*bottom > dims.1 as f64, "row {row} fits but has no square");
+                continue;
+            };
+            let (y0, y1) = (r.y as f64, (r.y + r.h) as f64);
+            assert!(
+                (y0 - top).abs() <= 2.0,
+                "row {row}: square starts at {y0}, the row at {top}"
+            );
+            assert!(
+                y1 <= bottom + 1.0,
+                "row {row}: square ends at {y1}, past the row bottom {bottom}"
+            );
+        }
+    }
+
     #[test]
     fn short_board_returns_none() {
-        // 1440-wide crop. Row 0 starts at y=120 and the square is 99px,
+        // 1440-wide crop. 6v6 row 0 starts at y=120 and the square is 99px,
         // so anything shorter than 219px would cut it. That used to come
         // back as 99x30. Callers save this rect as a hero reference.
-        assert!(portrait_rect((1664, 150), 0, 5).is_none());
-        assert!(portrait_rect((1664, 218), 0, 5).is_none());
+        assert!(portrait_rect((1664, 150), 0, 6).is_none());
+        assert!(portrait_rect((1664, 218), 0, 6).is_none());
+        assert!(portrait_rect((1664, 219), 0, 6).is_some());
+        // 5v5 row 0 starts at y=34 with an 86px square: 120px is the floor.
         assert!(portrait_rect((1664, 100), 0, 5).is_none());
+        assert!(portrait_rect((1664, 119), 0, 5).is_none());
+        assert!(portrait_rect((1664, 120), 0, 5).is_some());
     }
 }
 
@@ -1148,11 +1341,13 @@ mod provisional_portrait_tests {
     #[test]
     fn capture_decision_needs_a_known_row_and_a_replaceable_slot() {
         // Career panel, empty-or-stand-in slot, identified row.
-        assert!(should_save_portrait_crop(true, false, true, true));
+        assert!(should_save_portrait_crop(true, false, true, true, true));
         // Row not identified: do not crop row 0, even with --collect-portraits.
-        assert!(!should_save_portrait_crop(true, true, true, false));
+        assert!(!should_save_portrait_crop(true, true, true, false, true));
         // Portrait/held/text guess, collection off.
-        assert!(!should_save_portrait_crop(false, false, true, true));
+        assert!(!should_save_portrait_crop(false, false, true, true, true));
+        // Layout not known to fit the portrait grid (5v5 perks / centred).
+        assert!(!should_save_portrait_crop(true, true, true, true, false));
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doctrine.png");
@@ -1161,7 +1356,173 @@ mod provisional_portrait_tests {
             .expect("write real portrait");
         let replaceable = portrait_slot_is_replaceable(&path);
         assert!(!replaceable);
-        assert!(!should_save_portrait_crop(true, true, replaceable, true));
+        assert!(!should_save_portrait_crop(
+            true,
+            true,
+            replaceable,
+            true,
+            true
+        ));
+    }
+}
+
+#[cfg(test)]
+mod seed_layout_tests {
+    use super::{portrait_seed_layout_known, should_save_portrait_crop};
+    use crate::ocr::preprocess::{
+        NAME_WINDOW_5V5_CENTRED, NAME_WINDOW_5V5_INGAME, NAME_WINDOW_5V5_PERKS,
+    };
+    use crate::parse::NameMatch;
+
+    fn m(window: usize, sole_window: bool) -> NameMatch {
+        NameMatch {
+            row: 0,
+            window,
+            sole_window,
+        }
+    }
+
+    #[test]
+    fn five_v_five_seeds_only_from_the_no_perk_in_match_window() {
+        assert!(portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_INGAME, true))
+        ));
+        // Perk and centred boards: the grid's x does not fit them.
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_PERKS, true))
+        ));
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_CENTRED, true))
+        ));
+        // The no-perk window matched, but so did another: layout unknown.
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_INGAME, false))
+        ));
+        // Row from the highlight alone: layout unknown.
+        assert!(!portrait_seed_layout_known(5, None));
+    }
+
+    #[test]
+    fn six_v_six_seeding_is_unchanged() {
+        assert!(portrait_seed_layout_known(6, None));
+        assert!(portrait_seed_layout_known(6, Some(&m(0, true))));
+    }
+
+    #[test]
+    fn a_perk_board_never_seeds_even_with_the_career_panel() {
+        let layout = portrait_seed_layout_known(5, Some(&m(NAME_WINDOW_5V5_PERKS, true)));
+        assert!(!should_save_portrait_crop(true, true, true, true, layout));
+        let layout = portrait_seed_layout_known(5, Some(&m(NAME_WINDOW_5V5_INGAME, true)));
+        assert!(should_save_portrait_crop(true, false, true, true, layout));
+    }
+}
+
+#[cfg(test)]
+mod stale_seed_tests {
+    use super::{
+        PortraitMatcher, SEED_GEOMETRY_MARKER, SEED_GEOMETRY_VERSION, bundled_portraits,
+        invalidate_stale_seeds, invalidate_stale_seeds_with,
+    };
+
+    fn bundled(stem: &str) -> &'static [u8] {
+        bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == stem)
+            .map(|(_, bytes)| *bytes)
+            .unwrap()
+    }
+
+    fn marker(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join(SEED_GEOMETRY_MARKER)).unwrap()
+    }
+
+    #[test]
+    fn fresh_dir_moves_nothing_and_writes_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let portraits = dir.path().join("portraits");
+        assert_eq!(invalidate_stale_seeds(&portraits).unwrap(), 0);
+        assert_eq!(marker(&portraits).trim(), SEED_GEOMETRY_VERSION.to_string());
+    }
+
+    #[test]
+    fn alpha5_seeds_move_aside_and_bundled_files_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // Bundled reference, untouched since unpack.
+        std::fs::write(p.join("ana.png"), bundled("ana")).unwrap();
+        // Doctrine still the provisional stand-in.
+        std::fs::write(p.join("doctrine.png"), bundled("doctrine")).unwrap();
+        // Captured seeds: a hero with no bundled file, and a bundled stem
+        // whose bytes are a crop.
+        std::fs::write(p.join("dmon.png"), b"seed one").unwrap();
+        std::fs::write(p.join("mercy.png"), b"seed two").unwrap();
+        // Not a reference.
+        std::fs::write(p.join("notes.txt"), b"keep").unwrap();
+
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 2);
+        assert_eq!(std::fs::read(p.join("ana.png")).unwrap(), bundled("ana"));
+        assert_eq!(
+            std::fs::read(p.join("doctrine.png")).unwrap(),
+            bundled("doctrine")
+        );
+        assert!(p.join("notes.txt").exists());
+        assert!(!p.join("dmon.png").exists());
+        assert!(!p.join("mercy.png").exists());
+        // Moved, never deleted.
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/dmon.png")).unwrap(),
+            b"seed one"
+        );
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/mercy.png")).unwrap(),
+            b"seed two"
+        );
+        assert_eq!(marker(p).trim(), SEED_GEOMETRY_VERSION.to_string());
+
+        // Once per version: a seed cut under the new grid stays.
+        std::fs::write(p.join("dmon.png"), b"new seed").unwrap();
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 0);
+        assert_eq!(std::fs::read(p.join("dmon.png")).unwrap(), b"new seed");
+    }
+
+    #[test]
+    fn an_older_marker_also_invalidates_and_names_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join(SEED_GEOMETRY_MARKER), "1\n").unwrap();
+        std::fs::write(p.join("ana.png"), b"crop").unwrap();
+        let fake: &[(&str, &[u8])] = &[("ana", b"bundled ana")];
+        assert_eq!(invalidate_stale_seeds_with(p, fake).unwrap(), 1);
+        assert!(p.join("invalidated-1/ana.png").exists());
+        // A second stale file of the same name never overwrites the first.
+        std::fs::write(p.join(SEED_GEOMETRY_MARKER), "1\n").unwrap();
+        std::fs::write(p.join("ana.png"), b"crop two").unwrap();
+        assert_eq!(invalidate_stale_seeds_with(p, fake).unwrap(), 1);
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/ana.png")).unwrap(),
+            b"crop"
+        );
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/ana.1.png")).unwrap(),
+            b"crop two"
+        );
+    }
+
+    #[test]
+    fn loading_restores_the_bundled_reference_a_seed_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("mercy.png"), b"wrong-row seed").unwrap();
+        let _ = PortraitMatcher::load(p);
+        assert_eq!(
+            std::fs::read(p.join("mercy.png")).unwrap(),
+            bundled("mercy")
+        );
+        assert!(p.join("invalidated-1/mercy.png").exists());
     }
 }
 
