@@ -84,12 +84,36 @@ fn dump_board_measurements() {
 /// Row verdicts of the whole blanker (no chat on screen), one JSON line per
 /// board: `SCUFFED_QA_FRAMES=<dir> SCUFFED_QA_OUT=<file>`; with
 /// `SCUFFED_QA_IMAGES=<dir>` the blanked crops are written there too.
+///
+/// Portraits need an earlier capture (`SCUFFED_QA_MEMORY`):
+/// * unset: none, so no portrait is kept;
+/// * `seq`: the files are captures of one member in time order (the
+///   `YYYYMMDD_HHMMSS` in their names) and share one memory;
+/// * `self`: each file is checked against itself captured two minutes earlier
+///   (an overlay that stayed put);
+/// * any other value: a JSON file mapping a file name to the image of the
+///   earlier capture (two minutes earlier).
 #[test]
 #[ignore = "needs SCUFFED_QA_FRAMES and SCUFFED_QA_OUT"]
 fn dump_blank_verdicts() {
+    use chrono::{DateTime, Duration, NaiveDateTime, Utc};
     let dir = std::env::var("SCUFFED_QA_FRAMES").expect("SCUFFED_QA_FRAMES");
     let out = std::env::var("SCUFFED_QA_OUT").expect("SCUFFED_QA_OUT");
     let images = std::env::var("SCUFFED_QA_IMAGES").ok();
+    let mode = std::env::var("SCUFFED_QA_MEMORY").unwrap_or_default();
+    let refs: serde_json::Map<String, serde_json::Value> = match mode.as_str() {
+        "" | "seq" | "self" => Default::default(),
+        path => serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+    };
+    let stamp = |name: &str| -> Option<DateTime<Utc>> {
+        let b = name.as_bytes();
+        (0..b.len().saturating_sub(15)).find_map(|i| {
+            let t = std::str::from_utf8(&b[i..i + 15]).ok()?;
+            NaiveDateTime::parse_from_str(t, "%Y%m%d_%H%M%S")
+                .ok()
+                .map(|n| n.and_utc())
+        })
+    };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -99,26 +123,54 @@ fn dump_blank_verdicts() {
         })
         .collect();
     files.sort();
+    if mode == "seq" {
+        files.sort_by_key(|p| stamp(&p.file_name().unwrap().to_string_lossy()));
+    }
+    // SCUFFED_QA_CHAT=unknown: blank as a crop with no frame (chat
+    // could cover the bottom rows)
+    let chat = match std::env::var("SCUFFED_QA_CHAT").as_deref() {
+        Ok("unknown") => super::Chat::Unknown,
+        _ => super::Chat::None,
+    };
+    // a 16:9 (or wider) full frame goes through the frame path, with chat
+    // read from the frame
+    let run = |img: &image::RgbImage, mem: &mut super::PortraitMemory, at: DateTime<Utc>| {
+        let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
+        if ratio > 1.7 {
+            super::blanked_scoreboard_seen(
+                &image::DynamicImage::ImageRgb8(img.clone()),
+                Some(6),
+                mem,
+                at,
+            )
+        } else {
+            super::blank_crop_seen(img, Some(6), chat, mem, at)
+        }
+    };
+    let t0 = DateTime::<Utc>::UNIX_EPOCH + Duration::days(20_000);
+    let mut shared = super::PortraitMemory::new();
     let mut lines = String::new();
-    for p in files {
+    for (i, p) in files.into_iter().enumerate() {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         let img = image::open(&p).unwrap().to_rgb8();
-        let t0 = std::time::Instant::now();
-        // SCUFFED_QA_CHAT=unknown: blank as a crop with no frame (chat
-        // could cover the bottom rows)
-        let chat = match std::env::var("SCUFFED_QA_CHAT").as_deref() {
-            Ok("unknown") => super::Chat::Unknown,
-            _ => super::Chat::None,
+        let at = match mode.as_str() {
+            "seq" => stamp(&name).unwrap_or(t0 + Duration::minutes(2 * i as i64)),
+            _ => t0,
         };
-        // a 16:9 (or wider) full frame goes through the frame path, with
-        // chat read from the frame
-        let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
-        let b = if ratio > 1.7 {
-            super::blanked_scoreboard(&image::DynamicImage::ImageRgb8(img.clone()), Some(6))
-        } else {
-            super::blank_crop(&img, Some(6), chat)
-        };
-        let ms = t0.elapsed().as_millis();
+        let mut own = super::PortraitMemory::new();
+        let mem = if mode == "seq" { &mut shared } else { &mut own };
+        if mode == "self" {
+            run(&img, mem, at - Duration::minutes(2));
+        } else if let Some(r) = refs.get(&name).and_then(|v| v.as_str()) {
+            run(
+                &image::open(r).unwrap().to_rgb8(),
+                mem,
+                at - Duration::minutes(2),
+            );
+        }
+        let t = std::time::Instant::now();
+        let b = run(&img, mem, at);
+        let ms = t.elapsed().as_millis();
         if let Some(d) = &images {
             b.image.save(std::path::Path::new(d).join(&name)).unwrap();
         }

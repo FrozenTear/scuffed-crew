@@ -220,9 +220,42 @@ pub fn encode_png(img: &RgbImage) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Record an accepted scoreboard capture: cut and blank the board, and
-/// replace the session's `scoreboard.png` and `reads.json`. A board the
-/// blanker keeps nothing of (it could not be measured) writes no kit.
+/// Sessions whose portrait memory is kept in memory.
+const MEMORY_SESSIONS: usize = 4;
+
+/// The portrait memory of the newest sessions, keyed by session directory
+/// ([`blank::PortraitMemory`]: unblanked portrait cells, in memory only).
+fn portrait_memory() -> &'static std::sync::Mutex<Vec<(PathBuf, blank::PortraitMemory)>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<Vec<(PathBuf, blank::PortraitMemory)>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Blank `frame` against the session's earlier captures and remember it.
+fn blank_seen(
+    dir: &Path,
+    frame: &DynamicImage,
+    team_size: Option<usize>,
+    at: DateTime<Utc>,
+) -> blank::BlankedBoard {
+    let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
+    let i = match all.iter().position(|(d, _)| d == dir) {
+        Some(i) => i,
+        None => {
+            if all.len() >= MEMORY_SESSIONS {
+                all.remove(0);
+            }
+            all.push((dir.to_path_buf(), blank::PortraitMemory::new()));
+            all.len() - 1
+        }
+    };
+    blank::blanked_scoreboard_seen(frame, team_size, &mut all[i].1, at)
+}
+
+/// Record an accepted scoreboard capture: cut and blank the board (its
+/// portraits checked against the session's earlier captures), and replace
+/// the session's `scoreboard.png` and `reads.json`. A board the blanker
+/// keeps nothing of writes no kit.
 pub fn record_scoreboard(
     data_dir: &Path,
     session_id: &str,
@@ -233,7 +266,7 @@ pub fn record_scoreboard(
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
-    let board = blank::blanked_scoreboard(frame, team_size);
+    let board = blank_seen(&dir, frame, team_size, reads.captured_at);
     if !board.kept_anything() {
         return Ok(());
     }

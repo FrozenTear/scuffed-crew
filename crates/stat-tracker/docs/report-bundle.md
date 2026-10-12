@@ -4,7 +4,7 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
-Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4).
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4).
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
@@ -247,7 +247,7 @@ Pixel edges use the same truncation as the current scoreboard crop: scale by the
 
 The bands outside the playfield (the letterbox or pillarbox) are filled with the same solid colour on every frame we keep. Those bands are the complement of the playfield, not a row in the table. Overlays and notifications sit there on ultrawide and 16:10 captures.
 
-### Scoreboard (revision 4, measured)
+### Scoreboard (revision 5, measured)
 
 The scoreboard crop, as fractions of the playfield, matches the crop the tracker already uses:
 
@@ -262,19 +262,21 @@ The scoreboard crop, as fractions of the playfield, matches the crop the tracker
 
 Geometry, measured per board. Lengths are in the 1664 px crop of a 2560x1440 frame, times `s` = crop width / 1664.
 
-- Board: the crop aspect is within 1% of 1664:1007 and `s` is between 0.70 and 1.60. The light header strip gives the table edges `L` and `R` and the header bottom. Only the measured layouts pass: the in-match table centred at 522 `s`, or the post-match table centred in the crop, with `R - L` of 930, 978, 994, or 1044 `s`. The stat header labels sit at their offsets from `R` (5 of the 6 must be found; the one-letter H can drop out of the label scan), with no other label between E and MIT.
+- Board: the crop aspect is within 1% of 1664:1007 and `s` is between 0.70 and 1.60. Only the 1440p and 1080p crops (`s` within 5% of 1 or of 0.75) keep anything: digits and portraits have no measured floors at other scales, so a board measured at any other scale keeps nothing. The light header strip gives the table edges `L` and `R` and the header bottom. Only the measured layouts pass: the in-match table centred at 522 `s`, or the post-match table centred in the crop, with `R - L` of 930, 978, 994, or 1044 `s`. The stat header labels sit at their offsets from `R` (5 of the 6 must be found; the one-letter H can drop out of the label scan), with no other label between E and MIT.
 - Rows: each team's grid is fitted to the 2 px separators between rows: team 1 from the header bottom, team 2 from 556 to 576 `s`, pitch 74.5 to 75.75 `s`. A team's grid is trusted when 3 of its internal separators show, and a row is used only when the separators on both of its sides show.
 - Only 6v6 has measured geometry. Any other team size, or an unknown one, keeps nothing. A board whose geometry fails keeps nothing at all.
 
 A row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. It is copied whole only when all of these hold:
 
+- the cell matches the same row's cell on an earlier capture of the same game, taken at least a minute earlier and at most 30 minutes earlier: of the difference between the two cells, minus its 15 `s` box mean (a team colour or world shift moves the whole bar or background and cancels), no channel may be off by more than 20 at more than 20 px (x `s` squared). Text, boxes and fades drawn on one capture and not the other differ at hundreds of px. The daemon keeps the portrait cells of a game's last 8 captures in memory for this (never on disk); the first capture of a game, a hero swap, a death and a respawn keep no portrait until a matching earlier capture exists;
 - the role bar is one opaque colour: 55% of its non-icon pixels sit within 40 of their median;
-- the bar shows at most 2 sharp-stroke pixels (a channel more than 30 from its 5x5 median) outside the role icon, and white only inside the icon zone, with the icon centred and mirror-symmetric;
-- the 6 px strip right of the portrait holds at most 2 white or grey or bright bar-coloured pixels, and the 8 px strip left of the bar at most 2 white or grey pixels;
+- the bar shows at most 2 sharp-stroke pixels (a channel more than 30 from its 5x5 median) outside the role icon, a role icon of at least 120 white px (x `s` squared), and white only inside the icon zone, with the icon centred and mirror-symmetric;
+- the 6 px strip right of the portrait holds at most 2 white or grey or bright bar-coloured pixels and at most 30 sharp-stroke pixels of any colour, and the 8 px strip left of the bar at most 2 white or grey pixels;
 - the portrait's right edge shows on at least 40% of the row's pixel rows (a menu box laid across it hides it);
+- the row separators above and below the portrait square show: on at most 35% of its columns may a separator sit within 12 of the pixels 3 `s` above and below it on every channel (real rows: at most 26%);
 - no chat can be over the row (below).
 
-On the member's 34 boards of 2026-10-11 and 10-12, at 1664 and 1248 px, these gates drop 0 of 408 portraits.
+On the member's 34 boards of 2026-10-11 and 10-12, blanked in time order as one member's captures (the daemon's case), the edge gates drop 39 of 408 portraits (the rows with no hero picked, which show no role icon) and the content check drops 263 more (207 differ from every earlier capture at least a minute older, 56 have none): 106 of 408 portraits are kept at 1664 px and 80 of 408 at 1248 px. Those captures are a few minutes apart, with deaths and hero swaps between them; the daemon sees every accepted Tab, so it finds a matching earlier capture more often.
 
 Chat is read on the full frame. The chat box stacks lines upward from a bottom line below the crop, and each line starts left of the crop. When the strip at x 60 to 448, y 1250 to 1340 of the 2560x1440 playfield holds chat text (more than 12 sharp-stroke pixels; the member's chat-free Tab frames hold 0 to 1, frames with chat 282 to 2,071), the stack is followed upward line by line. Every row it can reach keeps no portrait, and at least the rows reaching below 85% of the crop height. Blanking a crop with no frame drops those bottom portraits too. Chat drawn in a role bar's own colour cannot be seen on the bar, so this is the gate that stops it.
 
@@ -289,19 +291,21 @@ Copied from a kept cell are its glyphs' binarised pixels, plus the rim pixels ar
 
 Measured on 2026-10-12 with the Rust blanker:
 
-- The member's 34 real boards at 1664 px: 0 secret pixels kept, 97.5% of digit pixels, 407 of 408 rows of numbers (one row needed a slanted cut), and 408 of 408 portraits.
+- The member's 34 real boards at 1664 px: 0 secret pixels kept, 97.5% of digit pixels, 407 of 408 rows of numbers (one row needed a slanted cut), and (blank table 10, in time order) 106 of 408 portraits.
 - Both post-match fixtures keep all 12 rows of numbers.
 - 118 forged attacks: 3 leak, 278 px in all, none readable.
 - 219 further forgeries (menus, notifications, killcam banners, coloured text beside digits, chat in every channel colour): all closed, except a box drawn wholly inside one portrait.
+- Attack round 2, re-run on blank table 10 (582 forgeries with the clean board as the earlier capture): every portrait and overlay forgery copies 0 drawn px (context menus opened inside a portrait, menus mid fade-in, coloured or faded text across the portrait edge, translucent boxes, tooltips over the portrait column, panels over the role bar, text in the icon zone, chat in the bar colour, a translucent board over in-world nameplates). What is left is the digit rim residue below (53 forgeries, 4,959 px) and one 2 px sample.
+- The same 711 forgeries with the overlay also on the earlier capture (it stayed pixel-identical for a minute or more): the edge gates alone leave 178 leaking, 102,353 px (portraits and digit rims together).
 
 Known limits:
 
-- A box drawn wholly inside one portrait, such as a tooltip, is copied with the portrait.
-- Pale text behind a translucent row can leave 1 to 2 px samples on digit rims. They cannot be read.
+- An overlay that stays pixel-identical over a portrait for a minute or more (a pinned stream overlay, a menu held open through two captures a minute apart) passes the content check, and only the edge gates judge it. A box or text drawn wholly inside one portrait, or one whose edges miss every gate, is then copied with the portrait. Fades and translucent boxes over the moving world cannot stay identical for a minute; opaque ones can.
+- Pale text behind a translucent row can leave rim samples on digit rims: chains of up to about 60 px per component, unreadable.
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 9 for this revision), and a kit from another version is never reported.
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 10 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
@@ -473,8 +477,9 @@ Tests use synthetic images drawn for the test, and the two post-match fixtures i
 Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates; plus the two post-match fixtures. After blanking:
 
 - Every name stroke is the solid colour, and the header and the world are filled.
-- Every portrait passes on a clean synthetic board; on the post-match fixtures all 12 rows keep their numbers, read back the same.
+- Every portrait passes on a clean synthetic board blanked after an identical earlier capture, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
 - Each gate has a test that drops what it guards and copies none of the drawn pixels: a name in a stat cell, a notice across the columns, a grey row tint, a stroke over the role bar, a menu box laid across a portrait, touching glyphs joined by a thick stroke, chat on the frame (one line, and a stack), a crop with no frame, a board that is not 6v6, and a board whose header is gone.
+- The portrait content check, each against a clean earlier capture: a dark menu opened inside a portrait, a menu caught mid fade-in, and orange, grey and blue text across the portrait edge copy nothing of the overlay; a changed portrait and an earlier capture under a minute old keep no portrait. With the overlay on both captures: a box over the portrait column hides the separators, and a panel in the bar colour hides the role icon. A board at another scale keeps no portrait.
 - An ignored harness runs the blanker on a directory of member frames for retention, leaks, and read-back on the member's machine (`report::blank::port_check`).
 
 One synthetic frame per other screen class, at both resolutions, paints the fake name into every name region of that class and checks that blanking removes it.

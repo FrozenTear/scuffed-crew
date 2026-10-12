@@ -118,6 +118,12 @@ const PAINT_SEP: i32 = 2;
 const NATIVE: [f64; 2] = [1.0, 756.0 / 1007.0];
 const NATIVE_TOL: f64 = 0.05;
 
+/// The 1440p or 1080p crop scale (+-5%): the only scales with measured
+/// floors, for digits and portraits.
+pub(super) fn native_scale(s: f64) -> bool {
+    NATIVE.iter().any(|n| (s / n - 1.0).abs() <= NATIVE_TOL)
+}
+
 /// Which digit template set a board uses (as `templates_for`).
 fn set_1440(h: u32) -> bool {
     h.abs_diff(1007) <= h.abs_diff(756)
@@ -179,7 +185,7 @@ pub(super) fn digit_rows(
     let rows = &b.rows;
     let (w, h) = img.dimensions();
     let s = b.s;
-    if !NATIVE.iter().any(|n| (s / n - 1.0).abs() <= NATIVE_TOL) {
+    if !native_scale(s) {
         let why = format!("scale {s:.3} has no fitted floors");
         return rows.iter().map(|_| Err(why.clone())).collect();
     }

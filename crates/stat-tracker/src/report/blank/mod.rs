@@ -3,9 +3,11 @@
 //! `crops/scoreboard.png` is an allowlist. It starts as [`FILL`], and only
 //! two kinds of pixel are copied from the frame, each from a structure
 //! measured on this board ([`board`]) and checked by an independent cue:
-//! * the portrait cell of a row (role bar and hero portrait), when nothing
-//!   is drawn over its bar, out of it to either side, or across its edge, and
-//!   no chat can be over it ([`portrait`], [`chat`]);
+//! * the portrait cell of a row (role bar and hero portrait), when its fine
+//!   detail matches the same row on an earlier capture of the game
+//!   ([`PortraitMemory`]), nothing is drawn over its bar, out of it to either
+//!   side, across its edge or over the separators above and below it, and no
+//!   chat can be over it ([`portrait`], [`chat`]);
 //! * the digit glyphs of a row whose six cells the reader copy reads as
 //!   well-formed numbers and every glyph gate accepts, on one flat colour per
 //!   cell that equals no source pixel ([`cells`]).
@@ -33,6 +35,9 @@ mod tests_measured;
 
 pub use chat::{Chat, chat_over_board};
 
+use std::collections::VecDeque;
+
+use chrono::{DateTime, Utc};
 use image::{DynamicImage, Rgb, RgbImage};
 
 use crate::ocr::preprocess::{crop_scoreboard_rect, game_rect_16_9};
@@ -45,7 +50,69 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 ///
 /// * 9: measured geometry, glyph gates on the reader copy, portrait gates,
 ///   chat over the board (2026-10-12 redesign).
-pub const BLANK_TABLE_VERSION: u32 = 9;
+/// * 10: a portrait is copied only when it matches the same row on an
+///   earlier capture of the game; a role icon and the separators over the
+///   portrait must show; portraits only at the 1440p and 1080p scales.
+pub const BLANK_TABLE_VERSION: u32 = 10;
+
+/// An earlier capture is a reference for the portrait check only when it is
+/// at least this old: an overlay that shows on both captures has to stay
+/// pixel-identical for this long.
+pub const REF_MIN_AGE: chrono::Duration = chrono::Duration::seconds(60);
+/// ... and at most this old (one game).
+pub const REF_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
+/// Captures a [`PortraitMemory`] keeps.
+const MEMORY_BOARDS: usize = 8;
+
+/// Portrait cells of the earlier captures of one game, kept in memory only
+/// (never written) as references for the portrait content check. Each cell
+/// is the unblanked `[L, pe)` cell of a measured row, so the memory lives as
+/// long as the daemon holds the game and no longer.
+#[derive(Default)]
+pub struct PortraitMemory {
+    seen: VecDeque<Seen>,
+}
+
+struct Seen {
+    at: DateTime<Utc>,
+    crop_w: u32,
+    /// `(team, idx, cell)`.
+    cells: Vec<(usize, usize, RgbImage)>,
+}
+
+impl PortraitMemory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cells of the same row, of the same size, captured between
+    /// [`REF_MIN_AGE`] and [`REF_MAX_AGE`] before `at`.
+    fn references<'a>(
+        &'a self,
+        at: DateTime<Utc>,
+        crop_w: u32,
+        team: usize,
+        idx: usize,
+        dims: (u32, u32),
+    ) -> impl Iterator<Item = &'a RgbImage> + 'a {
+        self.seen
+            .iter()
+            .filter(move |b| {
+                b.crop_w == crop_w && at - b.at >= REF_MIN_AGE && at - b.at <= REF_MAX_AGE
+            })
+            .flat_map(|b| b.cells.iter())
+            .filter(move |(t, i, c)| *t == team && *i == idx && c.dimensions() == dims)
+            .map(|(_, _, c)| c)
+    }
+
+    fn remember(&mut self, seen: Seen) {
+        self.seen.retain(|b| (seen.at - b.at).abs() <= REF_MAX_AGE);
+        self.seen.push_back(seen);
+        while self.seen.len() > MEMORY_BOARDS {
+            self.seen.pop_front();
+        }
+    }
+}
 
 /// A region of the 16:9 playfield, in thousandths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,19 +357,56 @@ impl BlankedBoard {
     }
 }
 
-/// `crops/scoreboard.png` from a full frame: the scoreboard crop, blanked,
-/// with chat read from the rest of the frame.
+/// `crops/scoreboard.png` from a full frame with no earlier capture: no
+/// portrait is kept.
 pub fn blanked_scoreboard(frame: &DynamicImage, team_size: Option<usize>) -> BlankedBoard {
+    blanked_scoreboard_seen(
+        frame,
+        team_size,
+        &mut PortraitMemory::new(),
+        DateTime::<Utc>::UNIX_EPOCH,
+    )
+}
+
+/// `crops/scoreboard.png` from a full frame captured at `at`: the
+/// scoreboard crop, blanked, with chat read from the rest of the frame and
+/// portraits checked against the game's earlier captures in `memory`, which
+/// then remembers this one.
+pub fn blanked_scoreboard_seen(
+    frame: &DynamicImage,
+    team_size: Option<usize>,
+    memory: &mut PortraitMemory,
+    at: DateTime<Utc>,
+) -> BlankedBoard {
     let rgb = frame.to_rgb8();
     let (x, y, w, h) = crop_scoreboard_rect(rgb.width(), rgb.height());
     let crop = image::imageops::crop_imm(&rgb, x, y, w, h).to_image();
-    blank_crop(&crop, team_size, chat_over_board(&rgb))
+    blank_crop_seen(&crop, team_size, chat_over_board(&rgb), memory, at)
 }
 
-/// The allowlist on a cut scoreboard crop. `chat` is what the full frame
-/// showed; with [`Chat::Unknown`] every row the chat box could reach keeps
-/// no portrait.
+/// The allowlist on a cut scoreboard crop with no earlier capture: no
+/// portrait is kept.
 pub fn blank_crop(src: &RgbImage, team_size: Option<usize>, chat: Chat) -> BlankedBoard {
+    blank_crop_seen(
+        src,
+        team_size,
+        chat,
+        &mut PortraitMemory::new(),
+        DateTime::<Utc>::UNIX_EPOCH,
+    )
+}
+
+/// The allowlist on a cut scoreboard crop captured at `at`. `chat` is what
+/// the full frame showed; with [`Chat::Unknown`] every row the chat box could
+/// reach keeps no portrait. `memory` holds the game's earlier captures and
+/// remembers this one's portrait cells.
+pub fn blank_crop_seen(
+    src: &RgbImage,
+    team_size: Option<usize>,
+    chat: Chat,
+    memory: &mut PortraitMemory,
+    at: DateTime<Utc>,
+) -> BlankedBoard {
     let (w, h) = src.dimensions();
     let mut out = RgbImage::from_pixel(w, h, FILL);
     let Some(team) = team_size else {
@@ -359,33 +463,74 @@ pub fn blank_crop(src: &RgbImage, team_size: Option<usize>, chat: Chat) -> Blank
     let sal = portrait::salient_map(src, sal_x0, sal_x1);
     let sal_w = sal_x1.saturating_sub(sal_x0) as usize;
     let digits = cells::digit_rows(src, &b, &tint);
+    let native = cells::native_scale(s);
     let mut rows = Vec::with_capacity(b.rows.len());
     let mut painted: Vec<(usize, cells::KeptRow)> = Vec::new();
+    let mut seen = Seen {
+        at,
+        crop_w: w,
+        cells: Vec::new(),
+    };
     for (ri, ((r, bar), dig)) in b.rows.iter().zip(&bars).zip(digits).enumerate() {
-        let portrait = match (bar, &pe) {
-            (None, _) => Err("row not verified".to_string()),
-            (Some(Err(e)), _) => Err(format!("no portrait: {e}")),
-            (_, Err(e)) => Err(format!("no portrait edge: {}", e.0)),
-            (Some(Ok(c)), Ok(pe)) => portrait::verdict(src, &sal, sal_x0, sal_w, b.l, r, s)
-                .and_then(|()| portrait::surroundings(src, b.l, *pe, r, s, *c))
-                .map_err(str::to_string)
-                .and_then(|()| {
-                    if chat.covers(r.bot, h) {
-                        Err("chat may cover it".to_string())
-                    } else {
-                        Ok(())
-                    }
-                }),
+        // 1 px (x s) in from the fitted row edges: the grid is fitted to
+        // +-1 px, so the cell never takes a separator or the next row
+        let cell = match (bar, &pe) {
+            (Some(Ok(_)), Ok(pe)) => portrait::cell_rect(src, b.l, *pe, r, s).map(|c| {
+                (
+                    c,
+                    image::imageops::crop_imm(src, c.x, c.y, c.w, c.h).to_image(),
+                )
+            }),
+            _ => None,
         };
-        if let (Ok(()), Ok(pe)) = (&portrait, &pe) {
-            // 1 px (x s) in from the fitted row edges: the grid is fitted to
-            // +-1 px, so the cell never takes a separator or the next row
-            let m = board::pyround(s).max(1) as u32;
-            for y in r.top + m..r.bot.saturating_sub(m) {
-                for x in b.l..(*pe).min(w) {
-                    out.put_pixel(x, y, *src.get_pixel(x, y));
+        let portrait = match (bar, &pe, &cell) {
+            (None, _, _) => Err("row not verified".to_string()),
+            (Some(Err(e)), _, _) => Err(format!("no portrait: {e}")),
+            (_, Err(e), _) => Err(format!("no portrait edge: {}", e.0)),
+            (_, _, None) => Err("portrait cell outside the crop".to_string()),
+            (Some(Ok(_)), Ok(_), Some(_)) if !native => {
+                Err(format!("scale {s:.3} has no measured portraits"))
+            }
+            (Some(Ok(c)), Ok(pe), Some((_, img))) => {
+                portrait::verdict(src, &sal, sal_x0, sal_w, b.l, r, s)
+                    .and_then(|()| portrait::surroundings(src, b.l, *pe, r, s, *c))
+                    .and_then(|()| portrait::separators(src, b.l, *pe, r, s))
+                    .map_err(str::to_string)
+                    .and_then(|()| {
+                        if chat.covers(r.bot, h) {
+                            Err("chat may cover it".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .and_then(|()| {
+                        let mut refs = memory
+                            .references(at, w, r.team, r.idx, img.dimensions())
+                            .peekable();
+                        if refs.peek().is_none() {
+                            return Err("no earlier capture of this row".to_string());
+                        }
+                        let best = refs
+                            .map(|e| portrait::residual(img, e, s))
+                            .min()
+                            .unwrap_or(usize::MAX);
+                        if portrait::residual_ok(best, s) {
+                            Ok(())
+                        } else {
+                            Err(format!("differs from the earlier capture ({best} px)"))
+                        }
+                    })
+            }
+        };
+        if let Some((c, img)) = cell {
+            if portrait.is_ok() {
+                for y in 0..c.h {
+                    for x in 0..c.w {
+                        out.put_pixel(c.x + x, c.y + y, *img.get_pixel(x, y));
+                    }
                 }
             }
+            seen.cells.push((r.team, r.idx, img));
         }
         let digits = match dig {
             Err(why) => Err(why),
@@ -430,6 +575,7 @@ pub fn blank_crop(src: &RgbImage, team_size: Option<usize>, chat: Chat) -> Blank
             }
         }
     }
+    memory.remember(seen);
     BlankedBoard {
         image: out,
         board: Ok(()),
@@ -476,15 +622,17 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 9 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 10 for this revision)",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
             "the portrait's right edge shows on at least 40% of the row's pixel rows",
+            "at least a minute earlier",
+            "more than 20 at more than 20 px",
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 9);
+        assert_eq!(BLANK_TABLE_VERSION, 10);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 

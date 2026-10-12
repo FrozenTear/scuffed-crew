@@ -64,6 +64,32 @@ fn verdicts(b: &super::BlankedBoard) -> String {
         .join("\n")
 }
 
+/// Capture times for the portrait memory: an earlier capture two minutes
+/// before the one blanked.
+fn t0() -> chrono::DateTime<chrono::Utc> {
+    "2026-10-12T20:00:00Z".parse().unwrap()
+}
+
+/// Blank `img` captured two minutes after `earlier`, the same row's earlier
+/// capture.
+fn blank_after(earlier: &RgbImage, img: &RgbImage, chat: super::Chat) -> super::BlankedBoard {
+    let mut mem = super::PortraitMemory::new();
+    super::blank_crop_seen(earlier, Some(6), chat, &mut mem, t0());
+    super::blank_crop_seen(
+        img,
+        Some(6),
+        chat,
+        &mut mem,
+        t0() + chrono::Duration::minutes(2),
+    )
+}
+
+/// Blank `img` after an identical earlier capture: whatever is drawn on it
+/// stayed put, so only the edge gates can catch it.
+fn blank_still(img: &RgbImage) -> super::BlankedBoard {
+    blank_after(img, img, super::Chat::None)
+}
+
 /// The in-repo post-match fixtures (real 1440p and 1080p boards, names
 /// pre-filled): every row keeps all six numbers, read back exactly.
 #[test]
@@ -83,7 +109,10 @@ fn real_post_match_fixtures_keep_every_number() {
 fn synthetic_boards_keep_portraits_and_no_name() {
     for layout in LAYOUTS {
         let img = synth::board(layout);
-        let b = super::blank_crop(&img, Some(6), super::Chat::None);
+        // the first capture of a game has no earlier capture: no portrait
+        let first = super::blank_crop(&img, Some(6), super::Chat::None);
+        assert_eq!(first.portraits(), 0, "{layout:?}");
+        let b = blank_still(&img);
         assert_eq!(b.board, Ok(()), "{layout:?}");
         assert_eq!(b.rows.len(), 12, "{layout:?}");
         // synthetic digits are not real glyphs: the gates may drop them
@@ -242,7 +271,7 @@ fn text_over_the_role_bar_drops_that_portrait_only() {
         top + 9,
         Rgb([245, 245, 245]),
     );
-    let b = blank(&img);
+    let b = blank_still(&img);
     assert!(b.rows[7].portrait.is_err(), "{}", verdicts(&b));
     assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
     assert_not_copied(&b, &img, &drawn, "bar stroke");
@@ -297,7 +326,13 @@ fn touching_digits_joined_by_a_thick_stroke_are_not_kept() {
 fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
     let clean = synth::frame(Layout::L1, &synth::VALUES);
     assert_eq!(super::chat_over_board(&clean.to_rgb8()), super::Chat::None);
-    let b = super::blanked_scoreboard(&clean, Some(6));
+    // the chat stays put between the two captures: the chat gate decides
+    let twice = |f: &image::DynamicImage| {
+        let mut mem = super::PortraitMemory::new();
+        super::blanked_scoreboard_seen(f, Some(6), &mut mem, t0());
+        super::blanked_scoreboard_seen(f, Some(6), &mut mem, t0() + chrono::Duration::minutes(2))
+    };
+    let b = twice(&clean);
     assert_eq!(b.portraits(), 12, "{}", verdicts(&b));
     // one chat line at the bottom of the chat box, left of the crop
     let mut f = clean.to_rgb8();
@@ -307,7 +342,7 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
     }
     let chat = super::chat_over_board(&f);
     assert!(matches!(chat, super::Chat::ReachesY(_)), "{chat:?}");
-    let b = super::blanked_scoreboard(&image::DynamicImage::ImageRgb8(f.clone()), Some(6));
+    let b = twice(&image::DynamicImage::ImageRgb8(f.clone()));
     let dropped: Vec<usize> = b
         .rows
         .iter()
@@ -324,7 +359,7 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
             stroke(&mut f, &mut drawn, x, y, x + 3, y + 16, Rgb([124, 5, 124]));
         }
     }
-    let b = super::blanked_scoreboard(&image::DynamicImage::ImageRgb8(f), Some(6));
+    let b = twice(&image::DynamicImage::ImageRgb8(f));
     let dropped: Vec<usize> = b
         .rows
         .iter()
@@ -337,7 +372,8 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
 
 #[test]
 fn a_crop_without_its_frame_drops_the_chat_reach_portraits() {
-    let b = super::blank_crop(&synth::board(Layout::L1), Some(6), super::Chat::Unknown);
+    let img = synth::board(Layout::L1);
+    let b = blank_after(&img, &img, super::Chat::Unknown);
     let dropped: Vec<usize> = b
         .rows
         .iter()
@@ -370,4 +406,199 @@ fn unmeasured_layouts_keep_nothing() {
     let b = super::blank_crop(&flat, Some(6), super::Chat::None);
     assert!(b.board.is_err());
     assert!(b.image.pixels().all(|p| *p == super::FILL));
+}
+
+// ---- the portrait content check (blank table 10) ---------------------------
+//
+// Attack round 2: a dark context menu opened inside a portrait, a menu
+// caught mid fade-in, and coloured text across the portrait edge all passed
+// the edge gates and were copied with the portrait. Each is drawn on a
+// synthetic board whose earlier capture is clean.
+
+/// Row `r` of the L1 synthetic board: `(L, pe, top)`.
+fn l1_row(r: usize) -> (u32, u32, u32) {
+    let (l, _) = Layout::L1.edges();
+    (l, l + 104, synth::row_span(r).0)
+}
+
+/// Alpha-blend a box of colour `c` at opacity `op` (no drawn px recorded:
+/// the box itself carries no name).
+fn shade(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, c: [f64; 3], op: f64) {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel(x, y).0;
+            img.put_pixel(
+                x,
+                y,
+                Rgb(std::array::from_fn(|k| {
+                    (f64::from(p[k]) * (1.0 - op) + c[k] * op).round() as u8
+                })),
+            );
+        }
+    }
+}
+
+fn portrait_dropped(b: &super::BlankedBoard, row: usize, src: &RgbImage, drawn: &[(u32, u32)]) {
+    assert!(b.rows[row].portrait.is_err(), "{}", verdicts(b));
+    assert_not_copied(b, src, drawn, "overlay");
+}
+
+#[test]
+fn a_dark_menu_opened_inside_a_portrait_keeps_nothing_of_it() {
+    // CO-1 / G1: a box over 35% of the row height from 44 px inside the
+    // portrait, the player name in white starting inside the portrait
+    let clean = synth::board(Layout::L1);
+    let mut img = clean.clone();
+    let (_, pe, top) = l1_row(2);
+    shade(
+        &mut img,
+        pe - 44,
+        top + 24,
+        pe + 220,
+        top + 50,
+        [22.0, 22.0, 26.0],
+        0.92,
+    );
+    let mut drawn = Vec::new();
+    draw_name(&mut img, &mut drawn, pe - 40, top + 31);
+    let b = blank_after(&clean, &img, super::Chat::None);
+    portrait_dropped(&b, 2, &img, &drawn);
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+}
+
+#[test]
+fn a_menu_caught_mid_fade_keeps_nothing_of_it() {
+    // P-R1: the menu at 50% of its fade, white text at half strength
+    let clean = synth::board(Layout::L1);
+    let mut img = clean.clone();
+    let (_, pe, top) = l1_row(8);
+    shade(
+        &mut img,
+        pe - 74,
+        top + 12,
+        pe + 226,
+        top + 70,
+        [22.0, 22.0, 26.0],
+        0.46,
+    );
+    let mut drawn = Vec::new();
+    let mut ink = clean.clone();
+    draw_name(&mut ink, &mut drawn, pe - 66, top + 20);
+    for &(x, y) in &drawn {
+        let p = img.get_pixel(x, y).0;
+        img.put_pixel(x, y, Rgb(p.map(|v| ((u16::from(v) + 240) / 2) as u8)));
+    }
+    let b = blank_after(&clean, &img, super::Chat::None);
+    portrait_dropped(&b, 8, &img, &drawn);
+}
+
+#[test]
+fn coloured_text_across_the_portrait_edge_keeps_nothing_of_it() {
+    // P-R2: orange, grey 140 and chat-blue names from inside the portrait
+    // across its right edge, no box
+    for (row, c) in [
+        (1, [255u8, 140, 30]),
+        (4, [140, 140, 140]),
+        (9, [90, 170, 255]),
+    ] {
+        let clean = synth::board(Layout::L1);
+        let mut img = clean.clone();
+        let (_, pe, top) = l1_row(row);
+        let mut drawn = Vec::new();
+        let mut ink = clean.clone();
+        draw_name(&mut ink, &mut drawn, pe - 30, top + 28);
+        for &(x, y) in &drawn {
+            img.put_pixel(x, y, Rgb(c));
+        }
+        let b = blank_after(&clean, &img, super::Chat::None);
+        portrait_dropped(&b, row, &img, &drawn);
+        assert_eq!(b.portraits(), 11, "row {row}: {}", verdicts(&b));
+    }
+}
+
+#[test]
+fn a_hero_swap_or_no_earlier_capture_keeps_no_portrait() {
+    let clean = synth::board(Layout::L1);
+    let mut other = clean.clone();
+    let (l, pe, top) = l1_row(3);
+    for y in top + 4..top + 69 {
+        for x in l + 31..pe {
+            let p = other.get_pixel(x, y).0;
+            other.put_pixel(x, y, Rgb([p[2], p[0], p[1]]));
+            if (x + y) % 7 == 0 {
+                other.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+    }
+    let b = blank_after(&clean, &other, super::Chat::None);
+    assert!(b.rows[3].portrait.is_err(), "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+    // an earlier capture under a minute old is not a reference
+    let mut mem = super::PortraitMemory::new();
+    super::blank_crop_seen(&clean, Some(6), super::Chat::None, &mut mem, t0());
+    let b = super::blank_crop_seen(
+        &clean,
+        Some(6),
+        super::Chat::None,
+        &mut mem,
+        t0() + chrono::Duration::seconds(50),
+    );
+    assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
+}
+
+#[test]
+fn a_box_that_stays_over_the_portrait_column_hides_its_separators() {
+    // P-V1 drawn on both captures: a tooltip over three portrait squares
+    let mut img = synth::board(Layout::L1);
+    let (l, pe, top) = l1_row(2);
+    let (_, _, top4) = l1_row(4);
+    shade(
+        &mut img,
+        l + 35,
+        top + 8,
+        pe - 4,
+        top4 + 65,
+        [22.0, 22.0, 26.0],
+        0.95,
+    );
+    let mut drawn = Vec::new();
+    for k in 0..6 {
+        draw_name(&mut img, &mut drawn, l + 38, top + 20 + 30 * k);
+    }
+    let b = blank_still(&img);
+    for row in 2..=4 {
+        assert!(b.rows[row].portrait.is_err(), "row {row}: {}", verdicts(&b));
+    }
+    assert_not_copied(&b, &img, &drawn, "tooltip");
+}
+
+#[test]
+fn a_panel_that_stays_over_the_role_bar_hides_the_icon() {
+    // P-L1 / P-B1 drawn on both captures: a box in the bar's own colour over
+    // the bar and most of the portrait, text over the portrait square
+    let mut img = synth::board(Layout::L1);
+    let (l, pe, top) = l1_row(1);
+    let bar = synth::BAR_T1.0.map(f64::from);
+    shade(&mut img, l, top + 6, pe - 8, top + 67, bar, 1.0);
+    let mut drawn = Vec::new();
+    draw_name(&mut img, &mut drawn, l + 36, top + 30);
+    let b = blank_still(&img);
+    portrait_dropped(&b, 1, &img, &drawn);
+}
+
+#[test]
+fn portraits_keep_only_at_the_measured_scales() {
+    // a 1.25x board (1600p) measures, but its portraits were never checked
+    let img = synth::board(Layout::L1);
+    let (w, h) = img.dimensions();
+    let big = image::imageops::resize(
+        &img,
+        w * 5 / 4,
+        h * 5 / 4,
+        image::imageops::FilterType::Triangle,
+    );
+    let b = blank_after(&big, &big, super::Chat::None);
+    if b.board.is_ok() {
+        assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
+    }
 }
