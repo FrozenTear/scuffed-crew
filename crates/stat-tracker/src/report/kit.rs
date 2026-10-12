@@ -319,6 +319,13 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
     }
 }
 
+/// Delete a session's kit (the member deleted the game).
+pub fn remove(data_dir: &Path, session_id: &str) {
+    if let Some(dir) = session_dir(data_dir, session_id) {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
 /// Keep the newest `keep` session kits and delete the rest.
 pub fn prune(data_dir: &Path, keep: usize) {
     let root = kit_root(data_dir);
@@ -424,6 +431,18 @@ mod tests {
         v.as_object_mut().unwrap().remove("blank_table");
         fs::write(dir.join(READS_JSON), serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(!has_kit(tmp.path(), "s-old"));
+    }
+
+    #[test]
+    fn removing_a_session_deletes_its_kit_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        for sid in ["keep", "gone"] {
+            record_scoreboard(tmp.path(), sid, &frame(), TeamLayout::Five, &reads()).unwrap();
+        }
+        remove(tmp.path(), "gone");
+        remove(tmp.path(), "../keep");
+        assert!(!session_dir(tmp.path(), "gone").unwrap().exists());
+        assert_eq!(sessions(tmp.path()), vec!["keep".to_string()]);
     }
 
     #[test]

@@ -1040,6 +1040,7 @@ mod tests {
             manifest_json: "{}".into(),
             files: Vec::new(),
             log_text: String::new(),
+            images: Vec::new(),
         });
         let mut d = ReportDialog::new(LogOnlyCategory::Other, true);
         assert!(!d.can_send() && !d.can_save());

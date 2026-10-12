@@ -5580,6 +5580,8 @@ async fn apply_queued_commands(
                 }
             }
             storage::StoreCommand::DeleteSession { session_id } => {
+                // A deleted game's report kit goes too (QC1-6).
+                stat_tracker::report::kit::remove(data_dir, session_id);
                 if st
                     .active_game
                     .as_ref()

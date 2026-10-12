@@ -52,6 +52,10 @@ pub const NAME_COLUMNS_6V6: RowColumns = RowColumns {
     digits_start: 255,
 };
 
+/// Left edge of the kept portrait cell, in thousandths of the scoreboard crop
+/// width: the start of the role bar. Left of it is the game world (QC1-2).
+pub const PORTRAIT_START: u32 = 20;
+
 /// Right edge of the stat table (end of the MIT column), in thousandths of
 /// the scoreboard crop width. Right of it are the voice icons, the hero card,
 /// and the game world, which can hold in-world nameplates.
@@ -67,7 +71,7 @@ pub const NOTICE_BAND: (u32, u32) = (740, 900);
 /// Bumped whenever a table in this module changes. Kits store it, and a kit
 /// written under another table is never reported (it is blanked again or
 /// refused).
-pub const BLANK_TABLE_VERSION: u32 = 3;
+pub const BLANK_TABLE_VERSION: u32 = 4;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -253,15 +257,16 @@ pub fn name_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
 /// pixels. These must stay byte-identical after blanking.
 pub fn protected_rects(crop_w: u32, crop_h: u32, team_size: usize) -> Vec<Rect> {
     let c = columns(team_size);
-    let portrait_w = frac(crop_w, c.portrait_end);
+    let portrait_x = frac(crop_w, PORTRAIT_START);
+    let portrait_end = frac(crop_w, c.portrait_end).max(portrait_x);
     let digits_x = frac(crop_w, c.digits_start);
     let table_end = frac(crop_w, TABLE_END).max(digits_x);
     let mut out = Vec::new();
     for (y, h) in row_bands(crop_h, team_size) {
         out.push(Rect {
-            x: 0,
+            x: portrait_x,
             y,
-            w: portrait_w,
+            w: portrait_end - portrait_x,
             h,
         });
         out.push(Rect {
@@ -297,15 +302,13 @@ pub fn kept_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
         // column of either layout is kept.
         TeamLayout::Unknown => &[5, 6],
     };
-    let mut out = Vec::new();
-    for r in protected_rects(crop_w, crop_h, sizes[0]) {
-        for piece in subtract_rows(r, band) {
-            if sizes.len() == 1 || covered_by_all(piece, crop_w, crop_h, sizes) {
-                out.push(piece);
-            }
-        }
-    }
-    out
+    // A row cell that touches the notice band is not kept at all, so no
+    // row keeps half of its digits (QC1-3).
+    protected_rects(crop_w, crop_h, sizes[0])
+        .into_iter()
+        .filter(|r| !r.intersects(&band))
+        .filter(|r| sizes.len() == 1 || covered_by_all(*r, crop_w, crop_h, sizes))
+        .collect()
 }
 
 fn covered_by_all(r: Rect, crop_w: u32, crop_h: u32, sizes: &[usize]) -> bool {
@@ -322,27 +325,6 @@ fn layout_for(ts: usize) -> TeamLayout {
     } else {
         TeamLayout::Five
     }
-}
-
-/// `r` minus the rows of `band` (a full-width band), as up to two pieces.
-fn subtract_rows(r: Rect, band: Rect) -> Vec<Rect> {
-    let (top, bottom) = (r.y, r.y + r.h);
-    let (b0, b1) = (band.y, band.y + band.h);
-    if bottom <= b0 || top >= b1 {
-        return vec![r];
-    }
-    let mut out = Vec::new();
-    if top < b0 {
-        out.push(Rect { h: b0 - top, ..r });
-    }
-    if bottom > b1 {
-        out.push(Rect {
-            y: b1,
-            h: bottom - b1,
-            ..r
-        });
-    }
-    out
 }
 
 /// A playfield region in frame pixels. Both edges are scaled from the
@@ -644,6 +626,53 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn notices_nameplates_and_the_left_strip_are_filled() {
+        // QC1-1 / QC1-2 at the measured spots, on a 2560x1440 frame: a notice
+        // across the stat columns (crop y 791..831 per mille), a nameplate in
+        // the gap by the hero card (x 600..700, y 500..540), one at the right
+        // edge, and world pixels left of the role bar.
+        let (w, h) = (2560, 1440);
+        let (sx, sy, cw, ch) = crop_scoreboard_rect(w, h);
+        let mut img = noise_frame(w, h).to_rgb8();
+        let white = Rgb([255, 255, 255]);
+        let mut paint = |x0: u32, x1: u32, y0: u32, y1: u32| {
+            for y in frac(ch, y0)..frac(ch, y1) {
+                for x in frac(cw, x0)..frac(cw, x1) {
+                    img.put_pixel(sx + x, sy + y, white);
+                }
+            }
+        };
+        paint(364, 631, 791, 831);
+        paint(600, 700, 500, 540);
+        paint(950, 1000, 0, 60);
+        paint(0, PORTRAIT_START, 100, 400);
+        let out = blanked_scoreboard(&DynamicImage::ImageRgb8(img), TeamLayout::Six);
+        for (x0, x1, y0, y1) in [
+            (364, 631, 791, 831),
+            (600, 700, 500, 540),
+            (950, 1000, 0, 60),
+            (0, PORTRAIT_START, 100, 400),
+        ] {
+            for y in frac(ch, y0)..frac(ch, y1) {
+                for x in frac(cw, x0)..frac(cw, x1) {
+                    assert_eq!(
+                        *out.get_pixel(x, y),
+                        FILL,
+                        "px {x},{y} in ({x0},{x1},{y0},{y1})"
+                    );
+                }
+            }
+        }
+        // Every kept cell starts at the role bar or right of it, and a row
+        // that touches the band keeps nothing.
+        let band = notice_band(cw, ch);
+        for r in kept_rects(cw, ch, TeamLayout::Six) {
+            assert!(r.x >= frac(cw, PORTRAIT_START), "{r:?}");
+            assert!(!r.intersects(&band), "{r:?}");
         }
     }
 
