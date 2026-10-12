@@ -740,65 +740,166 @@ pub fn guess_role_public(hero: &str) -> String {
     guess_role(hero)
 }
 
+/// Fuzzy score a name read needs to count as the player's name.
+const NAME_MATCH_MIN: f64 = 0.55;
+
+/// The row that matched the configured player name, and which name window
+/// matched it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameMatch {
+    /// Row index across both teams.
+    pub row: usize,
+    /// Index into [`crate::ocr::preprocess::name_windows`] of the read that
+    /// matched: a substring hit if there is one, else the best fuzzy read
+    /// (the lower index on a tie).
+    pub window: usize,
+    /// No other window's read on that row matched. On 5v5 the windows belong
+    /// to different table layouts, so a sole match also names the layout.
+    pub sole_window: bool,
+}
+
 /// Find which row (across all rows, both teams) best matches the configured
-/// player name. Returns the row index and match score.
+/// player name. Returns the row index.
 ///
 /// Used for replay and post-match screens where the player may be on team 2,
 /// so brightness-based team-1 scanning can't find them. The name cells from
 /// `recognize_row` are noisy OCR, so we use a generous fuzzy threshold (0.55)
-/// and pick the best score across all rows.
+/// and pick the best score across all rows. See [`match_player_row_by_name`]
+/// for the matching window.
 pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<usize> {
+    match_player_row_by_name(rows, player_name).map(|m| m.row)
+}
+
+/// Like [`find_player_row_by_name`], and also reports which name window
+/// matched.
+///
+/// Each row scores as its best read over every name window (5v5 reads one
+/// per table layout). The first row, in board order, with a substring hit in
+/// any window wins outright; otherwise the best fuzzy row at or above 0.55.
+pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<NameMatch> {
     let name_lower = player_name.to_lowercase();
 
-    let mut best_row: Option<usize> = None;
-    let mut best_score = 0.0f64;
+    let mut best: Option<(usize, f64)> = None;
 
     for (i, row) in rows.iter().enumerate() {
-        let cell_text = match &row.name {
-            Some(c) if !c.value.is_empty() => c.value.to_lowercase(),
-            _ => continue,
-        };
-
-        // Try substring match first (handles "FROZEN" inside "L7 mRoE FROZEN")
-        if cell_text.contains(&name_lower) {
+        let scores = row_window_scores(row, &name_lower);
+        if let Some(&(window, _)) = scores.iter().find(|(_, s)| s.is_substring()) {
             // `name` so the report log scrub drops the field (report-bundle §6).
-            tracing::debug!(row = i, name = %cell_text, "player name found via substring in row");
-            return Some(i);
+            tracing::debug!(row = i, window, "player name found via substring in row");
+            return Some(name_match(i, window, &scores));
         }
-
-        // Fuzzy: slide a window the length of the player name over the cell text
-        let name_chars: Vec<char> = name_lower.chars().collect();
-        let cell_chars: Vec<char> = cell_text.chars().collect();
-        let window = name_chars.len();
-        if window == 0 || window > cell_chars.len() + 4 {
-            continue;
-        }
-        // Also compare whole cell text against the name
-        let score_whole = normalized_levenshtein(&cell_text, &name_lower);
-        let score_window = if cell_chars.len() >= window {
-            (0..=(cell_chars.len().saturating_sub(window)))
-                .map(|s| {
-                    let slice: String = cell_chars[s..s + window].iter().collect();
-                    normalized_levenshtein(&slice, &name_lower)
-                })
-                .fold(0.0f64, f64::max)
-        } else {
-            0.0
-        };
-        let score = score_whole.max(score_window);
-
-        if score > best_score {
-            best_score = score;
-            best_row = Some(i);
+        let row_best = scores
+            .iter()
+            .filter_map(|(_, s)| s.fuzzy())
+            .fold(None, |acc: Option<f64>, s| {
+                Some(acc.map_or(s, |a| a.max(s)))
+            });
+        if let Some(score) = row_best
+            && best.is_none_or(|(_, b)| score > b)
+        {
+            best = Some((i, score));
         }
     }
 
-    if best_score >= 0.55 {
-        tracing::debug!(row = ?best_row, score = best_score, "player name fuzzy-matched in row");
-        best_row
+    let (row, score) = best?;
+    if score < NAME_MATCH_MIN {
+        return None;
+    }
+    let scores = row_window_scores(&rows[row], &name_lower);
+    let window = scores
+        .iter()
+        .filter(|(_, s)| s.fuzzy() == Some(score))
+        .map(|(w, _)| *w)
+        .min()
+        .unwrap_or(0);
+    tracing::debug!(row, window, score, "player name fuzzy-matched in row");
+    Some(name_match(row, window, &scores))
+}
+
+fn name_match(row: usize, window: usize, scores: &[(usize, NameRead)]) -> NameMatch {
+    let sole_window = !scores
+        .iter()
+        .any(|(w, s)| *w != window && s.passes(NAME_MATCH_MIN));
+    NameMatch {
+        row,
+        window,
+        sole_window,
+    }
+}
+
+/// `(window index, score)` for every non-empty name read of `row`. `name` is
+/// window 0 and `name_alternates[k]` is window `k + 1`.
+fn row_window_scores(row: &RowOcrResult, name_lower: &str) -> Vec<(usize, NameRead)> {
+    std::iter::once(row.name.as_ref())
+        .chain(row.name_alternates.iter().map(Option::as_ref))
+        .enumerate()
+        .filter_map(|(window, read)| {
+            let read = read.filter(|c| !c.value.is_empty())?;
+            Some((
+                window,
+                name_read_score(&read.value.to_lowercase(), name_lower),
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NameRead {
+    /// The read contains the name (handles "FROZEN" inside "L7 mRoE FROZEN").
+    Substring,
+    /// Best fuzzy score of the read against the name.
+    Fuzzy(f64),
+    /// The read is too short to hold the name; not scored.
+    TooShort,
+}
+
+impl NameRead {
+    fn is_substring(self) -> bool {
+        self == NameRead::Substring
+    }
+
+    fn fuzzy(self) -> Option<f64> {
+        match self {
+            NameRead::Fuzzy(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn passes(self, min: f64) -> bool {
+        match self {
+            NameRead::Substring => true,
+            NameRead::Fuzzy(s) => s >= min,
+            NameRead::TooShort => false,
+        }
+    }
+}
+
+/// Score one lowercased name-cell read against the lowercased player name.
+fn name_read_score(cell_text: &str, name_lower: &str) -> NameRead {
+    if cell_text.contains(name_lower) {
+        return NameRead::Substring;
+    }
+
+    // Fuzzy: slide a window the length of the player name over the cell text
+    let name_chars: Vec<char> = name_lower.chars().collect();
+    let cell_chars: Vec<char> = cell_text.chars().collect();
+    let window = name_chars.len();
+    if window == 0 || window > cell_chars.len() + 4 {
+        return NameRead::TooShort;
+    }
+    // Also compare whole cell text against the name
+    let score_whole = normalized_levenshtein(cell_text, name_lower);
+    let score_window = if cell_chars.len() >= window {
+        (0..=(cell_chars.len().saturating_sub(window)))
+            .map(|s| {
+                let slice: String = cell_chars[s..s + window].iter().collect();
+                normalized_levenshtein(&slice, name_lower)
+            })
+            .fold(0.0f64, f64::max)
     } else {
-        None
-    }
+        0.0
+    };
+    NameRead::Fuzzy(score_whole.max(score_window))
 }
 
 /// Canonicalize a map identifier to its display name in the MAPS table —
@@ -1442,6 +1543,7 @@ mod tests {
     fn row(name: Option<&str>, stats: [&str; 6]) -> RowOcrResult {
         RowOcrResult {
             name: name.map(cell),
+            name_alternates: Vec::new(),
             stats: stats.iter().map(|s| cell(s)).collect(),
             mean_confidence: 80,
         }
@@ -1463,6 +1565,129 @@ mod tests {
         );
         assert_eq!(exact_map_in_text("BUSAN").as_deref(), Some("Busan"));
         assert!(exact_map_in_text("not a map").is_none());
+    }
+
+    /// A row read through several name windows (5v5: in-match, perks,
+    /// centred). Only one window holds the name; the others read digits,
+    /// perk-icon junk or nothing.
+    fn multi_window_row(reads: [&str; 3]) -> RowOcrResult {
+        let mut r = row(Some(reads[0]), ["5", "3", "2", "4,316", "1,200", "899"]);
+        r.name_alternates = reads[1..].iter().map(|s| Some(cell(s))).collect();
+        r
+    }
+
+    #[test]
+    fn player_row_matches_on_any_name_window() {
+        // 2026-10-12 5v5 in-match boards: the old single window read the E/A
+        // digits on every row. The name only shows in one of the windows.
+        let rows = vec![
+            multi_window_row(["0 3", "ELYSIA", ""]),
+            multi_window_row(["3 1", "@ ©", "PLAYERONE"]),
+            multi_window_row(["0", "", "SZEZI"]),
+        ];
+        assert_eq!(find_player_row_by_name(&rows, "PlayerOne"), Some(1));
+    }
+
+    #[test]
+    fn player_row_keeps_the_best_window_per_row() {
+        // Row 0's best read is a near-miss in its third window; row 1 holds a
+        // weaker read in its first. The best read per row must win, not the
+        // first window's read.
+        let rows = vec![
+            multi_window_row(["0", "x", "PLAYERONF"]),
+            multi_window_row(["PLAYERXXX", "", ""]),
+        ];
+        assert_eq!(find_player_row_by_name(&rows, "PlayerOne"), Some(0));
+        // Junk in every window stays unmatched.
+        let junk = vec![multi_window_row(["0 3", "@ ©", "99"])];
+        assert_eq!(find_player_row_by_name(&junk, "PlayerOne"), None);
+    }
+
+    #[test]
+    fn name_match_reports_the_window_that_matched() {
+        // In-match no-perk board: only window 0 holds the name.
+        let rows = vec![
+            multi_window_row(["0 3", "@ ©", "1"]),
+            multi_window_row(["PLAYERONE", "ow", ""]),
+        ];
+        let m = match_player_row_by_name(&rows, "PlayerOne").unwrap();
+        assert_eq!((m.row, m.window, m.sole_window), (1, 0, true));
+
+        // Perk board: the name is in window 1, window 0 read the perk icon.
+        let rows = vec![multi_window_row(["@ 3", "PLAYERONE", ""])];
+        let m = match_player_row_by_name(&rows, "PlayerOne").unwrap();
+        assert_eq!((m.window, m.sole_window), (1, true));
+
+        // Two windows read the name: window 0 wins, but not as the sole one.
+        let rows = vec![multi_window_row(["PLAYERONE", "PLAYERONF", ""])];
+        let m = match_player_row_by_name(&rows, "PlayerOne").unwrap();
+        assert_eq!((m.window, m.sole_window), (0, false));
+
+        // Fuzzy only: the best window is reported.
+        let rows = vec![multi_window_row(["PLAYXXONE", "x", "PLAYERONF"])];
+        let m = match_player_row_by_name(&rows, "PlayerOne").unwrap();
+        assert_eq!((m.window, m.sole_window), (2, false));
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_window_index() {
+        // Window 1's read failed; the centred window (2) still reports as 2.
+        let mut r = row(Some("0"), ["5", "3", "2", "4,316", "1,200", "899"]);
+        r.name_alternates = vec![None, Some(cell("PLAYERONE"))];
+        let m = match_player_row_by_name(&[r], "PlayerOne").unwrap();
+        assert_eq!((m.row, m.window, m.sole_window), (0, 2, true));
+    }
+
+    /// Reads the extra 5v5 windows produce on rows that are not the player's:
+    /// digits from the E/A columns, perk-icon and ult-ring junk, rank badge
+    /// numerals, and clipped plate edges.
+    const JUNK_READS: [[&str; 3]; 9] = [
+        ["0 3", "©", "12"],
+        ["IV", "@ O", "O"],
+        ["0", "Q", "|"],
+        ["3 1", "ow", "V"],
+        ["87", "@", "64"],
+        ["Il", "% ©", "8 3"],
+        ["oO", "€", "a"],
+        ["5 2", "”", "-"],
+        ["|", "0 0 0", "e"],
+    ];
+
+    fn junk_board_with(own_row: usize, own: [&str; 3]) -> Vec<RowOcrResult> {
+        (0..10)
+            .map(|i| {
+                if i == own_row {
+                    multi_window_row(own)
+                } else {
+                    multi_window_row(JUNK_READS[i % JUNK_READS.len()])
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn short_names_do_not_match_junk_in_the_extra_windows() {
+        for name in ["Kai", "Rex", "Yuna", "Zed", "Ana", "Mo3"] {
+            // Junk in every window on every row: nothing matches.
+            let rows: Vec<RowOcrResult> = (0..10)
+                .map(|i| multi_window_row(JUNK_READS[i % JUNK_READS.len()]))
+                .collect();
+            assert_eq!(
+                match_player_row_by_name(&rows, name),
+                None,
+                "{name}: junk read matched"
+            );
+            // The own row (team 1 row 3) reads the name in one window; the
+            // other windows and rows are junk.
+            for window in 0..3 {
+                let mut own = ["0", "@", "|"];
+                own[window] = name;
+                let rows = junk_board_with(3, own);
+                let m = match_player_row_by_name(&rows, name)
+                    .unwrap_or_else(|| panic!("{name} window {window}: own row not found"));
+                assert_eq!((m.row, m.window), (3, window), "{name} window {window}");
+            }
+        }
     }
 
     #[test]

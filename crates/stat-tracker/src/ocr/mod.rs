@@ -231,7 +231,13 @@ pub struct CellOcrResult {
 
 #[derive(Debug)]
 pub struct RowOcrResult {
+    /// Read of name window 0 ([`preprocess::name_windows`]).
     pub name: Option<CellOcrResult>,
+    /// Reads of the other name windows: `name_alternates[k]` is window
+    /// `k + 1`, `None` where that read failed, so the index always names the
+    /// window. Empty for 6v6, which has one window. The row matcher scores
+    /// `name` and these together and keeps the best.
+    pub name_alternates: Vec<Option<CellOcrResult>>,
     pub stats: Vec<CellOcrResult>,
     pub mean_confidence: i32,
 }
@@ -498,10 +504,21 @@ pub fn recognize_row(
     columns: &preprocess::StatColumns,
     team_size: usize,
 ) -> RowOcrResult {
-    let name = {
-        let name_crop = preprocess::crop_name_cell(row_img, team_size);
-        recognize_name(&name_crop).ok()
+    // One read per name window. 5v5 has a window per table layout (in-match,
+    // in-match with perks, centred); which one holds the name is only known
+    // once the configured name is compared, so all of them are read.
+    let mut name_reads: Vec<Option<CellOcrResult>> =
+        preprocess::crop_name_cells(row_img, team_size)
+            .par_iter()
+            .map(|crop| recognize_name(crop).ok())
+            .collect();
+    let name = if name_reads.is_empty() {
+        None
+    } else {
+        name_reads.remove(0)
     };
+    // Failed reads stay as `None` so each index keeps naming its window.
+    let name_alternates = name_reads;
 
     // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
     // Run in parallel — each cell creates its own Tesseract instance so there is
@@ -547,6 +564,7 @@ pub fn recognize_row(
 
     RowOcrResult {
         name,
+        name_alternates,
         stats,
         mean_confidence,
     }

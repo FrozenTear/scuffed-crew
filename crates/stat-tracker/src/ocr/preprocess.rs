@@ -19,18 +19,52 @@ const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
     (0.725, 0.050), // Mitigation (narrow to exclude UI warning icon)
 ];
 
-/// Player name column within each row.
-/// Layout (left→right): portrait + level/rank badges (0–26%), name text (26–38%), ability icons (38%+).
-/// Original value of 0.09 only captured the portrait area, not the name text.
-/// Upper bound set to ~38% to exclude the circular hero-ability icons that OCR reads as "Q"/"O".
-const NAME_COL_X: f64 = 0.26;
-const NAME_COL_W: f64 = 0.12;
 /// 6v6 squeezes the table horizontally: the name plate sits further left.
 /// Measured on the 2026-07-16 fixture (12-row board, dumped row_00.png):
 /// name text spans ~0.155–0.24 of row width; 0.26+ lands on the E/A/D digits,
 /// which is exactly what OCR read before this constant existed.
 const NAME_COL_X_6V6: f64 = 0.15;
 const NAME_COL_W_6V6: f64 = 0.10;
+
+/// 5v5 name windows `(x, w)`, one per table layout, as fractions of row
+/// width. Measured 2026-10-12 on 15 in-match boards (0, 1 and 2 perks) and
+/// one centred pre-match board at 2560x1440:
+///
+/// | layout | names | first thing to the right |
+/// |---|---|---|
+/// | in-match, no perks | 0.106-0.225 | E digits from about 0.27 |
+/// | in-match with perks | 0.097-0.184 | perk icons, 0.214-0.292 |
+/// | centred | 0.328-0.415 | E digits from about 0.46 |
+///
+/// The in-match table sits left of the career panel and moves further left
+/// for each perk column; the centred table is the no-perk table moved right
+/// by 0.186. Each window covers its layout's names and stops before that
+/// layout's digits and perk icons. A window must also clear the ult-charge
+/// ring and rank badge on the left: the old single window (0.26-0.38) took in
+/// the centred board's ult ring and read the in-match E/A digits, and found
+/// the own row on 0 of 18 boards. These three found it on 18 of 18.
+const NAME_WINDOWS_5V5: [(f64, f64); 3] = [
+    (NAME_COL_X_5V5_INGAME, NAME_COL_W_5V5_INGAME),
+    (NAME_COL_X_5V5_PERKS, NAME_COL_W_5V5_PERKS),
+    (NAME_COL_X_5V5_CENTRED, NAME_COL_W_5V5_CENTRED),
+];
+/// Index of the in-match no-perk window in [`name_windows`] for 5v5. The 5v5
+/// portrait grid fits only this layout (see
+/// [`crate::detect::hero_portrait::portrait_seed_layout_known`]).
+pub const NAME_WINDOW_5V5_INGAME: usize = 0;
+/// Index of the in-match with-perks window in [`name_windows`] for 5v5.
+pub const NAME_WINDOW_5V5_PERKS: usize = 1;
+/// Index of the centred pre-match window in [`name_windows`] for 5v5.
+pub const NAME_WINDOW_5V5_CENTRED: usize = 2;
+/// In-match, no perks: 0.10-0.25.
+const NAME_COL_X_5V5_INGAME: f64 = 0.10;
+const NAME_COL_W_5V5_INGAME: f64 = 0.15;
+/// In-match with one or two perks: 0.095-0.20.
+const NAME_COL_X_5V5_PERKS: f64 = 0.095;
+const NAME_COL_W_5V5_PERKS: f64 = 0.105;
+/// Centred pre-match table: 0.29-0.43.
+const NAME_COL_X_5V5_CENTRED: f64 = 0.29;
+const NAME_COL_W_5V5_CENTRED: f64 = 0.14;
 
 /// Luma floor for the hard-threshold nameplate fallback. Cosmetic plates put
 /// mid-grey gradients behind the glyphs; 200 keeps the brightest glyph pixels
@@ -1578,14 +1612,36 @@ pub fn prepare_name_cell_hard_threshold(img: &DynamicImage) -> GrayImage {
     bin
 }
 
-/// Extract the player name cell from a row. The window depends on the match
-/// layout: 6v6 renders a narrower table than 5v5.
-pub fn crop_name_cell(row: &DynamicImage, team_size: usize) -> DynamicImage {
-    let (name_x, name_w) = if team_size >= 6 {
-        (NAME_COL_X_6V6, NAME_COL_W_6V6)
+/// Name windows `(x, w)` to read for a row, as fractions of row width.
+///
+/// 6v6 has one window. 5v5 has one per layout, because the table moves: the
+/// in-match board sits left of the career panel and shifts further left as
+/// perks appear, and the pre-match board is centred. No single window fits
+/// all three without reaching the perk icons or the E digits, so the row
+/// matcher scores every read and keeps the best one per row.
+pub fn name_windows(team_size: usize) -> &'static [(f64, f64)] {
+    if team_size >= 6 {
+        &[(NAME_COL_X_6V6, NAME_COL_W_6V6)]
     } else {
-        (NAME_COL_X, NAME_COL_W)
-    };
+        &NAME_WINDOWS_5V5
+    }
+}
+
+/// Extract the player name cell from a row: the first of
+/// [`name_windows`]. Use [`crop_name_cells`] to read every window.
+pub fn crop_name_cell(row: &DynamicImage, team_size: usize) -> DynamicImage {
+    crop_name_window(row, name_windows(team_size)[0])
+}
+
+/// Every name window for the layout, in [`name_windows`] order.
+pub fn crop_name_cells(row: &DynamicImage, team_size: usize) -> Vec<DynamicImage> {
+    name_windows(team_size)
+        .iter()
+        .map(|&window| crop_name_window(row, window))
+        .collect()
+}
+
+fn crop_name_window(row: &DynamicImage, (name_x, name_w): (f64, f64)) -> DynamicImage {
     let (w, h) = (row.width(), row.height());
     let x = (w as f64 * name_x) as u32;
     let cell_w = (w as f64 * name_w) as u32;
@@ -2798,7 +2854,7 @@ mod uncapped_retry_tests {
 #[cfg(test)]
 mod map_name_rect_tests {
     use super::{
-        HEADER_RATIO, NAME_COL_W, NAME_COL_W_6V6, NAME_COL_X, NAME_COL_X_6V6, SCOREBOARD_H_RATIO,
+        HEADER_RATIO, NAME_COL_W_6V6, NAME_COL_X_6V6, NAME_WINDOWS_5V5, SCOREBOARD_H_RATIO,
         SCOREBOARD_W_RATIO, SCOREBOARD_X_RATIO, SCOREBOARD_Y_RATIO, crop_map_label_box,
         game_rect_16_9, map_name_rect,
     };
@@ -2851,22 +2907,23 @@ mod map_name_rect_tests {
                 rect.y + rect.h
             );
             let crop_box = (rect.x, rect.y, rect.w, rect.h);
-            let names_5 = name_area(w, h, NAME_COL_X, NAME_COL_W);
-            let names_6 = name_area(w, h, NAME_COL_X_6V6, NAME_COL_W_6V6);
-            let name_top = names_5.1.min(names_6.1);
+            let names: Vec<(u32, u32, u32, u32)> = NAME_WINDOWS_5V5
+                .iter()
+                .chain([(NAME_COL_X_6V6, NAME_COL_W_6V6)].iter())
+                .map(|&(x, nw)| name_area(w, h, x, nw))
+                .collect();
+            let name_top = names.iter().map(|n| n.1).min().unwrap();
             assert!(
                 rect.y.saturating_add(rect.h) <= name_top,
                 "{label}: map crop ends at {} and the name row starts at {name_top}",
                 rect.y + rect.h
             );
-            assert!(
-                !overlaps(crop_box, names_5),
-                "{label}: reaches 5v5 names {names_5:?}"
-            );
-            assert!(
-                !overlaps(crop_box, names_6),
-                "{label}: reaches 6v6 names {names_6:?}"
-            );
+            for area in &names {
+                assert!(
+                    !overlaps(crop_box, *area),
+                    "{label}: reaches the name window {area:?}"
+                );
+            }
 
             let map = [10, 220, 30];
             let name = [240, 20, 20];
@@ -2876,7 +2933,7 @@ mod map_name_rect_tests {
                     img.put_pixel(x, y, Rgb(map));
                 }
             }
-            for (nx, ny, nw, nh) in [names_5, names_6] {
+            for &(nx, ny, nw, nh) in &names {
                 for y in ny..ny.saturating_add(nh).min(h) {
                     for x in nx..nx.saturating_add(nw).min(w) {
                         img.put_pixel(x, y, Rgb(name));
