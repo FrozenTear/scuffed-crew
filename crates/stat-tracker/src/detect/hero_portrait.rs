@@ -147,6 +147,18 @@ impl PortraitMatcher {
     }
 }
 
+/// The player's row: the row of a trusted portrait match, else the
+/// highlighted row on its own. A low portrait score (an ult ring over the
+/// portrait reads 0.77) must not drop the row, or every later Tab is
+/// "player row not found" and the slow full-board read runs each time.
+pub fn resolve_player_row(
+    portrait_match: Option<usize>,
+    scoreboard: &DynamicImage,
+    team_size: usize,
+) -> Option<usize> {
+    portrait_match.or_else(|| detect_player_row_inner(scoreboard, team_size))
+}
+
 /// Detect which row in team 1 is the player's own row.
 /// OW2 highlights the player's row with a slightly lighter/brighter background.
 ///
@@ -1534,5 +1546,62 @@ mod portrait_floor_tests {
         assert_eq!(accepted.0, "sierra");
         assert!((accepted.1 - at_floor).abs() < 1e-9, "{}", accepted.1);
         assert!(matcher.match_portrait(&solid(128 + 39)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod player_row_fallback_tests {
+    use super::{PortraitMatcher, resolve_player_row};
+    use image::{DynamicImage, Rgb, RgbImage};
+    use std::collections::HashMap;
+
+    /// A 5v5 board, flat dark grey, with one team-1 row slot lighter, as the
+    /// game draws the player's own row.
+    fn board_with_highlight(row: usize) -> DynamicImage {
+        let (w, h, team_size) = (1600u32, 900u32, 5usize);
+        let mut img = RgbImage::from_pixel(w, h, Rgb([40, 40, 40]));
+        let slot = crate::ocr::preprocess::row_slot_height(h, team_size);
+        let top = (h as f64 * 0.025) as u32 + row as u32 * slot;
+        for y in top..top + slot {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([62, 62, 62]));
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn highlighted_row_survives_a_portrait_below_the_threshold() {
+        let board = board_with_highlight(2);
+        // The only reference is pure white, so every portrait crop scores far
+        // below the trust floor and the portrait path returns nothing.
+        let matcher = PortraitMatcher::from_references(HashMap::from([(
+            "white".to_string(),
+            RgbImage::from_pixel(
+                super::PORTRAIT_SIZE,
+                super::PORTRAIT_SIZE,
+                Rgb([255, 255, 255]),
+            ),
+        )]));
+        let portrait = matcher.match_player_hero_with_team_size(&board, 5);
+        assert!(
+            portrait.is_none(),
+            "portrait should be untrusted: {portrait:?}"
+        );
+
+        let row = resolve_player_row(portrait.map(|(_, _, idx)| idx), &board, 5);
+        assert_eq!(row, Some(2));
+    }
+
+    #[test]
+    fn a_trusted_portrait_row_wins_over_the_highlight() {
+        let board = board_with_highlight(2);
+        assert_eq!(resolve_player_row(Some(4), &board, 5), Some(4));
+    }
+
+    #[test]
+    fn no_highlight_and_no_portrait_is_no_row() {
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(1600, 900, Rgb([40, 40, 40])));
+        assert_eq!(resolve_player_row(None, &flat, 5), None);
     }
 }
