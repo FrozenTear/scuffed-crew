@@ -3346,7 +3346,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             .as_ref()
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
-                        let (signal, phase, accolade_map, end_reel, stability, result_read) = tokio::task::spawn_blocking(move || {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = tokio::task::spawn_blocking(move || {
                             let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
@@ -3412,14 +3412,31 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     POLL_DUMP_KEEP,
                                 );
                             }
+                            // Report kit (spec section 3): the rank screen's
+                            // word box, cut from this same frame, only when
+                            // the rank screen detector fired on it.
+                            let rank_outcome_png = stat_tracker::report::kit::rank_outcome_png(
+                                signal.map(|(_, source)| source),
+                                &img,
+                            );
                             stat_tracker::perf::record(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            (signal, phase, accolade_map, end_reel, stability, result_read)
+                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
                         }).await.unwrap_or_else(|_| {
-                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None)
+                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
                         });
+                        if let Some(png) = rank_outcome_png
+                            && let Some(game) = st.active_game.as_ref()
+                            && let Err(e) = stat_tracker::report::kit::record_outcome_png(
+                                data_dir,
+                                &game.session_id,
+                                &png,
+                            )
+                        {
+                            tracing::debug!(error = %e, "report kit: outcome crop not written");
+                        }
                         st.ocr_stability = stability;
                         if let Some(read) = result_read
                             && let Some(game) = st.active_game.as_mut()
@@ -4778,6 +4795,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // first capture creates the session row; later captures (including hero
             // swaps and the post-match scoreboard) append to the same session.
             parsed.session_id = target_session.clone();
+            // The Tesseract read, kept for the report kit's `ocr_v1` field.
+            let ocr_parsed = parsed.clone();
             if ctx.use_new_reader {
                 apply_new_reader(
                     &mut parsed,
@@ -4812,6 +4831,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             save_accepted_frame(data_dir, scoreboard_img);
+            record_report_kit(data_dir, &target_session, &frame_img, team_size, &ocr_parsed, &parsed);
 
             // Re-derive the session's hero timeline from its RAW snapshots after
             // every capture (HS-1). A single capture can mislabel (career panel
@@ -5022,6 +5042,38 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
 /// the only way to retune calibration). Fire-and-forget; encode off-runtime.
+/// Report kit (`report::kit`): the blanked scoreboard and the reads of this
+/// accepted capture. Written off the capture path; a failure is logged and
+/// never touches the stored match.
+fn record_report_kit(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+    team_size: usize,
+    ocr_parsed: &storage::PersonalMatch,
+    stored: &storage::PersonalMatch,
+) {
+    let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size)) else {
+        return;
+    };
+    let reads = stat_tracker::report::kit::KitReads::from_capture(
+        ocr_parsed,
+        stored,
+        frame.width(),
+        frame.height(),
+        layout,
+        chrono::Utc::now(),
+    );
+    let (data_dir, session_id, frame) = (data_dir.to_path_buf(), session_id.to_string(), frame.clone());
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) =
+            stat_tracker::report::kit::record_scoreboard(&data_dir, &session_id, &frame, layout, &reads)
+        {
+            tracing::debug!(error = %e, "report kit: scoreboard not written");
+        }
+    });
+}
+
 fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImage>) {
     let dir = data_dir.join("debug").join("accepted");
     tokio::task::spawn_blocking(move || {

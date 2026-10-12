@@ -3,13 +3,15 @@
 //!
 //! This module covers log-only reports (`crash`, `performance`, `other`):
 //! the crash marker ([`marker`]), the log scrub ([`scrub`]), and the zip
-//! with its manifest ([`bundle`]). Game reports with blanked crops build on
-//! the same pieces later.
+//! with its manifest ([`bundle`]). Game reports add the name blanking
+//! ([`blank`]) and the per-session report kit the daemon keeps ([`kit`]).
 //!
 //! The desktop app calls [`bundle::LogReportInput::from_config`] and
 //! [`bundle::build_log_report`] for the preview, then uploads or saves the
 //! returned bytes unchanged.
 
+pub mod blank;
+pub mod kit;
 pub mod bundle;
 pub mod marker;
 pub mod scrub;
@@ -18,8 +20,9 @@ pub mod scrub;
 mod tests;
 
 pub use bundle::{
-    LogOnlyCategory, LogReportInput, ReportError, ReportFile, ReportZip, Resolution, SessionType,
-    SystemInfo, build_log_report,
+    GameCategory, GameReportInput, LogOnlyCategory, LogReportInput, ReportError, ReportFile,
+    ReportImage, ReportZip, Resolution, SessionType, SystemInfo, build_game_report,
+    build_log_report,
 };
 pub use marker::{LastExit, MarkerHeartbeat, RunMarker};
 pub use scrub::{LogWindow, ScrubContext};
