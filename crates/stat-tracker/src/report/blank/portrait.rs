@@ -20,14 +20,14 @@ use super::board::{BAR_FULL, Fail, Row, median, pyround};
 
 /// Share of the bar body that must sit within 40 of its median colour (real
 /// bars >= 0.9).
-const BAR_UNIFORM: f64 = 0.55;
+pub(super) const BAR_UNIFORM: f64 = 0.55;
 /// Portrait cell end, `L + PORTRAIT_END * s` (measured on all four Tab
 /// layouts and the post-match table).
 const PORTRAIT_END: f64 = 104.0;
 /// A sharp stroke: a channel more than this from the 5x5 median. Real bars
 /// never show more than 1 such px outside the icon at 30 (816 rows at 1664
 /// and 1248 px); chat drawn within 30 of the bar colour stays invisible here.
-const SAL_THR: i32 = 30;
+pub(super) const SAL_THR: i32 = 30;
 /// Role icon zone: x from `L`, y from the row centre (x s); measured
 /// 5.3..24 and -12.7..15.
 const ICON_X: (f64, f64) = (4.0, 26.0);
@@ -39,13 +39,13 @@ const ICON_ASYM: f64 = 0.45;
 /// rows: 0). Left: the 8 px (x s) before the bar, white/grey pixels (real
 /// rows: at most 1). More than `STRIP_MAX` drops the portrait.
 const STRIP_W: (f64, f64) = (6.0, 8.0);
-const STRIP_MAX: usize = 2;
+pub(super) const STRIP_MAX: usize = 2;
 /// Sharp strokes of any colour in the right strip (a channel more than
 /// [`SAL_THR`] from its 5x5 median, the median taken over the strip and 3 px
 /// either side): real rows hold at most 25 (world effects and the ult ring
 /// behind the translucent row); text of any colour crossing the edge holds
 /// more.
-const STRIP_STROKES_MAX: usize = 30;
+pub(super) const STRIP_STROKES_MAX: usize = 30;
 /// White/grey: every channel >= 150 and spread <= 25% of the brightest.
 const NEUTRAL_MIN: u8 = 150;
 /// Bright bar-coloured: within 40 of the bar colour in every channel and at
@@ -55,26 +55,26 @@ const BAR_LIKE: f64 = 40.0;
 /// inner pixel rows may have `sum |p(pe) - p(pe - 1)| < EDGE_WEAK` (real max
 /// 0.52 over 816 rows; a menu box laid across the edge hides it on 0.66+).
 const EDGE_WEAK: f64 = 20.0;
-const EDGE_HIDDEN_MAX: f64 = 0.60;
+pub(super) const EDGE_HIDDEN_MAX: f64 = 0.60;
 /// Role icon: at least this many white px (x s^2). Real icons hold 156 to
 /// 343 at 1664 px; only rows with no hero picked (the grey silhouette) show
 /// none.
-const ICON_MIN_AREA: f64 = 120.0;
+pub(super) const ICON_MIN_AREA: f64 = 120.0;
 /// Row separators over the portrait square, columns `[L + 34 s, pe - 2 s)`:
 /// a separator is hidden on a column where its mean is within
 /// `SEP_FLAT` of the pixels 3 s above and below it on every channel. Real
 /// rows hide at most 26% of the columns (816 rows at 1664 and 1248 px); an
 /// opaque box across the separator hides nearly all of them.
-const SEP_FLAT: i32 = 12;
-const SEP_HIDDEN_MAX: f64 = 0.35;
+pub(super) const SEP_FLAT: i32 = 12;
+pub(super) const SEP_HIDDEN_MAX: f64 = 0.35;
 /// Content check against an earlier capture of the same row: the difference
 /// `d = cell - earlier` minus its `RESID_BOX * s` box mean (a team colour or
 /// world shift moves the whole bar or background and cancels) may exceed
 /// `RESID_T` on any channel at no more than `RESID_MAX * s^2` px. Text,
 /// boxes and fades drawn on one of the two captures exceed it at hundreds.
-const RESID_BOX: f64 = 15.0;
-const RESID_T: f64 = 20.0;
-const RESID_MAX: f64 = 20.0;
+pub(super) const RESID_BOX: f64 = 15.0;
+pub(super) const RESID_T: f64 = 20.0;
+pub(super) const RESID_MAX: f64 = 20.0;
 
 /// Saturation of a colour: `(max - min) / max`.
 pub(super) fn sat(c: [f64; 3]) -> f64 {
@@ -398,15 +398,21 @@ pub(super) fn surroundings(
     if strip_strokes(img, pe + 1, rw, y0, y1) > STRIP_STROKES_MAX {
         return Err("strokes right of the portrait");
     }
+    // The 8 px left of the bar; a bar closer than that to the crop's left
+    // edge (the wide perk layout, L = 0) has the strip cut short, so the
+    // bar's own first 4 px (left of the icon zone) are checked with it.
     let lw = pyround(STRIP_W.1 * s) as u32;
-    if l >= lw {
-        let left = (l - lw..l)
-            .flat_map(|x| (y0..y1).map(move |y| (x, y)))
-            .filter(|&(x, y)| neutral_bright(img.get_pixel(x, y).0))
-            .count();
-        if left > STRIP_MAX {
-            return Err("text continues left of the bar");
-        }
+    let (lx0, lx1) = if l >= lw {
+        (l - lw, l)
+    } else {
+        (0, (l + pyround(ICON_X.0 * s) as u32).min(w))
+    };
+    let left = (lx0..lx1)
+        .flat_map(|x| (y0..y1).map(move |y| (x, y)))
+        .filter(|&(x, y)| neutral_bright(img.get_pixel(x, y).0))
+        .count();
+    if left > STRIP_MAX {
+        return Err("text continues left of the bar");
     }
     if pe == 0 || pe >= w {
         return Err("portrait edge outside the crop");
@@ -448,8 +454,8 @@ pub(super) fn cell_rect(img: &RgbImage, l: u32, pe: u32, row: &Row, s: f64) -> O
 }
 
 /// The row separators above and below the portrait square show (see
-/// [`SEP_HIDDEN_MAX`]). A separator whose neighbours fall off the crop is
-/// not judged.
+/// [`SEP_HIDDEN_MAX`]). A separator whose neighbours fall off the crop
+/// cannot show, so that row keeps no portrait.
 pub(super) fn separators(
     img: &RgbImage,
     l: u32,
@@ -487,8 +493,14 @@ pub(super) fn separators(
         Some(n as f64 / f64::from(x1 - x0))
     };
     for yb in [i64::from(row.top) - i64::from(sw), i64::from(row.bot)] {
-        if hidden(yb).is_some_and(|v| v > SEP_HIDDEN_MAX) {
-            return Err("row separator hidden over the portrait");
+        match hidden(yb) {
+            // the crop cuts the separator or its neighbours off: it cannot
+            // be seen to show (the bottom row of a 1440p crop)
+            None => return Err("row separator outside the crop"),
+            Some(v) if v > SEP_HIDDEN_MAX => {
+                return Err("row separator hidden over the portrait");
+            }
+            Some(_) => {}
         }
     }
     Ok(())

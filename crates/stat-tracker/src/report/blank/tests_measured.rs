@@ -73,21 +73,37 @@ fn t0() -> chrono::DateTime<chrono::Utc> {
 /// Blank `img` captured two minutes after `earlier`, the same row's earlier
 /// capture.
 fn blank_after(earlier: &RgbImage, img: &RgbImage, chat: super::Chat) -> super::BlankedBoard {
-    let mut mem = super::PortraitMemory::new();
-    super::blank_crop_seen(earlier, Some(6), chat, &mut mem, t0());
+    let mut mem = super::PortraitMemory::replay();
+    super::blank_crop_seen(
+        earlier,
+        Some(6),
+        chat,
+        &mut mem,
+        super::CaptureTime::wall(t0()),
+    );
     super::blank_crop_seen(
         img,
         Some(6),
         chat,
         &mut mem,
-        t0() + chrono::Duration::minutes(2),
+        super::CaptureTime::wall(t0() + chrono::Duration::minutes(2)),
     )
 }
 
-/// Blank `img` after an identical earlier capture: whatever is drawn on it
+/// `img` with one world pixel changed: a later live frame of the same
+/// board (a byte-identical crop is a frozen render, never a reference).
+fn live(img: &RgbImage) -> RgbImage {
+    let mut e = img.clone();
+    let (x, y) = (img.width() - 1, 2);
+    let p = e.get_pixel(x, y).0;
+    e.put_pixel(x, y, Rgb(p.map(|v| v ^ 0x10)));
+    e
+}
+
+/// Blank `img` after an earlier capture that shows the same overlay: it
 /// stayed put, so only the edge gates can catch it.
 fn blank_still(img: &RgbImage) -> super::BlankedBoard {
-    blank_after(img, img, super::Chat::None)
+    blank_after(&live(img), img, super::Chat::None)
 }
 
 /// The in-repo post-match fixtures (real 1440p and 1080p boards, names
@@ -116,7 +132,7 @@ fn synthetic_boards_keep_portraits_and_no_name() {
         assert_eq!(b.board, Ok(()), "{layout:?}");
         assert_eq!(b.rows.len(), 12, "{layout:?}");
         // synthetic digits are not real glyphs: the gates may drop them
-        assert_eq!(b.portraits(), 12, "{layout:?}:\n{}", verdicts(&b));
+        assert_eq!(b.portraits(), 11, "{layout:?}:\n{}", verdicts(&b));
         for (x0, y0, x1, y1) in synth::name_boxes(layout) {
             for y in y0..y1 {
                 for x in x0..x1 {
@@ -273,18 +289,22 @@ fn text_over_the_role_bar_drops_that_portrait_only() {
     );
     let b = blank_still(&img);
     assert!(b.rows[7].portrait.is_err(), "{}", verdicts(&b));
-    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 10, "{}", verdicts(&b));
     assert_not_copied(&b, &img, &drawn, "bar stroke");
 }
 
 #[test]
 fn a_menu_box_laid_across_a_portrait_drops_the_portraits_it_covers() {
-    // a context-menu box starting inside the portrait with a coloured name
-    // header, 300 px wide and 150 tall (judge forgery menu_hdrcol_optfar)
-    let mut img = post_match();
+    // a context-menu box starting inside the portrait with a name header,
+    // 300 px wide and 150 tall (judge forgery menu_hdrcol_optfar), opened
+    // since the earlier capture: the rows it covers keep no portrait.
+    // (Left open across both captures it passes the edge gates on this
+    // board: the pinned-overlay limit of section 4.)
+    let clean = synth::board(Layout::L1);
+    let mut img = clean.clone();
     let mut drawn = Vec::new();
-    let (top, _) = pm_row(1);
-    let (bx0, by0) = (PM_L + 31 + 30, top + 12);
+    let (l, _, top) = l1_row(1);
+    let (bx0, by0) = (l + 31 + 30, top + 12);
     for y in by0..by0 + 150 {
         for x in bx0..bx0 + 300 {
             let p = img.get_pixel(x, y).0;
@@ -295,9 +315,13 @@ fn a_menu_box_laid_across_a_portrait_drops_the_portraits_it_covers() {
         }
     }
     draw_name(&mut img, &mut drawn, bx0 + 8, by0 + 8);
-    let b = blank(&img);
+    let b = blank_after(&clean, &img, super::Chat::None);
     assert!(b.rows[1].portrait.is_err(), "{}", verdicts(&b));
     assert!(b.rows[2].portrait.is_err(), "{}", verdicts(&b));
+    // the box's last 12 px reach row 3; all others keep theirs but the
+    // bottom row, whose lower separator the crop cuts
+    assert!(b.rows[3].portrait.is_err(), "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 8, "{}", verdicts(&b));
     assert_not_copied(&b, &img, &drawn, "menu header");
 }
 
@@ -328,12 +352,23 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
     assert_eq!(super::chat_over_board(&clean.to_rgb8()), super::Chat::None);
     // the chat stays put between the two captures: the chat gate decides
     let twice = |f: &image::DynamicImage| {
-        let mut mem = super::PortraitMemory::new();
-        super::blanked_scoreboard_seen(f, Some(6), &mut mem, t0());
-        super::blanked_scoreboard_seen(f, Some(6), &mut mem, t0() + chrono::Duration::minutes(2))
+        let mut mem = super::PortraitMemory::replay();
+        // the earlier frame differs in one world pixel inside the crop
+        let mut e = f.to_rgb8();
+        let (cx, cy, cw, _) = crate::ocr::preprocess::crop_scoreboard_rect(e.width(), e.height());
+        let p = e.get_pixel(cx + cw - 1, cy + 2).0;
+        e.put_pixel(cx + cw - 1, cy + 2, Rgb(p.map(|v| v ^ 0x10)));
+        let e = image::DynamicImage::ImageRgb8(e);
+        super::blanked_scoreboard_seen(&e, Some(6), &mut mem, super::CaptureTime::wall(t0()));
+        super::blanked_scoreboard_seen(
+            f,
+            Some(6),
+            &mut mem,
+            super::CaptureTime::wall(t0() + chrono::Duration::minutes(2)),
+        )
     };
     let b = twice(&clean);
-    assert_eq!(b.portraits(), 12, "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
     // one chat line at the bottom of the chat box, left of the crop
     let mut f = clean.to_rgb8();
     let mut drawn = Vec::new();
@@ -373,7 +408,7 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
 #[test]
 fn a_crop_without_its_frame_drops_the_chat_reach_portraits() {
     let img = synth::board(Layout::L1);
-    let b = blank_after(&img, &img, super::Chat::Unknown);
+    let b = blank_after(&live(&img), &img, super::Chat::Unknown);
     let dropped: Vec<usize> = b
         .rows
         .iter()
@@ -463,7 +498,7 @@ fn a_dark_menu_opened_inside_a_portrait_keeps_nothing_of_it() {
     draw_name(&mut img, &mut drawn, pe - 40, top + 31);
     let b = blank_after(&clean, &img, super::Chat::None);
     portrait_dropped(&b, 2, &img, &drawn);
-    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 10, "{}", verdicts(&b));
 }
 
 #[test]
@@ -512,7 +547,7 @@ fn coloured_text_across_the_portrait_edge_keeps_nothing_of_it() {
         }
         let b = blank_after(&clean, &img, super::Chat::None);
         portrait_dropped(&b, row, &img, &drawn);
-        assert_eq!(b.portraits(), 11, "row {row}: {}", verdicts(&b));
+        assert_eq!(b.portraits(), 10, "row {row}: {}", verdicts(&b));
     }
 }
 
@@ -532,16 +567,22 @@ fn a_hero_swap_or_no_earlier_capture_keeps_no_portrait() {
     }
     let b = blank_after(&clean, &other, super::Chat::None);
     assert!(b.rows[3].portrait.is_err(), "{}", verdicts(&b));
-    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 10, "{}", verdicts(&b));
     // an earlier capture under a minute old is not a reference
-    let mut mem = super::PortraitMemory::new();
-    super::blank_crop_seen(&clean, Some(6), super::Chat::None, &mut mem, t0());
+    let mut mem = super::PortraitMemory::replay();
+    super::blank_crop_seen(
+        &clean,
+        Some(6),
+        super::Chat::None,
+        &mut mem,
+        super::CaptureTime::wall(t0()),
+    );
     let b = super::blank_crop_seen(
         &clean,
         Some(6),
         super::Chat::None,
         &mut mem,
-        t0() + chrono::Duration::seconds(50),
+        super::CaptureTime::wall(t0() + chrono::Duration::seconds(50)),
     );
     assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
 }
@@ -597,8 +638,117 @@ fn portraits_keep_only_at_the_measured_scales() {
         h * 5 / 4,
         image::imageops::FilterType::Triangle,
     );
-    let b = blank_after(&big, &big, super::Chat::None);
-    if b.board.is_ok() {
-        assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
+    let b = blank_after(&live(&big), &big, super::Chat::None);
+    assert_eq!(b.board, Ok(()), "the 1.25x board must measure");
+    assert!(
+        b.rows.iter().all(|r| r.portrait.is_err()),
+        "{}",
+        verdicts(&b)
+    );
+    // the same board at the native scale keeps them
+    assert_eq!(blank_still(&img).portraits(), 11);
+}
+
+// ---- review round (claude-3 pre-review of #236) ----------------------------
+
+/// Portraits a board keeps when its earlier capture is a live copy.
+fn kept(img: &RgbImage) -> usize {
+    blank_still(img).portraits()
+}
+
+#[test]
+fn the_bottom_row_whose_separator_the_crop_cuts_keeps_no_portrait() {
+    // B4: on the 1007 px crop the last row's lower separator is cut off
+    let b = blank_still(&synth::board(Layout::L1));
+    assert!(b.rows[11].portrait.is_err(), "{}", verdicts(&b));
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+}
+
+#[test]
+fn a_frozen_render_is_never_a_reference() {
+    // B2: a byte-identical earlier crop proves nothing about an overlay
+    let img = synth::board(Layout::L1);
+    let b = blank_after(&img, &img, super::Chat::None);
+    assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
+    assert!(kept(&img) > 0);
+}
+
+#[test]
+fn a_clock_step_does_not_make_a_fresh_capture_a_reference() {
+    // B1 / R3-2: the daemon's memory takes the age on the monotonic instant
+    // of the frame grab too, not only on the stamped wall clock
+    let img = synth::board(Layout::L1);
+    let grab = std::time::Instant::now();
+    let at = |wall_min: i64, mono_s: u64| super::CaptureTime {
+        wall: t0() + chrono::Duration::minutes(wall_min),
+        mono: grab + std::time::Duration::from_secs(mono_s),
+    };
+    let kept_after = |mono_s: u64| {
+        let mut mem = super::PortraitMemory::new();
+        super::blank_crop_seen(&live(&img), Some(6), super::Chat::None, &mut mem, at(0, 0));
+        super::blank_crop_seen(&img, Some(6), super::Chat::None, &mut mem, at(5, mono_s))
+    };
+    // the wall clock jumped 5 minutes, the grabs were 30 s apart: no reference
+    let b = kept_after(30);
+    assert_eq!(b.portraits(), 0, "{}", verdicts(&b));
+    // 70 s apart on the monotonic clock: a reference
+    let b = kept_after(70);
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+}
+
+#[test]
+fn fast_tab_presses_keep_a_reference_old_enough() {
+    // K5: twelve captures 5 s apart overflow the 8 kept; the oldest stays
+    // until a newer one is old enough, so the capture at 65 s has one
+    let img = synth::board(Layout::L1);
+    let mut mem = super::PortraitMemory::replay();
+    for i in 0..12i64 {
+        let mut f = img.clone();
+        f.put_pixel(img.width() - 1, 2, Rgb([i as u8, 0, 0]));
+        super::blank_crop_seen(
+            &f,
+            Some(6),
+            super::Chat::None,
+            &mut mem,
+            super::CaptureTime::wall(t0() + chrono::Duration::seconds(5 * i)),
+        );
     }
+    let b = super::blank_crop_seen(
+        &img,
+        Some(6),
+        super::Chat::None,
+        &mut mem,
+        super::CaptureTime::wall(t0() + chrono::Duration::seconds(65)),
+    );
+    assert_eq!(b.portraits(), 11, "{}", verdicts(&b));
+}
+
+#[test]
+fn text_left_of_a_bar_at_the_crop_edge_drops_the_portrait() {
+    // B3: the wide perk layout puts the bar at x 0, so nothing is left of
+    // it in the crop; white text over the bar's first px still drops it
+    let mut img = synth::board(Layout::L4);
+    let (l, _) = Layout::L4.edges();
+    assert!(l < 8, "L4 is the layout with the bar at the crop edge");
+    let (top, _) = synth::row_span(3);
+    let mut drawn = Vec::new();
+    // the last letter's stroke ends in the bar's first 2 px, left of where
+    // the bar's own stroke check starts
+    stroke(
+        &mut img,
+        &mut drawn,
+        l,
+        top + 26,
+        l + 2,
+        top + 40,
+        Rgb([240, 240, 240]),
+    );
+    let b = blank_still(&img);
+    assert_eq!(
+        b.rows[3].portrait,
+        Err("text continues left of the bar".to_string()),
+        "{}",
+        verdicts(&b)
+    );
+    assert_not_copied(&b, &img, &drawn, "left text");
 }

@@ -9,8 +9,10 @@
 //! every row the chat box could reach drops its portrait.
 //!
 //! Measured on the member's 14 full Tab frames of 2026-10-11/12 (2560x1440):
-//! the bottom band x 60-448, y 1250-1340 holds 0-1 sharp-stroke px without
-//! chat and 282-2,071 with it; the bottom line sits at y 1258-1308.
+//! the bottom band x 60-448, y 1250-1340 holds 0-2 stroke px (a channel
+//! more than [`STROKE`] = 40 from its 5x5 median) without chat and
+//! 282-2,071 with it; at 30 two chat-free Tab frames hold 91 and 93. The
+//! bottom line sits at y 1258-1308.
 
 use image::RgbImage;
 
@@ -22,9 +24,9 @@ const X: (f64, f64) = (60.0, 448.0);
 const BOTTOM: (f64, f64) = (1250.0, 1340.0);
 const LINE: f64 = 28.0;
 /// A stroke: a channel more than this from its 5x5 median.
-const STROKE: i32 = 40;
+pub(super) const STROKE: i32 = 40;
 /// Stroke px (x scale^2) in a band that mean text.
-const TEXT_PX: f64 = 12.0;
+pub(super) const TEXT_PX: f64 = 12.0;
 /// Rows whose bottom lies below this share of the crop height are within
 /// the chat box's reach (about seven lines above the bottom line).
 pub(super) const REACH: f64 = 0.85;

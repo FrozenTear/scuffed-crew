@@ -76,7 +76,8 @@ pub struct KitReads {
 
 impl KitReads {
     /// Reads of one accepted capture. `before` is the match as the Tesseract
-    /// pass parsed it (the `ocr_v1` read), `after` is what was stored.
+    /// pass parsed it, before the capture gate or the digit reader changed a
+    /// stat (the `ocr_v1` read); `after` is what was stored.
     pub fn from_capture(
         before: &crate::storage::PersonalMatch,
         after: &crate::storage::PersonalMatch,
@@ -91,20 +92,29 @@ impl KitReads {
             (!s.is_empty()).then(|| s.chars().take(64).collect::<String>())
         };
         let mut reads = BTreeMap::new();
-        let mut put = |key: &str, value: Option<String>, ocr: Option<String>| {
+        // Spec section 2: a read is suspect when the tracker flags it, when
+        // its value is null, or (stats) when the stored value and the
+        // Tesseract read disagree.
+        let mut put = |key: &str, value: Option<String>, ocr: Option<String>, disagree: bool| {
+            let suspect = suspects.iter().any(|f| f == key) || value.is_none() || disagree;
             reads.insert(
                 key.to_string(),
                 KitRead {
                     value,
                     confidence: None,
                     ocr_v1: ocr,
-                    suspect: suspects.iter().any(|f| f == key),
+                    suspect,
                 },
             );
         };
-        put("mode", text(&after.game_mode), text(&before.game_mode));
-        put("result", text(&after.outcome), text(&before.outcome));
-        put("hero", text(&after.hero), text(&before.hero));
+        put(
+            "mode",
+            text(&after.game_mode),
+            text(&before.game_mode),
+            false,
+        );
+        put("result", text(&after.outcome), text(&before.outcome), false);
+        put("hero", text(&after.hero), text(&before.hero), false);
         for (key, a, b) in [
             ("e", after.elims, before.elims),
             ("a", after.assists, before.assists),
@@ -113,7 +123,7 @@ impl KitReads {
             ("h", after.healing, before.healing),
             ("mit", after.mitigation, before.mitigation),
         ] {
-            put(key, Some(a.to_string()), Some(b.to_string()));
+            put(key, Some(a.to_string()), Some(b.to_string()), a != b);
         }
         Self {
             captured_at,
@@ -199,11 +209,23 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        let written = opts.open(&tmp).and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        });
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
     }
-    fs::rename(&tmp, dir.join(name))
+    if let Err(e) = fs::rename(&tmp, dir.join(name)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // the rename itself survives a crash only once the directory is synced
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 /// Lossless 8-bit RGB PNG with no ancillary chunks.
@@ -220,8 +242,27 @@ pub fn encode_png(img: &RgbImage) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Sessions whose portrait memory is kept in memory.
+/// Session directories deleted while the daemon runs: a capture still in
+/// flight when the member deleted the game never writes its kit again.
+fn removed() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+fn was_removed(dir: &Path) -> bool {
+    removed()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(dir)
+}
+
+/// Sessions whose portrait memory is kept in memory. Tests run many
+/// sessions at once through the one process-wide memory.
+#[cfg(not(test))]
 const MEMORY_SESSIONS: usize = 4;
+#[cfg(test)]
+const MEMORY_SESSIONS: usize = 256;
 
 /// The portrait memory of the newest sessions, keyed by session directory
 /// ([`blank::PortraitMemory`]: unblanked portrait cells, in memory only).
@@ -231,14 +272,28 @@ fn portrait_memory() -> &'static std::sync::Mutex<Vec<(PathBuf, blank::PortraitM
     M.get_or_init(Default::default)
 }
 
+/// Drop a session's portrait memory: the game ended or was deleted.
+pub fn forget_portraits(data_dir: &Path, session_id: &str) {
+    if let Some(dir) = session_dir(data_dir, session_id) {
+        let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|(d, _)| *d != dir);
+    }
+}
+
 /// Blank `frame` against the session's earlier captures and remember it.
 fn blank_seen(
     dir: &Path,
     frame: &DynamicImage,
     team_size: Option<usize>,
-    at: DateTime<Utc>,
+    at: blank::CaptureTime,
 ) -> blank::BlankedBoard {
     let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
+    // a session with no capture for longer than a reference may be old
+    // holds nothing usable
+    all.retain(|(_, m)| {
+        m.latest()
+            .is_none_or(|t| at.wall - t <= blank::REF_MAX_AGE)
+    });
     let i = match all.iter().position(|(d, _)| d == dir) {
         Some(i) => i,
         None => {
@@ -252,10 +307,8 @@ fn blank_seen(
     blank::blanked_scoreboard_seen(frame, team_size, &mut all[i].1, at)
 }
 
-/// Record an accepted scoreboard capture: cut and blank the board (its
-/// portraits checked against the session's earlier captures), and replace
-/// the session's `scoreboard.png` and `reads.json`. A board the blanker
-/// keeps nothing of writes no kit.
+/// [`record_scoreboard_at`] for a capture grabbed now, stamped
+/// `reads.captured_at`.
 pub fn record_scoreboard(
     data_dir: &Path,
     session_id: &str,
@@ -263,10 +316,30 @@ pub fn record_scoreboard(
     team_size: Option<usize>,
     reads: &KitReads,
 ) -> io::Result<()> {
+    let at = blank::CaptureTime {
+        wall: reads.captured_at,
+        mono: std::time::Instant::now(),
+    };
+    record_scoreboard_at(data_dir, session_id, frame, team_size, reads, at)
+}
+
+/// Record an accepted scoreboard capture: cut and blank the board (its
+/// portraits checked against the session's earlier captures, aged from
+/// `grabbed`, the frame grab or the Tab press that asked for it), and
+/// replace the session's `scoreboard.png` and `reads.json`. A board the
+/// blanker keeps nothing of writes no kit.
+pub fn record_scoreboard_at(
+    data_dir: &Path,
+    session_id: &str,
+    frame: &DynamicImage,
+    team_size: Option<usize>,
+    reads: &KitReads,
+    grabbed: blank::CaptureTime,
+) -> io::Result<()> {
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
-    let board = blank_seen(&dir, frame, team_size, reads.captured_at);
+    let board = blank_seen(&dir, frame, team_size, grabbed);
     if !board.kept_anything() {
         return Ok(());
     }
@@ -275,18 +348,21 @@ pub fn record_scoreboard(
     reads.scoreboard_sha256 = super::bundle::sha256_hex(&png);
     let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
     let _guard = write_lock();
+    if was_removed(&dir) {
+        return Ok(());
+    }
     // An older capture that finishes late never replaces a newer one.
     if read_reads(&dir).is_some_and(|cur| cur.captured_at > reads.captured_at) {
         return Ok(());
     }
-    let new_session = !dir.exists();
     private_dir(&kit_root(data_dir))?;
     private_dir(&dir)?;
+    // The scoreboard first, then the reads that carry its hash: a reader
+    // between the two renames (or a crash there) sees a pair that does not
+    // match, and [`load`] reports nothing.
     write_private(&dir, SCOREBOARD_PNG, &png)?;
     write_private(&dir, READS_JSON, &json)?;
-    if new_session {
-        prune_locked(data_dir, KEEP);
-    }
+    prune_locked(data_dir, KEEP);
     Ok(())
 }
 
@@ -330,9 +406,14 @@ pub fn record_outcome_png(data_dir: &Path, session_id: &str, png: &[u8]) -> io::
         return Ok(());
     };
     let _guard = write_lock();
+    if was_removed(&dir) {
+        return Ok(());
+    }
     private_dir(&kit_root(data_dir))?;
     private_dir(&dir)?;
-    write_private(&dir, OUTCOME_PNG, png)
+    write_private(&dir, OUTCOME_PNG, png)?;
+    prune_locked(data_dir, KEEP);
+    Ok(())
 }
 
 fn modified(path: &Path) -> std::time::SystemTime {
@@ -371,7 +452,10 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
         return Kit::default();
     };
     // The daemon may be between the two renames of a pair: read again.
-    for _ in 0..3 {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         let Some(reads) = read_reads(&dir) else {
             return Kit::default();
         };
@@ -397,10 +481,16 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
     Kit::default()
 }
 
-/// Delete a session's kit (the member deleted the game).
+/// Delete a session's kit (the member deleted the game), its portrait
+/// memory, and any kit write still in flight for it.
 pub fn remove(data_dir: &Path, session_id: &str) {
+    forget_portraits(data_dir, session_id);
     if let Some(dir) = session_dir(data_dir, session_id) {
         let _guard = write_lock();
+        removed()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dir.clone());
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -799,5 +889,117 @@ mod tests {
                 1080 * 225 / 1000 - 1080 * 145 / 1000
             )
         );
+    }
+
+    #[test]
+    fn every_write_path_keeps_only_the_newest_sessions() {
+        // K1: games that only ever wrote an outcome crop are pruned too
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..KEEP + 3 {
+            record_outcome_png(tmp.path(), &format!("o{i:02}"), b"png").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let dirs = fs::read_dir(kit_root(tmp.path())).unwrap().count();
+        assert_eq!(dirs, KEEP);
+        assert!(session_dir(tmp.path(), "o00").is_some_and(|d| !d.exists()));
+        assert!(session_dir(tmp.path(), &format!("o{:02}", KEEP + 2)).is_some_and(|d| d.exists()));
+    }
+
+    #[test]
+    fn a_write_in_flight_never_recreates_a_deleted_kit() {
+        // K7: the member deleted the game while its capture was blanking
+        let tmp = tempfile::tempdir().unwrap();
+        record_scoreboard(tmp.path(), "gone-1", &frame(), Some(6), &reads()).unwrap();
+        assert!(has_kit(tmp.path(), "gone-1"));
+        remove(tmp.path(), "gone-1");
+        record_scoreboard(tmp.path(), "gone-1", &frame(), Some(6), &reads()).unwrap();
+        record_outcome_png(tmp.path(), "gone-1", b"png").unwrap();
+        assert!(!session_dir(tmp.path(), "gone-1").unwrap().exists());
+    }
+
+    fn pm(stats: [u32; 6], hero: &str) -> crate::storage::PersonalMatch {
+        crate::storage::PersonalMatch {
+            id: None,
+            hero: hero.into(),
+            map_name: "Ilios".into(),
+            game_mode: "Control".into(),
+            role: "Support".into(),
+            outcome: String::new(),
+            elims: stats[0],
+            deaths: stats[2],
+            assists: stats[1],
+            damage: stats[3],
+            healing: stats[4],
+            mitigation: stats[5],
+            played_at: surrealdb_types::Datetime::from(Utc::now()),
+            synced: false,
+            sync_rev: 0,
+            upload_reject: None,
+            session_id: "s".into(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+            recognizer: "cv-v5".into(),
+            suspect_fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn from_capture_keeps_the_tesseract_read_and_flags_what_the_spec_says() {
+        // K2: ocr_v1 is the read before the gate held a stat; a read is
+        // suspect when flagged, null, or (stats) when stored and ocr_v1
+        // disagree
+        let before = pm([12, 3, 4, 5000, 0, 900], "Ana");
+        let mut after = pm([12, 3, 4, 5100, 0, 900], "Ana");
+        after.suspect_fields = vec!["mit".into()];
+        let at: DateTime<Utc> = "2026-10-12T20:00:00Z".parse().unwrap();
+        let r = KitReads::from_capture(&before, &after, 2560, 1440, TeamLayout::Six, at);
+        assert_eq!(r.captured_at, at);
+        let get = |k: &str| r.reads.get(k).unwrap().clone();
+        assert_eq!(get("dmg").value.as_deref(), Some("5100"));
+        assert_eq!(get("dmg").ocr_v1.as_deref(), Some("5000"));
+        assert!(get("dmg").suspect, "stored and ocr_v1 disagree");
+        assert!(!get("e").suspect);
+        assert!(get("mit").suspect, "flagged by the tracker");
+        assert!(get("result").value.is_none());
+        assert!(get("result").suspect, "a null read is suspect");
+        assert!(!get("hero").suspect);
+        assert_eq!(get("hero").ocr_v1.as_deref(), Some("Ana"));
+        assert_eq!(r.reads.len(), 9);
+    }
+
+    fn memory_holds(data_dir: &Path, session_id: &str) -> bool {
+        let dir = session_dir(data_dir, session_id).unwrap();
+        portrait_memory()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(d, m)| *d == dir && m.latest().is_some())
+    }
+
+    #[test]
+    fn deleting_or_ending_a_game_drops_its_portrait_memory() {
+        // R3-4 / K4: no unblanked portrait cell of a deleted or ended game
+        // stays in memory
+        let tmp = tempfile::tempdir().unwrap();
+        record_scoreboard(tmp.path(), "mem-del", &frame(), Some(6), &reads()).unwrap();
+        record_scoreboard(tmp.path(), "mem-end", &frame(), Some(6), &reads()).unwrap();
+        assert!(memory_holds(tmp.path(), "mem-del"));
+        assert!(memory_holds(tmp.path(), "mem-end"));
+        remove(tmp.path(), "mem-del");
+        assert!(!memory_holds(tmp.path(), "mem-del"));
+        forget_portraits(tmp.path(), "mem-end");
+        assert!(!memory_holds(tmp.path(), "mem-end"));
     }
 }

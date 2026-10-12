@@ -61,36 +61,117 @@ pub const BLANK_TABLE_VERSION: u32 = 10;
 pub const REF_MIN_AGE: chrono::Duration = chrono::Duration::seconds(60);
 /// ... and at most this old (one game).
 pub const REF_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
+/// The one switch for portrait copying. Off, every portrait cell stays fill
+/// on every board (digits are kept as before) and no portrait cell is held
+/// in memory.
+pub const COPY_PORTRAITS: bool = true;
+
+/// When a capture was taken: the wall clock it is stamped with, and the
+/// monotonic instant of the frame grab (or the Tab press that asked for it),
+/// so its age never depends on how long blanking took or on a clock step.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureTime {
+    pub wall: DateTime<Utc>,
+    pub mono: std::time::Instant,
+}
+
+impl CaptureTime {
+    /// Now, on both clocks.
+    pub fn now() -> Self {
+        CaptureTime {
+            wall: Utc::now(),
+            mono: std::time::Instant::now(),
+        }
+    }
+
+    /// A stamped capture replayed at `wall` (the monotonic instant is now;
+    /// a [`PortraitMemory::replay`] memory ignores it).
+    pub fn wall(wall: DateTime<Utc>) -> Self {
+        CaptureTime {
+            wall,
+            mono: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Captures a [`PortraitMemory`] keeps.
 const MEMORY_BOARDS: usize = 8;
 
 /// Portrait cells of the earlier captures of one game, kept in memory only
 /// (never written) as references for the portrait content check. Each cell
-/// is the unblanked `[L, pe)` cell of a measured row, so the memory lives as
-/// long as the daemon holds the game and no longer.
-#[derive(Default)]
+/// is the unblanked `[L, pe)` cell of a measured row; the daemon drops a
+/// game's memory when the game ends or is deleted.
+///
+/// A capture's age is checked on the wall clock it was stamped with and,
+/// for the daemon's memory ([`PortraitMemory::new`]), on the monotonic clock
+/// as well, so a clock step never makes a seconds-old capture a reference.
+/// A capture whose crop is byte-identical to the one checked (a frozen
+/// render) is never a reference.
 pub struct PortraitMemory {
     seen: VecDeque<Seen>,
+    /// Check ages on the monotonic clock too (the daemon). Tests and the
+    /// port check replay stamped captures on the wall clock only.
+    monotonic: bool,
 }
 
 struct Seen {
     at: DateTime<Utc>,
+    mono: std::time::Instant,
     crop_w: u32,
+    /// Hash of the whole crop, to spot a frozen render.
+    crop_hash: u64,
     /// `(team, idx, cell)`.
     cells: Vec<(usize, usize, RgbImage)>,
 }
 
+impl Default for PortraitMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PortraitMemory {
+    /// The daemon's memory: ages on the wall and the monotonic clock.
     pub fn new() -> Self {
-        Self::default()
+        PortraitMemory {
+            seen: VecDeque::new(),
+            monotonic: true,
+        }
     }
 
-    /// Cells of the same row, of the same size, captured between
-    /// [`REF_MIN_AGE`] and [`REF_MAX_AGE`] before `at`.
+    /// Replay of stamped captures (tests, the port check): ages on the wall
+    /// clock only.
+    pub fn replay() -> Self {
+        PortraitMemory {
+            seen: VecDeque::new(),
+            monotonic: false,
+        }
+    }
+
+    /// Newest capture time held, if any.
+    pub fn latest(&self) -> Option<DateTime<Utc>> {
+        self.seen.iter().map(|b| b.at).max()
+    }
+
+    fn old_enough(&self, b: &Seen, at: DateTime<Utc>, now: std::time::Instant) -> bool {
+        let wall = at - b.at;
+        let mono_ok = !self.monotonic
+            || now
+                .checked_duration_since(b.mono)
+                .is_some_and(|d| d >= REF_MIN_AGE.to_std().unwrap_or_default());
+        wall >= REF_MIN_AGE && wall <= REF_MAX_AGE && mono_ok
+    }
+
+    /// Cells of the same row, of the same size, from captures between
+    /// [`REF_MIN_AGE`] and [`REF_MAX_AGE`] before `at` whose crop is not
+    /// byte-identical to this one.
+    #[allow(clippy::too_many_arguments)]
     fn references<'a>(
         &'a self,
         at: DateTime<Utc>,
+        now: std::time::Instant,
         crop_w: u32,
+        crop_hash: u64,
         team: usize,
         idx: usize,
         dims: (u32, u32),
@@ -98,20 +179,41 @@ impl PortraitMemory {
         self.seen
             .iter()
             .filter(move |b| {
-                b.crop_w == crop_w && at - b.at >= REF_MIN_AGE && at - b.at <= REF_MAX_AGE
+                b.crop_w == crop_w && b.crop_hash != crop_hash && self.old_enough(b, at, now)
             })
             .flat_map(|b| b.cells.iter())
             .filter(move |(t, i, c)| *t == team && *i == idx && c.dimensions() == dims)
             .map(|(_, _, c)| c)
     }
 
+    /// Keep `seen`. Captures more than [`REF_MAX_AGE`] apart from it go;
+    /// past [`MEMORY_BOARDS`] the oldest goes, except the newest capture old
+    /// enough to be a reference (or, while none is, the oldest one, which
+    /// becomes one first): fast Tab presses never push every reference out.
     fn remember(&mut self, seen: Seen) {
         self.seen.retain(|b| (seen.at - b.at).abs() <= REF_MAX_AGE);
         self.seen.push_back(seen);
         while self.seen.len() > MEMORY_BOARDS {
-            self.seen.pop_front();
+            let newest = self.seen.back().map(|b| (b.at, b.mono));
+            let anchor = newest.and_then(|(at, mono)| {
+                self.seen.iter().rposition(|b| self.old_enough(b, at, mono))
+            });
+            let victim = match anchor {
+                Some(0) | None => 1,
+                Some(_) => 0,
+            };
+            self.seen.remove(victim);
         }
     }
+}
+
+/// Hash of a crop's bytes (frozen-render check).
+fn crop_hash(img: &RgbImage) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    img.dimensions().hash(&mut h);
+    img.as_raw().hash(&mut h);
+    h.finish()
 }
 
 /// A region of the 16:9 playfield, in thousandths.
@@ -363,8 +465,8 @@ pub fn blanked_scoreboard(frame: &DynamicImage, team_size: Option<usize>) -> Bla
     blanked_scoreboard_seen(
         frame,
         team_size,
-        &mut PortraitMemory::new(),
-        DateTime::<Utc>::UNIX_EPOCH,
+        &mut PortraitMemory::replay(),
+        CaptureTime::wall(DateTime::<Utc>::UNIX_EPOCH),
     )
 }
 
@@ -376,7 +478,7 @@ pub fn blanked_scoreboard_seen(
     frame: &DynamicImage,
     team_size: Option<usize>,
     memory: &mut PortraitMemory,
-    at: DateTime<Utc>,
+    at: CaptureTime,
 ) -> BlankedBoard {
     let rgb = frame.to_rgb8();
     let (x, y, w, h) = crop_scoreboard_rect(rgb.width(), rgb.height());
@@ -391,8 +493,8 @@ pub fn blank_crop(src: &RgbImage, team_size: Option<usize>, chat: Chat) -> Blank
         src,
         team_size,
         chat,
-        &mut PortraitMemory::new(),
-        DateTime::<Utc>::UNIX_EPOCH,
+        &mut PortraitMemory::replay(),
+        CaptureTime::wall(DateTime::<Utc>::UNIX_EPOCH),
     )
 }
 
@@ -405,7 +507,19 @@ pub fn blank_crop_seen(
     team_size: Option<usize>,
     chat: Chat,
     memory: &mut PortraitMemory,
-    at: DateTime<Utc>,
+    at: CaptureTime,
+) -> BlankedBoard {
+    blank_crop_inner(src, team_size, chat, memory, at, COPY_PORTRAITS)
+}
+
+/// [`blank_crop_seen`] with the [`COPY_PORTRAITS`] switch as a parameter.
+fn blank_crop_inner(
+    src: &RgbImage,
+    team_size: Option<usize>,
+    chat: Chat,
+    memory: &mut PortraitMemory,
+    at: CaptureTime,
+    copy_portraits: bool,
 ) -> BlankedBoard {
     let (w, h) = src.dimensions();
     let mut out = RgbImage::from_pixel(w, h, FILL);
@@ -466,9 +580,13 @@ pub fn blank_crop_seen(
     let native = cells::native_scale(s);
     let mut rows = Vec::with_capacity(b.rows.len());
     let mut painted: Vec<(usize, cells::KeptRow)> = Vec::new();
+    let now = at.mono;
+    let hash = crop_hash(src);
     let mut seen = Seen {
-        at,
+        at: at.wall,
+        mono: now,
         crop_w: w,
+        crop_hash: hash,
         cells: Vec::new(),
     };
     for (ri, ((r, bar), dig)) in b.rows.iter().zip(&bars).zip(digits).enumerate() {
@@ -505,7 +623,7 @@ pub fn blank_crop_seen(
                     })
                     .and_then(|()| {
                         let mut refs = memory
-                            .references(at, w, r.team, r.idx, img.dimensions())
+                            .references(at.wall, now, w, hash, r.team, r.idx, img.dimensions())
                             .peekable();
                         if refs.peek().is_none() {
                             return Err("no earlier capture of this row".to_string());
@@ -530,7 +648,9 @@ pub fn blank_crop_seen(
                     }
                 }
             }
-            seen.cells.push((r.team, r.idx, img));
+            if copy_portraits {
+                seen.cells.push((r.team, r.idx, img));
+            }
         }
         let digits = match dig {
             Err(why) => Err(why),
@@ -634,6 +754,146 @@ mod tests {
         }
         assert_eq!(BLANK_TABLE_VERSION, 10);
         assert_eq!(FILL, Rgb([32, 32, 32]));
+    }
+
+    #[test]
+    fn the_spec_states_the_portrait_and_chat_constants() {
+        // section 4 quotes these numbers; a change to one must change both
+        let doc = include_str!("../../../docs/report-bundle.md");
+        let p = |v: f64| format!("{}", (v * 1e6).round() / 1e6);
+        assert_eq!(REF_MIN_AGE, chrono::Duration::seconds(60));
+        assert_eq!(REF_MAX_AGE, chrono::Duration::minutes(30));
+        for line in [
+            "taken at least a minute earlier and at most 30 minutes earlier".to_string(),
+            format!("minus its {} `s` box mean", p(portrait::RESID_BOX)),
+            format!(
+                "no channel may be off by more than {} at more than {} px",
+                p(portrait::RESID_T),
+                p(portrait::RESID_MAX)
+            ),
+            format!("a game's last {MEMORY_BOARDS} captures"),
+            format!(
+                "{}% of its non-icon pixels sit within 40",
+                p(portrait::BAR_UNIFORM * 100.0)
+            ),
+            format!(
+                "a channel more than {} from its 5x5 median) outside the role icon",
+                portrait::SAL_THR
+            ),
+            format!(
+                "a role icon of at least {} white px",
+                p(portrait::ICON_MIN_AREA)
+            ),
+            format!(
+                "at most {} white or grey or bright bar-coloured pixels and at most {} sharp-stroke pixels of any colour",
+                portrait::STRIP_MAX,
+                portrait::STRIP_STROKES_MAX
+            ),
+            format!(
+                "at least {}% of the row's pixel rows",
+                p(((1.0 - portrait::EDGE_HIDDEN_MAX) * 100.0).round())
+            ),
+            format!(
+                "on at most {}% of its columns may a separator sit within {} of the pixels",
+                p(portrait::SEP_HIDDEN_MAX * 100.0),
+                portrait::SEP_FLAT
+            ),
+            format!(
+                "more than {} pixels with a channel more than {} from its 5x5 median",
+                p(chat::TEXT_PX),
+                chat::STROKE
+            ),
+            format!(
+                "by more than {} of the template score at 1440p and {} at 1080p",
+                p(cells::LETTER_DELTA_1440),
+                p(cells::LETTER_DELTA_1080)
+            ),
+        ] {
+            assert!(doc.contains(&line), "spec line missing: {line}");
+        }
+    }
+
+    #[test]
+    fn with_portrait_copying_off_no_portrait_pixel_is_copied() {
+        // the switch: every portrait cell stays fill, digits are unchanged
+        let img = synth::board(synth::Layout::L1);
+        let mut e = img.clone();
+        let p = e.get_pixel(img.width() - 1, 2).0;
+        e.put_pixel(img.width() - 1, 2, Rgb(p.map(|v| v ^ 0x10)));
+        let t0: DateTime<Utc> = "2026-10-12T20:00:00Z".parse().unwrap();
+        let run = |copy: bool| {
+            let mut mem = PortraitMemory::replay();
+            blank_crop_inner(
+                &e,
+                Some(6),
+                Chat::None,
+                &mut mem,
+                CaptureTime::wall(t0),
+                copy,
+            );
+            let b = blank_crop_inner(
+                &img,
+                Some(6),
+                Chat::None,
+                &mut mem,
+                CaptureTime::wall(t0 + chrono::Duration::minutes(2)),
+                copy,
+            );
+            (b, mem.seen.iter().map(|s| s.cells.len()).sum::<usize>())
+        };
+        let (on, _) = run(true);
+        let (off, held) = run(false);
+        assert!(on.portraits() > 0);
+        assert_eq!(off.portraits(), 0);
+        assert_eq!(held, 0, "no portrait cell is held in memory");
+        let (l, _) = synth::Layout::L1.edges();
+        for y in 0..img.height() {
+            for x in l..l + 104 {
+                assert_eq!(*off.image.get_pixel(x, y), FILL, "portrait px {x},{y}");
+            }
+        }
+        assert_eq!(off.digit_rows(), on.digit_rows());
+        assert_eq!(
+            off.rows
+                .iter()
+                .map(|r| r.digits.clone())
+                .collect::<Vec<_>>(),
+            on.rows.iter().map(|r| r.digits.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tables_match_the_spec() {
+        // the scoreboard crop, the overlay bars and the outcome box: the code
+        // tables and the spec tables hold the same numbers
+        let doc = include_str!("../../../docs/report-bundle.md");
+        for line in [
+            "| x | 175/1000 |",
+            "| y | 150/1000 |",
+            "| width | 650/1000 |",
+            "| height | 700/1000 |",
+            "x 10/1000, y 145/1000, width 240/1000, height 80/1000",
+        ] {
+            assert!(doc.contains(line), "spec line missing: {line}");
+        }
+        assert_eq!(crop_scoreboard_rect(2560, 1440), (448, 216, 1664, 1007));
+        assert_eq!(crop_scoreboard_rect(1920, 1080), (336, 162, 1248, 756));
+        assert_eq!(
+            (
+                OUTCOME_BAND.x,
+                OUTCOME_BAND.y,
+                OUTCOME_BAND.w,
+                OUTCOME_BAND.h
+            ),
+            (10, 145, 240, 80)
+        );
+        for r in &OVERLAY_REGIONS {
+            let row = format!(
+                "| `{}` | every kept frame | {} | {} | {} | {} | no |",
+                r.id, r.x, r.y, r.w, r.h
+            );
+            assert!(doc.contains(&row), "spec row missing: {row}");
+        }
     }
 
     #[test]

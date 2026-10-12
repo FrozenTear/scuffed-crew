@@ -72,8 +72,8 @@ const MASS_1080: [(f64, f64); 10] = [
     (0.34, 0.62),
 ];
 /// A letter template beating the digit's own score by this rejects the glyph.
-const LETTER_DELTA_1440: f64 = 0.04;
-const LETTER_DELTA_1080: f64 = 0.06;
+pub(super) const LETTER_DELTA_1440: f64 = 0.04;
+pub(super) const LETTER_DELTA_1080: f64 = 0.06;
 /// Digit top vs the row's consensus top, and digit height vs the board's
 /// (x s).
 const TOP_TOL: f64 = 1.6;
@@ -268,7 +268,8 @@ pub(super) fn digit_rows(
             if let Some(why) = &board_why {
                 return Err(format!("board: {why}"));
             }
-            if tint_sat[ri].is_some_and(|t| t < TINT_SAT_MIN) {
+            // a NaN tint fails too
+            if tint_sat[ri].is_some_and(|t| t.is_nan() || t < TINT_SAT_MIN) {
                 return Err(format!(
                     "team tint near grey ({:.2})",
                     tint_sat[ri].unwrap_or(0.0)
@@ -409,7 +410,8 @@ fn accept(c: &CellInfo, k: usize, band: (usize, usize), x: &Ctx) -> Result<(), S
     let Some(text) = c.text() else {
         return Err("unread".into());
     };
-    if saturation(c.colour) < CELL_SAT_MIN {
+    let cell_sat = saturation(c.colour);
+    if cell_sat.is_nan() || cell_sat < CELL_SAT_MIN {
         return Err("cell colour near grey".into());
     }
     if iso_mid(&c.cell.ink, s) as f64 > ISO_MID_MAX * (s * s).max(1.0) {

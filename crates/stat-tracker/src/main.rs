@@ -297,6 +297,9 @@ struct DaemonCtx {
 
 /// Per-capture parameters decided by the session state machine at Tab time.
 struct CaptureRequest {
+    /// The Tab press that asked for this capture, on the wall and the
+    /// monotonic clock: the report kit ages its portrait references from it.
+    tab_at: stat_tracker::report::blank::CaptureTime,
     session_id: String,
     create_session: bool,
     game_outcome: detect::MatchOutcome,
@@ -1284,6 +1287,8 @@ async fn retire_active_game(
     let Some(mut g) = st.active_game.take() else {
         return;
     };
+    // The game is over: its unblanked portrait cells leave memory.
+    stat_tracker::report::kit::forget_portraits(data_dir, &g.session_id);
     let had_outcome = g.finished();
     if !had_outcome {
         // Only an explicit two-signal seal. A leftover hint is not an outcome.
@@ -2481,6 +2486,10 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
         _ => None,
     };
     CaptureRequest {
+        tab_at: stat_tracker::report::blank::CaptureTime {
+            wall: Utc::now(),
+            mono: now,
+        },
         session_id: g.session_id.clone(),
         create_session: !g.session_created,
         game_outcome: g.outcome,
@@ -3432,6 +3441,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         });
                         if let Some(png) = rank_outcome_png
                             && let Some(game) = st.active_game.as_ref()
+                            // the rank screen follows the game it belongs
+                            // to: a game quiet for longer gets no outcome crop
+                            && game.last_activity.elapsed() <= RANK_OUTCOME_MAX_IDLE
                             && let Err(e) = stat_tracker::report::kit::record_outcome_png(
                                 data_dir,
                                 &game.session_id,
@@ -4773,6 +4785,16 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             }
             let held_stats = gate.accepted;
             let held_cells = gate.holds.clone();
+            // The Tesseract stats as read, before the gate's held values
+            // replace them: the report kit's `ocr_v1` (spec section 2).
+            let tesseract_stats = (
+                parsed.elims,
+                parsed.assists,
+                parsed.deaths,
+                parsed.damage,
+                parsed.healing,
+                parsed.mitigation,
+            );
             parsed.elims = held_stats.elims;
             parsed.assists = held_stats.assists;
             parsed.deaths = held_stats.deaths;
@@ -4801,8 +4823,17 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // first capture creates the session row; later captures (including hero
             // swaps and the post-match scoreboard) append to the same session.
             parsed.session_id = target_session.clone();
-            // The Tesseract read, kept for the report kit's `ocr_v1` field.
-            let ocr_parsed = parsed.clone();
+            // The Tesseract read, kept for the report kit's `ocr_v1` field:
+            // this capture's fields with the stats as Tesseract read them.
+            let mut ocr_parsed = parsed.clone();
+            (
+                ocr_parsed.elims,
+                ocr_parsed.assists,
+                ocr_parsed.deaths,
+                ocr_parsed.damage,
+                ocr_parsed.healing,
+                ocr_parsed.mitigation,
+            ) = tesseract_stats;
             if ctx.use_new_reader {
                 apply_new_reader(
                     &mut parsed,
@@ -4844,6 +4875,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 team_size,
                 &ocr_parsed,
                 &parsed,
+                captured_at,
+                req.tab_at,
             );
 
             // Re-derive the session's hero timeline from its RAW snapshots after
@@ -5051,6 +5084,10 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
     });
 }
 
+/// A rank screen's `outcome.png` goes to the active game only when that game
+/// recorded evidence (a capture, an outcome) this recently.
+const RANK_OUTCOME_MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
 /// accepted capture. Written off the capture path; a failure is logged and
 /// never touches the stored match.
@@ -5061,6 +5098,8 @@ fn record_report_kit(
     team_size: usize,
     ocr_parsed: &storage::PersonalMatch,
     stored: &storage::PersonalMatch,
+    captured_at: chrono::DateTime<Utc>,
+    tab_at: stat_tracker::report::blank::CaptureTime,
 ) {
     let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
     else {
@@ -5072,7 +5111,7 @@ fn record_report_kit(
         frame.width(),
         frame.height(),
         layout,
-        chrono::Utc::now(),
+        captured_at,
     );
     let (data_dir, session_id, frame) = (
         data_dir.to_path_buf(),
@@ -5080,12 +5119,13 @@ fn record_report_kit(
         frame.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = stat_tracker::report::kit::record_scoreboard(
+        if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
             &data_dir,
             &session_id,
             &frame,
             Some(team_size),
             &reads,
+            tab_at,
         ) {
             tracing::debug!(error = %e, "report kit: scoreboard not written");
         }

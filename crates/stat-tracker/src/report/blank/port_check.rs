@@ -107,7 +107,7 @@ fn dump_blank_verdicts() {
     };
     let stamp = |name: &str| -> Option<DateTime<Utc>> {
         let b = name.as_bytes();
-        (0..b.len().saturating_sub(15)).find_map(|i| {
+        (0..(b.len() + 1).saturating_sub(15)).find_map(|i| {
             let t = std::str::from_utf8(&b[i..i + 15]).ok()?;
             NaiveDateTime::parse_from_str(t, "%Y%m%d_%H%M%S")
                 .ok()
@@ -135,6 +135,7 @@ fn dump_blank_verdicts() {
     // a 16:9 (or wider) full frame goes through the frame path, with chat
     // read from the frame
     let run = |img: &image::RgbImage, mem: &mut super::PortraitMemory, at: DateTime<Utc>| {
+        let at = super::CaptureTime::wall(at);
         let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
         if ratio > 1.7 {
             super::blanked_scoreboard_seen(
@@ -148,7 +149,7 @@ fn dump_blank_verdicts() {
         }
     };
     let t0 = DateTime::<Utc>::UNIX_EPOCH + Duration::days(20_000);
-    let mut shared = super::PortraitMemory::new();
+    let mut shared = super::PortraitMemory::replay();
     let mut lines = String::new();
     for (i, p) in files.into_iter().enumerate() {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
@@ -157,10 +158,23 @@ fn dump_blank_verdicts() {
             "seq" => stamp(&name).unwrap_or(t0 + Duration::minutes(2 * i as i64)),
             _ => t0,
         };
-        let mut own = super::PortraitMemory::new();
+        let mut own = super::PortraitMemory::replay();
         let mem = if mode == "seq" { &mut shared } else { &mut own };
         if mode == "self" {
-            run(&img, mem, at - Duration::minutes(2));
+            // the same board a live frame earlier: one crop pixel differs
+            // (a byte-identical crop is a frozen render, never a reference)
+            let mut e = img.clone();
+            let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
+            let (x, y) = if ratio > 1.7 {
+                let (cx, cy, cw, _) =
+                    crate::ocr::preprocess::crop_scoreboard_rect(img.width(), img.height());
+                (cx + cw - 1, cy + 2)
+            } else {
+                (img.width() - 1, 2)
+            };
+            let p = e.get_pixel(x, y).0;
+            e.put_pixel(x, y, image::Rgb(p.map(|v| v ^ 0x10)));
+            run(&e, mem, at - Duration::minutes(2));
         } else if let Some(r) = refs.get(&name).and_then(|v| v.as_str()) {
             run(
                 &image::open(r).unwrap().to_rgb8(),
