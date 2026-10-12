@@ -203,12 +203,13 @@ pub fn record_scoreboard(
     session_id: &str,
     frame: &DynamicImage,
     layout: TeamLayout,
+    own_row: Option<usize>,
     reads: &KitReads,
 ) -> io::Result<()> {
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
-    let board = blank::blanked_scoreboard(frame, layout);
+    let board = blank::blanked_scoreboard(frame, layout, own_row);
     let png = encode_png(&board)?;
     let json = serde_json::to_vec_pretty(reads).map_err(io::Error::other)?;
     let new_session = !dir.exists();
@@ -386,7 +387,15 @@ mod tests {
     #[test]
     fn scoreboard_is_blanked_private_and_loads_back() {
         let tmp = tempfile::tempdir().unwrap();
-        record_scoreboard(tmp.path(), "s-1", &frame(), TeamLayout::Five, &reads()).unwrap();
+        record_scoreboard(
+            tmp.path(),
+            "s-1",
+            &frame(),
+            TeamLayout::Five,
+            Some(0),
+            &reads(),
+        )
+        .unwrap();
         let kit = load(tmp.path(), "s-1");
         let png = kit.scoreboard_png.expect("scoreboard");
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
@@ -420,7 +429,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut old = reads();
         old.blank_table = blank::BLANK_TABLE_VERSION - 1;
-        record_scoreboard(tmp.path(), "s-old", &frame(), TeamLayout::Five, &old).unwrap();
+        record_scoreboard(
+            tmp.path(),
+            "s-old",
+            &frame(),
+            TeamLayout::Five,
+            Some(0),
+            &old,
+        )
+        .unwrap();
         assert!(!has_kit(tmp.path(), "s-old"));
         assert!(load(tmp.path(), "s-old").scoreboard_png.is_none());
         assert!(sessions(tmp.path()).is_empty());
@@ -437,7 +454,15 @@ mod tests {
     fn removing_a_session_deletes_its_kit_only() {
         let tmp = tempfile::tempdir().unwrap();
         for sid in ["keep", "gone"] {
-            record_scoreboard(tmp.path(), sid, &frame(), TeamLayout::Five, &reads()).unwrap();
+            record_scoreboard(
+                tmp.path(),
+                sid,
+                &frame(),
+                TeamLayout::Five,
+                Some(0),
+                &reads(),
+            )
+            .unwrap();
         }
         remove(tmp.path(), "gone");
         remove(tmp.path(), "../keep");
@@ -467,7 +492,15 @@ mod tests {
     fn unsafe_session_ids_get_no_kit() {
         let tmp = tempfile::tempdir().unwrap();
         for sid in ["", "../x", "a/b", "a b", &"x".repeat(65)] {
-            record_scoreboard(tmp.path(), sid, &frame(), TeamLayout::Five, &reads()).unwrap();
+            record_scoreboard(
+                tmp.path(),
+                sid,
+                &frame(),
+                TeamLayout::Five,
+                Some(0),
+                &reads(),
+            )
+            .unwrap();
             assert!(!has_kit(tmp.path(), sid));
         }
         assert!(sessions(tmp.path()).is_empty());
@@ -483,6 +516,7 @@ mod tests {
                 &format!("s{i}"),
                 &frame(),
                 TeamLayout::Five,
+                Some(0),
                 &reads(),
             )
             .unwrap();
@@ -619,7 +653,15 @@ mod tests {
         // An outcome alone is not a reportable kit.
         assert!(!has_kit(tmp.path(), "s-1"));
         assert!(load(tmp.path(), "s-1").outcome_png.is_none());
-        record_scoreboard(tmp.path(), "s-1", &frame(), TeamLayout::Five, &reads()).unwrap();
+        record_scoreboard(
+            tmp.path(),
+            "s-1",
+            &frame(),
+            TeamLayout::Five,
+            Some(0),
+            &reads(),
+        )
+        .unwrap();
         let png = load(tmp.path(), "s-1").outcome_png.expect("outcome");
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!(

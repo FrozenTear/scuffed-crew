@@ -731,6 +731,7 @@ mod game {
             "sess-1",
             &frame(),
             TeamLayout::Five,
+            Some(0),
             &reads(Some(5)),
         )
         .unwrap();
@@ -798,6 +799,7 @@ mod game {
             "sess-1",
             &frame(),
             TeamLayout::Unknown,
+            None,
             &reads(None),
         )
         .unwrap();

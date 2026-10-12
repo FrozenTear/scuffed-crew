@@ -4836,6 +4836,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 &target_session,
                 &frame_img,
                 team_size,
+                player_row_idx,
                 &ocr_parsed,
                 &parsed,
             );
@@ -5053,6 +5054,7 @@ fn record_report_kit(
     session_id: &str,
     frame: &image::DynamicImage,
     team_size: usize,
+    own_row: Option<usize>,
     ocr_parsed: &storage::PersonalMatch,
     stored: &storage::PersonalMatch,
 ) {
@@ -5079,6 +5081,7 @@ fn record_report_kit(
             &session_id,
             &frame,
             layout,
+            own_row,
             &reads,
         ) {
             tracing::debug!(error = %e, "report kit: scoreboard not written");

@@ -71,7 +71,7 @@ pub const NOTICE_BAND: (u32, u32) = (740, 900);
 /// Bumped whenever a table in this module changes. Kits store it, and a kit
 /// written under another table is never reported (it is blanked again or
 /// refused).
-pub const BLANK_TABLE_VERSION: u32 = 6;
+pub const BLANK_TABLE_VERSION: u32 = 7;
 
 /// One playfield region from the "Other name regions" table, in thousandths
 /// of the 16:9 playfield.
@@ -293,7 +293,19 @@ pub fn notice_band(crop_w: u32, crop_h: u32) -> Rect {
 /// What `crops/scoreboard.png` keeps, in scoreboard-crop pixels: the
 /// portrait and digit cells of each row, minus the notice band. Everything
 /// else is the fill colour.
-pub fn kept_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
+///
+/// Digit cells are kept for `own_row` only (the member's row, index 0..2n
+/// with team 1 first, the same index `crop_player_row` takes): the table rows
+/// are translucent, and the glyph test cannot prove the world behind a row
+/// holds no name for every team colour (QC1-8). The member's row is the only
+/// row the tracker reads stats from. Other rows keep only their portrait. With
+/// no own row, or an unknown team size, no digit cell is kept.
+pub fn kept_rects(
+    crop_w: u32,
+    crop_h: u32,
+    layout: TeamLayout,
+    own_row: Option<usize>,
+) -> Vec<Rect> {
     let band = notice_band(crop_w, crop_h);
     let sizes: &[usize] = match layout {
         TeamLayout::Five => &[5],
@@ -304,8 +316,13 @@ pub fn kept_rects(crop_w: u32, crop_h: u32, layout: TeamLayout) -> Vec<Rect> {
     };
     // A row cell that touches the notice band is not kept at all, so no
     // row keeps half of its digits (QC1-3).
+    let own_row = own_row.filter(|_| sizes.len() == 1);
     protected_rects(crop_w, crop_h, sizes[0])
         .into_iter()
+        .enumerate()
+        // protected_rects gives (portrait, digits) for each row in order.
+        .filter(|(i, _)| i % 2 == 0 || own_row == Some(i / 2))
+        .map(|(_, r)| r)
         .filter(|r| !r.intersects(&band))
         .filter(|r| sizes.len() == 1 || covered_by_all(*r, crop_w, crop_h, sizes))
         .collect()
@@ -442,16 +459,20 @@ pub fn blank_scoreboard_frame(frame: &DynamicImage, layout: TeamLayout) -> RgbIm
 /// (portrait and digit cells) are copied from the blanked frame. Names,
 /// titles, badges, the header, the gaps, the hero card, the game world
 /// (in-world nameplates), and the notice band all stay filled.
-pub fn blanked_scoreboard(frame: &DynamicImage, layout: TeamLayout) -> RgbImage {
+pub fn blanked_scoreboard(
+    frame: &DynamicImage,
+    layout: TeamLayout,
+    own_row: Option<usize>,
+) -> RgbImage {
     let blanked = blank_scoreboard_frame(frame, layout);
     let (x, y, w, h) = crop_scoreboard_rect(blanked.width(), blanked.height());
     let src = image::imageops::crop_imm(&blanked, x, y, w, h).to_image();
-    allowlist_crop(&src, layout)
+    allowlist_crop(&src, layout, own_row)
 }
 
 /// The allowlist step of [`blanked_scoreboard`] on an already cut scoreboard
 /// crop (the tracker's `debug/accepted` ring holds such crops).
-pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout) -> RgbImage {
+pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout, own_row: Option<usize>) -> RgbImage {
     let (w, h) = src.dimensions();
     let mut out = RgbImage::from_pixel(w, h, FILL);
     // Portrait cells are opaque art and are copied as they are. The table
@@ -460,7 +481,7 @@ pub fn allowlist_crop(src: &RgbImage, layout: TeamLayout) -> RgbImage {
     // the digit glyphs are kept: they are drawn near-white on top of the row,
     // while anything behind the row is tinted by its purple or yellow colour.
     let digits_from = frac(w, NAME_COLUMNS_6V6.digits_start);
-    for r in kept_rects(w, h, layout) {
+    for r in kept_rects(w, h, layout, own_row) {
         let r = r.clipped(w, h);
         let digit_cell = r.x >= digits_from;
         // Fail closed (R236-F): the glyph test only separates digits from the
@@ -642,7 +663,8 @@ mod tests {
             let orig_sb = crop_scoreboard_rect(w, h);
             let orig = frame.to_rgb8();
             for (ts, layout) in [(5, TeamLayout::Five), (6, TeamLayout::Six)] {
-                let out = blanked_scoreboard(&frame, layout);
+                let own = Some(1);
+                let out = blanked_scoreboard(&frame, layout, own);
                 assert_eq!(out.dimensions(), (orig_sb.2, orig_sb.3));
                 for n in name_rects(orig_sb.2, orig_sb.3, layout) {
                     for y in n.y..n.y + n.h {
@@ -651,7 +673,7 @@ mod tests {
                         }
                     }
                 }
-                let kept = kept_rects(orig_sb.2, orig_sb.3, layout);
+                let kept = kept_rects(orig_sb.2, orig_sb.3, layout, own);
                 let digits_from = frac(orig_sb.2, NAME_COLUMNS_6V6.digits_start);
                 let orig_crop = image::imageops::crop_imm(
                     &blank_scoreboard_frame(&frame, layout),
@@ -725,7 +747,7 @@ mod tests {
         paint(600, 700, 500, 540);
         paint(950, 1000, 0, 60);
         paint(0, PORTRAIT_START, 100, 400);
-        let out = blanked_scoreboard(&DynamicImage::ImageRgb8(img), TeamLayout::Six);
+        let out = blanked_scoreboard(&DynamicImage::ImageRgb8(img), TeamLayout::Six, Some(0));
         for (x0, x1, y0, y1) in [
             (364, 631, 791, 831),
             (600, 700, 500, 540),
@@ -745,7 +767,7 @@ mod tests {
         // Every kept cell starts at the role bar or right of it, and a row
         // that touches the band keeps nothing.
         let band = notice_band(cw, ch);
-        for r in kept_rects(cw, ch, TeamLayout::Six) {
+        for r in kept_rects(cw, ch, TeamLayout::Six, Some(0)) {
             assert!(r.x >= frac(cw, PORTRAIT_START), "{r:?}");
             assert!(!r.intersects(&band), "{r:?}");
         }
@@ -765,26 +787,25 @@ mod tests {
     #[test]
     fn world_text_behind_a_translucent_row_is_flattened_and_digits_stay() {
         // QC1-7: a nameplate (red, white) and a white world label behind the
-        // purple team-1 and yellow team-2 rows, plus a white digit drawn on top.
+        // purple team-1 and yellow team-2 rows, plus a white digit and a dim
+        // zero drawn on top. Each case is the member's own row.
         let (cw, ch) = (1664, 1007);
         let purple = Rgb([110, 20, 120]);
         let yellow = Rgb([200, 160, 20]);
-        let mut src = RgbImage::from_pixel(cw, ch, Rgb([40, 40, 40]));
-        let kept = kept_rects(cw, ch, TeamLayout::Six);
         let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
-        let cells: Vec<_> = kept.iter().filter(|r| r.x >= digits_from).collect();
-        let team1 = cells.first().unwrap();
-        let team2 = cells.last().unwrap();
         let world = [
             Rgb([255, 255, 255]),
             Rgb([255, 60, 60]),
-            Rgb([250, 250, 250]),
+            Rgb([200, 200, 200]),
         ];
-        for (cell, tint) in [(team1, purple), (team2, yellow)] {
+        for (own, tint) in [(0usize, purple), (6, yellow)] {
+            let mut src = RgbImage::from_pixel(cw, ch, Rgb([40, 40, 40]));
+            let cell = *kept_rects(cw, ch, TeamLayout::Six, Some(own))
+                .iter()
+                .find(|r| r.x >= digits_from)
+                .expect("own row digit cell");
             for y in cell.y..cell.y + cell.h {
                 for x in cell.x..cell.x + cell.w {
-                    // World text behind the row on the left half, the row
-                    // tint at about 70 % opacity over it.
                     let behind = if x < cell.x + cell.w / 2 {
                         world[(x as usize) % 3]
                     } else {
@@ -793,7 +814,6 @@ mod tests {
                     src.put_pixel(x, y, blend(behind, tint, 180));
                 }
             }
-            // A white digit and a dim grey zero drawn on top of the row.
             for y in cell.y + 5..cell.y + 15 {
                 for x in cell.x + cell.w - 20..cell.x + cell.w - 10 {
                     src.put_pixel(x, y, Rgb([255, 255, 255]));
@@ -802,9 +822,7 @@ mod tests {
                     src.put_pixel(x, y, Rgb([172, 170, 172]));
                 }
             }
-        }
-        let out = allowlist_crop(&src, TeamLayout::Six);
-        for cell in [team1, team2] {
+            let out = allowlist_crop(&src, TeamLayout::Six, Some(own));
             for y in cell.y..cell.y + cell.h {
                 for x in cell.x..cell.x + cell.w / 2 {
                     assert_eq!(*out.get_pixel(x, y), FILL, "world text kept at {x},{y}");
@@ -814,6 +832,58 @@ mod tests {
                 *out.get_pixel(cell.x + cell.w - 15, cell.y + 10),
                 Rgb([255, 255, 255])
             );
+            assert_eq!(
+                *out.get_pixel(cell.x + cell.w - 35, cell.y + 10),
+                Rgb([172, 170, 172])
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_own_row_keeps_digit_cells() {
+        // QC1-8: other rows keep their portrait only, whatever the colours.
+        let (cw, ch) = (1664, 1007);
+        let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
+        for layout in [TeamLayout::Five, TeamLayout::Six] {
+            let n = if layout == TeamLayout::Six { 12 } else { 10 };
+            for own in 0..n {
+                let digits: Vec<_> = kept_rects(cw, ch, layout, Some(own))
+                    .into_iter()
+                    .filter(|r| r.x >= digits_from)
+                    .collect();
+                assert!(digits.len() <= 1, "{layout:?} own {own}: {digits:?}");
+            }
+            let none: Vec<_> = kept_rects(cw, ch, layout, None)
+                .into_iter()
+                .filter(|r| r.x >= digits_from)
+                .collect();
+            assert!(
+                none.is_empty(),
+                "{layout:?} without an own row kept {none:?}"
+            );
+        }
+        assert!(
+            kept_rects(cw, ch, TeamLayout::Unknown, Some(0))
+                .iter()
+                .all(|r| r.x < digits_from),
+            "unknown team size kept a digit cell"
+        );
+        // A white nameplate behind a grey row on ANOTHER row is filled even
+        // though the glyph and tint tests would pass it (the QC1-8 forge).
+        let grey = Rgb([90, 90, 92]);
+        let mut src = RgbImage::from_pixel(cw, ch, Rgb([60, 120, 220]));
+        let other = protected_rects(cw, ch, 6)[2 * 3 + 1];
+        for y in other.y + 2..other.y + 12 {
+            for x in other.x + 10..other.x + 80 {
+                src.put_pixel(x, y, Rgb([235, 235, 235]));
+            }
+        }
+        let _ = grey;
+        let out = allowlist_crop(&src, TeamLayout::Six, Some(0));
+        for y in other.y..other.y + other.h {
+            for x in other.x..other.x + other.w {
+                assert_eq!(*out.get_pixel(x, y), FILL, "{x},{y}");
+            }
         }
     }
 
@@ -825,7 +895,7 @@ mod tests {
         let grey = Rgb([90, 90, 92]);
         let mut src = RgbImage::from_pixel(cw, ch, grey);
         let digits_from = frac(cw, NAME_COLUMNS_6V6.digits_start);
-        let cell = *kept_rects(cw, ch, TeamLayout::Six)
+        let cell = *kept_rects(cw, ch, TeamLayout::Six, Some(0))
             .iter()
             .find(|r| r.x >= digits_from)
             .unwrap();
@@ -835,7 +905,7 @@ mod tests {
             }
         }
         assert!(!row_tint_is_coloured(&src, cell));
-        let out = allowlist_crop(&src, TeamLayout::Six);
+        let out = allowlist_crop(&src, TeamLayout::Six, Some(0));
         for y in cell.y..cell.y + cell.h {
             for x in cell.x..cell.x + cell.w {
                 assert_eq!(*out.get_pixel(x, y), FILL, "{x},{y}");
@@ -852,7 +922,7 @@ mod tests {
     fn unknown_team_size_keeps_nothing_in_either_name_column() {
         for (w, h) in SIZES {
             let (_, _, cw, ch) = crop_scoreboard_rect(w, h);
-            let kept = kept_rects(cw, ch, TeamLayout::Unknown);
+            let kept = kept_rects(cw, ch, TeamLayout::Unknown, Some(0));
             for layout in [TeamLayout::Five, TeamLayout::Six] {
                 for n in name_rects(cw, ch, layout) {
                     assert!(kept.iter().all(|k| !k.intersects(&n)), "{w}x{h} {n:?}");
@@ -883,7 +953,7 @@ mod tests {
         let (w, h) = (1920, 1080);
         let frame = noise_frame(w, h);
         let (_, _, cw, ch) = crop_scoreboard_rect(w, h);
-        let out = blanked_scoreboard(&frame, TeamLayout::Unknown);
+        let out = blanked_scoreboard(&frame, TeamLayout::Unknown, Some(0));
         for layout in [TeamLayout::Five, TeamLayout::Six] {
             for n in name_rects(cw, ch, layout) {
                 assert_eq!(*out.get_pixel(n.x, n.y), FILL);
@@ -943,14 +1013,18 @@ mod tests {
                 continue;
             };
             let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let own_row = std::env::var("SCUFFED_QA_OWN_ROW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(Some(0));
             // A scoreboard crop (debug/accepted) is about 1.65:1; a frame is wider.
             let ratio = img.width() as f64 / img.height().max(1) as f64;
             let is_crop = (ratio - 1.651).abs() < 0.02;
             for (tag, layout) in [("5", TeamLayout::Five), ("6", TeamLayout::Six)] {
                 let blanked = if is_crop {
-                    allowlist_crop(&img.to_rgb8(), layout)
+                    allowlist_crop(&img.to_rgb8(), layout, own_row)
                 } else {
-                    blanked_scoreboard(&img, layout)
+                    blanked_scoreboard(&img, layout, own_row)
                 };
                 blanked
                     .save(out.join(format!("{stem}_{tag}v{tag}.png")))
