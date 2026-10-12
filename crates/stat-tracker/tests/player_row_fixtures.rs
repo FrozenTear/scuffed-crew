@@ -94,9 +94,14 @@ fn player_row_resolves_by_name_in_5v5() {
     let mut checked = 0usize;
     let mut missed = Vec::new();
     for path in &paths {
-        let Ok(img) = image::open(path) else {
-            continue;
-        };
+        // An unreadable board (a dangling link after the tracker rotated
+        // `debug/accepted`) must fail, not shrink the set silently.
+        let img = image::open(path).unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        });
         let board = if (img.width(), img.height()) == (1664, 1007) {
             img
         } else {
@@ -112,7 +117,18 @@ fn player_row_resolves_by_name_in_5v5() {
             continue;
         }
         let rows = ocr::recognize_scoreboard_cells_pre_cropped(&board, 5);
-        let row = parse::find_player_row_by_name(&rows, &name);
+        let matched = parse::match_player_row_by_name(&rows, &name);
+        let row = matched.map(|m| m.row);
+        // File name and window only: which layout window matched (0 in-match,
+        // 1 perks, 2 centred) and whether it was the only one.
+        if let Some(m) = matched {
+            eprintln!(
+                "{}: window {} sole {}",
+                path.file_name().unwrap().to_string_lossy(),
+                m.window,
+                m.sole_window
+            );
+        }
         if row != Some(expected) {
             // File name only: the reads would print player names.
             missed.push(format!(

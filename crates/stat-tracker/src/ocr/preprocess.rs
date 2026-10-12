@@ -48,6 +48,14 @@ const NAME_WINDOWS_5V5: [(f64, f64); 3] = [
     (NAME_COL_X_5V5_PERKS, NAME_COL_W_5V5_PERKS),
     (NAME_COL_X_5V5_CENTRED, NAME_COL_W_5V5_CENTRED),
 ];
+/// Index of the in-match no-perk window in [`name_windows`] for 5v5. The 5v5
+/// portrait grid fits only this layout (see
+/// [`crate::detect::hero_portrait::portrait_seed_layout_known`]).
+pub const NAME_WINDOW_5V5_INGAME: usize = 0;
+/// Index of the in-match with-perks window in [`name_windows`] for 5v5.
+pub const NAME_WINDOW_5V5_PERKS: usize = 1;
+/// Index of the centred pre-match window in [`name_windows`] for 5v5.
+pub const NAME_WINDOW_5V5_CENTRED: usize = 2;
 /// In-match, no perks: 0.10-0.25.
 const NAME_COL_X_5V5_INGAME: f64 = 0.10;
 const NAME_COL_W_5V5_INGAME: f64 = 0.15;

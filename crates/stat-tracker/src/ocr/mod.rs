@@ -231,12 +231,13 @@ pub struct CellOcrResult {
 
 #[derive(Debug)]
 pub struct RowOcrResult {
-    /// Read of the first name window ([`preprocess::name_windows`]).
+    /// Read of name window 0 ([`preprocess::name_windows`]).
     pub name: Option<CellOcrResult>,
-    /// Reads of the other name windows for the layout, in window order. Empty
-    /// for 6v6, which has one window. The row matcher scores `name` and these
-    /// together and keeps the best.
-    pub name_alternates: Vec<CellOcrResult>,
+    /// Reads of the other name windows: `name_alternates[k]` is window
+    /// `k + 1`, `None` where that read failed, so the index always names the
+    /// window. Empty for 6v6, which has one window. The row matcher scores
+    /// `name` and these together and keeps the best.
+    pub name_alternates: Vec<Option<CellOcrResult>>,
     pub stats: Vec<CellOcrResult>,
     pub mean_confidence: i32,
 }
@@ -516,7 +517,8 @@ pub fn recognize_row(
     } else {
         name_reads.remove(0)
     };
-    let name_alternates: Vec<CellOcrResult> = name_reads.into_iter().flatten().collect();
+    // Failed reads stay as `None` so each index keeps naming its window.
+    let name_alternates = name_reads;
 
     // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
     // Run in parallel — each cell creates its own Tesseract instance so there is

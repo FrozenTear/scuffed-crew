@@ -13,6 +13,11 @@ pub struct PortraitMatcher {
 
 impl PortraitMatcher {
     pub fn load(portraits_dir: &Path) -> Self {
+        // Seeds cut with an older portrait grid go first, so the bundled
+        // references they shadowed are unpacked again below.
+        if let Err(e) = invalidate_stale_seeds(portraits_dir) {
+            tracing::warn!(error = %e, "could not move stale portrait seeds aside; will retry next start");
+        }
         // Unpack bundled portraits if the directory is empty or missing
         unpack_bundled(portraits_dir);
 
@@ -802,15 +807,40 @@ fn png_bytes(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
 /// Whether this capture may write a portrait reference.
 ///
 /// A save needs an identified player row (row 0 belongs to someone else when
-/// the row was not found), a slot that is empty or still a provisional
-/// stand-in, and either the career panel or `--collect-portraits`.
+/// the row was not found), a portrait grid known to fit the board layout
+/// ([`portrait_seed_layout_known`]), a slot that is empty or still a
+/// provisional stand-in, and either the career panel or `--collect-portraits`.
 pub fn should_save_portrait_crop(
     career_panel: bool,
     collect_portraits: bool,
     slot_replaceable: bool,
     player_row_known: bool,
+    layout_known: bool,
 ) -> bool {
-    player_row_known && slot_replaceable && (collect_portraits || career_panel)
+    player_row_known && layout_known && slot_replaceable && (collect_portraits || career_panel)
+}
+
+/// Whether [`portrait_rect`] is known to fit this board, so its crop may seed
+/// a hero reference.
+///
+/// 6v6 has one measured layout: always. 5v5 only when the own name matched in
+/// the in-match no-perk window
+/// ([`crate::ocr::preprocess::NAME_WINDOW_5V5_INGAME`]) and in no other
+/// window. The 5v5 grid's x fits only that layout: one or two perks shift the
+/// table 28 or 66 px left, so the square is cut or misplaced, and the centred
+/// table puts the portrait near x 323. A saved crop is never overwritten, so a
+/// misplaced one would stick. A row found only by the highlight says nothing
+/// about the layout and never seeds on 5v5.
+pub fn portrait_seed_layout_known(
+    team_size: usize,
+    name_match: Option<&crate::parse::NameMatch>,
+) -> bool {
+    if team_size >= 6 {
+        return true;
+    }
+    name_match.is_some_and(|m| {
+        m.window == crate::ocr::preprocess::NAME_WINDOW_5V5_INGAME && m.sole_window
+    })
 }
 
 /// Write `crop` only when the slot is empty or still holds a provisional
@@ -887,6 +917,95 @@ pub fn portrait_slot_is_replaceable(path: &Path) -> bool {
         Ok(bytes) => bytes_match_provisional(stem, &bytes),
         Err(_) => false,
     }
+}
+
+/// Version of the portrait grid that captured seeds are cut with.
+///
+/// - 1: alpha.5 and earlier. The 5v5 grid put "row 0" at y 120 (row 1's
+///   portrait), so a 5v5 seed could hold a teammate's hero.
+/// - 2: the measured 5v5 grid, and 5v5 seeds only from the no-perk in-match
+///   layout ([`portrait_seed_layout_known`]).
+///
+/// Bump it whenever [`portrait_rect`] moves for a layout that may seed.
+pub const SEED_GEOMETRY_VERSION: u32 = 2;
+
+/// Marker in the portraits directory holding the [`SEED_GEOMETRY_VERSION`]
+/// its captured seeds were cut with. Absent means version 1.
+const SEED_GEOMETRY_MARKER: &str = ".seed-geometry";
+
+/// Move captured seeds cut with an older portrait grid out of the reference
+/// set, once per [`SEED_GEOMETRY_VERSION`].
+///
+/// A file stays when its bytes are a bundled reference or a provisional
+/// stand-in for its stem. Every other `*.png` is a captured seed (or a file
+/// the user placed there) and moves to `invalidated-<old version>/` in the
+/// same directory; nothing is deleted. A moved slot is then missing, so the
+/// bundled reference is unpacked again where one exists and the next
+/// qualifying capture seeds it afresh. Returns how many files moved. The
+/// marker is written only after every move succeeded.
+pub fn invalidate_stale_seeds(portraits_dir: &Path) -> std::io::Result<usize> {
+    invalidate_stale_seeds_with(portraits_dir, bundled_portraits())
+}
+
+fn invalidate_stale_seeds_with(
+    portraits_dir: &Path,
+    bundled: &[(&str, &[u8])],
+) -> std::io::Result<usize> {
+    std::fs::create_dir_all(portraits_dir)?;
+    let marker = portraits_dir.join(SEED_GEOMETRY_MARKER);
+    let on_disk: u32 = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    if on_disk >= SEED_GEOMETRY_VERSION {
+        return Ok(0);
+    }
+
+    let dest = portraits_dir.join(format!("invalidated-{on_disk}"));
+    let mut moved = 0usize;
+    for entry in std::fs::read_dir(portraits_dir)? {
+        let path = entry?.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("png") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.starts_with('.') {
+            continue;
+        }
+        let bytes = std::fs::read(&path)?;
+        let is_bundled = bundled
+            .iter()
+            .any(|(name, data)| *name == stem && *data == bytes.as_slice());
+        if is_bundled || bytes_match_provisional(stem, &bytes) {
+            continue;
+        }
+        std::fs::create_dir_all(&dest)?;
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let mut target = dest.join(file_name);
+        let mut n = 1;
+        while target.exists() {
+            target = dest.join(format!("{stem}.{n}.png"));
+            n += 1;
+        }
+        std::fs::rename(&path, &target)?;
+        moved += 1;
+    }
+
+    write_bytes_atomic(&marker, format!("{SEED_GEOMETRY_VERSION}\n").as_bytes())?;
+    if moved > 0 {
+        tracing::info!(
+            moved,
+            from_version = on_disk,
+            to_version = SEED_GEOMETRY_VERSION,
+            dir = %dest.display(),
+            "moved portrait seeds cut with an older portrait grid aside; they re-seed from new captures"
+        );
+    }
+    Ok(moved)
 }
 
 /// Unpack bundled portraits into the data directory.
@@ -1222,11 +1341,13 @@ mod provisional_portrait_tests {
     #[test]
     fn capture_decision_needs_a_known_row_and_a_replaceable_slot() {
         // Career panel, empty-or-stand-in slot, identified row.
-        assert!(should_save_portrait_crop(true, false, true, true));
+        assert!(should_save_portrait_crop(true, false, true, true, true));
         // Row not identified: do not crop row 0, even with --collect-portraits.
-        assert!(!should_save_portrait_crop(true, true, true, false));
+        assert!(!should_save_portrait_crop(true, true, true, false, true));
         // Portrait/held/text guess, collection off.
-        assert!(!should_save_portrait_crop(false, false, true, true));
+        assert!(!should_save_portrait_crop(false, false, true, true, true));
+        // Layout not known to fit the portrait grid (5v5 perks / centred).
+        assert!(!should_save_portrait_crop(true, true, true, true, false));
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doctrine.png");
@@ -1235,7 +1356,173 @@ mod provisional_portrait_tests {
             .expect("write real portrait");
         let replaceable = portrait_slot_is_replaceable(&path);
         assert!(!replaceable);
-        assert!(!should_save_portrait_crop(true, true, replaceable, true));
+        assert!(!should_save_portrait_crop(
+            true,
+            true,
+            replaceable,
+            true,
+            true
+        ));
+    }
+}
+
+#[cfg(test)]
+mod seed_layout_tests {
+    use super::{portrait_seed_layout_known, should_save_portrait_crop};
+    use crate::ocr::preprocess::{
+        NAME_WINDOW_5V5_CENTRED, NAME_WINDOW_5V5_INGAME, NAME_WINDOW_5V5_PERKS,
+    };
+    use crate::parse::NameMatch;
+
+    fn m(window: usize, sole_window: bool) -> NameMatch {
+        NameMatch {
+            row: 0,
+            window,
+            sole_window,
+        }
+    }
+
+    #[test]
+    fn five_v_five_seeds_only_from_the_no_perk_in_match_window() {
+        assert!(portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_INGAME, true))
+        ));
+        // Perk and centred boards: the grid's x does not fit them.
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_PERKS, true))
+        ));
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_CENTRED, true))
+        ));
+        // The no-perk window matched, but so did another: layout unknown.
+        assert!(!portrait_seed_layout_known(
+            5,
+            Some(&m(NAME_WINDOW_5V5_INGAME, false))
+        ));
+        // Row from the highlight alone: layout unknown.
+        assert!(!portrait_seed_layout_known(5, None));
+    }
+
+    #[test]
+    fn six_v_six_seeding_is_unchanged() {
+        assert!(portrait_seed_layout_known(6, None));
+        assert!(portrait_seed_layout_known(6, Some(&m(0, true))));
+    }
+
+    #[test]
+    fn a_perk_board_never_seeds_even_with_the_career_panel() {
+        let layout = portrait_seed_layout_known(5, Some(&m(NAME_WINDOW_5V5_PERKS, true)));
+        assert!(!should_save_portrait_crop(true, true, true, true, layout));
+        let layout = portrait_seed_layout_known(5, Some(&m(NAME_WINDOW_5V5_INGAME, true)));
+        assert!(should_save_portrait_crop(true, false, true, true, layout));
+    }
+}
+
+#[cfg(test)]
+mod stale_seed_tests {
+    use super::{
+        PortraitMatcher, SEED_GEOMETRY_MARKER, SEED_GEOMETRY_VERSION, bundled_portraits,
+        invalidate_stale_seeds, invalidate_stale_seeds_with,
+    };
+
+    fn bundled(stem: &str) -> &'static [u8] {
+        bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == stem)
+            .map(|(_, bytes)| *bytes)
+            .unwrap()
+    }
+
+    fn marker(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join(SEED_GEOMETRY_MARKER)).unwrap()
+    }
+
+    #[test]
+    fn fresh_dir_moves_nothing_and_writes_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let portraits = dir.path().join("portraits");
+        assert_eq!(invalidate_stale_seeds(&portraits).unwrap(), 0);
+        assert_eq!(marker(&portraits).trim(), SEED_GEOMETRY_VERSION.to_string());
+    }
+
+    #[test]
+    fn alpha5_seeds_move_aside_and_bundled_files_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // Bundled reference, untouched since unpack.
+        std::fs::write(p.join("ana.png"), bundled("ana")).unwrap();
+        // Doctrine still the provisional stand-in.
+        std::fs::write(p.join("doctrine.png"), bundled("doctrine")).unwrap();
+        // Captured seeds: a hero with no bundled file, and a bundled stem
+        // whose bytes are a crop.
+        std::fs::write(p.join("dmon.png"), b"seed one").unwrap();
+        std::fs::write(p.join("mercy.png"), b"seed two").unwrap();
+        // Not a reference.
+        std::fs::write(p.join("notes.txt"), b"keep").unwrap();
+
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 2);
+        assert_eq!(std::fs::read(p.join("ana.png")).unwrap(), bundled("ana"));
+        assert_eq!(
+            std::fs::read(p.join("doctrine.png")).unwrap(),
+            bundled("doctrine")
+        );
+        assert!(p.join("notes.txt").exists());
+        assert!(!p.join("dmon.png").exists());
+        assert!(!p.join("mercy.png").exists());
+        // Moved, never deleted.
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/dmon.png")).unwrap(),
+            b"seed one"
+        );
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/mercy.png")).unwrap(),
+            b"seed two"
+        );
+        assert_eq!(marker(p).trim(), SEED_GEOMETRY_VERSION.to_string());
+
+        // Once per version: a seed cut under the new grid stays.
+        std::fs::write(p.join("dmon.png"), b"new seed").unwrap();
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 0);
+        assert_eq!(std::fs::read(p.join("dmon.png")).unwrap(), b"new seed");
+    }
+
+    #[test]
+    fn an_older_marker_also_invalidates_and_names_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join(SEED_GEOMETRY_MARKER), "1\n").unwrap();
+        std::fs::write(p.join("ana.png"), b"crop").unwrap();
+        let fake: &[(&str, &[u8])] = &[("ana", b"bundled ana")];
+        assert_eq!(invalidate_stale_seeds_with(p, fake).unwrap(), 1);
+        assert!(p.join("invalidated-1/ana.png").exists());
+        // A second stale file of the same name never overwrites the first.
+        std::fs::write(p.join(SEED_GEOMETRY_MARKER), "1\n").unwrap();
+        std::fs::write(p.join("ana.png"), b"crop two").unwrap();
+        assert_eq!(invalidate_stale_seeds_with(p, fake).unwrap(), 1);
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/ana.png")).unwrap(),
+            b"crop"
+        );
+        assert_eq!(
+            std::fs::read(p.join("invalidated-1/ana.1.png")).unwrap(),
+            b"crop two"
+        );
+    }
+
+    #[test]
+    fn loading_restores_the_bundled_reference_a_seed_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("mercy.png"), b"wrong-row seed").unwrap();
+        let _ = PortraitMatcher::load(p);
+        assert_eq!(
+            std::fs::read(p.join("mercy.png")).unwrap(),
+            bundled("mercy")
+        );
+        assert!(p.join("invalidated-1/mercy.png").exists());
     }
 }
 

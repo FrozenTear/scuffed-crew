@@ -21,7 +21,8 @@
 
 use image::{DynamicImage, Rgb, RgbImage};
 use stat_tracker::ocr::preprocess::{
-    crop_name_cell, crop_name_cells, prepare_name_cell_hard_threshold,
+    NAME_WINDOW_5V5_CENTRED, NAME_WINDOW_5V5_INGAME, NAME_WINDOW_5V5_PERKS, crop_name_cell,
+    crop_name_cells, prepare_name_cell_hard_threshold,
 };
 
 /// Measured on the 2026-07-16 6v6 board (12 rows, dumped row_00.png): the name
@@ -166,6 +167,27 @@ fn name_window_5v5_centred_covers_the_names_and_stops_before_the_digits() {
             .any(|&w| covers(w, NAME_SPAN_5V5_CENTRED) && !overlaps(w, E_DIGITS_5V5_CENTRED)),
         "no 5v5 window holds the centred names {NAME_SPAN_5V5_CENTRED:?} \
          without the E digits {E_DIGITS_5V5_CENTRED:?}: {wins:?}"
+    );
+}
+
+#[test]
+fn name_window_indices_name_their_layouts() {
+    // Portrait seeding trusts the index of the matching window to name the
+    // layout (`portrait_seed_layout_known`), so each index must hold its
+    // layout's window.
+    let wins = windows_5v5();
+    let ingame = wins[NAME_WINDOW_5V5_INGAME];
+    assert!(covers(ingame, NAME_SPAN_5V5_INGAME) && !overlaps(ingame, E_DIGITS_5V5_INGAME));
+    let perks = wins[NAME_WINDOW_5V5_PERKS];
+    assert!(covers(perks, NAME_SPAN_5V5_PERKS) && !overlaps(perks, PERK_ICONS_5V5));
+    let centred = wins[NAME_WINDOW_5V5_CENTRED];
+    assert!(covers(centred, NAME_SPAN_5V5_CENTRED) && !overlaps(centred, E_DIGITS_5V5_CENTRED));
+    // The no-perk window must not also fit the perk layout: a perk board
+    // matching window 0 would seed a misplaced portrait.
+    assert!(
+        overlaps(ingame, PERK_ICONS_5V5),
+        "the no-perk window reaches where the perk icons sit, so a perk board \
+         does not read cleanly through it"
     );
 }
 
