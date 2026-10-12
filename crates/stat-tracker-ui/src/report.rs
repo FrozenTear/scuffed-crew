@@ -107,13 +107,26 @@ pub struct GameChoice {
     pub has_kit: bool,
 }
 
-/// A kit PNG kept in memory for the preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A kit PNG kept in memory for the preview. The handle is built once so
+/// iced can reuse the decoded raster.
+#[derive(Clone, PartialEq, Eq)]
 pub struct KitImage {
     pub path: String,
     pub png: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub handle: iced::widget::image::Handle,
+}
+
+impl std::fmt::Debug for KitImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KitImage")
+            .field("path", &self.path)
+            .field("png_len", &self.png.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
 }
 
 /// `<data_dir>/report-kit/<session_id>`.
@@ -177,6 +190,7 @@ fn read_kit_png(path: &Path, name: &str) -> Option<KitImage> {
     }
     Some(KitImage {
         path: format!("crops/{name}"),
+        handle: iced::widget::image::Handle::from_bytes(png.clone()),
         png,
         width,
         height,
@@ -352,7 +366,7 @@ pub fn next_generation() -> u64 {
 #[derive(Debug, Clone)]
 pub enum ReportUi {
     CrashPrompt { last_seen: Option<DateTime<Utc>> },
-    Dialog(ReportDialog),
+    Dialog(Box<ReportDialog>),
 }
 
 /// Crash prompt for app start: `Some` when `last_crash.marker` exists.
@@ -903,22 +917,30 @@ fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
     .spacing(6)
     .width(Fill);
     for image in &d.kit_images {
-        let mut widget =
-            iced::widget::image(iced::widget::image::Handle::from_bytes(image.png.clone()));
-        if d.image_actual {
-            widget = widget
-                .width(Length::Fixed(image.width as f32))
-                .height(Length::Fixed(image.height as f32));
+        let widget = iced::widget::image(image.handle.clone());
+        let shown: Element<'_, Message> = if d.image_actual {
+            scrollable(
+                widget
+                    .width(Length::Fixed(image.width as f32))
+                    .height(Length::Fixed(image.height as f32)),
+            )
+            .direction(iced::widget::scrollable::Direction::Both {
+                vertical: iced::widget::scrollable::Scrollbar::default(),
+                horizontal: iced::widget::scrollable::Scrollbar::default(),
+            })
+            .width(Fill)
+            .height(Length::Fixed(320.0))
+            .into()
         } else {
-            widget = widget.width(Fill);
-        }
+            widget.width(Fill).into()
+        };
         col = col.push(
             text(format!("{} {}×{}", image.path, image.width, image.height))
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
         );
-        col = col.push(widget);
+        col = col.push(shown);
     }
     col.into()
 }
