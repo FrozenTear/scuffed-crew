@@ -301,6 +301,47 @@ restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
     || fail "restart ran before the reload or the session import: $(cat "$LOG")"
 pass "upgrade restarts a running daemon, and only a running one"
 
+# The source-build installer (crates/stat-tracker/install.sh) has the same
+# restart call. Stage it in a fake repo whose `cargo` writes stub binaries.
+SRC_REPO="$TMP/src-repo"
+mkdir -p "$SRC_REPO/crates/stat-tracker" "$TMP/fake-bin"
+cp "$ROOT/install.sh" "$SRC_REPO/crates/stat-tracker/install.sh"
+cp -r "$ROOT/dist" "$ROOT/assets" "$SRC_REPO/crates/stat-tracker/"
+cat > "$TMP/fake-bin/cargo" << FAKECARGO
+#!/bin/sh
+mkdir -p "$SRC_REPO/target/release"
+for b in scuffed-stat-tracker stat-tracker-gui; do
+    printf '%s\n' '#!/bin/sh' "echo \$b 0.0.0" > "$SRC_REPO/target/release/\$b"
+    chmod +x "$SRC_REPO/target/release/\$b"
+done
+FAKECARGO
+chmod +x "$TMP/fake-bin/cargo"
+run_source_install() {
+    rm -f "$LOG"
+    env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+        -u XDG_RUNTIME_DIR \
+        PATH="$TMP/fake-bin:$PATH" \
+        HOME="$1" \
+        PREFIX="$2" \
+        SCUFFED_PROC_ROOT="$PROC" \
+        SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+        bash "$SRC_REPO/crates/stat-tracker/install.sh" > /dev/null 2>&1 \
+        || fail "source install failed"
+}
+SRC_HOME="$TMP/home-src"
+mkdir -p "$SRC_HOME"
+run_source_install "$SRC_HOME" "$TMP/opt/src"
+grep -q 'try-restart' "$LOG" && fail "source install restarted a stopped daemon: $(cat "$LOG")"
+FAKE_ACTIVE=1 run_source_install "$SRC_HOME" "$TMP/opt/src"
+grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \
+    || fail "source install did not restart a running daemon: $(cat "$LOG")"
+reload_at="$(grep -n -- '--user daemon-reload' "$LOG" | head -1 | cut -d: -f1)"
+import_at="$(grep -n -- 'import-environment' "$LOG" | head -1 | cut -d: -f1)"
+restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
+[[ -n "$reload_at" && -n "$import_at" && "$reload_at" -lt "$restart_at" && "$import_at" -lt "$restart_at" ]] \
+    || fail "source install restarted before the reload or the session import: $(cat "$LOG")"
+pass "source-build install restarts a running daemon, and only a running one"
+
 # Spaced PREFIX is quoted in the unit.
 PREFIX_SPACE="$TMP/my prefix"
 HOME_SPACE="$TMP/home-space"
