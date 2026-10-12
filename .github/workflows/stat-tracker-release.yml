@@ -275,13 +275,18 @@ jobs:
           path: gui
 
       - name: Packaging unit checks (OpenSSL deny + isolated lib dirs)
+        # alpha.5 hung here for 50 min. Each script is named and capped so the
+        # next hang fails fast and says which one.
+        timeout-minutes: 10
         run: |
-          bash crates/stat-tracker/dist/test-packaging.sh
-          bash crates/stat-tracker/dist/test-uninstall-paths.sh
-          bash crates/stat-tracker/dist/test-desktop-entry.sh
-          bash crates/stat-tracker/dist/test-systemd-unit.sh
-          bash crates/stat-tracker/dist/test-release-notes.sh
-          bash crates/stat-tracker/dist/test-stage-assets.sh
+          set -euo pipefail
+          for t in test-packaging test-uninstall-paths test-desktop-entry \
+                   test-systemd-unit test-release-notes test-stage-assets; do
+            echo "::group::${t}.sh"
+            echo "running ${t}.sh"
+            timeout 300 bash "crates/stat-tracker/dist/${t}.sh"
+            echo "::endgroup::"
+          done
 
       - name: Assemble tarball
         run: |

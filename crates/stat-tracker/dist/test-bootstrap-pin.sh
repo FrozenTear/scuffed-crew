@@ -122,8 +122,10 @@ set -e
 pass "key plus .minisig refuses when minisign is not installed"
 
 if ! command -v minisign >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends minisign
+    # CI only. A dead mirror must fail in minutes, not hang the release job.
+    apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+    sudo timeout 180 apt-get "${apt_opts[@]}" update -qq
+    sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
 command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
 
