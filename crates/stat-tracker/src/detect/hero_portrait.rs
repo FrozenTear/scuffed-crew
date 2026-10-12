@@ -263,11 +263,24 @@ pub struct PortraitRect {
 /// reference rows by width keeps 1440p pixel-identical and lands 1080p on
 /// that grid.
 const PORTRAIT_REF_W: u32 = 1664;
-/// `1007 * 12 / 100` on the 1440p crop.
+/// 6v6: `1007 * 12 / 100` on the 1440p crop.
 const PORTRAIT_REF_START_Y: u32 = 120;
-/// `1007 * 7 / 100` (5v5) and `1007 * 58 / 1000` (6v6).
-const PORTRAIT_REF_PITCH_5: u32 = 70;
+/// 6v6: `1007 * 58 / 1000`.
 const PORTRAIT_REF_PITCH_6: u32 = 58;
+
+/// 5v5 row 0 top on the 1440p crop. Measured 2026-10-12 on 15 in-match
+/// boards (0, 1 and 2 perks) and one centred pre-match board: row 0 starts at
+/// y 34.1, and the layouts agree within 0.1 px. The old grid (y 120, pitch
+/// 70) put "row 0" on row 1's portrait.
+const PORTRAIT_REF_START_Y_5: u32 = 34;
+/// 5v5 row pitch, measured 88.07 (team 1) and 88.06 (team 2).
+const PORTRAIT_REF_PITCH_5: u32 = 88;
+/// 5v5 team 2 row 0 top, measured 576.0 to 576.6. The team gap is not a
+/// whole pitch (576 - 34 = 6.15 pitches), so team 2 gets its own origin.
+const PORTRAIT_REF_TEAM2_Y_5: u32 = 576;
+/// 5v5 portrait square, measured 85.5 px wide. The shared `w * 6 / 100`
+/// square (99 px) would run 13 px into the next row at the 88 px pitch.
+const PORTRAIT_REF_SIDE_5: u32 = 86;
 
 fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
     let r = PORTRAIT_REF_W as u64;
@@ -279,9 +292,14 @@ fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
 /// OW2 Tab scoreboard layout (after `crop_scoreboard`):
 /// - 5 or 6 player rows per team
 /// - Hero portrait at the left edge of each row
-/// - Rows start ~12% from top
-/// - Portrait ~leftmost 5-6% of width, square
-/// - One-row team gap between team 1 and team 2
+/// - 6v6: rows start ~12% from top, portrait ~6% of width, square, and a
+///   one-row team gap between team 1 and team 2
+/// - 5v5: the measured grid above (row 0 at y 34, pitch 88, team 2 at 576,
+///   86 px square on the 1440p crop)
+///
+/// The x origin is shared. It fits the 5v5 in-match table with no perks; the
+/// table shifts left by 28 px (1 perk) or 66 px (2 perks), which this grid
+/// does not follow.
 ///
 /// Returns None unless the full square fits in the crop. A cut-off
 /// rectangle can be saved as a hero reference, so a short board is
@@ -301,27 +319,36 @@ pub fn portrait_rect(
         return None;
     }
 
-    let side = w * 6 / 100;
+    let side = if team_size == 6 {
+        w * 6 / 100
+    } else {
+        scale_portrait_px(PORTRAIT_REF_SIDE_5, w)
+    };
     let portrait_x = w / 100;
     if side == 0 || portrait_x.saturating_add(side) > w {
         return None;
     }
 
-    // 5v5: rows take ~7% of the 1440p crop each; 6v6: ~5.8%.
-    // The team gap is one extra row of that pitch.
-    let pitch = if team_size == 6 {
-        PORTRAIT_REF_PITCH_6
-    } else {
-        PORTRAIT_REF_PITCH_5
-    };
     let team = (row_idx / team_size) as u32;
     let row_in_team = (row_idx % team_size) as u32;
-    let steps = if team == 0 {
-        row_in_team
+    let ref_y = if team_size == 6 {
+        // 6v6: ~5.8% of the 1440p crop per row; the team gap is one extra
+        // row of that pitch.
+        let steps = if team == 0 {
+            row_in_team
+        } else {
+            team_size as u32 + 1 + row_in_team
+        };
+        PORTRAIT_REF_START_Y + steps * PORTRAIT_REF_PITCH_6
     } else {
-        team_size as u32 + 1 + row_in_team
+        let origin = if team == 0 {
+            PORTRAIT_REF_START_Y_5
+        } else {
+            PORTRAIT_REF_TEAM2_Y_5
+        };
+        origin + row_in_team * PORTRAIT_REF_PITCH_5
     };
-    let y = scale_portrait_px(PORTRAIT_REF_START_Y + steps * pitch, w);
+    let y = scale_portrait_px(ref_y, w);
     if y.saturating_add(side) > h {
         return None;
     }
@@ -955,17 +982,26 @@ mod portrait_rect_tests {
         assert_eq!(d1080, (1248, 756));
 
         // Reference grid, pinned so a 1080 fix cannot slide 1440.
-        assert_eq!(portrait_rect(d1440, 0, 5).unwrap().y, 120);
-        assert_eq!(portrait_rect(d1440, 9, 5).unwrap().y, 820);
         assert_eq!(portrait_rect(d1440, 0, 6).unwrap().y, 120);
         assert_eq!(portrait_rect(d1440, 11, 6).unwrap().y, 816);
+        assert_eq!(portrait_rect(d1440, 0, 5).unwrap().y, 34);
+        assert_eq!(portrait_rect(d1440, 5, 5).unwrap().y, 576);
+        assert_eq!(portrait_rect(d1440, 8, 5).unwrap().y, 840);
 
-        // Truncating the height pitch left these 5px and 6px high.
-        assert_eq!(portrait_rect(d1080, 9, 5).unwrap().y, 615);
+        // Truncating the height pitch left this 6px high.
         assert_eq!(portrait_rect(d1080, 11, 6).unwrap().y, 612);
+        assert_eq!(portrait_rect(d1080, 8, 5).unwrap().y, 630);
 
-        for team in [5usize, 6] {
-            for row in 0..(team * 2) {
+        // The 5v5 last row runs to y 1014.85 and the crop stops at 1007, so
+        // its square is cut at both resolutions and refused.
+        assert_eq!(portrait_rect(d1440, 9, 5), None);
+        assert_eq!(portrait_rect(d1080, 9, 5), None);
+
+        for (team, rows, full_1440, full_1080) in [
+            (6usize, 12usize, d1440.0 * 6 / 100, d1080.0 * 6 / 100),
+            (5, 9, 86, 65),
+        ] {
+            for row in 0..rows {
                 let src = portrait_rect(d1440, row, team).unwrap();
                 let dst = portrait_rect(d1080, row, team).unwrap();
                 let expect_y = ((src.y as u64 * d1080.0 as u64) + 1664 / 2) / 1664;
@@ -973,8 +1009,6 @@ mod portrait_rect_tests {
                     dst.y, expect_y as u32,
                     "team {team} row {row} must scale with board width"
                 );
-                let full_1440 = d1440.0 * 6 / 100;
-                let full_1080 = d1080.0 * 6 / 100;
                 assert_eq!(
                     (src.w, src.h),
                     (full_1440, full_1440),
@@ -991,14 +1025,54 @@ mod portrait_rect_tests {
         }
     }
 
+    /// 5v5 row bands on the 1440p crop, measured 2026-10-12 on 15 in-match
+    /// boards and one centred board (row top, exclusive bottom). Hardcoded on
+    /// purpose: deriving them from the constants would test nothing.
+    const ROWS_5V5_1440: [(f64, f64); 10] = [
+        (34.1, 119.9),
+        (122.2, 208.0),
+        (210.3, 296.1),
+        (298.3, 384.1),
+        (386.4, 472.9),
+        (576.0, 661.7),
+        (664.1, 749.8),
+        (752.1, 837.9),
+        (840.2, 925.9),
+        (928.3, 1014.3),
+    ];
+
+    #[test]
+    fn five_v_five_portraits_sit_inside_the_measured_rows() {
+        let dims = board_dims(2560, 1440);
+        for (row, (top, bottom)) in ROWS_5V5_1440.iter().enumerate() {
+            let Some(r) = portrait_rect(dims, row, 5) else {
+                assert!(*bottom > dims.1 as f64, "row {row} fits but has no square");
+                continue;
+            };
+            let (y0, y1) = (r.y as f64, (r.y + r.h) as f64);
+            assert!(
+                (y0 - top).abs() <= 2.0,
+                "row {row}: square starts at {y0}, the row at {top}"
+            );
+            assert!(
+                y1 <= bottom + 1.0,
+                "row {row}: square ends at {y1}, past the row bottom {bottom}"
+            );
+        }
+    }
+
     #[test]
     fn short_board_returns_none() {
-        // 1440-wide crop. Row 0 starts at y=120 and the square is 99px,
+        // 1440-wide crop. 6v6 row 0 starts at y=120 and the square is 99px,
         // so anything shorter than 219px would cut it. That used to come
         // back as 99x30. Callers save this rect as a hero reference.
-        assert!(portrait_rect((1664, 150), 0, 5).is_none());
-        assert!(portrait_rect((1664, 218), 0, 5).is_none());
+        assert!(portrait_rect((1664, 150), 0, 6).is_none());
+        assert!(portrait_rect((1664, 218), 0, 6).is_none());
+        assert!(portrait_rect((1664, 219), 0, 6).is_some());
+        // 5v5 row 0 starts at y=34 with an 86px square: 120px is the floor.
         assert!(portrait_rect((1664, 100), 0, 5).is_none());
+        assert!(portrait_rect((1664, 119), 0, 5).is_none());
+        assert!(portrait_rect((1664, 120), 0, 5).is_some());
     }
 }
 
