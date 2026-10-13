@@ -2,11 +2,15 @@
 //!
 //! Log-only reports: the member picks `crash`, `performance`, or `other`,
 //! types a short note, and reads a preview built from the exact zip that
-//! would leave the PC. **Send** posts that zip to the linked site with the
-//! tracker sync token (create only). **Save report** writes the same zip to
-//! the Downloads folder after a private-file warning. The daemon library
-//! builds the zip (`stat_tracker::report`); this module is the dialog, the
-//! upload, the save path, and the crash prompt.
+//! would leave the PC. A game report (Games tab and the game card) is the
+//! same dialog for one session: the category list starts at `wrong_stats`
+//! and leaves out `crash` and `performance`. **Send** posts that zip to the
+//! linked site with the tracker sync token (create only). **Save report**
+//! writes the same zip to the Downloads folder after a private-file warning.
+//! The daemon library builds the zip (`stat_tracker::report`). A game report
+//! loads its kit with `kit::load`, which checks the blank-table version and
+//! the scoreboard hash. This module is the dialog, the upload, the save
+//! path, and the crash prompt.
 
 use std::fs;
 use std::io::Write as _;
@@ -22,7 +26,9 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::Config;
 use stat_tracker::report::bundle::REASON_TEXT_MAX_CHARS;
-use stat_tracker::report::{LogOnlyCategory, LogReportInput, ReportZip, Resolution};
+use stat_tracker::report::{
+    GameReportInput, LogOnlyCategory, LogReportInput, ReportZip, Resolution,
+};
 
 use crate::app::Message;
 use crate::theme::{
@@ -46,60 +52,22 @@ const PRIVATE_WARNING: &str = "This is a private report. Give it only to an offi
 
 const NAME_HINT: &str = "Do not type other players' names.";
 
-/// Game-report categories from the C1 contract. `as_str` is the manifest id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GameCategory {
-    WrongStats,
-    WrongHero,
-    WrongMap,
-    WrongMode,
-    WrongResult,
-    MissedGame,
-    Other,
+/// Game-report categories. The manifest ids live in the tracker library.
+pub use stat_tracker::report::GameCategory;
+
+/// A missed game has no kit. Every other game category needs one.
+pub trait GameReportCategory {
+    fn allows_missing_kit(self) -> bool;
 }
 
-impl GameCategory {
-    pub const ALL: [GameCategory; 7] = [
-        GameCategory::WrongStats,
-        GameCategory::WrongHero,
-        GameCategory::WrongMap,
-        GameCategory::WrongMode,
-        GameCategory::WrongResult,
-        GameCategory::MissedGame,
-        GameCategory::Other,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            GameCategory::WrongStats => "wrong_stats",
-            GameCategory::WrongHero => "wrong_hero",
-            GameCategory::WrongMap => "wrong_map",
-            GameCategory::WrongMode => "wrong_mode",
-            GameCategory::WrongResult => "wrong_result",
-            GameCategory::MissedGame => "missed_game",
-            GameCategory::Other => "other",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            GameCategory::WrongStats => "Wrong stats",
-            GameCategory::WrongHero => "Wrong hero",
-            GameCategory::WrongMap => "Wrong map",
-            GameCategory::WrongMode => "Wrong mode",
-            GameCategory::WrongResult => "Wrong result",
-            GameCategory::MissedGame => "Missed game",
-            GameCategory::Other => "Other",
-        }
-    }
-
-    /// A missed game has no kit. Every other game category needs one.
-    pub fn allows_missing_kit(self) -> bool {
+impl GameReportCategory for GameCategory {
+    fn allows_missing_kit(self) -> bool {
         matches!(self, GameCategory::MissedGame)
     }
 }
 
-/// One row in the game picker. `has_kit` is the report-kit directory.
+/// One row in the game picker. `has_kit` is [`stat_tracker::report::kit::has_kit`]:
+/// a scoreboard `kit::load` accepts, not a bare file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameChoice {
     pub session_id: String,
@@ -107,12 +75,11 @@ pub struct GameChoice {
     pub has_kit: bool,
 }
 
-/// A kit PNG kept in memory for the preview. The handle is built once so
-/// iced can reuse the decoded raster.
+/// A preview raster. The zip owns the PNG bytes; this is only the handle
+/// iced draws, built once so redraws reuse it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KitImage {
     pub path: String,
-    pub png: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub handle: iced::widget::image::Handle,
@@ -122,79 +89,29 @@ impl std::fmt::Debug for KitImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KitImage")
             .field("path", &self.path)
-            .field("png_len", &self.png.len())
             .field("width", &self.width)
             .field("height", &self.height)
             .finish()
     }
 }
 
-/// `<data_dir>/report-kit/<session_id>`.
-pub fn kit_dir(data_dir: &Path, session_id: &str) -> PathBuf {
-    data_dir.join("report-kit").join(session_id)
-}
+/// True when [`stat_tracker::report::kit::load`] returns a scoreboard.
+pub use stat_tracker::report::kit::has_kit;
 
-/// True when the session has a blanked scoreboard picture.
-fn session_id_ok(session_id: &str) -> bool {
-    !session_id.is_empty()
-        && session_id.len() <= 64
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
+/// Kit session ids, newest directory first. Each id passed [`has_kit`].
+pub use stat_tracker::report::kit::sessions as kit_sessions;
 
-pub fn has_kit(data_dir: &Path, session_id: &str) -> bool {
-    session_id_ok(session_id)
-        && kit_dir(data_dir, session_id)
-            .join("scoreboard.png")
-            .is_file()
-}
-
-/// Kit session ids, newest directory first.
-pub fn kit_sessions(data_dir: &Path) -> Vec<String> {
-    let root = data_dir.join("report-kit");
-    let Ok(read) = fs::read_dir(&root) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, String)> = read
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if !has_kit(data_dir, &name) {
-                return None;
-            }
-            let modified = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            Some((modified, name))
+/// Preview handles for the images stored in `zip`. The bytes stay in the zip.
+pub fn kit_images_from_zip(zip: &ReportZip) -> Vec<KitImage> {
+    zip.images
+        .iter()
+        .map(|image| KitImage {
+            path: image.path.clone(),
+            width: image.width,
+            height: image.height,
+            handle: iced::widget::image::Handle::from_bytes(image.png.clone()),
         })
-        .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    found.into_iter().map(|(_, name)| name).collect()
-}
-
-/// Scoreboard and outcome pictures for the preview. Missing files are skipped.
-pub fn load_kit_images(data_dir: &Path, session_id: &str) -> Vec<KitImage> {
-    ["scoreboard.png", "outcome.png"]
-        .into_iter()
-        .filter_map(|name| read_kit_png(&kit_dir(data_dir, session_id).join(name), name))
         .collect()
-}
-
-fn read_kit_png(path: &Path, name: &str) -> Option<KitImage> {
-    let png = fs::read(path).ok()?;
-    let (width, height) = image::image_dimensions(path).ok()?;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    Some(KitImage {
-        path: format!("crops/{name}"),
-        handle: iced::widget::image::Handle::from_bytes(png.clone()),
-        png,
-        width,
-        height,
-    })
 }
 
 /// Messages the dialog sends. Wrapped in [`Message::Report`].
@@ -256,7 +173,7 @@ pub struct ReportDialog {
     pub game_category: Option<GameCategory>,
     pub game_session: Option<String>,
     pub game_choices: Vec<GameChoice>,
-    /// Kit pictures for the selected session. Not part of the zip until C1.
+    /// Handles for the images in the current preview zip.
     pub kit_images: Vec<KitImage>,
     /// Draw kit pictures at their pixel size. Off fits them to the dialog.
     pub image_actual: bool,
@@ -323,11 +240,12 @@ impl ReportDialog {
         self.game_category.is_some()
     }
 
-    /// A game report cannot be sent until `build_game_report` is in the tracker.
+    /// Send posts the preview zip. A log zip is never sent from a game
+    /// dialog, and a game zip is never sent from a log dialog.
     pub fn can_send(&self) -> bool {
-        !self.is_game()
-            && self.linked
+        self.linked
             && self.preview_current()
+            && self.preview_matches_kind()
             && !matches!(self.send, SendState::Sending)
             && !self.sent()
     }
@@ -337,7 +255,15 @@ impl ReportDialog {
     }
 
     pub fn can_save(&self) -> bool {
-        !self.is_game() && self.preview_current() && !self.saving && !self.sent()
+        self.preview_current() && self.preview_matches_kind() && !self.saving && !self.sent()
+    }
+
+    /// The preview zip is a game report exactly when the dialog is one.
+    fn preview_matches_kind(&self) -> bool {
+        let Some(Ok(zip)) = &self.built else {
+            return false;
+        };
+        manifest_has_game(&zip.manifest_json) == self.is_game()
     }
 
     pub fn busy(&self) -> bool {
@@ -354,6 +280,14 @@ impl ReportDialog {
         }
         self.generation
     }
+}
+
+/// `manifest.game` is an object on a game report and null on a log report.
+fn manifest_has_game(manifest_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(manifest_json)
+        .ok()
+        .and_then(|value| value.get("game").cloned())
+        .is_some_and(|game| !game.is_null())
 }
 
 /// Process-wide build counter. Starts at 1; 0 means no build yet.
@@ -406,6 +340,42 @@ pub async fn build(req: BuildRequest) -> Result<Arc<ReportZip>, String> {
         );
         input.training = req.training;
         stat_tracker::report::build_log_report(&input)
+            .map(Arc::new)
+            .map_err(|e| format!("Could not build the report: {e}"))
+    })
+    .await
+    .map_err(|_| "Could not build the report.".to_string())?
+}
+
+/// Everything a game-report build needs. The kit is not here: [`build_game`]
+/// loads it with `kit::load` inside [`GameReportInput::from_config`].
+pub struct GameBuildRequest {
+    pub config: Config,
+    pub session_id: String,
+    pub category: GameCategory,
+    pub text: String,
+    pub training: bool,
+    pub capture_backend: CaptureBackend,
+}
+
+/// Build a game-report zip off the UI thread. The scoreboard bytes are the
+/// ones `kit::load` hash-checked, never a picture the dialog read itself.
+pub async fn build_game(req: GameBuildRequest) -> Result<Arc<ReportZip>, String> {
+    tokio::task::spawn_blocking(move || {
+        let daemon_running = stat_tracker::report::daemon_running(&req.config.data_dir);
+        let mut input = GameReportInput::from_config(
+            &req.config,
+            &req.session_id,
+            req.category,
+            req.text,
+            req.capture_backend,
+            daemon_running,
+            Vec::new(),
+            Utc::now(),
+        )
+        .map_err(|e| format!("Could not build the report: {e}"))?;
+        input.training = req.training;
+        stat_tracker::report::build_game_report(&input)
             .map(Arc::new)
             .map_err(|e| format!("Could not build the report: {e}"))
     })
@@ -855,7 +825,11 @@ fn game_row(d: &ReportDialog) -> Element<'_, Message> {
     }
     if !d.kit_images.is_empty() {
         col = col.push(kit_pictures(d));
-    } else if d.is_game() && !d.game_category.is_some_and(|c| c.allows_missing_kit()) {
+    } else if d.is_game()
+        && d.building.is_none()
+        && d.text_edited_at.is_none()
+        && !d.game_category.is_some_and(|c| c.allows_missing_kit())
+    {
         col = col.push(
             text("No pictures for this game yet.")
                 .size(SIZE_META)
@@ -899,7 +873,7 @@ fn game_picker(d: &ReportDialog) -> Element<'_, Message> {
 
 fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![
-        text("Pictures on this PC. They are not in the zip until the tracker core adds them.")
+        text("Pictures in this report. They are the blanked scoreboard and the result banner.")
             .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
@@ -973,9 +947,14 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
             );
         }
         Some(Ok(zip)) => {
+            let pictures = if d.is_game() {
+                "The pictures above are the ones in the zip."
+            } else {
+                "No screenshots."
+            };
             col = col.push(
                 text(format!(
-                    "One zip, {} compressed. No screenshots. The log is scrubbed: your name, \
+                    "One zip, {} compressed. {pictures} The log is scrubbed: your name, \
                      the sync token, the site address, your home folder, account name, and \
                      hostname are replaced.",
                     size_text(zip.bytes.len() as u64)
@@ -1057,18 +1036,7 @@ fn size_text(bytes: u64) -> String {
 
 fn status_block(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![].spacing(6).width(Fill);
-    if d.is_game() && !d.sent() {
-        col = col.push(
-            text(
-                "Send and Save stay off for a game report until the tracker can build that zip. \
-                 The pictures above are the ones it will include.",
-            )
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(theme::WARN),
-        );
-    }
-    if !d.linked && !d.sent() && !d.is_game() {
+    if !d.linked && !d.sent() {
         col = col.push(
             text(
                 "The tracker is not linked, so Send is off. Link it in Settings, or use Save \
@@ -1421,44 +1389,133 @@ mod tests {
         assert!(crash_prompt(tmp.path()).is_none());
     }
 
+    /// 1x1 PNG. `kit::load` accepts it only with a matching `reads.json`.
+    fn one_pixel_png() -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(1, 1, image::Rgb([8, 8, 8]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    fn write_checked_kit(dir: &Path, png: &[u8]) {
+        use stat_tracker::report::blank::BLANK_TABLE_VERSION;
+        use stat_tracker::report::bundle::sha256_hex;
+        use stat_tracker::report::kit::{KitRead, KitReads, READS_JSON, SCOREBOARD_PNG};
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(SCOREBOARD_PNG), png).unwrap();
+        let mut reads = std::collections::BTreeMap::new();
+        reads.insert(
+            "hero".into(),
+            KitRead {
+                value: Some("ana".into()),
+                confidence: None,
+                ocr_v1: None,
+                suspect: false,
+            },
+        );
+        let reads = KitReads {
+            captured_at: Utc.with_ymd_and_hms(2026, 10, 13, 1, 0, 0).unwrap(),
+            width: 1,
+            height: 1,
+            team_size: Some(5),
+            map: None,
+            mode: None,
+            result: None,
+            recognizer: "cv-v5".into(),
+            blank_table: BLANK_TABLE_VERSION,
+            scoreboard_sha256: sha256_hex(png),
+            reads,
+        };
+        fs::write(dir.join(READS_JSON), serde_json::to_vec(&reads).unwrap()).unwrap();
+    }
+
     #[test]
-    fn kit_requires_a_scoreboard_and_a_game_report_does_not_send() {
+    fn a_log_zip_is_never_sent_as_a_game_report() {
         assert_eq!(GameCategory::WrongStats.as_str(), "wrong_stats");
-        assert_eq!(GameCategory::MissedGame.as_str(), "missed_game");
         assert!(GameCategory::MissedGame.allows_missing_kit());
         assert!(!GameCategory::WrongStats.allows_missing_kit());
 
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!has_kit(tmp.path(), "s1"));
+        let config = Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let built_at = Utc.with_ymd_and_hms(2026, 10, 13, 1, 0, 0).unwrap();
+        let log_input = LogReportInput::from_config(
+            &config,
+            LogOnlyCategory::Other,
+            "the log".into(),
+            FALLBACK_RESOLUTION,
+            CaptureBackend::None,
+            false,
+            Vec::new(),
+            built_at,
+        );
+        let log_zip = stat_tracker::report::build_log_report(&log_input).unwrap();
+        assert!(!manifest_has_game(&log_zip.manifest_json));
+
+        let mut dialog = ReportDialog::new(LogOnlyCategory::Other, true);
+        dialog.built = Some(Ok(Arc::new(log_zip)));
+        assert!(dialog.can_send() && dialog.can_save());
+        dialog.game_category = Some(GameCategory::WrongStats);
+        assert!(!dialog.can_send() && !dialog.can_save());
+
+        // A bare scoreboard file is not a kit. `kit::load` wants the hash.
+        let bare = stat_tracker::report::kit::session_dir(tmp.path(), "bare").unwrap();
+        fs::create_dir_all(&bare).unwrap();
+        fs::write(bare.join("scoreboard.png"), one_pixel_png()).unwrap();
+        assert!(!has_kit(tmp.path(), "bare"));
+        assert!(!has_kit(tmp.path(), "../bare"));
         assert!(kit_sessions(tmp.path()).is_empty());
-        let dir = kit_dir(tmp.path(), "s1");
-        fs::create_dir_all(&dir).unwrap();
-        assert!(!has_kit(tmp.path(), "s1"));
-        // 1x1 PNG.
-        let png = [
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 248, 15, 4,
-            0, 9, 251, 3, 253, 160, 53, 14, 150, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-        ];
-        fs::write(dir.join("scoreboard.png"), png).unwrap();
+
+        let png = one_pixel_png();
+        let session = stat_tracker::report::kit::session_dir(tmp.path(), "s1").unwrap();
+        write_checked_kit(&session, &png);
         assert!(has_kit(tmp.path(), "s1"));
-        assert!(!has_kit(tmp.path(), "../s1"));
-        let images = load_kit_images(tmp.path(), "s1");
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].path, "crops/scoreboard.png");
-        assert_eq!((images[0].width, images[0].height), (1, 1));
         assert_eq!(kit_sessions(tmp.path()), vec!["s1".to_string()]);
 
-        let mut d = ReportDialog::new(LogOnlyCategory::Other, true);
-        d.built = Some(Ok(Arc::new(ReportZip {
-            bytes: vec![1],
-            manifest_json: "{}".into(),
-            files: Vec::new(),
-            log_text: String::new(),
-            images: Vec::new(),
-        })));
-        assert!(d.can_send());
-        d.game_category = Some(GameCategory::WrongStats);
-        assert!(!d.can_send() && !d.can_save());
+        let game_input = GameReportInput::from_config(
+            &config,
+            "s1",
+            GameCategory::WrongStats,
+            "the stats".into(),
+            CaptureBackend::None,
+            false,
+            Vec::new(),
+            built_at,
+        )
+        .unwrap();
+        assert_eq!(
+            game_input.kit.scoreboard_png.as_deref(),
+            Some(png.as_slice())
+        );
+        let game_zip = stat_tracker::report::build_game_report(&game_input).unwrap();
+        assert!(manifest_has_game(&game_zip.manifest_json));
+        let preview = kit_images_from_zip(&game_zip);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].path, "crops/scoreboard.png");
+        assert_eq!((preview[0].width, preview[0].height), (1, 1));
+        let file = game_zip
+            .files
+            .iter()
+            .find(|entry| entry.path == "crops/scoreboard.png")
+            .unwrap();
+        let image = game_zip
+            .images
+            .iter()
+            .find(|entry| entry.path == "crops/scoreboard.png")
+            .unwrap();
+        assert_eq!(
+            file.sha256,
+            stat_tracker::report::bundle::sha256_hex(&image.png)
+        );
+        assert_eq!(file.sha256, stat_tracker::report::bundle::sha256_hex(&png));
+
+        dialog.built = Some(Ok(Arc::new(game_zip)));
+        assert!(dialog.can_send() && dialog.can_save());
+        dialog.game_category = None;
+        assert!(!dialog.can_send() && !dialog.can_save());
     }
 }
