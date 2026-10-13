@@ -129,6 +129,7 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         stat_tracker::packs::PACK_UNAVAILABLE,
         stat_tracker::packs::PACK_UNSUPPORTED,
         stat_tracker::packs::PACK_NOT_LISTED,
+        stat_tracker::packs::PACK_BUSY,
         stat_tracker::packs::PACK_MISMATCH,
         stat_tracker::packs::PACK_UNSAFE,
         stat_tracker::packs::PACK_FAILED,
