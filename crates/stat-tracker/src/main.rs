@@ -3635,10 +3635,18 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 || shadow::read_accolade_map(&img),
                                 || detect::match_end::read_accolade_map(&img),
                             );
+                            // `reader = "new"` confirms the vote, ban and
+                            // select screens with the words-v1 phrase masks,
+                            // not OCR (alpha.7 O7).
                             let phase = if outcome_only {
                                 detect::GamePhase::Unknown
                             } else {
-                                detect::match_start::detect_phase_polled(&img, &rgb, &mut stability)
+                                detect::match_start::detect_phase_polled(
+                                    &img,
+                                    &rgb,
+                                    &mut stability,
+                                    detect::match_start::PhaseSource::for_reader(use_new_reader),
+                                )
                             };
                             // Wake hint only — does not confirm an outcome.
                             // Ban Heroes is a distinct hook (`detect_ban_screen`)
@@ -8659,6 +8667,27 @@ mod tests {
         assert_eq!(rows[0].map_name, "Ilios");
         assert_eq!(rows[0].game_mode, "Control");
         assert_eq!(rows[0].display_map_name(), "King's Row");
+    }
+
+    /// The poll tick confirms the vote, ban and select screens with the
+    /// source the reader switch picks (alpha.7 O7), and calls no ocr-v1
+    /// only phase read. Whitespace is ignored.
+    #[test]
+    fn the_poll_tick_takes_the_phase_source_from_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let src = norm(full.split("\nmod tests {").next().unwrap());
+        assert!(src.contains(
+            "detect::match_start::detect_phase_polled( &img, &rgb, &mut stability, \
+             detect::match_start::PhaseSource::for_reader(use_new_reader), )"
+        ));
+        for ocr_only in [
+            "detect::match_start::detect_phase(",
+            "detect::match_start::detect_phase_with_rgb(",
+            "PhaseSource::Ocr",
+        ] {
+            assert!(!src.contains(ocr_only), "{ocr_only}");
+        }
     }
 
     /// The vision pass reads the banner only through `choose_top_bar_map`,
