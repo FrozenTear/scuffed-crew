@@ -1746,8 +1746,9 @@ mod tests {
                 }
             }
         }
-        // banner maps ocr-v1 stores under their own name (34 before #201)
-        assert_eq!(known, 59);
+        // banner maps ocr-v1 stores under their own name (34 before #201),
+        // and ADLERSBRUNN, which it stores as Eichenwalde (M1)
+        assert_eq!(known, 60);
         for c in OCR_V1_COLLISIONS {
             assert!(MAPS.iter().any(|m| m.name == c), "{c}");
         }
@@ -1866,6 +1867,28 @@ mod tests {
         assert_eq!(g.name, "Watchpoint: Grímsvötn");
     }
 
+    /// `ADLERSBRUNN`, the Halloween label, is stored the way ocr-v1 stores
+    /// it: as Eichenwalde, Hybrid, the same top-bar map an `EICHENWALDE`
+    /// banner gives. A flagged read of it abstains like any other.
+    #[test]
+    fn a_sure_adlersbrunn_read_is_the_top_bar_map_eichenwalde() {
+        use crate::shadow::banner::{ADLERSBRUNN, ADLERSBRUNN_KEY};
+        let alias = map_info(ADLERSBRUNN_KEY);
+        let t = top_bar_map(&sure_read(alias)).expect("sure read");
+        assert_eq!((t.name.as_str(), t.mode), ("Eichenwalde", Some("Hybrid")));
+        assert_eq!(
+            crate::parse::canonical_map(ADLERSBRUNN).as_deref(),
+            Some(t.name.as_str()),
+            "the name ocr-v1 stores for the label"
+        );
+        assert_eq!(crate::parse::stored_game_mode(&t.name), "Hybrid");
+        let own = top_bar_map(&sure_read(map_info("eichenwalde"))).unwrap();
+        assert_eq!((own.name, own.mode), (t.name, t.mode));
+        let mut flagged = sure_read(alias);
+        flagged.suspect = true;
+        assert_eq!(top_bar_map(&flagged), None);
+    }
+
     #[test]
     fn a_name_the_tracker_does_not_know_abstains() {
         static ATLANTIS: MapInfo = MapInfo {
@@ -1918,7 +1941,11 @@ mod tests {
                     info.key
                 );
                 assert_eq!(server.display_name().parse(), Ok(server));
-                tracked += 1;
+                // ADLERSBRUNN is a second label of Eichenwalde, not a
+                // second map: it is checked like the rest and counted once
+                if info.key != crate::shadow::banner::ADLERSBRUNN_KEY {
+                    tracked += 1;
+                }
             }
         }
         assert_eq!(tracked, scuffed_types::MapName::ALL.len());

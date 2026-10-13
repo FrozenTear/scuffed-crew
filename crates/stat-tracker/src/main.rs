@@ -2634,8 +2634,10 @@ struct FrameAnalysis {
     pack_hero: Option<String>,
     /// Top-bar map label OCR, already canonicalized.
     map_from_panel: Option<String>,
-    /// Top-bar OCR before canonicalization. The Adlersbrunn alias check
-    /// needs the raw label; a literal Eichenwalde read is not an alias.
+    /// The top bar's raw label ([`top_bar_raw_label`]): the OCR text before
+    /// canonicalization, or `ADLERSBRUNN` after a sure banner read of it.
+    /// The Adlersbrunn alias check needs the raw label; a literal
+    /// Eichenwalde read is not an alias.
     map_panel_raw: Option<String>,
     /// `map_from_panel` is a sure banner read (`reader = "new"`).
     map_from_banner: bool,
@@ -4274,6 +4276,7 @@ fn analyze_frame(
         map_panel_raw.as_deref().and_then(parse::match_map_in_text),
     );
     let map_from_panel = top_bar.map;
+    let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path —
@@ -5201,6 +5204,32 @@ fn choose_top_bar_map(
             }
         }
         None => ocr(Some(read)),
+    }
+}
+
+/// The top bar's raw label of one Tab, for the Adlersbrunn check in
+/// [`prepare_capture_row`] (alpha.7 M1).
+///
+/// Adlersbrunn is the Halloween label of Eichenwalde, and a Junkenstein
+/// board is told from a real game by that label plus stats on one team
+/// only. ocr-v1 finds the label in the top-bar OCR text
+/// ([`parse::is_adlersbrunn_alias`]). With `reader = "new"` a sure banner
+/// read of `ADLERSBRUNN` ([`shadow::banner::MapRead::is_adlersbrunn`]: the
+/// map pack's glyph match, no OCR) says the same thing, so the label is that
+/// spelling whatever the OCR text was, the way [`choose_top_bar_map`] takes
+/// the sure banner read over the OCR label for the map. With OCR off it is
+/// the only thing that says it.
+///
+/// Every other banner read (another map, a flagged read, no banner, no map
+/// pack) and `reader = "ocr-v1"` (`banner` is `None`: the banner is never
+/// read) leave the OCR label exactly as read.
+fn top_bar_raw_label(
+    banner: Option<&Option<shadow::banner::MapRead>>,
+    ocr_label: Option<String>,
+) -> Option<String> {
+    match banner {
+        Some(Some(read)) if read.is_adlersbrunn() => Some(shadow::banner::ADLERSBRUNN.to_string()),
+        _ => ocr_label,
     }
 }
 
@@ -16627,6 +16656,157 @@ mod tests {
             PreparedRow::Store,
             "a one-letter Eichenwalde misread is not an Adlersbrunn alias"
         );
+    }
+
+    // ---- M1: Adlersbrunn on the Tab banner without OCR.
+
+    /// One Tab of the new reader with no OCR text at all (OCR off): the
+    /// banner read is the only source. Returns the top-bar map and the
+    /// capture row decision for a board with stats on one or both teams.
+    fn adlersbrunn_tab(
+        banner: Option<shadow::banner::MapRead>,
+        both_teams: bool,
+    ) -> (Option<String>, PreparedRow, String, String) {
+        let top = choose_top_bar_map(true, || banner, None);
+        let label = top_bar_raw_label(top.banner.as_ref(), None);
+        let (name, source) = resolved_map(None, top.map.as_deref(), "", &[]);
+        let (mut staged, mut parsed) = staged_row("m1", &name, source);
+        let row = prepare_capture_row(
+            &mut parsed,
+            &mut staged,
+            None,
+            label.as_deref(),
+            "",
+            both_teams,
+        );
+        (top.map, row, parsed.map_name, parsed.game_mode)
+    }
+
+    /// The banner spelling is text ocr-v1's alias check accepts, and it is
+    /// the label the tracker's map table stores as Eichenwalde.
+    #[test]
+    fn the_banner_spelling_of_adlersbrunn_is_an_ocr_v1_alias() {
+        let label = shadow::banner::ADLERSBRUNN;
+        assert!(parse::is_adlersbrunn_alias(label));
+        assert_eq!(
+            parse::match_map_in_text(label).as_deref(),
+            Some("Eichenwalde")
+        );
+    }
+
+    /// With no OCR text, a sure `ADLERSBRUNN` banner read gives what the
+    /// OCR label gives under ocr-v1: the map is Eichenwalde (Hybrid), a
+    /// board with stats on both teams is stored, and a board with stats on
+    /// one team only (Junkenstein) is dropped.
+    #[test]
+    fn a_sure_adlersbrunn_banner_read_feeds_the_pve_gate_without_ocr() {
+        let key = shadow::banner::ADLERSBRUNN_KEY;
+        let (map, row, stored, mode) = adlersbrunn_tab(Some(banner_read(key, false)), true);
+        assert_eq!(map.as_deref(), Some("Eichenwalde"));
+        assert_eq!(row, PreparedRow::Store);
+        assert_eq!((stored.as_str(), mode.as_str()), ("Eichenwalde", "Hybrid"));
+        let (map, row, ..) = adlersbrunn_tab(Some(banner_read(key, false)), false);
+        assert_eq!(map.as_deref(), Some("Eichenwalde"));
+        assert_eq!(row, PreparedRow::Drop, "a Junkenstein board is dropped");
+
+        // the same two boards through ocr-v1's label
+        for (both_teams, want) in [(true, PreparedRow::Store), (false, PreparedRow::Drop)] {
+            let v1 = choose_top_bar_map(false, || None, parse::match_map_in_text("ADLERSBRUNN"));
+            assert_eq!(v1.map.as_deref(), Some("Eichenwalde"));
+            let label = top_bar_raw_label(v1.banner.as_ref(), Some("ADLERSBRUNN".into()));
+            let (mut staged, mut parsed) =
+                staged_row("m1", "Eichenwalde", Some(boundary::MapSource::TopBar));
+            let row = prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                label.as_deref(),
+                "",
+                both_teams,
+            );
+            assert_eq!(row, want);
+            assert_eq!(
+                (parsed.map_name.as_str(), parsed.game_mode.as_str()),
+                ("Eichenwalde", "Hybrid")
+            );
+        }
+    }
+
+    /// A real Eichenwalde banner is not the label: a board with stats on
+    /// one team is stored, as ocr-v1 stores it. A flagged `ADLERSBRUNN`
+    /// read names nothing and drops nothing.
+    #[test]
+    fn an_eichenwalde_or_flagged_banner_read_does_not_feed_the_pve_gate() {
+        let (map, row, stored, _) = adlersbrunn_tab(Some(banner_read("eichenwalde", false)), false);
+        assert_eq!(map.as_deref(), Some("Eichenwalde"));
+        assert_eq!(row, PreparedRow::Store);
+        assert_eq!(stored, "Eichenwalde");
+        let key = shadow::banner::ADLERSBRUNN_KEY;
+        let (map, row, stored, _) = adlersbrunn_tab(Some(banner_read(key, true)), false);
+        assert_eq!(map, None, "a flagged read is no top-bar map");
+        assert_eq!(row, PreparedRow::Store);
+        assert_eq!(stored, "");
+        let (map, row, ..) = adlersbrunn_tab(None, false);
+        assert_eq!((map, row), (None, PreparedRow::Store), "no map pack");
+    }
+
+    /// Only a sure `ADLERSBRUNN` banner read replaces the OCR label. Every
+    /// other read, and ocr-v1, hand the OCR label on untouched.
+    #[test]
+    fn only_a_sure_adlersbrunn_banner_read_becomes_the_raw_label() {
+        let key = shadow::banner::ADLERSBRUNN_KEY;
+        let sure = Some(banner_read(key, false));
+        assert_eq!(
+            top_bar_raw_label(Some(&sure), None).as_deref(),
+            Some("ADLERSBRUNN")
+        );
+        assert_eq!(
+            top_bar_raw_label(Some(&sure), Some("EICHENWALDE".into())).as_deref(),
+            Some("ADLERSBRUNN"),
+            "the sure banner read wins over the OCR label, as it does for the map"
+        );
+        let untouched = [
+            Some(Some(banner_read(key, true))),
+            Some(Some(banner_read("eichenwalde", false))),
+            Some(Some(banner_read("ilios", false))),
+            Some(None),
+            None,
+        ];
+        for banner in &untouched {
+            for ocr in [
+                None,
+                Some("ADLERSBRUNN"),
+                Some("EICHENWALDE"),
+                Some("BUSAN"),
+            ] {
+                assert_eq!(
+                    top_bar_raw_label(banner.as_ref(), ocr.map(String::from)).as_deref(),
+                    ocr,
+                    "{banner:?}"
+                );
+            }
+        }
+        let mut no_banner = banner_read(key, false);
+        no_banner.found_banner = false;
+        assert_eq!(top_bar_raw_label(Some(&Some(no_banner)), None), None);
+    }
+
+    /// The vision pass hands the label on from the banner it already read,
+    /// before the board takes that read. Whitespace is ignored.
+    #[test]
+    fn the_vision_pass_takes_the_raw_label_from_the_banner_read() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let src = full.split("\nmod tests {").next().unwrap();
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        let call = "let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);";
+        assert_eq!(body.matches(call).count(), 1);
+        let chosen = body.find("let top_bar = choose_top_bar_map(").unwrap();
+        let built = body.find("FrameAnalysis {").unwrap();
+        let at = body.find(call).unwrap();
+        assert!(chosen < at && at < built);
+        assert!(body[at..].contains(" map_panel_raw, "));
     }
 
     #[tokio::test]
