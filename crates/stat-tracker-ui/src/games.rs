@@ -43,8 +43,8 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col.into()
 }
 
-/// Compact shelf at `cols` (2–4). An expanded game *replaces* its compact card
-/// (full-width) instead of duplicating below the row.
+/// Compact shelf at `cols` (2–4, five on an ultrawide). An expanded game
+/// *replaces* its compact card (full-width) instead of duplicating below the row.
 fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Element<'a, Message> {
     let cols = cols.max(1);
     let live = app.live_game_session.as_deref();

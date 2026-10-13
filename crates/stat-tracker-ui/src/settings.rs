@@ -1,7 +1,8 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
-//! Layout: two-column masonry (Maps density tokens), Stored data spanning the
-//! pane, Save as a full-width footer strip. Does not invent daemon config keys.
+//! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
+//! Stored data spanning the pane, Save as a full-width footer strip. Does
+//! not invent daemon config keys.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
 //! The new reader switch writes `reader`. The alpha updates switch writes
@@ -29,7 +30,17 @@ pub(crate) const FIELD_SHORT: f32 = 280.0;
 /// URL, token, process list. Capped so they do not become a full-pane bar.
 pub(crate) const FIELD_TEXT: f32 = 480.0;
 
+/// Help copy wraps here even when the card is wider (about 90 characters at
+/// `SIZE_LABEL`). A 768 px card on a 2560 window would otherwise make
+/// lines of 130 characters.
+pub(crate) const HELP_MEASURE: f32 = 520.0;
+/// A field with a hint is at least this wide, so the hint under a 168 px
+/// numeric input does not wrap every two or three words.
+pub(crate) const FIELD_HINT_MIN: f32 = FIELD_SHORT;
+
 const _: () = {
+    assert!(FIELD_TEXT <= HELP_MEASURE);
+    assert!(HELP_MEASURE < crate::layout::MAX_SETTINGS_CARD - 2.0 * PAD_INNER);
     assert!(FIELD_NUMERIC <= 200.0);
     assert!(FIELD_SHORT < 400.0);
     assert!(FIELD_TEXT <= 560.0);
@@ -364,6 +375,17 @@ pub(crate) fn field_max_width(field: SettingsField) -> f32 {
     }
 }
 
+/// Width cap of a field's label + input + hint column. The input keeps
+/// [`field_max_width`]; a hint gets at least [`FIELD_HINT_MIN`] to wrap in.
+pub(crate) fn field_column_max(field: SettingsField, has_hint: bool) -> f32 {
+    let input = field_max_width(field);
+    if has_hint {
+        input.max(FIELD_HINT_MIN)
+    } else {
+        input
+    }
+}
+
 /// Every settings card. Order here is the 1-column stack and the masonry input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
@@ -378,7 +400,7 @@ pub(crate) enum SettingsSection {
     Data,
 }
 
-/// Two-column masonry. Stored data spans the pane so the last row is not
+/// Masonry input. Stored data spans the pane so the last row is not
 /// a skyscraper + empty pocket.
 pub(crate) const MASONRY_SECTIONS: &[SettingsSection] = &[
     SettingsSection::Daemon,
@@ -409,10 +431,11 @@ pub(crate) fn section_weight(section: SettingsSection) -> u16 {
     }
 }
 
-/// Greedy masonry: each section goes into the currently shorter column.
-/// Tie → leftmost. One column returns the input order.
+/// Greedy masonry for any column count: each section goes into the currently
+/// shortest column. Tie → leftmost. One column returns the input order.
+/// Never more columns than sections, so no column is left empty.
 pub(crate) fn pack_columns(sections: &[SettingsSection], cols: usize) -> Vec<Vec<SettingsSection>> {
-    let cols = cols.max(1);
+    let cols = cols.clamp(1, sections.len().max(1));
     if cols == 1 {
         return vec![sections.to_vec()];
     }
@@ -870,10 +893,7 @@ fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             } else {
                 theme::WARN
             }),
-        text("Install if missing. Rebuild retrains (needs network, a few minutes).")
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        hint("Install if missing. Rebuild retrains (needs network, a few minutes)."),
     ]
     .spacing(6);
     if app.tessdata_busy {
@@ -960,10 +980,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        text(DEBUG_IMAGES_HELP)
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        hint(DEBUG_IMAGES_HELP),
     ]
     .spacing(6);
     settings_card("Diagnostics", body.into())
@@ -1136,15 +1153,22 @@ fn field_caption(label: &'static str) -> text::Text<'static> {
         .color(TEXT_2)
 }
 
-fn hint(copy: impl Into<String>) -> text::Text<'static> {
-    text(copy.into())
-        .size(SIZE_LABEL)
-        .font(FONT_MEDIUM)
-        .color(TEXT_3)
+/// Help copy. Wraps at [`HELP_MEASURE`] even in a wider card.
+fn hint(copy: impl Into<String>) -> Element<'static, Message> {
+    container(
+        text(copy.into())
+            .size(SIZE_LABEL)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
+    )
+    .max_width(HELP_MEASURE)
+    .into()
 }
 
-/// One or two compact fields, left-aligned. Trailing Fill keeps them from
-/// stretching across an ultrawide card.
+/// One or two compact fields, left-aligned. Each field's own max width keeps
+/// it from stretching across an ultrawide card. There is no trailing spacer:
+/// Iced splits a row's Fill space evenly, so a spacer took a third of the row
+/// and squeezed both fields (and wrapped their hints) on a narrow card.
 fn compact_row<'a>(
     left: Option<Element<'a, Message>>,
     right: Option<Element<'a, Message>>,
@@ -1159,7 +1183,7 @@ fn compact_row<'a>(
     if let Some(right) = right {
         r = r.push(right);
     }
-    r.push(space().width(Fill)).into()
+    r.into()
 }
 
 fn field_input<'a>(
@@ -1180,11 +1204,16 @@ fn field_input<'a>(
     if !demo {
         input = input.on_input(move |v| Message::SettingsText(field, v));
     }
+    let input = container(input)
+        .width(Fill)
+        .max_width(field_max_width(field));
     let mut col = column![field_caption(label), input].spacing(4);
     if let Some(copy) = hint_copy {
         col = col.push(hint(copy));
     }
-    col.width(Fill).max_width(field_max_width(field)).into()
+    col.width(Fill)
+        .max_width(field_column_max(field, hint_copy.is_some()))
+        .into()
 }
 
 fn output_chip(
@@ -1428,13 +1457,41 @@ mod tests {
         });
     }
 
+    /// G4: was `settings_section_grid_is_one_or_two_columns`. Wide windows
+    /// now get three and four columns (see `layout` tests for the table).
     #[test]
-    fn settings_section_grid_is_one_or_two_columns() {
-        use crate::layout::settings_columns;
+    fn settings_section_grid_is_one_to_four_columns() {
+        use crate::layout::{MAX_SETTINGS_COLUMNS, settings_columns};
         assert_eq!(settings_columns(200.0), 1);
         assert_eq!(settings_columns(480.0), 1);
         assert_eq!(settings_columns(972.0), 2);
-        assert_eq!(settings_columns(10_000.0), 2);
+        assert_eq!(settings_columns(1688.0), 3);
+        assert_eq!(settings_columns(3208.0), 4);
+        assert_eq!(settings_columns(10_000.0), MAX_SETTINGS_COLUMNS);
+        assert!(MAX_SETTINGS_COLUMNS <= MASONRY_SECTIONS.len());
+    }
+
+    #[test]
+    fn a_hinted_numeric_field_gives_its_hint_room() {
+        // The input stays compact; the hint column does not wrap at 168 px.
+        assert_eq!(
+            field_column_max(SettingsField::SessionWindow, true),
+            FIELD_HINT_MIN
+        );
+        assert_eq!(
+            field_column_max(SettingsField::SessionWindow, false),
+            FIELD_NUMERIC
+        );
+        assert_eq!(
+            field_column_max(SettingsField::PollInterval, false),
+            FIELD_NUMERIC
+        );
+        assert_eq!(
+            field_column_max(SettingsField::PlayerName, true),
+            FIELD_SHORT
+        );
+        assert_eq!(field_column_max(SettingsField::SyncToken, true), FIELD_TEXT);
+        assert_eq!(field_max_width(SettingsField::SessionWindow), FIELD_NUMERIC);
     }
 
     #[test]
@@ -1503,6 +1560,96 @@ mod tests {
     fn one_column_pack_keeps_input_order() {
         let packed = pack_columns(MASONRY_SECTIONS, 1);
         assert_eq!(packed, vec![MASONRY_SECTIONS.to_vec()]);
+    }
+
+    fn heights(packed: &[Vec<SettingsSection>]) -> Vec<u16> {
+        packed
+            .iter()
+            .map(|c| c.iter().copied().map(section_weight).sum())
+            .collect()
+    }
+
+    #[test]
+    fn three_column_pack_is_as_even_as_the_weights_allow() {
+        // 24 units over 3 columns: Player (4) has no partner summing to 4,
+        // so 8/8/8 is impossible and 7/9/8 is the best split.
+        let packed = pack_columns(MASONRY_SECTIONS, 3);
+        assert_eq!(
+            packed,
+            vec![
+                vec![SettingsSection::Daemon, SettingsSection::Player],
+                vec![
+                    SettingsSection::Capture,
+                    SettingsSection::AutoDetect,
+                    SettingsSection::Ocr,
+                ],
+                vec![
+                    SettingsSection::Companion,
+                    SettingsSection::Sync,
+                    SettingsSection::Diagnostics,
+                ],
+            ]
+        );
+        assert_eq!(heights(&packed), vec![7, 9, 8]);
+    }
+
+    #[test]
+    fn four_column_pack_is_two_cards_each_and_level() {
+        let packed = pack_columns(MASONRY_SECTIONS, 4);
+        assert_eq!(packed.len(), 4);
+        for col in &packed {
+            assert_eq!(col.len(), 2, "{packed:?}");
+        }
+        assert_eq!(heights(&packed), vec![6, 6, 6, 6]);
+    }
+
+    #[test]
+    fn pack_balances_any_column_count_and_never_leaves_a_column_empty() {
+        let max_weight = MASONRY_SECTIONS
+            .iter()
+            .copied()
+            .map(section_weight)
+            .max()
+            .unwrap();
+        for cols in 1..=12 {
+            let packed = pack_columns(MASONRY_SECTIONS, cols);
+            assert_eq!(
+                packed.len(),
+                cols.min(MASONRY_SECTIONS.len()),
+                "column count for {cols}"
+            );
+            assert!(packed.iter().all(|c| !c.is_empty()), "{cols}: {packed:?}");
+            // Every section exactly once, in input order within a column.
+            let mut seen: Vec<SettingsSection> = packed.iter().flatten().copied().collect();
+            assert_eq!(seen.len(), MASONRY_SECTIONS.len());
+            for col in &packed {
+                let idx: Vec<usize> = col
+                    .iter()
+                    .map(|s| MASONRY_SECTIONS.iter().position(|m| m == s).unwrap())
+                    .collect();
+                assert!(idx.windows(2).all(|w| w[0] < w[1]), "{cols}: {col:?}");
+            }
+            seen.sort_by_key(|s| MASONRY_SECTIONS.iter().position(|m| m == s));
+            assert_eq!(seen, MASONRY_SECTIONS.to_vec());
+            // Greedy shortest-column bound: no column is taller than the
+            // shortest by more than one card.
+            let h = heights(&packed);
+            let spread = h.iter().max().unwrap() - h.iter().min().unwrap();
+            assert!(spread <= max_weight, "{cols}: heights {h:?}");
+        }
+    }
+
+    #[test]
+    fn pack_columns_for_every_settings_width_fills_each_column() {
+        use crate::layout::{content_width_for_window, settings_columns};
+        for window in [
+            720.0, 1080.0, 1280.0, 1600.0, 1920.0, 2560.0, 3440.0, 5120.0,
+        ] {
+            let cols = settings_columns(content_width_for_window(window));
+            let packed = pack_columns(MASONRY_SECTIONS, cols);
+            assert_eq!(packed.len(), cols, "window {window}");
+            assert!(packed.iter().all(|c| !c.is_empty()), "window {window}");
+        }
     }
 
     #[test]
