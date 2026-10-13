@@ -3659,6 +3659,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
 /// pre-OCR preflight, and (when the frame is a scoreboard) the portrait match,
 /// per-cell OCR, career/map reads, and lazy full-board OCR. Returns everything
 /// the caller needs, or a cheap rejection when the frame has no scoreboard rows.
+#[allow(clippy::too_many_arguments)]
 fn analyze_frame(
     img: image::DynamicImage,
     matcher: Arc<detect::hero_portrait::PortraitMatcher>,
@@ -3667,6 +3668,7 @@ fn analyze_frame(
     allow_banner_recovery: bool,
     session_map_known: bool,
     shadow_on: bool,
+    use_new_reader: bool,
 ) -> FrameAnalysisOutcome {
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection (only when the
@@ -3756,7 +3758,11 @@ fn analyze_frame(
     } else {
         Some(map_text)
     };
-    let map_from_panel = map_panel_raw.as_deref().and_then(parse::match_map_in_text);
+    let map_from_panel = choose_top_bar_map(
+        use_new_reader,
+        || shadow::read_top_bar(&img),
+        map_panel_raw.as_deref().and_then(parse::match_map_in_text),
+    );
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path —
@@ -4258,7 +4264,9 @@ fn note_gate_suspects(
 /// A missing board, an unknown team size, or an uncertain own row leaves the
 /// ocr-v1 row unchanged, including its recognizer tag. The map and mode
 /// already chosen by capture policy stay even when the board names another
-/// map. This does not touch the capture gate, the session map, or the report.
+/// map; under this reader that policy map already took the banner read as
+/// its top-bar map ([`choose_top_bar_map`]). This does not touch the capture
+/// gate, the session map, or the report.
 async fn apply_new_reader(
     parsed: &mut storage::PersonalMatch,
     frame: &image::DynamicImage,
@@ -4321,6 +4329,40 @@ async fn apply_new_reader(
     );
 }
 
+/// The top-bar map of one Tab: the read capture policy stores as
+/// [`boundary::MapSource::TopBar`].
+///
+/// With `reader = "new"` a sure banner read ([`shadow::read_top_bar`]: the
+/// map pack's glyph match, no OCR) is the top-bar map. It then goes through
+/// the same policy as the top-bar OCR: the session map, the vote-candidate
+/// veto, a hinted different-map split and the untracked-map rules. When the
+/// banner reader abstains (no pack, no banner, a flagged read, or a name the
+/// tracker would not store) the top-bar OCR is used, the way the new reader
+/// falls back to ocr-v1 for every other field. With `reader = "ocr-v1"` the
+/// banner is never read and the OCR label is returned unchanged.
+fn choose_top_bar_map(
+    use_new_reader: bool,
+    banner: impl FnOnce() -> Option<shadow::TopBarMap>,
+    ocr_map: Option<String>,
+) -> Option<String> {
+    if !use_new_reader {
+        return ocr_map;
+    }
+    match banner() {
+        Some(read) => {
+            tracing::info!(
+                map = %read.name,
+                score = read.score,
+                margin = read.margin,
+                ocr_agrees = ocr_map.as_deref() == Some(read.name.as_str()),
+                "top-bar map from the map pack"
+            );
+            Some(read.name)
+        }
+        None => ocr_map,
+    }
+}
+
 /// A prepared analysis for tests of [`handle_capture`]. Production never sets it.
 #[cfg(test)]
 struct InjectedCapture {
@@ -4373,6 +4415,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         let player_name_owned = player_name.map(|s| s.to_string());
         let session_map_known = session_map.is_some();
         let shadow_on = ctx.shadow.is_some();
+        let use_new_reader = ctx.use_new_reader;
         let analysis = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
             let analysis = analyze_frame(
@@ -4383,6 +4426,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 allow_banner_recovery,
                 session_map_known,
                 shadow_on,
+                use_new_reader,
             );
             stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
             analysis
@@ -7783,6 +7827,98 @@ mod tests {
         game.map_source = Some(boundary::MapSource::TopBar);
         let input = poll_input_from_game(&game, None, false, None, None, false, now);
         assert!(input.map_trusted);
+    }
+
+    fn banner(name: &str) -> shadow::TopBarMap {
+        shadow::TopBarMap {
+            name: name.into(),
+            mode: None,
+            score: 0.95,
+            margin: 0.2,
+        }
+    }
+
+    /// `reader = "ocr-v1"` (the default) never reads the banner: the top-bar
+    /// map is the OCR label, read or not.
+    #[test]
+    fn ocr_v1_never_reads_the_banner_for_the_top_bar_map() {
+        let never = || -> Option<shadow::TopBarMap> { panic!("banner read under ocr-v1") };
+        assert_eq!(
+            choose_top_bar_map(false, never, Some("Busan".into())),
+            Some("Busan".to_string())
+        );
+        assert_eq!(choose_top_bar_map(false, never, None), None);
+    }
+
+    #[test]
+    fn the_new_reader_takes_a_sure_banner_read_over_the_ocr_label() {
+        assert_eq!(
+            choose_top_bar_map(true, || Some(banner("Ilios")), Some("Busan".into())),
+            Some("Ilios".to_string())
+        );
+        assert_eq!(
+            choose_top_bar_map(true, || Some(banner("Ilios")), None),
+            Some("Ilios".to_string())
+        );
+        // The banner read is a top-bar read: a session without a map stores
+        // it as MapSource::TopBar, and a session map still wins.
+        let top = choose_top_bar_map(true, || Some(banner("Ilios")), None);
+        assert_eq!(
+            resolved_map(None, top.as_deref(), "Nepal", &[]),
+            ("Ilios".to_string(), Some(boundary::MapSource::TopBar))
+        );
+        assert_eq!(
+            resolved_map(Some("Busan"), top.as_deref(), "", &[]),
+            ("Busan".to_string(), None)
+        );
+        // the vote-candidate veto still applies
+        let candidates = vec!["Oasis".to_string(), "Busan".to_string()];
+        assert_eq!(
+            resolved_map(None, top.as_deref(), "Oasis", &candidates),
+            ("Oasis".to_string(), Some(boundary::MapSource::TextFallback))
+        );
+    }
+
+    /// The capture path reads the banner only through `choose_top_bar_map`,
+    /// with the daemon's reader switch. Hard-wiring `true` or `false`, or
+    /// reading the banner anywhere else in the vision pass, fails here.
+    #[test]
+    fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
+        let src = include_str!("main.rs");
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = src[at..].split("\n}\n").next().unwrap();
+        let call = body
+            .find("let map_from_panel = choose_top_bar_map(")
+            .expect("the top-bar map goes through choose_top_bar_map");
+        let args = &body[call..call + 220];
+        assert!(args.contains("use_new_reader,"), "{args}");
+        assert!(args.contains("|| shadow::read_top_bar(&img),"), "{args}");
+        assert!(
+            args.contains("map_panel_raw.as_deref().and_then(parse::match_map_in_text),"),
+            "{args}"
+        );
+        assert_eq!(body.matches("read_top_bar").count(), 1);
+        assert!(body.contains("    use_new_reader: bool,\n) -> FrameAnalysisOutcome {"));
+        let hc = src
+            .find("\nasync fn handle_capture(")
+            .expect("handle_capture");
+        let hc_body = src[hc..].split("\n}\n").next().unwrap();
+        assert!(hc_body.contains("let use_new_reader = ctx.use_new_reader;"));
+        let call = hc_body.find("analyze_frame(").expect("analyze_frame call");
+        let args = hc_body[call..].split(");").next().unwrap();
+        assert!(args.trim_end().ends_with("use_new_reader,"), "{args}");
+    }
+
+    /// An abstaining banner (no pack, no banner, a flagged read, an unknown
+    /// name: `shadow::top_bar_map` returns `None` for all of them) leaves the
+    /// OCR label in place.
+    #[test]
+    fn an_abstaining_banner_falls_back_to_the_ocr_label() {
+        assert_eq!(
+            choose_top_bar_map(true, || None, Some("Busan".into())),
+            Some("Busan".to_string())
+        );
+        assert_eq!(choose_top_bar_map(true, || None, None), None);
     }
 
     #[test]

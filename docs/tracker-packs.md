@@ -85,7 +85,7 @@ entry:
 | `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | new reader, 1440p-scale boards (when complete) |
 | `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
-| `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | nothing yet |
+| `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | nothing yet |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
@@ -109,6 +109,17 @@ The new reader (`reader = "new"`) uses a v2 hero pack only when it has every
 hero and special class `heroes-v1.tar` has. The daemon installs the v2 packs
 after the reader has started; the reader notices the new folder on a later
 board and re-loads its hero set in the background.
+
+The new reader reads the map from the Tab board's top banner with
+`maps-v1.tar`. A map pack copied in by hand to `templates/maps/` is used only
+when `templates/maps-v1/` is missing or does not load. Like the v2 hero
+packs, maps-v1 is picked up on a later Tab once it is swapped in, without a
+restart; a folder that changes while it loads is not used. A sure banner read
+is the top-bar map: the session map, a vote-candidate veto, and the rule that
+keeps Deathmatch and other untracked maps local apply to it as they do to the
+top-bar OCR. A flagged read, no banner, or a name the tracker's map table
+does not hold falls back to the top-bar OCR. With `reader = "ocr-v1"` the
+banner is not read.
 
 Each file is a plain ustar archive. At the top level it holds:
 
