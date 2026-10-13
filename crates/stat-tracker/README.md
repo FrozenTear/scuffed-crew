@@ -133,6 +133,16 @@ nothing else. A recorded path that leaves your home folder, or that contains
 files that are still there and asks first. Settings stay unless you also
 delete saved games.
 
+One thing in the saved-games folder goes on every uninstall, kept data or
+not: `private/own-name/`, the small crops of your own in-game name that
+`reader = "new"` keeps to find your row (see below). The uninstaller never
+follows a link and never deletes outside your home folder or the install
+folder, so it leaves the crops when the saved-games folder is a link, lies
+outside your home folder, or when a system package owns this copy.
+`scuffed-stat-tracker-uninstall` says so; the app's Uninstall does not list
+them in that case. You can delete `private/own-name/` by hand at any time:
+the tracker learns the crops again.
+
 If a system package owns this copy, nothing is removed. The app shows
 `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` and can copy that command.
 An AppImage is removed like any other copy, including the AppImage file.
@@ -193,6 +203,61 @@ ocr_threads = 1
 
 The daemon reads config once at startup — restart it after changes.
 
+### OCR CPU use (`OMP_THREAD_LIMIT`)
+
+The daemon runs Tesseract with `OMP_THREAD_LIMIT=1`. Tesseract is built
+with OpenMP, and with no limit each OCR call also spins up its own thread
+team on top of the `ocr_threads` workers. The fields are still read in
+parallel by the `ocr_threads` workers.
+
+Measured with Tesseract 5 on the development machine: the reads are
+identical on 10,784 + 816 samples, text and confidence, for about a third
+of the CPU time. Release builds bundle Tesseract 4.1.1 (also built with
+OpenMP); that library was not measured.
+
+- The systemd unit sets it (`Environment=OMP_THREAD_LIMIT=1`). An update
+  rewrites the unit and restarts a running tracker. The app's Start button
+  starts the unit whenever the unit is installed.
+- A start outside systemd (a shell, or the app's Start button when no unit
+  is installed) has no such line. OpenMP reads the variable when the binary
+  loads, so the daemon starts itself again once, same pid and arguments,
+  with the variable set. `SCUFFED_OMP_REEXEC` marks that second start and
+  stops a loop. This happens before any flag is read, so `--version` and
+  `--help` also start themselves again once (same pid, same output), and a
+  `--version` process started by an installer or the app has
+  `SCUFFED_OMP_REEXEC=1` in its environment.
+- A value you set yourself is kept: `OMP_THREAD_LIMIT=4 scuffed-stat-tracker`,
+  or for the unit a drop-in (`systemctl --user edit scuffed-stat-tracker`).
+  That command writes
+  `~/.config/systemd/user/scuffed-stat-tracker.service.d/override.conf`.
+  The uninstallers do not remove that file, and it applies again after a
+  reinstall: delete it yourself when you no longer want it.
+- To run with no limit, leave `OMP_THREAD_LIMIT` unset and set
+  `SCUFFED_OMP_NO_REEXEC=1`. In a drop-in for the unit that is
+  `UnsetEnvironment=OMP_THREAD_LIMIT` and
+  `Environment=SCUFFED_OMP_NO_REEXEC=1`. An empty `OMP_THREAD_LIMIT=`
+  counts as unset, so on its own it ends up as 1.
+- `--generate-tessdata` does not restart: it runs Tesseract's training tools,
+  which would inherit the limit.
+- Only the daemon does this. The examples, the replay benchmark and the
+  fixture tests run with no limit unless you set the variable for them.
+
+To check what a process got:
+
+- `scuffed-stat-tracker --print-omp-limit` starts a new process and prints
+  the value that process ended up with and what OpenMP itself reports. It
+  says nothing about a tracker that is already running.
+- A running tracker logs one line at start (`OpenMP thread limit for OCR`,
+  with `omp_thread_limit` and `libgomp_thread_limit`), its thread count
+  after the first scoreboard OCR, and `omp_thread_limit` and `os_threads`
+  on each `capture timing` line. Under the unit these lines are in the
+  journal: `journalctl --user -u scuffed-stat-tracker`.
+  `systemctl --user show -p Environment scuffed-stat-tracker` shows what
+  the unit sets.
+- These lines are not in a problem report from a standard install. A
+  report's log is cut from `daemon.log`, which only a tracker the app
+  started itself (no unit installed) writes.
+
 ### Where the daemon writes
 
 The user unit sets `ProtectSystem=strict`. When that sandbox is applied,
@@ -213,6 +278,37 @@ folder under `$HOME` — is read-only under the sandbox. `install.sh` writes
 that path. Reinstall after you change `data_dir`. If the directory is
 still not writable, the daemon exits and prints the same drop-in. A
 relative `data_dir` is not put in the unit.
+
+With `reader = "new"` in config.toml, `{data_dir}` also holds
+`private/own-name/seeds.json` (folder 0700, file 0600). The new reader does
+not read player names to find your row. It keeps a few crops of your own
+name as it is drawn on the scoreboard, and compares each row with them. A
+crop is taken only from a board where your row is clearly highlighted, the
+hero panel shows the same hero as that row, and no chat covers it. It is
+trusted only after three boards from two games gave matching crops in one
+run of the tracker. Crops that keep pointing at another row than a clearly
+highlighted one are dropped and learned again.
+
+Names are still read in two places while Tesseract is on. When neither a
+crop nor the highlight finds your row, the tracker reads the name column
+of that one scoreboard and looks for your configured `player_name`, as
+`reader = "ocr-v1"` does on every scoreboard. And the full-scoreboard text
+read still runs when the per-cell read could not supply everything (#266
+removes it under the new reader).
+
+Only trusted crops are written to the file: crops confirmed as your own
+name line. A crop that is still waiting for confirmation could be another
+player's name, so it is kept in memory only and is gone when the tracker
+stops. If you restart the tracker between games the count starts again,
+and until your name is trusted your row is found by its highlight alone.
+The file holds pixels and a hash of the configured `player_name`, never
+the name. It is cleared when another name is configured, which the tracker
+notices when it next starts with `reader = "new"`; a start where the name
+is not known (not set here and not fetched) keeps it. It is removed on
+uninstall, and never put in a report, an upload or the log.
+`reader = "ocr-v1"` (the default) does not create it and does not read it;
+after a switch back to `ocr-v1` an existing file stays, unused, until
+uninstall or until you delete it.
 
 `%h` in the unit is `$HOME`. It does not follow `XDG_DATA_HOME` or
 `XDG_CONFIG_HOME`. On a user manager that cannot apply the sandbox, the
