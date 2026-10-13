@@ -3154,18 +3154,37 @@ mod tests {
     }
 
     /// Regions for the search tests below: six small ones (the template
-    /// builds one refine level there) and one of the words-v1 end-title
-    /// shape (two refine levels). Each has `t` and `other` drawn into noise.
+    /// builds one refine level there) and two of the words-v1 end-title
+    /// shape (two refine levels). Each has `t` and `other` drawn into
+    /// noise, except the last, which has `t` alone in its top-left corner:
+    /// there the refine windows of the two levels have the same
+    /// coordinates, so a score kept under a position alone would be handed
+    /// to the wrong level.
     fn search_cases() -> Vec<(Vec<Level>, [Gray; 3])> {
         let mut rng = Rng(0x2633);
         let mut out = Vec::new();
-        for (n, (tw, th, rw, rh)) in [(6, SIZES[2]), (1, (279, 100, 512, 230))] {
+        let deep = (279, 100, 512, 230);
+        for (n, (tw, th, rw, rh)) in [(6, SIZES[2]), (1, deep)] {
             let words = [glyphs(4, tw, th), glyphs(7, tw, th), glyphs(11, tw, th)];
             for _ in 0..n {
                 let g = random_region(&mut rng, &words[0], &words[1], rw, rh);
                 out.push((pyramid(g), words.clone()));
             }
         }
+        let (tw, th, rw, rh) = deep;
+        let words = [glyphs(4, tw, th), glyphs(7, tw, th), glyphs(11, tw, th)];
+        let mut g = Gray::new(rw, rh);
+        for v in g.px.iter_mut() {
+            *v = 0.1 + rng.next(30) as f32 / 255.0;
+        }
+        for y in 0..th {
+            for x in 0..tw {
+                let a = words[0].at(x, y) / 0.9;
+                let p = &mut g.px[(5 + y) * rw + 6 + x];
+                *p = (*p * (1.0 - a) + 0.9 * a).min(1.0);
+            }
+        }
+        out.push((pyramid(g), words));
         out
     }
 
