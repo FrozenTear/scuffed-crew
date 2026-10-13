@@ -138,22 +138,27 @@ fn count(blocked: &[(&str, &str, u64)], file: &str, entries: &[&str]) -> u64 {
         .sum()
 }
 
+/// What [`judge`] found wrong. Collected, so one run names every read that
+/// is out of step with its mark, not only the first.
+static PROBLEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// The rule, for one read on one driver.
 fn judge(read: Read, what: &str, calls: u64, blocked: &[(&str, &str, u64)]) {
     assert_eq!(checked(read), Checked::Here);
-    if read.without_ocr() {
-        assert_eq!(
-            calls, 0,
+    let problem = if read.without_ocr() && calls > 0 {
+        format!(
             "{read:?} is marked as read without OCR, and {what} still sent {calls} call(s) to \
              the gate: {blocked:?}"
-        );
-    } else {
-        assert!(
-            calls >= 1,
+        )
+    } else if !read.without_ocr() && calls == 0 {
+        format!(
             "{read:?} still needs OCR, and {what} never reached its OCR call, so this frame \
              would not notice the read being flipped: {blocked:?}"
-        );
-    }
+        )
+    } else {
+        return;
+    };
+    PROBLEMS.lock().unwrap().push(problem);
 }
 
 #[test]
@@ -298,6 +303,14 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
         "the poll tick's phase read",
         blocked.iter().map(|(_, _, n)| n).sum(),
         &blocked,
+    );
+
+    let problems = PROBLEMS.lock().unwrap().clone();
+    assert!(
+        problems.is_empty(),
+        "{} read(s) out of step with their mark:\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 
     // Whatever was blocked, nothing of Tesseract was started.
