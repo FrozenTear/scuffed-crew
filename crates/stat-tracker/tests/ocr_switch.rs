@@ -198,6 +198,31 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         "every call was stopped at its entry point, none as deep as a resource: {held:?}"
     );
 
+    // The poll tick's phase read does not ask for OCR at all while it is
+    // off: a screen no title mask confirms is left unconfirmed, and the OCR
+    // check behind it is not attempted, so nothing is counted for it. Asked
+    // with the OCR source, so that no mask can answer first. The frame
+    // holds still, so the second tick is past the stability check.
+    let before_poll = gate::blocked_total();
+    let rgb = frame.to_rgb8();
+    let mut stability = stat_tracker::detect::stability::FrameStability::default();
+    for _ in 0..3 {
+        assert!(matches!(
+            match_start::detect_phase_polled(
+                &frame,
+                &rgb,
+                &mut stability,
+                match_start::PhaseSource::Ocr
+            ),
+            GamePhase::Unknown
+        ));
+    }
+    assert_eq!(
+        gate::blocked_total(),
+        before_poll,
+        "the poll tick's phase OCR check is not attempted with OCR off"
+    );
+
     // Nothing of Tesseract was started.
     assert_eq!(gate::leptess_created(), 0, "no LepTess was created");
     assert_eq!(gate::tesseract_calls(), 0, "no Tesseract read ran");
