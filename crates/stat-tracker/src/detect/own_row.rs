@@ -181,7 +181,7 @@ impl Plane {
         let mut hist = [0u32; 256];
         for y in y0..y1 {
             let row = &raw[(y * iw + x0) * 3..(y * iw + x1) * 3];
-            for p in row.chunks_exact(3) {
+            for p in row.as_chunks::<3>().0 {
                 let m = p[0].min(p[1]).min(p[2]);
                 hist[usize::from(m)] += 1;
                 white.push(m);
@@ -482,7 +482,9 @@ mod hex {
         if raw.len() % 2 != 0 {
             return Err(serde::de::Error::custom("odd hex length"));
         }
-        raw.chunks_exact(2)
+        raw.as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| match (nibble(pair[0]), nibble(pair[1])) {
                 (Some(hi), Some(lo)) => Ok(hi << 4 | lo),
                 _ => Err(serde::de::Error::custom("not hex")),
