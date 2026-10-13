@@ -25,6 +25,16 @@ fn bars(seed: u32, w: u32, h: u32) -> GrayImage {
     })
 }
 
+/// Pseudo-random 3 px blocks, 8-bit grey: lit texture that is no word.
+fn noise(seed: u32, w: u32, h: u32) -> GrayImage {
+    GrayImage::from_fn(w, h, |x, y| {
+        let v = (x / 3).wrapping_mul(73_856_093)
+            ^ (y / 3).wrapping_mul(19_349_663)
+            ^ seed.wrapping_mul(83_492_791);
+        Luma([if v % 5 < 2 { 229 } else { 0 }])
+    })
+}
+
 /// A 1440p frame of one colour with `word` painted (doubled) at (x0, y0).
 fn frame(back: [u8; 3], word: Option<(&GrayImage, u32, u32, [u8; 3])>) -> RgbImage {
     let mut frame = RgbImage::from_pixel(2560, 1440, Rgb(back));
@@ -160,11 +170,23 @@ fn the_daemon_reads_the_result_word_from_the_words_pack() {
         assert_eq!(detect_outcome_signal(&img), None);
     }
 
-    // No word on the frame, whether the crops are dark or lit: no signal,
-    // and no read to keep (a first look at the two screens finds no word,
-    // so the frame is not read in full).
-    for back in [DARK, WARM, [230, 230, 235]] {
-        let rgb = frame(back, None);
+    // No word on the frame: lit texture where the accolade word sits, where
+    // the rank word sits, and in both places (not flat planes, so the read
+    // has something to score). No signal, and no read to keep: the first
+    // look at the two screens finds no sure word, so the frame is not read
+    // in full.
+    let (speckle, grain) = (noise(1, 110, 30), noise(2, 100, 36));
+    let mut both = frame(DARK, Some((&speckle, 32, 60, gold)));
+    for (x, y, px) in frame(DARK, Some((&grain, 45, 218, white))).enumerate_pixels() {
+        if (200..300).contains(&y) {
+            both.put_pixel(x, y, *px);
+        }
+    }
+    for rgb in [
+        frame(DARK, Some((&speckle, 32, 60, gold))),
+        frame(WARM, Some((&grain, 45, 218, white))),
+        both,
+    ] {
         let img = DynamicImage::ImageRgb8(rgb.clone());
         let titles = Titles::for_rgb(true, &rgb);
         let mut stability = FrameStability::default();

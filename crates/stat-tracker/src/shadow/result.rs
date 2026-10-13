@@ -2624,6 +2624,21 @@ mod tests {
         );
         assert_eq!(loaded.read_screens(&title).read, None);
 
+        // lit texture in both result regions that is no word (not a flat
+        // plane, so the first look has something to score)
+        let mut busy = dark_frame();
+        paint(&mut busy, &lay(ACCOLADE), &blobs(3, 110, 30), [255, 220, 0]);
+        paint(
+            &mut busy,
+            &lay(RANK_SCREEN),
+            &glyphs(5, 100, 34),
+            [245, 245, 245],
+        );
+        let first = loaded.screen_words.as_ref().unwrap().read(&busy);
+        assert!(first.score > 0.0, "the texture is scored: {first:?}");
+        assert_eq!(first.sure(), None, "{first:?}");
+        assert_eq!(loaded.read_screens(&busy).read, None);
+
         // no result-screen templates at all: never read
         let titles_only = LoadedResults::new(
             loaded.end_titles.clone().unwrap(),
