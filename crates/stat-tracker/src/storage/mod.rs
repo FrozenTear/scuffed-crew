@@ -244,6 +244,12 @@ impl PersonalMatch {
         self.edited_fields.iter().any(|f| f == field)
     }
 
+    /// True when this row carries a member's own map choice (a map edit or
+    /// pick: `corrected_map_name`, or `map_name` in `edited_fields`).
+    pub fn has_member_map_edit(&self) -> bool {
+        self.corrected_map_name.is_some() || self.field_edited("map_name")
+    }
+
     /// Effective hero: a manual correction wins, else the majority-derived
     /// primary from the hero timeline, else the raw OCR read.
     pub fn display_hero(&self) -> &str {
@@ -1149,6 +1155,77 @@ impl LocalStore {
             }),
         );
         Ok(())
+    }
+
+    /// [`Self::set_session_map`] that leaves a member's own map choice alone.
+    ///
+    /// A row that carries a member's map choice
+    /// ([`PersonalMatch::has_member_map_edit`]) keeps the `map_name` read
+    /// under the choice and the `game_mode` stored with it. The session and
+    /// every other row take `map`, as in [`Self::set_session_map`]: a map
+    /// choice is stamped on the rows that exist when it is made, so the rows
+    /// captured after it (the newest is the game's row) have none and must
+    /// not keep an untrusted or empty map. Returns how many rows were left
+    /// alone. With none, this is [`Self::set_session_map`].
+    pub async fn set_session_map_keeping_member_choices(
+        &self,
+        session_id: &str,
+        map: &str,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        let kept = snaps.iter().filter(|m| m.has_member_map_edit()).count();
+        if kept == 0 {
+            self.set_session_map(session_id, map).await?;
+            return Ok(0);
+        }
+        let mode = crate::parse::stored_game_mode(map);
+        self.db
+            .query("UPDATE match_session SET map_name = $map WHERE session_id = $sid")
+            .bind(("map", map.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        for m in &snaps {
+            let Some(id) = m.id.clone() else { continue };
+            if m.has_member_map_edit() {
+                continue;
+            }
+            // the two writes of `set_session_map`, for this row only
+            if m.map_name != map || m.game_mode != mode {
+                self.db
+                    .query(
+                        "UPDATE $id SET map_name = $map, game_mode = $mode, synced = false, \
+                         upload_reject = '', sync_rev = (sync_rev ?? 0) + 1",
+                    )
+                    .bind(("id", id.clone()))
+                    .bind(("map", map.to_string()))
+                    .bind(("mode", mode.clone()))
+                    .await?;
+            }
+            let mut suspects = m.suspect_fields.clone();
+            crate::reader_apply::clear_edited_suspects(&mut suspects, "map_name");
+            if suspects != m.suspect_fields {
+                self.db
+                    .query("UPDATE $id SET suspect_fields = $sf")
+                    .bind(("id", id))
+                    .bind(("sf", suspects))
+                    .await?;
+            }
+        }
+        let map = map.to_string();
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|m| {
+                if m.has_member_map_edit() {
+                    return;
+                }
+                m.map_name = map.clone();
+                m.game_mode = mode.clone();
+                m.upload_reject = None;
+                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
+            }),
+        );
+        Ok(kept)
     }
 
     /// Back-fill a detected outcome onto a session and every capture snapshot it

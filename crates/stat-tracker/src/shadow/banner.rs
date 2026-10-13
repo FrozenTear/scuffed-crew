@@ -77,22 +77,53 @@ const CAP_ROWS: (f64, f64) = (8.0, 25.0);
 /// ([`super::result::ACCOLADE_Y1`]). No name is inside it.
 const ACCOLADE_X: (f64, f64) = (0.125, 0.45);
 const ACCOLADE_Y: (f64, f64) = (0.030, super::result::ACCOLADE_Y1);
-/// Where the capitals of the accolade map line sit: top edge and height, as
-/// fractions of the game rect height, with the tolerance on each. Measured
-/// on native 1080p and 1440p frames (top 4.17%, height 1.48% to 1.53%).
+/// Top edge of the accolade map line's capitals, as a fraction of the game
+/// rect height: (value, tolerance). Measured on native 1080p and 1440p
+/// frames (4.17%).
 const ACCOLADE_CAP_TOP: (f64, f64) = (0.0417, 0.0030);
+/// The tolerance on the line's place is never under this many pixels
+/// ([`place_slack`]). An edge lands on a whole row whatever the frame size,
+/// and a windowed 1650x926 frame has the line 2.6 px above its measured
+/// place, where 0.30% is 2.8 px: the next row up was outside. With 4 px
+/// that row is inside.
+const ACCOLADE_PLACE_MIN_PX: f64 = 4.0;
+/// Height of those capitals, as fractions of the game rect height: (lowest,
+/// highest). A range, not a tolerance. Measured 1.48% to 1.53%.
 const ACCOLADE_CAP_HEIGHT: (f64, f64) = (0.0125, 0.0180);
-/// Bottom edge of the row band that holds the line (a `Q` tail adds a row).
+/// Bottom edge of the line's capitals (a `Q` tail adds a row): the bottom
+/// of the row band that holds the line, or the capitals' own bottom when a
+/// mark hangs under them ([`ACCOLADE_DESCENDER`]).
 const ACCOLADE_BAND_BOTTOM: (f64, f64) = (0.0535, 0.0605);
 /// Top edge of that band: the capitals' top, or an accent joined to it.
 const ACCOLADE_BAND_TOP: (f64, f64) = (0.0330, 0.0455);
-// The region ends above the nameplate and holds the line's rows (checked
-// at compile time).
+/// How far a mark under the baseline may carry the band's bottom past the
+/// capitals', as a share of the capital height. The cedilla of `Ç` is 6 of
+/// 17 rows in maps-v1 (0.35); no other glyph of the pack goes under the
+/// baseline by more than a row.
+const ACCOLADE_DESCENDER: f64 = 0.50;
+/// Lowest score for a sure accolade read when no other map's template is
+/// inside the width gate ([`MAX_RATIO`]). The margin test has no rival to
+/// measure against then (`ILIOS` is the only name of its width), so the
+/// score alone has to carry the read. With maps-v1, the best score of a
+/// random string of 3 to 5 capitals that has no rival is 0.83 (2 of 20,000
+/// clear [`FLOOR`]); `ILIOS` itself scores 0.906 or more painted at five
+/// sizes and 0.937 or more on real accolade frames.
+pub const ACCOLADE_LONE_FLOOR: f32 = 0.87;
+// The region ends above the nameplate and holds the line's rows, a mark
+// under the baseline included (checked at compile time).
 const _: () = assert!(
     ACCOLADE_Y.1 < super::result::NAME_LINE_TOP
         && ACCOLADE_Y.0 < ACCOLADE_BAND_TOP.0
-        && ACCOLADE_BAND_BOTTOM.1 < ACCOLADE_Y.1
+        && ACCOLADE_BAND_BOTTOM.1 + ACCOLADE_DESCENDER * ACCOLADE_CAP_HEIGHT.1 < ACCOLADE_Y.1
 );
+
+/// How much wider than [`ACCOLADE_CAP_TOP`]'s tolerance the place gates are
+/// on a frame `gh` rows high, as a fraction of that height: what
+/// [`ACCOLADE_PLACE_MIN_PX`] adds on a small frame, and nothing from 1334
+/// rows up.
+fn place_slack(gh: f64) -> f64 {
+    (ACCOLADE_PLACE_MIN_PX / gh - ACCOLADE_CAP_TOP.1).max(0.0)
+}
 
 /// Accolade spellings that are not a banner spelling of the map: (text on
 /// the accolade screen, [`MapInfo::key`]). `ADLERSBRUNN` is the Halloween
@@ -728,11 +759,18 @@ fn true_runs(on: impl Iterator<Item = bool>) -> Vec<(usize, usize)> {
 /// * splits the band's ink into glyph runs and keeps the one group of at
 ///   least two runs with no gap wider than a capital,
 /// * takes the capitals' top and bottom as the median over the runs (an
-///   accent, an apostrophe or a `Q` tail moves one run, not the median) and
-///   checks them against [`ACCOLADE_CAP_TOP`] and [`ACCOLADE_CAP_HEIGHT`],
+///   accent, an apostrophe, a `Q` tail or a cedilla moves one run, not the
+///   median) and checks them against [`ACCOLADE_CAP_TOP`] and
+///   [`ACCOLADE_CAP_HEIGHT`],
+/// * lets a mark under the baseline carry the band's bottom past the
+///   line's (the cedilla of `ESPERANÇA`) only when the capitals' own bottom
+///   is where the line's is and the mark is no longer than
+///   [`ACCOLADE_DESCENDER`] of a capital. The size of the line is still the
+///   capitals', so a taller or lower line is not let in by this,
 /// * cuts the strip window around the capitals with the banner's proportions
 ///   ([`CAP_ROWS`]) and normalises it to [`H`] rows.
 ///
+/// The place gates have [`place_slack`] more room on a small frame.
 /// Anything else is `None`: this is the only gate that says "accolade line".
 pub fn locate_accolade(rgb: &RgbImage) -> Option<Located> {
     let (w, h) = rgb.dimensions();
@@ -764,6 +802,11 @@ pub fn locate_accolade(rgb: &RgbImage) -> Option<Located> {
     // rows of the region as fractions of the game rect height
     let frac = |y: f64| (y0 as f64 + y - gy as f64) / ghf;
     let within = |v: f64, (lo, hi): (f64, f64)| lo <= v && v <= hi;
+    let slack = place_slack(ghf);
+    let widen = |(lo, hi): (f64, f64)| (lo - slack, hi + slack);
+    let (band_top, band_bottom) = (widen(ACCOLADE_BAND_TOP), widen(ACCOLADE_BAND_BOTTOM));
+    // the lowest a band may end: the line's bottom plus a mark under it
+    let hang_to = band_bottom.1 + ACCOLADE_DESCENDER * ACCOLADE_CAP_HEIGHT.1;
 
     let rows = true_runs((0..bh).map(|y| (0..bw).any(|x| ink(x, y))));
     // Ink that runs off the top of the region is not the line's: a
@@ -773,15 +816,30 @@ pub fn locate_accolade(rgb: &RgbImage) -> Option<Located> {
         Some(&(0, end)) => end,
         _ => 0,
     };
-    let (bt, bb) = rows.into_iter().find(|&(t, b)| {
-        within(frac(t as f64), ACCOLADE_BAND_TOP) && within(frac(b as f64), ACCOLADE_BAND_BOTTOM)
+    let at = rows.iter().position(|&(t, b)| {
+        t >= clip
+            && within(frac(t as f64), band_top)
+            && within(frac(b as f64), (band_bottom.0, hang_to))
     })?;
+    let (bt, bb) = rows[at];
     let rough = (bb - bt) as f64;
     // room for an accent above and a tail below, short of the match time
     let rt = bt
         .saturating_sub((0.40 * rough).round_ties_even() as usize)
         .max(clip);
-    let rb = (bb + (0.25 * rough).round_ties_even() as usize).min(bh);
+    let mut rb = (bb + (0.25 * rough).round_ties_even() as usize).min(bh);
+    // A mark that is not joined to its glyph is a row band of its own and
+    // stays inside the window. The match time is a band too, and is not:
+    // it ends far below anything that hangs under the line.
+    for &(t, b) in &rows[at + 1..] {
+        if t >= rb {
+            break;
+        }
+        if frac(b as f64) > hang_to {
+            rb = t;
+            break;
+        }
+    }
     let cols = true_runs((0..bw).map(|x| (rt..rb).any(|y| ink(x, y))));
     let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
     for run in cols {
@@ -803,7 +861,16 @@ pub fn locate_accolade(rgb: &RgbImage) -> Option<Located> {
     let (ct, cb) = (median(tops), median(bots));
     let cap = cb - ct;
     let (top, tol) = ACCOLADE_CAP_TOP;
-    if (frac(ct) - top).abs() > tol || !within(cap / ghf, ACCOLADE_CAP_HEIGHT) {
+    if (frac(ct) - top).abs() > tol + slack || !within(cap / ghf, ACCOLADE_CAP_HEIGHT) {
+        return None;
+    }
+    // A band that ends under the line's bottom is the line with a mark
+    // hanging from it, or it is not the line: the capitals must end where
+    // the line's do, and the mark must be no longer than a descender.
+    let hang = bb as f64 - cb;
+    if frac(bb as f64) > band_bottom.1
+        && (!within(frac(cb), band_bottom) || hang > ACCOLADE_DESCENDER * cap)
+    {
         return None;
     }
     let rows_per_cap = CAP_ROWS.1 - CAP_ROWS.0;
@@ -1004,45 +1071,8 @@ impl MapTemplates {
     /// or any other shape refuses the whole pack, so [`MapDirs`] falls back
     /// to the next folder and no image outside the pack is ever decoded.
     pub fn load_dir(dir: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(dir.join("atlas.json")).ok()?;
-        let atlas: AtlasFile = serde_json::from_str(&text).ok()?;
-        if atlas.height != H {
-            return None;
-        }
-        if !atlas
-            .glyphs
-            .values()
-            .all(|f| crate::packs::is_glyph_name(f))
-        {
-            tracing::warn!(
-                folder = ?dir.file_name(),
-                "map pack atlas.json names a file outside the pack layout; pack not used"
-            );
-            return None;
-        }
-        let mut glyphs: HashMap<char, Gray> = HashMap::new();
-        for (k, file) in &atlas.glyphs {
-            let Some(c) = k.chars().next() else { continue };
-            let Ok(img) = image::open(dir.join(file)) else {
-                continue;
-            };
-            let l = img.to_luma8();
-            if l.height() as usize != H || l.width() == 0 {
-                continue;
-            }
-            glyphs.insert(
-                c,
-                Gray {
-                    w: l.width() as usize,
-                    h: H,
-                    px: l.pixels().map(|p| p.0[0] as f32 / 255.0).collect(),
-                },
-            );
-        }
-        if glyphs.is_empty() {
-            return None;
-        }
-        Some(Self::compose_all(&glyphs, atlas.gap, atlas.space))
+        let (glyphs, gap, space) = load_glyphs(dir)?;
+        Some(Self::compose_all(&glyphs, gap, space))
     }
 
     /// Build templates from glyphs (tests use synthetic glyphs).
@@ -1091,7 +1121,8 @@ impl MapTemplates {
     }
 
     /// Read one frame's accolade map line ([`locate_accolade`]), with the
-    /// banner's floor and margin. `found_banner` is "the line was found".
+    /// banner's floor and margin, and [`ACCOLADE_LONE_FLOOR`] when no other
+    /// map is inside the width gate. `found_banner` is "the line was found".
     pub fn read_accolade(&self, rgb: &RgbImage) -> MapRead {
         match locate_accolade(rgb) {
             Some(l) => self.read_accolade_strip(&l.strip),
@@ -1108,19 +1139,32 @@ impl MapTemplates {
 
     /// Score a located banner strip against every map.
     pub fn read_strip(&self, strip: &Gray) -> MapRead {
-        self.read_strip_of(strip, self.tpls.iter())
+        self.read_strip_of(strip, self.tpls.iter(), FLOOR)
     }
 
     /// Score a located accolade strip against every map, the
     /// [`ACCOLADE_ALIASES`] spellings included.
+    ///
+    /// A read with no rival clears [`ACCOLADE_LONE_FLOOR`], not [`FLOOR`]:
+    /// the banner's margin says nothing when every other map's template is
+    /// outside the width gate. A short name such as `ILIOS` is then held by
+    /// four things: that floor, the width gate itself (the strip is within
+    /// 15% of the template's width), [`locate_accolade`] (one line of
+    /// capitals of the right size in the map line's rows and nothing beside
+    /// it), and the trigger (only a tick that read the result word).
     pub fn read_accolade_strip(&self, strip: &Gray) -> MapRead {
-        self.read_strip_of(strip, self.tpls.iter().chain(&self.accolade))
+        self.read_strip_of(
+            strip,
+            self.tpls.iter().chain(&self.accolade),
+            ACCOLADE_LONE_FLOOR,
+        )
     }
 
     fn read_strip_of<'a>(
         &self,
         strip: &Gray,
         tpls: impl Iterator<Item = &'a (usize, &'static str, Tpl)>,
+        lone_floor: f32,
     ) -> MapRead {
         let mut best = vec![f64::NEG_INFINITY; MAPS.len()];
         for (mi, _, t) in tpls {
@@ -1131,7 +1175,11 @@ impl MapTemplates {
         let s1 = order.first().map_or(-1.0, |&i| best[i]);
         let s2 = order.get(1).map_or(-1.0, |&i| best[i]);
         let found = s1 > 0.0;
-        let sure = s1 >= FLOOR as f64 && s1 - s2 >= MARGIN as f64;
+        // `Tpl::score` gives -1 to a template outside the width gate, so a
+        // runner-up at -1 (or none) is no rival and the margin is not a
+        // lead over anything.
+        let floor = if s2 > -1.0 { FLOOR } else { lone_floor };
+        let sure = s1 >= floor as f64 && s1 - s2 >= MARGIN as f64;
         let top = order.first().map(|&i| &MAPS[i]);
         MapRead {
             map: if found { top } else { None },
@@ -1142,6 +1190,50 @@ impl MapTemplates {
             found_banner: true,
         }
     }
+}
+
+/// The glyphs of the pack in `dir`, with its glyph gap and word space.
+/// See [`MapTemplates::load_dir`] for what is refused.
+fn load_glyphs(dir: &Path) -> Option<(HashMap<char, Gray>, f64, f64)> {
+    let text = std::fs::read_to_string(dir.join("atlas.json")).ok()?;
+    let atlas: AtlasFile = serde_json::from_str(&text).ok()?;
+    if atlas.height != H {
+        return None;
+    }
+    if !atlas
+        .glyphs
+        .values()
+        .all(|f| crate::packs::is_glyph_name(f))
+    {
+        tracing::warn!(
+            folder = ?dir.file_name(),
+            "map pack atlas.json names a file outside the pack layout; pack not used"
+        );
+        return None;
+    }
+    let mut glyphs: HashMap<char, Gray> = HashMap::new();
+    for (k, file) in &atlas.glyphs {
+        let Some(c) = k.chars().next() else { continue };
+        let Ok(img) = image::open(dir.join(file)) else {
+            continue;
+        };
+        let l = img.to_luma8();
+        if l.height() as usize != H || l.width() == 0 {
+            continue;
+        }
+        glyphs.insert(
+            c,
+            Gray {
+                w: l.width() as usize,
+                h: H,
+                px: l.pixels().map(|p| p.0[0] as f32 / 255.0).collect(),
+            },
+        );
+    }
+    if glyphs.is_empty() {
+        return None;
+    }
+    Some((glyphs, atlas.gap, atlas.space))
 }
 
 fn compose(glyphs: &HashMap<char, Gray>, gap: f64, space: f64, text: &str) -> Option<Tpl> {
@@ -1479,16 +1571,21 @@ pub(crate) mod test_fixtures {
         write_pack_rows(dir, letters, 7);
     }
 
-    /// [`write_pack`] with the [`accolade_atlas`] glyphs.
+    /// [`write_pack`] with the [`accolade_atlas`] glyphs
+    /// ([`accolade_glyph`], so `Ç` has its cedilla).
     pub(crate) fn write_accolade_pack(dir: &Path, letters: &str) {
-        write_pack_rows(dir, letters, 8);
+        write_pack_of(dir, letters, accolade_glyph);
     }
 
     fn write_pack_rows(dir: &Path, letters: &str, top: usize) {
+        write_pack_of(dir, letters, |c| glyph_rows(c, top));
+    }
+
+    fn write_pack_of(dir: &Path, letters: &str, glyph: impl Fn(char) -> Gray) {
         std::fs::create_dir_all(dir).unwrap();
         let mut entries = Vec::new();
         for c in letters.chars() {
-            let g = glyph_rows(c, top);
+            let g = glyph(c);
             let file = format!("g{:04x}.png", c as u32);
             let img = GrayImage::from_fn(g.w as u32, H as u32, |x, y| {
                 image::Luma([(g.at(x as usize, y as usize) * 255.0).round() as u8])
@@ -1507,9 +1604,41 @@ pub(crate) mod test_fixtures {
         std::fs::write(dir.join("atlas.json"), json).unwrap();
     }
 
+    /// Rows of the `Ç` glyph's cedilla, top and bottom edge: where maps-v1
+    /// has it, under the baseline ([`CAP_ROWS`] ends at 25).
+    pub(crate) const CEDILLA_ROWS: (usize, usize) = (25, 31);
+
+    /// One accolade glyph: the capital where maps-v1 keeps it
+    /// ([`CAP_ROWS`]). `Ç` is the `C` with a cedilla joined under it.
+    pub(crate) fn accolade_glyph(c: char) -> Gray {
+        if c == 'Ç' {
+            return with_cedilla(CEDILLA_ROWS);
+        }
+        glyph_rows(c, 8)
+    }
+
+    /// The `C` glyph with a mark under it in `rows` (top and bottom edge).
+    pub(crate) fn with_cedilla(rows: (usize, usize)) -> Gray {
+        let mut g = glyph_rows('C', 8);
+        for y in rows.0..rows.1 {
+            for x in 4..8 {
+                g.px[y * g.w + x] = 1.0;
+            }
+        }
+        g
+    }
+
+    /// [`LETTERS`] plus `Ç`, for accolade packs and frames.
+    pub(crate) fn accolade_letters() -> String {
+        format!("{LETTERS}Ç")
+    }
+
     /// Glyphs with the capital where maps-v1 keeps it, for accolade frames.
     pub(crate) fn accolade_atlas() -> HashMap<char, Gray> {
-        LETTERS.chars().map(|c| (c, glyph_rows(c, 8))).collect()
+        accolade_letters()
+            .chars()
+            .map(|c| (c, accolade_glyph(c)))
+            .collect()
     }
 
     /// What an accolade frame holds besides the map line.
@@ -1531,6 +1660,8 @@ pub(crate) mod test_fixtures {
         /// A performance overlay's white text across the top of the frame,
         /// down to this fraction of the frame height.
         pub overlay_to: Option<f64>,
+        /// The line's width over its natural width (1.0 is as drawn).
+        pub stretch: f64,
     }
 
     impl Accolade {
@@ -1543,6 +1674,15 @@ pub(crate) mod test_fixtures {
                 accents: false,
                 match_time: true,
                 overlay_to: None,
+                stretch: 1.0,
+            }
+        }
+
+        /// The line `px` rows below its measured place (above when negative).
+        pub(crate) fn moved_px(self, px: f64) -> Self {
+            Self {
+                cap_top: self.cap_top + px / self.size.1 as f64,
+                ..self
             }
         }
     }
@@ -1551,6 +1691,23 @@ pub(crate) mod test_fixtures {
     /// block at the left, `text` in white from the [`accolade_atlas`] glyphs
     /// with capitals `cap` of the frame height tall, and the match time line.
     pub(crate) fn frame_with_accolade(text: &str, a: Accolade) -> RgbImage {
+        let marks: &[usize] = if a.accents { &[0, 2] } else { &[] };
+        paint_accolade(&accolade_atlas(), GAP, SPACE, text, a, marks, (5.5, 0.0))
+    }
+
+    /// [`frame_with_accolade`] from any glyphs. `marks` are the glyphs (by
+    /// index, spaces not counted) that get a white accent block above them,
+    /// from `mark_rows.0` to `mark_rows.1` glyph rows above the capitals'
+    /// top (0 joins the accent to its glyph).
+    pub(crate) fn paint_accolade(
+        glyphs: &HashMap<char, Gray>,
+        gap: f64,
+        space: f64,
+        text: &str,
+        a: Accolade,
+        marks: &[usize],
+        mark_rows: (f64, f64),
+    ) -> RgbImage {
         let (w, h) = a.size;
         let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 24]));
         let (wf, hf) = (w as f64, h as f64);
@@ -1560,12 +1717,13 @@ pub(crate) mod test_fixtures {
                 img.put_pixel(x, y, Rgb([20, 190, 255]));
             }
         }
-        let t = compose(&accolade_atlas(), GAP, SPACE, text).unwrap();
+        let t = compose(glyphs, gap, space, text).unwrap();
         let tpl = t.render(&vec![0; t.parts.len()]);
         // 17 glyph rows hold the capital
         let s = a.cap * hf / 17.0;
+        let sx_scale = s * a.stretch;
         let (tw, th) = (
-            (tpl.w as f64 * s).round() as u32,
+            (tpl.w as f64 * sx_scale).round() as u32,
             (H as f64 * s).round() as u32,
         );
         let scaled = tpl.resize(tw as usize, th as usize);
@@ -1578,15 +1736,14 @@ pub(crate) mod test_fixtures {
                 img.put_pixel(sx + x, top + y, Rgb([c, c, c.max(24)]));
             }
         }
-        if a.accents {
-            let cap_top = (a.cap_top * hf).round() as u32;
-            for (px, g) in [&t.parts[0], &t.parts[2]] {
-                let gx = sx + ((*px as f64 + 3.0) * s) as u32;
-                let gw = ((g.w as f64 - 6.0) * s) as u32;
-                for y in cap_top - (5.5 * s) as u32..cap_top {
-                    for x in gx..gx + gw {
-                        img.put_pixel(x, y, Rgb([250, 250, 250]));
-                    }
+        let cap_top = (a.cap_top * hf).round() as u32;
+        for &i in marks {
+            let (px, g) = &t.parts[i];
+            let gx = sx + ((*px as f64 + 3.0) * sx_scale) as u32;
+            let gw = (((g.w as f64 - 6.0) * sx_scale) as u32).max(1);
+            for y in cap_top - (mark_rows.0 * s) as u32..cap_top - (mark_rows.1 * s) as u32 {
+                for x in gx..gx + gw {
+                    img.put_pixel(x, y, Rgb([250, 250, 250]));
                 }
             }
         }
@@ -1655,13 +1812,17 @@ pub(crate) mod test_fixtures {
 mod tests {
     use super::test_fixtures::{
         Accolade, GAP, LETTERS, SPACE, accolade_atlas, atlas, frame_with_accolade,
-        frame_with_banner, write_pack,
+        frame_with_banner, glyph_rows, paint_accolade, with_cedilla, write_pack,
     };
     use super::*;
     use image::Rgb;
 
+    const P720: (u32, u32) = (1280, 720);
+    /// The member's windowed size.
+    const WINDOWED: (u32, u32) = (1650, 926);
     const P1080: (u32, u32) = (1920, 1080);
     const P1440: (u32, u32) = (2560, 1440);
+    const P2160: (u32, u32) = (3840, 2160);
 
     fn accolade_templates() -> MapTemplates {
         MapTemplates::compose_all(&accolade_atlas(), GAP, SPACE)
@@ -1743,6 +1904,350 @@ mod tests {
             };
             assert!(locate_accolade(&frame_with_accolade("NEPAL", joined)).is_none());
         }
+    }
+
+    /// `ESPERANÇA`: the cedilla hangs under the baseline and carries the row
+    /// band's bottom past the line's (F265-2). The line is found, its window
+    /// is the one the same name has without the cedilla, and the map is
+    /// Esperança: at 720p, 1080p and 1440p, at the measured place and a
+    /// pixel off it, after either result word, and with the cedilla joined
+    /// to its `C` or a row band of its own. (The block glyphs of this
+    /// fixture are too coarse for a sure read at 720p; the painted sweep
+    /// below reads the real pack's glyphs sure at that size.)
+    #[test]
+    fn a_cedilla_under_the_accolade_line_does_not_hide_it() {
+        let joined = accolade_atlas();
+        let mut apart = accolade_atlas();
+        apart.insert('Ç', with_cedilla((27, 31)));
+        let mut bare = accolade_atlas();
+        bare.insert('Ç', glyph_rows('C', 8));
+        let paint = |glyphs: &HashMap<char, Gray>, a: Accolade| {
+            paint_accolade(glyphs, GAP, SPACE, "ESPERANÇA", a, &[], (0.0, 0.0))
+        };
+        for size in [P720, P1080, P1440] {
+            for px in [-1.0, 0.0, 1.0] {
+                for x in [0.174, 0.155] {
+                    let a = Accolade {
+                        x,
+                        ..Accolade::at(size)
+                    }
+                    .moved_px(px);
+                    let at = format!("{size:?} {px:+} px x {x}");
+                    let plain = locate_accolade(&paint(&bare, a)).expect("no cedilla");
+                    for (what, glyphs) in [("joined", &joined), ("apart", &apart)] {
+                        let img = paint(glyphs, a);
+                        let l = locate_accolade(&img)
+                            .unwrap_or_else(|| panic!("{what} cedilla, {at}: line not found"));
+                        assert_eq!(l.window, plain.window, "{what} cedilla, {at}");
+                        let r = MapTemplates::compose_all(glyphs, GAP, SPACE).read_accolade(&img);
+                        assert_eq!(r.map.map(|m| m.key), Some("esperanca"), "{what}, {at}");
+                        assert!(
+                            !r.suspect || size == P720,
+                            "{what}, {at}: score {} margin {}",
+                            r.score,
+                            r.margin
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The cedilla rule lets in a mark under the line, not another line.
+    /// Capitals that end where a cedilla would are not the map line, though
+    /// their top and height pass their own gates; and ink under one glyph
+    /// that is longer than a descender is not a cedilla.
+    #[test]
+    fn a_mark_under_the_line_does_not_stand_in_for_its_size() {
+        // sizes with no pixel floor on the gates, so the fractions are exact
+        for size in [P1440, P2160] {
+            let low = Accolade {
+                cap_top: 0.0444,
+                cap: 0.0172,
+                ..Accolade::at(size)
+            };
+            assert!(
+                locate_accolade(&frame_with_accolade("NEPAL", low)).is_none(),
+                "{size:?}: capitals down to 6.16%"
+            );
+            // a white stroke under the first glyph, from the baseline down
+            let stroke = |to: f64| {
+                let a = Accolade {
+                    match_time: false,
+                    ..Accolade::at(size)
+                };
+                let mut img = frame_with_accolade("NEPAL", a);
+                let (wf, hf) = (size.0 as f64, size.1 as f64);
+                let x0 = (0.174 * wf) as u32 + 2;
+                for y in ((0.0417 + 0.0150 - 0.002) * hf) as u32..(to * hf) as u32 {
+                    for x in x0..x0 + 3 {
+                        img.put_pixel(x, y, Rgb([250, 250, 250]));
+                    }
+                }
+                img
+            };
+            // 0.35 of a capital, as long as a cedilla: still the line
+            assert!(
+                locate_accolade(&stroke(0.0620)).is_some(),
+                "{size:?}: a cedilla's length"
+            );
+            // 0.7 of a capital
+            assert!(
+                locate_accolade(&stroke(0.0672)).is_none(),
+                "{size:?}: longer than a descender"
+            );
+        }
+    }
+
+    /// The tolerance on the line's place is at least
+    /// [`ACCOLADE_PLACE_MIN_PX`] rows (F265-4). On the member's windowed
+    /// 1650x926 frame the line sits 2.6 px above its measured place, and
+    /// 0.30% of that height is 2.8 px: one row more and it was gone. The
+    /// line is found 3.4 px off either way, and not 5.5 px off.
+    #[test]
+    fn the_line_is_found_a_few_pixels_off_on_a_small_window() {
+        let t = accolade_templates();
+        for px in [-3.4, -2.6, 0.0, 2.6, 3.4] {
+            let a = Accolade::at(WINDOWED).moved_px(px);
+            let r = t.read_accolade(&frame_with_accolade("KING'S ROW", a));
+            assert!(r.found_banner, "{px} px: line not found");
+            assert_eq!(r.map.map(|m| m.key), Some("kings-row"), "{px} px");
+            assert!(!r.suspect, "{px} px: score {} margin {}", r.score, r.margin);
+        }
+        // still a fixed place: 5.5 px off is another row of the screen
+        for px in [-5.5, 5.5] {
+            let a = Accolade {
+                match_time: false,
+                ..Accolade::at(WINDOWED)
+            }
+            .moved_px(px);
+            assert!(
+                locate_accolade(&frame_with_accolade("KING'S ROW", a)).is_none(),
+                "{px} px"
+            );
+        }
+    }
+
+    /// The capitals' top is its own gate, not a consequence of the row
+    /// band's (F265-7): a taller line 0.43% above the measured place has
+    /// both band edges in range and is not the map line. The same line at
+    /// the measured place is.
+    #[test]
+    fn capitals_above_the_measured_top_are_not_located() {
+        for size in [P1440, P2160] {
+            let tall = Accolade {
+                cap: 0.0170,
+                ..Accolade::at(size)
+            };
+            let high = Accolade {
+                cap_top: 0.0374,
+                ..tall
+            };
+            assert!(
+                locate_accolade(&frame_with_accolade("NEPAL", tall)).is_some(),
+                "{size:?}: a 1.70% line at the measured top"
+            );
+            assert!(
+                locate_accolade(&frame_with_accolade("NEPAL", high)).is_none(),
+                "{size:?}: the same line 0.43% higher"
+            );
+        }
+    }
+
+    /// One run of ink is not a line of capitals, and a lone run beside a
+    /// name is not a second group of them (F265-7).
+    #[test]
+    fn one_block_of_ink_on_the_accolade_rows_is_not_a_line() {
+        let (w, h) = P1080;
+        let rows = (0.0417 * h as f64) as u32..((0.0417 + 0.0150) * h as f64) as u32;
+        let mut bar = RgbImage::from_pixel(w, h, Rgb([12, 14, 24]));
+        for y in rows.clone() {
+            for x in (0.174 * w as f64) as u32..(0.27 * w as f64) as u32 {
+                bar.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+        assert!(locate_accolade(&bar).is_none(), "a white bar");
+
+        let plain = frame_with_accolade("NEPAL", Accolade::at(P1080));
+        let mut marked = plain.clone();
+        for y in rows {
+            for x in 760..766 {
+                marked.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+        let a = locate_accolade(&plain).unwrap();
+        let b = locate_accolade(&marked).expect("the name is still one group");
+        assert_eq!(a.window, b.window);
+    }
+
+    /// Glyphs that are one pixel apart from each other: every name of a
+    /// given shape scores almost the same.
+    fn lookalike_atlas() -> HashMap<char, Gray> {
+        LETTERS
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut g = glyph_rows('A', 8);
+                let (x, y) = (1 + i % 10, 9 + i / 10);
+                g.px[y * g.w + x] = 1.0 - g.px[y * g.w + x];
+                (c, g)
+            })
+            .collect()
+    }
+
+    /// A best map that clears the floor but leads the next by less than
+    /// [`MARGIN`] is flagged, on the banner path and on the accolade path
+    /// (F265-7).
+    #[test]
+    fn a_lead_under_the_margin_is_flagged_on_both_paths() {
+        let glyphs = lookalike_atlas();
+        let t = MapTemplates::compose_all(&glyphs, GAP, SPACE);
+        let nepal = compose(&glyphs, GAP, SPACE, "NEPAL").unwrap();
+        let strip = nepal.render(&[0; 5]);
+        for (path, r) in [
+            ("banner", t.read_strip(&strip)),
+            ("accolade", t.read_accolade_strip(&strip)),
+        ] {
+            assert_eq!(r.map.map(|m| m.key), Some("nepal"), "{path}");
+            assert!(r.score >= ACCOLADE_LONE_FLOOR, "{path}: score {}", r.score);
+            assert!(
+                r.margin > 0.0 && r.margin < MARGIN,
+                "{path}: margin {}",
+                r.margin
+            );
+            assert!(r.suspect, "{path}: sure with a lead of {}", r.margin);
+        }
+        // and on a frame, through the accolade locate
+        let img = paint_accolade(
+            &glyphs,
+            GAP,
+            SPACE,
+            "NEPAL",
+            Accolade::at(P1080),
+            &[],
+            (0.0, 0.0),
+        );
+        let r = t.read_accolade(&img);
+        assert!(r.found_banner && r.score >= FLOOR, "score {}", r.score);
+        assert!(r.suspect, "sure with a lead of {}", r.margin);
+    }
+
+    /// A strip is scored against a template only when their widths are
+    /// within [`MAX_RATIO`] (F265-7): the same glyphs drawn a fifth wider or
+    /// narrower are another word, and a name drawn 30% wider on the
+    /// accolade line does not read as that map.
+    #[test]
+    fn a_line_of_another_width_is_not_that_map() {
+        let nepal = compose(&accolade_atlas(), GAP, SPACE, "NEPAL").unwrap();
+        let strip = nepal.render(&[0; 5]);
+        assert!(nepal.score(&strip) > 0.99);
+        let scaled = |k: f64| strip.resize((strip.w as f64 * k).round() as usize, H);
+        for k in [0.90, 1.10] {
+            assert!(
+                nepal.score(&scaled(k)) > FLOOR as f64,
+                "{k}: inside the gate"
+            );
+        }
+        for k in [0.80, 1.20] {
+            assert_eq!(nepal.score(&scaled(k)), -1.0, "{k}: outside the gate");
+        }
+        let wide = Accolade {
+            stretch: 1.3,
+            ..Accolade::at(P1080)
+        };
+        let r = accolade_templates().read_accolade(&frame_with_accolade("NEPAL", wide));
+        assert!(r.found_banner, "the stretched line is still a line");
+        assert!(
+            r.suspect,
+            "read {:?} sure: score {} margin {}",
+            r.map.map(|m| m.key),
+            r.score,
+            r.margin
+        );
+    }
+
+    /// `strip` with `share` of a fixed stripe pattern mixed in.
+    fn degraded(strip: &Gray, share: f32) -> Gray {
+        let mut out = strip.clone();
+        for y in 0..out.h {
+            for x in 0..out.w {
+                let noise = if (x / 3 + y / 2) % 2 == 0 { 1.0 } else { 0.0 };
+                let v = &mut out.px[y * strip.w + x];
+                *v = (1.0 - share) * *v + share * noise;
+            }
+        }
+        out
+    }
+
+    /// The first degraded `strip` that `read` scores under `under`.
+    fn degrade_until(strip: &Gray, under: f32, read: impl Fn(&Gray) -> MapRead) -> Gray {
+        (1..60)
+            .map(|i| degraded(strip, i as f32 * 0.01))
+            .find(|s| read(s).score < under)
+            .expect("a degraded strip under the score")
+    }
+
+    /// A name with no other map inside the width gate has no rival for the
+    /// margin to measure against (F265-5). On the accolade path it then
+    /// needs [`ACCOLADE_LONE_FLOOR`]; a name with rivals keeps [`FLOOR`] and
+    /// the margin, and the banner path is as it was.
+    #[test]
+    fn a_read_with_no_rival_needs_the_higher_floor() {
+        // a narrow `I`, as in maps-v1: ILIOS is then narrower than any other
+        // name by more than the width gate
+        let mut glyphs = accolade_atlas();
+        let mut i = Gray::new(3, H);
+        for y in 8..25 {
+            i.px[y * 3 + 1] = 1.0;
+        }
+        glyphs.insert('I', i);
+        let t = MapTemplates::compose_all(&glyphs, GAP, SPACE);
+        let render = |text: &str| {
+            let tpl = compose(&glyphs, GAP, SPACE, text).unwrap();
+            tpl.render(&vec![0; tpl.parts.len()])
+        };
+
+        let ilios = render("ILIOS");
+        let clean = t.read_accolade_strip(&ilios);
+        assert_eq!(clean.map.map(|m| m.key), Some("ilios"));
+        assert!(clean.margin > 1.0, "ILIOS has a rival: {}", clean.margin);
+        assert!(!clean.suspect, "a clean ILIOS is sure");
+
+        // between the two floors: sure on the banner, flagged on the accolade
+        let weak = degrade_until(&ilios, ACCOLADE_LONE_FLOOR - 0.01, |s| {
+            t.read_accolade_strip(s)
+        });
+        let (banner, accolade) = (t.read_strip(&weak), t.read_accolade_strip(&weak));
+        assert!(
+            accolade.score > FLOOR + 0.01 && accolade.margin > 1.0,
+            "score {} margin {}",
+            accolade.score,
+            accolade.margin
+        );
+        assert_eq!(accolade.map.map(|m| m.key), Some("ilios"));
+        assert!(
+            accolade.suspect,
+            "ILIOS sure at {} with no rival",
+            accolade.score
+        );
+        assert!(!banner.suspect, "the banner path keeps its one floor");
+
+        // a name with rivals in the gate at the same score is still sure
+        let nepal = degrade_until(&render("NEPAL"), ACCOLADE_LONE_FLOOR - 0.01, |s| {
+            t.read_accolade_strip(s)
+        });
+        let r = t.read_accolade_strip(&nepal);
+        assert_eq!(r.map.map(|m| m.key), Some("nepal"));
+        assert!(
+            r.score > FLOOR + 0.01 && r.margin < 1.0 && r.margin >= MARGIN,
+            "score {} margin {}",
+            r.score,
+            r.margin
+        );
+        assert!(
+            !r.suspect,
+            "a rival in the gate: the banner's floor and margin"
+        );
     }
 
     /// White capitals of the right size in the wrong rows are not the map
@@ -2120,6 +2625,162 @@ mod tests {
         );
         let (maps, _) = dirs.load_stable(|| {}).expect("stable");
         assert_eq!(maps.unwrap().pack, MapPack::V1);
+    }
+
+    /// Where the painted sweeps below find a maps-v1 pack (the folder with
+    /// `atlas.json`). No pack is in git, so they are ignored by default:
+    /// `SCUFFED_MAPS_V1_DIR=<dir> cargo test -p scuffed-stat-tracker --lib --
+    /// --ignored --nocapture painted_`.
+    const PACK_ENV: &str = "SCUFFED_MAPS_V1_DIR";
+
+    fn real_pack() -> (HashMap<char, Gray>, f64, f64) {
+        let dir = std::env::var_os(PACK_ENV).unwrap_or_else(|| panic!("set {PACK_ENV}"));
+        load_glyphs(Path::new(&dir)).expect("a maps-v1 pack")
+    }
+
+    /// Every spelling the accolade read knows, banner spellings and
+    /// aliases, painted on the accolade line with a real pack's glyphs: at
+    /// 720p, the windowed 926p, 1080p, 1440p and 2160p, at the measured
+    /// place and one pixel above and below it, after either result word (6
+    /// placements a size). A letter the pack has no glyph for is drawn from
+    /// its base letter with an accent block above it, which its template
+    /// does not have. Every line must be located and read as its own map.
+    #[test]
+    #[ignore = "needs a maps-v1 pack outside git (SCUFFED_MAPS_V1_DIR)"]
+    fn painted_sweep_of_every_accolade_spelling() {
+        let (glyphs, gap, space) = real_pack();
+        let t = MapTemplates::compose_all(&glyphs, gap, space);
+        let mut spellings: Vec<(&str, &str)> = MAPS
+            .iter()
+            .flat_map(|m| m.banner.iter().map(move |b| (*b, m.key)))
+            .collect();
+        spellings.extend(ACCOLADE_ALIASES.iter().copied());
+        let sizes = [P720, WINDOWED, P1080, P1440, P2160];
+        let mut failed = Vec::new();
+        // per size: lines, located, right, wrong, abstain
+        let mut totals = [[0usize; 5]; 5];
+        let mut lone = Vec::new();
+        for (text, key) in &spellings {
+            if compose(&glyphs, gap, space, text).is_none() {
+                println!("{text}: the pack cannot spell it");
+                failed.push(text.to_string());
+                continue;
+            }
+            let marks: Vec<usize> = text
+                .chars()
+                .filter(|c| *c != ' ')
+                .enumerate()
+                .filter(|(_, c)| !glyphs.contains_key(c) && base_char(*c) != *c)
+                .map(|(i, _)| i)
+                .collect();
+            let mut line = format!("{text:24}");
+            let (mut low_score, mut low_margin) = (f32::MAX, f32::MAX);
+            let mut low_by_size = [f32::MAX; 5];
+            for (si, size) in sizes.iter().enumerate() {
+                let (mut located, mut right, mut wrong, mut abstain) = (0, 0, 0, 0);
+                for px in [-1.0, 0.0, 1.0] {
+                    for x in [0.174, 0.155] {
+                        let a = Accolade {
+                            x,
+                            ..Accolade::at(*size)
+                        }
+                        .moved_px(px);
+                        let img = paint_accolade(&glyphs, gap, space, text, a, &marks, (6.0, 2.0));
+                        let r = t.read_accolade(&img);
+                        if !r.found_banner {
+                            continue;
+                        }
+                        located += 1;
+                        match r.map {
+                            Some(m) if !r.suspect && m.key == *key => {
+                                right += 1;
+                                low_score = low_score.min(r.score);
+                                low_margin = low_margin.min(r.margin);
+                                low_by_size[si] = low_by_size[si].min(r.score);
+                            }
+                            Some(_) if !r.suspect => wrong += 1,
+                            _ => abstain += 1,
+                        }
+                    }
+                }
+                for (i, n) in [6, located, right, wrong, abstain].into_iter().enumerate() {
+                    totals[si][i] += n;
+                }
+                line += &format!(
+                    " | {}p loc {located}/6 right {right} wrong {wrong} abst {abstain}",
+                    size.1
+                );
+                if right != 6 {
+                    failed.push(format!("{text} at {}p", size.1));
+                }
+            }
+            println!("{line} | low score {low_score:.3} margin {low_margin:.3}");
+            if low_margin > 1.0 {
+                lone.push((*text, low_by_size));
+            }
+        }
+        for (size, [n, located, right, wrong, abstain]) in sizes.iter().zip(totals) {
+            println!(
+                "{}p: {n} lines, located {located}, right {right}, wrong {wrong}, abstain {abstain}",
+                size.1
+            );
+        }
+        println!("no rival inside the width gate (name, lowest score a size): {lone:?}");
+        assert!(failed.is_empty(), "not located and right: {failed:?}");
+    }
+
+    /// 20,000 random strings of 3 to 5 capitals, as strips drawn with a real
+    /// pack's glyphs: how many read sure as a map with the banner's one
+    /// floor, and how many with [`ACCOLADE_LONE_FLOOR`] (F265-5). Counts
+    /// only; the strings are not names.
+    #[test]
+    #[ignore = "needs a maps-v1 pack outside git (SCUFFED_MAPS_V1_DIR)"]
+    fn painted_random_short_strings_against_the_lone_floor() {
+        let (glyphs, gap, space) = real_pack();
+        let t = MapTemplates::compose_all(&glyphs, gap, space);
+        let names: Vec<&str> = MAPS.iter().flat_map(|m| m.banner.iter().copied()).collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let (mut one_floor, mut lone_floor) = (0, 0);
+        // reads with no rival inside the width gate: how many, highest score
+        let mut no_rival = (0, 0.0f32);
+        let mut by_map: HashMap<&str, (usize, f32)> = HashMap::new();
+        let mut n = 0;
+        while n < 20_000 {
+            let text: String = (0..3 + next(3))
+                .map(|_| (b'A' + next(26) as u8) as char)
+                .collect();
+            if names.contains(&text.as_str()) {
+                continue;
+            }
+            n += 1;
+            let tpl = compose(&glyphs, gap, space, &text).unwrap();
+            let strip = tpl.render(&vec![0; tpl.parts.len()]);
+            let all = || t.tpls.iter().chain(&t.accolade);
+            let old = t.read_strip_of(&strip, all(), FLOOR);
+            let new = t.read_accolade_strip(&strip);
+            if !old.suspect && old.margin > 1.0 {
+                no_rival = (no_rival.0 + 1, no_rival.1.max(old.score));
+            }
+            if !old.suspect {
+                one_floor += 1;
+                let e = by_map.entry(old.map.unwrap().key).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 = e.1.max(old.score);
+            }
+            if !new.suspect {
+                lone_floor += 1;
+            }
+        }
+        println!("{n} strings: sure with one floor {one_floor}, with the lone floor {lone_floor}");
+        println!("one floor, by map (reads, highest score): {by_map:?}");
+        println!("one floor, no rival in the gate (reads, highest score): {no_rival:?}");
+        assert!(lone_floor <= one_floor);
     }
 
     #[test]

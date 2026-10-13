@@ -317,12 +317,17 @@ impl Reader {
 
     /// The map on one after-match accolade frame, when its map line is
     /// found and the read is sure and storable: the same gate as the top bar
-    /// ([`top_bar_map`]). `None` is an abstain: no map pack, no accolade map
-    /// line, a flagged read, or a name the tracker would not store. Nothing
-    /// is guessed and nothing else is read in its place.
-    pub fn read_accolade_map(&self, frame: &DynamicImage) -> Option<TopBarMap> {
-        let maps = self.maps.current()?;
-        top_bar_map(&maps.templates.read_accolade(&rgb_of(frame)))
+    /// ([`top_bar_map`]). Nothing is guessed. See [`AccoladeRead`] for the
+    /// two ways there is no map: the pack did not read the frame, or it read
+    /// it and abstains.
+    pub fn read_accolade_map(&self, rgb: &RgbImage) -> AccoladeRead {
+        let Some(maps) = self.maps.current() else {
+            return AccoladeRead::NoPack;
+        };
+        match top_bar_map(&maps.templates.read_accolade(rgb)) {
+            Some(map) => AccoladeRead::Map(map),
+            None => AccoladeRead::Abstain,
+        }
     }
 
     /// Read every field of one full Tab frame. `result` stays suspect.
@@ -645,6 +650,22 @@ pub struct TopBarMap {
     pub margin: f32,
 }
 
+/// What the map pack makes of one accolade frame
+/// ([`Reader::read_accolade_map`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccoladeRead {
+    /// No map pack is loaded, so nothing read the frame. The caller reads
+    /// the line the way it did before the pack (the OCR), like the top bar,
+    /// the FINAL SCORE line and the phase titles without theirs.
+    NoPack,
+    /// The pack read the frame and has no map for it: no accolade map line,
+    /// a flagged read, or a name the tracker would not store. Nothing else
+    /// is read in its place.
+    Abstain,
+    /// A sure, storable map.
+    Map(TopBarMap),
+}
+
 /// The storable map in one banner read, or `None` (abstain).
 ///
 /// Only a sure read counts: the banner was found, the best map clears
@@ -777,10 +798,10 @@ pub fn read_banner(frame: &DynamicImage) -> Option<MapRead> {
 }
 
 /// [`Reader::read_accolade_map`] with the process-wide reader.
-pub fn read_accolade_map(frame: &DynamicImage) -> Option<TopBarMap> {
+pub fn read_accolade_map(rgb: &RgbImage) -> AccoladeRead {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
-        .read_accolade_map(frame)
+        .read_accolade_map(rgb)
 }
 
 /// [`Reader::read_board_with_banner`] with the process-wide reader.
@@ -1964,38 +1985,51 @@ mod tests {
 
     /// The accolade map line reads through the same pack and the same gate
     /// as the top bar ([`top_bar_map`], whose tests cover a name the tracker
-    /// does not store): the tracker's display name, or nothing.
+    /// does not store): the tracker's display name, or an abstain. With no
+    /// map pack nothing is read, and the answer says so (F265-3).
     #[test]
     fn the_reader_reads_the_accolade_map_from_maps_v1() {
         use crate::shadow::banner::test_fixtures::{
-            Accolade, LETTERS, frame_with_accolade, frame_with_banner, write_accolade_pack,
+            Accolade, accolade_letters, frame_with_accolade, frame_with_banner, write_accolade_pack,
         };
         let data = tempfile::tempdir().unwrap();
-        write_accolade_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
+        write_accolade_pack(&MapTemplates::dir_v1_in(data.path()), &accolade_letters());
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let sure = |read: AccoladeRead| match read {
+            AccoladeRead::Map(t) => t,
+            other => panic!("no sure read: {other:?}"),
+        };
         for size in [(1920, 1080), (2560, 1440)] {
-            let frame =
-                |text| DynamicImage::ImageRgb8(frame_with_accolade(text, Accolade::at(size)));
-            let t = reader
-                .read_accolade_map(&frame("KING'S ROW"))
-                .expect("sure read");
+            let frame = |text| frame_with_accolade(text, Accolade::at(size));
+            let t = sure(reader.read_accolade_map(&frame("KING'S ROW")));
             assert_eq!((t.name.as_str(), t.mode), ("King's Row", Some("Hybrid")));
             // the accolade spelling of Eichenwalde's Halloween label
-            let alias = reader
-                .read_accolade_map(&frame("ADLERSBRUNN"))
-                .expect("alias");
+            let alias = sure(reader.read_accolade_map(&frame("ADLERSBRUNN")));
             assert_eq!(alias.name, "Eichenwalde");
+            // a cedilla under the line (F265-2)
+            let cedilla = sure(reader.read_accolade_map(&frame("ESPERANÇA")));
+            assert_eq!(
+                (cedilla.name.as_str(), cedilla.mode),
+                ("Esperanca", Some("Push"))
+            );
             assert_eq!(
                 Reader::load(&ReaderConfig::default()).read_accolade_map(&frame("KING'S ROW")),
-                None,
+                AccoladeRead::NoPack,
                 "no map pack"
             );
         }
-        let blank =
-            DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([20, 24, 40])));
-        assert_eq!(reader.read_accolade_map(&blank), None, "no accolade line");
-        let tab = DynamicImage::ImageRgb8(frame_with_banner("KING'S ROW"));
-        assert_eq!(reader.read_accolade_map(&tab), None, "a Tab board");
+        let blank = RgbImage::from_pixel(1920, 1080, image::Rgb([20, 24, 40]));
+        assert_eq!(
+            reader.read_accolade_map(&blank),
+            AccoladeRead::Abstain,
+            "no accolade line"
+        );
+        let tab = frame_with_banner("KING'S ROW");
+        assert_eq!(
+            reader.read_accolade_map(&tab),
+            AccoladeRead::Abstain,
+            "a Tab board"
+        );
     }
 
     /// The pack lacks a glyph NEPAL needs: the best map on the accolade
@@ -2011,13 +2045,15 @@ mod tests {
             &LETTERS.replace('P', ""),
         );
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
-        let frame =
-            |text| DynamicImage::ImageRgb8(frame_with_accolade(text, Accolade::at((1920, 1080))));
-        assert_eq!(reader.read_accolade_map(&frame("NEPAL")), None);
+        let frame = |text| frame_with_accolade(text, Accolade::at((1920, 1080)));
         assert_eq!(
-            reader.read_accolade_map(&frame("ILIOS")).unwrap().name,
-            "Ilios"
+            reader.read_accolade_map(&frame("NEPAL")),
+            AccoladeRead::Abstain
         );
+        match reader.read_accolade_map(&frame("ILIOS")) {
+            AccoladeRead::Map(t) => assert_eq!(t.name, "Ilios"),
+            other => panic!("ILIOS: {other:?}"),
+        }
     }
 
     /// The hand-installed pack lacks a glyph NEPAL needs: the best map is
