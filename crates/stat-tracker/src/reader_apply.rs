@@ -8,7 +8,10 @@
 //! suspect or empty digit read is never stored and no OCR number takes its
 //! place. A held cell keeps the game's last accepted value through the
 //! capture gate (`capture_gate::apply_gate_held`), is listed in
-//! `suspect_fields`, and is replaced by the next sure read.
+//! `suspect_fields`, and is replaced by the next sure read. A column the
+//! game has never read has no value to keep, and a placeholder is not a
+//! number: the capture path stores no row for the game until every column
+//! has had a sure read (`capture_gate::GateState::unread_cols`).
 //!
 //! [`merge_saved`] then chooses the values stored on the member's own row.
 //! It starts from the row capture policy built ([`PolicyRow`]: the gated
@@ -112,8 +115,7 @@ pub fn own_row(
     fallback_row: Option<usize>,
     team_size: usize,
 ) -> OwnRow {
-    let named = player_name.is_some_and(|name| !name.trim().is_empty());
-    let index = if named {
+    let index = if player_name_is_set(player_name) {
         name_match.or(fallback_row)
     } else {
         fallback_row
@@ -122,6 +124,13 @@ pub fn own_row(
         Some(index) => OwnRow::Identified { index, team_size },
         None => OwnRow::Uncertain,
     }
+}
+
+/// A player name is configured and is not blank. Only then can a name cell
+/// find the member's row, so only then are the name cells read at all under
+/// `reader = "new"` (OCR site T4, F266-10).
+pub fn player_name_is_set(player_name: Option<&str>) -> bool {
+    player_name.is_some_and(|name| !name.trim().is_empty())
 }
 
 /// Why the capture path stores nothing from this board under
@@ -163,12 +172,19 @@ pub fn row_cells(board: &BoardRead, index: usize) -> [CellTrust; 6] {
     })
 }
 
+/// Sure stat cells a row needs before it is read at all: the same four the
+/// team rule ([`both_teams_have_stats`]) and the reader's own board check
+/// ask for. Under it a single cell just above the reader's suspect line
+/// would be the only read of the row (F266-6).
+pub const MIN_SURE_CELLS: usize = 4;
+
 /// Read the member's stats off an accepted board, with no OCR text.
 ///
 /// The refusals are ocr-v1's two (`parse::read_scoreboard`), decided on the
 /// digit reads: no identified row is [`ScoreboardMiss::PlayerRowNotFound`],
-/// and a row with no sure cell at all is [`ScoreboardMiss::CellsUnreadable`].
-/// There is no third path: a row is never rebuilt from text.
+/// and a row with fewer than [`MIN_SURE_CELLS`] sure cells is
+/// [`ScoreboardMiss::CellsUnreadable`]. There is no third path: a row is
+/// never rebuilt from text.
 pub fn read_own_row(
     board: &BoardRead,
     own: OwnRow,
@@ -181,7 +197,7 @@ pub fn read_own_row(
         return Err(ScoreboardMiss::PlayerRowNotFound);
     }
     let cells = row_cells(board, index);
-    if !cells.iter().any(|cell| matches!(cell, CellTrust::Sure(_))) {
+    if sure_cells(&cells) < MIN_SURE_CELLS {
         return Err(ScoreboardMiss::CellsUnreadable);
     }
     let stats = cells.map(|cell| match cell {
@@ -197,14 +213,15 @@ pub fn read_own_row(
 /// Both teams show a row with four sure stat cells: ocr-v1's
 /// `parse::both_teams_have_stats` on the digit reads.
 pub fn both_teams_have_stats(board: &BoardRead, team_size: usize) -> bool {
-    let plausible = |row: usize| {
-        row_cells(board, row)
-            .iter()
-            .filter(|cell| matches!(cell, CellTrust::Sure(_)))
-            .count()
-            >= 4
-    };
+    let plausible = |row: usize| sure_cells(&row_cells(board, row)) >= MIN_SURE_CELLS;
     team_size > 0 && (0..team_size).any(plausible) && (team_size..2 * team_size).any(plausible)
+}
+
+fn sure_cells(cells: &[CellTrust; 6]) -> usize {
+    cells
+        .iter()
+        .filter(|cell| matches!(cell, CellTrust::Sure(_)))
+        .count()
 }
 
 /// Merge one accepted board.
@@ -683,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn read_own_row_refuses_without_a_row_or_without_a_sure_cell() {
+    fn read_own_row_refuses_without_a_row_or_with_under_four_sure_cells() {
         let board = confident_board(5, 2);
         assert_eq!(
             read_own_row(&board, OwnRow::Uncertain, "unknown").unwrap_err(),
@@ -704,12 +721,50 @@ mod tests {
             read_own_row(&unsure, identified(2, 5), "unknown").unwrap_err(),
             ScoreboardMiss::CellsUnreadable
         );
-        // one sure cell is a row: the other five are held
-        unsure.fields.push(int_field("r2.e", 4, false));
-        unsure.fields.retain(|f| f.name != "r2.e" || !f.suspect);
+        // one, two and three sure cells are still not a row (F266-6): a
+        // single read just over the suspect line is not stored alone
+        let sure = |board: &mut BoardRead, suffix: &str, value: u32| {
+            let name = format!("r2.{suffix}");
+            board.fields.retain(|f| f.name != name);
+            board.fields.push(int_field(&name, value, false));
+        };
+        for (suffix, value) in [("e", 4), ("a", 2), ("d", 1)] {
+            sure(&mut unsure, suffix, value);
+            assert_eq!(
+                read_own_row(&unsure, identified(2, 5), "unknown").unwrap_err(),
+                ScoreboardMiss::CellsUnreadable,
+                "sure up to {suffix}"
+            );
+        }
+        // the fourth makes it a row: the other two are held
+        sure(&mut unsure, "dmg", 900);
         let read = read_own_row(&unsure, identified(2, 5), "unknown").unwrap();
-        assert_eq!(read.held, [false, true, true, true, true, true]);
-        assert_eq!(read.matched.elims, 4);
+        assert_eq!(read.held, [false, false, false, false, true, true]);
+        assert_eq!(
+            (
+                read.matched.elims,
+                read.matched.damage,
+                read.matched.healing
+            ),
+            (4, 900, 0)
+        );
+        assert_eq!(MIN_SURE_CELLS, 4);
+    }
+
+    #[test]
+    fn a_blank_player_name_is_no_name() {
+        assert!(!player_name_is_set(None));
+        assert!(!player_name_is_set(Some("")));
+        assert!(!player_name_is_set(Some("  \t")));
+        assert!(player_name_is_set(Some("Soot")));
+        // and it does not pick a row either: the highlight row stands
+        assert_eq!(
+            own_row(Some(" "), Some(7), Some(2), 5),
+            OwnRow::Identified {
+                index: 2,
+                team_size: 5
+            }
+        );
     }
 
     #[test]

@@ -81,8 +81,15 @@ pub struct Config {
     /// six stats then come from that reader only: a Tab whose board it does
     /// not vouch for is not stored, and a stat cell it is unsure of keeps
     /// the game's last accepted value and is marked, with no OCR number in
-    /// its place. The top-bar map still falls back to OCR when the banner
-    /// reader abstains. Game start and game end stay on ocr-v1 either way.
+    /// its place. A game has no stored row until each of the six stats has
+    /// had a sure read on some Tab of it: a stat never read is not stored
+    /// or uploaded as 0, and a game that ends that way is not stored at
+    /// all. The top-bar map still falls back to OCR when the banner reader
+    /// abstains, and the name cells are read with OCR when a player name is
+    /// set. Under `"new"` the result words, the FINAL SCORE line and the
+    /// game-start screens are read from the words pack, with OCR only where
+    /// a template or mask is not loaded; the accolade and rank words and
+    /// the accolade map are still OCR.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
     pub reader: ReaderSetting,
 }
