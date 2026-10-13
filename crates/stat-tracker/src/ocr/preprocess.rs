@@ -1068,7 +1068,13 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
 // --- Scoreboard geometry ---
 
 pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {
-    let (w, h) = (img.width(), img.height());
+    let (x, y, crop_w, crop_h) = crop_scoreboard_rect(img.width(), img.height());
+    img.crop_imm(x, y, crop_w, crop_h)
+}
+
+/// The rectangle [`crop_scoreboard`] cuts from a `w` x `h` frame, as
+/// `(x, y, width, height)`. Report blanking uses the same rectangle.
+pub fn crop_scoreboard_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
     // OW2's scoreboard renders inside a 16:9 region centered on the frame. On
     // non-16:9 displays (ultrawide, 16:10) the ratios below must apply to that
     // inner region, not the whole frame, or the crop drifts off the scoreboard.
@@ -1077,7 +1083,7 @@ pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {
     let y = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
     let crop_w = ((gw as f64 * SCOREBOARD_W_RATIO) as u32).min(w.saturating_sub(x));
     let crop_h = ((gh as f64 * SCOREBOARD_H_RATIO) as u32).min(h.saturating_sub(y));
-    img.crop_imm(x, y, crop_w, crop_h)
+    (x, y, crop_w, crop_h)
 }
 
 /// Compute the centered 16:9 sub-rectangle of a frame as (x, y, w, h).
