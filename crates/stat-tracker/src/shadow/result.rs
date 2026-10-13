@@ -310,9 +310,10 @@ impl Kernel {
 #[derive(Debug, Clone)]
 struct Stack {
     levels: Vec<Kernel>,
-    /// The template's block projection at the coarsest level, for the
-    /// certification bound ([`certify`]). `None` with a single level.
-    proj: Option<Proj>,
+    /// The template's block projections for the certification bound
+    /// ([`certify`]), coarsest first: `f` = 16, 8, 4, 2 while the template
+    /// keeps [`MIN_PROJ_BLOCKS`] blocks on each side.
+    projs: Vec<Proj>,
 }
 
 /// A template projected onto `f` x `f` blocks: `ct` is each block's mean
@@ -366,9 +367,12 @@ impl Stack {
                 _ => break,
             }
         }
-        let top = levels.len() - 1;
-        let proj = (top > 0).then(|| Proj::new(t, top, levels[0].norm));
-        Some(Self { levels, proj })
+        let projs = (1..=4)
+            .rev()
+            .filter(|&l| (t.w >> l).min(t.h >> l) >= MIN_PROJ_BLOCKS)
+            .map(|l| Proj::new(t, l, levels[0].norm))
+            .collect();
+        Some(Self { levels, projs })
     }
 }
 
@@ -575,6 +579,8 @@ fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -
     Some((pp + res_p * pr.res) / (var.sqrt() * k.norm))
 }
 
+/// Fewest blocks on a template side for a projection bound.
+const MIN_PROJ_BLOCKS: usize = 3;
 /// Slack on the bound for float rounding (f32 block means and dot).
 const BOUND_SLACK: f64 = 1e-4;
 /// Multiply-adds one read may spend on exact scores while certifying.
@@ -591,14 +597,15 @@ enum Cert {
     Unknown,
 }
 
-/// Decide exactly whether any window of `st` scores at least `tau`: every
-/// window whose bound ([`bound_at`]) reaches `tau` is scored with
-/// [`ncc_at`]. The same answer as [`search_full`] against `tau`, at a
-/// small part of its cost when the bound is tight. A stack with one level
-/// is searched in full.
+/// Decide exactly whether any window of `st` scores at least `tau`: a
+/// window is ruled out when any bound of the chain ([`bound_at`], one per
+/// projection, coarsest and cheapest first) is below `tau`; every other
+/// window is scored with [`ncc_at`]. The same answer as [`search_full`]
+/// against `tau`, at a small part of its cost when the bounds are tight.
+/// Without projections the stack is searched in full.
 fn certify(
     region: &[Level],
-    phased: Option<&Phased>,
+    chain: &[(&Proj, &Phased)],
     st: &Stack,
     tau: f64,
     budget: &mut usize,
@@ -607,7 +614,7 @@ fn certify(
     if k.w > p.w || k.h > p.h {
         return Cert::Below;
     }
-    let (Some(pr), Some(ph)) = (&st.proj, phased) else {
+    if chain.is_empty() {
         let full = search_full(region, st);
         *budget = budget.saturating_sub(full.macs);
         return if full.score >= tau {
@@ -615,14 +622,15 @@ fn certify(
         } else {
             Cert::Below
         };
-    };
+    }
     for y in 0..=p.h - k.h {
-        for x in 0..=p.w - k.w {
-            let Some(ub) = bound_at(p, ph, k, pr, x, y) else {
-                continue;
-            };
-            if ub + BOUND_SLACK < tau {
-                continue;
+        'window_x: for x in 0..=p.w - k.w {
+            for (pr, ph) in chain {
+                match bound_at(p, ph, k, pr, x, y) {
+                    None => continue 'window_x,
+                    Some(ub) if ub + BOUND_SLACK < tau => continue 'window_x,
+                    Some(_) => {}
+                }
             }
             let cost = k.w * k.h;
             if *budget < cost {
@@ -949,8 +957,18 @@ impl ResultTemplates {
                 let cert = {
                     let Regions { levels, phased, .. } = &mut *regions;
                     let Some(lv) = &levels[ri] else { break };
-                    let ph = st.proj.as_ref().map(|pr| phased_for(phased, ri, lv, pr.f));
-                    certify(lv, ph, st, tau, &mut budget)
+                    for pr in &st.projs {
+                        make_phased(phased, ri, lv, pr.f);
+                    }
+                    let chain: Vec<(&Proj, &Phased)> = st
+                        .projs
+                        .iter()
+                        .filter_map(|pr| {
+                            let ph = phased.iter().find(|(k, _)| *k == (ri, pr.f))?;
+                            Some((pr, &ph.1))
+                        })
+                        .collect();
+                    certify(lv, &chain, st, tau, &mut budget)
                 };
                 match cert {
                     Cert::Below => {}
@@ -1013,21 +1031,11 @@ struct Regions {
     phased: Vec<((usize, usize), Phased)>,
 }
 
-/// The phase images of region `ri` at block size `f`, made once.
-fn phased_for<'a>(
-    cache: &'a mut Vec<((usize, usize), Phased)>,
-    ri: usize,
-    levels: &[Level],
-    f: usize,
-) -> &'a Phased {
-    let idx = match cache.iter().position(|(k, _)| *k == (ri, f)) {
-        Some(i) => i,
-        None => {
-            cache.push(((ri, f), Phased::new(&levels[0], f)));
-            cache.len() - 1
-        }
-    };
-    &cache[idx].1
+/// Make the phase images of region `ri` at block size `f`, once.
+fn make_phased(cache: &mut Vec<((usize, usize), Phased)>, ri: usize, levels: &[Level], f: usize) {
+    if !cache.iter().any(|(k, _)| *k == (ri, f)) {
+        cache.push(((ri, f), Phased::new(&levels[0], f)));
+    }
 }
 
 // ------------------------------------------------------------ live reload
@@ -2040,16 +2048,22 @@ mod tests {
             let p = pyramid(random_region(&mut rng, &t, &other, tw + 40, th + 24));
             for tpl in [&t, &other] {
                 let st = Stack::new(tpl).unwrap();
-                let Some(pr) = &st.proj else { continue };
-                let ph = Phased::new(&p[0], pr.f);
-                let k = &st.levels[0];
-                for y in 0..=p[0].h - k.h {
-                    for x in 0..=p[0].w - k.w {
-                        if let (Some(ub), Some(v)) =
-                            (bound_at(&p[0], &ph, k, pr, x, y), ncc_at(&p[0], k, x, y))
-                        {
-                            assert!(ub + 1e-6 >= v, "case {case} ({x},{y}): bound {ub} < {v}");
-                            checked += 1;
+                assert!(!st.projs.is_empty());
+                for pr in &st.projs {
+                    let ph = Phased::new(&p[0], pr.f);
+                    let k = &st.levels[0];
+                    for y in 0..=p[0].h - k.h {
+                        for x in 0..=p[0].w - k.w {
+                            if let (Some(ub), Some(v)) =
+                                (bound_at(&p[0], &ph, k, pr, x, y), ncc_at(&p[0], k, x, y))
+                            {
+                                assert!(
+                                    ub + 1e-6 >= v,
+                                    "case {case} f {} ({x},{y}): bound {ub} < {v}",
+                                    pr.f
+                                );
+                                checked += 1;
+                            }
                         }
                     }
                 }
@@ -2070,11 +2084,12 @@ mod tests {
             let p = pyramid(random_region(&mut rng, &t, &other, rw, rh));
             for tpl in [&t, &other] {
                 let st = Stack::new(tpl).unwrap();
-                let ph = st.proj.as_ref().map(|pr| Phased::new(&p[0], pr.f));
+                let phs: Vec<Phased> = st.projs.iter().map(|pr| Phased::new(&p[0], pr.f)).collect();
+                let chain: Vec<(&Proj, &Phased)> = st.projs.iter().zip(&phs).collect();
                 let full = search_full(&p, &st).score;
                 for tau in [0.3, 0.5, full - 0.02, full + 1e-3] {
                     let mut budget = usize::MAX;
-                    let c = certify(&p, ph.as_ref(), &st, tau, &mut budget);
+                    let c = certify(&p, &chain, &st, tau, &mut budget);
                     match c {
                         Cert::Above(v) => assert!(full >= tau && v >= tau && v <= full + 1e-9),
                         Cert::Below => assert!(full < tau, "case {case} tau {tau}: full {full}"),
@@ -2083,10 +2098,7 @@ mod tests {
                 }
                 // no budget: any window that needs an exact score stops it
                 if full >= 0.5 {
-                    assert_eq!(
-                        certify(&p, ph.as_ref(), &st, full - 0.02, &mut 0),
-                        Cert::Unknown
-                    );
+                    assert_eq!(certify(&p, &chain, &st, full - 0.02, &mut 0), Cert::Unknown);
                 }
             }
         }
