@@ -7,6 +7,8 @@
 //! no display, so it reads no real config, holds no sync token, and captures
 //! nothing.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -35,8 +37,8 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
 
     let log_path = root.path().join("daemon.out");
     let log = std::fs::File::create(&log_path).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"))
-        .env_clear()
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"));
+    cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -45,9 +47,10 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("spawn daemon");
+        .stderr(Stdio::from(log));
+    // Killed and reaped when `daemon` drops, on every way out of this test.
+    let mut daemon = common::spawn_daemon(cmd);
+    let child = &mut daemon.child;
     let pid = child.id();
 
     let marker = data_dir.join("run.marker");
@@ -77,6 +80,20 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
         .filter(|l| l.contains("WARN") && l.contains("did not exit cleanly"))
         .collect();
     assert_eq!(warns.len(), 1, "one WARN line; output:\n{out}");
+
+    // Started with no OMP_THREAD_LIMIT (alpha.7 C1): the daemon restarted
+    // itself with the limit, kept this pid (the marker above names it), and
+    // says so once.
+    let omp: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("OpenMP thread limit for OCR"))
+        .collect();
+    assert_eq!(omp.len(), 1, "one start-up line; output:\n{out}");
+    assert!(
+        omp[0].contains("omp_thread_limit=1") && omp[0].contains("restarted=true"),
+        "{}",
+        omp[0]
+    );
 
     // run.marker is written early in startup, before run_loop installs the
     // SIGTERM handler. A signal in that gap takes the default action (killed

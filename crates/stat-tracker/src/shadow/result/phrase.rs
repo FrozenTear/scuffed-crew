@@ -8,6 +8,9 @@
 //! these in place of ocr-v1's P7 OCR, behind the same pixel gates:
 //!
 //! * `vote_for_a_map`: the map vote ([`Phrase::VoteForAMap`]);
+//! * `selecting_map`: the same screen once the vote closed and the map is
+//!   drawn ([`Phrase::SelectingMap`], words-v1 version 2; ocr-v1 reads it as
+//!   a map vote through the subtitle's "VOTES");
 //! * `ban_heroes`: the hero-ban vote ([`Phrase::BanHeroes`]);
 //! * `select_a_preferred_hero`: the preferred-hero pick
 //!   ([`Phrase::SelectAPreferredHero`]).
@@ -48,6 +51,8 @@ pub const PHRASE_FLOOR: f32 = 0.70;
 pub enum Phrase {
     /// "VOTE FOR A MAP" (map vote).
     VoteForAMap,
+    /// "SELECTING MAP" (the map vote after the timer: the map is drawn).
+    SelectingMap,
     /// "BAN HEROES" (hero-ban vote; the counter after it is not in the mask).
     BanHeroes,
     /// "SELECT A PREFERRED HERO" (preferred-hero pick).
@@ -55,8 +60,9 @@ pub enum Phrase {
 }
 
 impl Phrase {
-    pub const ALL: [Phrase; 3] = [
+    pub const ALL: [Phrase; 4] = [
         Phrase::VoteForAMap,
+        Phrase::SelectingMap,
         Phrase::BanHeroes,
         Phrase::SelectAPreferredHero,
     ];
@@ -65,6 +71,7 @@ impl Phrase {
     pub fn id(self) -> &'static str {
         match self {
             Phrase::VoteForAMap => "vote_for_a_map",
+            Phrase::SelectingMap => "selecting_map",
             Phrase::BanHeroes => "ban_heroes",
             Phrase::SelectAPreferredHero => "select_a_preferred_hero",
         }
@@ -137,13 +144,24 @@ impl PhraseTemplates {
     /// refuses the folder, and so does any entry (read or not) whose id is
     /// not a plain word id ([`crate::packs::is_word_id`]), whose region is
     /// not inside the game rect, or whose work scale is not the reader's.
-    /// A listed phrase whose mask is missing or flat is left out.
+    /// A listed phrase whose mask is missing or flat is left out, and so is
+    /// one whose mask cannot fit its region ([`fits`]): a mask that can
+    /// never match would silence its detector, so it counts as not loaded.
     pub fn load_dir(dir: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(dir.join(PHRASES_FILE)).ok()?;
+        let text = match std::fs::read_to_string(dir.join(PHRASES_FILE)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            // Not UTF-8, a directory, no permission: warned like an
+            // unreadable layouts.json (F253-14, F260-13).
+            Err(e) => {
+                tracing::warn!(error = %e, "phrases.json unreadable; phrases refused");
+                return None;
+            }
+        };
         let entries: BTreeMap<String, Entry> = match serde_json::from_str(&text) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!(error = %e, "phrases.json unreadable; phrases refused");
+                tracing::warn!(error = %e, "phrases.json does not parse; phrases refused");
                 return None;
             }
         };
@@ -173,6 +191,19 @@ impl PhraseTemplates {
 
     fn template(phrase: Phrase, roi: [f64; 4], plane: Plane, t: &Gray) -> Option<PhraseTemplate> {
         let stacks = scaled_stacks(t);
+        if !fits(roi, &stacks) {
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    phrase = phrase.id(),
+                    mask_w = t.w,
+                    mask_h = t.h,
+                    "phrase mask does not fit its region; treated as not loaded"
+                );
+            }
+            return None;
+        }
         (!stacks.is_empty()).then_some(PhraseTemplate {
             phrase,
             roi,
@@ -243,6 +274,20 @@ impl PhraseTemplates {
                 .fold(-1.0f64, f64::max),
         ))
     }
+}
+
+/// Whether a mask at every search scale fits inside `roi` at the work scale
+/// (F260-5). The region is cut with truncated corners ([`region`]), so it
+/// can be one pixel short of `fraction * size` on each axis; a mask must fit
+/// that smallest region. A region with no pixels fits nothing.
+fn fits(roi: [f64; 4], stacks: &[Stack]) -> bool {
+    let (work_w, work_h) = (WORK * 1440.0 * 16.0 / 9.0, WORK * 1440.0);
+    let rw = ((roi[2] - roi[0]) * work_w).floor() - 1.0;
+    let rh = ((roi[3] - roi[1]) * work_h).floor() - 1.0;
+    stacks
+        .iter()
+        .filter_map(|st| st.levels.first())
+        .all(|l| l.w as f64 <= rw && l.h as f64 <= rh)
 }
 
 /// The read for this fast score: sure at the floor, absent below
@@ -495,6 +540,136 @@ mod tests {
         // No pack at all: no read.
         let r = Reader::load(&ReaderConfig::default());
         assert_eq!(r.read_phrase(Phrase::VoteForAMap, &on), None);
+    }
+
+    /// F260-4: a refused `phrases.json` refuses the phrases only. The result
+    /// words of the same folder (#253) stay loaded.
+    #[test]
+    fn a_refused_phrases_json_leaves_the_result_words_loaded() {
+        use super::super::{ResultDirs, ResultPack};
+        let vote = strokes(11, 150, 26);
+        let d = tempfile::tempdir().unwrap();
+        let words = d.path().join("words-v1");
+        words_pack(&words, &vote);
+        let dirs = ResultDirs {
+            words: Some(words.clone()),
+            legacy: None,
+        };
+        let good = dirs.load().unwrap();
+        assert_eq!(good.pack, ResultPack::WordsV1);
+        assert!(good.phrases.is_some_and(|p| p.has(Phrase::VoteForAMap)));
+        for body in [
+            r#"{"vote_for_a_map": "#.to_string(),
+            format!(
+                r#"{{"../x": {}}}"#,
+                entry("[0.36, 0.11, 0.64, 0.235]", "0.5")
+            ),
+        ] {
+            std::fs::write(words.join(PHRASES_FILE), &body).unwrap();
+            let l = dirs.load().expect("the result words still load");
+            assert_eq!(l.pack, ResultPack::WordsV1, "{body}");
+            assert!(l.phrases.is_none(), "{body}");
+        }
+    }
+
+    /// F260-13: a `phrases.json` that cannot be read gives no phrases (and a
+    /// warning), like a missing one gives none.
+    #[test]
+    fn an_unreadable_phrases_json_gives_no_phrases() {
+        let vote = strokes(11, 150, 26);
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::write(bad.path().join(PHRASES_FILE), [0xff, 0xfe, b'{', b'}']).unwrap();
+        save(bad.path(), "phrase_vote_for_a_map.png", &vote);
+        assert!(PhraseTemplates::load_dir(bad.path()).is_none(), "not UTF-8");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(PHRASES_FILE)).unwrap();
+        save(dir.path(), "phrase_vote_for_a_map.png", &vote);
+        assert!(
+            PhraseTemplates::load_dir(dir.path()).is_none(),
+            "a directory"
+        );
+    }
+
+    /// F260-5: a mask that cannot fit its region is not loaded, so its
+    /// detector keeps the OCR check instead of reading absent forever.
+    #[test]
+    fn a_mask_that_cannot_fit_its_region_is_not_loaded() {
+        let band = "[0.36, 0.11, 0.64, 0.235]";
+        // The band is 358 x 90 at the work scale.
+        for (w, h, ok) in [
+            (150, 26, true),
+            (340, 84, true),
+            // fits at 1.00 but not at 1.04
+            (350, 26, false),
+            (150, 88, false),
+            (400, 26, false),
+            (150, 120, false),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(
+                d.path().join(PHRASES_FILE),
+                format!(
+                    r#"{{"vote_for_a_map": {}, "ban_heroes": {}}}"#,
+                    entry(band, "0.5"),
+                    entry(band, "0.5")
+                ),
+            )
+            .unwrap();
+            save(d.path(), "phrase_vote_for_a_map.png", &strokes(11, w, h));
+            save(d.path(), "phrase_ban_heroes.png", &strokes(29, 118, 26));
+            let p = PhraseTemplates::load_dir(d.path()).unwrap();
+            assert_eq!(p.has(Phrase::VoteForAMap), ok, "{w}x{h}");
+            // the other phrase of the pack is not affected
+            assert!(p.has(Phrase::BanHeroes));
+            let blank = RgbImage::from_pixel(1280, 720, image::Rgb([14, 20, 30]));
+            assert_eq!(p.read(Phrase::VoteForAMap, &blank).is_some(), ok);
+        }
+        // A valid region with no pixels at the work scale fits nothing.
+        let thin = [0.5, 0.5, 0.5004, 0.5004];
+        assert!(roi_is_valid(thin));
+        assert!(
+            PhraseTemplates::from_templates(vec![(
+                Phrase::VoteForAMap,
+                thin,
+                Plane::Min,
+                strokes(11, 150, 26)
+            )])
+            .is_none()
+        );
+    }
+
+    /// words-v1 version 2 adds `selecting_map`; a version 1 folder without
+    /// it loads as before.
+    #[test]
+    fn selecting_map_loads_when_the_pack_has_it() {
+        let band = "[0.36, 0.11, 0.64, 0.235]";
+        let (vote, sel) = (strokes(11, 150, 26), strokes(47, 140, 26));
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(PHRASES_FILE),
+            format!(r#"{{"vote_for_a_map": {}}}"#, entry(band, "0.5")),
+        )
+        .unwrap();
+        save(d.path(), "phrase_vote_for_a_map.png", &vote);
+        let v1 = PhraseTemplates::load_dir(d.path()).unwrap();
+        assert_eq!(v1.ids(), vec!["vote_for_a_map"]);
+        let on = frame_with(&sel, 37, 21, sel.w);
+        assert_eq!(v1.read(Phrase::SelectingMap, &on), None);
+        std::fs::write(
+            d.path().join(PHRASES_FILE),
+            format!(
+                r#"{{"vote_for_a_map": {}, "selecting_map": {}}}"#,
+                entry(band, "0.5"),
+                entry(band, "0.5")
+            ),
+        )
+        .unwrap();
+        save(d.path(), "phrase_selecting_map.png", &sel);
+        let v2 = PhraseTemplates::load_dir(d.path()).unwrap();
+        assert_eq!(v2.ids(), vec!["selecting_map", "vote_for_a_map"]);
+        assert!(v2.read(Phrase::SelectingMap, &on).unwrap().is_signal());
+        assert!(!v2.read(Phrase::VoteForAMap, &on).unwrap().is_signal());
+        assert_eq!(Phrase::from_id("selecting_map"), Some(Phrase::SelectingMap));
     }
 
     #[test]
