@@ -35,7 +35,9 @@ pub struct Config {
     /// on confirm (banner or second agreeing word-OCR) and first word-OCR
     /// streak — not every mid-match tick. Off by default — the Tab path
     /// recomputes preprocess just to dump stages and dominated capture
-    /// latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`.
+    /// latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`. Also gates
+    /// the `debug/accepted/` and `debug/rejected/` rings: those crops are
+    /// unblanked and show other players' names.
     #[serde(default)]
     pub debug_ocr: bool,
     /// Parallel OCR workers (each keeps a ~23 MB Tesseract model resident).
