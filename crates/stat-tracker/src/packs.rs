@@ -31,7 +31,9 @@
 //! never waits on the other packs. The keeper syncs them and, while the
 //! daemon runs, keeps trying whatever is not in place: after a busy lock, a
 //! 429, packs switched off, a network error or a refused download (the
-//! waits are the table on `Backoff`). The new reader starts on heroes-v1 and
+//! waits are the table on `Backoff`). It reuses the list it has, sends one
+//! request every 10 s once the site has answered 429, and downloads a pack
+//! it refused for a fixed reason once. The new reader starts on heroes-v1 and
 //! re-loads its hero set once heroes-v2 or heroes-v2-1080 is swapped in
 //! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
 //! once it lands ([`crate::shadow::banner::LiveMaps`]), however late that
@@ -237,6 +239,11 @@ impl PackSync {
             .ok()
     }
 
+    /// A failure the same bytes would get again; see [`is_fixed_refusal`].
+    fn is_fixed_refusal(&self) -> bool {
+        matches!(self, Self::Failed(message) if is_fixed_refusal(message))
+    }
+
     /// Nothing a later try would change: in place, not offered by the
     /// site, or a server without reader packs.
     fn is_settled(&self) -> bool {
@@ -394,26 +401,37 @@ async fn sync_on_startup_capped(
     data_dir: &Path,
     max_bytes: u64,
 ) -> StartupSync {
-    let (report, entries) = run_sync(
+    let run = run_sync(
         server_url,
         token,
         data_dir,
         max_bytes,
         Scope::HeroesOnly,
-        None,
+        RunPlan::default(),
     )
     .await;
-    log_installed(&report);
-    StartupSync { report, entries }
+    log_installed(&run.report);
+    StartupSync {
+        server_url: server_url.to_string(),
+        run,
+    }
 }
 
-/// What [`sync_on_startup`] came to, for [`PackKeeper`] to carry on from.
+/// What [`sync_on_startup`] came to, for [`PackKeeper`] to carry on from:
+/// the heroes-v1 outcome and, when it was read, the list.
 pub struct StartupSync {
-    report: PackReport,
-    /// The list, when it was read and the heroes-v1 download hit no stop
-    /// (refused token, rate limit, packs switched off). The keeper's first
-    /// try reuses it, so a first install is still seven requests in all.
-    entries: Option<Vec<PackListEntry>>,
+    /// The server the list is from.
+    server_url: String,
+    run: SyncRun,
+}
+
+impl StartupSync {
+    /// Startup read the list and no request hit a stop (refused token, rate
+    /// limit, packs switched off). The keeper's first try then goes on with
+    /// the other packs at once. Otherwise it starts with a wait.
+    fn goes_on(&self) -> bool {
+        self.run.entries.is_some() && !self.run.stopped
+    }
 }
 
 /// Waits, in seconds, while another process holds the pack sync lock. The
@@ -422,10 +440,22 @@ const BUSY_WAITS_SECS: [u64; 3] = [5, 15, 60];
 /// Waits, in seconds, after packs switched off (503), a network error, a
 /// refused token or a refused download. The last one repeats.
 const FAILED_WAITS_SECS: [u64; 4] = [60, 300, 900, 1800];
+/// The least wait, in seconds, after the first, second, third... 429 since
+/// a pack last arrived. The server's own figure counts when it is longer.
+/// The last one repeats.
+const LIMITED_WAITS_SECS: [u64; 6] = [0, 10, 20, 40, 80, 120];
 /// No wait between two tries is shorter than this.
 const RETRY_FLOOR_SECS: u64 = 5;
-/// The longest wait the keeper takes from a 429.
+/// The longest wait the keeper takes from a 429's own figure.
 const RATE_LIMIT_RETRY_MAX_SECS: u64 = 120;
+/// Once the site has answered 429, the job sends one request per try and
+/// waits this long between tries. The site gives one request back every
+/// 10 s (`pack_governor_config` in site-server), so the job then takes no
+/// more than comes back, and other trackers behind the same address get
+/// their share.
+const PACED_GAP_SECS: u64 = 10;
+/// A kept list this old is read again before the next download.
+const LIST_MAX_AGE_SECS: u64 = 30 * 60;
 
 /// `waits[tries]` as a wait, or the last one once `tries` is past the end.
 fn nth_wait(waits: &[u64], tries: usize) -> Duration {
@@ -440,6 +470,24 @@ fn pid_jitter(pid: u32) -> Duration {
     Duration::from_millis(u64::from(pid % 20) * 250)
 }
 
+/// True for a refusal the same bytes would get again: wrong size or
+/// sha256, a layout the tracker does not accept, or too large.
+fn is_fixed_refusal(message: &str) -> bool {
+    message == PACK_MISMATCH || message == PACK_UNSAFE || message == PACK_TOO_BIG
+}
+
+/// Downloads the tracker refused for a fixed reason in this daemon run, by
+/// pack name: the list entry that was refused and the message. A pack is
+/// not downloaded again while the list still shows that same entry.
+type Refused = BTreeMap<String, (PackListEntry, String)>;
+
+/// The message `entry` was refused with, when it is the entry that was
+/// refused before.
+fn known_refusal(refused: Option<&Refused>, entry: &PackListEntry) -> Option<String> {
+    let (was, message) = refused?.get(&entry.name)?;
+    (was == entry).then(|| message.clone())
+}
+
 /// What one try left undone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Verdict {
@@ -449,8 +497,14 @@ struct Verdict {
     limited: Option<u64>,
     /// The site has packs switched off (503 `packs_disabled`).
     disabled: bool,
-    /// Anything else that left a pack not in place.
+    /// Something that may pass by itself: the network, a refused token.
     failed: bool,
+    /// A download refused for a fixed reason ([`is_fixed_refusal`]). It is
+    /// not fetched again until the list shows another entry for it.
+    refused: bool,
+    /// Downloads left for the next try because the job is paced
+    /// ([`PACED_GAP_SECS`]).
+    held: bool,
 }
 
 /// The one reason a wait is logged with, when a try had several.
@@ -460,6 +514,8 @@ enum Why {
     Disabled,
     Limited,
     Busy,
+    /// Nothing went wrong: the next download is due after the paced gap.
+    Paced,
 }
 
 impl Verdict {
@@ -472,6 +528,7 @@ impl Verdict {
                 PackSync::Unavailable => verdict.disabled = true,
                 outcome => match outcome.rate_limit_secs() {
                     Some(seconds) => verdict.limited = verdict.limited.max(Some(seconds)),
+                    None if outcome.is_fixed_refusal() => verdict.refused = true,
                     None => verdict.failed = true,
                 },
             }
@@ -485,14 +542,16 @@ impl Verdict {
     }
 
     fn why(&self) -> Why {
-        if self.failed {
-            Why::Failed
-        } else if self.disabled {
-            Why::Disabled
-        } else if self.limited.is_some() {
-            Why::Limited
-        } else {
-            Why::Busy
+        match self {
+            Self { failed: true, .. } => Why::Failed,
+            Self { disabled: true, .. } => Why::Disabled,
+            Self {
+                limited: Some(_), ..
+            } => Why::Limited,
+            Self { busy: true, .. } => Why::Busy,
+            Self { held: true, .. } => Why::Paced,
+            // Only a pack refused for a fixed reason is left.
+            _ => Why::Failed,
         }
     }
 }
@@ -502,21 +561,33 @@ impl Verdict {
 /// | The try ended on | Wait before the next try |
 /// | --- | --- |
 /// | another process holds the lock | 5 s, 15 s, then 60 s each time |
-/// | a 429 | the server's `Retry-After`, kept to 1..=120 s, plus [`pid_jitter`] |
-/// | packs switched off (503), network error, refused token, refused download | 1 min, 5 min, 15 min, then 30 min each time |
+/// | a 429 | the server's `Retry-After`, kept to 1..=120 s, and from the second 429 since a pack last arrived at least 10, 20, 40, 80, then 120 s; plus [`pid_jitter`] |
+/// | downloads held back while paced | [`PACED_GAP_SECS`] |
+/// | packs switched off (503), network error, refused token, a pack refused for a fixed reason | 1 min, 5 min, 15 min, then 30 min each time |
 ///
 /// No wait is under [`RETRY_FLOOR_SECS`]. A try that ended on several of
-/// these waits the longest of them. The busy step starts over once the
-/// lock was free. The failure step never starts over while the daemon
-/// runs, so a pack the tracker refuses is fetched no more often than the
-/// last row, also when a 429 or a busy lock comes in between.
+/// these waits the longest of them, with one exception: while downloads
+/// are held back, a pack that is known to be refused does not slow them
+/// down (it is not fetched anyway). The busy step starts over once the
+/// lock was free. The 429 step starts over when a pack arrives
+/// ([`Backoff::pack_arrived`]), not when only the list got through: a
+/// tracker that can read the list and is refused every download still
+/// backs off to one request in two minutes. The failure step never starts
+/// over while the daemon runs.
 #[derive(Debug, Default)]
 struct Backoff {
     busy_tries: usize,
+    limited_tries: usize,
     failed_tries: usize,
 }
 
 impl Backoff {
+    /// A download got through and was installed: the next 429 is the first
+    /// one again.
+    fn pack_arrived(&mut self) {
+        self.limited_tries = 0;
+    }
+
     /// The wait before the next try, or `None` when nothing is left to try.
     fn wait_after(&mut self, verdict: Verdict, jitter: Duration) -> Option<Duration> {
         if verdict.settled() {
@@ -531,9 +602,14 @@ impl Backoff {
         }
         if let Some(seconds) = verdict.limited {
             let asked = seconds.clamp(RETRY_AFTER_MIN_SECS, RATE_LIMIT_RETRY_MAX_SECS);
-            wait = wait.max(Duration::from_secs(asked) + jitter);
+            let least = nth_wait(&LIMITED_WAITS_SECS, self.limited_tries);
+            wait = wait.max(Duration::from_secs(asked).max(least) + jitter);
+            self.limited_tries += 1;
         }
-        if verdict.failed || verdict.disabled {
+        if verdict.held {
+            wait = wait.max(Duration::from_secs(PACED_GAP_SECS));
+        }
+        if verdict.failed || verdict.disabled || (verdict.refused && !verdict.held) {
             wait = wait.max(nth_wait(&FAILED_WAITS_SECS, self.failed_tries));
             self.failed_tries += 1;
         }
@@ -542,8 +618,9 @@ impl Backoff {
 }
 
 /// The packs that are not on disk and that this try did not settle. A
-/// pack the try did not cover counts (startup looks at heroes-v1 only); a
-/// pack the site does not offer does not.
+/// pack the try did not cover counts (startup looks at heroes-v1 only, a
+/// paced try at one pack); a pack the site does not offer does not.
+/// Blocking (it reads the versions file); see [`missing_off_runtime`].
 fn missing_packs(data_dir: &Path, report: &PackReport) -> Vec<&'static str> {
     let versions = read_versions(data_dir);
     PACKS
@@ -552,6 +629,13 @@ fn missing_packs(data_dir: &Path, report: &PackReport) -> Vec<&'static str> {
         .filter(|spec| !report.get(spec.name).is_some_and(PackSync::is_settled))
         .map(|spec| spec.name)
         .collect()
+}
+
+/// [`missing_packs`] on the blocking pool. Empty if that work panicked.
+async fn missing_off_runtime(data_dir: PathBuf, report: PackReport) -> Vec<&'static str> {
+    off_runtime(move || missing_packs(&data_dir, &report))
+        .await
+        .unwrap_or_default()
 }
 
 /// `a, b, c`, or `None` for no names, which leaves the field out of the line.
@@ -571,19 +655,33 @@ struct Voice {
 }
 
 impl Voice {
-    fn arrivals(&mut self, report: &PackReport) {
+    /// Note the packs a try installed. `true` when there was one.
+    fn arrivals(&mut self, report: &PackReport) -> bool {
+        let before = self.arrived.len();
         let installed = report
             .packs
             .iter()
             .filter(|status| status.outcome == PackSync::Installed);
         self.arrived.extend(installed.map(|status| status.name));
+        self.arrived.len() > before
     }
 
-    fn waiting(&mut self, data_dir: &Path, report: &PackReport, verdict: Verdict, wait: Duration) {
+    fn waiting(
+        &mut self,
+        report: &PackReport,
+        missing: Vec<&'static str>,
+        verdict: Verdict,
+        wait: Duration,
+    ) {
         self.waits += 1;
         let why = verdict.why();
-        let missing = missing_packs(data_dir, report);
         let wait_secs = wait.as_secs();
+        if why == Why::Paced {
+            // Not news: the 429 line said the tracker is waiting, and the
+            // closing line names what arrived.
+            tracing::debug!(wait_secs, "reader packs: next download after the paced gap");
+            return;
+        }
         if self
             .said
             .as_ref()
@@ -595,6 +693,7 @@ impl Voice {
         let names = name_list(&missing);
         let names = names.as_deref();
         match why {
+            Why::Paced => {}
             Why::Busy => tracing::info!(
                 wait_secs,
                 "another reader pack sync is running; the tracker will try again"
@@ -680,7 +779,46 @@ pub struct PackCredentials {
     pub token: String,
 }
 
+/// What [`PackKeeper`]'s first try came to, sent once on the channel from
+/// [`PackKeeper::first_try_done`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstTry {
+    /// The packs that are still not on disk, by list name. Empty when
+    /// every pack is in place or not offered by the site.
+    pub missing: Vec<&'static str>,
+    /// The wait before the job's next try, or `None` when the job has
+    /// ended. A short wait (a 429, a busy lock, the paced gap) means packs
+    /// can still arrive soon; a wait of a minute or more means they will
+    /// not.
+    pub next_try_in: Option<Duration>,
+}
+
 type Nap = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// A list kept from one try for the tries after it.
+struct KeptList {
+    /// The server it is from. A list is not used for another server.
+    server_url: String,
+    entries: Vec<PackListEntry>,
+    /// How long ago it was read, counted in the job's own waits.
+    age: Duration,
+}
+
+/// One try as the job's loop sees it.
+struct Tried {
+    report: PackReport,
+    /// Downloads left for the next try by the paced limit.
+    held_back: usize,
+}
+
+impl Tried {
+    fn verdict(&self) -> Verdict {
+        Verdict {
+            held: self.held_back > 0,
+            ..Verdict::of(&self.report)
+        }
+    }
+}
 
 /// The daemon's one background job for reader packs: make every pack in
 /// [`PACKS`] current, and keep trying while the daemon runs.
@@ -689,105 +827,220 @@ type Nap = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 /// it syncs the other packs, so a first install is still seven requests.
 /// If startup did not get that far (busy lock, 429, packs switched off, a
 /// network error, a refused token) nothing is sent now and that outcome
-/// sets the first wait. Every later try is one list request plus only the
-/// packs that are missing or out of date. It stops once every pack is in
-/// place or not offered; until then it waits as `Backoff` says and tries
-/// again, one try at a time. Each try takes the pack sync lock, so the
-/// setup guide and a second process still take turns with it.
+/// sets the first wait.
+///
+/// A later try downloads only the packs that are missing or out of date.
+/// It reuses the list it has: the list is read again only when it is
+/// [`LIST_MAX_AGE_SECS`] old, or when a download showed it is out of date
+/// (a listed pack was a 404, or its bytes did not match the listed size
+/// and sha256). So a try after a 429 is the refused download and nothing
+/// before it.
+///
+/// Once the site has answered 429 the job is paced for the rest of its
+/// life: one request per try, [`PACED_GAP_SECS`] apart.
+///
+/// A pack refused for a fixed reason (size, sha256, layout) is downloaded
+/// once. It is fetched again only when the list shows another entry for
+/// it, or after a restart.
+///
+/// The job stops once every pack is in place or not offered; until then
+/// it waits as `Backoff` says and tries again, one try at a time. Each try
+/// takes the pack sync lock, so the setup guide and a second process still
+/// take turns with it.
 ///
 /// Capture never waits on it. Dropping it (the daemon stopping) between
 /// tries leaves nothing behind; a download in flight is dropped before
 /// anything is written.
 pub struct PackKeeper {
     data_dir: PathBuf,
-    startup: Option<StartupSync>,
+    /// The startup outcome, and whether the first try goes on from it at
+    /// once ([`StartupSync::goes_on`]).
+    startup: Option<(PackReport, bool)>,
     credentials: Box<dyn Fn() -> Option<PackCredentials> + Send>,
     max_bytes: u64,
     jitter: Duration,
     sleep: Box<dyn FnMut(Duration) -> Nap + Send>,
+    list: Option<KeptList>,
+    refused: Refused,
+    /// The site has answered 429: one request per try from here on.
+    paced: bool,
+    first_try: Option<tokio::sync::oneshot::Sender<FirstTry>>,
 }
 
 impl PackKeeper {
     /// `startup` is `None` when no startup sync ran. `credentials` is asked
-    /// before every try, so a token changed in Settings is picked up; while
-    /// it gives `None` (sync paused on a rejected token) nothing is sent.
+    /// before every try and gives the sync client's current URL and token;
+    /// while it gives `None` (sync paused on a rejected token) nothing is
+    /// sent.
     pub fn new(
         data_dir: &Path,
         startup: Option<StartupSync>,
         credentials: impl Fn() -> Option<PackCredentials> + Send + 'static,
     ) -> Self {
-        Self {
+        let mut keeper = Self {
             data_dir: data_dir.to_path_buf(),
-            startup,
+            startup: None,
             credentials: Box::new(credentials),
             max_bytes: PACK_MAX_BYTES,
             jitter: pid_jitter(std::process::id()),
             sleep: Box::new(|wait| Box::pin(tokio::time::sleep(wait))),
+            list: None,
+            refused: Refused::new(),
+            paced: false,
+            first_try: None,
+        };
+        if let Some(startup) = startup {
+            let goes_on = startup.goes_on();
+            let StartupSync {
+                server_url,
+                mut run,
+            } = startup;
+            keeper.learn(&server_url, &mut run, Duration::ZERO);
+            keeper.startup = Some((run.report, goes_on));
         }
+        keeper
     }
 
-    /// True when startup read the pack list, so the first try downloads
-    /// the other packs at once. False when the first thing this job does
-    /// is wait (startup got no list, or did not run): a caller that wants
-    /// to give the downloads a moment has nothing to wait for then.
+    /// True when startup read the pack list and hit no stop, so the first
+    /// try downloads the other packs at once. False when the first thing
+    /// this job does is wait (startup got no list, was refused, or did not
+    /// run): a caller that wants to give the downloads a moment has
+    /// nothing to wait for then.
     pub fn starts_with_downloads(&self) -> bool {
-        self.startup
-            .as_ref()
-            .is_some_and(|startup| startup.entries.is_some())
+        matches!(self.startup, Some((_, true)))
+    }
+
+    /// A channel that gets one [`FirstTry`] when the first try is over,
+    /// whatever it came to. Call it before [`Self::run`]. `run` itself
+    /// returns only when every pack is settled, which can be hours later,
+    /// so a caller that holds something up for the downloads (startup with
+    /// `ocr = "off"` asked for) waits on this and not on the task:
+    ///
+    /// ```text
+    /// let first = job.first_try_done();
+    /// tokio::spawn(job.run());
+    /// let first = tokio::time::timeout(PACK_WAIT, first).await;
+    /// ```
+    ///
+    /// The channel closes without a message if the job is dropped first.
+    /// A second call replaces the first channel.
+    pub fn first_try_done(&mut self) -> tokio::sync::oneshot::Receiver<FirstTry> {
+        let (done, first) = tokio::sync::oneshot::channel();
+        self.first_try = Some(done);
+        first
     }
 
     /// Meant for `tokio::spawn`. Returns once every pack is settled.
     pub async fn run(mut self) {
         let mut backoff = Backoff::default();
         let mut voice = Voice::default();
-        let mut report = self.first_try().await;
+        let mut first_try = self.first_try.take();
+        let mut tried = self.first_pass().await;
         loop {
-            voice.arrivals(&report);
-            let verdict = Verdict::of(&report);
-            let Some(wait) = backoff.wait_after(verdict, self.jitter) else {
-                voice.done(&report);
+            if voice.arrivals(&tried.report) {
+                backoff.pack_arrived();
+            }
+            let verdict = tried.verdict();
+            let wait = backoff.wait_after(verdict, self.jitter);
+            let missing = if wait.is_some() || first_try.is_some() {
+                missing_off_runtime(self.data_dir.clone(), tried.report.clone()).await
+            } else {
+                Vec::new()
+            };
+            if let Some(first) = first_try.take() {
+                // Nobody listening is fine.
+                let _ = first.send(FirstTry {
+                    missing: missing.clone(),
+                    next_try_in: wait,
+                });
+            }
+            let Some(wait) = wait else {
+                voice.done(&tried.report);
                 return;
             };
-            voice.waiting(&self.data_dir, &report, verdict, wait);
+            voice.waiting(&tried.report, missing, verdict, wait);
             (self.sleep)(wait).await;
-            report = self.attempt(Scope::All, None).await;
-        }
-    }
-
-    /// The startup outcome plus, when startup left a list to reuse, the
-    /// packs it did not cover.
-    async fn first_try(&mut self) -> PackReport {
-        match self.startup.take() {
-            Some(StartupSync {
-                report,
-                entries: Some(entries),
-            }) => {
-                let rest = self.attempt(Scope::ExtrasOnly, Some(entries)).await;
-                report.followed_by(rest)
+            if let Some(list) = &mut self.list {
+                list.age += wait;
             }
-            Some(StartupSync {
-                report,
-                entries: None,
-            }) => report,
-            None => self.attempt(Scope::All, None).await,
+            tried = self.attempt(Scope::All).await;
         }
     }
 
-    async fn attempt(&mut self, scope: Scope, listed: Option<Vec<PackListEntry>>) -> PackReport {
+    /// The startup outcome plus, when the first try goes on from it at
+    /// once, the packs startup did not cover.
+    async fn first_pass(&mut self) -> Tried {
+        match self.startup.take() {
+            Some((report, true)) => {
+                let rest = self.attempt(Scope::ExtrasOnly).await;
+                Tried {
+                    report: report.followed_by(rest.report),
+                    held_back: rest.held_back,
+                }
+            }
+            Some((report, false)) => Tried {
+                report,
+                held_back: 0,
+            },
+            None => self.attempt(Scope::All).await,
+        }
+    }
+
+    async fn attempt(&mut self, scope: Scope) -> Tried {
         let Some(credentials) = (self.credentials)() else {
-            return PackReport::all(scope, PackSync::Failed(PACK_SIGN_IN.to_string()));
+            return Tried {
+                report: PackReport::all(scope, PackSync::Failed(PACK_SIGN_IN.to_string())),
+                held_back: 0,
+            };
         };
-        let (report, _) = run_sync(
+        let max_age = Duration::from_secs(LIST_MAX_AGE_SECS);
+        let kept = self
+            .list
+            .take()
+            .filter(|list| list.server_url == credentials.server_url && list.age < max_age);
+        let age = kept.as_ref().map_or(Duration::ZERO, |list| list.age);
+        let listed = kept.map(|list| list.entries);
+        let plan = RunPlan {
+            listed,
+            max_requests: self.paced.then_some(1),
+            refused: Some(&self.refused),
+        };
+        let mut run = run_sync(
             &credentials.server_url,
             &credentials.token,
             &self.data_dir,
             self.max_bytes,
             scope,
-            listed,
+            plan,
         )
         .await;
-        log_installed(&report);
-        report
+        log_installed(&run.report);
+        self.learn(&credentials.server_url, &mut run, age);
+        Tried {
+            report: run.report,
+            held_back: run.held_back,
+        }
+    }
+
+    /// Keep what a run found out for the tries after it: its list (unless
+    /// a download showed the list is out of date), what it refused, and
+    /// that the site said to slow down. `age` is the age of the list the
+    /// run was handed.
+    fn learn(&mut self, server_url: &str, run: &mut SyncRun, age: Duration) {
+        self.list = match run.entries.take() {
+            Some(entries) if !run.stale => Some(KeptList {
+                server_url: server_url.to_string(),
+                entries,
+                age: if run.read_list { Duration::ZERO } else { age },
+            }),
+            _ => None,
+        };
+        for (entry, message) in run.refused.drain(..) {
+            self.refused.insert(entry.name.clone(), (entry, message));
+        }
+        if Verdict::of(&run.report).limited.is_some() {
+            self.paced = true;
+        }
     }
 }
 
@@ -798,38 +1051,109 @@ pub async fn sync_reader_packs(
     data_dir: &Path,
     max_bytes: u64,
 ) -> PackReport {
-    run_sync(server_url, token, data_dir, max_bytes, Scope::All, None)
-        .await
-        .0
+    run_sync(
+        server_url,
+        token,
+        data_dir,
+        max_bytes,
+        Scope::All,
+        RunPlan::default(),
+    )
+    .await
+    .report
 }
 
-/// One run over `scope`. `listed` reuses a list already fetched. Returns the
-/// report and the list it used, when it got one and no download hit a stop.
+/// What one run may reuse and how far it may go. The default is a plain
+/// run: read the list, then download every pack that is not current.
+#[derive(Default)]
+struct RunPlan<'a> {
+    /// A list read earlier, used instead of a list request.
+    listed: Option<Vec<PackListEntry>>,
+    /// The most requests this run may send; the list request counts.
+    /// `None` is no limit.
+    max_requests: Option<usize>,
+    /// Downloads refused before; see [`known_refusal`].
+    refused: Option<&'a Refused>,
+}
+
+/// What one run came to.
+struct SyncRun {
+    /// One entry per pack the run looked at, in [`PACKS`] order. A pack
+    /// left for later by [`RunPlan::max_requests`] has no entry.
+    report: PackReport,
+    /// The list the run had: read now, or handed in. `None` when it had
+    /// none (the list request failed, or the run ended before it).
+    entries: Option<Vec<PackListEntry>>,
+    /// This run sent the list request and got the list.
+    read_list: bool,
+    /// A download hit a stop (refused token, rate limit, packs switched
+    /// off) and the packs after it were not tried.
+    stopped: bool,
+    /// A download showed the list is out of date: a listed pack was a 404,
+    /// or its bytes did not match the listed size and sha256.
+    stale: bool,
+    /// Packs that need a download and were left for a later run by
+    /// [`RunPlan::max_requests`].
+    held_back: usize,
+    /// Downloads this run refused for a fixed reason.
+    refused: Vec<(PackListEntry, String)>,
+}
+
+impl SyncRun {
+    /// A run that ended before it looked at a pack: every pack in `scope`
+    /// gets `outcome`. `listed` is the list it was handed, given back
+    /// unused.
+    fn early(scope: Scope, outcome: PackSync, listed: Option<Vec<PackListEntry>>) -> Self {
+        Self {
+            report: PackReport::all(scope, outcome),
+            entries: listed,
+            read_list: false,
+            stopped: false,
+            stale: false,
+            held_back: 0,
+            refused: Vec::new(),
+        }
+    }
+}
+
+/// Take one request off a budget. `false` when none is left.
+fn take_request(left: &mut Option<usize>) -> bool {
+    match left {
+        None => true,
+        Some(0) => false,
+        Some(left) => {
+            *left -= 1;
+            true
+        }
+    }
+}
+
+/// One run over `scope`, as `plan` allows.
 async fn run_sync(
     server_url: &str,
     token: &str,
     data_dir: &Path,
     max_bytes: u64,
     scope: Scope,
-    listed: Option<Vec<PackListEntry>>,
-) -> (PackReport, Option<Vec<PackListEntry>>) {
+    plan: RunPlan<'_>,
+) -> SyncRun {
     if token.trim().is_empty() || server_url.trim().is_empty() {
         let outcome = PackSync::Failed(PACK_SIGN_IN.to_string());
-        return (PackReport::all(scope, outcome), None);
+        return SyncRun::early(scope, outcome, plan.listed);
     }
     if validate_sync_server_url(server_url).is_err() {
         let outcome = PackSync::Failed(PACK_FAILED.to_string());
-        return (PackReport::all(scope, outcome), None);
+        return SyncRun::early(scope, outcome, plan.listed);
     }
     // One sync at a time across processes, taken before any request. The
     // daemon and the app share pack-versions.json and the request budget.
     let _lock = match SyncLock::try_acquire(data_dir) {
         Ok(Some(lock)) => lock,
-        Ok(None) => return (PackReport::all(scope, PackSync::Busy), None),
+        Ok(None) => return SyncRun::early(scope, PackSync::Busy, plan.listed),
         Err(err) => {
             tracing::warn!(error = %err, "reader pack sync lock was not taken");
             let outcome = PackSync::Failed(PACK_FAILED.to_string());
-            return (PackReport::all(scope, outcome), None);
+            return SyncRun::early(scope, outcome, plan.listed);
         }
     };
     sweep_stale_staging(data_dir);
@@ -841,15 +1165,19 @@ async fn run_sync(
         Ok(client) => client,
         Err(_) => {
             let outcome = PackSync::Failed(PACK_FAILED.to_string());
-            return (PackReport::all(scope, outcome), None);
+            return SyncRun::early(scope, outcome, plan.listed);
         }
     };
     let base = server_url.trim().trim_end_matches('/');
-    let entries = match listed {
-        Some(entries) => entries,
+    let mut requests_left = plan.max_requests;
+    let (entries, read_list) = match plan.listed {
+        Some(entries) => (entries, false),
         None => match fetch_list(&client, base, token).await {
-            Ok(entries) => entries,
-            Err(outcome) => return (PackReport::all(scope, outcome), None),
+            Ok(entries) => {
+                take_request(&mut requests_left);
+                (entries, true)
+            }
+            Err(outcome) => return SyncRun::early(scope, outcome, None),
         },
     };
     let fetch = Fetch {
@@ -864,22 +1192,45 @@ async fn run_sync(
     // A refused token, a rate limit, or packs switched off applies to every
     // download, so the packs after it are not tried. Their folders stay.
     let mut stopped: Option<PackSync> = None;
+    let mut stale = false;
+    let mut held_back = 0;
+    let mut refused = Vec::new();
     for spec in scope.specs() {
-        let outcome = match select_pack(&entries, spec) {
-            Err(outcome) => outcome,
-            // Checked before the stop, so a pack that is already in place
-            // is reported as current, not as the stop's failure.
-            Ok(entry) if is_current(data_dir, spec, entry, &versions) => PackSync::Current,
-            Ok(_) if stopped.is_some() => stopped.clone().unwrap_or(PackSync::Unavailable),
-            Ok(entry) => {
-                let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
-                    Step::Done(outcome) => outcome,
-                    Step::Stop(outcome) => {
-                        stopped = Some(outcome.clone());
-                        outcome
-                    }
-                };
-                if outcome == PackSync::Installed {
+        let entry = match select_pack(&entries, spec) {
+            Ok(entry) => entry,
+            Err(outcome) => {
+                packs.push(PackStatus {
+                    name: spec.name,
+                    outcome,
+                });
+                continue;
+            }
+        };
+        // Checked before the stop, so a pack that is already in place is
+        // reported as current, not as the stop's failure.
+        let outcome = if is_current(data_dir, spec, entry, &versions) {
+            PackSync::Current
+        } else if let Some(message) = known_refusal(plan.refused, entry) {
+            PackSync::Failed(message)
+        } else if let Some(stop) = &stopped {
+            stop.clone()
+        } else if !take_request(&mut requests_left) {
+            held_back += 1;
+            continue;
+        } else {
+            let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
+                Step::Done(outcome) => outcome,
+                Step::Gone => {
+                    stale = true;
+                    PackSync::Failed(PACK_FAILED.to_string())
+                }
+                Step::Stop(outcome) => {
+                    stopped = Some(outcome.clone());
+                    outcome
+                }
+            };
+            match &outcome {
+                PackSync::Installed => {
                     // Keep the other packs' versions, including an alpha.6
                     // file that only names heroes-v1.tar.
                     versions.insert(spec.name.to_string(), entry.version.clone());
@@ -895,17 +1246,30 @@ async fn run_sync(
                         );
                     }
                 }
-                outcome
+                PackSync::Failed(message) if is_fixed_refusal(message) => {
+                    // The bytes did not match what the list says: the list
+                    // may have moved on since it was read.
+                    stale |= message == PACK_MISMATCH;
+                    refused.push((entry.clone(), message.clone()));
+                }
+                _ => {}
             }
+            outcome
         };
         packs.push(PackStatus {
             name: spec.name,
             outcome,
         });
     }
-    // After a stop the list is not handed on, so no later run reuses it to
-    // send the request the server just refused or rate limited.
-    (PackReport { packs }, stopped.is_none().then_some(entries))
+    SyncRun {
+        report: PackReport { packs },
+        entries: Some(entries),
+        read_list,
+        stopped: stopped.is_some(),
+        stale,
+        held_back,
+        refused,
+    }
 }
 
 async fn fetch_list(
@@ -1058,6 +1422,9 @@ fn sweep_stale_staging(data_dir: &Path) {
 /// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
 enum Step {
     Done(PackSync),
+    /// The site listed the pack and then had no such file (404). The pack
+    /// failed, and the list is out of date.
+    Gone,
     Stop(PackSync),
 }
 
@@ -1090,7 +1457,7 @@ async fn sync_one(
     {
         Get::Ok(bytes) => bytes,
         Get::Unavailable => return Step::Stop(PackSync::Unavailable),
-        Get::Unsupported => return Step::Done(PackSync::Failed(PACK_FAILED.to_string())),
+        Get::Unsupported => return Step::Gone,
         Get::Auth => return Step::Stop(PackSync::Failed(PACK_AUTH.to_string())),
         Get::Forbidden => return Step::Stop(PackSync::Failed(PACK_FORBIDDEN.to_string())),
         Get::Limited(seconds) => {
@@ -1165,7 +1532,7 @@ fn unique_suffix() -> String {
     )
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct PackListEntry {
     name: String,
     version: String,
@@ -2318,6 +2685,7 @@ mod tests {
         }]))
         .unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked = requested_paths();
         let fake = Arc::new(Fake {
             token: token.into(),
             list_status: 200,
@@ -2328,12 +2696,13 @@ mod tests {
             file_chunked: false,
             named_files: BTreeMap::new(),
             file_hits: hits.clone(),
-            requested: requested_paths(),
+            requested: asked.clone(),
         });
         let base = spawn_fake(fake);
         let logs = capture_logs();
         let startup = sync_on_startup(base.as_str(), token, dir.path()).await;
-        // The keeper says what went wrong, then tries the pack twice more.
+        // The keeper says what went wrong and does not download the pack
+        // again while the list shows the same entry.
         let creds = move || {
             Some(PackCredentials {
                 server_url: base.clone(),
@@ -2346,7 +2715,12 @@ mod tests {
         let logs = logs.text();
         assert!(!finished, "a pack that never matches is never settled");
         assert_eq!(waits, [secs(60), secs(300), secs(900)]);
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            3,
+            "the list, the download, and the list once more"
+        );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
         assert!(logs.contains(PACK_MISMATCH), "{logs}");
@@ -3286,7 +3660,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let startup =
             sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert!(startup.entries.is_some(), "the list was read and is kept");
+        assert!(startup.goes_on(), "the list was read and is kept");
         // Capture starts after this: only the alpha.6 requests happened.
         assert_eq!(served.downloaded(), vec![HEROES_PACK_NAME.to_string()]);
         assert_eq!(list_requests(&served), 1);
@@ -3294,7 +3668,7 @@ mod tests {
             assert!(!spec.dir_in(dir.path()).exists(), "{}", spec.name);
         }
         let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
-        let report = keeper.first_try().await;
+        let report = keeper.first_pass().await.report;
         assert_eq!(
             report.packs.len(),
             PACKS.len(),
@@ -3337,7 +3711,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
         let startup = sync_on_startup(base.as_str(), TOKEN, dir.path()).await;
-        assert!(startup.entries.is_none());
+        assert!(startup.run.entries.is_none());
         // The keeper writes the line, with the wait before its next try.
         let (finished, waits) = rig(&base, dir.path(), Some(startup), 0, no_nap).run().await;
         let logs = logs.text();
@@ -3372,8 +3746,8 @@ mod tests {
         assert_eq!(report.guide_result(), Ok(PACK_BUSY.to_string()));
         let startup =
             sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert_eq!(startup.report.heroes(), &PackSync::Busy);
-        assert!(startup.entries.is_none());
+        assert_eq!(startup.run.report.heroes(), &PackSync::Busy);
+        assert!(startup.run.entries.is_none());
         assert!(served.requested.lock().unwrap().is_empty(), "no request");
         drop(held);
         let report = sync(&served, dir.path()).await;
@@ -3673,7 +4047,11 @@ mod tests {
             let startup =
                 sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
                     .await;
-            assert!(startup.entries.is_none(), "HTTP {status} hands on no list");
+            assert!(
+                startup.run.entries.is_some(),
+                "HTTP {status}: the list is kept"
+            );
+            assert!(!startup.goes_on(), "HTTP {status}: the keeper waits first");
             // The keeper sends nothing more before its first wait is over.
             let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 0, no_nap)
                 .run()
@@ -3692,9 +4070,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let startup =
             sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert!(startup.entries.is_some(), "a mismatch is not a stop");
+        assert!(startup.goes_on(), "a mismatch is not a stop");
         let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
-        let report = keeper.first_try().await;
+        let report = keeper.first_pass().await.report;
         assert_eq!(
             report.heroes(),
             &PackSync::Failed(PACK_MISMATCH.to_string())
@@ -3705,7 +4083,11 @@ mod tests {
                 .all(|s| s.outcome == PackSync::Installed),
             "{report:?}"
         );
-        assert_eq!(list_requests(&served), 1, "the startup list is reused");
+        assert_eq!(
+            list_requests(&served),
+            2,
+            "a download that did not match the list: the list is read again"
+        );
     }
 
     struct Gated {
@@ -3873,7 +4255,7 @@ mod tests {
         let startup =
             sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
         let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
-        let report = keeper.first_try().await;
+        let report = keeper.first_pass().await.report;
         assert!(
             report
                 .packs
@@ -4209,29 +4591,33 @@ mod tests {
         })
     }
 
-    const BUSY: Verdict = Verdict {
-        busy: true,
-        limited: None,
-        disabled: false,
-        failed: false,
-    };
-    const FAILED: Verdict = Verdict {
+    const NONE: Verdict = Verdict {
         busy: false,
         limited: None,
         disabled: false,
+        failed: false,
+        refused: false,
+        held: false,
+    };
+    const BUSY: Verdict = Verdict { busy: true, ..NONE };
+    const FAILED: Verdict = Verdict {
         failed: true,
+        ..NONE
     };
     const DISABLED: Verdict = Verdict {
-        busy: false,
-        limited: None,
         disabled: true,
-        failed: false,
+        ..NONE
     };
+    const REFUSED: Verdict = Verdict {
+        refused: true,
+        ..NONE
+    };
+    const HELD: Verdict = Verdict { held: true, ..NONE };
 
     fn limited(seconds: u64) -> Verdict {
         Verdict {
             limited: Some(seconds),
-            ..Verdict::default()
+            ..NONE
         }
     }
 
@@ -4253,9 +4639,10 @@ mod tests {
     #[test]
     fn nothing_left_to_try_is_no_wait() {
         let mut backoff = Backoff::default();
-        assert_eq!(backoff.wait_after(Verdict::default(), TEST_JITTER), None);
-        assert!(Verdict::default().settled());
-        for unsettled in [BUSY, FAILED, DISABLED, limited(1)] {
+        assert_eq!(NONE, Verdict::default());
+        assert_eq!(backoff.wait_after(NONE, TEST_JITTER), None);
+        assert!(NONE.settled());
+        for unsettled in [BUSY, FAILED, DISABLED, REFUSED, HELD, limited(1)] {
             assert!(!unsettled.settled(), "{unsettled:?}");
             assert!(backoff.wait_after(unsettled, TEST_JITTER).is_some());
         }
@@ -4280,16 +4667,15 @@ mod tests {
             waits_ms(&[FAILED; 6]),
             [60_000, 300_000, 900_000, 1_800_000, 1_800_000, 1_800_000]
         );
-        // Packs switched off walks the same steps.
+        // Packs switched off and a refused pack walk the same steps.
         assert_eq!(
-            waits_ms(&[DISABLED, FAILED, DISABLED, DISABLED, FAILED]),
+            waits_ms(&[DISABLED, FAILED, REFUSED, DISABLED, REFUSED]),
             [60_000, 300_000, 900_000, 1_800_000, 1_800_000]
         );
-        // The step does not start over after a 429 or a busy lock, so a
-        // refused pack is not fetched sooner than the row it has reached.
+        // The step does not start over after a 429 or a busy lock.
         assert_eq!(
             waits_ms(&[FAILED, limited(9), BUSY, FAILED, limited(9), FAILED]),
-            [60_000, 9_750, 5_000, 300_000, 9_750, 900_000]
+            [60_000, 9_750, 5_000, 300_000, 10_750, 900_000]
         );
     }
 
@@ -4298,15 +4684,14 @@ mod tests {
         // 7 s is taken as asked, plus the jitter.
         assert_eq!(waits_ms(&[limited(7)]), [7_750]);
         // Under the floor: 0 counts as 1, and 1 s + jitter is still 5 s.
-        assert_eq!(waits_ms(&[limited(0), limited(1), limited(4)]), [5_000; 3]);
+        for under in [0, 1, 4] {
+            assert_eq!(waits_ms(&[limited(under)]), [5_000], "{under}");
+        }
         assert_eq!(waits_ms(&[limited(5)]), [5_750]);
         // Over the cap: 120 s, however long the server said.
-        assert_eq!(
-            waits_ms(&[limited(120), limited(121), limited(3600), limited(u64::MAX)]),
-            [120_750; 4]
-        );
-        // The same wait every time: a 429 has no step of its own.
-        assert_eq!(waits_ms(&[limited(30); 3]), [30_750; 3]);
+        for over in [120, 121, 3600, u64::MAX] {
+            assert_eq!(waits_ms(&[limited(over)]), [120_750], "{over}");
+        }
         // No jitter, no extra.
         let mut backoff = Backoff::default();
         assert_eq!(
@@ -4316,14 +4701,90 @@ mod tests {
     }
 
     #[test]
+    fn a_429_after_a_429_waits_at_least_10_20_40_80_then_120_seconds() {
+        assert_eq!(
+            waits_ms(&[limited(7); 8]),
+            [
+                7_750, 10_750, 20_750, 40_750, 80_750, 120_750, 120_750, 120_750
+            ]
+        );
+        // Never under what the server asked.
+        assert_eq!(
+            waits_ms(&[limited(30); 5]),
+            [30_750, 30_750, 30_750, 40_750, 80_750]
+        );
+        // A try without a 429 does not start the step over by itself: the
+        // list getting through, or a busy lock, is not a download.
+        assert_eq!(
+            waits_ms(&[
+                limited(7),
+                limited(7),
+                limited(7),
+                HELD,
+                limited(7),
+                limited(7)
+            ]),
+            [7_750, 10_750, 20_750, 10_000, 40_750, 80_750]
+        );
+        assert_eq!(
+            waits_ms(&[limited(7), limited(7), BUSY, limited(7)]),
+            [7_750, 10_750, 5_000, 20_750]
+        );
+        // A pack that arrived does.
+        let mut backoff = Backoff::default();
+        let wait = |backoff: &mut Backoff| {
+            backoff
+                .wait_after(limited(7), TEST_JITTER)
+                .expect("not settled")
+        };
+        assert_eq!(wait(&mut backoff), ms(7_750));
+        assert_eq!(wait(&mut backoff), ms(10_750));
+        assert_eq!(wait(&mut backoff), ms(20_750));
+        backoff.pack_arrived();
+        assert_eq!(wait(&mut backoff), ms(7_750));
+        assert_eq!(wait(&mut backoff), ms(10_750));
+    }
+
+    #[test]
+    fn while_paced_the_next_download_is_ten_seconds_away() {
+        assert_eq!(waits_ms(&[HELD; 3]), [10_000; 3]);
+        // A pack that is known to be refused does not slow the others
+        // down, and the failure step stays where it was.
+        let held_and_refused = Verdict {
+            held: true,
+            refused: true,
+            ..NONE
+        };
+        assert_eq!(
+            waits_ms(&[held_and_refused, held_and_refused, REFUSED, REFUSED]),
+            [10_000, 10_000, 60_000, 300_000]
+        );
+        // Something that failed for another reason does.
+        let held_and_failed = Verdict {
+            held: true,
+            failed: true,
+            ..NONE
+        };
+        assert_eq!(waits_ms(&[held_and_failed, HELD]), [60_000, 10_000]);
+        // With a 429 as well: the longer of the two.
+        let held_and_limited = |seconds| Verdict {
+            held: true,
+            limited: Some(seconds),
+            ..NONE
+        };
+        assert_eq!(waits_ms(&[held_and_limited(2)]), [10_000]);
+        assert_eq!(waits_ms(&[held_and_limited(30)]), [30_750]);
+    }
+
+    #[test]
     fn a_try_that_ended_on_several_things_waits_the_longest() {
         let both = |seconds: u64, failed: bool, busy: bool| Verdict {
             busy,
             limited: Some(seconds),
-            disabled: false,
             failed,
+            ..NONE
         };
-        // A refused pack and a 429 in one try: the minute, not 10 s.
+        // A failure and a 429 in one try: the minute, not 10 s.
         assert_eq!(waits_ms(&[both(10, true, false)]), [60_000]);
         // The 429 asks for longer than the failure row.
         assert_eq!(waits_ms(&[both(100, true, false)]), [100_750]);
@@ -4345,7 +4806,7 @@ mod tests {
         let busy_and_failed = Verdict {
             busy: true,
             failed: true,
-            ..Verdict::default()
+            ..NONE
         };
         assert_eq!(
             waits_ms(&[busy_and_failed, BUSY, FAILED]),
@@ -4365,6 +4826,52 @@ mod tests {
     }
 
     #[test]
+    fn a_request_budget_counts_down_and_none_is_no_limit() {
+        let mut none = None;
+        assert!(take_request(&mut none) && take_request(&mut none));
+        assert_eq!(none, None);
+        let mut two = Some(2);
+        assert!(take_request(&mut two));
+        assert!(take_request(&mut two));
+        assert!(!take_request(&mut two));
+        assert!(!take_request(&mut two));
+        assert_eq!(two, Some(0));
+    }
+
+    #[test]
+    fn a_refusal_is_known_only_for_the_same_list_entry() {
+        let entry = |version: &str, sha: &str, size: u64| PackListEntry {
+            name: "heroes-v2.tar".into(),
+            version: version.into(),
+            sha256: sha.into(),
+            size,
+        };
+        let was = entry("1", "aa", 10);
+        let mut refused = Refused::new();
+        refused.insert(was.name.clone(), (was.clone(), PACK_MISMATCH.to_string()));
+        let known = |entry: &PackListEntry| known_refusal(Some(&refused), entry);
+        assert_eq!(known(&was), Some(PACK_MISMATCH.to_string()));
+        // Another version, sha256 or size is another entry: fetched again.
+        assert_eq!(known(&entry("2", "aa", 10)), None);
+        assert_eq!(known(&entry("1", "bb", 10)), None);
+        assert_eq!(known(&entry("1", "aa", 11)), None);
+        let other = PackListEntry {
+            name: "maps-v1.tar".into(),
+            ..was.clone()
+        };
+        assert_eq!(known(&other), None);
+        assert_eq!(known_refusal(None, &was), None);
+        // Only what the same bytes would get again counts as fixed.
+        for message in [PACK_MISMATCH, PACK_UNSAFE, PACK_TOO_BIG] {
+            assert!(is_fixed_refusal(message), "{message}");
+        }
+        for message in [PACK_FAILED, PACK_AUTH, PACK_FORBIDDEN, PACK_SIGN_IN] {
+            assert!(!is_fixed_refusal(message), "{message}");
+        }
+        assert!(!is_fixed_refusal(&rate_limit_message(10)));
+    }
+
+    #[test]
     fn a_verdict_reads_every_outcome() {
         let settled = [
             PackSync::Installed,
@@ -4372,26 +4879,31 @@ mod tests {
             PackSync::Missing,
             PackSync::Unsupported,
         ];
-        assert_eq!(verdict(&settled), Verdict::default());
+        assert_eq!(verdict(&settled), NONE);
         for outcome in &settled {
             assert!(outcome.is_settled(), "{outcome:?}");
         }
         assert_eq!(verdict(&[PackSync::Current, PackSync::Busy]), BUSY);
         assert_eq!(verdict(&[PackSync::Unavailable]), DISABLED);
-        for message in [
-            PACK_FAILED,
-            PACK_MISMATCH,
-            PACK_UNSAFE,
-            PACK_AUTH,
-            PACK_FORBIDDEN,
-            PACK_SIGN_IN,
-        ] {
+        for message in [PACK_FAILED, PACK_AUTH, PACK_FORBIDDEN, PACK_SIGN_IN] {
             let outcome = PackSync::Failed(message.to_string());
             assert!(!outcome.is_settled());
+            assert!(!outcome.is_fixed_refusal());
             assert_eq!(outcome.rate_limit_secs(), None);
             assert_eq!(
                 verdict(&[PackSync::Installed, outcome]),
                 FAILED,
+                "{message}"
+            );
+        }
+        // A refusal the same bytes would get again is kept apart.
+        for message in [PACK_MISMATCH, PACK_UNSAFE, PACK_TOO_BIG] {
+            let outcome = PackSync::Failed(message.to_string());
+            assert!(!outcome.is_settled());
+            assert!(outcome.is_fixed_refusal());
+            assert_eq!(
+                verdict(&[PackSync::Installed, outcome]),
+                REFUSED,
                 "{message}"
             );
         }
@@ -4411,12 +4923,15 @@ mod tests {
         }
         for other in [PackSync::Installed, PackSync::Busy, PackSync::Unavailable] {
             assert_eq!(other.rate_limit_secs(), None);
+            assert!(!other.is_fixed_refusal());
         }
-        // Everything at once, and the one reason the log line names.
+        // Everything a report can show at once. Held-back downloads are
+        // not in a report; the job adds them.
         let all = verdict(&[
             PackSync::Busy,
             PackSync::Unavailable,
             limit(8),
+            PackSync::Failed(PACK_FAILED.to_string()),
             PackSync::Failed(PACK_MISMATCH.to_string()),
         ]);
         assert_eq!(
@@ -4425,28 +4940,41 @@ mod tests {
                 busy: true,
                 limited: Some(8),
                 disabled: true,
-                failed: true
+                failed: true,
+                refused: true,
+                held: false,
             }
         );
+        let tried = Tried {
+            report: PackReport { packs: Vec::new() },
+            held_back: 2,
+        };
+        assert_eq!(tried.verdict(), HELD);
+        // The one reason the log line names.
         assert_eq!(all.why(), Why::Failed);
-        assert_eq!(
-            Verdict {
-                failed: false,
-                ..all
-            }
-            .why(),
-            Why::Disabled
-        );
-        assert_eq!(
-            Verdict {
-                failed: false,
-                disabled: false,
-                ..all
-            }
-            .why(),
-            Why::Limited
-        );
+        let no_failure = Verdict {
+            failed: false,
+            ..all
+        };
+        assert_eq!(no_failure.why(), Why::Disabled);
+        let not_off = Verdict {
+            disabled: false,
+            ..no_failure
+        };
+        assert_eq!(not_off.why(), Why::Limited);
+        let not_limited = Verdict {
+            limited: None,
+            ..not_off
+        };
+        assert_eq!(not_limited.why(), Why::Busy);
         assert_eq!(BUSY.why(), Why::Busy);
+        assert_eq!(HELD.why(), Why::Paced);
+        let held_and_refused = Verdict {
+            held: true,
+            ..REFUSED
+        };
+        assert_eq!(held_and_refused.why(), Why::Paced);
+        assert_eq!(REFUSED.why(), Why::Failed);
     }
 
     /// Finding 1 of the pack download test, step for step: two starts on
@@ -4471,14 +4999,14 @@ mod tests {
         gate.arrived.await.expect("A asked for heroes-v1");
         // Start B finds the lock busy: no request, no list.
         let start_b = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert_eq!(start_b.report.heroes(), &PackSync::Busy);
-        assert!(start_b.entries.is_none());
+        assert_eq!(start_b.run.report.heroes(), &PackSync::Busy);
+        assert!(start_b.run.entries.is_none());
         assert_eq!(requests(&served), list_then(&[HEROES_PACK_NAME]), "A only");
         // A finishes heroes-v1, then finds B's pid file and exits. Its
         // keeper never runs.
         gate.release.send(()).expect("release");
         let start_a = start_a.await.expect("A");
-        assert_eq!(start_a.report.heroes(), &PackSync::Installed);
+        assert_eq!(start_a.run.report.heroes(), &PackSync::Installed);
         drop(start_a);
         // B is the daemon that stays, and its keeper gets the other five.
         let (finished, waits) = rig(&served.base, dir.path(), Some(start_b), 8, no_nap)
@@ -4538,7 +5066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_429_wait_is_the_servers_retry_after_and_then_the_packs_arrive() {
+    async fn after_a_429_only_the_refused_download_is_sent_and_the_rest_ten_seconds_apart() {
         let (list, files, contents) = all_packs_for_script();
         let served = serve_script(move |path, asked| {
             if path.ends_with("/heroes-v2.tar") && asked == 0 {
@@ -4550,17 +5078,28 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert!(startup.entries.is_some());
+        assert!(startup.goes_on());
         let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
             .run()
             .await;
         let logs = logs.text();
         assert!(finished);
-        assert_eq!(waits, [secs(7) + TEST_JITTER]);
+        // What the server asked for, then one download every 10 s.
+        assert_eq!(
+            waits,
+            [
+                secs(7) + TEST_JITTER,
+                secs(10),
+                secs(10),
+                secs(10),
+                secs(10)
+            ]
+        );
         assert_all_installed(dir.path(), &contents);
-        // Startup (2), the refused download, then one list and the five.
+        // Startup (2), the refused download, then the five downloads. The
+        // list is not asked for again.
         let mut expected = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
-        expected.extend(list_then(&pack_names()[1..]));
+        expected.extend(tar_paths(&pack_names()[1..]));
         assert_eq!(requests(&served), expected);
         let said = lines_with(&logs, SAID_LIMITED);
         assert_eq!(said.len(), 1, "{logs}");
@@ -4573,11 +5112,14 @@ mod tests {
         );
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
-        assert!(done[0].contains("tries=2"), "{logs}");
+        assert!(done[0].contains("tries=6"), "{logs}");
         assert!(
             done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
             "{logs}"
         );
+        // Six installs, the 429 line and the closing line. The paced waits
+        // are not written for a member.
+        assert_eq!(pack_lines(&logs).len(), 8, "{logs}");
         assert_no_secrets(&logs);
     }
 
@@ -4594,7 +5136,7 @@ mod tests {
         });
         let dir = tempfile::tempdir().expect("tempdir");
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert!(startup.entries.is_none());
+        assert!(startup.run.entries.is_none());
         let sent_by_nap = Arc::new(Mutex::new(Vec::new()));
         let (sent, paths) = (sent_by_nap.clone(), served.requested.clone());
         let on_nap = move |nap| {
@@ -4605,8 +5147,12 @@ mod tests {
             .run()
             .await;
         assert!(finished);
-        assert_eq!(waits, [secs(120) + TEST_JITTER], "300 s is cut to 120 s");
-        assert_eq!(*sent_by_nap.lock().unwrap(), [1], "only the refused list");
+        // 300 s is cut to 120 s. Then one request per try: the list, and
+        // each pack 10 s after the one before.
+        let mut expected_waits = vec![secs(120) + TEST_JITTER];
+        expected_waits.extend([secs(10); 6]);
+        assert_eq!(waits, expected_waits);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7]);
         assert_all_installed(dir.path(), &contents);
         let mut expected = vec![LIST_PATH.to_string()];
         expected.extend(list_then(&pack_names()));
@@ -4625,7 +5171,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert_eq!(startup.report.heroes(), &PackSync::Unavailable);
+        assert_eq!(startup.run.report.heroes(), &PackSync::Unavailable);
         let rig = rig(&served.base, dir.path(), Some(startup), 8, no_nap);
         assert!(!rig.keeper.starts_with_downloads(), "it waits first");
         let (finished, waits) = rig.run().await;
@@ -4674,7 +5220,7 @@ mod tests {
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(
-            startup.report.heroes(),
+            startup.run.report.heroes(),
             &PackSync::Failed(PACK_FAILED.to_string())
         );
         let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
@@ -4730,7 +5276,7 @@ mod tests {
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&dead, TOKEN, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(
-            startup.report.heroes(),
+            startup.run.report.heroes(),
             &PackSync::Failed(PACK_FAILED.to_string())
         );
         // It answers again during the keeper's second wait.
@@ -4839,7 +5385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_pack_is_fetched_once_per_backoff_step_and_the_others_once() {
+    async fn a_refused_pack_is_downloaded_once_and_then_only_the_list_is_read() {
         let served = all_packs_with_download("heroes-v2.tar", 200, b"not the listed pack");
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
@@ -4867,17 +5413,18 @@ mod tests {
                 secs(1800)
             ]
         );
-        // One download of the refused pack per try, and nothing in between.
+        // The refused pack is downloaded once, and so is every other pack.
         let asked = requests(&served);
         let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
-        assert_eq!(fetched("/heroes-v2.tar"), 6, "the first try and five more");
-        for spec in PACKS.iter().filter(|spec| spec.name != "heroes-v2.tar") {
+        for spec in PACKS {
             assert_eq!(fetched(&format!("/{}", spec.name)), 1, "{}", spec.name);
         }
-        assert_eq!(list_requests(&served), 6, "startup's list and five more");
-        // Startup and the first try are 7 requests; every later try is 2.
-        assert_eq!(*sent_by_nap.lock().unwrap(), [7, 9, 11, 13, 15]);
-        assert_eq!(asked.len(), 17);
+        // Startup and the first try are 7 requests. The next try reads the
+        // list again, because the download did not match it. After that
+        // the list is read only once it is 30 minutes old.
+        assert_eq!(*sent_by_nap.lock().unwrap(), [7, 8, 8, 8, 9]);
+        assert_eq!(list_requests(&served), 4);
+        assert_eq!(asked.len(), 10);
         assert!(
             !pack_spec("heroes-v2.tar")
                 .unwrap()
@@ -4887,12 +5434,123 @@ mod tests {
         assert_eq!(stored_versions(dir.path()).len(), PACKS.len() - 1);
         assert_eq!(leftovers(dir.path()), Vec::<String>::new());
         let said = lines_with(&logs, SAID_MISSING);
-        assert_eq!(said.len(), 1, "six refusals, one line:\n{logs}");
+        assert_eq!(said.len(), 1, "one line for the refused pack:\n{logs}");
+        assert!(said[0].contains(" WARN "), "{logs}");
         assert!(said[0].contains("missing=\"heroes-v2.tar\""), "{logs}");
         assert!(said[0].contains("refused=\"heroes-v2.tar\""), "{logs}");
         assert!(said[0].contains(PACK_MISMATCH), "{logs}");
         assert!(lines_with(&logs, SAID_DONE).is_empty(), "{logs}");
         assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_refused_pack_is_downloaded_again_when_its_list_entry_changes() {
+        let (list, files, contents) = all_packs();
+        // The site lists heroes-v2 and serves other bytes under that name.
+        // From the third list on it is fixed: a new version, with its bytes.
+        let fixed_tar = build_pack("heroes-v2.tar", "154088.2", &contents["heroes-v2.tar"]);
+        let fixed_list: Vec<serde_json::Value> = list
+            .iter()
+            .map(|entry| {
+                if entry["name"] == "heroes-v2.tar" {
+                    entry_json("heroes-v2.tar", "154088.2", &fixed_tar)
+                } else {
+                    entry.clone()
+                }
+            })
+            .collect();
+        let (broken_list, fixed_list) = (
+            serde_json::to_vec(&list).unwrap(),
+            serde_json::to_vec(&fixed_list).unwrap(),
+        );
+        let fixed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let now_fixed = fixed.clone();
+        let served = serve_script(move |path, asked| {
+            use std::sync::atomic::Ordering::SeqCst;
+            if path == LIST_PATH && asked >= 2 {
+                now_fixed.store(true, SeqCst);
+                return Some((200, fixed_list.clone(), None));
+            }
+            if path.ends_with("/heroes-v2.tar") {
+                let body = if now_fixed.load(SeqCst) {
+                    fixed_tar.clone()
+                } else {
+                    b"not the listed pack".to_vec()
+                };
+                return Some((200, body, None));
+            }
+            healthy(&broken_list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished, "the fixed pack settles it");
+        assert!(fixed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(waits, [secs(60), secs(300), secs(900), secs(1800)]);
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(stored_versions(dir.path())["heroes-v2.tar"], "154088.2");
+        // Startup 2, the first try 5, the list after the mismatch, the
+        // list at 30 minutes, and the pack again under its new entry.
+        let asked = requests(&served);
+        let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
+        assert_eq!(fetched("/heroes-v2.tar"), 2);
+        assert_eq!(list_requests(&served), 3);
+        assert_eq!(asked.len(), 10);
+        assert_eq!(lines_with(&logs, SAID_MISSING).len(), 1, "{logs}");
+        let done = lines_with(&logs, SAID_DONE);
+        assert_eq!(done.len(), 1, "{logs}");
+        assert!(done[0].contains("heroes-v2.tar"), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_listed_pack_that_is_a_404_makes_the_next_try_read_the_list_again() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path.ends_with("/heroes-v2.tar") && asked == 0 {
+                return Some((404, br#"{"error":"pack_not_found"}"#.to_vec(), None));
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        assert!(finished);
+        assert_eq!(waits, [secs(60)]);
+        assert_all_installed(dir.path(), &contents);
+        // The other four are not held up by the 404. The next try is the
+        // list and the one pack.
+        let mut expected = list_then(&pack_names());
+        expected.extend(list_then(&["heroes-v2.tar"]));
+        assert_eq!(requests(&served), expected);
+    }
+
+    #[tokio::test]
+    async fn a_download_that_failed_on_the_network_is_tried_again_without_the_list() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path.ends_with("/heroes-v2.tar") && asked == 0 {
+                return None;
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        assert!(finished);
+        assert_eq!(waits, [secs(60)]);
+        assert_all_installed(dir.path(), &contents);
+        let mut expected = list_then(&pack_names());
+        expected.extend(tar_paths(&["heroes-v2.tar"]));
+        assert_eq!(requests(&served), expected, "the list it has is used");
     }
 
     #[tokio::test]
@@ -4979,7 +5637,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert_eq!(startup.report.heroes(), &PackSync::Unsupported);
+        assert_eq!(startup.run.report.heroes(), &PackSync::Unsupported);
         let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
             .run()
             .await;
@@ -5210,5 +5868,509 @@ mod tests {
         assert_eq!(waits, Vec::<Duration>::new());
         assert_all_installed(dir.path(), &contents);
         assert_eq!(requests(&served)[before..], list_then(&pack_names()[1..]));
+    }
+
+    // ---- P1c fix round: the first-try signal ----
+
+    #[tokio::test]
+    async fn the_first_try_signal_says_what_is_missing_and_when_the_next_try_is() {
+        // A first install without trouble: nothing missing, no next try.
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let mut job = rig(&served.base, dir.path(), Some(startup), 8, no_nap);
+        let first = job.keeper.first_try_done();
+        assert!(job.run().await.0);
+        assert_eq!(
+            first.await.expect("sent"),
+            FirstTry {
+                missing: Vec::new(),
+                next_try_in: None
+            }
+        );
+
+        // Packs switched off: everything is missing and the next try is a
+        // minute away. The signal comes before that wait, not after it.
+        let served =
+            serve_script(|_, _| Some((503, br#"{"error":"packs_disabled"}"#.to_vec(), None)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let mut job = rig(&served.base, dir.path(), Some(startup), 0, no_nap);
+        let first = job.keeper.first_try_done();
+        assert!(!job.run().await.0, "still waiting");
+        assert_eq!(
+            first.await.expect("sent"),
+            FirstTry {
+                missing: pack_names(),
+                next_try_in: Some(secs(60))
+            }
+        );
+
+        // A 429 on a download: five are missing and the next try is soon.
+        let (list, files, _) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path.ends_with("/heroes-v2.tar") && asked == 0 {
+                let body = br#"{"error":"rate_limited","retry_after":7}"#;
+                return Some((429, body.to_vec(), Some(7)));
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let mut job = rig(&served.base, dir.path(), Some(startup), 0, no_nap);
+        let first = job.keeper.first_try_done();
+        assert!(!job.run().await.0, "still waiting");
+        assert_eq!(
+            first.await.expect("sent"),
+            FirstTry {
+                missing: pack_names()[1..].to_vec(),
+                next_try_in: Some(secs(7) + TEST_JITTER)
+            }
+        );
+
+        // A job that is dropped before its first try closes the channel.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut job = rig(&served.base, dir.path(), None, 0, no_nap);
+        let first = job.keeper.first_try_done();
+        drop(job);
+        assert!(first.await.is_err());
+    }
+
+    // ---- P1c fix round: against the site's real rate limit (F268-1) ----
+    // The fake below keeps the bucket the way the site's limiter does, on a
+    // clock that only the trackers' own waits move.
+
+    /// The site's pack rate limit as governor 0.10 keeps it (GCRA): 8 in a
+    /// burst, one more every 10 s, per address. A refused request costs
+    /// nothing and is told the whole seconds to the next allowed time, plus
+    /// one (`governor_error_response` in site-server).
+    struct Bucket {
+        /// The limiter's "theoretical arrival time". `None` until the
+        /// first request.
+        tat: Option<Duration>,
+    }
+
+    impl Bucket {
+        const EVERY: Duration = Duration::from_secs(10);
+        const BURST: u32 = 8;
+
+        /// A bucket with `left` requests in it at time zero.
+        fn with_left(left: u32) -> Self {
+            Self {
+                tat: Some(Self::EVERY * (Self::BURST - left)),
+            }
+        }
+
+        /// `Ok` when the request is let through, `Err(retry_after)` in
+        /// whole seconds when it is not.
+        fn ask(&mut self, now: Duration) -> Result<(), u64> {
+            let tau = Self::EVERY * (Self::BURST - 1);
+            let tat = self.tat.unwrap_or(now);
+            let earliest = tat.saturating_sub(tau);
+            if now < earliest {
+                return Err((earliest - now).as_secs() + 1);
+            }
+            self.tat = Some(tat.max(now) + Self::EVERY);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_bucket_model_is_eight_then_one_every_ten_seconds() {
+        let mut bucket = Bucket { tat: None };
+        let at = Duration::from_secs_f64;
+        for request in 0..8 {
+            assert_eq!(bucket.ask(at(0.0)), Ok(()), "request {request}");
+        }
+        // Empty: the next one is allowed at 10 s. Asking does not cost.
+        assert_eq!(bucket.ask(at(0.0)), Err(11));
+        assert_eq!(bucket.ask(at(3.0)), Err(8));
+        assert_eq!(bucket.ask(at(9.5)), Err(1));
+        assert_eq!(bucket.ask(at(10.0)), Ok(()));
+        assert_eq!(bucket.ask(at(10.0)), Err(11));
+        assert_eq!(bucket.ask(at(12.0)), Err(9));
+        assert_eq!(bucket.ask(at(20.0)), Ok(()));
+        // After 80 quiet seconds the burst is whole again.
+        for request in 0..8 {
+            assert_eq!(bucket.ask(at(110.0)), Ok(()), "request {request}");
+        }
+        assert_eq!(bucket.ask(at(110.0)), Err(11));
+        // The starting states the tests use.
+        assert_eq!(Bucket::with_left(8).ask(at(0.0)), Ok(()));
+        let mut four = Bucket::with_left(4);
+        for request in 0..4 {
+            assert_eq!(four.ask(at(0.0)), Ok(()), "request {request}");
+        }
+        assert_eq!(four.ask(at(0.0)), Err(11));
+        assert_eq!(Bucket::with_left(0).ask(at(0.0)), Err(11));
+        assert_eq!(Bucket::with_left(0).ask(at(10.0)), Ok(()));
+    }
+
+    /// Time for trackers that share one bucket. Each tracker is an actor.
+    /// The clock jumps to the next wake-up once every actor is asleep or
+    /// done, so no wait is slept for real and the order of events is the
+    /// order of the waits.
+    struct SimClock {
+        state: Mutex<SimState>,
+        moved: tokio::sync::Notify,
+    }
+
+    struct SimState {
+        now: Duration,
+        /// Actors that are neither asleep nor done.
+        awake: usize,
+        /// When each sleeping actor wakes.
+        wakes: Vec<Duration>,
+        /// The run is given up when the clock would pass this.
+        limit: Duration,
+        ran_out: bool,
+    }
+
+    impl SimState {
+        /// Jump to the next wake-up if nobody is awake.
+        fn settle(&mut self) {
+            if self.awake > 0 || self.ran_out {
+                return;
+            }
+            let Some(next) = self.wakes.iter().min().copied() else {
+                return;
+            };
+            if next > self.limit {
+                self.ran_out = true;
+                return;
+            }
+            self.now = next;
+            let asleep = self.wakes.len();
+            self.wakes.retain(|wake| *wake > next);
+            self.awake += asleep - self.wakes.len();
+        }
+    }
+
+    impl SimClock {
+        fn new(actors: usize, limit: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(SimState {
+                    now: Duration::ZERO,
+                    awake: actors,
+                    wakes: Vec::new(),
+                    limit,
+                    ran_out: false,
+                }),
+                moved: tokio::sync::Notify::new(),
+            })
+        }
+
+        fn now(&self) -> Duration {
+            self.state.lock().expect("clock").now
+        }
+
+        /// The calling actor sleeps for `wait` of this clock's time.
+        fn sleep(self: &Arc<Self>, wait: Duration) -> Nap {
+            let wake = {
+                let mut state = self.state.lock().expect("clock");
+                let wake = state.now + wait;
+                state.wakes.push(wake);
+                state.awake -= 1;
+                state.settle();
+                wake
+            };
+            self.moved.notify_waiters();
+            let clock = Arc::clone(self);
+            Box::pin(async move {
+                loop {
+                    let moved = clock.moved.notified();
+                    tokio::pin!(moved);
+                    let _ = moved.as_mut().enable();
+                    {
+                        let state = clock.state.lock().expect("clock");
+                        if !state.ran_out && state.now >= wake && !state.wakes.contains(&wake) {
+                            return;
+                        }
+                    }
+                    moved.await;
+                }
+            })
+        }
+
+        /// The calling actor is done for good.
+        fn actor_done(&self) {
+            {
+                let mut state = self.state.lock().expect("clock");
+                state.awake -= 1;
+                state.settle();
+            }
+            self.moved.notify_waiters();
+        }
+
+        /// Resolves when the clock gave up at its limit.
+        async fn ran_out(&self) {
+            loop {
+                let moved = self.moved.notified();
+                tokio::pin!(moved);
+                let _ = moved.as_mut().enable();
+                if self.state.lock().expect("clock").ran_out {
+                    return;
+                }
+                moved.await;
+            }
+        }
+    }
+
+    /// A site with all six packs behind the real rate limit, and every
+    /// request it saw: when, which path, which status.
+    struct LimitedSite {
+        base: String,
+        seen: Arc<Mutex<Vec<(Duration, String, u16)>>>,
+    }
+
+    impl LimitedSite {
+        fn statuses(&self) -> Vec<u16> {
+            let seen = self.seen.lock().expect("seen");
+            seen.iter().map(|(_, _, status)| *status).collect()
+        }
+
+        fn paths(&self) -> Vec<String> {
+            let seen = self.seen.lock().expect("seen");
+            seen.iter().map(|(_, path, _)| path.clone()).collect()
+        }
+
+        fn times(&self) -> Vec<Duration> {
+            let seen = self.seen.lock().expect("seen");
+            seen.iter().map(|(at, _, _)| *at).collect()
+        }
+
+        fn refused(&self) -> usize {
+            self.statuses()
+                .iter()
+                .filter(|status| **status == 429)
+                .count()
+        }
+    }
+
+    fn serve_limited(clock: &Arc<SimClock>, bucket: Bucket) -> (LimitedSite, PackContents) {
+        let (list, files, contents) = all_packs_for_script();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (clock, bucket, log) = (Arc::clone(clock), Mutex::new(bucket), seen.clone());
+        let served = serve_script(move |path, _| {
+            let now = clock.now();
+            let answer = match bucket.lock().expect("bucket").ask(now) {
+                Ok(()) => healthy(&list, &files, path),
+                Err(wait) => {
+                    let body = format!(r#"{{"error":"rate_limited","retry_after":{wait}}}"#);
+                    Some((429, body.into_bytes(), Some(wait)))
+                }
+            };
+            let status = answer.as_ref().map_or(0, |(status, _, _)| *status);
+            log.lock()
+                .expect("seen")
+                .push((now, path.to_string(), status));
+            answer
+        });
+        let site = LimitedSite {
+            base: served.base,
+            seen,
+        };
+        (site, contents)
+    }
+
+    /// One tracker on the simulated clock: it starts after `start_after`,
+    /// runs its startup sync and then its job to the end. The second value
+    /// collects the waits the job asked for.
+    fn tracker(
+        clock: &Arc<SimClock>,
+        site: &LimitedSite,
+        data_dir: &Path,
+        start_after: Duration,
+        jitter: Duration,
+    ) -> (Nap, Arc<Mutex<Vec<Duration>>>) {
+        let (clock, base, data_dir) =
+            (Arc::clone(clock), site.base.clone(), data_dir.to_path_buf());
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let asked = waits.clone();
+        let run = async move {
+            if !start_after.is_zero() {
+                clock.sleep(start_after).await;
+            }
+            let startup = sync_on_startup_capped(&base, TOKEN, &data_dir, PACK_MAX_BYTES).await;
+            let server_url = base.clone();
+            let mut keeper = PackKeeper::new(&data_dir, Some(startup), move || {
+                Some(PackCredentials {
+                    server_url: server_url.clone(),
+                    token: TOKEN.to_string(),
+                })
+            });
+            keeper.jitter = jitter;
+            let napper = Arc::clone(&clock);
+            keeper.sleep = Box::new(move |wait| {
+                asked.lock().expect("waits").push(wait);
+                napper.sleep(wait)
+            });
+            keeper.run().await;
+            clock.actor_done();
+        };
+        (Box::pin(run), waits)
+    }
+
+    /// Run the trackers to the end. `false` when the clock reached its
+    /// limit with a tracker still not done.
+    async fn run_trackers(clock: &Arc<SimClock>, trackers: Vec<Nap>) -> bool {
+        let handles: Vec<_> = trackers.into_iter().map(tokio::spawn).collect();
+        let all = async {
+            for handle in handles {
+                handle.await.expect("tracker");
+            }
+        };
+        tokio::select! {
+            () = all => true,
+            () = clock.ran_out() => false,
+        }
+    }
+
+    const SIM_LIMIT: Duration = Duration::from_secs(3600);
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    #[tokio::test]
+    async fn against_the_real_limit_one_first_install_is_seven_requests_and_no_429() {
+        let clock = SimClock::new(1, SIM_LIMIT);
+        let (site, contents) = serve_limited(&clock, Bucket::with_left(8));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tracker, waits) = tracker(&clock, &site, dir.path(), Duration::ZERO, TEST_JITTER);
+        assert!(run_trackers(&clock, vec![tracker]).await);
+        assert_eq!(*waits.lock().unwrap(), Vec::<Duration>::new());
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(site.paths(), list_then(&pack_names()));
+        assert_eq!(site.statuses(), [200; 7]);
+        assert_eq!(clock.now(), Duration::ZERO);
+    }
+
+    /// F268-1 as reviewed: the bucket runs out in the middle of a first
+    /// install. The refused download is the next request, not the list, and
+    /// the rest follow one every 10 s.
+    #[tokio::test]
+    async fn against_the_real_limit_a_429_in_the_middle_is_followed_by_the_downloads() {
+        let clock = SimClock::new(1, SIM_LIMIT);
+        let (site, contents) = serve_limited(&clock, Bucket::with_left(4));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tracker, waits) = tracker(&clock, &site, dir.path(), Duration::ZERO, TEST_JITTER);
+        assert!(
+            run_trackers(&clock, vec![tracker]).await,
+            "the job must end; it asked for {:?}",
+            site.paths()
+        );
+        assert_all_installed(dir.path(), &contents);
+        // The list and three packs fit. bans-v1 is refused with 11 s.
+        let mut expected = list_then(&pack_names()[..3]);
+        expected.extend(tar_paths(&["bans-v1.tar"]));
+        expected.extend(tar_paths(&pack_names()[3..]));
+        assert_eq!(site.paths(), expected);
+        assert_eq!(site.statuses(), [200, 200, 200, 200, 429, 200, 200, 200]);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [secs(11) + TEST_JITTER, secs(10), secs(10)]
+        );
+        assert_eq!(site.times()[5..], [ms(11_750), ms(21_750), ms(31_750)]);
+        assert_eq!(clock.now(), ms(31_750));
+    }
+
+    #[tokio::test]
+    async fn against_the_real_limit_a_bucket_that_starts_empty_is_eight_requests() {
+        let clock = SimClock::new(1, SIM_LIMIT);
+        let (site, contents) = serve_limited(&clock, Bucket::with_left(0));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tracker, waits) = tracker(&clock, &site, dir.path(), Duration::ZERO, TEST_JITTER);
+        assert!(
+            run_trackers(&clock, vec![tracker]).await,
+            "the job must end; it asked for {:?}",
+            site.paths()
+        );
+        assert_all_installed(dir.path(), &contents);
+        // The refused list, the list, then the six packs.
+        let mut expected = vec![LIST_PATH.to_string()];
+        expected.extend(list_then(&pack_names()));
+        assert_eq!(site.paths(), expected);
+        assert_eq!(site.refused(), 1);
+        let mut expected_waits = vec![secs(11) + TEST_JITTER];
+        expected_waits.extend([secs(10); 6]);
+        assert_eq!(*waits.lock().unwrap(), expected_waits);
+        // One request every 10 s, each 1.75 s after the bucket gave it.
+        let times = site.times();
+        assert_eq!(times[1], ms(11_750));
+        assert!(
+            times[1..]
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == secs(10))
+        );
+        assert_eq!(clock.now(), ms(71_750));
+    }
+
+    #[tokio::test]
+    async fn against_the_real_limit_two_trackers_behind_one_address_both_finish() {
+        let clock = SimClock::new(2, SIM_LIMIT);
+        let (site, contents) = serve_limited(&clock, Bucket::with_left(8));
+        let (dir_a, dir_b) = (
+            tempfile::tempdir().expect("tempdir"),
+            tempfile::tempdir().expect("tempdir"),
+        );
+        // B starts 3 s after A, as a second machine on release night would.
+        let (a, waits_a) = tracker(&clock, &site, dir_a.path(), Duration::ZERO, TEST_JITTER);
+        let (b, waits_b) = tracker(&clock, &site, dir_b.path(), secs(3), TEST_JITTER);
+        assert!(
+            run_trackers(&clock, vec![a, b]).await,
+            "both jobs must end; they asked for {:?}",
+            site.paths()
+        );
+        assert_all_installed(dir_a.path(), &contents);
+        assert_all_installed(dir_b.path(), &contents);
+        // A takes 7 of the 8. B's list is the eighth, its first download
+        // is refused with 8 s, and its six packs follow 10 s apart.
+        assert_eq!(*waits_a.lock().unwrap(), Vec::<Duration>::new());
+        let mut expected_waits = vec![secs(8) + TEST_JITTER];
+        expected_waits.extend([secs(10); 5]);
+        assert_eq!(*waits_b.lock().unwrap(), expected_waits);
+        let mut expected = list_then(&pack_names());
+        expected.extend(list_then(&[HEROES_PACK_NAME]));
+        expected.extend(tar_paths(&pack_names()));
+        assert_eq!(site.paths(), expected);
+        assert_eq!(site.statuses().len(), 15);
+        assert_eq!(site.refused(), 1);
+        assert_eq!(clock.now(), ms(61_750));
+    }
+
+    /// Both trackers want the same refilled request every 10 s. The one
+    /// that comes second backs off further each time, so the first gets
+    /// through, and then the second.
+    #[tokio::test]
+    async fn against_the_real_limit_two_trackers_on_an_empty_bucket_both_finish() {
+        let clock = SimClock::new(2, SIM_LIMIT);
+        let (site, contents) = serve_limited(&clock, Bucket::with_left(0));
+        let (dir_a, dir_b) = (
+            tempfile::tempdir().expect("tempdir"),
+            tempfile::tempdir().expect("tempdir"),
+        );
+        let (a, waits_a) = tracker(&clock, &site, dir_a.path(), Duration::ZERO, ms(750));
+        let (b, waits_b) = tracker(&clock, &site, dir_b.path(), Duration::ZERO, ms(2_250));
+        assert!(
+            run_trackers(&clock, vec![a, b]).await,
+            "both jobs must end; they asked for {:?}",
+            site.paths()
+        );
+        assert_all_installed(dir_a.path(), &contents);
+        assert_all_installed(dir_b.path(), &contents);
+        let (requests, refused, took) = (site.statuses().len(), site.refused(), clock.now());
+        println!(
+            "two trackers, empty bucket: {requests} requests, {refused} refused, done after {took:?}; \
+             waits A {:?}, waits B {:?}",
+            waits_a.lock().unwrap(),
+            waits_b.lock().unwrap()
+        );
+        // 14 requests are needed (two lists, twelve packs). The rest are
+        // refused ones, and they must stay few.
+        assert_eq!(requests - refused, 14);
+        assert!(refused <= 8, "{refused} refused requests");
+        assert!(took <= secs(240), "took {took:?}");
     }
 }

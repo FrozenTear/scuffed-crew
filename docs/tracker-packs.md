@@ -424,7 +424,13 @@ depends on the tracker release.
 - **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
   then starts capture. The other five packs are synced in the background
   with the same list, so capture never waits on them.
-- **Setup guide** ("Download reader pack") syncs all six.
+- **While the daemon runs**, that background job keeps trying until every
+  pack is in place or not on the list. See
+  [The daemon's background job](#the-daemons-background-job).
+- **Setup guide** ("Download reader pack") syncs all six, once per click.
+- **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
+  compacts and exits. It never starts the background job, so nothing is
+  tried again, and a pack sync that failed in that run is not logged.
 - A pack is downloaded when its folder is missing, or when the listed
   `version` differs from the one recorded in
   `<data_dir>/templates/pack-versions.json`. Otherwise it is left alone.
@@ -440,7 +446,8 @@ place.
 
 So after a publish: a member who restarts the tracker gets what their
 release asks for. A member who does not restart keeps running on what they
-have.
+have: the background job ends once every pack is current and does not look
+for new versions after that.
 
 More detail on a sync, for the tracker on main:
 
@@ -449,13 +456,64 @@ More detail on a sync, for the tracker on main:
   sync (the daemon and the app at once) sends nothing and reports "A reader
   pack sync is already running. Try again in a moment." That is not a failure.
 - A 401, 403, 429, or `packs_disabled` answer on one download stops the packs
-  after it for that run. Their folders are kept, a pack that is already
-  current is still reported as current, and the next run tries again.
+  after it for that run. Their folders are kept, and a pack that is already
+  current is still reported as current. The setup guide tries again on the
+  next click. The daemon's background job tries again by itself.
 - A first install of all six is seven requests (the list and six files),
   inside the burst of 8.
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
   an hour old.
+
+### The daemon's background job
+
+One job per daemon owns "make every pack current". Every daemon that has
+sync set up starts it, whatever the start sync came to. A second start on
+the same data folder exits at the pid check before it sends anything.
+
+- Its first try carries on from the start sync with the same list. If the
+  start sync was refused (429, 401, 403, `packs_disabled`), found the lock
+  busy or got no answer, the job sends nothing and waits first.
+- It keeps the list it has. The list is read again only when it is 30
+  minutes old, or when a download showed it is out of date (a listed pack
+  was a 404, or its bytes did not match the listed size and sha256). So the
+  request after a 429 is the refused download, not the list.
+- How long it waits before the next try:
+
+  | The try ended on | Wait |
+  | --- | --- |
+  | Another sync holds the lock | 5 s, 15 s, then 60 s each time |
+  | 429 | what the answer asks, kept to 1 to 120 s, and from the second 429 since a pack last arrived at least 10, 20, 40, 80, then 120 s; plus up to 4.75 s that differ per machine |
+  | Downloads still to do after a 429 | 10 s |
+  | `packs_disabled`, no answer, 401, 403, a refused pack | 1 min, 5 min, 15 min, then 30 min each time |
+
+  No wait is under 5 s.
+- **After the first 429 the job sends one request per try, 10 s apart**, for
+  as long as it runs. The limiter gives one request back every 10 s, so the
+  job takes no more than comes back and other trackers behind the same
+  address get theirs. Five missing packs then take under a minute.
+- **A pack the tracker refuses for a fixed reason** (size, sha256, layout,
+  too large) is downloaded once. The job logs one warning with the pack's
+  name and does not fetch it again until the list shows another `version`,
+  `sha256` or `size` for it, or the tracker is restarted. It reads the list
+  every 30 minutes to notice.
+- The job ends when every pack is in place or not on the list. A list with
+  only `heroes-v1.tar`, or a server without the pack routes, is not polled.
+- While sync is paused on a rejected token the job sends nothing.
+
+Requests from one tracker in the worst case, per hour:
+
+| What is wrong | Requests |
+| --- | --- |
+| Another sync holds the lock | 0 |
+| Every request is a 429 | 34 in the first hour, then at most 32; a refused request does not take from the bucket |
+| `packs_disabled`, 401 or 403 (on the list or on a download), or no answer at all | at most 7 in the first hour (the start and tries after 1, 6, 21 and 51 minutes), then at most 4 |
+| The list answers and every download fails on the network | six downloads per try: at most 32 in the first hour, then 14 |
+| One pack is refused for a fixed reason | that download once, then the list: 2 |
+
+The log has one line when the reason or the set of missing packs changes,
+not one per try, and one closing line with what arrived. No line carries
+the server address, a header or the token.
 
 The setup guide shows the hero pack's line, plus "Extra reader packs ready:
 N of M." when the server lists any of the other packs, plus the rate-limit

@@ -471,8 +471,10 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         // that has sync set up, whatever the startup sync came to (a busy
         // lock, a 429, packs switched off, no network, or no startup sync
         // at all while the token is paused), and it keeps trying while the
-        // daemon runs. The client clone shares the URL and token, so a pair
-        // saved in Settings later is the one it uses.
+        // daemon runs. The client clone shares the URL and token with the
+        // sync client, so when the daemon takes a new pair from Settings
+        // (it does that while sync is paused on a rejected token) the job
+        // uses it on its next try.
         let (data_dir, client) = (config.data_dir.clone(), client.clone());
         extra_packs = Some(stat_tracker::packs::PackKeeper::new(
             &config.data_dir,
@@ -684,10 +686,12 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
     }
 }
 
-/// The server URL and token for one try of the reader pack job, read from
-/// the sync client each time, so a pair saved in Settings while the daemon
-/// runs is the one used. `None` while sync is paused on a rejected token:
-/// that token is not sent again.
+/// The server URL and token for one try of the reader pack job: the sync
+/// client's pair at that moment. The daemon swaps that pair only while sync
+/// is paused on a rejected token (`maybe_resume_sync_after_settings_change`
+/// then re-reads Settings); until then a pair saved in Settings waits for
+/// a restart, for the job as for uploads. `None` while sync is paused: the
+/// rejected token is not sent again.
 fn pack_credentials(
     data_dir: &std::path::Path,
     client: &sync::SyncClient,
@@ -11441,6 +11445,9 @@ mod tests {
             assert_eq!(body.matches(needle).count(), 1, "{needle} once in startup");
             body.find(needle).expect("counted above")
         };
+        // The call of the run loop, without its arguments: another lane
+        // adds one.
+        const RUN_LOOP: &str = "let result = run_loop(";
         let guard = at("acquire_pid_guard(&config.data_dir)?");
         for later in [
             "open_sync_client(",
@@ -11452,10 +11459,14 @@ mod tests {
             "startup_maintenance(",
             "open_store(",
             "packs::PackKeeper::new(",
-            "run_loop(ctx).await",
+            RUN_LOOP,
         ] {
             assert!(guard < at(later), "{later} must come after the pid guard");
         }
+        // The run loop is awaited in place, whatever arguments it takes.
+        let run_loop = at(RUN_LOOP);
+        let call = body[run_loop..].split(';').next().expect("a statement");
+        assert!(call.ends_with(".await"), "{call}");
         assert!(at("maybe_vacuum(") < at("marker::start_run("));
         assert!(at("packs::sync_on_startup(") < at("marker::start_run("));
         // The keeper is made after the paused / not paused branches have
@@ -11470,7 +11481,7 @@ mod tests {
         );
         let spawn =
             at("    if let Some(extras) = extra_packs {\n        tokio::spawn(extras.run());\n");
-        assert!(keeper < spawn && spawn < at("run_loop(ctx).await"));
+        assert!(keeper < spawn && spawn < run_loop);
     }
 
     /// Deleting the command-tick call, or the upload inside the timer, fails

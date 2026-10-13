@@ -9,12 +9,15 @@
 //! is served and no game art is involved. The daemon runs with an empty
 //! HOME and XDG dirs in a temp directory and no display, so it reads no
 //! real config and captures nothing. Like `run_marker_sigterm.rs` it does
-//! reach the keyboard open.
+//! reach the keyboard open, and like it the daemon is started through
+//! `common::spawn_daemon`, so it cannot outlive the test.
+
+mod common;
 
 use std::io::{Read, Write};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -26,16 +29,17 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// A daemon that cannot outlive its test: killed when this is dropped (a
-/// failed assert included), and by the kernel if the test dies first.
+/// A started daemon and where its output goes. `common::Daemon` kills it
+/// when this is dropped (a failed assert included), and the kernel does if
+/// the test dies first.
 struct Daemon {
-    child: Child,
+    daemon: common::Daemon,
     log: PathBuf,
 }
 
 impl Daemon {
     fn pid(&self) -> u32 {
-        self.child.id()
+        self.daemon.child.id()
     }
 
     fn output(&self) -> String {
@@ -47,7 +51,7 @@ impl Daemon {
     fn wait_for(&mut self, what: &str, timeout: Duration, mut ok: impl FnMut(&str) -> bool) {
         let start = Instant::now();
         while !ok(&self.output()) {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
+            if let Some(status) = self.daemon.child.try_wait().expect("try_wait") {
                 panic!(
                     "daemon ended ({status}) before {what}; output:\n{}",
                     self.output()
@@ -66,7 +70,7 @@ impl Daemon {
     fn exit_within(&mut self, timeout: Duration) -> std::process::ExitStatus {
         let start = Instant::now();
         loop {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
+            if let Some(status) = self.daemon.child.try_wait().expect("try_wait") {
                 return status;
             }
             assert!(
@@ -77,13 +81,6 @@ impl Daemon {
             );
             std::thread::sleep(Duration::from_millis(25));
         }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -221,31 +218,8 @@ impl Scratch {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().expect("log clone")))
             .stderr(Stdio::from(log));
-        // SAFETY: runs between fork and exec and only makes async-signal-safe
-        // calls (prctl, close_range).
-        unsafe {
-            command.pre_exec(|| {
-                // SIGKILL when the test thread that started it ends, also
-                // when the test is killed and Drop never runs.
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Nothing the test harness holds open (other tests' sockets
-                // and temp files) is inherited: every fd from 3 up is
-                // closed at exec. CLOSE_RANGE_CLOEXEC, Linux 5.11.
-                const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
-                libc::syscall(
-                    libc::SYS_close_range,
-                    3 as libc::c_uint,
-                    libc::c_uint::MAX,
-                    CLOSE_RANGE_CLOEXEC,
-                );
-                Ok(())
-            });
-        }
-        let child = command.spawn().expect("spawn daemon");
         Daemon {
-            child,
+            daemon: common::spawn_daemon(command),
             log: log_path,
         }
     }
