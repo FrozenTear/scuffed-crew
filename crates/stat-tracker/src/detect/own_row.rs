@@ -27,10 +27,13 @@
 //! * **Combine.** [`combine`]: seed and highlight on one row is sure, one of
 //!   them alone is used and marked, two different rows is no row.
 //!
-//! The seeds live in `<data_dir>/private/own-name/seeds.json` (dir 0700, file
-//! 0600, written atomically). The file holds a hash of the configured name,
-//! never the name, and is dropped when that hash changes. No report bundle,
-//! upload or log line reads it.
+//! The trusted seeds live in `<data_dir>/private/own-name/seeds.json` (dir
+//! 0700, file 0600, written atomically). Only crops confirmed as the member's
+//! own name line are ever written: a crop still waiting for confirmation may
+//! be another player's name, so it stays in memory and a restart drops it.
+//! The file holds a hash of the configured name, never the name, and is
+//! dropped when that hash changes. No report bundle, upload or log line
+//! reads it.
 
 use std::path::{Path, PathBuf};
 
@@ -114,7 +117,9 @@ const PENDING_MAX: usize = 12;
 /// Crops of a newly trusted group that become seeds.
 const PROMOTE: usize = 3;
 
-const SEED_FILE_VERSION: u32 = 1;
+/// 2: the file holds trusted seeds only. A version 1 file could hold
+/// waiting crops as well; it is deleted on open like any other version.
+const SEED_FILE_VERSION: u32 = 2;
 const PRIVATE_DIR: &str = "private";
 const OWN_NAME_DIR: &str = "own-name";
 const SEED_FILE: &str = "seeds.json";
@@ -412,15 +417,17 @@ impl Seed {
 
 /// A crop offered for seeding, with the name area it came from so two
 /// candidates can be matched on each other's row.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+///
+/// A candidate is not yet known to be the member's own name: if the
+/// highlight was wrong it is another player's name line. It lives in memory
+/// only. The type cannot be serialised, so no code path can write one.
+#[derive(Clone, PartialEq)]
 pub struct Candidate {
     seed: Seed,
     area_w: u32,
     area_h: u32,
-    #[serde(with = "hex")]
     area: Vec<u8>,
     /// Opaque game key (a hash of the session id).
-    #[serde(default)]
     game: String,
 }
 
@@ -830,8 +837,8 @@ pub struct OwnRowRead {
 }
 
 impl OwnRowRead {
-    /// The highlight alone: what the new reader used before seeds, and what
-    /// is left when the name areas cannot be measured.
+    /// The highlight alone, unconfirmed: what the new reader used before
+    /// seeds existed.
     pub fn highlight_only(highlight: Option<usize>) -> Self {
         Self {
             own: combine(None, highlight, false),
@@ -855,7 +862,13 @@ pub fn read_own_row(
 ) -> OwnRowRead {
     let lit = highlight.map(|h| h.row);
     let Some(board) = NameBoard::measure(frame, scoreboard, team_size) else {
-        return OwnRowRead::highlight_only(lit);
+        // No name area to compare. With seeds in hand the highlight is
+        // still only one of two voices, so its row is marked like any other
+        // highlight a seed did not confirm.
+        return OwnRowRead {
+            own: combine(None, lit, !seeds.is_empty()),
+            ..OwnRowRead::highlight_only(lit)
+        };
     };
     let scores = board.scores(seeds);
     let mut sorted = scores.clone();
@@ -920,19 +933,29 @@ pub enum Offer {
     Promoted,
 }
 
+/// What is on disk: the trusted seeds, and nothing else. A file with any
+/// other key (the waiting crops an earlier draft of this file held) does not
+/// parse, and a file that does not parse is deleted on open.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SeedFile {
     version: u32,
     /// SHA-256 of the configured in-game name. Never the name.
     name_hash: String,
     trusted: Vec<Seed>,
-    pending: Vec<Candidate>,
 }
 
-/// The member's own-name seeds, in memory and in
-/// `<data_dir>/private/own-name/seeds.json`.
+/// The member's own-name seeds.
+///
+/// * `trusted`: crops confirmed as the member's own name line (three
+///   matching crops from two games). In memory and in
+///   `<data_dir>/private/own-name/seeds.json`.
+/// * `pending`: crops still waiting for that confirmation. In memory only,
+///   never written: an unconfirmed crop may be another player's name. A
+///   restart of the tracker drops them, so the three crops from two games
+///   have to come within one run.
 pub struct SeedStore {
-    /// `None` keeps the seeds in memory only.
+    /// `None` keeps the trusted seeds in memory only too.
     dir: Option<PathBuf>,
     name_hash: String,
     trusted: Vec<Seed>,
@@ -1006,10 +1029,11 @@ impl SeedStore {
         }
     }
 
-    /// Open the seeds under `data_dir`. A file written for another
-    /// configured name, another file version, or one that does not parse is
-    /// deleted and the store starts empty. Nothing is created until the
-    /// first candidate arrives.
+    /// Open the trusted seeds under `data_dir`. A file written for another
+    /// configured name, another file version, or one that does not parse
+    /// (which includes a file with waiting crops in it) is deleted and the
+    /// store starts empty. Nothing is created until a group of crops is
+    /// trusted. The waiting list always starts empty.
     pub fn open(data_dir: &Path, configured_name: Option<&str>) -> Self {
         let dir = seed_dir(data_dir);
         let mut store = Self::in_memory(configured_name);
@@ -1029,7 +1053,6 @@ impl SeedStore {
                 if saved.version == SEED_FILE_VERSION && saved.name_hash == store.name_hash =>
             {
                 store.trusted = saved.trusted;
-                store.pending = saved.pending;
             }
             Ok(_) => {
                 tracing::info!("configured in-game name changed: own-row seeds cleared");
@@ -1057,8 +1080,9 @@ impl SeedStore {
     /// `game` ([`game_key`]).
     ///
     /// A crop a trusted seed already matches changes nothing. Any other is
-    /// kept, and once [`SEED_BOARDS`] kept crops from [`SEED_GAMES`] games
-    /// match each other, that group is trusted.
+    /// kept in memory, and once [`SEED_BOARDS`] kept crops from
+    /// [`SEED_GAMES`] games match each other, that group is trusted and the
+    /// trusted seeds are written. A waiting crop is never written.
     pub fn offer(&mut self, mut candidate: Candidate, game: &str) -> Offer {
         if self
             .trusted
@@ -1109,7 +1133,9 @@ impl SeedStore {
             }
             Offer::Pending
         };
-        self.save();
+        if offer == Offer::Promoted {
+            self.save();
+        }
         offer
     }
 
@@ -1122,8 +1148,9 @@ impl SeedStore {
         }
     }
 
-    /// Write the seeds: a 0600 temp file in the 0700 folder, then a rename.
-    /// A failure keeps the seeds in memory and logs no path and no content.
+    /// Write the trusted seeds, and only those: a 0600 temp file in the 0700
+    /// folder, then a rename. A failure keeps the seeds in memory and logs
+    /// no path and no content.
     fn save(&self) {
         let Some(dir) = &self.dir else {
             return;
@@ -1139,7 +1166,6 @@ impl SeedStore {
                 version: SEED_FILE_VERSION,
                 name_hash: self.name_hash.clone(),
                 trusted: self.trusted.clone(),
-                pending: self.pending.clone(),
             })
             .map_err(std::io::Error::other)?;
             let tmp = dir.join(format!("{SEED_FILE}.tmp"));

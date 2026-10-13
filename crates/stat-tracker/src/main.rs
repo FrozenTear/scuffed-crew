@@ -10180,7 +10180,8 @@ mod tests {
                 trusted,
                 "tab {i}"
             );
-            assert!(file.is_file(), "kept on disk from the first crop");
+            // a waiting crop is never on disk; the trusted seeds are
+            assert_eq!(file.is_file(), trusted > 0, "tab {i}");
         }
         // the seeds the next vision pass gets find the name on a new board
         let seeds = own_name_seeds(ctx.own_name.as_ref());

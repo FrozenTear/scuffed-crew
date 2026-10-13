@@ -398,13 +398,18 @@ fn read_own_row_combines_the_seed_with_the_highlight() {
         (Some(1), Trust::Unconfirmed)
     );
     assert_eq!(read(&img, 5, None, &[]).own.row, None);
-    // no table to measure: the highlight, unconfirmed
+    // no table to measure: the highlight. With seeds in hand it is marked
+    // (the seed could not confirm it); with none it is as it always was.
     let blank = RgbImage::from_pixel(600, 400, Rgb([10, 10, 10]));
     let none = read(&blank, 5, Some((3, 1.5)), store.trusted());
+    assert_eq!((none.own.row, none.own.trust), (Some(3), Trust::Suspect));
+    assert!(none.candidate.is_none());
+    let bare = read(&blank, 5, Some((3, 1.5)), &[]);
     assert_eq!(
-        (none.own.row, none.own.trust),
+        (bare.own.row, bare.own.trust),
         (Some(3), Trust::Unconfirmed)
     );
+    assert_eq!(read(&blank, 5, None, store.trusted()).own.row, None);
 }
 
 #[test]
@@ -593,7 +598,7 @@ fn seeds_are_kept_private_and_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
     let mut store = SeedStore::open(data, Some("Made Up Name"));
-    // nothing is created before the first crop
+    // nothing is created before a crop is trusted
     assert!(!data.join("private").exists());
     fill(&mut store, 5, 88);
     assert_eq!(store.trusted().len(), PROMOTE);
@@ -617,16 +622,143 @@ fn seeds_are_kept_private_and_survive_a_restart() {
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains(&name_hash(Some("Made Up Name"))));
     assert!(!text.to_lowercase().contains("made"));
-    // the same name after a restart: the seeds are back
-    let again = SeedStore::open(data, Some(" made up NAME "));
+    // the same name after a restart: the trusted seeds are back
+    let mut again = SeedStore::open(data, Some(" made up NAME "));
     assert_eq!(again.trusted(), store.trusted());
-    // a waiting crop survives a restart too
+    // a waiting crop does not survive a restart: it was never written
+    let before = std::fs::read(&file).unwrap();
+    assert_eq!(again.offer(waiting_crop(), "g9"), Offer::Pending);
+    assert_eq!(again.pending_len(), 1);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    let restarted = SeedStore::open(data, Some("Made Up Name"));
+    assert_eq!(restarted.pending_len(), 0);
+    assert_eq!(restarted.trusted(), store.trusted());
+}
+
+/// A crop of another made-up name, as a wrong highlight would offer it.
+fn waiting_crop() -> Candidate {
     let mut names = other_names(10);
     names[0] = vec![9, 9, 1, 5, 0];
-    let img = named_board(5, 88, [TEAL, PURPLE], &names);
-    let mut again = again;
-    assert_eq!(again.offer(candidate(&img, 5, 0), "g9"), Offer::Pending);
-    assert_eq!(SeedStore::open(data, Some("Made Up Name")).pending_len(), 1);
+    candidate(&named_board(5, 88, [TEAL, PURPLE], &names), 5, 0)
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// R262-A: a crop that is not yet confirmed as the member's own name may be
+/// another player's. It is never on disk, not even between two writes.
+#[test]
+fn only_confirmed_crops_are_ever_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let file = seed_dir(data).join(SEED_FILE);
+    let mut store = SeedStore::open(data, None);
+    // two crops of the member's name wait: nothing is written at all
+    for own in 0..2 {
+        let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, own));
+        assert_eq!(store.offer(candidate(&img, 5, own), "g1"), Offer::Pending);
+        assert!(!data.join("private").exists(), "a waiting crop was written");
+    }
+    // and so does a crop of another name
+    let other = waiting_crop();
+    assert_eq!(store.offer(other.clone(), "g1"), Offer::Pending);
+    assert!(!data.join("private").exists(), "a waiting crop was written");
+    // the third crop of the member's name, from a second game, is trusted:
+    // now the file exists and holds the trusted seeds and nothing else
+    let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 2));
+    assert_eq!(store.offer(candidate(&img, 5, 2), "g2"), Offer::Promoted);
+    assert_eq!(
+        store.pending_len(),
+        1,
+        "the other name still waits in memory"
+    );
+    let check = |store: &SeedStore| {
+        let text = std::fs::read_to_string(&file).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["name_hash", "trusted", "version"]);
+        assert_eq!(value["version"], SEED_FILE_VERSION);
+        // every crop in the file is one of the trusted seeds
+        let written: Vec<&str> = value["trusted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|seed| seed["px"].as_str().unwrap())
+            .collect();
+        let trusted: Vec<String> = store.trusted().iter().map(|s| hex_of(&s.px)).collect();
+        assert_eq!(written, trusted);
+        // and the waiting crop is nowhere in the bytes: not its name line,
+        // not the name area it was cut from
+        assert!(!text.contains(&hex_of(&other.seed.px)));
+        assert!(!text.contains(&hex_of(&other.area)));
+        assert!(!text.contains("pending") && !text.contains("area"));
+        text
+    };
+    let first = check(&store);
+    // another waiting crop does not touch the file
+    let img = named_board(6, 75, [TEAL, PURPLE], &roster(6, 0));
+    assert_eq!(store.offer(candidate(&img, 6, 0), "g2"), Offer::Pending);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), first);
+    // a later write (seeds of another table trusted) still leaves it out
+    fill(&mut store, 6, 75);
+    assert_eq!(store.trusted().len(), 2 * PROMOTE);
+    assert_eq!(store.pending_len(), 1);
+    assert_ne!(check(&store), first);
+    // a store that cannot write keeps working from memory
+    let mut memory = SeedStore::in_memory(None);
+    fill(&mut memory, 5, 88);
+    assert_eq!(memory.trusted().len(), PROMOTE);
+}
+
+/// R262-A: an earlier draft of the file (version 1) held the waiting crops
+/// too. Such a file is deleted on open, trusted seeds and all: nothing of it
+/// is loaded and nothing of it stays on disk. No release ever wrote one, so
+/// there is nothing worth converting, and deleting cannot leave a waiting
+/// crop behind the way a failed rewrite could.
+#[test]
+fn a_file_that_holds_waiting_crops_is_deleted_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let file = seed_dir(data).join(SEED_FILE);
+    let mut store = SeedStore::open(data, None);
+    fill(&mut store, 5, 88);
+    let good = std::fs::read_to_string(&file).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&good).unwrap();
+    let other = waiting_crop();
+    let waiting = serde_json::json!([{
+        "seed": serde_json::to_value(other.seed()).unwrap(),
+        "area_w": other.area_w,
+        "area_h": other.area_h,
+        "area": hex_of(&other.area),
+        "game": "g1",
+    }]);
+    // the old format: version 1 with a `pending` list
+    value["version"] = serde_json::json!(1);
+    value["pending"] = waiting.clone();
+    std::fs::write(&file, value.to_string()).unwrap();
+    let opened = SeedStore::open(data, None);
+    assert!(opened.trusted().is_empty() && opened.pending_len() == 0);
+    assert!(
+        !file.exists(),
+        "the old file, waiting crops included, is gone"
+    );
+    // the current version with a `pending` list smuggled in: not a seed file
+    value["version"] = serde_json::json!(SEED_FILE_VERSION);
+    std::fs::write(&file, value.to_string()).unwrap();
+    let opened = SeedStore::open(data, None);
+    assert!(opened.trusted().is_empty() && opened.pending_len() == 0);
+    assert!(!file.exists());
+    // the file as this version writes it loads
+    std::fs::write(&file, &good).unwrap();
+    assert_eq!(SeedStore::open(data, None).trusted(), store.trusted());
+    assert!(file.is_file());
 }
 
 #[cfg(unix)]
@@ -731,10 +863,11 @@ fn a_seed_never_prints_its_pixels() {
 fn seed_pixels_round_trip_through_the_file_format() {
     let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 0));
     let c = candidate(&img, 5, 0);
-    let text = serde_json::to_string(&c).unwrap();
-    assert_eq!(serde_json::from_str::<Candidate>(&text).unwrap(), c);
+    let text = serde_json::to_string(c.seed()).unwrap();
+    assert_eq!(&serde_json::from_str::<Seed>(&text).unwrap(), c.seed());
     // pixels are hex text, not a number per pixel
-    assert!(text.len() < 3 * (c.area.len() + c.seed.px.len()));
+    assert!(text.contains(&hex_of(&c.seed.px)));
+    assert!(text.len() < 3 * c.seed.px.len());
     assert!(
         serde_json::from_str::<Seed>(r#"{"row_h":88,"w":1,"h":1,"px":"zz","left_blank":true}"#)
             .is_err()

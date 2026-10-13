@@ -223,10 +223,17 @@ With `reader = "new"` in config.toml, `{data_dir}` also holds
 not read player names. To find your row it keeps a few crops of your own
 name as it is drawn on the scoreboard, and compares each row with them. A
 crop is taken only from a board where your row is clearly highlighted, the
-hero panel shows the hero on that row, and no chat covers it, and it is
-trusted only after three boards from two games gave matching crops. The
-file holds pixels and a hash of the configured `player_name`, never the
-name. It is cleared when that name changes and on uninstall, and it is
+hero panel shows a hero that the row does not contradict, and no chat
+covers it. It is trusted only after three boards from two games gave
+matching crops in one run of the tracker.
+
+Only trusted crops are written to the file: crops confirmed as your own
+name line. A crop that is still waiting for confirmation could be another
+player's name, so it is kept in memory only and is gone when the tracker
+stops. If you restart the tracker between games the count starts again,
+and until your name is trusted your row is found by its highlight alone.
+The file holds pixels and a hash of the configured `player_name`, never
+the name. It is cleared when that name changes and on uninstall, and it is
 never put in a report, an upload or the log. `reader = "ocr-v1"` (the
 default) does not create it.
 
