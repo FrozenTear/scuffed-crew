@@ -12,8 +12,10 @@
 //! capture path takes a sure banner read as the top-bar map
 //! (`boundary::MapSource::TopBar`, see `choose_top_bar_map` in main.rs) and
 //! uses the top-bar OCR only when the banner reader abstains. The policy then
-//! keeps a session's first map, applies the vote-candidate veto, and keeps
-//! untracked maps local, exactly as for the OCR label. A confident or suspect
+//! keeps a session's first trusted map, applies the vote-candidate veto, and
+//! keeps untracked maps local, exactly as for the OCR label. A sure banner read
+//! may also replace a text-fallback session map while that game shows no
+//! boundary signal (`banner_replaces_text_fallback` in main.rs). A confident or suspect
 //! board map that names a different map adds `map` to `suspect_fields` and
 //! does not replace the policy map or mode.
 //!
@@ -27,6 +29,10 @@
 //! career panel or the portrait matcher are per-field: confident digits
 //! stay on this reader. The recognizer is also `ocr-v1` when every stored
 //! field fell back to ocr-v1.
+//!
+//! The recognizer tag describes the stat, hero and result fields only, never
+//! the map: a row tagged `ocr-v1` may carry a map from the banner reader, and
+//! a `cv-v5` row may carry one from the top-bar OCR or the full-board text.
 
 use scuffed_types::{RECOGNIZER_OCR_V1, SUSPECT_FIELD_NAMES};
 

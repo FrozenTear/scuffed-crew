@@ -59,7 +59,7 @@ const STEP_COST: f64 = 0.02;
 
 /// One map: stable key (OverFast API), the name ocr-v1 stores, banner
 /// spellings, and its single game mode (`None` when it has several).
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct MapInfo {
     pub key: &'static str,
     pub name: &'static str,
@@ -808,10 +808,26 @@ impl MapTemplates {
     }
 
     /// Load `<dir>/atlas.json` and its glyph PNGs. `None` when missing or bad.
+    ///
+    /// Every glyph file `atlas.json` names must be one `g<4 lowercase
+    /// hex>.png` file in `dir`, the maps-v1 layout pack sync allows
+    /// (`packs::is_glyph_name`). A name with a `/`, a `..`, an absolute path
+    /// or any other shape refuses the whole pack, so [`MapDirs`] falls back
+    /// to the next folder and no image outside the pack is ever decoded.
     pub fn load_dir(dir: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(dir.join("atlas.json")).ok()?;
         let atlas: AtlasFile = serde_json::from_str(&text).ok()?;
         if atlas.height != H {
+            return None;
+        }
+        if !atlas
+            .glyphs
+            .values()
+            .all(|f| crate::packs::is_glyph_name(f))
+        {
+            tracing::warn!(
+                "map pack atlas.json names a file outside the pack layout; pack not used"
+            );
             return None;
         }
         let mut glyphs: HashMap<char, Gray> = HashMap::new();
@@ -915,7 +931,7 @@ fn compose(glyphs: &HashMap<char, Gray>, gap: f64, space: f64, text: &str) -> Op
 
 /// One banner read. `map` names the best map when a strip was scored, even
 /// when flagged; `suspect` is false only for a sure read.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MapRead {
     pub map: Option<&'static MapInfo>,
     pub best: Option<&'static MapInfo>,
@@ -1393,6 +1409,45 @@ mod tests {
                 .load()
                 .is_none()
         );
+    }
+
+    /// F251-7: an atlas that points a glyph anywhere but a `g<hex>.png` file
+    /// in the pack refuses the whole pack, and the fallback folder is used.
+    #[test]
+    fn a_hostile_atlas_path_refuses_the_pack() {
+        let data = tempfile::tempdir().unwrap();
+        let v1 = MapTemplates::dir_v1_in(data.path());
+        write_pack(&MapTemplates::dir_in(data.path()), LETTERS);
+        // an image outside the pack that would load as a glyph
+        let outside = data.path().join("outside.png");
+        image::GrayImage::from_pixel(12, H as u32, image::Luma([255]))
+            .save(&outside)
+            .unwrap();
+        let hostile = [
+            outside.to_str().unwrap().to_string(),
+            "../outside.png".into(),
+            "sub/g0041.png".into(),
+            "../maps/g0041.png".into(),
+            "G0041.png".into(),
+            "g0041.PNG".into(),
+            "g041.png".into(),
+            "g00411.png".into(),
+            "g0041.png.png".into(),
+            "".into(),
+        ];
+        for bad in hostile {
+            write_pack(&v1, LETTERS);
+            let text = std::fs::read_to_string(v1.join("atlas.json")).unwrap();
+            let mut atlas: serde_json::Value = serde_json::from_str(&text).unwrap();
+            atlas["glyphs"]["A"] = serde_json::json!(bad);
+            std::fs::write(v1.join("atlas.json"), atlas.to_string()).unwrap();
+            assert!(MapTemplates::load_dir(&v1).is_none(), "{bad:?} accepted");
+            let maps = MapDirs::in_data_dir(data.path()).load().unwrap();
+            assert_eq!(maps.pack, MapPack::Legacy, "{bad:?}");
+        }
+        // the same pack with its own names loads
+        write_pack(&v1, LETTERS);
+        assert!(MapTemplates::load_dir(&v1).is_some());
     }
 
     /// Install `templates/maps-v1` the way pack sync does: build it in a
