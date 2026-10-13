@@ -2404,6 +2404,11 @@ mod tests {
         assert_eq!(r.map.map(|m| m.key), Some(ADLERSBRUNN_KEY));
         assert_eq!(r.map.map(|m| m.name), Some("Eichenwalde"));
         assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
+        // and the Tab banner names the same entry, sure
+        let on_banner =
+            MapTemplates::compose_all(&atlas(), GAP, SPACE).read(&frame_with_banner(ADLERSBRUNN));
+        assert_eq!(on_banner.map.map(|m| m.key), Some(ADLERSBRUNN_KEY));
+        assert!(on_banner.found_banner && !on_banner.suspect);
 
         // the alias path itself, with a spelling no map has
         let aliased =
