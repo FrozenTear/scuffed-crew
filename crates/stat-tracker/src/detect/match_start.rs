@@ -923,25 +923,49 @@ mod tests {
 
     #[test]
     fn under_words_a_screen_without_a_mask_keeps_the_ocr_check() {
-        // No mask for the vote title: the OCR confirms it, as today.
-        let vote_unloaded =
-            |p: Phrase, _: &RgbImage| (p != Phrase::VoteForAMap).then_some(PhraseRead::Absent(0.2));
-        let ocr = |_: &DynamicImage| Some("vote for a map  ilios".to_string());
+        // No mask for this screen's title: the OCR confirms it, as today.
+        let unloaded = |missing: Phrase| {
+            move |p: Phrase, _: &RgbImage| (p != missing).then_some(PhraseRead::Absent(0.2))
+        };
+        let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
+        let w = PhaseSource::Words;
         assert_eq!(
-            polled(&vote_frame(), PhaseSource::Words, vote_unloaded, ocr),
+            polled(
+                &vote_frame(),
+                w,
+                unloaded(Phrase::VoteForAMap),
+                text("vote for a map  ilios")
+            ),
             GamePhase::MapVote {
                 maps: vec!["ILIOS".to_string()]
             }
         );
+        assert_eq!(
+            polled(
+                &ban_frame(),
+                w,
+                unloaded(Phrase::BanHeroes),
+                text("BAN HEROES 20")
+            ),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(
+                &select_frame([10, 10, 10]),
+                w,
+                unloaded(Phrase::SelectAPreferredHero),
+                text("ASSEMBLE YOUR TEAM")
+            ),
+            GamePhase::HeroSelect
+        );
         // A loaded mask is never overruled by the OCR, sure or not.
-        let says_select = |_: &DynamicImage| Some("SELECT A PREFERRED HERO".to_string());
         let absent = |_: Phrase, _: &RgbImage| Some(PhraseRead::Absent(0.2));
         assert_eq!(
             polled(
                 &select_frame([10, 10, 10]),
-                PhaseSource::Words,
+                w,
                 absent,
-                says_select
+                text("SELECT A PREFERRED HERO")
             ),
             GamePhase::Unknown
         );
@@ -1002,14 +1026,20 @@ mod tests {
             }
         }
         // Only the gate-passing screen's phrase is read.
-        let only_vote = |p: Phrase, _: &RgbImage| {
-            assert_eq!(p, Phrase::VoteForAMap, "a shut gate's phrase was read");
-            Some(PhraseRead::Absent(0.2))
-        };
-        assert_eq!(
-            polled(&vote_frame(), PhaseSource::Words, only_vote, no_ocr),
-            GamePhase::Unknown
-        );
+        for (frame, open) in [
+            (vote_frame(), Phrase::VoteForAMap),
+            (ban_frame(), Phrase::BanHeroes),
+            (select_frame([10, 10, 10]), Phrase::SelectAPreferredHero),
+        ] {
+            let only_open = move |p: Phrase, _: &RgbImage| {
+                assert_eq!(p, open, "a shut gate's phrase was read");
+                Some(PhraseRead::Absent(0.2))
+            };
+            assert_eq!(
+                polled(&frame, PhaseSource::Words, only_open, no_ocr),
+                GamePhase::Unknown
+            );
+        }
     }
 
     #[test]
