@@ -10,8 +10,10 @@
 //! The hero pack [`HEROES_PACK_NAME`] lands in
 //! [`crate::shadow::heroes::HeroTemplates::dir_in`] as a top-level
 //! `<hero-key>.png` or `special/<class>*.png`, the layout
-//! [`HeroTemplates::load_dir`] reads. It is the only pack a reader uses
-//! today. The other packs are downloaded into folders no reader opens yet.
+//! [`HeroTemplates::load_dir`] reads. `heroes-v2.tar` and
+//! `heroes-v2-1080.tar` use the same layout; the new reader prefers them
+//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]). The
+//! other packs are downloaded into folders no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -80,7 +82,9 @@ impl PackSpec {
 
 /// Every pack the tracker syncs, in download order. `heroes-v1.tar` goes
 /// first so a rate limit or refused token hits it the way it did in alpha.6.
-/// Only `heroes-v1.tar` is read by a reader today.
+/// The hero packs are read by a reader today (heroes-v1 by the shadow log and
+/// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
+/// reader); the others are not yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,

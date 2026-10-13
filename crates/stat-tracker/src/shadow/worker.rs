@@ -536,7 +536,7 @@ mod tests {
             assert_eq!(r["voted"], want.as_str());
             assert_eq!(r["suspect"], false);
         }
-        assert_eq!(lines[0]["recognizer"], "hero-v1");
+        assert_eq!(lines[0]["recognizer"], "hero-v1.1");
         assert!(lines[0]["elapsed_us"].as_u64().is_some());
     }
 

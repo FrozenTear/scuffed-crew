@@ -25,6 +25,16 @@
 //! `<data_dir>/templates/heroes/` (`<hero-key>.png`, RGBA with alpha as the
 //! foreground mask, plus `special/<class>*.png`). When the directory is
 //! missing or holds no hero template, the hero matcher is skipped.
+//!
+//! The new reader ([`super::reader`]) loads a [`HeroSet`] instead: the
+//! heroes-v2 pack (`templates/heroes-v2/`, 74 px cuts) for 1440p-scale
+//! boards and heroes-v2-1080 (`templates/heroes-v2-1080/`) for 1080p-scale
+//! boards, each with the same file layout and `special/` handling as v1.
+//! heroes-v1 stays the fallback: a v2 folder that is missing, or that lacks a
+//! class v1 has, is not used. On a full frame whose 5v5 board is wider than
+//! the fixed scoreboard crop, the header bar starts at the crop's left edge;
+//! [`HeroSet::read_frame`] then re-crops further left before matching
+//! ([`clipped_header_pad`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,14 +44,30 @@ use image::{DynamicImage, RgbImage, RgbaImage};
 use serde::Serialize;
 
 /// Identifies this recognizer's output in the log. Bump on any change that
-/// can move a read, score or suspect flag.
-pub const HERO_RECOGNIZER_ID: &str = "hero-v1";
-/// Minimum correlation for an accepted read.
-pub const MIN_SCORE: f32 = 0.55;
+/// can move a read, score or suspect flag. `hero-v1.1`: [`MIN_SCORE`] 0.65.
+pub const HERO_RECOGNIZER_ID: &str = "hero-v1.1";
+/// Minimum correlation for an accepted read. 0.65 since alpha.7: half-portrait
+/// patches from a clipped 5v5 board scored 0.60 to 0.64 with a 0.14 to 0.17
+/// lead and passed the old 0.55 gate as the wrong hero.
+pub const MIN_SCORE: f32 = 0.65;
 /// Minimum lead over the best other class for an accepted read.
 pub const MIN_LEAD: f32 = 0.10;
-/// Template directory under the data dir.
+/// Template directory under the data dir (heroes-v1).
 pub const TEMPLATE_SUBDIR: &str = "templates/heroes";
+/// heroes-v2 pack directory under the data dir (1440p-scale cuts).
+pub const TEMPLATE_SUBDIR_V2: &str = "templates/heroes-v2";
+/// heroes-v2-1080 pack directory under the data dir (1080p-scale cuts).
+pub const TEMPLATE_SUBDIR_V2_1080: &str = "templates/heroes-v2-1080";
+/// Scoreboard crop height of a 1440p frame (`crop_scoreboard`).
+const CROP_H_1440: f64 = 1007.0;
+/// Boards below this scale (crop height over [`CROP_H_1440`]; 1080p is 0.75)
+/// use the 1080 set. Halfway between 1080p and 1440p.
+pub const SCALE_1080_BELOW: f64 = 0.875;
+/// Re-crop this many px (at 1440p, scaled by the 16:9 height) further left
+/// when the header bar starts at the scoreboard crop's left edge. 5v5 headers
+/// start 24 to 90 px left of the crop at 1440p; on the bench 90 to 200 px all
+/// read the same and 60 px was not enough.
+pub const CLIPPED_HEADER_PAD_1440: u32 = 120;
 /// Special (non-hero) classes, in file-name form.
 pub const SPECIAL_CLASSES: [&str; 3] = ["placeholder", "skull", "empty"];
 
@@ -621,6 +647,11 @@ fn template_class(stem: &str) -> String {
     }
 }
 
+/// The accept gate: at least [`MIN_SCORE`] and a lead of [`MIN_LEAD`].
+pub fn passes_gate(score: f32, lead: f32) -> bool {
+    score >= MIN_SCORE && lead >= MIN_LEAD
+}
+
 /// Placeholder, skull, and empty reads name no hero.
 fn special_row_class(name: &str) -> Option<RowClass> {
     if !scuffed_types::is_placeholder_hero(name) {
@@ -694,6 +725,15 @@ impl HeroTemplates {
         self.classes.len()
     }
 
+    /// True when this set has every class `other` has (heroes and special
+    /// classes).
+    pub fn covers(&self, other: &HeroTemplates) -> bool {
+        other
+            .classes
+            .iter()
+            .all(|(name, _)| self.classes.iter().any(|(n, _)| n == name))
+    }
+
     /// Best and runner-up `(class, score)` for one 40x40 query.
     fn rank(&self, q: &Patch) -> [(usize, f32); 2] {
         let qs = rescale(q, N / 2);
@@ -745,7 +785,7 @@ impl HeroTemplates {
         let [(b, s), (b2, s2)] = self.rank(q);
         let best = self.classes[b].0.clone();
         let lead = s - s2;
-        let ok = s >= MIN_SCORE && lead >= MIN_LEAD;
+        let ok = passes_gate(s, lead);
         let class = if !ok {
             RowClass::Unknown
         } else {
@@ -774,16 +814,21 @@ impl HeroTemplates {
         if !(5..=6).contains(&team_size) {
             return Err(HeroError::Unsupported("team size"));
         }
-        let owned;
-        let view = match board {
-            DynamicImage::ImageRgb8(r) => View::rgb(r),
-            DynamicImage::ImageRgba8(r) => View::rgba(r),
-            other => {
-                owned = other.to_rgb8();
-                View::rgb(&owned)
-            }
-        };
+        let mut owned = None;
+        let view = view_of(board, &mut owned);
         let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
+        self.read_rows(view, hdr, team_size, budget, t0)
+    }
+
+    /// Rows and portraits of one board whose header bar is already known.
+    fn read_rows(
+        &self,
+        view: View<'_>,
+        hdr: (usize, usize, usize, usize),
+        team_size: usize,
+        budget: Duration,
+        t0: Instant,
+    ) -> Result<HeroBoard, HeroError> {
         let bands = find_rows(view, hdr, team_size);
         if bands.len() != 2 * team_size {
             return Err(HeroError::NoRows);
@@ -801,6 +846,211 @@ impl HeroTemplates {
             elapsed_us: t0.elapsed().as_micros() as u64,
         })
     }
+}
+
+/// Borrow `img` as a [`View`], converting into `owned` only when it is not
+/// 8-bit RGB or RGBA.
+fn view_of<'a>(img: &'a DynamicImage, owned: &'a mut Option<RgbImage>) -> View<'a> {
+    match img {
+        DynamicImage::ImageRgb8(r) => View::rgb(r),
+        DynamicImage::ImageRgba8(r) => View::rgba(r),
+        other => View::rgb(owned.insert(other.to_rgb8())),
+    }
+}
+
+// ---------------------------------------------------------------- packs
+
+/// Which pack a template set came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HeroPack {
+    #[serde(rename = "heroes-v1")]
+    V1,
+    #[serde(rename = "heroes-v2")]
+    V2,
+    #[serde(rename = "heroes-v2-1080")]
+    V2At1080,
+}
+
+impl HeroPack {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "heroes-v1",
+            Self::V2 => "heroes-v2",
+            Self::V2At1080 => "heroes-v2-1080",
+        }
+    }
+}
+
+/// The new reader's hero templates: one set for 1440p-scale boards and an
+/// optional one for 1080p-scale boards.
+///
+/// * 1440p-scale: heroes-v2 when it is complete, else heroes-v1.
+/// * 1080p-scale: heroes-v2-1080 when it is complete, else the 1440p set.
+///
+/// A v2 set is complete when it has every class heroes-v1 has (each hero and
+/// each special class). Without heroes-v1 there is nothing to compare with,
+/// and a v2 set that loads is used as it is.
+#[derive(Debug, Clone)]
+pub struct HeroSet {
+    main: (HeroPack, HeroTemplates),
+    at_1080: Option<(HeroPack, HeroTemplates)>,
+}
+
+/// One board's reads through a [`HeroSet`], and how they were made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeroFrameRead {
+    pub board: HeroBoard,
+    pub pack: HeroPack,
+    /// Frame px the hero crop was widened to the left by (clipped header).
+    pub pad_px: Option<u32>,
+}
+
+impl HeroSet {
+    /// `<data_dir>/templates/{heroes,heroes-v2,heroes-v2-1080}`.
+    pub fn load_data_dir(data_dir: &Path) -> Option<Self> {
+        Self::load_dirs(
+            Some(&HeroTemplates::dir_in(data_dir)),
+            Some(&data_dir.join(TEMPLATE_SUBDIR_V2)),
+            Some(&data_dir.join(TEMPLATE_SUBDIR_V2_1080)),
+        )
+    }
+
+    /// Load the three sets and pick as described on [`HeroSet`]. `None`
+    /// when no set loads.
+    pub fn load_dirs(v1: Option<&Path>, v2: Option<&Path>, v2_1080: Option<&Path>) -> Option<Self> {
+        let v1 = v1.and_then(HeroTemplates::load_dir);
+        let complete = |dir: Option<&Path>, pack: HeroPack| {
+            let t = dir.and_then(HeroTemplates::load_dir)?;
+            match &v1 {
+                Some(base) if !t.covers(base) => {
+                    tracing::warn!(
+                        pack = pack.as_str(),
+                        classes = t.class_count(),
+                        v1_classes = base.class_count(),
+                        "hero pack incomplete, not used"
+                    );
+                    None
+                }
+                _ => Some((pack, t)),
+            }
+        };
+        let v2 = complete(v2, HeroPack::V2);
+        let v2_1080 = complete(v2_1080, HeroPack::V2At1080);
+        let main = v2.or_else(|| v1.map(|t| (HeroPack::V1, t)));
+        match (main, v2_1080) {
+            (Some(main), at_1080) => Some(Self { main, at_1080 }),
+            (None, Some(only)) => Some(Self {
+                main: only,
+                at_1080: None,
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// The pack used for 1440p-scale boards.
+    pub fn main_pack(&self) -> HeroPack {
+        self.main.0
+    }
+
+    /// The pack used for 1080p-scale boards.
+    pub fn pack_1080(&self) -> HeroPack {
+        self.at_1080.as_ref().unwrap_or(&self.main).0
+    }
+
+    /// The set for a scoreboard crop `board_h` px high.
+    pub fn for_board_height(&self, board_h: u32) -> (HeroPack, &HeroTemplates) {
+        let scale = board_h as f64 / CROP_H_1440;
+        let (pack, t) = match &self.at_1080 {
+            Some(small) if scale < SCALE_1080_BELOW => small,
+            _ => &self.main,
+        };
+        (*pack, t)
+    }
+
+    /// Read a scoreboard crop with the set for its height (no re-crop).
+    pub fn read_board(
+        &self,
+        board: &DynamicImage,
+        team_size: usize,
+        budget: Duration,
+    ) -> Result<HeroFrameRead, HeroError> {
+        let (pack, t) = self.for_board_height(board.height());
+        Ok(HeroFrameRead {
+            board: t.read_board(board, team_size, budget)?,
+            pack,
+            pad_px: None,
+        })
+    }
+
+    /// Read the heroes of `scoreboard`, cut from the full `frame` by
+    /// `crop_scoreboard`. When the header bar starts at the crop's left
+    /// edge, the board is wider than the crop: re-cut it
+    /// [`clipped_header_pad`] px further left and read that instead.
+    pub fn read_frame(
+        &self,
+        frame: &DynamicImage,
+        scoreboard: &DynamicImage,
+        team_size: usize,
+        budget: Duration,
+    ) -> Result<HeroFrameRead, HeroError> {
+        let t0 = Instant::now();
+        if !(5..=6).contains(&team_size) {
+            return Err(HeroError::Unsupported("team size"));
+        }
+        let (pack, t) = self.for_board_height(scoreboard.height());
+        let mut owned = None;
+        let view = view_of(scoreboard, &mut owned);
+        let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
+        let Some(pad) = clipped_header_pad(frame.width(), frame.height(), scoreboard, hdr.0) else {
+            return Ok(HeroFrameRead {
+                board: t.read_rows(view, hdr, team_size, budget, t0)?,
+                pack,
+                pad_px: None,
+            });
+        };
+        let wide = hero_crop(frame, pad);
+        let mut owned = None;
+        let view = view_of(&wide, &mut owned);
+        let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
+        Ok(HeroFrameRead {
+            board: t.read_rows(view, hdr, team_size, budget, t0)?,
+            pack,
+            pad_px: Some(pad),
+        })
+    }
+}
+
+/// Frame px to widen the hero crop to the left by, or `None` to keep the
+/// scoreboard crop. Only when the header bar starts at the crop's left edge
+/// (`header_x0 == 0`), `scoreboard` is the `crop_scoreboard` cut of a
+/// `frame_w` x `frame_h` frame, and the frame has pixels left of the crop.
+/// [`CLIPPED_HEADER_PAD_1440`] scaled by the 16:9 height, at most up to the
+/// frame's left edge.
+pub fn clipped_header_pad(
+    frame_w: u32,
+    frame_h: u32,
+    scoreboard: &DynamicImage,
+    header_x0: usize,
+) -> Option<u32> {
+    if header_x0 != 0 {
+        return None;
+    }
+    let (x, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(frame_w, frame_h);
+    if x == 0 || (scoreboard.width(), scoreboard.height()) != (cw, ch) {
+        return None;
+    }
+    let (_, _, _, gh) = crate::ocr::preprocess::game_rect_16_9(frame_w, frame_h);
+    let pad = (CLIPPED_HEADER_PAD_1440 as f64 * gh as f64 / 1440.0).round() as u32;
+    Some(pad.clamp(1, x))
+}
+
+/// `crop_scoreboard` widened `pad` px to the left: same top, height and
+/// right edge.
+pub fn hero_crop(frame: &DynamicImage, pad: u32) -> DynamicImage {
+    let (x, y, cw, ch) =
+        crate::ocr::preprocess::crop_scoreboard_rect(frame.width(), frame.height());
+    let x0 = x.saturating_sub(pad);
+    frame.crop_imm(x0, y, cw + (x - x0), ch)
 }
 
 // ---------------------------------------------------------------- voting
@@ -978,9 +1228,18 @@ pub(crate) mod test_fixtures {
     /// alpha marking the foreground, 95 px.
     pub(crate) fn template_dir(ids: &[u32]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
+        write_templates(dir.path(), ids, 95, 0);
+        dir
+    }
+
+    /// Write `hero-{id}.png` for each id into `dir` (created if missing):
+    /// `size` px, drawn as synthetic portrait `id + art`, so two packs can
+    /// hold different art under the same hero keys.
+    pub(crate) fn write_templates(dir: &Path, ids: &[u32], size: u32, art: u32) {
+        std::fs::create_dir_all(dir).unwrap();
         for &id in ids {
-            let fg = portrait(id, 95, None);
-            let mut t = RgbaImage::new(95, 95);
+            let fg = portrait(id + art, size, None);
+            let mut t = RgbaImage::new(size, size);
             for (x, y, p) in fg.enumerate_pixels() {
                 let v = if p.0[3] > 0 {
                     Rgba([p.0[0], p.0[1], p.0[2], 255])
@@ -989,9 +1248,16 @@ pub(crate) mod test_fixtures {
                 };
                 t.put_pixel(x, y, v);
             }
-            t.save(dir.path().join(format!("hero-{id}.png"))).unwrap();
+            t.save(dir.join(format!("hero-{id}.png"))).unwrap();
         }
-        dir
+    }
+
+    /// A `special/skull_01.png` in `dir`.
+    pub(crate) fn write_skull(dir: &Path) {
+        std::fs::create_dir_all(dir.join("special")).unwrap();
+        portrait(501, 74, Some(PURPLE))
+            .save(dir.join("special/skull_01.png"))
+            .unwrap();
     }
 }
 
@@ -1227,11 +1493,227 @@ mod tests {
             }],
         };
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
-        assert_eq!(v["recognizer"], "hero-v1");
+        assert_eq!(v["recognizer"], "hero-v1.1");
         assert_eq!(v["rows"][0]["hero"], "ana");
         assert_eq!(v["rows"][0]["class"], "hero");
         assert_eq!(v["rows"][0]["voted"], "ana");
         assert!(v.get("error").is_none());
+    }
+
+    // ------------------------------------------------ heroes-v2 and re-crop
+
+    const IDS: [u32; 6] = [1, 2, 3, 4, 5, 6];
+    /// Art offsets: the same hero key is drawn differently in each pack, so
+    /// a read shows which pack made it.
+    const ART_V2: u32 = 100;
+    const ART_1080: u32 = 200;
+
+    /// `<data>/templates/{heroes,heroes-v2,heroes-v2-1080}` with the given
+    /// packs; each has a skull in `special/`.
+    fn data_dir(v1: bool, v2: Option<&[u32]>, v2_1080: Option<&[u32]>) -> tempfile::TempDir {
+        let data = tempfile::tempdir().unwrap();
+        let mut packs = Vec::new();
+        if v1 {
+            packs.push((data.path().join(TEMPLATE_SUBDIR), &IDS[..], 95, 0));
+        }
+        if let Some(ids) = v2 {
+            packs.push((data.path().join(TEMPLATE_SUBDIR_V2), ids, 74, ART_V2));
+        }
+        if let Some(ids) = v2_1080 {
+            packs.push((data.path().join(TEMPLATE_SUBDIR_V2_1080), ids, 56, ART_1080));
+        }
+        for (dir, ids, size, art) in packs {
+            write_templates(&dir, ids, size, art);
+            write_skull(&dir);
+        }
+        data
+    }
+
+    /// Heroes read on a synthetic 6v6 board drawn with art `art`; `None`
+    /// for a row that is not an accepted hero.
+    fn reads(set: &HeroSet, art: u32, pitch: u32) -> (HeroPack, Vec<Option<String>>) {
+        let ids: Vec<u32> = IDS.iter().chain(&IDS).map(|i| i + art).collect();
+        let img = DynamicImage::ImageRgb8(board(&ids, 6, pitch, [YELLOW, TEAL]));
+        let r = set.read_board(&img, 6, Duration::from_secs(5)).unwrap();
+        (r.pack, r.board.rows.into_iter().map(|r| r.hero).collect())
+    }
+
+    fn all_right(heroes: &[Option<String>]) -> bool {
+        heroes
+            .iter()
+            .enumerate()
+            .all(|(i, h)| h.as_deref() == Some(format!("hero-{}", IDS[i % 6]).as_str()))
+    }
+
+    #[test]
+    fn v2_is_preferred_when_complete() {
+        let data = data_dir(true, Some(&IDS), None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        assert_eq!(set.main_pack(), HeroPack::V2);
+        let (pack, heroes) = reads(&set, ART_V2, 76);
+        assert_eq!(pack, HeroPack::V2);
+        assert!(all_right(&heroes), "{heroes:?}");
+        // v1 art is not in the set that is used
+        let (_, heroes) = reads(&set, 0, 76);
+        assert!(heroes.iter().all(Option::is_none), "{heroes:?}");
+        // without v1 there is nothing to compare with: v2 alone is used
+        let data = data_dir(false, Some(&IDS), None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        assert_eq!(set.main_pack(), HeroPack::V2);
+        // and the reader looks where P1 installs the packs
+        for (name, sub) in [
+            ("heroes-v2.tar", TEMPLATE_SUBDIR_V2),
+            ("heroes-v2-1080.tar", TEMPLATE_SUBDIR_V2_1080),
+        ] {
+            let spec = crate::packs::pack_spec(name).unwrap();
+            assert_eq!(spec.dir_in(Path::new("/d")), Path::new("/d").join(sub));
+        }
+    }
+
+    #[test]
+    fn v1_is_the_fallback_when_v2_is_missing_or_partial() {
+        let missing = data_dir(true, None, None);
+        let partial = data_dir(true, Some(&IDS[..5]), None);
+        // a v2 folder without the special classes v1 has is partial too
+        let no_special = data_dir(true, None, None);
+        write_templates(
+            &no_special.path().join(TEMPLATE_SUBDIR_V2),
+            &IDS,
+            74,
+            ART_V2,
+        );
+        for (what, data) in [
+            ("missing", &missing),
+            ("partial", &partial),
+            ("no special", &no_special),
+        ] {
+            let set = HeroSet::load_data_dir(data.path()).unwrap();
+            assert_eq!(set.main_pack(), HeroPack::V1, "{what}");
+            let (pack, heroes) = reads(&set, 0, 76);
+            assert_eq!(pack, HeroPack::V1, "{what}");
+            assert!(all_right(&heroes), "{what}: {heroes:?}");
+        }
+        assert!(HeroSet::load_data_dir(tempfile::tempdir().unwrap().path()).is_none());
+    }
+
+    #[test]
+    fn the_1080_set_is_used_at_1080_scale() {
+        let data = data_dir(true, Some(&IDS), Some(&IDS));
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        assert_eq!(set.pack_1080(), HeroPack::V2At1080);
+        // crop heights: 1080p 756, 1440p 1007, 4K 1512; the split is at 881
+        for (h, want) in [
+            (756, HeroPack::V2At1080),
+            (880, HeroPack::V2At1080),
+            (882, HeroPack::V2),
+            (1007, HeroPack::V2),
+            (1512, HeroPack::V2),
+        ] {
+            assert_eq!(set.for_board_height(h).0, want, "height {h}");
+        }
+        // a 57 px pitch board is 820 px high (1080 scale), 76 px is 1093
+        let (pack, heroes) = reads(&set, ART_1080, 57);
+        assert_eq!(pack, HeroPack::V2At1080);
+        assert!(all_right(&heroes), "{heroes:?}");
+        let (pack, heroes) = reads(&set, ART_V2, 76);
+        assert_eq!(pack, HeroPack::V2);
+        assert!(all_right(&heroes), "{heroes:?}");
+        // a partial 1080 set falls back to the 1440p set
+        let data = data_dir(true, Some(&IDS), Some(&IDS[1..]));
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        assert_eq!(set.pack_1080(), HeroPack::V2);
+        let (pack, heroes) = reads(&set, ART_V2, 57);
+        assert_eq!(pack, HeroPack::V2);
+        assert!(all_right(&heroes), "{heroes:?}");
+    }
+
+    /// A 2560x1440 frame with a synthetic 5v5 board whose header bar starts
+    /// `left` px left of the scoreboard crop's left edge (negative: right of
+    /// it), at the crop's top.
+    fn frame_with_board(ids: &[u32], left: i64) -> DynamicImage {
+        let pitch = 80;
+        let b = board(ids, 5, pitch, [PURPLE, YELLOW]);
+        let (cx, cy, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+        let mut f = RgbImage::from_pixel(2560, 1440, image::Rgb([12, 14, 24]));
+        let x = cx as i64 - left - (pitch / 2) as i64;
+        image::imageops::overlay(&mut f, &b, x, cy as i64);
+        DynamicImage::ImageRgb8(f)
+    }
+
+    fn five_v_five_right(rows: &[HeroRead]) -> usize {
+        rows.iter()
+            .filter(|r| r.hero.as_deref() == Some(format!("hero-{}", r.row % 5 + 1).as_str()))
+            .count()
+    }
+
+    #[test]
+    fn a_clipped_header_is_re_cropped_and_a_normal_one_is_not() {
+        let data = data_dir(true, None, None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        let ids = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
+        let read = |frame: &DynamicImage| {
+            let sb = crate::ocr::preprocess::crop_scoreboard(frame);
+            let fixed = set.read_board(&sb, 5, Duration::from_secs(5));
+            let r = set
+                .read_frame(frame, &sb, 5, Duration::from_secs(5))
+                .unwrap();
+            (fixed, r)
+        };
+        for left in [24, 60, 90] {
+            let (fixed, r) = read(&frame_with_board(&ids, left));
+            assert_eq!(r.pad_px, Some(CLIPPED_HEADER_PAD_1440), "{left}");
+            assert_eq!(five_v_five_right(&r.board.rows), 10, "{left}: {r:?}");
+            // the fixed crop alone misses the portraits
+            let fixed_right = fixed.map_or(0, |f| five_v_five_right(&f.board.rows));
+            assert!(fixed_right < 10, "{left}: fixed crop read {fixed_right}");
+        }
+        for left in [-40, -1] {
+            let (fixed, r) = read(&frame_with_board(&ids, left));
+            assert_eq!(r.pad_px, None, "{left}");
+            assert_eq!(five_v_five_right(&r.board.rows), 10, "{left}");
+            assert_eq!(
+                fixed.unwrap().board.rows,
+                r.board.rows,
+                "{left}: same as the fixed crop"
+            );
+        }
+    }
+
+    #[test]
+    fn re_crop_pad_scales_with_the_frame_and_needs_a_clipped_full_frame() {
+        let sb = |w: u32, h: u32| {
+            let (_, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(w, h);
+            DynamicImage::new_rgb8(cw, ch)
+        };
+        for (w, h, pad) in [(2560, 1440, 120), (1920, 1080, 90), (3840, 2160, 180)] {
+            assert_eq!(clipped_header_pad(w, h, &sb(w, h), 0), Some(pad), "{w}x{h}");
+            assert_eq!(clipped_header_pad(w, h, &sb(w, h), 1), None, "{w}x{h}");
+        }
+        // ultrawide: scaled by the 16:9 height
+        assert_eq!(
+            clipped_header_pad(3440, 1440, &sb(3440, 1440), 0),
+            Some(120)
+        );
+        // a board crop passed as the frame is not a full frame
+        assert_eq!(clipped_header_pad(1664, 1007, &sb(2560, 1440), 0), None);
+        let wide = hero_crop(&DynamicImage::new_rgb8(2560, 1440), 120);
+        assert_eq!(
+            (wide.width(), wide.height()),
+            (1664 + 120, 1007),
+            "same right edge, top and height"
+        );
+    }
+
+    #[test]
+    fn the_gate_rejects_half_portrait_scores() {
+        // clipped 5v5 boards: half-portrait patches scored 0.60 to 0.64 with
+        // a 0.14 to 0.17 lead
+        for (score, lead) in [(0.60, 0.14), (0.62, 0.17), (0.64, 0.17), (0.6499, 0.3)] {
+            assert!(!passes_gate(score, lead), "{score} {lead}");
+        }
+        assert!(passes_gate(0.65, 0.10));
+        assert!(passes_gate(0.95, 0.35));
+        assert!(!passes_gate(0.95, 0.09), "lead gate unchanged");
     }
 
     /// Local bench on labelled boards (box only, never in CI): set

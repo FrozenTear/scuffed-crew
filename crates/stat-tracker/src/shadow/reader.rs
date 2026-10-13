@@ -40,7 +40,9 @@ use serde::Serialize;
 
 use super::banner::{MapInfo, MapTemplates};
 use super::digits;
-use super::heroes::{HeroTemplates, RowClass};
+use super::heroes::{
+    HeroSet, HeroTemplates, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
+};
 use super::result::{ResultEvidence, ResultRead, ResultTemplates};
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
@@ -154,19 +156,26 @@ pub fn field_names(team_size: usize) -> Vec<String> {
     out
 }
 
-/// Where the optional packs live. `None` skips that reader.
+/// Where the optional packs live. `None` skips that reader. The hero
+/// matcher uses heroes-v2 (`hero_v2_dir`, `hero_v2_1080_dir`) when complete
+/// and heroes-v1 (`hero_dir`) otherwise ([`HeroSet`]).
 #[derive(Debug, Clone, Default)]
 pub struct ReaderConfig {
     pub hero_dir: Option<PathBuf>,
+    pub hero_v2_dir: Option<PathBuf>,
+    pub hero_v2_1080_dir: Option<PathBuf>,
     pub map_dir: Option<PathBuf>,
     pub result_dir: Option<PathBuf>,
 }
 
 impl ReaderConfig {
-    /// `<root>/templates/{heroes,maps,result}`; `root` is the data dir.
+    /// `<root>/templates/{heroes,heroes-v2,heroes-v2-1080,maps,result}`;
+    /// `root` is the data dir.
     pub fn from_data_dir(root: &Path) -> Self {
         Self {
             hero_dir: Some(HeroTemplates::dir_in(root)),
+            hero_v2_dir: Some(root.join(TEMPLATE_SUBDIR_V2)),
+            hero_v2_1080_dir: Some(root.join(TEMPLATE_SUBDIR_V2_1080)),
             map_dir: Some(MapTemplates::dir_in(root)),
             result_dir: Some(ResultTemplates::dir_in(root)),
         }
@@ -183,14 +192,18 @@ impl ReaderConfig {
 /// The loaded packs. Digits need none (their templates are embedded).
 #[derive(Default)]
 pub struct Reader {
-    heroes: Option<HeroTemplates>,
+    heroes: Option<HeroSet>,
     maps: Option<MapTemplates>,
     results: Option<ResultTemplates>,
 }
 
 impl Reader {
     pub fn load(config: &ReaderConfig) -> Self {
-        let heroes = config.hero_dir.as_deref().and_then(HeroTemplates::load_dir);
+        let heroes = HeroSet::load_dirs(
+            config.hero_dir.as_deref(),
+            config.hero_v2_dir.as_deref(),
+            config.hero_v2_1080_dir.as_deref(),
+        );
         let maps = config.map_dir.as_deref().and_then(MapTemplates::load_dir);
         let results = config
             .result_dir
@@ -198,6 +211,8 @@ impl Reader {
             .and_then(ResultTemplates::load_dir);
         tracing::info!(
             heroes = heroes.is_some(),
+            hero_pack = heroes.as_ref().map(|h| h.main_pack().as_str()),
+            hero_pack_1080 = heroes.as_ref().map(|h| h.pack_1080().as_str()),
             maps = maps.is_some(),
             results = results.is_some(),
             "shadow reader packs"
@@ -241,14 +256,16 @@ impl Reader {
             b.elapsed_ms = elapsed_ms(t0);
             return b;
         }
+        // Heroes from the scoreboard crop, or a wider re-crop of the frame
+        // when the board's header is clipped at the crop's left edge.
         let hero_read = self
             .heroes
             .as_ref()
-            .and_then(|h| h.read_board(&scoreboard, team_size, budget).ok());
+            .and_then(|h| h.read_frame(frame, &scoreboard, team_size, budget).ok());
         let mut board = assemble(
             team_size,
             digit_read.as_ref(),
-            hero_read.as_ref().map(|h| &h.rows[..]),
+            hero_read.as_ref().map(|h| &h.board.rows[..]),
         );
         if let Some(maps) = &self.maps {
             let m = maps.read(&frame.to_rgb8());
@@ -1076,6 +1093,82 @@ mod tests {
             assert!((got - pitch).abs() < 0.004, "{team}v{team}: {scan:?}");
             let b = reader.read_board(&frame);
             assert_stand_in_read(&b, team, &format!("{team}v{team}"));
+        }
+    }
+
+    /// A 5v5 Tab stand-in whose board starts `left` px left of the crop, as
+    /// on wide 5v5 boards: the header bar, the role column and each row's
+    /// portrait (synthetic art `ids[row]`) sit left of the crop edge, placed
+    /// with the hero matcher's own geometry on the board's real header.
+    fn clipped_tab_stand_in(ids: &[u32; 10], left: u32) -> DynamicImage {
+        use crate::shadow::heroes::{View, find_header, find_rows, portrait_box, test_fixtures};
+        let mut img = tab_stand_in(2560, 1440, 5, PITCH_5V5, BLUE_RED, true).to_rgb8();
+        let (cx, cy, crop_w, ch) = crop_rect(2560, 1440);
+        let strip = at_scale(26.0, ch).round() as u32;
+        let p = PITCH_5V5 * ch as f64;
+        for x in cx - left..cx {
+            for y in cy..cy + strip {
+                img.put_pixel(x, y, image::Rgb([225, 225, 225]));
+            }
+            for r in 0..10 {
+                let base = if r < 5 { 0.025 } else { 0.565 } * ch as f64;
+                let top = base + (r % 5) as f64 * p;
+                for y in top as u32..(top + p) as u32 - 3 {
+                    img.put_pixel(x, cy + y, image::Rgb(BLUE_RED[r / 5]));
+                }
+            }
+        }
+        // the board as a crop that holds its whole header
+        let x0 = cx - left - 10;
+        let wide = image::imageops::crop_imm(&img, x0, cy, crop_w + left + 10, ch).to_image();
+        let hdr = find_header(View::rgb(&wide)).expect("header");
+        assert_eq!(hdr.0, 10, "the stand-in's header starts left of the crop");
+        let bands = find_rows(View::rgb(&wide), hdr, 5);
+        assert_eq!(bands.len(), 10);
+        for (r, band) in bands.into_iter().enumerate() {
+            let (px0, py0, px1, _) = portrait_box(hdr, band);
+            let art = test_fixtures::portrait(ids[r], (px1 - px0) as u32, None);
+            for (x, y, px) in art.enumerate_pixels() {
+                if px.0[3] > 0 {
+                    let rgb = image::Rgb([px.0[0], px.0[1], px.0[2]]);
+                    img.put_pixel(x0 + px0 as u32 + x, cy + py0 as u32 + y, rgb);
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// The hero fields of a 5v5 board wider than the scoreboard crop come
+    /// from the re-cropped board (H5), in the reader's real path, with
+    /// heroes-v1 alone and with a complete heroes-v2 next to it (the board
+    /// then shows v2 art).
+    #[test]
+    fn a_clipped_5v5_board_reads_its_heroes() {
+        use crate::shadow::heroes::test_fixtures::write_templates;
+        let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        for art in [0, 100] {
+            let data = tempfile::tempdir().unwrap();
+            write_templates(&HeroTemplates::dir_in(data.path()), &ids, 95, 0);
+            if art > 0 {
+                write_templates(&data.path().join(TEMPLATE_SUBDIR_V2), &ids, 74, art);
+            }
+            let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+            assert!(reader.has_heroes());
+            for left in [30, 60, 90] {
+                let what = format!("art {art} left {left}");
+                let frame = clipped_tab_stand_in(&ids.map(|i| i + art), left);
+                let b = reader.read_board(&frame);
+                assert_stand_in_read(&b, 5, &what);
+                for (r, id) in ids.iter().enumerate() {
+                    let f = b.get(&format!("r{r}.hero")).unwrap();
+                    assert_eq!(
+                        f.value,
+                        Some(Value::Text(format!("hero-{id}"))),
+                        "{what} r{r}: {f:?}"
+                    );
+                    assert!(!f.suspect, "{what} r{r}");
+                }
+            }
         }
     }
 
