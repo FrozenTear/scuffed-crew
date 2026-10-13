@@ -231,6 +231,8 @@ pub enum Message {
         packs: stat_tracker::ocr_switch::PackReadiness,
         turn_off: bool,
     },
+    /// The OK button under a refused click on the classic OCR switch.
+    DismissOcrRefusal,
     Vacuum,
     VacuumReady(Result<String, String>),
     ConfirmClear,
@@ -672,7 +674,7 @@ impl TrackerApp {
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
-            tasks.push(check_reader_packs(app.saved_config.data_dir.clone(), false));
+            tasks.push(check_reader_packs(app.data_dir.clone(), false));
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -1003,6 +1005,10 @@ impl TrackerApp {
             }
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
+                Task::none()
+            }
+            Message::DismissOcrRefusal => {
+                self.ocr_switch.refusal = None;
                 Task::none()
             }
             Message::ReaderPacksChecked { packs, turn_off } => {
@@ -2117,7 +2123,7 @@ impl TrackerApp {
             Step::PackReady(result) => {
                 self.setup.download_ready(result);
                 // The classic OCR switch shows which packs are there.
-                check_reader_packs(self.saved_config.data_dir.clone(), false)
+                check_reader_packs(self.data_dir.clone(), false)
             }
         }
     }
@@ -2244,9 +2250,10 @@ impl TrackerApp {
             let status = stat_tracker::ocr_switch::read_status(&self.data_dir);
             self.ocr_switch.daemon_off =
                 settings::daemon_runs_ocr_off(status.as_ref(), self.daemon.pid);
-            let notice = settings::daemon_ocr_notice(status.as_ref(), self.daemon.pid);
-            if notice != self.ocr_switch.notice {
-                self.ocr_switch.notice = notice;
+            self.ocr_switch.notice = settings::daemon_ocr_notice(status.as_ref(), self.daemon.pid);
+            let health = settings::daemon_health_notice(status.as_ref(), self.daemon.pid);
+            if health != self.ocr_switch.health_notice {
+                self.ocr_switch.health_notice = health;
                 self.health_status = self.health_now();
             }
         }
@@ -2546,7 +2553,7 @@ impl TrackerApp {
                     .as_ref()
                     .map(|s| (s.server_url.as_str(), s.token.as_str())),
             ),
-            self.ocr_switch.notice.as_deref(),
+            self.ocr_switch.health_notice.as_deref(),
         )
     }
 
@@ -2567,7 +2574,7 @@ impl TrackerApp {
             self.ocr_switch.refusal = None;
             return Task::none();
         }
-        check_reader_packs(self.saved_config.data_dir.clone(), true)
+        check_reader_packs(self.data_dir.clone(), true)
     }
 }
 
@@ -2583,9 +2590,10 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
 
-/// Tracker health with the tracker's classic OCR notice (it kept OCR on, or
-/// it holds reads for a missing reader pack). The notice takes the place of
-/// the two idle lines and follows a sync problem.
+/// Tracker health with the tracker's classic OCR notice: it runs with OCR
+/// off and holds reads for a missing reader pack, or a read was stopped. A
+/// refused off is not in it (`settings::daemon_health_notice`). The notice
+/// takes the place of the two idle lines and follows a sync problem.
 fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     match notice {
         None => base,

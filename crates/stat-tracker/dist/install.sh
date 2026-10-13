@@ -237,13 +237,17 @@ find_eng_traineddata() {
 
 # Only classic OCR needs eng.traineddata. The check always runs: with
 # `ocr = "off"` in config.toml the tracker may still keep classic OCR on (a
-# reader pack is missing), and the member may turn it back on. Asked off, a
-# missing model is a note, not a warning.
+# tracker version that cannot turn it off yet, or a missing reader pack), and
+# the member may turn it back on. Asked off, a missing model is a note, not a
+# warning, and it still says what to install.
 if find_eng_traineddata; then
     :
 elif config_ocr_is_off "$HOME"; then
-    info "eng.traineddata not found. Classic OCR is off in config.toml, so the tracker does not need it now."
-    info "It is needed if you turn classic OCR back on, or if the tracker keeps it on because a reader pack is missing."
+    info "eng.traineddata not found. config.toml asks for classic OCR off, so the tracker may not need it."
+    info "It does need it whenever it keeps classic OCR on: a tracker version that cannot turn it off yet, a missing reader pack, or you turn classic OCR back on."
+    info "  Arch:    sudo pacman -S tesseract-data-eng"
+    info "  Debian:  sudo apt install tesseract-ocr-eng"
+    info "  Fedora:  sudo dnf install tesseract-langpack-eng"
 else
     warn "eng.traineddata not found — install your distro's eng tessdata package."
     warn "  Arch:    sudo pacman -S tesseract-data-eng"

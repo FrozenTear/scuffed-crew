@@ -12,7 +12,7 @@ UNINSTALL="$DIST/uninstall.sh"
 bash "$DIST/test-bootstrap-pin.sh"
 bash "$DIST/test-atomic-install.sh"
 bash "$DIST/test-safe-extract.sh"
-# The tessdata check runs only with classic OCR on (`ocr` in config.toml).
+# The tessdata check always runs; its wording follows `ocr` in config.toml.
 bash "$DIST/test-ocr-off.sh"
 FAILS=0
 

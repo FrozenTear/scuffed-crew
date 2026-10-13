@@ -120,22 +120,25 @@ pub fn is_off_error(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bo
     err.downcast_ref::<OcrOff>().is_some()
 }
 
-/// Set the process-wide mode. The daemon calls this once at startup.
+/// Set the process-wide mode. The daemon calls this once at startup, from
+/// [`crate::ocr_switch::Switch`]. That is the only caller outside tests: a
+/// test in `ocr/mod.rs` reads the source tree for any other.
+#[doc(hidden)]
 pub fn set_mode(mode: OcrMode) {
     MODE.store(mode as u8, Ordering::Relaxed);
 }
 
-/// The mode for a call made on this thread: a [`scoped`] mode when one is
-/// active here, else the process-wide one.
+/// The mode for a call made on this thread. Off when the process-wide mode
+/// is off, whatever a [`scoped`] mode says: a scope can turn OCR off for its
+/// thread, never back on in a process that runs with OCR off. Otherwise the
+/// scoped mode when one is active here, else on.
 pub fn mode() -> OcrMode {
-    if let Some(mode) = SCOPE.with(|s| s.borrow().as_ref().map(|scope| scope.mode)) {
-        return mode;
-    }
     if MODE.load(Ordering::Relaxed) == OcrMode::Off as u8 {
-        OcrMode::Off
-    } else {
-        OcrMode::On
+        return OcrMode::Off;
     }
+    SCOPE
+        .with(|s| s.borrow().as_ref().map(|scope| scope.mode))
+        .unwrap_or(OcrMode::On)
 }
 
 /// True when an OCR call made here would be blocked. A caller with an OCR
@@ -238,9 +241,12 @@ pub struct ScopedMode {
 }
 
 /// Switch the mode for OCR calls made on this thread until the returned
-/// value is dropped. For tests and benches: other threads, the OCR pool's
-/// included, keep the process-wide mode, so a test can turn OCR off without
-/// touching the tests running next to it.
+/// value is dropped. For tests: other threads, the OCR pool's included, keep
+/// the process-wide mode, so a test can turn OCR off without touching the
+/// tests running next to it. It can only tighten: in a process that runs
+/// with OCR off, a scoped `On` changes nothing ([`mode`]). No code outside
+/// tests calls it: a test in `ocr/mod.rs` reads the source tree for that.
+#[doc(hidden)]
 pub fn scoped(mode: OcrMode) -> ScopedMode {
     let previous = SCOPE.with(|s| {
         s.borrow_mut().replace(Scope {

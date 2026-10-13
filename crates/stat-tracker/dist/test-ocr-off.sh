@@ -84,6 +84,17 @@ if STAT_TRACKER_OCR=maybe config_ocr_is_off "$home"; then
 else
     fail "env: an unknown STAT_TRACKER_OCR value should fall back to the file"
 fi
+rm "$home/.config/scuffed-stat-tracker/config.toml"
+if STAT_TRACKER_OCR=' off ' config_ocr_is_off "$home"; then
+    pass "env: spaces around the value are ignored"
+else
+    fail "env: STAT_TRACKER_OCR=' off ' should be off"
+fi
+if STAT_TRACKER_OCR='o f f' config_ocr_is_off "$home"; then
+    fail "env: 'o f f' is not off (the tracker does not read it as off)"
+else
+    pass "env: spaces inside the value make it another word"
+fi
 
 # XDG_CONFIG_HOME is where the tracker looks first.
 xdg="$TMP/xdg"
@@ -137,7 +148,7 @@ run_install() {
 }
 
 WARN_LINE="install your distro's eng tessdata package"
-NOTE_LINE='eng.traineddata not found. Classic OCR is off in config.toml'
+NOTE_LINE='eng.traineddata not found. config.toml asks for classic OCR off, so the tracker may not need it.'
 
 # check_out <yes|no> <output> <line> <label>: the line is (or is not) in the output.
 check_out() {
@@ -157,6 +168,12 @@ check_out() {
 off_out="$(run_install off "$NO_MODEL" 'ocr = "off"')"
 check_out yes "$off_out" "$NOTE_LINE" "OCR off and no model: a note says when it is needed"
 check_out no  "$off_out" "$WARN_LINE" "OCR off and no model: no warning"
+check_out no  "$off_out" "does not need it" "OCR off and no model: the note does not say the model is not needed"
+check_out yes "$off_out" "a tracker version that cannot turn it off yet" "OCR off and no model: the note names a refusing version"
+check_out yes "$off_out" "a missing reader pack" "OCR off and no model: the note names a missing pack"
+check_out yes "$off_out" "sudo pacman -S tesseract-data-eng" "OCR off and no model: the package to install is named (Arch)"
+check_out yes "$off_out" "sudo apt install tesseract-ocr-eng" "OCR off and no model: the package to install is named (Debian)"
+check_out yes "$off_out" "sudo dnf install tesseract-langpack-eng" "OCR off and no model: the package to install is named (Fedora)"
 if grep -F -- "warn ]" <<<"$off_out" | grep -q "traineddata"; then
     fail "install: OCR off and no model: the model is still mentioned at warn level"
 else
@@ -202,7 +219,8 @@ if grep -q 'source "\$DIST/install-paths.sh"' "$SRC_INSTALL" \
 else
     fail "source install: the tesseract check is behind a condition"
 fi
-if grep -A3 'if \[\[ "\$OCR_OFF" -eq 1 \]\]; then' "$SRC_INSTALL" | grep -qF "$NOTE_LINE" \
+if grep -A4 'if \[\[ "\$OCR_OFF" -eq 1 \]\]; then' "$SRC_INSTALL" | grep -qF "$NOTE_LINE" \
+   && grep -A4 'if \[\[ "\$OCR_OFF" -eq 1 \]\]; then' "$SRC_INSTALL" | grep -qF "tesseract-data-eng" \
    && grep -qF "$WARN_LINE" "$SRC_INSTALL"; then
     pass "source install: a missing model is a note with OCR off and a warning with it on"
 else

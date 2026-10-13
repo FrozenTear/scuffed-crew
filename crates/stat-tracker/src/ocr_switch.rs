@@ -66,10 +66,17 @@ pub enum Read {
     MatchStart,
     /// The map beside the accolade screen's result word (P6).
     AccoladeMap,
+    /// The check that drops a co-op event board (Junkenstein's Revenge on
+    /// Adlersbrunn, stats on one team only) instead of storing it as an
+    /// Eichenwalde game. It has no OCR call of its own. It needs two inputs
+    /// that only OCR supplies today: the word "Adlersbrunn" (the top-bar
+    /// label or the board text, neither asked for with OCR off) and "both
+    /// teams have stats" (counted on the OCR cell rows).
+    PveBoard,
 }
 
 impl Read {
-    pub const ALL: [Read; 9] = [
+    pub const ALL: [Read; 10] = [
         Read::StatCells,
         Read::OwnRow,
         Read::Hero,
@@ -79,6 +86,7 @@ impl Read {
         Read::FinalScore,
         Read::MatchStart,
         Read::AccoladeMap,
+        Read::PveBoard,
     ];
 
     /// True when the code in this build reads it without Tesseract.
@@ -108,6 +116,11 @@ impl Read {
             Read::EndTitle => false,
             // Lane O5 (#265).
             Read::AccoladeMap => false,
+            // Two lanes, and both have to be in: M1 (ADLERSBRUNN from the
+            // Tab banner under the new reader) and O10 (#266, both teams
+            // counted on the new reader's cells). Until then, with OCR off
+            // a co-op board would be stored and uploaded as a game.
+            Read::PveBoard => false,
         }
     }
 
@@ -123,6 +136,7 @@ impl Read {
             Read::FinalScore => "the final score line",
             Read::MatchStart => "the match-start screens",
             Read::AccoladeMap => "the map on the end screen",
+            Read::PveBoard => "whether a scoreboard is a co-op event board",
         }
     }
 
@@ -178,7 +192,12 @@ pub const READER_ENTRIES: &[(&str, &[PackGroup])] = &[
 
 /// What the readers without an OCR fallback have loaded, as one reader sees
 /// it ([`Reader::pack_readiness`]).
+///
+/// It is part of the status file, which the app and the tracker may read and
+/// write at different versions (an update without a restart): a field that
+/// is missing reads as `false`, and an unknown field is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PackReadiness {
     /// [`PackGroup::HeroIcons`].
     pub heroes: bool,
@@ -339,6 +358,10 @@ pub const DAEMON_FIX: &str =
     "Sign in and download the reader packs (Settings, Open setup guide), then restart the tracker.";
 /// Said when this build is what stands in the way.
 pub const LATER_VERSION: &str = "A later version can turn it off.";
+/// After [`LATER_VERSION`] when the tracker refused at start: the switch is
+/// off in the file, and this is how the member clears the message.
+pub const TURN_BACK_ON: &str =
+    "To clear this message, turn Use classic OCR (Tesseract) on in Settings and save.";
 /// What a member can do while a pack is gone with OCR off.
 pub const HOLD_FIX: &str =
     "Download the reader packs again (Settings, Open setup guide), or turn classic OCR on.";
@@ -377,11 +400,29 @@ fn capitalised(sentence: &str) -> String {
 
 /// Why `ocr = "off"` is not granted.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Refusal {
     /// Reads this build still needs Tesseract for. No pack fixes these.
+    #[serde(deserialize_with = "known_only")]
     pub reads: Vec<Read>,
     /// Packs that are missing or out of date.
+    #[serde(deserialize_with = "known_only")]
     pub packs: Vec<PackProblem>,
+}
+
+/// A list from the status file, without the entries this version does not
+/// know (a read or a pack problem a later tracker added). One unknown word
+/// must not make the whole file unreadable.
+fn known_only<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 /// Who a refusal is worded for: the next step differs.
@@ -415,16 +456,16 @@ impl Refusal {
                 out.push_str(&format!(" {}.", capitalised(&sentence)));
             }
         }
+        // While this build stands in the way no pack turns it off, so no
+        // pack is asked for.
+        let next = match (self.reads.is_empty(), audience) {
+            (false, Audience::Click) => LATER_VERSION.to_string(),
+            (false, Audience::Daemon) => format!("{LATER_VERSION} {TURN_BACK_ON}"),
+            (true, Audience::Click) => CLICK_FIX.to_string(),
+            (true, Audience::Daemon) => DAEMON_FIX.to_string(),
+        };
         out.push(' ');
-        out.push_str(if !self.reads.is_empty() {
-            // No pack turns it off on this build, so no pack is asked for.
-            LATER_VERSION
-        } else {
-            match audience {
-                Audience::Click => CLICK_FIX,
-                Audience::Daemon => DAEMON_FIX,
-            }
-        });
+        out.push_str(&next);
         out
     }
 }
@@ -462,12 +503,22 @@ pub const fn effective_reader(effective: OcrSetting, reader: ReaderSetting) -> R
 /// reads everything without Tesseract) and every pack is ready; otherwise
 /// OCR stays on and the reasons come back.
 pub fn decide(requested: OcrSetting, packs: &PackReadiness, needing_ocr: &[Read]) -> Decision {
+    decide_with(requested, packs.problems(), needing_ocr)
+}
+
+/// [`decide`] when the packs were not looked at because this build refuses
+/// anyway: the refusal names the reads and no pack.
+fn decide_for_build(requested: OcrSetting, needing_ocr: &[Read]) -> Decision {
+    decide_with(requested, Vec::new(), needing_ocr)
+}
+
+fn decide_with(requested: OcrSetting, packs: Vec<PackProblem>, needing_ocr: &[Read]) -> Decision {
     let refusal = match requested {
         OcrSetting::On => None,
         OcrSetting::Off => {
             let refusal = Refusal {
                 reads: needing_ocr.to_vec(),
-                packs: packs.problems(),
+                packs,
             };
             (!refusal.is_empty()).then_some(refusal)
         }
@@ -487,7 +538,12 @@ pub fn decide(requested: OcrSetting, packs: &PackReadiness, needing_ocr: &[Read]
 
 /// What the daemon last wrote about the switch. Values only: settings, pack
 /// flags, counts and source locations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Read across versions: a missing field takes its default and an unknown
+/// one is ignored, so a field added or dropped later does not make the file
+/// unreadable to the other side.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Status {
     /// The daemon that wrote this.
     pub pid: u32,
@@ -507,7 +563,8 @@ pub struct Status {
 }
 
 /// One blocked call site in [`Status`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StatusSite {
     /// `file:line function`, a place in the tracker's source.
     pub site: String,
@@ -536,6 +593,15 @@ impl Status {
             )),
             (None, _) => None,
         }
+    }
+
+    /// The part of [`Self::notice`] that belongs in Tracker health: only
+    /// what is wrong while the tracker runs with OCR off (a pack on hold, a
+    /// read that was stopped). A refused `off` is not a health problem: the
+    /// tracker runs classic OCR and reads everything, so health stays as it
+    /// is and the reason is shown in Settings.
+    pub fn health_notice(&self) -> Option<String> {
+        self.effective.is_off().then(|| self.notice()).flatten()
     }
 }
 
@@ -595,8 +661,12 @@ pub struct Switch {
     /// process-wide reader is not this one. It re-loads a pack whose folder
     /// changed, like the process-wide one.
     own_reader: Option<Reader>,
+    /// The packs as last seen. `None` when they were never looked at: OCR
+    /// asked on, or a build that refuses off whatever the packs are.
     packs: Option<PackReadiness>,
     written: Option<Status>,
+    /// The last write of the status file failed (said once at WARN).
+    write_failed: bool,
 }
 
 impl std::fmt::Debug for Switch {
@@ -613,10 +683,15 @@ impl Switch {
     /// when it is off, set the gate, log the outcome and write the status
     /// file.
     ///
-    /// The packs are loaded once. When off is granted that reader becomes
-    /// the process-wide one ([`crate::shadow::install`]), since off implies
-    /// the new reader. When it is refused the reader stays with the switch,
-    /// only to watch the packs.
+    /// The packs are loaded at most once, and only when they can change the
+    /// answer: off is asked for and this build could grant it. A build that
+    /// refuses anyway loads nothing and watches nothing.
+    ///
+    /// When off is granted, or refused for a pack while `reader = "new"`,
+    /// the reader that was loaded becomes the process-wide one
+    /// ([`crate::shadow::install`]), so the daemon does not load the packs a
+    /// second time. Refused for a pack under `reader = "ocr-v1"`, the reader
+    /// stays with the switch, only to see the packs arrive.
     pub fn start(config: &Config) -> Self {
         Self::start_with(config, &Read::needing_ocr(), |data_dir| {
             Reader::load(&ReaderConfig::from_data_dir(data_dir))
@@ -625,21 +700,26 @@ impl Switch {
 
     /// [`Self::start`] with the reads this build still needs OCR for and
     /// the reader as arguments (tests). `reader` runs only when off is
-    /// requested.
+    /// requested and `needing_ocr` is empty.
     pub fn start_with(
         config: &Config,
         needing_ocr: &[Read],
         reader: impl FnOnce(&Path) -> Reader,
     ) -> Self {
         let requested = config.ocr_control().requested();
-        let reader = requested.is_off().then(|| reader(&config.data_dir));
+        let reader =
+            (requested.is_off() && needing_ocr.is_empty()).then(|| reader(&config.data_dir));
         let packs = reader.as_ref().map(Reader::pack_readiness);
-        let decision = decide(requested, &packs.unwrap_or_default(), needing_ocr);
+        let decision = match &packs {
+            Some(packs) => decide(requested, packs, needing_ocr),
+            None => decide_for_build(requested, needing_ocr),
+        };
         let own_reader = match reader {
-            Some(reader) if decision.effective.is_off() => {
-                // Off: this reader is the one that reads. When a reader was
-                // installed before (a second start in one process), that
-                // one stays, and it is the one the watch asks.
+            Some(reader) if decision.reader(config).is_new() => {
+                // The new reader reads this run (off was granted, or it was
+                // refused for a pack and `reader = "new"`): this is the
+                // reader. When one was installed before (a second start in
+                // one process), that one stays, and the watch asks it.
                 crate::shadow::install(reader);
                 None
             }
@@ -651,6 +731,7 @@ impl Switch {
             own_reader,
             packs,
             written: None,
+            write_failed: false,
         };
         switch.apply();
         switch.publish();
@@ -715,7 +796,20 @@ impl Switch {
             return;
         }
         match write_status(&self.data_dir, &status) {
-            Ok(()) => self.written = Some(status),
+            Ok(()) => {
+                self.written = Some(status);
+                self.write_failed = false;
+            }
+            // Once per failure, not on every tick: without the file the app
+            // cannot say what the tracker decided.
+            Err(e) if !self.write_failed => {
+                self.write_failed = true;
+                tracing::warn!(
+                    error = %e,
+                    file = STATUS_FILE,
+                    "could not write the OCR switch status; the app will not show what the tracker decided"
+                );
+            }
             Err(e) => tracing::debug!(error = %e, "could not write the OCR switch status"),
         }
     }
@@ -734,7 +828,7 @@ impl Switch {
     /// also calls it once when it shuts down, so the file holds the run's
     /// last counts, with OCR on as well.
     pub fn check(&mut self) {
-        if self.decision.requested.is_off() {
+        if self.watches() {
             let now = self.packs_now();
             if self.packs != Some(now) {
                 self.log_pack_change(&now);
@@ -764,9 +858,12 @@ impl Switch {
         }
     }
 
-    /// Whether the watch has anything to do: only when off was asked for.
+    /// Whether the watch has anything to do: only when the packs were
+    /// looked at, which is when off was asked for and this build could
+    /// grant it. Then a pack that goes away is held and named, and packs
+    /// that arrive after a refusal are announced ("restart the tracker").
     pub fn watches(&self) -> bool {
-        self.decision.requested.is_off()
+        self.packs.is_some()
     }
 }
 
@@ -784,7 +881,13 @@ pub async fn watch(switch: SharedSwitch) {
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         timer.tick().await;
-        switch.lock().unwrap_or_else(|e| e.into_inner()).check();
+        // The check stats pack folders and may write the status file: off
+        // the async workers.
+        let switch = std::sync::Arc::clone(&switch);
+        let _ = tokio::task::spawn_blocking(move || {
+            switch.lock().unwrap_or_else(|e| e.into_inner()).check()
+        })
+        .await;
     }
 }
 
@@ -896,15 +999,17 @@ mod tests {
             let refusal = refused.refusal.expect("the reason");
             assert_eq!(refusal.reads, [read]);
             assert!(refusal.packs.is_empty());
-            for audience in [Audience::Click, Audience::Daemon] {
-                assert_eq!(
-                    refusal.text(audience),
-                    format!(
-                        "Classic OCR stays on: this tracker version cannot read {} without it yet. {LATER_VERSION}",
-                        read.plain()
-                    )
-                );
-            }
+            let reason = format!(
+                "Classic OCR stays on: this tracker version cannot read {} without it yet. {LATER_VERSION}",
+                read.plain()
+            );
+            assert_eq!(refusal.text(Audience::Click), reason);
+            // At start the switch is already off in the file: the member is
+            // told how to clear the message.
+            assert_eq!(
+                refusal.text(Audience::Daemon),
+                format!("{reason} {TURN_BACK_ON}")
+            );
         }
         // Reads and packs together: both are named, and the member is not
         // sent to download packs that would not turn it off.
@@ -923,8 +1028,24 @@ mod tests {
             format!(
                 "Classic OCR stays on: this tracker version cannot read the scoreboard numbers \
                  and the result on the end screens without it yet. The map pack is not installed. \
-                 {LATER_VERSION}"
+                 {LATER_VERSION} {TURN_BACK_ON}"
             )
+        );
+        // A build that refuses does not look at the packs, and names none.
+        let for_build = decide_for_build(OcrSetting::Off, &[Read::PveBoard]);
+        assert_eq!(for_build.effective, OcrSetting::On);
+        let refusal = for_build.refusal.expect("the reason");
+        assert!(refusal.packs.is_empty());
+        assert_eq!(
+            refusal.text(Audience::Click),
+            format!(
+                "Classic OCR stays on: this tracker version cannot read whether a scoreboard \
+                 is a co-op event board without it yet. {LATER_VERSION}"
+            )
+        );
+        assert_eq!(
+            decide_for_build(OcrSetting::On, &[Read::PveBoard]).refusal,
+            None
         );
     }
 
@@ -939,7 +1060,8 @@ mod tests {
                 Read::OwnRow,
                 Read::ResultWord,
                 Read::EndTitle,
-                Read::AccoladeMap
+                Read::AccoladeMap,
+                Read::PveBoard
             ]
         );
         let decision = decide(OcrSetting::Off, &READY, &Read::needing_ocr());
@@ -1163,6 +1285,91 @@ mod tests {
         assert!(notice.contains("not saved"), "{notice}");
         blocked.blocked_total = 1;
         assert!(blocked.notice().unwrap().contains("1 read still asked"));
+    }
+
+    /// Tracker health takes only what is wrong while OCR is off. A refused
+    /// off runs classic OCR and reads everything: health stays "Ready".
+    #[test]
+    fn a_refused_off_is_not_a_health_problem() {
+        let missing = PackReadiness {
+            maps: false,
+            ..READY
+        };
+        let for_pack = decide(OcrSetting::Off, &missing, &[]).refusal;
+        let for_build = decide_for_build(OcrSetting::Off, &[Read::StatCells]).refusal;
+        for refused in [
+            status(OcrSetting::Off, for_pack.clone(), Some(missing)),
+            status(OcrSetting::Off, for_pack, Some(READY)),
+            status(OcrSetting::Off, for_build, None),
+        ] {
+            assert!(refused.notice().is_some(), "Settings says why");
+            assert_eq!(refused.health_notice(), None, "{refused:?}");
+        }
+        assert_eq!(status(OcrSetting::On, None, None).health_notice(), None);
+        assert_eq!(
+            status(OcrSetting::Off, None, Some(READY)).health_notice(),
+            None
+        );
+        let held = status(OcrSetting::Off, None, Some(missing));
+        assert_eq!(held.health_notice(), missing.hold_banner());
+        let mut blocked = status(OcrSetting::Off, None, Some(READY));
+        blocked.blocked_total = 2;
+        assert_eq!(blocked.health_notice(), blocked.notice());
+        assert!(blocked.health_notice().is_some());
+    }
+
+    /// The app and the tracker can be of different versions (an update
+    /// without a restart). A status file with a field missing, a field this
+    /// version does not know, or a read or pack problem it does not know,
+    /// still reads.
+    #[test]
+    fn a_status_file_from_another_version_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |text: &str| std::fs::write(status_path(dir.path()), text).unwrap();
+        // fields missing, one unknown
+        write(r#"{"pid": 9, "requested": "off", "effective": "on", "a_later_field": [1, 2]}"#);
+        let old = read_status(dir.path()).expect("a file with fields missing");
+        assert_eq!(
+            (old.pid, old.requested, old.effective),
+            (9, OcrSetting::Off, OcrSetting::On)
+        );
+        assert_eq!(
+            (old.refusal.clone(), old.packs, old.blocked_total),
+            (None, None, 0)
+        );
+        // a pack flag this version does not have, and one it has is missing
+        write(
+            r#"{"pid": 9, "requested": "off", "effective": "off",
+                "packs": {"heroes": true, "maps": true, "end_titles": true}}"#,
+        );
+        let packs = read_status(dir.path()).unwrap().packs.unwrap();
+        assert!(packs.heroes && packs.maps && !packs.words, "{packs:?}");
+        // a read and a pack problem a later tracker added
+        write(
+            r#"{"pid": 9, "requested": "off", "effective": "on",
+                "refusal": {"reads": ["stat_cells", "a_later_read"],
+                            "packs": ["maps_missing", "a_later_problem"]}}"#,
+        );
+        let refusal = read_status(dir.path()).unwrap().refusal.unwrap();
+        assert_eq!(refusal.reads, [Read::StatCells]);
+        assert_eq!(refusal.packs, [PackProblem::MapsMissing]);
+        // every read and pack problem of this version survives the trip
+        let all = Refusal {
+            reads: Read::ALL.to_vec(),
+            packs: vec![
+                PackProblem::HeroesMissing,
+                PackProblem::MapsMissing,
+                PackProblem::WordsMissing,
+                PackProblem::WordsLackResultWords,
+                PackProblem::WordsLackPhaseTitles,
+                PackProblem::WordsLackFinalScore,
+            ],
+        };
+        let text = serde_json::to_string(&all).unwrap();
+        assert_eq!(serde_json::from_str::<Refusal>(&text).unwrap(), all);
+        // not JSON at all: none
+        write("not json");
+        assert_eq!(read_status(dir.path()), None);
     }
 
     #[test]

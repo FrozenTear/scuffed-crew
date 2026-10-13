@@ -90,6 +90,8 @@ For `e`, `a`, `d`, `dmg`, `h`, and `mit`, `value` is the stat the tracker stored
 
 For `mode`, `result`, and `hero`, the matcher does not read the field. `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
 
+With `system.ocr` `off` the tracker made no Tesseract read, so `ocr_v1` is not "the Tesseract read" in that report. This revision does not define what the field holds then. No released tracker runs with classic OCR off, and the first version that can has to define it here before it ships.
+
 `system` is optional and only allowed in `bundle_version` 2. The app includes it on every report it writes. It describes the tracker setup, not the person. Every key except `ocr` and `ocr_blocked_calls` is required when the object is present, and unknown keys are invalid:
 
 | Key | Type | Example |

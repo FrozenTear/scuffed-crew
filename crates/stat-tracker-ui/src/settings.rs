@@ -147,9 +147,21 @@ pub(crate) const NEW_READER_RESTART: &str =
 
 pub(crate) const CLASSIC_OCR_LABEL: &str = "Use classic OCR (Tesseract)";
 
+/// The hint while this tracker version can turn classic OCR off. It says
+/// what the member gives up: the map on the scoreboard has no second reader.
 pub(crate) const CLASSIC_OCR_HINT: &str = "\
-Off: the tracker reads the game with its own reader and never starts Tesseract. \
-It uses far less CPU. On: classic OCR.";
+Tesseract is the classic text reader. Off: the tracker reads the game with its own reader \
+and does not start Tesseract. With classic OCR off the map can be missing more often, \
+mostly at 1080p.";
+
+/// The hint while this tracker version still needs classic OCR for a read:
+/// no build of it turns the switch off, so nothing is promised.
+pub(crate) const CLASSIC_OCR_HINT_NOT_YET: &str = "\
+Tesseract is the classic text reader. This tracker version still needs it for some reads, \
+so it stays on.";
+
+/// The button that takes a shown refusal away.
+pub(crate) const DISMISS_REFUSAL_LABEL: &str = "OK";
 
 pub(crate) const CLASSIC_OCR_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
@@ -172,6 +184,10 @@ pub struct OcrSwitchView {
     /// What the running tracker reports: it kept OCR on, or it runs with
     /// OCR off and holds reads for a missing pack.
     pub notice: Option<String>,
+    /// The running tracker's notice for Tracker health
+    /// ([`daemon_health_notice`]): a hold or a stopped read, never a
+    /// refused off.
+    pub health_notice: Option<String>,
     /// The running tracker decided to run with classic OCR off
     /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
     /// when this is true, not when the box is merely unticked.
@@ -247,6 +263,58 @@ pub(crate) fn daemon_runs_ocr_off(
     daemon_pid: Option<u32>,
 ) -> bool {
     live_status(status, daemon_pid).is_some_and(|status| status.effective.is_off())
+}
+
+/// The tracker's notice for Tracker health: only what is wrong while it
+/// runs with classic OCR off. A refused off is not a health problem (the
+/// tracker reads everything with classic OCR), so health stays "Ready" and
+/// the reason is shown in Settings ([`daemon_ocr_notice`]).
+pub(crate) fn daemon_health_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    live_status(status, daemon_pid)?.health_notice()
+}
+
+/// The lines under the classic OCR switch that depend on the tracker
+/// version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OcrHintLines {
+    pub hint: &'static str,
+    /// "The tracker reads this when it starts" and the reader pack count:
+    /// only where the switch can be turned off at all.
+    pub restart_and_packs: bool,
+}
+
+/// `needing_ocr` is what this tracker version still needs classic OCR for.
+/// While that is anything, the card does not describe an off no build
+/// gives.
+pub(crate) fn ocr_hint_lines(needing_ocr: &[OcrRead]) -> OcrHintLines {
+    if needing_ocr.is_empty() {
+        OcrHintLines {
+            hint: CLASSIC_OCR_HINT,
+            restart_and_packs: true,
+        }
+    } else {
+        OcrHintLines {
+            hint: CLASSIC_OCR_HINT_NOT_YET,
+            restart_and_packs: false,
+        }
+    }
+}
+
+/// The one problem line under the switch: the refused click when there is
+/// one (it can be dismissed), else the running tracker's notice. Never
+/// both: after a hand-edited `off` they are the same sentence.
+pub(crate) fn card_problem<'a>(
+    refusal: Option<&'a str>,
+    notice: Option<&'a str>,
+) -> Option<(&'a str, bool)> {
+    match (refusal, notice) {
+        (Some(refusal), _) => Some((refusal, true)),
+        (None, Some(notice)) => Some((notice, false)),
+        (None, None) => None,
+    }
 }
 
 /// "Reader packs ready: 2 of 3", or a placeholder until they were checked.
@@ -1073,21 +1141,32 @@ fn classic_ocr_block(app: &TrackerApp) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        hint(CLASSIC_OCR_HINT),
-        hint(CLASSIC_OCR_RESTART),
-        hint(pack_status_line(app.ocr_switch.packs.as_ref())),
     ]
     .spacing(4);
-    for problem in [&app.ocr_switch.refusal, &app.ocr_switch.notice]
-        .into_iter()
-        .flatten()
-    {
+    let lines = ocr_hint_lines(&OcrRead::needing_ocr());
+    body = body.push(hint(lines.hint));
+    if lines.restart_and_packs {
+        body = body
+            .push(hint(CLASSIC_OCR_RESTART))
+            .push(hint(pack_status_line(app.ocr_switch.packs.as_ref())));
+    }
+    if let Some((problem, dismissable)) = card_problem(
+        app.ocr_switch.refusal.as_deref(),
+        app.ocr_switch.notice.as_deref(),
+    ) {
         body = body.push(
-            text(problem.clone())
+            text(problem.to_string())
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(theme::WARN),
         );
+        if dismissable {
+            body = body.push(action_btn(
+                DISMISS_REFUSAL_LABEL,
+                false,
+                Message::DismissOcrRefusal,
+            ));
+        }
     }
     if app.ocr_switch.daemon_off {
         body = body.push(hint(NEW_READER_IMPLIED));
@@ -2624,6 +2703,10 @@ token = \"not-a-real-token\"
             )
         );
         assert!(
+            !refused.contains("To clear this message"),
+            "a click has nothing to clear: {refused}"
+        );
+        assert!(
             !refused.contains("download"),
             "no pack would turn it off: {refused}"
         );
@@ -2779,26 +2862,100 @@ token = \"not-a-real-token\"
         assert_eq!(daemon_ocr_notice(Some(&fine), Some(41)), None);
     }
 
+    /// Tracker health takes a hold, not a refusal: a tracker that refused
+    /// off reads everything with classic OCR, and health stays "Ready".
+    #[test]
+    fn a_refused_off_stays_out_of_tracker_health() {
+        let refused = switch_status(41, refusal_for(&NO_MAPS), NO_MAPS);
+        assert!(daemon_ocr_notice(Some(&refused), Some(41)).is_some());
+        assert_eq!(daemon_health_notice(Some(&refused), Some(41)), None);
+        // refused because this tracker version needs OCR (a hand-edited off)
+        let mut for_build = switch_status(41, None, ALL_PACKS);
+        for_build.effective = OcrSetting::On;
+        for_build.refusal =
+            ocr_switch::decide(OcrSetting::Off, &ALL_PACKS, &[OcrRead::StatCells]).refusal;
+        let notice = daemon_ocr_notice(Some(&for_build), Some(41)).expect("Settings says why");
+        assert!(
+            notice.ends_with(ocr_switch::TURN_BACK_ON),
+            "and how to clear it: {notice}"
+        );
+        assert_eq!(daemon_health_notice(Some(&for_build), Some(41)), None);
+        // running with OCR off and a pack gone: that is a health problem
+        let held = switch_status(41, None, NO_MAPS);
+        assert_eq!(
+            daemon_health_notice(Some(&held), Some(41)),
+            NO_MAPS.hold_banner()
+        );
+        assert_eq!(daemon_health_notice(Some(&held), Some(42)), None);
+    }
+
+    #[test]
+    fn the_card_does_not_describe_an_off_this_version_cannot_give() {
+        let can = ocr_hint_lines(NO_READS);
+        assert_eq!(can.hint, CLASSIC_OCR_HINT);
+        assert!(can.restart_and_packs);
+        // where the member decides, the cost of off is said
+        assert!(
+            CLASSIC_OCR_HINT.contains("the map can be missing more often, mostly at 1080p"),
+            "{CLASSIC_OCR_HINT}"
+        );
+        let cannot = ocr_hint_lines(&[OcrRead::StatCells]);
+        assert_eq!(cannot.hint, CLASSIC_OCR_HINT_NOT_YET);
+        assert!(
+            !cannot.restart_and_packs,
+            "no pack count for a switch that cannot move"
+        );
+        for word in ["Off:", "CPU", "never", "less"] {
+            assert!(
+                !CLASSIC_OCR_HINT_NOT_YET.contains(word),
+                "{CLASSIC_OCR_HINT_NOT_YET}"
+            );
+        }
+        // nothing in either hint is a number nobody measured
+        assert!(!CLASSIC_OCR_HINT.contains("CPU"), "{CLASSIC_OCR_HINT}");
+        // what this version shows follows what it can do
+        assert_eq!(
+            ocr_hint_lines(&OcrRead::needing_ocr()).restart_and_packs,
+            OcrRead::needing_ocr().is_empty()
+        );
+    }
+
+    #[test]
+    fn one_problem_line_and_only_a_refused_click_can_be_dismissed() {
+        assert_eq!(card_problem(None, None), None);
+        assert_eq!(card_problem(None, Some("hold")), Some(("hold", false)));
+        assert_eq!(card_problem(Some("no"), None), Some(("no", true)));
+        // both: the click's line, once (after a hand-edited off they are
+        // the same sentence)
+        assert_eq!(card_problem(Some("no"), Some("no")), Some(("no", true)));
+        assert_eq!(card_problem(Some("no"), Some("hold")), Some(("no", true)));
+    }
+
     #[test]
     fn classic_ocr_copy_is_plain() {
         assert_eq!(CLASSIC_OCR_LABEL, "Use classic OCR (Tesseract)");
         for copy in [
             CLASSIC_OCR_LABEL,
             CLASSIC_OCR_HINT,
+            CLASSIC_OCR_HINT_NOT_YET,
             CLASSIC_OCR_RESTART,
             NEW_READER_IMPLIED,
             READER_PACKS_UNCHECKED,
             ocr_switch::CLICK_FIX,
             ocr_switch::DAEMON_FIX,
             ocr_switch::LATER_VERSION,
+            ocr_switch::TURN_BACK_ON,
             ocr_switch::HOLD_FIX,
             ocr_switch::RESTART_TO_APPLY,
         ] {
             assert!(!copy.contains('—'), "{copy}");
             assert!(!copy.contains('–'), "{copy}");
         }
-        assert!(CLASSIC_OCR_HINT.contains("never starts Tesseract"));
-        assert!(CLASSIC_OCR_HINT.starts_with("Off:"));
+        assert!(CLASSIC_OCR_HINT.contains("does not start Tesseract"));
+        // "Tesseract" in the label is explained by the first words under it.
+        for hint in [CLASSIC_OCR_HINT, CLASSIC_OCR_HINT_NOT_YET] {
+            assert!(hint.starts_with("Tesseract is the classic text reader."));
+        }
         assert!(CLASSIC_OCR_RESTART.contains("Restart"));
     }
 }

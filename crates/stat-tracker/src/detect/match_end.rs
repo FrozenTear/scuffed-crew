@@ -417,7 +417,7 @@ fn scoreline_looks_present_with(
             }
             // No p4_final_score template is loaded. OCR off: hold. The
             // out-of-date words pack is what the switch reports
-            // (`ocr_switch::PackProblem::WordsOutOfDate`).
+            // (`ocr_switch::PackProblem::WordsLackFinalScore`).
             None if crate::ocr::gate::is_off() => return false,
             // OCR on: under `reader = "new"` P4 still runs Tesseract below.
             None => {

@@ -16,6 +16,8 @@
 //! directory and no display: it reads no real config, holds no sync token,
 //! and captures nothing.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -184,8 +186,17 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
             .map(|b| b.count)
             .sum()
     };
+    // The result word (accolade and rank screen) and the accolade map each
+    // reach the gate while this build needs OCR for them. Once a read is
+    // marked as done without OCR its call must be gone: that direction is
+    // tests/ocr_flags.rs, per read.
+    let still_ocr = [(Read::ResultWord, 2), (Read::AccoladeMap, 1)]
+        .into_iter()
+        .filter(|(read, _)| !read.without_ocr())
+        .map(|(_, calls)| calls)
+        .sum::<u64>();
     assert!(
-        in_file("detect/match_end.rs") >= 3,
+        in_file("detect/match_end.rs") >= still_ocr,
         "the result word, rank screen and accolade map reads reached the gate: {held:?}"
     );
     assert!(
@@ -232,6 +243,17 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         "the tessdata language was not looked up"
     );
 
+    // A scoped mode can only tighten: in a process that runs with OCR off,
+    // a scoped "on" opens nothing on its thread.
+    {
+        let on = gate::scoped(gate::OcrMode::On);
+        assert!(gate::is_off(), "the process-wide off wins over a scope");
+        assert!(ocr::recognize_cell(&cell).is_err());
+        assert_eq!(gate::leptess_created(), 0);
+        assert_eq!(gate::tesseract_calls(), 0);
+        drop(on);
+    }
+
     // Back on, the same cell is read, and that is what the counters count.
     gate::set_mode(gate::OcrMode::On);
     let blocked = gate::blocked_total();
@@ -274,24 +296,42 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     );
     assert_eq!(status.packs, Some(PackReadiness::default()));
 
-    // Refused for the build: every pack is there, and one read that this
-    // build would still need Tesseract for is enough.
+    // Refused for the packs keeps a watch: the packs may still arrive.
+    assert!(refused.watches());
+    assert_eq!(
+        status.health_notice(),
+        None,
+        "a refused off is not a health problem"
+    );
+
+    // Refused for the build: one read that this build would still need
+    // Tesseract for is enough. No pack can change that answer, so the packs
+    // are not loaded, not named and not watched.
     gate::set_mode(gate::OcrMode::Off);
     let refused = Switch::start_with(
         &config(live.path(), OcrSetting::Off),
         &[Read::StatCells],
-        load,
+        |_| panic!("a build that refuses off never loads the packs"),
     );
     assert!(!refused.is_off());
+    assert!(!refused.watches(), "nothing to watch");
     assert!(!gate::is_off(), "a refusal opens the gate");
     let status = ocr_switch::read_status(live.path()).unwrap();
-    assert_eq!(status.packs, Some(READY));
+    assert_eq!(status.packs, None, "the packs were not looked at");
     let refusal = status.refusal.clone().expect("the reason");
     assert_eq!(
         (refusal.reads.clone(), refusal.packs.clone()),
         (vec![Read::StatCells], vec![])
     );
     assert_eq!(status.notice(), Some(refusal.text(Audience::Daemon)));
+    assert!(
+        refusal
+            .text(Audience::Daemon)
+            .ends_with(ocr_switch::TURN_BACK_ON),
+        "the member is told how to clear it: {}",
+        refusal.text(Audience::Daemon)
+    );
+    assert_eq!(status.health_notice(), None);
 
     // On: granted without a look at the packs, and the gate is open.
     gate::set_mode(gate::OcrMode::Off);
@@ -370,7 +410,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         status
             .blocked
             .iter()
-            .any(|s| s.site.starts_with("detect/match_end.rs:")),
+            .any(|s| s.site.starts_with("detect/match_start.rs:")),
         "a call made inside the tracker's source keeps its file: {:?}",
         status.blocked
     );
@@ -493,11 +533,18 @@ enum Words {
     NoRankScreen,
     /// One match-start title is missing.
     NoBanTitle,
+    /// A version 1 pack: no `selecting_map` (added in version 2, #269).
+    Version1,
     /// No FINAL SCORE line.
     NoFinalScore,
 }
 
-const PHRASES: [&str; 3] = ["vote_for_a_map", "ban_heroes", "select_a_preferred_hero"];
+const PHRASES: [&str; 4] = [
+    "vote_for_a_map",
+    "selecting_map",
+    "ban_heroes",
+    "select_a_preferred_hero",
+];
 
 fn words_pack(data_dir: &Path, which: Words) {
     let dir = data_dir.join("templates").join("words-v1");
@@ -516,6 +563,9 @@ fn words_pack(data_dir: &Path, which: Words) {
     }
     let mut entries = Vec::new();
     for (i, id) in PHRASES.iter().enumerate() {
+        if which == Words::Version1 && *id == "selecting_map" {
+            continue;
+        }
         entries.push(format!(
             "\"{id}\": {{\"roi\": [0.36, 0.11, 0.64, 0.235], \"plane\": \"min\", \"work\": 0.5}}"
         ));
@@ -562,6 +612,10 @@ fn the_pack_check_follows_what_each_reader_needs() {
     for (which, problem) in [
         (Words::NoRankScreen, PackProblem::WordsLackResultWords),
         (Words::NoBanTitle, PackProblem::WordsLackPhaseTitles),
+        // On purpose: the version 1 word pack has no SELECTING MAP title.
+        // With it the map vote would go unconfirmed once the vote closed,
+        // so off is refused until the version 2 pack is there.
+        (Words::Version1, PackProblem::WordsLackPhaseTitles),
         (Words::NoFinalScore, PackProblem::WordsLackFinalScore),
     ] {
         words_pack(data, which);
@@ -631,17 +685,6 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// Kills the daemon when the test leaves, also on a panic. A daemon that
-/// outlives its test keeps every file descriptor it inherited.
-struct KillOnDrop(std::process::Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 struct DaemonRun {
     /// Everything the daemon printed.
     out: String,
@@ -652,15 +695,36 @@ struct DaemonRun {
     pid: u32,
 }
 
-/// Start the daemon on `data_dir` with `ocr`, wait until it is in its run
-/// loop, read the status file, then stop it with SIGTERM.
-fn run_daemon(root: &Path, data_dir: &Path, ocr: &str) -> DaemonRun {
+/// How a test daemon is told what `ocr` is.
+#[derive(Clone, Copy)]
+enum Ask<'a> {
+    /// `STAT_TRACKER_OCR`.
+    Env(&'a str),
+    /// `ocr = "..."` in config.toml, and no env override.
+    File(&'a str),
+}
+
+/// The daemon binary on `data_dir`, with an empty HOME and XDG dirs below
+/// `root`, its output in `log`. Started through `tests/common`, so it never
+/// outlives the test: killed on drop, and by the kernel if the test binary
+/// itself is killed.
+fn spawn_daemon(
+    root: &Path,
+    data_dir: &Path,
+    ask: Ask,
+    args: &[&str],
+    log: &Path,
+) -> common::Daemon {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(data_dir).unwrap();
-    let log_path = root.join("daemon.out");
-    let log = std::fs::File::create(&log_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"))
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"));
+    cmd.args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
@@ -668,29 +732,55 @@ fn run_daemon(root: &Path, data_dir: &Path, ocr: &str) -> DaemonRun {
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_CACHE_HOME", root.join("cache"))
         .env("NO_COLOR", "1")
-        .env(stat_tracker::config::OCR_ENV, ocr)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("spawn daemon");
-    let mut child = KillOnDrop(child);
-    let pid = child.0.id();
-    // The SIGTERM handler is installed in the run loop; before that the
-    // signal's default action would kill the daemon.
-    let ready = wait_for("signal handlers ready", Duration::from_secs(90), || {
-        read(&log_path).contains("signal handlers ready")
-    });
-    let status = ocr_switch::read_status(data_dir);
-    if ready {
-        // SAFETY: plain kill(2) on the child this test spawned.
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-        wait_for("the daemon to exit", Duration::from_secs(60), || {
-            matches!(child.0.try_wait(), Ok(Some(_)))
-        });
+        .stdout(Stdio::from(out.try_clone().unwrap()))
+        .stderr(Stdio::from(out));
+    match ask {
+        Ask::Env(ocr) => {
+            cmd.env(stat_tracker::config::OCR_ENV, ocr);
+        }
+        Ask::File(ocr) => {
+            let dir = root.join("config").join("scuffed-stat-tracker");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), format!("ocr = \"{ocr}\"\n")).unwrap();
+        }
     }
-    let _ = child.0.kill();
-    let exit = child.0.wait().expect("wait for the daemon");
+    common::spawn_daemon(cmd)
+}
+
+/// Wait until the daemon's SIGTERM handler is installed (in the run loop;
+/// before that the signal's default action would kill it).
+fn wait_until_ready(log: &Path) -> bool {
+    wait_for("signal handlers ready", Duration::from_secs(90), || {
+        read(log).contains("signal handlers ready")
+    })
+}
+
+/// SIGTERM, then wait for the exit.
+fn stop(daemon: &mut common::Daemon) -> std::process::ExitStatus {
+    // SAFETY: plain kill(2) on the child this test spawned.
+    unsafe { libc::kill(daemon.child.id() as i32, libc::SIGTERM) };
+    wait_for("the daemon to exit", Duration::from_secs(60), || {
+        matches!(daemon.child.try_wait(), Ok(Some(_)))
+    });
+    let _ = daemon.child.kill();
+    daemon.child.wait().expect("wait for the daemon")
+}
+
+/// Start the daemon on `data_dir`, wait until it is in its run loop, read
+/// the status file, then stop it with SIGTERM.
+fn run_daemon(root: &Path, data_dir: &Path, ask: Ask) -> DaemonRun {
+    let log_path = root.join("daemon.out");
+    let mut daemon = spawn_daemon(root, data_dir, ask, &[], &log_path);
+    let pid = daemon.child.id();
+    let ready = wait_until_ready(&log_path);
+    let status = ocr_switch::read_status(data_dir);
+    let exit = if ready {
+        stop(&mut daemon)
+    } else {
+        let _ = daemon.child.kill();
+        daemon.child.wait().expect("wait for the daemon")
+    };
     let out = read(&log_path);
     assert!(
         ready,
@@ -723,7 +813,7 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
     let (root, data_dir) = daemon_dirs();
     // heroes only: maps-v1 and words-v1 are missing
     hero_pack(&data_dir);
-    let run = run_daemon(root.path(), &data_dir, "off");
+    let run = run_daemon(root.path(), &data_dir, Ask::Env("off"));
 
     assert_eq!(run.status.pid, run.pid);
     assert_eq!(run.status.requested, OcrSetting::Off);
@@ -733,39 +823,52 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         .refusal
         .clone()
         .expect("the refusal has a reason");
-    assert_eq!(
-        refusal.packs,
-        [PackProblem::MapsMissing, PackProblem::WordsMissing],
-        "the hero pack is there"
-    );
-    assert_eq!(refusal.reads, Read::needing_ocr());
+    let needing = Read::needing_ocr();
+    assert_eq!(refusal.reads, needing);
     let reason = refusal.text(Audience::Daemon);
-    // After the reads this build still needs OCR for, the packs are a
-    // sentence of their own ("The map pack is not installed and ...").
     let lower = reason.to_lowercase();
-    assert!(
-        lower.contains("the map pack is not installed")
-            && lower.contains("the word pack is not installed")
-            && !lower.contains("hero pack"),
-        "{reason}"
-    );
-    assert_eq!(run.status.notice(), Some(reason));
-    assert_eq!(run.status.blocked_total, 0);
-
     let refused: Vec<&str> = run
         .out
         .lines()
         .filter(|l| l.contains("WARN") && l.contains("was refused"))
         .collect();
     assert_eq!(refused.len(), 1, "one WARN line; output:\n{}", run.out);
-    assert!(
-        refused[0].contains("maps-v1")
-            && refused[0]
-                .to_lowercase()
-                .contains("the map pack is not installed"),
-        "the log says why, with the pack id: {}",
-        refused[0]
+    if needing.is_empty() {
+        // This build could turn OCR off: the packs decide, and are named.
+        assert_eq!(
+            refusal.packs,
+            [PackProblem::MapsMissing, PackProblem::WordsMissing],
+            "the hero pack is there"
+        );
+        assert!(
+            lower.contains("the map pack is not installed")
+                && lower.contains("the word pack is not installed")
+                && !lower.contains("hero pack"),
+            "{reason}"
+        );
+        assert!(
+            refused[0].contains("maps-v1")
+                && refused[0]
+                    .to_lowercase()
+                    .contains("the map pack is not installed"),
+            "the log says why, with the pack id: {}",
+            refused[0]
+        );
+    } else {
+        // This build refuses whatever the packs are: they are not looked
+        // at, and the member is not sent to download any.
+        assert!(refusal.packs.is_empty(), "no pack is named");
+        assert_eq!(run.status.packs, None, "the packs were not loaded");
+        assert!(!lower.contains("pack"), "{reason}");
+        assert!(reason.ends_with(ocr_switch::TURN_BACK_ON), "{reason}");
+    }
+    assert_eq!(run.status.notice(), Some(reason));
+    assert_eq!(
+        run.status.health_notice(),
+        None,
+        "the tracker reads everything with classic OCR: not a health problem"
     );
+    assert_eq!(run.status.blocked_total, 0);
     assert!(
         run.out.contains(OCR_WORKERS_LINE),
         "the daemon runs classic OCR; output:\n{}",
@@ -774,6 +877,70 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
     assert!(!run.out.contains("classic OCR is off"), "{}", run.out);
     // a refused off runs with the file's reader, which is ocr-v1 here
     assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
+}
+
+/// `ocr` is read from config.toml (the other daemon tests use the env
+/// override), in any case.
+#[test]
+fn the_daemon_takes_ocr_off_from_config_toml() {
+    let (root, data_dir) = daemon_dirs();
+    let run = run_daemon(root.path(), &data_dir, Ask::File("Off"));
+    assert_eq!(run.status.requested, OcrSetting::Off, "{}", run.out);
+    assert_eq!(run.status.pid, run.pid);
+    // No pack is installed, so off is refused on every build.
+    assert_eq!(run.status.effective, OcrSetting::On);
+    assert!(run.status.refusal.is_some());
+    assert!(run.out.contains("was refused"), "{}", run.out);
+}
+
+/// The switch is decided below the pid guard and the `--vacuum` exit. A
+/// second start that is refused for the running daemon, and a maintenance
+/// run, leave the running daemon's status file as it is, byte for byte.
+#[test]
+fn a_second_start_and_a_vacuum_run_leave_the_status_file_alone() {
+    let (root, data_dir) = daemon_dirs();
+    let log = root.path().join("daemon.out");
+    let mut live = spawn_daemon(root.path(), &data_dir, Ask::Env("on"), &[], &log);
+    assert!(wait_until_ready(&log), "output:\n{}", read(&log));
+    let status_path = data_dir.join(ocr_switch::STATUS_FILE);
+    let before = std::fs::read(&status_path).expect("the live daemon's status file");
+    let live_status = ocr_switch::read_status(&data_dir).unwrap();
+    assert_eq!(live_status.pid, live.child.id());
+    assert_eq!(live_status.requested, OcrSetting::On);
+
+    // Each of these asks for off, so a status written by them would differ.
+    for (what, args) in [
+        ("a second start", &[][..]),
+        ("a vacuum run", &["--vacuum"][..]),
+    ] {
+        let other_log = root.path().join(format!("other-{}.out", args.len()));
+        let mut other = spawn_daemon(root.path(), &data_dir, Ask::Env("off"), args, &other_log);
+        let exited = wait_for(what, Duration::from_secs(60), || {
+            matches!(other.child.try_wait(), Ok(Some(_)))
+        });
+        let out = read(&other_log);
+        assert!(
+            exited,
+            "{what} did not end while a daemon runs; output:\n{out}"
+        );
+        let exit = other.child.wait().unwrap();
+        assert!(
+            !exit.success(),
+            "{what} is refused for the running daemon; output:\n{out}"
+        );
+        assert!(
+            !out.contains("was refused: classic OCR stays on")
+                && !out.contains("classic OCR is off"),
+            "{what} never reached the switch; output:\n{out}"
+        );
+        assert_eq!(
+            std::fs::read(&status_path).unwrap(),
+            before,
+            "{what} rewrote the running daemon's status file"
+        );
+    }
+    let exit = stop(&mut live);
+    assert!(exit.success(), "exit {exit:?}; output:\n{}", read(&log));
 }
 
 /// Every pack is installed. What the daemon decides then follows from the
@@ -785,10 +952,14 @@ fn the_daemon_with_every_pack_turns_ocr_off_only_when_the_build_can() {
     hero_pack(&data_dir);
     map_pack(&data_dir);
     words_pack(&data_dir, Words::Current);
-    let run = run_daemon(root.path(), &data_dir, "off");
+    let run = run_daemon(root.path(), &data_dir, Ask::Env("off"));
 
     assert_eq!(run.status.requested, OcrSetting::Off);
-    assert_eq!(run.status.packs, Some(READY));
+    // The packs are looked at only when this build could turn OCR off.
+    assert_eq!(
+        run.status.packs,
+        Read::needing_ocr().is_empty().then_some(READY)
+    );
     assert_eq!(run.status.leptess_created, 0);
     assert_eq!(run.status.blocked_total, 0);
     assert_eq!(run.last_status.pid, run.pid, "the file is this run's");
@@ -837,7 +1008,7 @@ fn the_daemon_with_every_pack_turns_ocr_off_only_when_the_build_can() {
 #[test]
 fn the_daemon_runs_classic_ocr_when_nothing_asks_for_off() {
     let (root, data_dir) = daemon_dirs();
-    let run = run_daemon(root.path(), &data_dir, "on");
+    let run = run_daemon(root.path(), &data_dir, Ask::Env("on"));
     assert_eq!(run.status.requested, OcrSetting::On);
     assert_eq!(run.status.effective, OcrSetting::On);
     assert_eq!(run.status.refusal, None);

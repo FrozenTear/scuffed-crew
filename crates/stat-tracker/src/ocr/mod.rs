@@ -1201,9 +1201,13 @@ mod tests {
         const RESOURCES: [&str; 3] = ["ocr_with", "ocr_pool", "tessdata_lang"];
         for resource in RESOURCES {
             let (_, body) = functions.get(resource).expect(resource);
+            // The refusal is the first statement, so nothing is started
+            // before it: not after the instance or the pool is built.
+            let start = body.find('{').expect("a body");
+            let first_statement = body[start + 1..].trim_start();
             assert!(
-                body.contains("if gate::is_off() {") && body.contains("gate::block("),
-                "{resource} has to refuse when OCR is off"
+                first_statement.starts_with("if gate::is_off() {\n        return Err(gate::block("),
+                "{resource} has to refuse when OCR is off, before anything else"
             );
         }
         // What can reach a resource: a fixpoint over the calls in each body.
@@ -1267,6 +1271,123 @@ mod tests {
         // A public function that reaches nothing is not gated and need not be.
         assert!(functions.contains_key("cell_edge_ink"));
         assert!(!reaches.contains("cell_edge_ink"));
+    }
+
+    /// The second layer, by behaviour: each resource refuses by itself when
+    /// the gate is off, with the gate's own error, counted under its own
+    /// name. So an entry point that forgets the check still starts nothing.
+    #[test]
+    fn the_three_resources_refuse_by_themselves_when_ocr_is_off() {
+        let off = gate::scoped(gate::OcrMode::Off);
+        let err = ocr_with("eng", "7", None, &[]).expect_err("no read with OCR off");
+        assert!(gate::is_off_error(err.as_ref()), "{err}");
+        assert!(ocr_pool().is_err(), "no pool with OCR off");
+        assert!(tessdata_lang().is_err(), "no language lookup with OCR off");
+        let blocked = off.blocked();
+        let mut entries: Vec<&str> = blocked.iter().map(|b| b.site.entry).collect();
+        entries.sort_unstable();
+        assert_eq!(entries, ["ocr_pool", "ocr_with", "tessdata_lang"]);
+        for b in &blocked {
+            assert_eq!(b.count, 1, "{}", b.site);
+            assert!(b.site.file.ends_with("ocr/mod.rs"), "{}", b.site);
+        }
+        drop(off);
+        // With OCR on the same calls go past the gate.
+        assert!(tessdata_lang().is_ok());
+        assert!(tessdata_lang_probed());
+        assert!(ocr_pool().is_ok());
+        assert!(pool_started());
+    }
+
+    /// Every `.rs` file below `src/`, with the part of it that is not test
+    /// code: the text before its first test module. Files that are test
+    /// code as a whole are left out.
+    fn production_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        files.sort();
+        files
+            .into_iter()
+            .filter(|path| {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                // `mod tests;` files and the OCR-off bench are test code.
+                !stem.starts_with("tests") && stem != "ocr_bench"
+            })
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).expect("read a source file");
+                let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+                    .iter()
+                    .filter_map(|marker| text.find(marker))
+                    .min()
+                    .unwrap_or(text.len());
+                let name = path
+                    .strip_prefix(&src)
+                    .expect("below src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (name, text[..end].to_string())
+            })
+            .collect()
+    }
+
+    /// Nothing outside this file can start Tesseract or open the gate:
+    /// - one `LepTess` construction in the whole tree, in `ocr_with`;
+    /// - `ocr_with` is called from this file only;
+    /// - the process-wide mode is set from `ocr_switch.rs` only, and no
+    ///   code outside tests sets a scoped mode.
+    #[test]
+    fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
+        // Built at run time, so this test does not find itself.
+        let construct = format!("LepTess::{}(", "new");
+        let read = format!("ocr_{}(", "with");
+        let set_mode = format!("set_{}(", "mode");
+        let scoped = format!("scop{}(", "ed");
+        let sources = production_sources();
+        assert!(
+            sources.len() > 20,
+            "the walk found the tree: {}",
+            sources.len()
+        );
+        let holding = |needle: &str| -> Vec<(String, usize)> {
+            sources
+                .iter()
+                .map(|(name, text)| (name.clone(), text.matches(needle).count()))
+                .filter(|(_, count)| *count > 0)
+                .collect()
+        };
+        assert_eq!(
+            holding(&construct),
+            [("ocr/mod.rs".to_string(), 1)],
+            "one Tesseract instance is built, in ocr_with"
+        );
+        let callers = holding(&read);
+        assert_eq!(callers.len(), 1, "{callers:?}");
+        assert_eq!(
+            callers[0].0, "ocr/mod.rs",
+            "ocr_with is private to this file"
+        );
+        let setters: Vec<String> = holding(&set_mode)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            setters,
+            ["ocr/gate.rs", "ocr_switch.rs"],
+            "only the switch sets the process-wide mode"
+        );
+        let scopes: Vec<String> = holding(&scoped).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(scopes, ["ocr/gate.rs"], "a scoped mode is for tests");
     }
 
     /// The line above `fn name` (after its doc comment) is `#[track_caller]`.

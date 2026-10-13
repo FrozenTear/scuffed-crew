@@ -48,7 +48,10 @@ EOF
 config_ocr_is_off() {
     local home="$1" env_value="${STAT_TRACKER_OCR:-}"
     env_value="${env_value,,}"
-    env_value="${env_value//[[:space:]]/}"
+    # Spaces around the word are ignored, as the tracker does. Spaces inside
+    # it make it another word.
+    env_value="${env_value#"${env_value%%[![:space:]]*}"}"
+    env_value="${env_value%"${env_value##*[![:space:]]}"}"
     case "$env_value" in
         off) return 0 ;;
         on) return 1 ;;

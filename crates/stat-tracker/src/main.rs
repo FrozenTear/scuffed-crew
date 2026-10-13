@@ -510,14 +510,38 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // off is asked for and they are what is missing, give them a bounded
     // moment first, or a first start would refuse off for the whole run.
     // The download goes on in the background either way.
+    //
+    // The run loop's SIGTERM handler does not exist yet. So the handler is
+    // registered here, before the wait, and handed to the run loop: a stop
+    // during the wait is a clean stop (run.marker removed, no crash report
+    // offered on the next start), and a stop between the wait and the run
+    // loop is still waiting in the handler when the loop first looks.
+    let mut early_sigterm = None;
     if extra_packs.is_some() && stat_tracker::ocr_switch::needs_pack_wait(&config) {
         tracing::info!(
             wait_secs = stat_tracker::ocr_switch::PACK_WAIT.as_secs(),
             "ocr = \"off\" needs reader packs that are still downloading; waiting for them before deciding"
         );
         if let Some(extras) = extra_packs.take() {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let mut download = tokio::spawn(extras.run());
-            let _ = tokio::time::timeout(stat_tracker::ocr_switch::PACK_WAIT, &mut download).await;
+            let stopped =
+                stopped_while_waiting(stat_tracker::ocr_switch::PACK_WAIT, &mut download, async {
+                    tokio::select! {
+                        _ = sigterm.recv() => {}
+                        _ = tokio::signal::ctrl_c() => {}
+                    }
+                })
+                .await;
+            if stopped {
+                tracing::info!("stop asked while waiting for the reader packs, shutting down");
+                if let Some(guard) = run_marker {
+                    guard.finish();
+                }
+                return Ok(());
+            }
+            early_sigterm = Some(sigterm);
         }
     }
     let ocr_switch = stat_tracker::ocr_switch::Switch::start(&config);
@@ -584,7 +608,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(extras) = extra_packs {
         tokio::spawn(extras.run());
     }
-    let result = run_loop(ctx).await;
+    let result = run_loop(ctx, early_sigterm).await;
     // The status file's counters as they stand when the run ends.
     ocr_switch.lock().unwrap_or_else(|e| e.into_inner()).check();
     if result.is_ok()
@@ -593,6 +617,20 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         guard.finish();
     }
     result
+}
+
+/// Wait for `work`, at most `limit`. True when `stop` (SIGTERM or Ctrl+C at
+/// startup) came first: the caller then stops. `work` keeps running either
+/// way.
+async fn stopped_while_waiting<T>(
+    limit: std::time::Duration,
+    work: &mut tokio::task::JoinHandle<T>,
+    stop: impl std::future::Future<Output = ()>,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::timeout(limit, work) => false,
+        () = stop => true,
+    }
 }
 
 /// Handle flags that must run before ANY initialization (version/help probes
@@ -3402,7 +3440,10 @@ fn resume_after_suspend(st: &mut SessionState, data_dir: &std::path::Path) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
+async fn run_loop(
+    ctx: Arc<DaemonCtx>,
+    early_sigterm: Option<tokio::signal::unix::Signal>,
+) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
     let store = &ctx.store;
@@ -3416,7 +3457,13 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
     // The GUI's Stop button (and systemd) send SIGTERM — shut down as
     // gracefully as Ctrl+C, with a final sync.
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // `early_sigterm` is the same handler, registered before startup's wait
+    // for the reader packs (only when that wait ran): a SIGTERM that came
+    // since is waiting in it.
+    let mut sigterm = match early_sigterm {
+        Some(sigterm) => sigterm,
+        None => tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+    };
     // From here a SIGTERM is a clean shutdown (run.marker removed). Before
     // this line the default action still applies. Tests wait for it.
     tracing::info!("signal handlers ready");
@@ -4835,7 +4882,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             let started = Instant::now();
             let analysis = analyze_frame(img, matcher, player_name_owned, game_outcome, flags);
             stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
-            stat_tracker::omp::log_threads_after_first_ocr();
+            // With classic OCR off there was no OCR, and no OCR workers.
+            if !ocr::gate::is_off() {
+                stat_tracker::omp::log_threads_after_first_ocr();
+            }
             analysis
         })
         .await?;
@@ -4961,11 +5011,14 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         .take_while(|&i| i <= 120)
         .last()
         .unwrap_or(0);
-    tracing::info!(
-        confidence = ocr_result.confidence,
-        text_preview = &ocr_result.raw_text[..preview_end],
-        "OCR result"
-    );
+    // With classic OCR off the board text is not asked for: nothing to log.
+    if !ocr::gate::is_off() {
+        tracing::info!(
+            confidence = ocr_result.confidence,
+            text_preview = &ocr_result.raw_text[..preview_end],
+            "OCR result"
+        );
+    }
 
     let player_row_conf = player_row_idx
         .and_then(|i| rows.get(i))
@@ -6709,6 +6762,9 @@ where
     );
     sync::SyncAttempt::Uploaded
 }
+
+#[cfg(test)]
+mod ocr_bench;
 
 #[cfg(test)]
 mod tests {
@@ -9798,16 +9854,19 @@ mod tests {
         assert_ne!(row.outcome, "unknown");
     }
 
-    /// The merge gate for `ocr = "off"`: with OCR off and every pack, a
-    /// board the new reader reads is stored, with its stats.
+    /// The merge gate for `ocr = "off"`, in two halves.
     ///
-    /// While this build still reads the cells or the own row with Tesseract
-    /// ([`stat_tracker::ocr_switch::Read::without_ocr`]), off is refused at
-    /// start, and that is what this checks. The lane that turns those two
-    /// lines to `true` makes the second half run: it fails unless a board
-    /// with no OCR rows is stored from the new reader's read alone.
-    #[tokio::test]
-    async fn with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats() {
+    /// 1. While the stat cells or the own row are not read without OCR on
+    ///    this build, off has to be refused, and the refusal names them.
+    /// 2. The Tab pass with OCR off, alone in a process
+    ///    ([`own_process_tab_pass_with_ocr_off`]): the real `analyze_frame`
+    ///    on a synthetic Tab, with the process-wide mode off, so a read on
+    ///    any thread is seen. No read may reach the gate from a read this
+    ///    build says it does without OCR, and once the stat cells and the
+    ///    own row are such reads, the board has to be stored with its
+    ///    stats, the own row found by `analyze_frame` itself.
+    #[test]
+    fn with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats() {
         use stat_tracker::config::OcrSetting;
         use stat_tracker::ocr_switch::{self, PackReadiness, Read};
         let every_pack = PackReadiness {
@@ -9830,12 +9889,159 @@ mod tests {
             for read in board_reads.iter().filter(|read| !read.without_ocr()) {
                 assert!(refusal.reads.contains(read), "{read:?} is named");
             }
+        }
+
+        let exe = std::env::current_exe().expect("this test binary");
+        let run = std::process::Command::new(exe)
+            .args([
+                "--ignored",
+                "--exact",
+                "tests::own_process_tab_pass_with_ocr_off",
+                "--test-threads",
+                "1",
+                "--nocapture",
+            ])
+            .env(OWN_PROCESS_ENV, "1")
+            .output()
+            .expect("run the Tab pass in its own process");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(
+            run.status.success() && text.contains("1 passed"),
+            "the Tab pass with OCR off, in its own process:\n{text}"
+        );
+    }
+
+    /// Set by [`with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats`]
+    /// for the process it starts.
+    const OWN_PROCESS_ENV: &str = "STAT_TRACKER_TEST_OWN_PROCESS";
+
+    /// The read behind each `ocr` entry point the Tab pass can call. A
+    /// blocked call is allowed only while its read still needs OCR on this
+    /// build ([`stat_tracker::ocr_switch::Read::without_ocr`]).
+    fn tab_pass_read(entry: &str) -> Option<stat_tracker::ocr_switch::Read> {
+        use stat_tracker::ocr_switch::Read;
+        Some(match entry {
+            "recognize_scoreboard_cells"
+            | "recognize_scoreboard_cells_with_team_size"
+            | "recognize_scoreboard_cells_pre_cropped"
+            | "recognize_scoreboard_cells_pre_cropped_with"
+            | "recognize_row"
+            | "recognize_row_with"
+            | "recognize_cell" => Read::StatCells,
+            "recognize_scoreboard_names_pre_cropped" | "recognize_name" => Read::OwnRow,
+            "recognize_region" => Read::Hero,
+            // The label and the full-board text are fallbacks of the banner
+            // read. They are not asked for with OCR off.
+            "recognize_map_label" | "read_map_crop" | "recognize" => Read::TopBarMap,
+            // The Tab frame's own outcome read.
+            "recognize_prepared" => Read::ResultWord,
+            "recognize_prepared_lang" => Read::EndTitle,
+            "recognize_sparse_region" => Read::MatchStart,
+            _ => return None,
+        })
+    }
+
+    /// Run by [`with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats`],
+    /// alone in a process, so the gate's mode and counters are this test's:
+    /// a read made on the OCR pool or in `spawn_blocking` is blocked and
+    /// counted like one made here (a scoped mode would miss it).
+    #[tokio::test]
+    #[ignore = "run alone in a process by with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats"]
+    async fn own_process_tab_pass_with_ocr_off() {
+        use stat_tracker::ocr_switch::Read;
+        assert_eq!(
+            std::env::var(OWN_PROCESS_ENV).as_deref(),
+            Ok("1"),
+            "this test sets the process-wide OCR mode: run it through its starter"
+        );
+        ocr::gate::set_mode(ocr::gate::OcrMode::Off);
+        assert_eq!(ocr::gate::mode(), ocr::gate::OcrMode::Off);
+
+        let dir = tempfile::tempdir().unwrap();
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(dir.path()));
+        let analysed = analyze_frame(
+            s1_tab_frame(),
+            matcher,
+            Some("PLAYER".into()),
+            detect::MatchOutcome::Unknown,
+            FrameFlags {
+                allow_banner_recovery: true,
+                session_map_known: false,
+                shadow_on: false,
+                // `ocr = "off"` implies the new reader
+                use_new_reader: true,
+            },
+        );
+        let FrameAnalysisOutcome::Analyzed(analysis) = analysed else {
+            panic!("the synthetic Tab was rejected before the reads");
+        };
+
+        // 1. Every call the pass sent to the gate belongs to a read this
+        //    build still needs OCR for. A read marked as done without OCR
+        //    that still calls OCR fails here, whatever thread made the call.
+        let check_blocked = |when: &str| {
+            for b in ocr::gate::blocked_calls() {
+                let read = tab_pass_read(b.site.entry).unwrap_or_else(|| {
+                    panic!(
+                        "{when}: {} is an entry point with no read: add it to tab_pass_read",
+                        b.site
+                    )
+                });
+                assert!(
+                    !read.without_ocr(),
+                    "{when}: {read:?} is marked as read without OCR, and {} still asked for it \
+                     {} time(s)",
+                    b.site,
+                    b.count
+                );
+            }
+        };
+        check_blocked("the Tab pass");
+        let blocked_for = |read: Read| -> u64 {
+            ocr::gate::blocked_calls()
+                .iter()
+                .filter(|b| tab_pass_read(b.site.entry) == Some(read))
+                .map(|b| b.count)
+                .sum()
+        };
+        // The synthetic Tab does reach the cell read: while the stat cells
+        // need OCR, that call is at the gate. (This is what makes the check
+        // above mean something for the board.)
+        if !Read::StatCells.without_ocr() {
+            assert!(
+                blocked_for(Read::StatCells) >= 1,
+                "the synthetic Tab never reached the cell read: {:?}",
+                ocr::gate::blocked_calls()
+            );
+        }
+        // 2. Nothing of Tesseract was started, on any thread.
+        assert_eq!(ocr::gate::leptess_created(), 0, "no LepTess");
+        assert_eq!(ocr::gate::tesseract_calls(), 0, "no Tesseract read");
+        assert!(!ocr::pool_started(), "no OCR pool");
+        assert!(!ocr::tessdata_lang_probed(), "no tessdata lookup");
+
+        if !(Read::StatCells.without_ocr() && Read::OwnRow.without_ocr()) {
+            // The pass read no cells: the board is held (the first half of
+            // the starter test says off is refused for that).
+            assert!(!parse::looks_like_scoreboard(&analysis.rows));
             return;
         }
 
+        // 3. Stat cells and own row are read without OCR on this build: the
+        //    board has to be stored, with the own row `analyze_frame` found
+        //    by itself. Nothing about the row is put in by this test.
+        assert!(
+            analysis.player_row_idx.is_some(),
+            "the own row is marked as read without OCR, and the Tab pass did not find it on \
+             the synthetic Tab (it needs the own-row highlight the reader looks for)"
+        );
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = o8_ctx(dir.path(), true).await;
+        let store_dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(store_dir.path(), true).await;
         let now = test_now();
         let mut active = game(detect::MatchOutcome::Unknown, None, now);
         active.session_id = "s1-gate".into();
@@ -9843,26 +10049,22 @@ mod tests {
         active.map_source = Some(boundary::MapSource::TopBar);
         active.session_created = false;
         let st = session(Some(active), now);
-        // What the vision pass hands over with OCR off: no OCR rows and no
-        // board text. The own row and the hero come from the new reader.
-        let analysis = FrameAnalysis {
-            player_row_idx: Some(0),
-            pack_hero: Some("zenyatta".into()),
-            ..s1_unread_analysis()
-        };
+        // The analysis is the real pass's. The digits are the one thing a
+        // synthetic frame cannot carry, so the new reader's board read is
+        // given: ten rows of 10 / 4 / 2 / 3000 / 800 / 400.
         *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
-            analysis,
+            analysis: *analysis,
             board: Some(o8_board(Some("zenyatta"))),
         });
-        let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
         let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
         let report = handle_capture(&ctx, req).await.expect("the capture");
         assert!(
             report.recorded,
             "with OCR off a board the new reader read has to be stored"
         );
-        assert_eq!(off.blocked(), [], "and no read went to the gate");
-        drop(off);
+        check_blocked("storing the board");
+        assert_eq!(ocr::gate::leptess_created(), 0);
+        assert_eq!(ocr::gate::tesseract_calls(), 0);
         let rows = ctx.store.get_session_snapshots("s1-gate").await.unwrap();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -9878,8 +10080,129 @@ mod tests {
             (10, 4, 2, 3000, 800, 400),
             "the new reader's numbers"
         );
-        assert_eq!(row.hero, "Zenyatta");
         assert_eq!(row.map_name, "Busan");
+    }
+
+    /// F261-9. Startup may wait for the reader packs before it decides the
+    /// OCR switch. A stop that comes during that wait ends it at once, and
+    /// startup then leaves as after a normal stop: the SIGTERM handler is
+    /// registered before the wait, the run marker is finished, and the same
+    /// handler goes on to the run loop.
+    #[tokio::test]
+    async fn a_stop_during_the_startup_pack_wait_ends_it_cleanly() {
+        let never = std::future::pending::<()>;
+        let mut slow = tokio::spawn(std::future::pending::<()>());
+        assert!(
+            !stopped_while_waiting(Duration::from_millis(30), &mut slow, never()).await,
+            "the limit ends the wait"
+        );
+        let mut done = tokio::spawn(async {});
+        assert!(
+            !stopped_while_waiting(Duration::from_secs(30), &mut done, never()).await,
+            "the download finishing ends the wait"
+        );
+        let started = Instant::now();
+        assert!(
+            stopped_while_waiting(Duration::from_secs(30), &mut slow, async {}).await,
+            "a stop ends the wait"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        slow.abort();
+
+        // The order in `run`, by its source.
+        let src = include_str!("main.rs");
+        let at = src.find("\nasync fn run(").expect("run");
+        let body = &src[at..];
+        let body = &body[..body
+            .find("\nasync fn stopped_while_waiting")
+            .expect("the helper")];
+        let wait = body.find("stopped_while_waiting(").expect("the wait");
+        let handler = body
+            .find("tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())")
+            .expect("the early handler");
+        let decide = body.find("Switch::start(&config)").expect("the switch");
+        assert!(
+            handler < wait && wait < decide,
+            "the handler is registered before the wait, and the wait is before the decision"
+        );
+        let stop_branch =
+            &body[body[wait..].find("if stopped {").expect("the stop branch") + wait..];
+        let stop_branch =
+            &stop_branch[..stop_branch.find("early_sigterm = Some(sigterm);").unwrap()];
+        assert!(
+            stop_branch.contains("guard.finish();") && stop_branch.contains("return Ok(());"),
+            "a stop during the wait finishes the run marker and returns Ok"
+        );
+        assert!(
+            body.contains("run_loop(ctx, early_sigterm)"),
+            "the same handler goes on to the run loop"
+        );
+    }
+
+    /// F261-1. The check that drops a co-op event board (Junkenstein on
+    /// Adlersbrunn: stats on one team) has no source without OCR: it is fed
+    /// by the top-bar label or the board text, and neither is asked for
+    /// with OCR off. So `off` stays refused for it
+    /// ([`stat_tracker::ocr_switch::Read::PveBoard`]).
+    ///
+    /// This test holds the flag: while the Tab pass with OCR off hands the
+    /// check nothing to see "Adlersbrunn" in, the flag has to be `false`.
+    /// The lanes that give it a source (M1 for the word, O10 for "both
+    /// teams have stats" from the new reader's cells) replace the last
+    /// assertion with the functional one: with OCR off a one-team
+    /// Adlersbrunn board is not stored, and a two-team one is stored as
+    /// Eichenwalde.
+    #[test]
+    fn the_pve_board_check_has_no_source_without_ocr_so_off_stays_refused() {
+        use stat_tracker::config::OcrSetting;
+        use stat_tracker::ocr_switch::{self, PackReadiness, Read};
+        // What the Tab pass hands over with OCR off.
+        let unread = s1_unread_analysis();
+        assert_eq!(unread.map_panel_raw, None, "no top-bar label");
+        assert_eq!(
+            unread.ocr.as_ref().map(|text| text.raw_text.as_str()).ok(),
+            Some(""),
+            "no board text"
+        );
+        let one_team = |label: Option<&str>, board_text: &str| {
+            let (mut staged, mut parsed) =
+                staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
+            prepare_capture_row(&mut parsed, &mut staged, None, label, board_text, false)
+        };
+        // With OCR the label says Adlersbrunn and the one-team board is dropped.
+        assert_eq!(one_team(Some("ADLERSBRUNN"), ""), PreparedRow::Drop);
+        assert_eq!(one_team(None, "ADLERSBRUNN"), PreparedRow::Drop);
+        // With OCR off there is no label and no text: the same board is kept.
+        let without_ocr = one_team(unread.map_panel_raw.as_deref(), "");
+        assert_eq!(
+            without_ocr,
+            PreparedRow::Store,
+            "the check now has a source without OCR: test it by function here (see the doc \
+             comment) and flip Read::PveBoard with it"
+        );
+        assert!(
+            !Read::PveBoard.without_ocr(),
+            "with OCR off a co-op board would be stored: the flag has to keep off refused"
+        );
+        let every_pack = PackReadiness {
+            heroes: true,
+            maps: true,
+            words: true,
+            result_words: true,
+            phase_titles: true,
+            final_score: true,
+        };
+        let refusal = ocr_switch::decide(OcrSetting::Off, &every_pack, &[Read::PveBoard])
+            .refusal
+            .expect("off is refused for the co-op board check alone");
+        assert_eq!(refusal.reads, [Read::PveBoard]);
+        assert!(
+            refusal
+                .text(ocr_switch::Audience::Click)
+                .contains("whether a scoreboard is a co-op event board"),
+            "{}",
+            refusal.text(ocr_switch::Audience::Click)
+        );
     }
 
     // ---- O8: hero authority (OCR site T5) under each reader.

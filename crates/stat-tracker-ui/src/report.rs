@@ -472,11 +472,10 @@ pub fn outcome_for(
                 .into(),
         ),
         // The site refused the report's contents. Sending it again gives
-        // the same answer: this happens when the site is older than the
-        // tracker and does not know a field the report carries.
-        400 => SendOutcome::Failed(
-            "This site version cannot take this report. Use Save report.".into(),
-        ),
+        // the same answer. It happens when the site is older than the
+        // tracker and does not know a field the report carries, and also
+        // when the report itself is not valid: the text is true for both.
+        400 => SendOutcome::Failed("The site did not accept this report. Use Save report.".into()),
         413 => SendOutcome::Failed("The report is too large to send. Use Save report.".into()),
         429 => {
             let wait = retry_after
@@ -1259,11 +1258,12 @@ mod tests {
         let SendOutcome::Failed(m) = outcome_for(400, None, r#"{"error":"bad"}"#, None) else {
             panic!()
         };
-        assert_eq!(
-            m,
-            "This site version cannot take this report. Use Save report."
-        );
+        assert_eq!(m, "The site did not accept this report. Use Save report.");
         assert!(!m.contains("Try again"), "{m}");
+        assert!(
+            !m.contains("version"),
+            "not every 400 is the site's age: {m}"
+        );
         // A 201 without a readable body is not shown as sent.
         assert!(matches!(
             outcome_for(201, None, "nope", None),
