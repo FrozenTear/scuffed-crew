@@ -1,9 +1,28 @@
+//! Match-start phase screens: map vote, hero ban, hero select (OCR site P7).
+//!
+//! Each screen has a pixel gate (no OCR) and then a title check:
+//!
+//! | phase | pixel gate | ocr-v1 title check (Tesseract, top-centre h/4 crop) | `reader = "new"` |
+//! |---|---|---|---|
+//! | [`GamePhase::MapVote`] | navy ≥ 0.40 in the top quarter | `VOTE` and `MAP`; map names from the same text | words-v1 `vote_for_a_map` |
+//! | [`GamePhase::HeroBan`] | red ≥ 0.003 and dark ≥ 0.30 in the top sixth | `BAN HERO`, `TEAM BAN SCORE` or `VOTE TO BAN` | words-v1 `ban_heroes` |
+//! | [`GamePhase::HeroSelect`] | dark ≥ 0.50 in the top eighth and grid variance ≥ 2000 | `ASSEMBLE`, `PREFERRED HERO`, or `SELECT` and `HERO` | words-v1 `select_a_preferred_hero` |
+//!
+//! The order is vote, ban, select; the first confirmed screen wins. Under
+//! `reader = "new"` ([`PhaseSource::Words`]) a screen whose mask is loaded
+//! is confirmed by that mask alone ([`crate::shadow::result::phrase`]): a
+//! sure read is the phase, a suspect or absent read is not, and no OCR
+//! runs. The map vote then names no maps. A screen without a loaded mask
+//! keeps the OCR check. The pixel gates, the stability deferral and the
+//! order are the same for both readers.
+
 use image::{DynamicImage, RgbImage};
 
 use super::GamePhase;
 use super::stability::FrameStability;
+use crate::shadow::result::phrase::{Phrase, PhraseRead};
 
-/// Detect map-vote / hero-ban / hero-select phase.
+/// Detect map-vote / hero-ban / hero-select phase (ocr-v1).
 ///
 /// Converts the frame to RGB once; detectors share that buffer (P6).
 pub fn detect_phase(img: &DynamicImage) -> GamePhase {
@@ -26,6 +45,29 @@ pub fn detect_phase_with_rgb(img: &DynamicImage, rgb: &RgbImage) -> GamePhase {
     GamePhase::Unknown
 }
 
+/// Who confirms a phase screen once its pixel gate passed (P7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseSource {
+    /// Tesseract over the top-centre crop (`reader = "ocr-v1"`).
+    #[default]
+    Ocr,
+    /// The words-v1 phrase masks (`reader = "new"`). Only a sure read is a
+    /// signal; a suspect or absent read is not, and no OCR runs. A screen
+    /// whose mask is not loaded keeps the OCR check.
+    Words,
+}
+
+impl PhaseSource {
+    /// The source for this reader setting (`reader = "new"` or not).
+    pub fn for_reader(use_new_reader: bool) -> Self {
+        if use_new_reader {
+            PhaseSource::Words
+        } else {
+            PhaseSource::Ocr
+        }
+    }
+}
+
 /// Poll-tick phase detection (PR-A). Two differences from the one-shot path,
 /// neither changing what a phase screen ultimately detects as:
 ///
@@ -34,18 +76,44 @@ pub fn detect_phase_with_rgb(img: &DynamicImage, rgb: &RgbImage) -> GamePhase {
 ///    on a tick where several pixel gates pass (dark combat scenes routinely
 ///    pass the ban/select gates). Here the crop is recognized once and each
 ///    gate-passing detector checks its phrases against the shared text.
-/// 2. The OCR is gated on temporal stability ([`FrameStability`]): phase
+/// 2. The confirm is gated on temporal stability ([`FrameStability`]): phase
 ///    screens hold still for 10s+, combat frames never do, so the confirm
-///    OCR stops burning a Tesseract call on every dark mid-fight tick. First
+///    stops burning a Tesseract call on every dark mid-fight tick. First
 ///    sighting of a screen defers one tick — well inside every phase screen's
 ///    lifetime.
 ///
 /// Pixel gates, thresholds, phrase checks, and priority order are shared with
-/// the one-shot detectors — fixture parity holds by construction.
+/// the one-shot detectors — fixture parity holds by construction. `source`
+/// says who confirms ([`PhaseSource`]); under [`PhaseSource::Words`] the
+/// crop is recognized only for a gate-passing screen without a mask.
 pub fn detect_phase_polled(
     img: &DynamicImage,
     rgb: &RgbImage,
     stability: &mut FrameStability,
+    source: PhaseSource,
+) -> GamePhase {
+    detect_phase_polled_with(
+        img,
+        rgb,
+        stability,
+        source,
+        crate::shadow::read_phrase,
+        |crop: &DynamicImage| crate::ocr::recognize_sparse_region(crop).ok(),
+    )
+}
+
+/// [`detect_phase_polled`] with the phrase read and the OCR as arguments
+/// (tests). `words` is called only under [`PhaseSource::Words`], for a
+/// gate-passing screen; `None` from it (no mask) leaves that screen to the
+/// OCR. `ocr` runs at most once per tick, and only when a gate-passing
+/// screen needs it.
+fn detect_phase_polled_with(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: &mut FrameStability,
+    source: PhaseSource,
+    words: impl Fn(Phrase, &RgbImage) -> Option<PhraseRead>,
+    ocr: impl FnOnce(&DynamicImage) -> Option<String>,
 ) -> GamePhase {
     let (w, h) = rgb.dimensions();
 
@@ -72,24 +140,77 @@ pub fn detect_phase_polled(
             vote_gate,
             ban_gate,
             select_gate,
-            "phase pixel gate passed but top region not stable — deferring OCR"
+            "phase pixel gate passed but top region not stable — deferring confirm"
         );
         return GamePhase::Unknown;
     }
 
-    let Ok(text) = crate::ocr::recognize_sparse_region(&top_region) else {
-        return GamePhase::Unknown;
+    // The words-v1 read of one gate-passing screen: `Some(confirmed)` when
+    // its mask is loaded, `None` to leave it to the OCR.
+    let read = |phrase: Phrase| {
+        if source != PhaseSource::Words {
+            return None;
+        }
+        let read = words(phrase, rgb)?;
+        tracing::debug!(phrase = phrase.id(), ?read, "phase title (words-v1)");
+        Some(read.is_signal())
     };
-    let upper = text.to_uppercase();
+    // The crop's OCR text, recognized on first use only.
+    let mut ocr = Some(ocr);
+    let mut text: Option<Option<String>> = None;
+    let mut upper = || -> Option<String> {
+        text.get_or_insert_with(|| {
+            ocr.take()
+                .and_then(|f| f(&top_region))
+                .map(|t| t.to_uppercase())
+        })
+        .clone()
+    };
 
-    if vote_gate && let Some(phase) = confirm_map_vote(&upper, navy) {
-        return phase;
+    if vote_gate {
+        match read(Phrase::VoteForAMap) {
+            Some(true) => {
+                tracing::info!(navy_ratio = navy, "map vote screen detected (words-v1)");
+                return GamePhase::MapVote { maps: Vec::new() };
+            }
+            Some(false) => {}
+            None => {
+                if let Some(phase) = upper().and_then(|t| confirm_map_vote(&t, navy)) {
+                    return phase;
+                }
+            }
+        }
     }
-    if ban_gate && confirm_hero_ban(&upper, red_ratio, dark_ratio) {
-        return GamePhase::HeroBan;
+    if ban_gate {
+        let confirmed = match read(Phrase::BanHeroes) {
+            Some(sure) => {
+                if sure {
+                    tracing::info!(red_ratio, "hero ban screen detected (words-v1)");
+                }
+                sure
+            }
+            None => upper().is_some_and(|t| confirm_hero_ban(&t, red_ratio, dark_ratio)),
+        };
+        if confirmed {
+            return GamePhase::HeroBan;
+        }
     }
-    if select_gate && confirm_hero_select(&upper, select_dark, select_variance) {
-        return GamePhase::HeroSelect;
+    if select_gate {
+        let confirmed = match read(Phrase::SelectAPreferredHero) {
+            Some(sure) => {
+                if sure {
+                    tracing::info!(
+                        variance = select_variance,
+                        "hero select screen detected (words-v1)"
+                    );
+                }
+                sure
+            }
+            None => upper().is_some_and(|t| confirm_hero_select(&t, select_dark, select_variance)),
+        };
+        if confirmed {
+            return GamePhase::HeroSelect;
+        }
     }
     GamePhase::Unknown
 }
@@ -385,8 +506,8 @@ fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
 
     // Hero select screen characteristics:
-    // - Header shows "SELECT A PREFERRED HERO" (2026-07 ban patch), previously
-    //   "CHOOSE YOUR HERO" / "ASSEMBLE YOUR TEAM"
+    // - Header shows "SELECT A PREFERRED HERO" (2026-07 ban patch) before the
+    //   ban vote, and "ASSEMBLE YOUR TEAM" on the in-match hero select
     // - Has a bright, colorful hero grid in the lower 2/3
     // - Top banner area is relatively dark with text
     // - Bottom area has high color variance from hero portraits
@@ -413,9 +534,10 @@ fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
 /// Phrase check for the hero-select screen's OCR text. Scoreboard frames pass
 /// both pixel gates and their top rows land in the crop, so bare "HERO" would
 /// match player names/titles ("Unrelenting Hero"); require phrases instead.
+/// The pre-patch "CHOOSE YOUR HERO" title is gone from the game, so a bare
+/// "CHOOSE" (chat, a player name) is no longer a hero select.
 fn confirm_hero_select(upper: &str, dark_ratio: f32, variance: f64) -> bool {
-    let is_hero_select = upper.contains("CHOOSE")
-        || upper.contains("ASSEMBLE")
+    let is_hero_select = upper.contains("ASSEMBLE")
         || upper.contains("PREFERRED HERO")
         || (upper.contains("SELECT") && upper.contains("HERO"));
     if is_hero_select {
@@ -668,6 +790,300 @@ mod tests {
         // Header words and hero names on the vote screen must not read as maps.
         let maps = extract_map_names("VOTE FOR A MAP  REAPER  SOMBRA  DOCTRINE");
         assert!(maps.is_empty(), "unexpected maps: {maps:?}");
+    }
+
+    // ------------------------------------------------ polled path (P7)
+
+    /// Top quarter navy: passes the map-vote gate only.
+    fn vote_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(1280, 720, image::Rgb([90, 90, 90]));
+        for y in 0..180 {
+            for x in 0..1280 {
+                img.put_pixel(x, y, image::Rgb([16, 25, 58]));
+            }
+        }
+        img
+    }
+
+    /// Dark top sixth with a red title strip: passes the ban gate only.
+    fn ban_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(1280, 720, image::Rgb([120, 120, 120]));
+        for y in 0..120 {
+            for x in 0..1280 {
+                img.put_pixel(x, y, image::Rgb([10, 10, 20]));
+            }
+        }
+        for y in 20..30 {
+            for x in 560..720 {
+                img.put_pixel(x, y, image::Rgb([200, 24, 24]));
+            }
+        }
+        img
+    }
+
+    /// Colourful lower half under `top`: passes the select gate (and with a
+    /// navy top, the vote gate too).
+    fn select_frame(top: [u8; 3]) -> RgbImage {
+        let mut img = RgbImage::from_pixel(1280, 720, image::Rgb(top));
+        for y in 360..720u32 {
+            for x in 0..1280u32 {
+                let c = [
+                    (x * 7 % 256) as u8,
+                    (y * 13 % 256) as u8,
+                    ((x + y) * 5 % 256) as u8,
+                ];
+                img.put_pixel(x, y, image::Rgb(c));
+            }
+        }
+        img
+    }
+
+    /// Two polled ticks of one frame (the first only primes stability).
+    fn polled(
+        rgb: &RgbImage,
+        source: PhaseSource,
+        words: impl Fn(Phrase, &RgbImage) -> Option<PhraseRead>,
+        ocr: impl Fn(&DynamicImage) -> Option<String>,
+    ) -> GamePhase {
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        let mut stab = FrameStability::default();
+        let first = detect_phase_polled_with(&img, rgb, &mut stab, source, &words, &ocr);
+        assert_eq!(first, GamePhase::Unknown, "first sighting defers");
+        detect_phase_polled_with(&img, rgb, &mut stab, source, &words, &ocr)
+    }
+
+    fn no_ocr(_: &DynamicImage) -> Option<String> {
+        panic!("OCR ran although the phrase mask is loaded")
+    }
+
+    fn no_words(_: Phrase, _: &RgbImage) -> Option<PhraseRead> {
+        panic!("the words-v1 masks were read under ocr-v1")
+    }
+
+    fn sure_for(want: Phrase) -> impl Fn(Phrase, &RgbImage) -> Option<PhraseRead> {
+        move |p, _| {
+            Some(if p == want {
+                PhraseRead::Sure(0.95)
+            } else {
+                PhraseRead::Absent(0.3)
+            })
+        }
+    }
+
+    #[test]
+    fn the_test_frames_pass_only_their_gates() {
+        let m = gate_metrics(&vote_frame());
+        assert!(m.navy_ratio >= 0.40 && m.ban_red_ratio < 0.003);
+        assert!(m.select_grid_variance < 2000.0);
+        let m = gate_metrics(&ban_frame());
+        assert!(m.navy_ratio < 0.40 && m.ban_red_ratio >= 0.003 && m.ban_dark_ratio >= 0.30);
+        assert!(m.select_grid_variance < 2000.0);
+        let m = gate_metrics(&select_frame([10, 10, 10]));
+        assert!(m.navy_ratio < 0.40 && m.ban_red_ratio < 0.003);
+        assert!(m.select_dark_header_ratio >= 0.50 && m.select_grid_variance >= 2000.0);
+        let m = gate_metrics(&select_frame([16, 25, 58]));
+        assert!(m.navy_ratio >= 0.40 && m.select_grid_variance >= 2000.0);
+    }
+
+    #[test]
+    fn under_words_a_sure_phrase_is_the_phase_and_no_ocr_runs() {
+        let w = PhaseSource::Words;
+        assert_eq!(
+            polled(&vote_frame(), w, sure_for(Phrase::VoteForAMap), no_ocr),
+            GamePhase::MapVote { maps: Vec::new() }
+        );
+        assert_eq!(
+            polled(&ban_frame(), w, sure_for(Phrase::BanHeroes), no_ocr),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(
+                &select_frame([10, 10, 10]),
+                w,
+                sure_for(Phrase::SelectAPreferredHero),
+                no_ocr
+            ),
+            GamePhase::HeroSelect
+        );
+    }
+
+    #[test]
+    fn under_words_a_suspect_or_absent_phrase_is_no_phase_and_no_ocr_runs() {
+        for read in [PhraseRead::Suspect(0.69), PhraseRead::Absent(0.2)] {
+            let words = move |_: Phrase, _: &RgbImage| Some(read);
+            for frame in [vote_frame(), ban_frame(), select_frame([10, 10, 10])] {
+                assert_eq!(
+                    polled(&frame, PhaseSource::Words, words, no_ocr),
+                    GamePhase::Unknown,
+                    "{read:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn under_words_a_screen_without_a_mask_keeps_the_ocr_check() {
+        // No mask for this screen's title: the OCR confirms it, as today.
+        let unloaded = |missing: Phrase| {
+            move |p: Phrase, _: &RgbImage| (p != missing).then_some(PhraseRead::Absent(0.2))
+        };
+        let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
+        let w = PhaseSource::Words;
+        assert_eq!(
+            polled(
+                &vote_frame(),
+                w,
+                unloaded(Phrase::VoteForAMap),
+                text("vote for a map  ilios")
+            ),
+            GamePhase::MapVote {
+                maps: vec!["ILIOS".to_string()]
+            }
+        );
+        assert_eq!(
+            polled(
+                &ban_frame(),
+                w,
+                unloaded(Phrase::BanHeroes),
+                text("BAN HEROES 20")
+            ),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(
+                &select_frame([10, 10, 10]),
+                w,
+                unloaded(Phrase::SelectAPreferredHero),
+                text("ASSEMBLE YOUR TEAM")
+            ),
+            GamePhase::HeroSelect
+        );
+        // A loaded mask is never overruled by the OCR, sure or not.
+        let absent = |_: Phrase, _: &RgbImage| Some(PhraseRead::Absent(0.2));
+        assert_eq!(
+            polled(
+                &select_frame([10, 10, 10]),
+                w,
+                absent,
+                text("SELECT A PREFERRED HERO")
+            ),
+            GamePhase::Unknown
+        );
+    }
+
+    #[test]
+    fn ocr_v1_never_reads_the_masks() {
+        let o = PhaseSource::Ocr;
+        let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
+        assert_eq!(
+            polled(&vote_frame(), o, no_words, text("VOTE FOR A MAP")),
+            GamePhase::MapVote { maps: Vec::new() }
+        );
+        assert_eq!(
+            polled(&ban_frame(), o, no_words, text("TEAM BAN SCORE")),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(
+                &select_frame([10, 10, 10]),
+                o,
+                no_words,
+                text("ASSEMBLE YOUR TEAM")
+            ),
+            GamePhase::HeroSelect
+        );
+        assert_eq!(
+            polled(&vote_frame(), o, no_words, |_: &DynamicImage| None),
+            GamePhase::Unknown
+        );
+        assert_eq!(PhaseSource::for_reader(false), PhaseSource::Ocr);
+        assert_eq!(PhaseSource::for_reader(true), PhaseSource::Words);
+        assert_eq!(PhaseSource::default(), PhaseSource::Ocr);
+    }
+
+    #[test]
+    fn the_pixel_gates_still_gate_the_phrase_read() {
+        let black = RgbImage::from_pixel(1280, 720, image::Rgb([0, 0, 0]));
+        let sky = RgbImage::from_pixel(1280, 720, image::Rgb([150, 190, 230]));
+        let read_any = |_: Phrase, _: &RgbImage| -> Option<PhraseRead> {
+            panic!("a phrase was read with every gate shut")
+        };
+        for frame in [black, sky] {
+            let img = DynamicImage::ImageRgb8(frame.clone());
+            let mut stab = FrameStability::default();
+            for _ in 0..2 {
+                assert_eq!(
+                    detect_phase_polled_with(
+                        &img,
+                        &frame,
+                        &mut stab,
+                        PhaseSource::Words,
+                        read_any,
+                        no_ocr
+                    ),
+                    GamePhase::Unknown
+                );
+            }
+        }
+        // Only the gate-passing screen's phrase is read.
+        for (frame, open) in [
+            (vote_frame(), Phrase::VoteForAMap),
+            (ban_frame(), Phrase::BanHeroes),
+            (select_frame([10, 10, 10]), Phrase::SelectAPreferredHero),
+        ] {
+            let only_open = move |p: Phrase, _: &RgbImage| {
+                assert_eq!(p, open, "a shut gate's phrase was read");
+                Some(PhraseRead::Absent(0.2))
+            };
+            assert_eq!(
+                polled(&frame, PhaseSource::Words, only_open, no_ocr),
+                GamePhase::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn under_words_the_order_is_vote_then_ban_then_select() {
+        // Navy top over a hero grid passes the vote and the select gates.
+        let both = select_frame([16, 25, 58]);
+        let all_sure = |_: Phrase, _: &RgbImage| Some(PhraseRead::Sure(0.95));
+        assert_eq!(
+            polled(&both, PhaseSource::Words, all_sure, no_ocr),
+            GamePhase::MapVote { maps: Vec::new() }
+        );
+        // The preferred-hero pick sits on the vote screen's navy: the vote
+        // title is absent, so the select title decides.
+        assert_eq!(
+            polled(
+                &both,
+                PhaseSource::Words,
+                sure_for(Phrase::SelectAPreferredHero),
+                no_ocr
+            ),
+            GamePhase::HeroSelect
+        );
+    }
+
+    #[test]
+    fn under_words_the_first_sighting_still_defers() {
+        let img = DynamicImage::ImageRgb8(vote_frame());
+        let rgb = vote_frame();
+        let mut stab = FrameStability::default();
+        let never = |_: Phrase, _: &RgbImage| -> Option<PhraseRead> {
+            panic!("the phrase was read before the screen held still")
+        };
+        assert_eq!(
+            detect_phase_polled_with(&img, &rgb, &mut stab, PhaseSource::Words, never, no_ocr),
+            GamePhase::Unknown
+        );
+    }
+
+    #[test]
+    fn hero_select_ocr_no_longer_takes_a_bare_choose() {
+        assert!(!confirm_hero_select("CHOOSE YOUR HERO", 0.9, 5000.0));
+        assert!(!confirm_hero_select("CHOOSE", 0.9, 5000.0));
+        assert!(confirm_hero_select("ASSEMBLE YOUR TEAM", 0.9, 5000.0));
+        assert!(confirm_hero_select("SELECT A PREFERRED HERO", 0.9, 5000.0));
     }
 
     #[test]

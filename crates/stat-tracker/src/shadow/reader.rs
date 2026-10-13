@@ -50,6 +50,7 @@ use super::heroes::{
     HeroDirs, HeroFrameRead, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2,
     TEMPLATE_SUBDIR_V2_1080,
 };
+use super::result::phrase::{Phrase, PhraseRead};
 use super::result::{
     FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates,
 };
@@ -490,6 +491,14 @@ impl Reader {
         Some(loaded.templates.final_score()?.read(frame))
     }
 
+    /// One phase-screen title read (P7) of one full frame, or `None` when
+    /// the loaded words pack has no mask for `phrase` (or no words pack is
+    /// loaded). Only [`PhraseRead::Sure`] is a signal.
+    pub fn read_phrase(&self, phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
+        let loaded = self.results.current()?;
+        loaded.phrases.as_ref()?.read(phrase, frame)
+    }
+
     /// [`Self::read_board`] with the `result` field from a match's evidence.
     pub fn read_board_with_evidence(
         &self,
@@ -815,6 +824,13 @@ pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_final_score(frame)
+}
+
+/// [`Reader::read_phrase`] with the process-wide reader.
+pub fn read_phrase(phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_phrase(phrase, frame)
 }
 
 /// [`Reader::pack_readiness`] with the process-wide reader.
