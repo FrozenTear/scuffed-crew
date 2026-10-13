@@ -10352,22 +10352,24 @@ mod tests {
         // 1. Every call the pass sent to the gate belongs to a read this
         //    build still needs OCR for. A read marked as done without OCR
         //    that still calls OCR fails here, whatever thread made the call.
+        //    Every such call is named, not only the first.
         let check_blocked = |when: &str| {
+            let mut wrong = Vec::new();
             for b in ocr::gate::blocked_calls() {
-                let read = tab_pass_read(b.site.entry).unwrap_or_else(|| {
-                    panic!(
-                        "{when}: {} is an entry point with no read: add it to tab_pass_read",
+                match tab_pass_read(b.site.entry) {
+                    None => wrong.push(format!(
+                        "{} is an entry point with no read: add it to tab_pass_read",
                         b.site
-                    )
-                });
-                assert!(
-                    !read.without_ocr(),
-                    "{when}: {read:?} is marked as read without OCR, and {} still asked for it \
-                     {} time(s)",
-                    b.site,
-                    b.count
-                );
+                    )),
+                    Some(read) if read.without_ocr() => wrong.push(format!(
+                        "{read:?} is marked as read without OCR, and {} still asked for it \
+                         {} time(s)",
+                        b.site, b.count
+                    )),
+                    Some(_) => {}
+                }
             }
+            assert!(wrong.is_empty(), "{when}:\n{}", wrong.join("\n"));
         };
         check_blocked("the Tab pass");
         let blocked_for = |read: Read| -> u64 {
