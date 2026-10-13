@@ -10551,6 +10551,29 @@ mod tests {
         assert!(!dir.path().join("private").exists());
         let rows = ctx.store.get_session_snapshots("g1").await.unwrap();
         assert!(rows.iter().all(|r| r.suspect_fields.is_empty()));
+        // Nor does it judge seeds that are there (a member who switched back
+        // from the new reader): verdicts are not counted under ocr-v1.
+        {
+            let mut store = ctx.own_name.as_ref().unwrap().lock().unwrap();
+            for (i, (session, map)) in [("s1", "Busan"), ("s1", "Busan"), ("s2", "Ilios")]
+                .into_iter()
+                .enumerate()
+            {
+                let game = detect::own_row::GameTag {
+                    session: session.into(),
+                    map: map.into(),
+                    at: 0,
+                };
+                store.offer(o9_candidate(i), &game);
+            }
+            assert_eq!(store.trusted().len(), 3);
+        }
+        for _ in 0..2 * detect::own_row::DISAGREE_DROPS {
+            let mut analysis = o8_analysis(Some("Ana"), None);
+            analysis.own_seed_verdict = detect::own_row::Verdict::Disagree(88);
+            assert!(o9_tab(&ctx, "g3", "Busan", analysis, None).await.recorded);
+        }
+        assert_eq!(own_name_seeds(ctx.own_name.as_ref()).len(), 3);
     }
 
     #[tokio::test]
