@@ -25,7 +25,10 @@
 //! scores at least [`FLOOR`] and leads the best other word by [`MARGIN`].
 //! DRAW has no real frame yet (its words-v1 template is rendered), so a DRAW
 //! read that is not sure names no word at all: it abstains instead of
-//! flagging the match.
+//! flagging the match. This is by design, and it has a cost: with no read,
+//! the `result` field is not attempted, so on a real draw that only the
+//! rendered template half-matches, ocr-v1's value is stored without a
+//! `result` suspect mark (it was marked before).
 //!
 //! The search is coarse to fine ([`ResultTemplates::read`]): each template
 //! is matched at every position of a 2x or 4x box-downscaled region, the
@@ -78,6 +81,8 @@ use super::heroes::{DirStamp, dir_stamp};
 use crate::ocr::preprocess::game_rect_16_9;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
+/// Nothing reads it yet: no snapshot, manifest or log carries it, so a field
+/// report cannot tell a result-v1 read from a result-v2 one.
 pub const RESULT_RECOGNIZER_ID: &str = "result-v2";
 /// The old manual template folder under the data dir (the fallback).
 pub const TEMPLATE_SUBDIR: &str = "templates/result";
@@ -98,7 +103,10 @@ pub const MIN_AGREE: usize = 2;
 /// about 9.2%.
 pub const NAME_LINE_TOP: f64 = 0.0865;
 /// Bottom of the accolade region, above [`NAME_LINE_TOP`]. 74 rows at
-/// 1440p, so the 2:1 resample to the work scale is exact.
+/// 1440p, so the 2:1 resample to the work scale is exact. At 1080p and
+/// below the gap to the nameplate is under one pixel (row 93 against about
+/// 93.96 at 1080p), from u32 truncation; native 1080p accolade frames are
+/// unmeasured.
 pub const ACCOLADE_Y1: f64 = 0.0862;
 /// The accolade nameplate box (x0, y0, x1, y1): its icon and text under the
 /// result word, across the width of the accolade region. No layout's region
