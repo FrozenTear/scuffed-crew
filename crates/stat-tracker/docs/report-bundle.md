@@ -117,7 +117,7 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 
 Anything else is a 400. The shape keeps an absolute path, a sentence and most names out; it cannot tell a folder name from a user name (`soot/main.rs:1` has the shape). That a key is a source location and never text read from a screen is the tracker's side of the contract:
 
-- The tracker builds a key from the place in its own source that made the call, and cuts everything up to and including `crates/stat-tracker/src/` from the file. A place that is not below that folder is sent as `other.rs:1`, never with its path.
+- The tracker builds a key from the place in its own source that made the call, and cuts everything up to and including `crates/stat-tracker/src/` from the file. A place that is not below that folder is sent as `other.rs:1` and the function, never with its path. Places that share a key are sent as one entry, their counts added.
 - It sends the 64 sites with the largest counts and leaves the rest out.
 - It leaves out a key that does not have the shape or is over 96 bytes, so one key cannot make the whole report a 400.
 - It sends a count above 4294967295 as 4294967295.
