@@ -453,16 +453,26 @@ fn player_from_section(version: &str, raw: &str) -> ReleaseNotes {
 }
 
 fn player_text(version: &str, raw: &str) -> ReleaseNotes {
-    let highlights = extract_highlights(raw);
+    let highlights = extract_highlights(raw)
+        .iter()
+        .map(|h| plain_inline(h))
+        .collect();
     let stripped = strip_highlights(raw);
     let (summary, rest) = split_summary(&stripped);
     ReleaseNotes {
         version: version.to_string(),
-        summary,
+        summary: plain_inline(&summary),
         highlights,
         body_markdown: rest.trim().to_string(),
         published_on: None,
     }
+}
+
+/// The summary and highlights are drawn as plain `text`, not markdown, so
+/// drop inline emphasis and code marks (`**bold**`, `__bold__`, `` `code` ``)
+/// instead of showing them literally (#234).
+fn plain_inline(s: &str) -> String {
+    s.replace("**", "").replace("__", "").replace('`', "")
 }
 
 fn usable(notes: &ReleaseNotes) -> bool {
@@ -901,6 +911,30 @@ impl<'a> markdown::Viewer<'a, Message> for NotesViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_inline_strips_bold_and_code_marks() {
+        assert_eq!(
+            plain_inline("**Report a problem** is in __About__ (`stat-tracker-gui`)"),
+            "Report a problem is in About (stat-tracker-gui)"
+        );
+        assert_eq!(plain_inline("no marks, 5 * 3_000"), "no marks, 5 * 3_000");
+    }
+
+    #[test]
+    fn player_text_summary_and_highlights_are_plain() {
+        let raw = "\
+**Report a problem** is in the menu. Use `Send`.
+
+### Highlights
+
+- **Bold** highlight
+- __Under__ and `code`
+";
+        let notes = player_text("0.5.0-alpha.5", raw);
+        assert_eq!(notes.summary, "Report a problem is in the menu. Use Send.");
+        assert_eq!(notes.highlights, vec!["Bold highlight", "Under and code"]);
+    }
 
     const FIXTURE: &str = "\
 # Stat Tracker changelog

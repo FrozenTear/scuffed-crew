@@ -228,6 +228,8 @@ pub enum Message {
     CopyUninstallCmd,
     RunUpdate,
     UpdateFinished(Result<String, String>),
+    /// "Restart now" after an update: start the new binary, then quit.
+    RestartGui,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     Tray(TrayAction),
@@ -1447,6 +1449,15 @@ impl TrackerApp {
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
                 Task::none()
             }
+            Message::RestartGui => match crate::instance::spawn_replacement() {
+                Ok(()) => self.apply_tray(TrayAction::Quit),
+                Err(e) => {
+                    self.replace_toast(format!(
+                        "Could not start the new version ({e}). Quit Stat Tracker and start it again."
+                    ));
+                    Task::none()
+                }
+            },
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
                 window::gain_focus(id)
@@ -2059,6 +2070,14 @@ impl TrackerApp {
             && let Some(action) = tray::poll(handle)
         {
             return self.apply_tray(action);
+        }
+
+        if crate::instance::consume_quit(&self.data_dir) {
+            tracing::info!("a newer tracker GUI asked this one to quit");
+            return self.apply_tray(TrayAction::Quit);
+        }
+        if crate::instance::consume_show(&self.data_dir) {
+            return self.show_window();
         }
 
         if hotkey::consume_toggle(&self.data_dir, &mut self.companion_toggle_mtime) {
@@ -2825,6 +2844,7 @@ token = \"secret-token-must-stay\"
             companion: false,
             help: false,
             version: false,
+            replace: false,
         };
         let (mut app, _open) = super::TrackerApp::new(cli);
         app.toast = Some("Outcome set to Victory".into());
