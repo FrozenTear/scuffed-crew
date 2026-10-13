@@ -742,7 +742,12 @@ fn spawn_daemon(
         Ask::File(ocr) => {
             let dir = root.join("config").join("scuffed-stat-tracker");
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("config.toml"), format!("ocr = \"{ocr}\"\n")).unwrap();
+            // `data_dir` is a required key of the file.
+            std::fs::write(
+                dir.join("config.toml"),
+                format!("data_dir = {:?}\nocr = \"{ocr}\"\n", data_dir),
+            )
+            .unwrap();
         }
     }
     common::spawn_daemon(cmd)
@@ -750,10 +755,12 @@ fn spawn_daemon(
 
 /// Wait until the daemon's SIGTERM handler is installed (in the run loop;
 /// before that the signal's default action would kill it).
-fn wait_until_ready(log: &Path) -> bool {
+/// False at once when the daemon ended before that.
+fn wait_until_ready(log: &Path, daemon: &mut common::Daemon) -> bool {
+    let ready = |log: &Path| read(log).contains("signal handlers ready");
     wait_for("signal handlers ready", Duration::from_secs(90), || {
-        read(log).contains("signal handlers ready")
-    })
+        ready(log) || matches!(daemon.child.try_wait(), Ok(Some(_)))
+    }) && ready(log)
 }
 
 /// SIGTERM, then wait for the exit.
@@ -773,7 +780,7 @@ fn run_daemon(root: &Path, data_dir: &Path, ask: Ask) -> DaemonRun {
     let log_path = root.join("daemon.out");
     let mut daemon = spawn_daemon(root, data_dir, ask, &[], &log_path);
     let pid = daemon.child.id();
-    let ready = wait_until_ready(&log_path);
+    let ready = wait_until_ready(&log_path, &mut daemon);
     let status = ocr_switch::read_status(data_dir);
     let exit = if ready {
         stop(&mut daemon)
@@ -901,7 +908,7 @@ fn a_second_start_and_a_vacuum_run_leave_the_status_file_alone() {
     let (root, data_dir) = daemon_dirs();
     let log = root.path().join("daemon.out");
     let mut live = spawn_daemon(root.path(), &data_dir, Ask::Env("on"), &[], &log);
-    assert!(wait_until_ready(&log), "output:\n{}", read(&log));
+    assert!(wait_until_ready(&log, &mut live), "output:\n{}", read(&log));
     let status_path = data_dir.join(ocr_switch::STATUS_FILE);
     let before = std::fs::read(&status_path).expect("the live daemon's status file");
     let live_status = ocr_switch::read_status(&data_dir).unwrap();
