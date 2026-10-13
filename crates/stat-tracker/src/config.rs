@@ -95,8 +95,10 @@ pub struct Config {
     /// | `off` | either | the new reader, everywhere; a field it cannot read is held, never read with OCR |
     ///
     /// `off` implies the new reader, so `reader` is not consulted (its value
-    /// stays in the file). `off` needs the hero, maps-v1 and words-v1 reader
-    /// packs: when one is missing the tracker keeps OCR on and logs why
+    /// stays in the file). `off` is granted only when nothing would go
+    /// unread: the build has to read everything without Tesseract, and the
+    /// hero, map and word packs have to be loaded with what those readers
+    /// need. Otherwise the tracker keeps OCR on for the run and logs why
     /// ([`crate::ocr_switch`]). The tracker reads this when it starts.
     /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
@@ -135,8 +137,10 @@ impl OcrSetting {
         matches!(self, Self::Off)
     }
 
+    /// `on` or `off`, in any case, with spaces around it ignored. The file
+    /// value and the env override read the same way.
     pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
+        match raw.trim().to_ascii_lowercase().as_str() {
             Self::ON => Some(Self::On),
             Self::OFF => Some(Self::Off),
             _ => None,
@@ -613,12 +617,12 @@ impl Config {
     }
 
     /// Pure form of [`Self::ocr_control`]. `env` is the raw variable value.
-    /// Only `on` and `off` (any case, trimmed) count; anything else is no
-    /// override.
+    /// Only `on` and `off` count ([`OcrSetting::parse`]); anything else is
+    /// no override.
     pub fn ocr_control_from(file: OcrSetting, env: Option<&str>) -> OcrControl {
         OcrControl {
             file,
-            env: env.and_then(|raw| OcrSetting::parse(raw.trim().to_ascii_lowercase().as_str())),
+            env: env.and_then(OcrSetting::parse),
         }
     }
 
@@ -2135,7 +2139,13 @@ custom_note = \"leave this line alone\"
         assert!(off.ocr.is_off());
         let on = Config::parse_file_contents(&format!("ocr = \"on\"\n{raw}")).expect("on");
         assert_eq!(on.ocr, OcrSetting::On);
-        for bad in ["\"OFF\"", "\"no\"", "\"\"", "false", "0"] {
+        // the file value reads like the env value: any case, trimmed
+        for spelled in ["\"Off\"", "\"OFF\"", "\" off \""] {
+            let loaded = Config::parse_file_contents(&format!("ocr = {spelled}\n{raw}"))
+                .unwrap_or_else(|e| panic!("ocr = {spelled}: {e}"));
+            assert_eq!(loaded.ocr, OcrSetting::Off, "{spelled}");
+        }
+        for bad in ["\"no\"", "\"\"", "\"offf\"", "false", "0"] {
             assert!(
                 Config::parse_file_contents(&format!("ocr = {bad}\n{raw}")).is_err(),
                 "ocr = {bad} must not parse"

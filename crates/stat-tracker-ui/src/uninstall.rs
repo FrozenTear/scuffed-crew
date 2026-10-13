@@ -865,6 +865,7 @@ fn is_tracker_data_name(name: &str) -> bool {
             | "run.marker"
             | "last_crash.marker"
             | "ocr_switch.json"
+            | "ocr_switch.json.tmp"
     ) || name.starts_with("stats.surrealkv.pre-vacuum-")
 }
 

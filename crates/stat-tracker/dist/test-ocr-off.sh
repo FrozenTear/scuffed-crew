@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The installers and the OCR on/off switch (`ocr` in config.toml).
 #
-# With classic OCR off the tracker never starts Tesseract, so the installers
-# must not check for (or warn about) tessdata. With it on they check as before.
+# The installers always check for Tesseract's model: the tracker keeps classic
+# OCR on when it has to (a reader pack is missing), whatever config.toml asks
+# for. With `ocr = "off"` a missing model is a note, not a warning. With OCR
+# on the warning is as before.
 # Run from anywhere: bash crates/stat-tracker/dist/test-ocr-off.sh
 set -euo pipefail
 
@@ -49,6 +51,8 @@ expect off "single quotes"                  "ocr = 'off'"
 expect off "no spaces"                      'ocr="off"'
 expect off "indented, with a comment"       '  ocr = "off"   # no Tesseract'
 expect off "after other root keys"          $'data_dir = "/x"\nreader = "new"\nocr = "off"\n\n[auto_detect]\nenabled = true'
+expect off "any case, as the tracker reads it"  'ocr = "Off"'
+expect off "spaces inside the quotes"       'ocr = " off "'
 expect on  'ocr = "on"'                     'ocr = "on"'
 expect on  "a commented-out key"            '# ocr = "off"'
 expect on  "ocr_threads is another key"     'ocr_threads = 2'
@@ -91,7 +95,7 @@ else
     fail "config: XDG_CONFIG_HOME/scuffed-stat-tracker/config.toml was not read"
 fi
 
-# ── dist/install.sh: the tessdata check runs only with OCR on ────────────────
+# ── dist/install.sh: the model check always runs; its wording follows `ocr` ──
 
 PKG="$TMP/pkg"
 mkdir -p "$PKG/bin" "$PKG/assets"
@@ -110,37 +114,53 @@ cp "$DIST/install.sh" "$PKG/install.sh"
 cp "$DIST/install-paths.sh" "$PKG/install-paths.sh"
 cp "$DIST/uninstall.sh" "$PKG/uninstall.sh"
 
-# run_install <name> <config text, or "-">: stderr of one install.
+# A stand-in for "/" with no model, and one with a model, so the check does
+# not depend on what this machine has installed.
+NO_MODEL="$TMP/sysroot-empty"
+WITH_MODEL="$TMP/sysroot-model"
+mkdir -p "$NO_MODEL" "$WITH_MODEL/usr/share/tessdata"
+printf 'eng-model\n' > "$WITH_MODEL/usr/share/tessdata/eng.traineddata"
+
+# run_install <name> <system root> <config text, or "-">: stderr of one install.
 run_install() {
-    local name="$1" text="$2"
+    local name="$1" sysroot="$2" text="$3"
     local home="$TMP/inst-$name/home" prefix="$TMP/inst-$name/prefix"
     mkdir -p "$home/.config/scuffed-stat-tracker" "$prefix"
     if [[ "$text" != "-" ]]; then
         printf '%s\n' "$text" > "$home/.config/scuffed-stat-tracker/config.toml"
     fi
-    # An empty TESSDATA_PREFIX and no bundled model: nothing in the fake tree
-    # supplies eng.traineddata, so only a system package can.
     # stderr only: that is where the installer logs.
     {
         HOME="$home" PREFIX="$prefix" SKIP_INTEGRATION=1 TESSDATA_PREFIX="" \
-            "$PKG/install.sh" >/dev/null
+            TESSDATA_SYSTEM_ROOT="$sysroot" "$PKG/install.sh" >/dev/null
     } 2>&1
 }
 
-SKIP_LINE='not checking for eng.traineddata'
-WARN_LINE='eng.traineddata not found'
+WARN_LINE="install your distro's eng tessdata package"
+NOTE_LINE='eng.traineddata not found. Classic OCR is off in config.toml'
 
-off_out="$(run_install off 'ocr = "off"')"
-if grep -q "$SKIP_LINE" <<<"$off_out"; then
-    pass "install: OCR off skips the eng.traineddata check"
+# check_out <yes|no> <output> <line> <label>: the line is (or is not) in the output.
+check_out() {
+    local want="$1" out="$2" line="$3" label="$4"
+    local got=no
+    if grep -qF -- "$line" <<<"$out"; then
+        got=yes
+    fi
+    if [[ "$got" == "$want" ]]; then
+        pass "install: $label"
+    else
+        fail "install: $label"
+        echo "$out" >&2
+    fi
+}
+
+off_out="$(run_install off "$NO_MODEL" 'ocr = "off"')"
+check_out yes "$off_out" "$NOTE_LINE" "OCR off and no model: a note says when it is needed"
+check_out no  "$off_out" "$WARN_LINE" "OCR off and no model: no warning"
+if grep -F -- "warn ]" <<<"$off_out" | grep -q "traineddata"; then
+    fail "install: OCR off and no model: the model is still mentioned at warn level"
 else
-    fail "install: OCR off did not skip the eng.traineddata check"
-    echo "$off_out" >&2
-fi
-if grep -q "$WARN_LINE" <<<"$off_out"; then
-    fail "install: OCR off still warns about eng.traineddata"
-else
-    pass "install: OCR off prints no eng.traineddata warning"
+    pass "install: OCR off and no model: no warn line mentions the model"
 fi
 
 for case_name in on none; do
@@ -148,36 +168,23 @@ for case_name in on none; do
         on)   text='ocr = "on"' ;;
         none) text='-' ;;
     esac
-    on_out="$(run_install "$case_name" "$text")"
-    if grep -q "$SKIP_LINE" <<<"$on_out"; then
-        fail "install: OCR on ($case_name) skipped the eng.traineddata check"
-    else
-        pass "install: OCR on ($case_name) still checks for eng.traineddata"
-    fi
+    on_out="$(run_install "$case_name" "$NO_MODEL" "$text")"
+    check_out yes "$on_out" "$WARN_LINE" "OCR on ($case_name) and no model: the warning, as before"
+    check_out no  "$on_out" "$NOTE_LINE" "OCR on ($case_name) and no model: not the OCR-off note"
 done
 
-# The check itself, where this machine has no system model to find.
-system_eng=0
-for f in /usr/share/tessdata/eng.traineddata /usr/local/share/tessdata/eng.traineddata \
-         /usr/share/tesseract/tessdata/eng.traineddata \
-         /usr/share/tesseract-ocr/*/tessdata/eng.traineddata; do
-    [[ -f "$f" ]] && system_eng=1
+# The check runs with OCR off too: a model that is there is found, and
+# nothing is said.
+for text in 'ocr = "off"' '-'; do
+    found_out="$(run_install "found-${text:0:1}" "$WITH_MODEL" "$text")"
+    check_out no "$found_out" "eng.traineddata not found" "a model that is there is found ($text)"
 done
-if [[ "$system_eng" -eq 0 ]]; then
-    if grep -q "$WARN_LINE" <<<"$on_out"; then
-        pass "install: OCR on warns when eng.traineddata is missing"
-    else
-        fail "install: OCR on did not warn about the missing eng.traineddata"
-    fi
-else
-    echo "SKIP  install: this machine has a system eng.traineddata, so the OCR-on warning cannot fire"
-fi
 
 # OCR off must not stop the bundled models from being installed: turning OCR
 # back on later has to work without another install.
 mkdir -p "$PKG/tessdata"
 printf 'eng-model\n' > "$PKG/tessdata/eng.traineddata"
-run_install bundled 'ocr = "off"' >/dev/null
+run_install bundled "$NO_MODEL" 'ocr = "off"' >/dev/null
 if [[ -f "$TMP/inst-bundled/home/.local/share/scuffed-stat-tracker/tessdata/eng.traineddata" ]]; then
     pass "install: OCR off still installs the bundled eng.traineddata"
 else
@@ -185,16 +192,21 @@ else
 fi
 rm -rf "$PKG/tessdata"
 
-# ── install.sh (source build): the same guard, by shape ──────────────────────
+# ── install.sh (source build), by shape ──────────────────────────────────────
 # That script builds with cargo, so it is not run here.
 
 SRC_INSTALL="$DIST/../install.sh"
 if grep -q 'source "\$DIST/install-paths.sh"' "$SRC_INSTALL" \
-   && grep -A3 '^if config_ocr_is_off "\$HOME"; then$' "$SRC_INSTALL" \
-        | grep -q '^elif ! command -v tesseract'; then
-    pass "source install: the tesseract and tessdata checks sit behind config_ocr_is_off"
+   && grep -q '^if ! command -v tesseract &>/dev/null; then$' "$SRC_INSTALL"; then
+    pass "source install: the tesseract check runs whatever ocr says"
 else
-    fail "source install: the tessdata checks are not guarded by config_ocr_is_off"
+    fail "source install: the tesseract check is behind a condition"
+fi
+if grep -A3 'if \[\[ "\$OCR_OFF" -eq 1 \]\]; then' "$SRC_INSTALL" | grep -qF "$NOTE_LINE" \
+   && grep -qF "$WARN_LINE" "$SRC_INSTALL"; then
+    pass "source install: a missing model is a note with OCR off and a warning with it on"
+else
+    fail "source install: the missing-model wording does not follow ocr"
 fi
 if grep -B1 'OCR will use eng tessdata' "$SRC_INSTALL" | grep -q 'OCR_OFF" -eq 0'; then
     pass "source install: the tessdata note prints only with OCR on"

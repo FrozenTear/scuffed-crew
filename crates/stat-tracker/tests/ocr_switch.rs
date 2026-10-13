@@ -5,24 +5,37 @@
 //!   `LepTess`, no OCR pool, no tessdata lookup). The readers that sit on
 //!   those functions hold: they return no outcome, no map and no phase.
 //! * The pack check, on real pack folders (synthetic files).
-//! * The real daemon binary: `ocr = "off"` is refused while a reader pack is
-//!   missing, and granted with every pack installed.
+//! * The startup step: off is granted only when the build reads everything
+//!   without Tesseract and every pack is loaded, and a pack that goes away
+//!   afterwards holds its reads without turning OCR back on.
+//! * The real daemon binary: what it decides and what it writes.
 //!
-//! The gate test switches the process-wide mode, so it is the only test here
-//! that calls OCR in this process. The daemon tests run the binary with an
-//! empty HOME and XDG dirs in a temp directory and no display: it reads no
-//! real config, holds no sync token, and captures nothing.
+//! The gate test switches the process-wide mode and installs the
+//! process-wide reader, so it is the only test here that does either. The
+//! daemon tests run the binary with an empty HOME and XDG dirs in a temp
+//! directory and no display: it reads no real config, holds no sync token,
+//! and captures nothing.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
-use stat_tracker::config::OcrSetting;
+use stat_tracker::config::{Config, OcrSetting};
 use stat_tracker::detect::hero_portrait::ScoreboardPreflight;
 use stat_tracker::detect::{GamePhase, MatchOutcome, match_end, match_start};
 use stat_tracker::ocr::{self, gate};
-use stat_tracker::ocr_switch::{self, PackProblem, PackReadiness};
+use stat_tracker::ocr_switch::{self, Audience, PackProblem, PackReadiness, Read, Switch};
+use stat_tracker::shadow::{Reader, ReaderConfig};
+
+const READY: PackReadiness = PackReadiness {
+    heroes: true,
+    maps: true,
+    words: true,
+    result_words: true,
+    phase_titles: true,
+    final_score: true,
+};
 
 // ------------------------------------------------------------- the gate
 
@@ -51,6 +64,18 @@ fn cell_with_ink() -> DynamicImage {
         }
     }
     DynamicImage::ImageRgb8(rgb)
+}
+
+fn load(data_dir: &Path) -> Reader {
+    Reader::load(&ReaderConfig::from_data_dir(data_dir))
+}
+
+fn config(data_dir: &Path, ocr: OcrSetting) -> Config {
+    Config {
+        data_dir: data_dir.to_path_buf(),
+        ocr,
+        ..Config::default()
+    }
 }
 
 #[test]
@@ -118,13 +143,12 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
             "recognize_prepared_lang",
             "recognize_region",
             "recognize_row",
+            "recognize_scoreboard_cells",
             "recognize_scoreboard_cells_pre_cropped",
-            // `recognize_scoreboard_cells` goes through this one
-            "recognize_scoreboard_cells_with_team_size",
             "recognize_scoreboard_cells_with_team_size",
             "recognize_sparse_region",
         ],
-        "one line per call above"
+        "one line per call above, each under its own name"
     );
     for b in &direct {
         assert_eq!(b.count, 1, "{}", b.site);
@@ -132,6 +156,11 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
             b.site.file.ends_with("tests/ocr_switch.rs"),
             "a call is counted where it was made, not inside ocr: {}",
             b.site
+        );
+        assert!(
+            b.site.key().starts_with("tests/ocr_switch.rs:"),
+            "the key that leaves the process has no folder above the crate: {}",
+            b.site.key()
         );
     }
     assert_eq!(gate::blocked_total(), 12);
@@ -163,8 +192,9 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         "the vote screen read reached the gate: {held:?}"
     );
     assert!(
-        held.iter().all(|b| b.site.entry != "ocr_with"),
-        "every call was stopped at its entry point, none as deep as ocr_with: {held:?}"
+        held.iter()
+            .all(|b| !matches!(b.site.entry, "ocr_with" | "ocr_pool" | "tessdata_lang")),
+        "every call was stopped at its entry point, none as deep as a resource: {held:?}"
     );
 
     // Nothing of Tesseract was started.
@@ -190,100 +220,118 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     ocr::recognize_region(&cell).expect("a region read with OCR on");
     assert!(ocr::tessdata_lang_probed());
 
-    // The daemon's startup step sets the gate from the decision. Off is
-    // granted with every pack and refused without, and the pack check runs
-    // only when off is asked for.
-    let dir = tempfile::tempdir().unwrap();
-    let config = |ocr| stat_tracker::config::Config {
-        data_dir: dir.path().to_path_buf(),
-        ocr,
-        ..stat_tracker::config::Config::default()
-    };
-    let ready = PackReadiness {
-        heroes: true,
-        maps: true,
-        words: true,
-        words_final_score: true,
-    };
-    let granted = ocr_switch::Switch::start_with(&config(OcrSetting::Off), |_| ready);
-    assert!(granted.is_off());
+    // ---- the daemon's startup step, with the build and the reader given.
+    let empty = tempfile::tempdir().unwrap();
+    let live = tempfile::tempdir().unwrap();
+    hero_pack(live.path());
+    map_pack(live.path());
+    words_pack(live.path(), Words::Current);
+
+    // Refused for the packs: OCR stays on, and the reason names them.
+    let refused = Switch::start_with(&config(empty.path(), OcrSetting::Off), &[], load);
+    assert!(!refused.is_off());
+    assert!(!gate::is_off(), "a refused off leaves OCR on");
+    ocr::recognize_cell(&cell).expect("OCR still reads after a refusal");
+    let status = ocr_switch::read_status(empty.path()).expect("the status file");
+    assert_eq!(status.pid, std::process::id());
+    assert_eq!(
+        (status.requested, status.effective),
+        (OcrSetting::Off, OcrSetting::On)
+    );
+    assert_eq!(
+        status.refusal.as_ref().map(|r| r.packs.clone()),
+        Some(vec![
+            PackProblem::HeroesMissing,
+            PackProblem::MapsMissing,
+            PackProblem::WordsMissing
+        ])
+    );
+    assert_eq!(status.packs, Some(PackReadiness::default()));
+
+    // Refused for the build: every pack is there, and one read that this
+    // build would still need Tesseract for is enough.
+    gate::set_mode(gate::OcrMode::Off);
+    let refused = Switch::start_with(
+        &config(live.path(), OcrSetting::Off),
+        &[Read::StatCells],
+        load,
+    );
+    assert!(!refused.is_off());
+    assert!(!gate::is_off(), "a refusal opens the gate");
+    let status = ocr_switch::read_status(live.path()).unwrap();
+    assert_eq!(status.packs, Some(READY));
+    let refusal = status.refusal.clone().expect("the reason");
+    assert_eq!(
+        (refusal.reads.clone(), refusal.packs.clone()),
+        (vec![Read::StatCells], vec![])
+    );
+    assert_eq!(status.notice(), Some(refusal.text(Audience::Daemon)));
+
+    // On: granted without a look at the packs, and the gate is open.
+    gate::set_mode(gate::OcrMode::Off);
+    let on = Switch::start_with(&config(live.path(), OcrSetting::On), &Read::ALL, |_| {
+        panic!("OCR on never loads a reader")
+    });
+    assert!(!on.is_off());
+    assert!(!gate::is_off(), "on opens the gate");
+    assert_eq!(ocr_switch::read_status(live.path()).unwrap().packs, None);
+
+    // Granted: every pack, and a build that reads everything without
+    // Tesseract. The gate shuts, and the reader that was checked is the one
+    // that reads from here on.
+    let mut switch = Switch::start_with(&config(live.path(), OcrSetting::Off), &[], load);
+    assert!(
+        switch.is_off(),
+        "every pack is there: {:?}",
+        switch.decision
+    );
     assert!(gate::is_off(), "a granted off closes the gate");
-    let status = ocr_switch::read_status(dir.path()).expect("the status file");
+    assert_eq!(
+        stat_tracker::shadow::pack_readiness(),
+        READY,
+        "the process-wide reader is the one the switch loaded"
+    );
+    let status = ocr_switch::read_status(live.path()).unwrap();
     assert_eq!(
         (status.requested, status.effective, status.refusal.clone()),
         (OcrSetting::Off, OcrSetting::Off, None)
     );
-    assert_eq!(status.pid, std::process::id());
-    assert_eq!(status.packs, Some(ready));
+    assert_eq!(status.packs, Some(READY));
+    assert_eq!(status.notice(), None);
     assert_eq!(status.blocked_total, blocked);
     assert_eq!(status.leptess_created, gate::leptess_created());
     assert!(status.leptess_created >= 1);
-    let region_site = direct
+    let region_key = direct
         .iter()
         .find(|b| b.site.entry == "recognize_region")
-        .map(|b| b.site.to_string())
+        .map(|b| b.site.key())
         .unwrap();
-    assert!(region_site.ends_with(" recognize_region"), "{region_site}");
+    assert!(region_key.ends_with(" recognize_region"), "{region_key}");
     assert!(
         status
             .blocked
             .iter()
-            .any(|s| s.site == region_site && s.count == 1),
+            .any(|s| s.site == region_key && s.count == 1),
         "the status file names the call sites: {:?}",
         status.blocked
     );
-    assert!(ocr::recognize_cell(&cell).is_err());
-    let blocked = blocked + 1;
-
-    let refused = ocr_switch::Switch::start_with(&config(OcrSetting::Off), |_| PackReadiness {
-        maps: false,
-        ..ready
-    });
-    assert!(!refused.is_off());
-    assert!(!gate::is_off(), "a refused off leaves OCR on");
-    ocr::recognize_cell(&cell).expect("OCR still reads after a refusal");
-    let status = ocr_switch::read_status(dir.path()).unwrap();
-    assert_eq!(status.effective, OcrSetting::On);
-    assert!(status.refusal.unwrap().contains("maps-v1"));
-
-    gate::set_mode(gate::OcrMode::Off);
-    let on = ocr_switch::Switch::start_with(&config(OcrSetting::On), |_| {
-        panic!("OCR on never looks at the packs")
-    });
-    assert!(!on.is_off());
-    assert!(!gate::is_off(), "on opens the gate again");
-    assert_eq!(ocr_switch::read_status(dir.path()).unwrap().packs, None);
+    // A call blocked later reaches the file on the next check, and the
+    // notice then says a read was stopped.
+    assert!(ocr::recognize_name(&cell).is_err());
+    switch.check();
+    let status = ocr_switch::read_status(live.path()).unwrap();
+    assert_eq!(status.blocked_total, blocked + 1);
+    assert!(
+        status
+            .notice()
+            .is_some_and(|n| n.contains("still asked for it")),
+        "{:?}",
+        status.notice()
+    );
 
     // A pack that goes away while the daemon runs with OCR off: its reads
     // are held and the status file says which pack, and OCR stays off.
-    // This is the real startup step, on the process-wide reader.
-    let live = tempfile::tempdir().unwrap();
-    hero_pack(live.path());
-    map_pack(live.path());
-    words_pack(live.path(), true);
-    let mut switch = ocr_switch::Switch::start(&stat_tracker::config::Config {
-        data_dir: live.path().to_path_buf(),
-        ocr: OcrSetting::Off,
-        ..stat_tracker::config::Config::default()
-    });
-    assert!(
-        switch.is_off() && gate::is_off(),
-        "every pack is there: {:?}",
-        switch.decision
-    );
-    let status = ocr_switch::read_status(live.path()).unwrap();
-    assert_eq!(status.packs, Some(ready));
-    assert_eq!(status.notice(), None);
-    assert_eq!(status.blocked_total, blocked);
-    // A call blocked later reaches the file on the next check.
-    assert!(ocr::recognize_name(&cell).is_err());
-    switch.check();
-    assert_eq!(
-        ocr_switch::read_status(live.path()).unwrap().blocked_total,
-        blocked + 1
-    );
-
-    let packs_now = |switch: &mut ocr_switch::Switch| {
+    let packs_now = |switch: &mut Switch| {
         switch.check();
         ocr_switch::read_status(live.path()).and_then(|s| s.packs)
     };
@@ -298,7 +346,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     assert_eq!(status.effective, OcrSetting::Off, "OCR stays off");
     let banner = status.notice().expect("a hold banner");
     assert!(
-        banner.starts_with("Reading on hold: the maps-v1 reader pack is not installed"),
+        banner.starts_with("Reading on hold: the map pack is not installed"),
         "{banner}"
     );
     assert!(gate::is_off(), "a missing pack never turns OCR back on");
@@ -313,7 +361,21 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         }),
         "the watch never saw maps-v1 come back"
     );
-    assert_eq!(ocr_switch::read_status(live.path()).unwrap().notice(), None);
+
+    // The real startup step, on this build.
+    gate::set_mode(gate::OcrMode::On);
+    let real = Switch::start(&config(live.path(), OcrSetting::Off));
+    let needing = Read::needing_ocr();
+    assert_eq!(
+        real.is_off(),
+        needing.is_empty(),
+        "off is granted exactly when this build needs Tesseract for nothing"
+    );
+    assert_eq!(gate::is_off(), needing.is_empty());
+    assert_eq!(
+        real.decision.refusal.as_ref().map(|r| r.reads.clone()),
+        (!needing.is_empty()).then_some(needing)
+    );
     gate::set_mode(gate::OcrMode::On);
 }
 
@@ -335,10 +397,14 @@ fn save_png(path: &Path, img: &GrayImage) {
     img.save(path).unwrap();
 }
 
-fn hero_pack(data_dir: &Path) {
-    let dir = data_dir.join("templates").join("heroes");
+fn hero_pack_in(data_dir: &Path, folder: &str) {
+    let dir = data_dir.join("templates").join(folder);
     save_png(&dir.join("ana.png"), &blocks(64, 64, 8, 0));
     save_png(&dir.join("mercy.png"), &blocks(64, 64, 16, 4));
+}
+
+fn hero_pack(data_dir: &Path) {
+    hero_pack_in(data_dir, "heroes");
 }
 
 fn map_pack(data_dir: &Path) {
@@ -359,29 +425,65 @@ fn map_pack(data_dir: &Path) {
     std::fs::write(dir.join("atlas.json"), atlas).unwrap();
 }
 
-/// words-v1 with both result words. `final_score` adds the FINAL SCORE
-/// template; without it the pack is the older, out-of-date one.
-fn words_pack(data_dir: &Path, final_score: bool) {
+/// Which words-v1 to write.
+#[derive(Clone, Copy, PartialEq)]
+enum Words {
+    /// Everything the readers without an OCR fallback need.
+    Current,
+    /// The accolade words only: no rank screen words.
+    NoRankScreen,
+    /// One match-start title is missing.
+    NoBanTitle,
+    /// No FINAL SCORE line.
+    NoFinalScore,
+}
+
+const PHRASES: [&str; 3] = ["vote_for_a_map", "ban_heroes", "select_a_preferred_hero"];
+
+fn words_pack(data_dir: &Path, which: Words) {
     let dir = data_dir.join("templates").join("words-v1");
+    let _ = std::fs::remove_dir_all(&dir);
     save_png(&dir.join("accolade_victory.png"), &blocks(224, 48, 12, 0));
     save_png(&dir.join("accolade_defeat.png"), &blocks(192, 48, 16, 6));
-    let p4 = dir.join("p4_final_score.png");
-    if final_score {
-        save_png(&p4, &blocks(256, 48, 12, 3));
-    } else {
-        let _ = std::fs::remove_file(p4);
+    if which != Words::NoRankScreen {
+        save_png(
+            &dir.join("rank_screen_victory.png"),
+            &blocks(224, 48, 10, 2),
+        );
+        save_png(&dir.join("rank_screen_defeat.png"), &blocks(192, 48, 14, 5));
     }
+    if which != Words::NoFinalScore {
+        save_png(&dir.join("p4_final_score.png"), &blocks(256, 48, 12, 3));
+    }
+    let mut entries = Vec::new();
+    for (i, id) in PHRASES.iter().enumerate() {
+        entries.push(format!(
+            "\"{id}\": {{\"roi\": [0.36, 0.11, 0.64, 0.235], \"plane\": \"min\", \"work\": 0.5}}"
+        ));
+        if which == Words::NoBanTitle && *id == "ban_heroes" {
+            continue;
+        }
+        save_png(
+            &dir.join(format!("phrase_{id}.png")),
+            &blocks(200, 40, 8 + 2 * i as u32, i as u32),
+        );
+    }
+    std::fs::write(
+        dir.join("phrases.json"),
+        format!("{{{}}}", entries.join(", ")),
+    )
+    .unwrap();
 }
 
 #[test]
-fn the_pack_check_follows_the_pack_folders() {
+fn the_pack_check_follows_what_each_reader_needs() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
     let none = PackReadiness::on_disk(data);
     assert_eq!(none, PackReadiness::default());
     assert_eq!(none.counts(), (0, 3));
     assert_eq!(
-        ocr_switch::decide(OcrSetting::Off, &none).effective,
+        ocr_switch::decide(OcrSetting::Off, &none, &[]).effective,
         OcrSetting::On,
         "no packs: off is refused"
     );
@@ -396,17 +498,33 @@ fn the_pack_check_follows_the_pack_folders() {
         PackReadiness::on_disk(data).problems(),
         [PackProblem::WordsMissing]
     );
-    words_pack(data, false);
-    let stale = PackReadiness::on_disk(data);
-    assert_eq!(stale.problems(), [PackProblem::WordsOutOfDate]);
-    assert_eq!(stale.counts(), (2, 3));
-    assert!(stale.refusal().unwrap().contains("out of date"));
 
-    words_pack(data, true);
+    // A word pack is ready only with everything its readers need.
+    for (which, problem) in [
+        (Words::NoRankScreen, PackProblem::WordsLackResultWords),
+        (Words::NoBanTitle, PackProblem::WordsLackPhaseTitles),
+        (Words::NoFinalScore, PackProblem::WordsLackFinalScore),
+    ] {
+        words_pack(data, which);
+        let old = PackReadiness::on_disk(data);
+        assert_eq!(old.problems(), [problem]);
+        assert!(old.words, "the pack itself loads");
+        assert_eq!(old.counts(), (2, 3));
+        let refusal = ocr_switch::decide(OcrSetting::Off, &old, &[])
+            .refusal
+            .expect("an out-of-date pack refuses off");
+        assert!(
+            refusal.text(Audience::Click).contains("out of date"),
+            "{}",
+            refusal.text(Audience::Click)
+        );
+    }
+
+    words_pack(data, Words::Current);
     let ready = PackReadiness::on_disk(data);
-    assert!(ready.ready(), "{ready:?}");
+    assert_eq!(ready, READY);
     assert_eq!(ready.status_line(), "Reader packs ready: 3 of 3");
-    let granted = ocr_switch::decide(OcrSetting::Off, &ready);
+    let granted = ocr_switch::decide(OcrSetting::Off, &ready, &[]);
     assert_eq!(granted.effective, OcrSetting::Off);
     assert_eq!(granted.refusal, None);
 
@@ -414,7 +532,7 @@ fn the_pack_check_follows_the_pack_folders() {
     let legacy = tempfile::tempdir().unwrap();
     hero_pack(legacy.path());
     map_pack(legacy.path());
-    words_pack(legacy.path(), true);
+    words_pack(legacy.path(), Words::Current);
     let t = legacy.path().join("templates");
     std::fs::rename(t.join("maps-v1"), t.join("maps")).unwrap();
     std::fs::rename(t.join("words-v1"), t.join("result")).unwrap();
@@ -422,6 +540,18 @@ fn the_pack_check_follows_the_pack_folders() {
         PackReadiness::on_disk(legacy.path()).problems(),
         [PackProblem::MapsMissing, PackProblem::WordsMissing]
     );
+
+    // heroes-v2-1080 alone reads no 1440p board: it is not "a hero pack".
+    let small = tempfile::tempdir().unwrap();
+    hero_pack_in(small.path(), "heroes-v2-1080");
+    map_pack(small.path());
+    words_pack(small.path(), Words::Current);
+    assert_eq!(
+        PackReadiness::on_disk(small.path()).problems(),
+        [PackProblem::HeroesMissing]
+    );
+    hero_pack_in(small.path(), "heroes-v2");
+    assert!(PackReadiness::on_disk(small.path()).ready());
 }
 
 // ----------------------------------------------------------- the daemon
@@ -458,6 +588,8 @@ struct DaemonRun {
     out: String,
     /// `ocr_switch.json` as it was while the daemon ran.
     status: ocr_switch::Status,
+    /// The same file after the daemon stopped.
+    last_status: ocr_switch::Status,
     pid: u32,
 }
 
@@ -506,9 +638,12 @@ fn run_daemon(root: &Path, data_dir: &Path, ocr: &str) -> DaemonRun {
         "the daemon never reached its run loop; output:\n{out}"
     );
     assert!(exit.success(), "exit {exit:?}; output:\n{out}");
+    let missing = || -> ocr_switch::Status {
+        panic!("no {} written; output:\n{out}", ocr_switch::STATUS_FILE)
+    };
     DaemonRun {
-        status: status
-            .unwrap_or_else(|| panic!("no {} written; output:\n{out}", ocr_switch::STATUS_FILE)),
+        status: status.unwrap_or_else(missing),
+        last_status: ocr_switch::read_status(data_dir).unwrap_or_else(missing),
         out,
         pid,
     }
@@ -522,6 +657,7 @@ fn daemon_dirs() -> (tempfile::TempDir, PathBuf) {
 
 /// The line that says the OCR pool size. Printed only with OCR on.
 const OCR_WORKERS_LINE: &str = "OCR workers (each holds";
+const NEW_READER_LINE: &str = "new scoreboard reader on for saved stats";
 
 #[test]
 fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
@@ -533,17 +669,24 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
     assert_eq!(run.status.pid, run.pid);
     assert_eq!(run.status.requested, OcrSetting::Off);
     assert_eq!(run.status.effective, OcrSetting::On, "OCR stays on");
-    let reason = run
+    let refusal = run
         .status
         .refusal
         .clone()
         .expect("the refusal has a reason");
+    assert_eq!(
+        refusal.packs,
+        [PackProblem::MapsMissing, PackProblem::WordsMissing],
+        "the hero pack is there"
+    );
+    assert_eq!(refusal.reads, Read::needing_ocr());
+    let reason = refusal.text(Audience::Daemon);
     assert!(
-        reason.contains("maps-v1") && reason.contains("words-v1"),
+        reason.contains("the map pack is not installed")
+            && reason.contains("the word pack is not installed"),
         "{reason}"
     );
-    assert!(!reason.contains("hero"), "the hero pack is there: {reason}");
-    assert_eq!(run.status.notice(), Some(reason.clone()));
+    assert_eq!(run.status.notice(), Some(reason));
     assert_eq!(run.status.blocked_total, 0);
 
     let refused: Vec<&str> = run
@@ -553,8 +696,8 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         .collect();
     assert_eq!(refused.len(), 1, "one WARN line; output:\n{}", run.out);
     assert!(
-        refused[0].contains("maps-v1"),
-        "the log says why: {}",
+        refused[0].contains("maps-v1") && refused[0].contains("the map pack is not installed"),
+        "the log says why, with the pack id: {}",
         refused[0]
     );
     assert!(
@@ -563,38 +706,66 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         run.out
     );
     assert!(!run.out.contains("classic OCR is off"), "{}", run.out);
+    // a refused off runs with the file's reader, which is ocr-v1 here
+    assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
 }
 
+/// Every pack is installed. What the daemon decides then follows from the
+/// build: granted once it reads everything without Tesseract, refused (and
+/// saying which reads) until then. Either way no state is silent.
 #[test]
-fn the_daemon_turns_ocr_off_with_every_reader_pack() {
+fn the_daemon_with_every_pack_turns_ocr_off_only_when_the_build_can() {
     let (root, data_dir) = daemon_dirs();
     hero_pack(&data_dir);
     map_pack(&data_dir);
-    words_pack(&data_dir, true);
+    words_pack(&data_dir, Words::Current);
     let run = run_daemon(root.path(), &data_dir, "off");
 
     assert_eq!(run.status.requested, OcrSetting::Off);
-    assert_eq!(run.status.effective, OcrSetting::Off);
-    assert_eq!(run.status.refusal, None);
-    assert_eq!(run.status.packs, Some(PackReadiness::on_disk(&data_dir)));
-    assert!(run.status.packs.unwrap().ready());
-    assert_eq!(run.status.notice(), None);
+    assert_eq!(run.status.packs, Some(READY));
     assert_eq!(run.status.leptess_created, 0);
     assert_eq!(run.status.blocked_total, 0);
+    assert_eq!(run.last_status.pid, run.pid, "the file is this run's");
 
-    assert!(run.out.contains("classic OCR is off"), "{}", run.out);
-    // off implies the new reader, though `reader` was never set
-    assert!(
-        run.out.contains("new scoreboard reader on for saved stats"),
-        "{}",
-        run.out
-    );
-    assert!(
-        !run.out.contains(OCR_WORKERS_LINE) && !run.out.contains("OCR worker pool ready"),
-        "no OCR pool with OCR off; output:\n{}",
-        run.out
-    );
-    assert!(!run.out.contains("was refused"), "{}", run.out);
+    let needing = Read::needing_ocr();
+    if needing.is_empty() {
+        assert_eq!(run.status.effective, OcrSetting::Off);
+        assert_eq!(run.status.refusal, None);
+        assert_eq!(run.status.notice(), None);
+        assert!(run.out.contains("classic OCR is off"), "{}", run.out);
+        // off implies the new reader, though `reader` was never set
+        assert!(run.out.contains(NEW_READER_LINE), "{}", run.out);
+        assert!(
+            !run.out.contains(OCR_WORKERS_LINE) && !run.out.contains("OCR worker pool ready"),
+            "no OCR pool with OCR off; output:\n{}",
+            run.out
+        );
+        assert!(!run.out.contains("was refused"), "{}", run.out);
+    } else {
+        assert_eq!(
+            run.status.effective,
+            OcrSetting::On,
+            "this build still needs Tesseract for {needing:?}"
+        );
+        let refusal = run.status.refusal.clone().expect("the reason");
+        assert_eq!(refusal.reads, needing);
+        assert!(refusal.packs.is_empty(), "every pack is there");
+        let notice = run.status.notice().expect("the member is told");
+        assert!(
+            notice.starts_with("Classic OCR stays on: this tracker version cannot read "),
+            "{notice}"
+        );
+        assert!(
+            run.out
+                .lines()
+                .any(|l| l.contains("WARN") && l.contains("was refused")),
+            "{}",
+            run.out
+        );
+        assert!(run.out.contains(OCR_WORKERS_LINE), "{}", run.out);
+        assert!(!run.out.contains("classic OCR is off"), "{}", run.out);
+        assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
+    }
 }
 
 #[test]
@@ -607,9 +778,7 @@ fn the_daemon_runs_classic_ocr_when_nothing_asks_for_off() {
     assert_eq!(run.status.packs, None, "the packs are not looked at");
     assert_eq!(run.status.notice(), None);
     assert!(run.out.contains(OCR_WORKERS_LINE), "{}", run.out);
-    assert!(
-        !run.out.contains("new scoreboard reader on for saved stats"),
-        "{}",
-        run.out
-    );
+    assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
+    // the temp file of the status write does not stay behind
+    assert!(!data_dir.join(ocr_switch::STATUS_TMP_FILE).exists());
 }

@@ -147,14 +147,16 @@ fi
 
 # ── OCR dependencies ──────────────────────────────────────────────────────────
 
-# Only classic OCR needs the tessdata. With `ocr = "off"` in config.toml the
-# tracker never starts Tesseract, so a missing model is not worth a warning.
-# (The build below still links the Tesseract library.)
+# The build below links the Tesseract library whatever `ocr` says, so the
+# tesseract check always runs. Only classic OCR needs the model: with
+# `ocr = "off"` in config.toml a missing eng.traineddata is a note, not a
+# warning (the tracker may still keep classic OCR on when a reader pack is
+# missing, and the member may turn it back on).
 OCR_OFF=0
 if config_ocr_is_off "$HOME"; then
     OCR_OFF=1
-    info "Classic OCR is off (ocr = \"off\" in config.toml) — not checking for tessdata."
-elif ! command -v tesseract &>/dev/null; then
+fi
+if ! command -v tesseract &>/dev/null; then
     warn "tesseract not found — OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
     echo >&2
@@ -164,9 +166,14 @@ elif ! { ls /usr/share/tessdata/eng.traineddata \
              /usr/share/tesseract-ocr/*/tessdata/eng.traineddata \
              "${TESSDATA_PREFIX:-}/eng.traineddata" \
              "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata" 2>/dev/null | grep -q .; }; then
-    warn "eng.traineddata not found — install your distro's eng tessdata package."
-    warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
-    echo >&2
+    if [[ "$OCR_OFF" -eq 1 ]]; then
+        info "eng.traineddata not found. Classic OCR is off in config.toml, so the tracker does not need it now."
+        info "It is needed if you turn classic OCR back on, or if the tracker keeps it on because a reader pack is missing."
+    else
+        warn "eng.traineddata not found — install your distro's eng tessdata package."
+        warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
+        echo >&2
+    fi
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────

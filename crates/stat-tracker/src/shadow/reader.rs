@@ -300,25 +300,49 @@ impl Reader {
         self.heroes.current().is_some()
     }
 
-    /// The packs `ocr = "off"` needs, as this reader has them loaded now
-    /// ([`crate::ocr_switch`]): any hero set, maps-v1 (not the hand-installed
-    /// folder) and words-v1 (not the old result folder), and whether that
-    /// words-v1 has the FINAL SCORE template. Like every read, this starts a
-    /// background re-load of a pack whose folder changed, so a later call
-    /// sees a pack that arrived or went away.
+    /// What `ocr = "off"` needs, as this reader has it loaded now
+    /// ([`crate::ocr_switch::PackGroup`]): one flag per reader that has no
+    /// OCR to fall back on.
+    ///
+    /// * heroes: a main hero set (heroes-v2 or heroes-v1). heroes-v2-1080
+    ///   alone reads no 1440p board.
+    /// * maps: maps-v1, not the hand-installed folder.
+    /// * words: words-v1, not the old result folder, and from it VICTORY and
+    ///   DEFEAT for the accolade screen and the rank screen, every
+    ///   match-start title, and the FINAL SCORE line.
+    ///
+    /// Like every read, this starts a background re-load of a pack whose
+    /// folder changed, so a later call sees a pack that arrived or went away.
     pub fn pack_readiness(&self) -> crate::ocr_switch::PackReadiness {
+        use super::result::{ACCOLADE, Outcome, RANK_SCREEN, ResultPack};
         let words = self
             .results
             .current()
-            .filter(|loaded| loaded.pack == super::result::ResultPack::WordsV1);
+            .filter(|loaded| loaded.pack == ResultPack::WordsV1);
+        let words = words.as_deref();
         crate::ocr_switch::PackReadiness {
-            heroes: self.heroes.current().is_some(),
+            heroes: self
+                .heroes
+                .current()
+                .is_some_and(|set| set.main_pack().is_some()),
             maps: self
                 .maps
                 .current()
                 .is_some_and(|loaded| loaded.pack == super::banner::MapPack::V1),
             words: words.is_some(),
-            words_final_score: words.is_some_and(|w| w.templates.final_score().is_some()),
+            result_words: words.is_some_and(|w| {
+                [ACCOLADE, RANK_SCREEN].iter().all(|layout| {
+                    [Outcome::Victory, Outcome::Defeat]
+                        .iter()
+                        .all(|outcome| w.templates.has(layout, *outcome))
+                })
+            }),
+            phase_titles: words.is_some_and(|w| {
+                w.phrases
+                    .as_ref()
+                    .is_some_and(|p| Phrase::ALL.iter().all(|phrase| p.has(*phrase)))
+            }),
+            final_score: words.is_some_and(|w| w.templates.final_score().is_some()),
         }
     }
 
@@ -760,9 +784,19 @@ pub fn assemble(
 static READER: OnceLock<Reader> = OnceLock::new();
 
 /// Load the packs for [`read_board`]. Only the first call has an effect;
-/// returns false when the reader was already set up.
+/// returns false when the reader was already set up. A later call loads
+/// nothing.
 pub fn init(config: &ReaderConfig) -> bool {
+    if READER.get().is_some() {
+        return false;
+    }
     READER.set(Reader::load(config)).is_ok()
+}
+
+/// Make `reader` the process-wide reader. Like [`init`], only the first
+/// reader stays; returns false when one was already set up.
+pub fn install(reader: Reader) -> bool {
+    READER.set(reader).is_ok()
 }
 
 /// Read every field of one Tab frame with the process-wide reader (packs

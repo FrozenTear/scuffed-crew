@@ -2305,6 +2305,88 @@ async fn v1_manifest_and_v2_game_manifest_with_null_team_size_store() {
     assert_eq!(status, StatusCode::CREATED, "v2: {body}");
 }
 
+/// The OCR-switch keys of `system` (tracker 0.5.0-alpha.7): a report from a
+/// tracker that ran with OCR off is stored, with or without its call-site
+/// counts. An oversized or malformed call-site map is a 400 and stores
+/// nothing. A report without the keys is stored as before.
+#[tokio::test]
+async fn system_ocr_switch_keys_store_and_an_oversized_call_site_map_is_400() {
+    let h = harness().await;
+    let log = b"synthetic log line\n".to_vec();
+    let post = |system: Value| {
+        let mut manifest = log_only_manifest("performance", &log);
+        manifest["system"] = system;
+        let built = zip_manifest(manifest, vec![("log.txt", log.clone())]);
+        post_report(&h, MEMBER_TOKEN, built.bytes)
+    };
+
+    // as every tracker sends today
+    let (status, body) = post(system_block()).await;
+    assert_eq!(status, StatusCode::CREATED, "no ocr keys: {body}");
+
+    let mut off = system_block();
+    off["ocr"] = json!("off");
+    let (status, body) = post(off.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "ocr off: {body}");
+
+    off["ocr_blocked_calls"] = json!({
+        "detect/match_end.rs:1133 recognize_prepared": 2396,
+        "main.rs:3966 recognize_scoreboard_cells_pre_cropped": 273
+    });
+    let (status, body) = post(off.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "ocr off with call sites: {body}"
+    );
+    assert_eq!(zip_count(&h.reports_dir), 3);
+
+    let sites = |n: usize| -> Value {
+        Value::Object(
+            (0..n)
+                .map(|i| (format!("main.rs:{i} recognize"), json!(1)))
+                .collect(),
+        )
+    };
+    off["ocr_blocked_calls"] = sites(scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX);
+    let (status, body) = post(off.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "64 call sites: {body}");
+
+    for (what, bad) in [
+        (
+            "65 call sites",
+            sites(scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX + 1),
+        ),
+        (
+            "a key longer than the cap",
+            json!({ "a".repeat(scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES + 1): 1 }),
+        ),
+        (
+            "a key that is free text",
+            json!({ "PLAYER#1234 said hi!": 1 }),
+        ),
+        ("a negative count", json!({ "main.rs:1 recognize": -1 })),
+        (
+            "a count above u32",
+            json!({ "main.rs:1 recognize": 4294967296u64 }),
+        ),
+    ] {
+        let mut system = off.clone();
+        system["ocr_blocked_calls"] = bad;
+        let (status, _) = post(system).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}");
+    }
+    let mut word = system_block();
+    word["ocr"] = json!("maybe");
+    let (status, _) = post(word).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "an unknown ocr word");
+    assert_eq!(
+        zip_count(&h.reports_dir),
+        4,
+        "a refused report stores nothing"
+    );
+}
+
 /// v2 game report with the given `(path, screen_class)` crops.
 fn v2_crops_bundle(crops: &[(&str, &str)]) -> Built {
     let log = b"synthetic log line\n".to_vec();

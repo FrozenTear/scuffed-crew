@@ -100,8 +100,18 @@ pub fn pool_started() -> bool {
     OCR_POOL.get().is_some()
 }
 
-fn ocr_pool() -> &'static rayon::ThreadPool {
-    OCR_POOL.get_or_init(|| {
+/// The OCR worker pool, built on first use. It exists only to run
+/// Tesseract, so with OCR off ([`gate`]) it refuses and is not built, also
+/// for a caller that did not ask the gate itself.
+fn ocr_pool() -> Result<&'static rayon::ThreadPool, gate::OcrOff> {
+    if gate::is_off() {
+        return Err(gate::block(gate::Site {
+            file: file!(),
+            line: line!(),
+            entry: "ocr_pool",
+        }));
+    }
+    Ok(OCR_POOL.get_or_init(|| {
         let threads = ocr_pool_thread_count();
         tracing::info!(ocr_threads = threads, "OCR worker pool ready");
         rayon::ThreadPoolBuilder::new()
@@ -109,7 +119,7 @@ fn ocr_pool() -> &'static rayon::ThreadPool {
             .thread_name(|i| format!("ocr-{i}"))
             .build()
             .expect("OCR thread pool")
-    })
+    }))
 }
 
 // Per-thread Tesseract instances, keyed by language. Constructing a LepTess
@@ -282,8 +292,18 @@ pub fn tessdata_lang_probed() -> bool {
     TESSDATA_LANG.get().is_some()
 }
 
-fn tessdata_lang() -> &'static str {
-    TESSDATA_LANG.get_or_init(|| {
+/// The tessdata language for scoreboard text, looked up on first use.
+/// With OCR off ([`gate`]) it refuses and the tessdata folder is not
+/// looked at, also for a caller that did not ask the gate itself.
+fn tessdata_lang() -> Result<&'static str, gate::OcrOff> {
+    if gate::is_off() {
+        return Err(gate::block(gate::Site {
+            file: file!(),
+            line: line!(),
+            entry: "tessdata_lang",
+        }));
+    }
+    Ok(TESSDATA_LANG.get_or_init(|| {
         let has_koverwatch = dirs::data_dir()
             .map(|d| {
                 d.join("scuffed-stat-tracker")
@@ -293,7 +313,7 @@ fn tessdata_lang() -> &'static str {
             })
             .unwrap_or(false);
         if has_koverwatch { "koverwatch" } else { "eng" }
-    })
+    }))
 }
 
 #[track_caller]
@@ -302,7 +322,7 @@ pub fn recognize_region(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     gate::check("recognize_region")?;
     let png_buf = encode_png(&preprocess::prepare(img))?;
-    let (text, _conf) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
+    let (text, _conf) = ocr_with(tessdata_lang()?, "7", None, &png_buf)?;
     Ok(text)
 }
 
@@ -348,7 +368,11 @@ pub fn recognize_map_label(frame: &DynamicImage, preflight: ScoreboardPreflight)
 ///
 /// `on_tab` is the scoreboard preflight. A gameplay frame, a menu, or any
 /// other non-Tab image keeps the first read and does not pay for the retry.
+#[track_caller]
 pub(crate) fn read_map_crop(crop: &DynamicImage, on_tab: bool) -> String {
+    if gate::check("read_map_crop").is_err() {
+        return String::new();
+    }
     let first = recognize_region(crop).unwrap_or_default();
     if crate::parse::match_map_in_text(&first).is_some() || !on_tab {
         return first;
@@ -383,7 +407,7 @@ pub fn recognize_sparse_region(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     gate::check("recognize_sparse_region")?;
     let png_buf = encode_png(&img.to_luma8())?;
-    let (text, _conf) = ocr_with(tessdata_lang(), "11", None, &png_buf)?;
+    let (text, _conf) = ocr_with(tessdata_lang()?, "11", None, &png_buf)?;
     Ok(text)
 }
 
@@ -398,7 +422,7 @@ pub fn recognize_prepared(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     gate::check("recognize_prepared")?;
     let png_buf = encode_png(img)?;
-    let (text, _conf) = ocr_with(tessdata_lang(), psm, whitelist, &png_buf)?;
+    let (text, _conf) = ocr_with(tessdata_lang()?, psm, whitelist, &png_buf)?;
     Ok(text)
 }
 
@@ -517,7 +541,7 @@ pub fn recognize_name(
         }
     } else {
         let png_buf = encode_png(&prepared)?;
-        let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
+        let (text, confidence) = ocr_with(tessdata_lang()?, "7", None, &png_buf)?;
         CellOcrResult {
             value: text.trim().to_string(),
             confidence,
@@ -537,7 +561,7 @@ pub fn recognize_name(
         return Ok(first);
     }
     let png_buf = encode_png(&hard)?;
-    let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
+    let (text, confidence) = ocr_with(tessdata_lang()?, "7", None, &png_buf)?;
     Ok(CellOcrResult {
         value: text.trim().to_string(),
         confidence,
@@ -555,19 +579,11 @@ pub fn recognize_row(
     team_size: usize,
 ) -> RowOcrResult {
     if gate::check("recognize_row").is_err() {
-        return RowOcrResult {
-            name: None,
-            name_alternates: Vec::new(),
-            stats: (0..STATS_PER_ROW)
-                .map(|_| CellOcrResult {
-                    value: String::new(),
-                    confidence: 0,
-                    suspect: false,
-                })
-                .collect(),
-            mean_confidence: 0,
-        };
+        return unread_row();
     }
+    let Ok(pool) = ocr_pool() else {
+        return unread_row();
+    };
     // One read per name window. 5v5 has a window per table layout (in-match,
     // in-match with perks, centred); which one holds the name is only known
     // once the configured name is compared, so all of them are read.
@@ -587,7 +603,7 @@ pub fn recognize_row(
     // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
     // Run in parallel — each cell creates its own Tesseract instance so there is
     // no shared state. Index order is preserved by collecting into a fixed-size array.
-    let mut stats: Vec<(usize, CellOcrResult)> = ocr_pool().install(|| {
+    let mut stats: Vec<(usize, CellOcrResult)> = pool.install(|| {
         (0..STATS_PER_ROW)
             .into_par_iter()
             .map(|i| {
@@ -634,6 +650,22 @@ pub fn recognize_row(
     }
 }
 
+/// A row nothing was read from: no name, and six empty cells.
+fn unread_row() -> RowOcrResult {
+    RowOcrResult {
+        name: None,
+        name_alternates: Vec::new(),
+        stats: (0..STATS_PER_ROW)
+            .map(|_| CellOcrResult {
+                value: String::new(),
+                confidence: 0,
+                suspect: false,
+            })
+            .collect(),
+        mean_confidence: 0,
+    }
+}
+
 /// Full scoreboard OCR using per-cell extraction.
 /// Returns structured results per row with higher confidence than full-image OCR.
 ///
@@ -642,6 +674,9 @@ pub fn recognize_row(
 /// calibrated and the OCR pool is not started.
 #[track_caller]
 pub fn recognize_scoreboard_cells(img: &DynamicImage) -> Vec<RowOcrResult> {
+    if gate::check("recognize_scoreboard_cells").is_err() {
+        return Vec::new();
+    }
     recognize_scoreboard_cells_with_team_size(img, None)
 }
 
@@ -673,6 +708,9 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     if gate::check("recognize_scoreboard_cells_pre_cropped").is_err() {
         return Vec::new();
     }
+    let Ok(pool) = ocr_pool() else {
+        return Vec::new();
+    };
     let total_rows = team_size * 2;
     let columns = calibrate_columns(cropped, team_size);
 
@@ -683,7 +721,7 @@ pub fn recognize_scoreboard_cells_pre_cropped(
         .filter_map(|i| preprocess::crop_player_row(cropped, i, team_size).map(|img| (i, img)))
         .collect();
 
-    let mut results: Vec<(usize, RowOcrResult)> = ocr_pool().install(|| {
+    let mut results: Vec<(usize, RowOcrResult)> = pool.install(|| {
         row_images
             .par_iter()
             .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns, team_size)))
@@ -801,7 +839,11 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
     }
 
     let best_of = |offsets: Vec<f64>| -> (f64, i32) {
-        ocr_pool().install(|| {
+        // No pool (OCR off) scores like an empty sweep.
+        let Ok(pool) = ocr_pool() else {
+            return (0.0f64, i32::MIN);
+        };
+        pool.install(|| {
             offsets
                 .into_par_iter()
                 .map(|o| (o, score(o)))
@@ -999,7 +1041,7 @@ pub fn recognize(
     DynamicImage::ImageLuma8(preprocessed.clone())
         .write_to(&mut Cursor::new(&mut png_buf), image::ImageFormat::Png)?;
 
-    let lang = tessdata_lang();
+    let lang = tessdata_lang()?;
     let primary = run_ocr(lang, &png_buf)?;
 
     tracing::debug!(confidence = primary.confidence, lang, "adaptive OCR result");
@@ -1102,6 +1144,139 @@ fn run_ocr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The functions of this file, by name: `(is it pub or pub(crate), body)`.
+    /// Top-level items only, up to the first test module.
+    fn production_functions() -> std::collections::BTreeMap<String, (bool, String)> {
+        let source = include_str!("mod.rs");
+        let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min()
+            .expect("the test modules");
+        let mut out = std::collections::BTreeMap::new();
+        let mut current: Option<(String, bool, String)> = None;
+        for line in source[..end].lines() {
+            let header = ["pub fn ", "pub(crate) fn ", "fn "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix).map(|rest| (*prefix, rest)));
+            if let Some((prefix, rest)) = header {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                current = Some((name, prefix != "fn ", String::new()));
+            }
+            if let Some((_, _, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+            if line == "}"
+                && let Some((name, public, body)) = current.take()
+            {
+                out.insert(name, (public, body));
+            }
+        }
+        out
+    }
+
+    /// `body` calls the function `name` (not one whose name only ends with it).
+    fn calls(body: &str, name: &str) -> bool {
+        let needle = format!("{name}(");
+        body.match_indices(&needle).any(|(at, _)| {
+            !body[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    }
+
+    /// Tesseract's three resources each refuse when the gate is off, and
+    /// every `pub` or `pub(crate)` function that can reach one of them asks
+    /// the gate itself, first. A new entry point that forgets fails here,
+    /// before it can start the pool or be counted under the wrong site.
+    #[test]
+    fn every_public_function_that_can_reach_tesseract_asks_the_gate() {
+        let functions = production_functions();
+        const RESOURCES: [&str; 3] = ["ocr_with", "ocr_pool", "tessdata_lang"];
+        for resource in RESOURCES {
+            let (_, body) = functions.get(resource).expect(resource);
+            assert!(
+                body.contains("if gate::is_off() {") && body.contains("gate::block("),
+                "{resource} has to refuse when OCR is off"
+            );
+        }
+        // What can reach a resource: a fixpoint over the calls in each body.
+        let mut reaches: std::collections::BTreeSet<&str> = RESOURCES.into_iter().collect();
+        loop {
+            let more: Vec<&str> = functions
+                .iter()
+                .filter(|(name, (_, body))| {
+                    !reaches.contains(name.as_str())
+                        && reaches.iter().any(|callee| {
+                            callee != &name.as_str()
+                                && calls(&body[body.find('{').unwrap_or(0)..], callee)
+                        })
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            reaches.extend(more);
+        }
+        let mut gated = Vec::new();
+        for name in &reaches {
+            let (public, body) = &functions[*name];
+            if !public {
+                continue;
+            }
+            let start = body.find('{').expect("a body");
+            let first_statement = body[start + 1..].trim_start();
+            assert!(
+                first_statement.starts_with(&format!("gate::check(\"{name}\")?;"))
+                    || first_statement
+                        .starts_with(&format!("if gate::check(\"{name}\").is_err() {{")),
+                "{name} can reach Tesseract and does not ask the gate first"
+            );
+            assert!(
+                body.contains("#[track_caller]") || source_has_track_caller(name),
+                "{name} has to count a blocked call under its caller's line"
+            );
+            gated.push(*name);
+        }
+        assert_eq!(
+            gated,
+            [
+                "read_map_crop",
+                "recognize",
+                "recognize_cell",
+                "recognize_map_label",
+                "recognize_name",
+                "recognize_prepared",
+                "recognize_prepared_lang",
+                "recognize_region",
+                "recognize_row",
+                "recognize_scoreboard_cells",
+                "recognize_scoreboard_cells_pre_cropped",
+                "recognize_scoreboard_cells_with_team_size",
+                "recognize_sparse_region",
+            ],
+            "the entry points changed: update this list and tests/ocr_switch.rs"
+        );
+        // A public function that reaches nothing is not gated and need not be.
+        assert!(functions.contains_key("cell_edge_ink"));
+        assert!(!reaches.contains("cell_edge_ink"));
+    }
+
+    /// The line above `fn name` (after its doc comment) is `#[track_caller]`.
+    fn source_has_track_caller(name: &str) -> bool {
+        let source = include_str!("mod.rs");
+        ["pub fn ", "pub(crate) fn "].iter().any(|prefix| {
+            source.contains(&format!("#[track_caller]\n{prefix}{name}("))
+                || source.contains(&format!("#[track_caller]\n{prefix}{name}<"))
+        })
+    }
 
     #[test]
     fn dim_zero_cell_reads_as_zero() {

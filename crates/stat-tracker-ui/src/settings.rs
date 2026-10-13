@@ -14,7 +14,9 @@ use iced::{Alignment, Element, Fill, Padding};
 use stat_tracker::config::{
     AutoDetectConfig, Config, OcrSetting, ShadowRecognizerControl, SyncConfig,
 };
-use stat_tracker::ocr_switch::{PackReadiness, Status as OcrSwitchStatus};
+use stat_tracker::ocr_switch::{
+    self, Audience, PackReadiness, Read as OcrRead, Status as OcrSwitchStatus,
+};
 
 use crate::app::{Message, TrackerApp};
 use crate::layout::{settings_columns, settings_pane_max};
@@ -138,9 +140,10 @@ It uses far less CPU. On: classic OCR.";
 pub(crate) const CLASSIC_OCR_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
 
-/// Shown in place of the "New reader (alpha)" switch while classic OCR is off.
+/// Shown in place of the "New reader (alpha)" switch while the tracker runs
+/// with classic OCR off.
 pub(crate) const NEW_READER_IMPLIED: &str =
-    "The new reader is always used while classic OCR is off.";
+    "The tracker is running with classic OCR off, so it always uses the new reader.";
 
 pub(crate) const READER_PACKS_UNCHECKED: &str = "Reader packs: checking…";
 
@@ -155,50 +158,81 @@ pub struct OcrSwitchView {
     /// What the running tracker reports: it kept OCR on, or it runs with
     /// OCR off and holds reads for a missing pack.
     pub notice: Option<String>,
+    /// The running tracker decided to run with classic OCR off
+    /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
+    /// when this is true, not when the box is merely unticked.
+    pub daemon_off: bool,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
-/// it off needs every reader pack: `Err` is the reason shown next to the
-/// switch, and the switch stays on. `Ok` is the new switch state.
+/// it off needs a tracker version that reads everything without Tesseract
+/// (`needing_ocr` empty) and every reader pack: `Err` is the reason shown
+/// next to the switch, and the switch stays on. `Ok` is the new switch
+/// state.
 pub(crate) fn classic_ocr_toggle(
     want_classic: bool,
     packs: &PackReadiness,
+    needing_ocr: &[OcrRead],
 ) -> Result<bool, String> {
     if want_classic {
         return Ok(true);
     }
-    match packs.refusal() {
-        Some(reason) => Err(reason),
+    match ocr_switch::decide(OcrSetting::Off, packs, needing_ocr).refusal {
+        Some(refusal) => Err(refusal.text(Audience::Click)),
         None => Ok(false),
     }
 }
 
-/// Why a save that turns classic OCR off must not be written, when the
-/// packs went away between the click and the save. `packs` is looked at
-/// only for that change, so every other save costs nothing.
+/// Why a save that turns classic OCR off must not be written. Checked only
+/// for that change, against the packs as they were last looked at (`None`
+/// before the first look: the tracker itself refuses at start then).
 pub(crate) fn ocr_save_problem(
     saved: OcrSetting,
     form_classic: bool,
-    packs: impl FnOnce() -> PackReadiness,
+    packs: Option<&PackReadiness>,
+    needing_ocr: &[OcrRead],
 ) -> Option<String> {
-    if saved.is_on() && !form_classic {
-        packs().refusal()
-    } else {
-        None
+    if saved.is_off() || form_classic {
+        return None;
     }
+    classic_ocr_toggle(false, packs?, needing_ocr).err()
 }
 
-/// The running tracker's notice about the switch. `None` when the status
-/// file is from another run than the tracker that is up now (or none is).
+/// The refusal still shown next to the switch after the packs were looked
+/// at again: it goes away once the click would be granted.
+pub(crate) fn refusal_after_pack_check(
+    shown: Option<String>,
+    packs: &PackReadiness,
+    needing_ocr: &[OcrRead],
+) -> Option<String> {
+    shown.and_then(|_| classic_ocr_toggle(false, packs, needing_ocr).err())
+}
+
+/// The running tracker's status. `None` when the status file is from
+/// another run than the tracker that is up now (or none is).
+fn live_status(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<&OcrSwitchStatus> {
+    status.filter(|status| daemon_pid == Some(status.pid))
+}
+
+/// The running tracker's notice about the switch ([`live_status`]).
 pub(crate) fn daemon_ocr_notice(
     status: Option<&OcrSwitchStatus>,
     daemon_pid: Option<u32>,
 ) -> Option<String> {
-    let status = status?;
-    if daemon_pid != Some(status.pid) {
-        return None;
-    }
-    status.notice()
+    live_status(status, daemon_pid)?.notice()
+}
+
+/// True when the running tracker decided to run with classic OCR off. Not
+/// the config value: a tracker that refused off, or one that was not
+/// restarted since the save, still runs Tesseract.
+pub(crate) fn daemon_runs_ocr_off(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> bool {
+    live_status(status, daemon_pid).is_some_and(|status| status.effective.is_off())
 }
 
 /// "Reader packs ready: 2 of 3", or a placeholder until they were checked.
@@ -213,17 +247,21 @@ pub(crate) fn pack_status_line(packs: Option<&PackReadiness>) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OcrCardBlocks {
     /// "Install reading model" / "Rebuild reading model" and the model
-    /// status. Tesseract's model: of no use with classic OCR off.
+    /// status. Tesseract's model: of no use to a tracker that runs with
+    /// classic OCR off.
     pub reading_model: bool,
     /// The "New reader (alpha)" switch. Off implies the new reader, so the
     /// switch has nothing to choose.
     pub new_reader: bool,
 }
 
-pub(crate) fn ocr_card_blocks(classic_ocr: bool) -> OcrCardBlocks {
+/// `daemon_off` is [`OcrSwitchView::daemon_off`]. While the tracker runs
+/// Tesseract (the box unticked but off refused, or not restarted yet, or no
+/// tracker running), both blocks stay: the member may need the model.
+pub(crate) fn ocr_card_blocks(daemon_off: bool) -> OcrCardBlocks {
     OcrCardBlocks {
-        reading_model: classic_ocr,
-        new_reader: classic_ocr,
+        reading_model: !daemon_off,
+        new_reader: !daemon_off,
     }
 }
 
@@ -955,7 +993,7 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let blocks = ocr_card_blocks(app.settings.classic_ocr);
+    let blocks = ocr_card_blocks(app.ocr_switch.daemon_off);
     let mut body = column![classic_ocr_block(app)].spacing(6);
     if blocks.reading_model {
         body = body.push(reading_model_block(app, demo));
@@ -991,7 +1029,7 @@ fn classic_ocr_block(app: &TrackerApp) -> Element<'_, Message> {
                 .color(theme::WARN),
         );
     }
-    if !app.settings.classic_ocr {
+    if app.ocr_switch.daemon_off {
         body = body.push(hint(NEW_READER_IMPLIED));
     }
     body.into()
@@ -2116,12 +2154,16 @@ token = \"not-a-real-token\"
         heroes: true,
         maps: true,
         words: true,
-        words_final_score: true,
+        result_words: true,
+        phase_titles: true,
+        final_score: true,
     };
     const NO_MAPS: PackReadiness = PackReadiness {
         maps: false,
         ..ALL_PACKS
     };
+    /// A tracker version that reads everything without Tesseract.
+    const NO_READS: &[OcrRead] = &[];
 
     #[test]
     fn classic_ocr_is_on_by_default_and_saves_as_the_ocr_key() {
@@ -2157,55 +2199,127 @@ token = \"not-a-real-token\"
 
     #[test]
     fn turning_classic_ocr_off_is_refused_without_every_reader_pack() {
-        assert_eq!(classic_ocr_toggle(false, &ALL_PACKS), Ok(false));
-        let refused = classic_ocr_toggle(false, &NO_MAPS).unwrap_err();
-        assert_eq!(Some(refused.clone()), NO_MAPS.refusal());
-        assert!(refused.contains("maps-v1"), "{refused}");
+        assert_eq!(classic_ocr_toggle(false, &ALL_PACKS, NO_READS), Ok(false));
+        let refused = classic_ocr_toggle(false, &NO_MAPS, NO_READS).unwrap_err();
         assert!(refused.starts_with("Classic OCR stays on"), "{refused}");
         assert!(
-            classic_ocr_toggle(false, &PackReadiness::default()).is_err(),
+            refused.contains("the map pack is not installed"),
+            "{refused}"
+        );
+        assert!(
+            refused.ends_with(ocr_switch::CLICK_FIX),
+            "a click is told to turn it off again: {refused}"
+        );
+        assert!(
+            classic_ocr_toggle(false, &PackReadiness::default(), NO_READS).is_err(),
             "no packs at all"
         );
-        // Turning it on never needs a pack.
+        // Turning it on never needs a pack or a newer tracker.
         assert_eq!(
-            classic_ocr_toggle(true, &PackReadiness::default()),
+            classic_ocr_toggle(true, &PackReadiness::default(), &OcrRead::ALL),
             Ok(true)
         );
-        assert_eq!(classic_ocr_toggle(true, &ALL_PACKS), Ok(true));
+        assert_eq!(classic_ocr_toggle(true, &ALL_PACKS, NO_READS), Ok(true));
     }
 
     #[test]
-    fn a_save_checks_the_packs_only_when_it_turns_classic_ocr_off() {
-        let never = || -> PackReadiness { panic!("the packs were looked at") };
-        // on stays on, off stays off, off goes on: no pack check
-        assert_eq!(ocr_save_problem(OcrSetting::On, true, never), None);
-        assert_eq!(ocr_save_problem(OcrSetting::Off, false, never), None);
-        assert_eq!(ocr_save_problem(OcrSetting::Off, true, never), None);
+    fn turning_classic_ocr_off_is_refused_while_the_tracker_needs_it_for_a_read() {
+        // Every pack is there: the tracker version is what stands in the way.
+        let refused = classic_ocr_toggle(false, &ALL_PACKS, &[OcrRead::StatCells]).unwrap_err();
+        assert_eq!(
+            refused,
+            format!(
+                "Classic OCR stays on: this tracker version cannot read the scoreboard numbers without it yet. {}",
+                ocr_switch::LATER_VERSION
+            )
+        );
+        assert!(
+            !refused.contains("download"),
+            "no pack would turn it off: {refused}"
+        );
+        // What this build says for a click today follows the build.
+        assert_eq!(
+            classic_ocr_toggle(false, &ALL_PACKS, &OcrRead::needing_ocr()).is_ok(),
+            OcrRead::needing_ocr().is_empty()
+        );
+    }
+
+    #[test]
+    fn a_save_checks_only_when_it_turns_classic_ocr_off() {
+        let refusal = classic_ocr_toggle(false, &NO_MAPS, NO_READS).err();
+        assert!(refusal.is_some());
+        // on stays on, off stays off, off goes on: nothing to check
+        for (saved, form_classic) in [
+            (OcrSetting::On, true),
+            (OcrSetting::Off, false),
+            (OcrSetting::Off, true),
+        ] {
+            assert_eq!(
+                ocr_save_problem(saved, form_classic, Some(&NO_MAPS), &OcrRead::ALL),
+                None,
+                "{saved:?} to classic={form_classic}"
+            );
+        }
         // on goes off: refused with the reason, or let through
         assert_eq!(
-            ocr_save_problem(OcrSetting::On, false, || NO_MAPS),
-            NO_MAPS.refusal()
+            ocr_save_problem(OcrSetting::On, false, Some(&NO_MAPS), NO_READS),
+            refusal
         );
-        assert!(NO_MAPS.refusal().is_some());
-        assert_eq!(ocr_save_problem(OcrSetting::On, false, || ALL_PACKS), None);
+        assert_eq!(
+            ocr_save_problem(OcrSetting::On, false, Some(&ALL_PACKS), NO_READS),
+            None
+        );
+        assert!(
+            ocr_save_problem(OcrSetting::On, false, Some(&ALL_PACKS), &[OcrRead::OwnRow]).is_some()
+        );
+        // the packs were never looked at: the save goes through, and the
+        // tracker decides when it starts
+        assert_eq!(
+            ocr_save_problem(OcrSetting::On, false, None, NO_READS),
+            None
+        );
     }
 
     #[test]
-    fn classic_ocr_off_hides_the_reading_model_and_the_new_reader_switch() {
+    fn a_shown_refusal_goes_away_once_the_packs_are_there() {
+        let shown = classic_ocr_toggle(false, &NO_MAPS, NO_READS).err();
         assert_eq!(
-            ocr_card_blocks(true),
-            OcrCardBlocks {
-                reading_model: true,
-                new_reader: true
-            }
+            refusal_after_pack_check(shown.clone(), &ALL_PACKS, NO_READS),
+            None,
+            "3 of 3 and a refusal are not shown together"
         );
         assert_eq!(
-            ocr_card_blocks(false),
+            refusal_after_pack_check(shown.clone(), &NO_MAPS, NO_READS),
+            shown
+        );
+        // a look at the packs does not invent a refusal nobody clicked for
+        assert_eq!(refusal_after_pack_check(None, &NO_MAPS, NO_READS), None);
+    }
+
+    #[test]
+    fn the_card_follows_what_the_tracker_runs_not_the_box() {
+        let all = OcrCardBlocks {
+            reading_model: true,
+            new_reader: true,
+        };
+        assert_eq!(ocr_card_blocks(false), all);
+        assert_eq!(
+            ocr_card_blocks(true),
             OcrCardBlocks {
                 reading_model: false,
                 new_reader: false
             }
         );
+        // Running with OCR off: only then are the blocks hidden.
+        let off = switch_status(41, None, ALL_PACKS);
+        assert!(daemon_runs_ocr_off(Some(&off), Some(41)));
+        // Refused at start: Tesseract runs, the model block stays.
+        let refused = switch_status(41, refusal_for(&NO_MAPS), NO_MAPS);
+        assert!(!daemon_runs_ocr_off(Some(&refused), Some(41)));
+        // Another run's file, a stopped tracker, no file.
+        assert!(!daemon_runs_ocr_off(Some(&off), Some(42)));
+        assert!(!daemon_runs_ocr_off(Some(&off), None));
+        assert!(!daemon_runs_ocr_off(None, Some(41)));
     }
 
     #[test]
@@ -2225,7 +2339,15 @@ token = \"not-a-real-token\"
         );
     }
 
-    fn switch_status(pid: u32, refusal: Option<String>, packs: PackReadiness) -> OcrSwitchStatus {
+    fn refusal_for(packs: &PackReadiness) -> Option<ocr_switch::Refusal> {
+        ocr_switch::decide(OcrSetting::Off, packs, NO_READS).refusal
+    }
+
+    fn switch_status(
+        pid: u32,
+        refusal: Option<ocr_switch::Refusal>,
+        packs: PackReadiness,
+    ) -> OcrSwitchStatus {
         OcrSwitchStatus {
             pid,
             requested: OcrSetting::Off,
@@ -2256,12 +2378,12 @@ token = \"not-a-real-token\"
         assert_eq!(daemon_ocr_notice(Some(&held), Some(42)), None);
         assert_eq!(daemon_ocr_notice(Some(&held), None), None);
         assert_eq!(daemon_ocr_notice(None, Some(41)), None);
-        // refused at startup: the reason
-        let refused = switch_status(41, NO_MAPS.refusal(), NO_MAPS);
-        assert_eq!(
-            daemon_ocr_notice(Some(&refused), Some(41)),
-            NO_MAPS.refusal()
-        );
+        // refused at startup: the reason, worded for a tracker that has to
+        // be restarted, not for a click
+        let refused = switch_status(41, refusal_for(&NO_MAPS), NO_MAPS);
+        let notice = daemon_ocr_notice(Some(&refused), Some(41)).expect("the reason");
+        assert!(notice.ends_with(ocr_switch::DAEMON_FIX), "{notice}");
+        assert!(!notice.contains("off again"), "{notice}");
         // off with every pack: nothing to show
         let fine = switch_status(41, None, ALL_PACKS);
         assert_eq!(daemon_ocr_notice(Some(&fine), Some(41)), None);
@@ -2276,9 +2398,11 @@ token = \"not-a-real-token\"
             CLASSIC_OCR_RESTART,
             NEW_READER_IMPLIED,
             READER_PACKS_UNCHECKED,
-            stat_tracker::ocr_switch::REFUSAL_FIX,
-            stat_tracker::ocr_switch::HOLD_FIX,
-            stat_tracker::ocr_switch::RESTART_TO_APPLY,
+            ocr_switch::CLICK_FIX,
+            ocr_switch::DAEMON_FIX,
+            ocr_switch::LATER_VERSION,
+            ocr_switch::HOLD_FIX,
+            ocr_switch::RESTART_TO_APPLY,
         ] {
             assert!(!copy.contains('—'), "{copy}");
             assert!(!copy.contains('–'), "{copy}");

@@ -997,6 +997,14 @@ impl ResultTemplates {
         self.tpls.iter().map(|t| &t.layout).find(|l| l.id == id)
     }
 
+    /// True when `layout` (a layout id such as [`ACCOLADE`]) has a template
+    /// for `outcome`.
+    pub fn has(&self, layout: &str, outcome: Outcome) -> bool {
+        self.tpls
+            .iter()
+            .any(|t| t.layout.id == layout && t.outcome == outcome)
+    }
+
     /// Source ids that have at least one template.
     pub fn sources(&self) -> Vec<&str> {
         let mut v: Vec<&str> = self.tpls.iter().map(|t| t.layout.id.as_str()).collect();

@@ -471,6 +471,12 @@ pub fn outcome_for(
             "Your account cannot send reports right now. Ask an officer, or use Save report."
                 .into(),
         ),
+        // The site refused the report's contents. Sending it again gives
+        // the same answer: this happens when the site is older than the
+        // tracker and does not know a field the report carries.
+        400 => SendOutcome::Failed(
+            "This site version cannot take this report. Use Save report.".into(),
+        ),
         413 => SendOutcome::Failed("The report is too large to send. Use Save report.".into()),
         429 => {
             let wait = retry_after
@@ -1249,6 +1255,15 @@ mod tests {
             panic!()
         };
         assert!(m.contains("was not sent"), "{m}");
+        // A 400 is the site not taking the contents: no "Try again".
+        let SendOutcome::Failed(m) = outcome_for(400, None, r#"{"error":"bad"}"#, None) else {
+            panic!()
+        };
+        assert_eq!(
+            m,
+            "This site version cannot take this report. Use Save report."
+        );
+        assert!(!m.contains("Try again"), "{m}");
         // A 201 without a readable body is not shown as sent.
         assert!(matches!(
             outcome_for(201, None, "nope", None),

@@ -59,6 +59,10 @@ const SESSION_TYPES: &[&str] = &["x11", "wayland", "unknown"];
 const CAPTURE_BACKENDS: &[&str] = &["x11", "wayshot", "portal", "none"];
 const READERS: &[&str] = &["ocr-v1", "new"];
 const OCR_SETTINGS: &[&str] = &["on", "off"];
+/// Most call sites `system.ocr_blocked_calls` may name.
+pub const OCR_BLOCKED_SITES_MAX: usize = 64;
+/// Longest call-site key in `system.ocr_blocked_calls`, in bytes.
+pub const OCR_BLOCKED_SITE_MAX_BYTES: usize = 96;
 const UPDATE_CHANNELS: &[&str] = &["stable", "prerelease"];
 const LAST_EXITS: &[&str] = &["clean", "crashed", "unknown"];
 
@@ -232,15 +236,16 @@ struct RawSystem {
     cpu_threads: u32,
     ocr_threads: u32,
     reader: String,
-    /// Optional. `on` or `off`: whether the tracker ran classic OCR. A
-    /// tracker from before the OCR switch, and one with OCR on, leave it
-    /// out. Present, it is not `null`.
+    /// Optional. `on` or `off`: whether the tracker ran classic OCR
+    /// (Tesseract). A tracker from before the OCR switch leaves it out,
+    /// which means `on`. Present, it is not `null`.
     #[serde(default, deserialize_with = "present")]
     ocr: Option<String>,
-    /// Optional. OCR calls the tracker blocked while OCR was off.
+    /// Optional. OCR calls the tracker stopped while OCR was off, per call
+    /// site: a place in the tracker's source, never text read from a
+    /// screen. See [`check_ocr_blocked_calls`] for the bounds.
     #[serde(default, deserialize_with = "present")]
-    #[allow(dead_code)]
-    ocr_blocked_calls: Option<u32>,
+    ocr_blocked_calls: Option<BTreeMap<String, u32>>,
     #[allow(dead_code)]
     shadow_recognizer: bool,
     update_channel: String,
@@ -696,6 +701,9 @@ fn check_system(system: &RawSystem) -> Result<(), String> {
     if let Some(ocr) = &system.ocr {
         pick("ocr", ocr, OCR_SETTINGS)?;
     }
+    if let Some(blocked) = &system.ocr_blocked_calls {
+        check_ocr_blocked_calls(blocked)?;
+    }
     pick("update_channel", &system.update_channel, UPDATE_CHANNELS)?;
     pick("last_exit", &system.last_exit, LAST_EXITS)?;
     if system.cpu_threads == 0 {
@@ -703,6 +711,31 @@ fn check_system(system: &RawSystem) -> Result<(), String> {
     }
     if system.ocr_threads == 0 {
         return Err("system.ocr_threads must be positive".into());
+    }
+    Ok(())
+}
+
+/// `system.ocr_blocked_calls`: at most [`OCR_BLOCKED_SITES_MAX`] entries.
+/// A key is a source location such as `detect/match_end.rs:1133
+/// recognize_prepared`: 1 to [`OCR_BLOCKED_SITE_MAX_BYTES`] bytes of ASCII
+/// letters, digits, `_`, `.`, `/`, `:`, `-` and single spaces, so it cannot
+/// carry a name, a home directory with other characters, or free text. A
+/// value is a count that fits a `u32` (the type already says so).
+fn check_ocr_blocked_calls(blocked: &BTreeMap<String, u32>) -> Result<(), String> {
+    if blocked.len() > OCR_BLOCKED_SITES_MAX {
+        return Err("system.ocr_blocked_calls names too many call sites".into());
+    }
+    for site in blocked.keys() {
+        let ok_char = |c: char| c.is_ascii_alphanumeric() || "_./:- ".contains(c);
+        if site.is_empty()
+            || site.len() > OCR_BLOCKED_SITE_MAX_BYTES
+            || !site.chars().all(ok_char)
+            || site.starts_with(' ')
+            || site.ends_with(' ')
+            || site.contains("  ")
+        {
+            return Err("system.ocr_blocked_calls has a key that is not a call site".into());
+        }
     }
     Ok(())
 }
@@ -1042,18 +1075,31 @@ mod tests {
         parse(&v).unwrap();
     }
 
-    /// The OCR switch keys are optional: a tracker with classic OCR on
-    /// (and every tracker from before the switch) leaves them out.
+    /// The OCR switch keys are optional: a tracker from before the switch
+    /// leaves them out, and its manifest still validates.
     #[test]
     fn system_takes_the_optional_ocr_switch_keys() {
-        parse(&sample_v2()).expect("no ocr keys");
+        parse(&sample_v2()).expect("no ocr keys, as every tracker sends today");
+        let sites = serde_json::json!({
+            "detect/match_end.rs:1133 recognize_prepared": 2396,
+            "main.rs:3966 recognize_scoreboard_cells_pre_cropped": 273,
+            "ocr/mod.rs:140 ocr_with": 0
+        });
         for ocr in OCR_SETTINGS {
             let mut v = sample_v2();
             v["system"]["ocr"] = serde_json::json!(ocr);
             parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} alone: {e}"));
-            v["system"]["ocr_blocked_calls"] = serde_json::json!(12);
-            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with a count: {e}"));
+            v["system"]["ocr_blocked_calls"] = sites.clone();
+            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with call sites: {e}"));
+            v["system"]["ocr_blocked_calls"] = serde_json::json!({});
+            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with no call site: {e}"));
         }
+        // the counts without the setting, and at the type's edge
+        let mut alone = sample_v2();
+        alone["system"]["ocr_blocked_calls"] =
+            serde_json::json!({ "main.rs:1 recognize": u32::MAX });
+        parse(&alone).expect("call sites alone");
+
         for bad in ["OFF", "no", ""] {
             let mut v = sample_v2();
             v["system"]["ocr"] = serde_json::json!(bad);
@@ -1064,8 +1110,27 @@ mod tests {
             ("ocr", serde_json::Value::Null),
             ("ocr", serde_json::json!(false)),
             ("ocr_blocked_calls", serde_json::Value::Null),
-            ("ocr_blocked_calls", serde_json::json!(-1)),
-            ("ocr_blocked_calls", serde_json::json!("3")),
+            ("ocr_blocked_calls", serde_json::json!(12)),
+            (
+                "ocr_blocked_calls",
+                serde_json::json!(["main.rs:1 recognize"]),
+            ),
+            (
+                "ocr_blocked_calls",
+                serde_json::json!({ "main.rs:1 recognize": -1 }),
+            ),
+            (
+                "ocr_blocked_calls",
+                serde_json::json!({ "main.rs:1 recognize": 1.5 }),
+            ),
+            (
+                "ocr_blocked_calls",
+                serde_json::json!({ "main.rs:1 recognize": "3" }),
+            ),
+            (
+                "ocr_blocked_calls",
+                serde_json::json!({ "main.rs:1 recognize": u64::from(u32::MAX) + 1 }),
+            ),
         ] {
             let mut v = sample_v2();
             v["system"][key] = bad.clone();
@@ -1073,6 +1138,46 @@ mod tests {
                 parse(&v).unwrap_err().contains("schema"),
                 "{key}={bad} must not parse"
             );
+        }
+    }
+
+    /// The call-site map is bounded: how many sites, how long a key is, and
+    /// which characters it may hold.
+    #[test]
+    fn system_ocr_blocked_calls_is_bounded() {
+        let with = |sites: serde_json::Value| {
+            let mut v = sample_v2();
+            v["system"]["ocr"] = serde_json::json!("off");
+            v["system"]["ocr_blocked_calls"] = sites;
+            parse(&v)
+        };
+        let many = |n: usize| {
+            let map: serde_json::Map<String, serde_json::Value> = (0..n)
+                .map(|i| (format!("main.rs:{i} recognize"), serde_json::json!(1)))
+                .collect();
+            serde_json::Value::Object(map)
+        };
+        with(many(OCR_BLOCKED_SITES_MAX)).expect("the cap itself is allowed");
+        let err = with(many(OCR_BLOCKED_SITES_MAX + 1)).unwrap_err();
+        assert!(err.contains("too many call sites"), "{err}");
+
+        let key = |k: &str| with(serde_json::json!({ k: 1 }));
+        key(&"a".repeat(OCR_BLOCKED_SITE_MAX_BYTES)).expect("the longest key");
+        for bad in [
+            "a".repeat(OCR_BLOCKED_SITE_MAX_BYTES + 1),
+            String::new(),
+            " main.rs:1 recognize".into(),
+            "main.rs:1 recognize ".into(),
+            "main.rs:1  recognize".into(),
+            "main.rs:1\nrecognize".into(),
+            "main.rs:1\trecognize".into(),
+            "/home/m\u{00fc}ller/main.rs:1 recognize".into(),
+            "name=PLAYER#1234".into(),
+            "a\"b".into(),
+            "C:\\Users\\x\\main.rs:1".into(),
+        ] {
+            let err = key(&bad).unwrap_err();
+            assert!(err.contains("not a call site"), "{bad:?}: {err}");
         }
     }
 

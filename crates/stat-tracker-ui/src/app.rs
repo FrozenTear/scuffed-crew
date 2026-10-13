@@ -225,7 +225,12 @@ pub enum Message {
     RebuildModel,
     ModelReady(Result<String, String>),
     /// The reader packs in the data dir, looked at off the UI thread.
-    ReaderPacksChecked(stat_tracker::ocr_switch::PackReadiness),
+    /// `turn_off` is a click that asked to turn classic OCR off and waits
+    /// for this look.
+    ReaderPacksChecked {
+        packs: stat_tracker::ocr_switch::PackReadiness,
+        turn_off: bool,
+    },
     Vacuum,
     VacuumReady(Result<String, String>),
     ConfirmClear,
@@ -667,7 +672,7 @@ impl TrackerApp {
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
-            tasks.push(check_reader_packs(app.saved_config.data_dir.clone()));
+            tasks.push(check_reader_packs(app.saved_config.data_dir.clone(), false));
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -994,15 +999,33 @@ impl TrackerApp {
                 Task::none()
             }
             Message::SettingsToggle(SettingsToggle::ClassicOcr, want_classic) => {
-                self.toggle_classic_ocr(want_classic);
-                Task::none()
+                self.toggle_classic_ocr(want_classic)
             }
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
             }
-            Message::ReaderPacksChecked(packs) => {
+            Message::ReaderPacksChecked { packs, turn_off } => {
                 self.ocr_switch.packs = Some(packs);
+                let needing_ocr = stat_tracker::ocr_switch::Read::needing_ocr();
+                if turn_off {
+                    match settings::classic_ocr_toggle(false, &packs, &needing_ocr) {
+                        Ok(classic) => {
+                            self.settings.classic_ocr = classic;
+                            self.ocr_switch.refusal = None;
+                        }
+                        Err(reason) => {
+                            self.settings.classic_ocr = true;
+                            self.ocr_switch.refusal = Some(reason);
+                        }
+                    }
+                } else {
+                    self.ocr_switch.refusal = settings::refusal_after_pack_check(
+                        self.ocr_switch.refusal.take(),
+                        &packs,
+                        &needing_ocr,
+                    );
+                }
                 Task::none()
             }
             Message::SelectOutput(name) => {
@@ -1024,7 +1047,7 @@ impl TrackerApp {
                 let sync_url = self.settings.sync_url.clone();
                 let saved_ocr = self.saved_config.ocr;
                 let form_classic_ocr = self.settings.classic_ocr;
-                let packs_dir = self.saved_config.data_dir.clone();
+                let known_packs = self.ocr_switch.packs;
                 let hotkey_enabled = self.settings.overlay_hotkey_enabled;
                 let hotkey_bind = self.settings.overlay_hotkey.clone();
                 let mut stored_hotkey = None;
@@ -1042,14 +1065,16 @@ impl TrackerApp {
                         if let Some(problem) = settings::sync_url_problem(&sync_url) {
                             return Err(problem.to_string());
                         }
-                        // Turning classic OCR off needs the reader packs. The
-                        // switch checked them at the click; they are checked
-                        // again here because the save is what the tracker reads.
-                        if let Some(reason) =
-                            settings::ocr_save_problem(saved_ocr, form_classic_ocr, || {
-                                stat_tracker::ocr_switch::PackReadiness::on_disk(&packs_dir)
-                            })
-                        {
+                        // Turning classic OCR off needs a tracker version
+                        // that can, and the reader packs. The click looked;
+                        // the save checks what that look found. The tracker
+                        // itself decides again when it starts.
+                        if let Some(reason) = settings::ocr_save_problem(
+                            saved_ocr,
+                            form_classic_ocr,
+                            known_packs.as_ref(),
+                            &stat_tracker::ocr_switch::Read::needing_ocr(),
+                        ) {
                             return Err(reason);
                         }
                         let hotkey = OverlayHotkey::normalized(hotkey_enabled, &hotkey_bind);
@@ -1107,12 +1132,6 @@ impl TrackerApp {
                         }
                     }
                     Err(SettingsSaveError::Blocked(message)) => {
-                        if saved_ocr.is_on() && !form_classic_ocr {
-                            // When the packs are what blocked the save, this
-                            // puts the switch back on with the reason next to
-                            // it. Blocked for another field, it stays off.
-                            self.toggle_classic_ocr(false);
-                        }
                         self.replace_toast(message);
                     }
                     Err(SettingsSaveError::Write(message)) => {
@@ -2098,7 +2117,7 @@ impl TrackerApp {
             Step::PackReady(result) => {
                 self.setup.download_ready(result);
                 // The classic OCR switch shows which packs are there.
-                check_reader_packs(self.saved_config.data_dir.clone())
+                check_reader_packs(self.saved_config.data_dir.clone(), false)
             }
         }
     }
@@ -2222,10 +2241,10 @@ impl TrackerApp {
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
-            let notice = settings::daemon_ocr_notice(
-                stat_tracker::ocr_switch::read_status(&self.data_dir).as_ref(),
-                self.daemon.pid,
-            );
+            let status = stat_tracker::ocr_switch::read_status(&self.data_dir);
+            self.ocr_switch.daemon_off =
+                settings::daemon_runs_ocr_off(status.as_ref(), self.daemon.pid);
+            let notice = settings::daemon_ocr_notice(status.as_ref(), self.daemon.pid);
             if notice != self.ocr_switch.notice {
                 self.ocr_switch.notice = notice;
                 self.health_status = self.health_now();
@@ -2531,41 +2550,33 @@ impl TrackerApp {
         )
     }
 
-    /// A click on "Use classic OCR (Tesseract)". Turning it off looks at
-    /// the reader packs in the tracker's data dir first. With one missing
-    /// the switch stays on and the reason is shown next to it.
-    fn toggle_classic_ocr(&mut self, want_classic: bool) {
+    /// A click on "Use classic OCR (Tesseract)". Turning it on is at once.
+    /// Turning it off first looks at the reader packs in the tracker's data
+    /// dir, off the UI thread: the box changes when that look comes back
+    /// ([`Message::ReaderPacksChecked`]). With a pack missing, or a tracker
+    /// version that cannot yet, the box stays ticked and the reason is shown
+    /// next to it.
+    fn toggle_classic_ocr(&mut self, want_classic: bool) -> Task<Message> {
         if self.fixture.is_some() {
             // Demo mode saves nothing and has no packs to look at.
             self.settings.classic_ocr = want_classic;
-            return;
+            return Task::none();
         }
-        let packs = if want_classic {
-            self.ocr_switch.packs.unwrap_or_default()
-        } else {
-            let packs =
-                stat_tracker::ocr_switch::PackReadiness::on_disk(&self.saved_config.data_dir);
-            self.ocr_switch.packs = Some(packs);
-            packs
-        };
-        match settings::classic_ocr_toggle(want_classic, &packs) {
-            Ok(classic) => {
-                self.settings.classic_ocr = classic;
-                self.ocr_switch.refusal = None;
-            }
-            Err(reason) => {
-                self.settings.classic_ocr = true;
-                self.ocr_switch.refusal = Some(reason);
-            }
+        if want_classic {
+            self.settings.classic_ocr = true;
+            self.ocr_switch.refusal = None;
+            return Task::none();
         }
+        check_reader_packs(self.saved_config.data_dir.clone(), true)
     }
 }
 
-/// Look at the reader packs in `data_dir` off the UI thread.
-fn check_reader_packs(data_dir: PathBuf) -> Task<Message> {
+/// Look at the reader packs in `data_dir` off the UI thread. `turn_off`
+/// carries a waiting click on the classic OCR switch.
+fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     Task::perform(
         async move { stat_tracker::ocr_switch::PackReadiness::on_disk(&data_dir) },
-        Message::ReaderPacksChecked,
+        move |packs| Message::ReaderPacksChecked { packs, turn_off },
     )
 }
 
