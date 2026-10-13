@@ -193,6 +193,32 @@ ocr_threads = 1
 
 The daemon reads config once at startup — restart it after changes.
 
+### OCR CPU use (`OMP_THREAD_LIMIT`)
+
+OCR uses about a third of the CPU it did, with the same results. Tesseract
+is built with OpenMP, and with no limit each OCR call also spins up its own
+thread team on top of the `ocr_threads` workers. The daemon now runs with
+`OMP_THREAD_LIMIT=1`. The fields are still read in parallel by the
+`ocr_threads` workers.
+
+- The systemd unit sets it (`Environment=OMP_THREAD_LIMIT=1`). An update
+  rewrites the unit and restarts a running tracker.
+- A start outside systemd (a shell, the app's Start button) has no such line.
+  OpenMP reads the variable when the binary loads, so the daemon starts
+  itself again once, same pid and arguments, with the variable set.
+  `SCUFFED_OMP_REEXEC` marks that second start and stops a loop.
+- A value you set yourself is kept: `OMP_THREAD_LIMIT=4 scuffed-stat-tracker`,
+  or a drop-in for the unit (`systemctl --user edit scuffed-stat-tracker`).
+  `SCUFFED_OMP_NO_REEXEC=1` turns the restart off (dev).
+- `--generate-tessdata` does not restart: it runs Tesseract's training tools,
+  which would inherit the limit.
+
+To check: `scuffed-stat-tracker --print-omp-limit` prints the value in
+force and what OpenMP itself reports. The daemon logs it once at start
+(`OpenMP thread limit for OCR`), logs its thread count after the first
+scoreboard OCR, and puts `omp_thread_limit` and `os_threads` on each
+`capture timing` line, which is in the log of a problem report.
+
 ### Where the daemon writes
 
 The user unit sets `ProtectSystem=strict`. When that sandbox is applied,

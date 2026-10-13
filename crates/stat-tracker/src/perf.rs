@@ -174,6 +174,10 @@ fn log_summary(s: &Summary) {
         tab_p50_ms = s.tab_analyze.p50_ms,
         tab_max_ms = s.tab_analyze.max_ms,
         tab_total_ms = s.tab_analyze.total_ms,
+        // Read when the line is written, so a problem report's log shows the
+        // limit OCR ran with and how many OS threads the daemon holds.
+        omp_thread_limit = %crate::omp::env_limit_label(),
+        os_threads = %crate::omp::os_threads_label(),
         "capture timing"
     );
 }

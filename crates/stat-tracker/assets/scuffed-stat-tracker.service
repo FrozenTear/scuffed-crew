@@ -24,6 +24,12 @@ ExecStart=%h/.local/bin/scuffed-stat-tracker
 # user-manager import when the compositor socket name changes.
 # The leading '-' means a missing file does not fail the unit.
 EnvironmentFile=-%h/.config/scuffed-stat-tracker/session.env
+# One OpenMP thread per Tesseract call. The reads are the same and OCR
+# takes about a third of the CPU time; the fields still run in parallel
+# on the daemon's own OCR workers (ocr_threads). libgomp reads this when
+# the binary loads, so it has to be set here and not by the daemon. To
+# use another value, set it in a drop-in (systemctl --user edit).
+Environment=OMP_THREAD_LIMIT=1
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

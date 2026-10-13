@@ -78,6 +78,20 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
         .collect();
     assert_eq!(warns.len(), 1, "one WARN line; output:\n{out}");
 
+    // Started with no OMP_THREAD_LIMIT (alpha.7 C1): the daemon restarted
+    // itself with the limit, kept this pid (the marker above names it), and
+    // says so once.
+    let omp: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("OpenMP thread limit for OCR"))
+        .collect();
+    assert_eq!(omp.len(), 1, "one start-up line; output:\n{out}");
+    assert!(
+        omp[0].contains("omp_thread_limit=1") && omp[0].contains("restarted=true"),
+        "{}",
+        omp[0]
+    );
+
     // run.marker is written early in startup, before run_loop installs the
     // SIGTERM handler. A signal in that gap takes the default action (killed
     // by signal 15), so wait until the daemon says the handlers are in place.
