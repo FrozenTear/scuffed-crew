@@ -2,6 +2,7 @@ use image::{DynamicImage, GrayImage, Luma, RgbImage};
 
 use super::MatchOutcome;
 use super::stability::FrameStability;
+use crate::shadow::result::{Outcome, ResultRead};
 
 /// Which detector produced an outcome. The banner color-flood is specific
 /// enough to act on from a single frame; the word-OCR sources (accolade
@@ -20,9 +21,63 @@ pub enum OutcomeSource {
     EndTitle,
 }
 
+/// One frame's end-of-match titles, by reader: the centred end title
+/// VICTORY! / DEFEAT (P3, [`read_end_title`]) and the title card that wakes
+/// the poller (P5, [`detect_end_reel_with`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Titles {
+    /// `reader = "ocr-v1"`: Tesseract reads both.
+    #[default]
+    Ocr,
+    /// `reader = "new"`: no OCR. This is the frame's words-v1 end-title
+    /// read (`shadow::read_end_title`), `None` when no end-title templates
+    /// are loaded. Only a sure read is a signal: a flagged read, a frame
+    /// with no word and a missing pack are all "no end title", and nothing
+    /// falls back to OCR.
+    Words(Option<ResultRead>),
+}
+
+impl Titles {
+    /// The titles of this frame for the reader setting. Under `reader =
+    /// "new"` this reads the end title once, for both P3 and P5; under
+    /// `reader = "ocr-v1"` it reads nothing.
+    pub fn for_rgb(use_new_reader: bool, rgb: &RgbImage) -> Self {
+        if use_new_reader {
+            Titles::Words(crate::shadow::read_end_title(rgb))
+        } else {
+            Titles::Ocr
+        }
+    }
+
+    /// [`Self::for_rgb`] for a frame that may not be RGB yet.
+    pub fn for_frame(use_new_reader: bool, img: &DynamicImage) -> Self {
+        if !use_new_reader {
+            return Titles::Ocr;
+        }
+        match img.as_rgb8() {
+            Some(rgb) => Self::for_rgb(true, rgb),
+            None => Self::for_rgb(true, &img.to_rgb8()),
+        }
+    }
+
+    /// The word of a sure end-title read under `reader = "new"`.
+    fn sure_end_title(&self) -> Option<Outcome> {
+        match self {
+            Titles::Words(Some(read)) => read.sure(),
+            Titles::Words(None) | Titles::Ocr => None,
+        }
+    }
+}
+
 /// One-shot outcome read for a single frame (Tab captures, dev tools).
 pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
-    detect_outcome_signal(img)
+    detect_outcome_with(img, &Titles::Ocr)
+}
+
+/// [`detect_outcome`] with the end title from `titles`.
+pub fn detect_outcome_with(img: &DynamicImage, titles: &Titles) -> MatchOutcome {
+    let rgb = img.to_rgb8();
+    detect_outcome_signal_inner(img, &rgb, None, titles)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
 }
@@ -46,7 +101,7 @@ pub fn detect_outcome_signal_with_rgb(
     img: &DynamicImage,
     rgb: &RgbImage,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, None)
+    detect_outcome_signal_inner(img, rgb, None, &Titles::Ocr)
 }
 
 /// Poll-tick outcome detection: identical to
@@ -56,18 +111,24 @@ pub fn detect_outcome_signal_with_rgb(
 /// gated: it is cheap, lasts ~3s, and a second tick may never come. Word
 /// detection shifts at most one tick later, inside the budget of screens that
 /// stay up 15–20s and already need two agreeing reads to confirm.
+///
+/// `titles` is the frame's end title by reader ([`Titles`]). Under `reader =
+/// "new"` the end title is not gated on stability: its read is already
+/// made, and a first sighting is a signal.
 pub fn detect_outcome_signal_polled(
     img: &DynamicImage,
     rgb: &RgbImage,
     stability: &mut FrameStability,
+    titles: &Titles,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, Some(stability))
+    detect_outcome_signal_inner(img, rgb, Some(stability), titles)
 }
 
 fn detect_outcome_signal_inner(
     img: &DynamicImage,
     rgb: &RgbImage,
     mut stability: Option<&mut FrameStability>,
+    titles: &Titles,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
     if let Some(outcome) = detect_banner(rgb) {
         return Some((outcome, OutcomeSource::Banner));
@@ -80,7 +141,7 @@ fn detect_outcome_signal_inner(
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::RankScreen)),
     }
-    match read_end_title(img, rgb, stability) {
+    match read_end_title(img, rgb, stability, titles) {
         MatchOutcome::Unknown => None,
         outcome => Some((outcome, OutcomeSource::EndTitle)),
     }
@@ -97,6 +158,11 @@ fn detect_outcome_signal_inner(
 /// `detect_outcome` returns `Unknown` and no outcome was carried over from the
 /// poller.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
+    detect_outcome_text_with(img, &Titles::Ocr)
+}
+
+/// [`detect_outcome_text`] with the end title from `titles`.
+pub fn detect_outcome_text_with(img: &DynamicImage, titles: &Titles) -> MatchOutcome {
     let rgb = img.to_rgb8();
     let (fw, fh) = (img.width(), img.height());
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
@@ -106,7 +172,7 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
     let band_w = gw * 400 / 1000;
     let band_h = gh * 220 / 1000;
     if band_w == 0 || band_h == 0 || x + band_w > fw || y + band_h > fh {
-        return read_end_title(img, &rgb, None);
+        return read_end_title(img, &rgb, None, titles);
     }
     let region = img.crop_imm(x, y, band_w, band_h);
 
@@ -123,23 +189,32 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
                 MatchOutcome::Draw
             } else {
                 tracing::debug!(text = %text.trim(), "scoreboard header text did not contain an outcome");
-                read_end_title(img, &rgb, None)
+                read_end_title(img, &rgb, None, titles)
             }
         }
         Err(e) => {
             tracing::debug!(error = %e, "scoreboard header OCR failed");
-            read_end_title(img, &rgb, None)
+            read_end_title(img, &rgb, None, titles)
         }
     }
 }
 
 /// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
 /// Cheap sat-mass / scoreline gate first so mid-fight ticks do not pay OCR.
+///
+/// Under `reader = "new"` ([`Titles::Words`]) the word is the frame's
+/// words-v1 end-title read and nothing else runs: no gate, no FINAL SCORE
+/// read, no OCR. The gate saves Tesseract calls, and it also shuts on a
+/// title with little colour (a pale title, a fade-in).
 fn read_end_title(
     img: &DynamicImage,
     rgb: &RgbImage,
     mut stability: Option<&mut FrameStability>,
+    titles: &Titles,
 ) -> MatchOutcome {
+    if let Titles::Words(read) = titles {
+        return end_title_from_words(read.as_ref());
+    }
     let mass = center_title_mass(rgb);
     let scoreline =
         mass < END_TITLE_MASS_MIN && scoreline_looks_present(img, rgb, stability.as_deref_mut());
@@ -197,6 +272,42 @@ fn read_end_title(
 }
 
 const END_TITLE_MASS_MIN: f32 = 0.06;
+
+/// The end title under `reader = "new"`: the word of a sure words-v1
+/// end-title read. A flagged read, a frame with no word and a missing pack
+/// (`None`) are all `Unknown`.
+///
+/// A DRAW is named only by a sure read (`shadow::result` drops an unsure
+/// one). One poll's read is a signal, not an outcome: the poller's streak
+/// still needs a second agreeing read to confirm it.
+fn end_title_from_words(read: Option<&ResultRead>) -> MatchOutcome {
+    let Some(read) = read else {
+        tracing::trace!("end title: no words-v1 end-title templates loaded");
+        return MatchOutcome::Unknown;
+    };
+    let outcome = match read.sure() {
+        Some(Outcome::Victory) => MatchOutcome::Victory,
+        Some(Outcome::Defeat) => MatchOutcome::Defeat,
+        Some(Outcome::Draw) => MatchOutcome::Draw,
+        None => MatchOutcome::Unknown,
+    };
+    if outcome.is_decided() {
+        tracing::info!(
+            score = read.score,
+            margin = read.margin,
+            context = "end title",
+            "result word (words-v1): {outcome:?}"
+        );
+    } else {
+        tracing::trace!(
+            score = read.score,
+            margin = read.margin,
+            suspect = read.suspect,
+            "end title (words-v1): no sure word"
+        );
+    }
+    outcome
+}
 
 fn fuzzy_outcome_word(raw: &str) -> MatchOutcome {
     fuzzy_outcome_word_inner(raw, 2)
@@ -502,6 +613,19 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// and must not set `end_reel_wake_until`. Future: register voted bans;
 /// this path only vetoes the wake.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    detect_end_reel_with(img, rgb, &Titles::Ocr)
+}
+
+/// [`detect_end_reel`] by reader. Under `reader = "new"` ([`Titles::Words`])
+/// path 2's phrase OCR does not run. The title that wakes is the end title:
+/// a sure words-v1 read of it on this frame is the wake, checked before the
+/// ban veto (the read is a template match; the veto is a pixel gate that
+/// also fires on end titles). Paths 1 and 3 are the same under both readers.
+pub fn detect_end_reel_with(img: &DynamicImage, rgb: &RgbImage, titles: &Titles) -> bool {
+    if titles.sure_end_title().is_some() {
+        tracing::info!("end title — end-of-match wake");
+        return true;
+    }
     if super::match_start::detect_ban_screen(img, rgb) {
         tracing::debug!("ban screen — not an end-reel wake");
         return false;
@@ -510,7 +634,7 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
         return true;
     }
-    if read_end_reel_title(img) {
+    if matches!(titles, Titles::Ocr) && read_end_reel_title(img) {
         tracing::info!("end-reel title — POTG / highlight wake");
         return true;
     }
@@ -1205,6 +1329,249 @@ mod tests {
         );
     }
 
+    // ------------------------- end title and its wake without OCR (O2)
+
+    use crate::ocr::ocr_calls;
+    use crate::shadow::result::END_TITLE;
+
+    fn dark_frame() -> (DynamicImage, RgbImage) {
+        let rgb = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// A frame whose centre passes the end-title colour-mass gate, so
+    /// ocr-v1 runs its end-title OCR on it.
+    fn title_mass_frame() -> (DynamicImage, RgbImage) {
+        let mut rgb = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        for y in 126..180 {
+            for x in 192..448 {
+                rgb.put_pixel(x, y, Rgb([220, 40, 220]));
+            }
+        }
+        assert!(center_title_mass(&rgb) >= END_TITLE_MASS_MIN);
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// No title colour, and a white bar on the FINAL SCORE line: ocr-v1
+    /// runs the FINAL SCORE OCR on it (P4).
+    fn scoreline_bar_frame() -> (DynamicImage, RgbImage) {
+        let mut rgb = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        for y in 268..284 {
+            for x in 240..400 {
+                rgb.put_pixel(x, y, Rgb([245, 245, 245]));
+            }
+        }
+        assert!(center_title_mass(&rgb) < END_TITLE_MASS_MIN);
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// A dark frame with bright bars in the upper band: it passes the title
+    /// card's pixel gate, so ocr-v1 runs its phrase OCR on it. The bars
+    /// spell no phrase, and no other path wakes on it.
+    fn title_card_frame() -> (DynamicImage, RgbImage) {
+        let mut rgb = RgbImage::from_pixel(640, 360, Rgb([12, 12, 12]));
+        for y in 50..90 {
+            for x in 120..520 {
+                if x % 3 == 0 {
+                    rgb.put_pixel(x, y, Rgb([225, 225, 225]));
+                }
+            }
+        }
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(cinematic_title_band(
+            &end_reel_cinematic_crop(&img).unwrap()
+        ));
+        assert!(!end_reel_letterbox(&rgb) && !read_end_reel_nameplate(&rgb));
+        (img, rgb)
+    }
+
+    fn words(outcome: Option<Outcome>, suspect: bool) -> Titles {
+        Titles::Words(Some(ResultRead {
+            outcome,
+            source: outcome.map(|_| END_TITLE.to_string()),
+            score: if outcome.is_some() { 0.9 } else { 0.2 },
+            margin: 0.4,
+            suspect,
+        }))
+    }
+
+    /// Every words-v1 read that is not a sure word, and no pack at all.
+    fn unsure_words() -> Vec<Titles> {
+        vec![
+            words(Some(Outcome::Victory), true),
+            words(Some(Outcome::Defeat), true),
+            words(Some(Outcome::Draw), true),
+            words(None, true),
+            Titles::Words(None),
+        ]
+    }
+
+    /// `reader = "ocr-v1"` takes no words-v1 read, and its end title is
+    /// still the gated OCR read.
+    #[test]
+    fn ocr_v1_reads_the_end_title_with_ocr_only() {
+        assert_eq!(Titles::default(), Titles::Ocr);
+        let (img, rgb) = title_mass_frame();
+        assert_eq!(Titles::for_rgb(false, &rgb), Titles::Ocr);
+        assert_eq!(Titles::for_frame(false, &img), Titles::Ocr);
+        assert!(matches!(Titles::for_rgb(true, &rgb), Titles::Words(_)));
+        assert!(matches!(Titles::for_frame(true, &img), Titles::Words(_)));
+        // past the colour-mass gate: one Tesseract call, on the title crop
+        let before = ocr_calls();
+        let _ = read_end_title(&img, &rgb, None, &Titles::Ocr);
+        assert_eq!(ocr_calls() - before, 1);
+        // a dark frame stays behind the gate
+        let (img, rgb) = dark_frame();
+        let before = ocr_calls();
+        assert_eq!(
+            read_end_title(&img, &rgb, None, &Titles::Ocr),
+            MatchOutcome::Unknown
+        );
+        assert_eq!(ocr_calls(), before);
+    }
+
+    /// `reader = "new"`: the word of a sure words-v1 read is the end title.
+    /// A flagged read, a frame with no word and a missing pack are all "no
+    /// end title". No Tesseract call is made, on frames where ocr-v1 makes
+    /// one for the title (P3) or for the FINAL SCORE line (P4).
+    #[test]
+    fn only_a_sure_words_read_is_an_end_title() {
+        let (bar_img, bar_rgb) = scoreline_bar_frame();
+        let before = ocr_calls();
+        let _ = read_end_title(&bar_img, &bar_rgb, None, &Titles::Ocr);
+        assert!(ocr_calls() > before, "ocr-v1 reads the FINAL SCORE line");
+
+        let before = ocr_calls();
+        for (img, rgb) in [title_mass_frame(), (bar_img, bar_rgb), dark_frame()] {
+            for (o, want) in [
+                (Outcome::Victory, MatchOutcome::Victory),
+                (Outcome::Defeat, MatchOutcome::Defeat),
+                (Outcome::Draw, MatchOutcome::Draw),
+            ] {
+                let got = read_end_title(&img, &rgb, None, &words(Some(o), false));
+                assert_eq!(got, want);
+            }
+            for titles in unsure_words() {
+                assert_eq!(
+                    read_end_title(&img, &rgb, None, &titles),
+                    MatchOutcome::Unknown,
+                    "{titles:?}"
+                );
+            }
+        }
+        assert_eq!(ocr_calls(), before, "no OCR under the new reader");
+    }
+
+    /// The poll tick under `reader = "new"`: a sure end title is an
+    /// `EndTitle` signal on its first sighting (ocr-v1 waits for the crop to
+    /// hold still), an unsure one is no signal, and the banner still wins.
+    #[test]
+    fn the_poll_tick_takes_the_end_title_from_words() {
+        let (img, rgb) = dark_frame();
+        let mut st = FrameStability::default();
+        let before = ocr_calls();
+        assert_eq!(
+            detect_outcome_signal_polled(&img, &rgb, &mut st, &words(Some(Outcome::Defeat), false)),
+            Some((MatchOutcome::Defeat, OutcomeSource::EndTitle))
+        );
+        for titles in unsure_words() {
+            assert_eq!(
+                detect_outcome_signal_polled(&img, &rgb, &mut st, &titles),
+                None,
+                "{titles:?}"
+            );
+        }
+        assert_eq!(
+            detect_outcome_with(&img, &words(Some(Outcome::Victory), false)),
+            MatchOutcome::Victory
+        );
+        assert_eq!(
+            detect_outcome_with(&img, &Titles::Words(None)),
+            MatchOutcome::Unknown
+        );
+        assert_eq!(ocr_calls(), before);
+        // ocr-v1 on a first sighting: deferred, and no signal
+        let (img, rgb) = title_mass_frame();
+        let mut st = FrameStability::default();
+        assert_eq!(
+            detect_outcome_signal_polled(&img, &rgb, &mut st, &Titles::Ocr),
+            None
+        );
+        // the colour flood is read before any word
+        let gold = flood([230, 180, 20]);
+        assert_eq!(
+            detect_outcome_signal_polled(
+                &gold,
+                &gold.to_rgb8(),
+                &mut st,
+                &words(Some(Outcome::Defeat), false)
+            ),
+            Some((MatchOutcome::Victory, OutcomeSource::Banner))
+        );
+    }
+
+    /// The Tab frame's text fallback under `reader = "new"` ends in the
+    /// words-v1 end title, not the end-title OCR.
+    #[test]
+    fn the_tab_text_fallback_takes_the_end_title_from_words() {
+        let (img, _) = dark_frame();
+        assert_eq!(
+            detect_outcome_text_with(&img, &words(Some(Outcome::Victory), false)),
+            MatchOutcome::Victory
+        );
+        for titles in unsure_words() {
+            assert_eq!(
+                detect_outcome_text_with(&img, &titles),
+                MatchOutcome::Unknown,
+                "{titles:?}"
+            );
+        }
+    }
+
+    /// `reader = "new"`: a sure end title is the wake. An unsure one is not,
+    /// and the title card's phrase OCR never runs.
+    #[test]
+    fn a_sure_end_title_wakes_under_the_new_reader() {
+        let (img, rgb) = dark_frame();
+        for o in [Outcome::Victory, Outcome::Defeat, Outcome::Draw] {
+            assert!(detect_end_reel_with(&img, &rgb, &words(Some(o), false)));
+        }
+        for titles in unsure_words() {
+            assert!(!detect_end_reel_with(&img, &rgb, &titles), "{titles:?}");
+        }
+        assert!(!detect_end_reel_with(&img, &rgb, &Titles::Ocr));
+        assert!(!detect_end_reel(&img, &rgb));
+
+        // ocr-v1 reads the phrase behind the title card's pixel gate
+        let (img, rgb) = title_card_frame();
+        let before = ocr_calls();
+        assert!(!detect_end_reel(&img, &rgb), "bars spell no phrase");
+        assert_eq!(ocr_calls() - before, 1, "ocr-v1 ran the phrase OCR");
+        // the new reader does not, and bars are no wake
+        let before = ocr_calls();
+        for titles in unsure_words() {
+            assert!(!detect_end_reel_with(&img, &rgb, &titles), "{titles:?}");
+        }
+        assert!(detect_end_reel_with(
+            &img,
+            &rgb,
+            &words(Some(Outcome::Victory), false)
+        ));
+        assert_eq!(ocr_calls(), before, "no OCR under the new reader");
+    }
+
+    /// The pixel paths wake the same under both readers: the letterbox
+    /// still wakes with no end title on the frame.
+    #[test]
+    fn the_letterbox_wakes_under_both_readers() {
+        let reel = letterbox_footage_frame();
+        let img = DynamicImage::ImageRgb8(reel.clone());
+        assert!(detect_end_reel_with(&img, &reel, &Titles::Ocr));
+        for titles in unsure_words() {
+            assert!(detect_end_reel_with(&img, &reel, &titles), "{titles:?}");
+        }
+    }
+
     #[test]
     fn gold_flood_still_wins_over_end_title() {
         assert_eq!(
@@ -1425,6 +1792,19 @@ mod tests {
             !detect_end_reel(&dyn_img, &img),
             "ban UI must not set end_reel_wake_until"
         );
+        for titles in unsure_words() {
+            assert!(
+                !detect_end_reel_with(&dyn_img, &img, &titles),
+                "nor under the new reader: {titles:?}"
+            );
+        }
+        // the ban gate also fires on real end titles: a sure end-title read
+        // is the stronger evidence, and wakes
+        assert!(detect_end_reel_with(
+            &dyn_img,
+            &img,
+            &words(Some(Outcome::Defeat), false)
+        ));
     }
 
     #[test]

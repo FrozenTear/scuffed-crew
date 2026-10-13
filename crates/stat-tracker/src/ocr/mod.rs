@@ -116,6 +116,19 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+// Tesseract calls made on this thread (tests). A path that must run no OCR
+// checks that this count does not move.
+#[cfg(test)]
+thread_local! {
+    static OCR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tesseract calls made on this thread so far (tests).
+#[cfg(test)]
+pub(crate) fn ocr_calls() -> usize {
+    OCR_CALLS.with(|c| c.get())
+}
+
 /// Run Tesseract on `png` using a thread-local instance for `lang`, returning
 /// the recognized text and mean confidence. `whitelist` of `None` (or empty)
 /// disables character restriction.
@@ -125,6 +138,8 @@ fn ocr_with(
     whitelist: Option<&str>,
     png: &[u8],
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(test)]
+    OCR_CALLS.with(|c| c.set(c.get() + 1));
     TESS_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if !cache.contains_key(lang) {

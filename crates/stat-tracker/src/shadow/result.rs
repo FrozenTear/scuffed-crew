@@ -11,8 +11,12 @@
 //! * `rank_screen`: competitive rank screen (incl. defeat); region x 1-25%, y 14.5-22.5%;
 //!   plane `min`; real frames: 98 (1440p).
 //! * `end_title`: centred italic end title; region x 32-68%, y 34-52%;
-//!   plane `max`; real frames: none. The words-v1 pack widens it with its
-//!   `layouts.json` (the current title sits lower, y 43-56.5%).
+//!   plane `max`. The words-v1 pack widens it with its `layouts.json` (the
+//!   current title sits lower, y 43-56.5%) and adds a second layout,
+//!   `end_title_plain`. Its templates are rendered from the game font, so
+//!   every real frame is held out. Under `reader = "new"` the poller reads
+//!   the end-title layouts on their own ([`ResultTemplates::end_titles`],
+//!   `detect::match_end`).
 //! * `tab_header`: post-match Tab board header; region x 30-70%, y 2-24%;
 //!   plane `min`; real frames: none.
 //!
@@ -66,7 +70,7 @@
 //! directory (see [`ResultTemplates::load_dir`]). [`LiveResults`] re-loads
 //! the templates when either folder changes, the way the hero packs do.
 //! Only `accolade` and `rank_screen` have real templates so far; DRAW,
-//! `end_title`, `tab_header` and 1080p-native accolade frames are untested.
+//! `tab_header` and 1080p-native accolade frames are untested.
 //! The tracker's colour-flood banner (gold or red over y 30-70%) is not read
 //! here: it depends on colour, and a word read covers the same screens.
 
@@ -224,6 +228,13 @@ pub struct ResultRead {
 }
 
 impl ResultRead {
+    /// The word of a sure read: present, at or above [`FLOOR`], and
+    /// [`MARGIN`] clear of every other word. `None` for a flagged read and
+    /// for a frame that shows no word.
+    pub fn sure(&self) -> Option<Outcome> {
+        self.outcome.filter(|_| !self.suspect)
+    }
+
     fn nothing(score: f64, margin: f64) -> Self {
         Self {
             outcome: None,
@@ -1096,6 +1107,20 @@ impl ResultPack {
 pub struct LoadedResults {
     pub templates: ResultTemplates,
     pub pack: ResultPack,
+    /// The end-title templates of `templates` on their own
+    /// ([`ResultTemplates::end_titles`]), cut once per load.
+    pub end_titles: Option<ResultTemplates>,
+}
+
+impl LoadedResults {
+    pub fn new(templates: ResultTemplates, pack: ResultPack) -> Self {
+        let end_titles = templates.end_titles();
+        Self {
+            templates,
+            pack,
+            end_titles,
+        }
+    }
 }
 
 type Stamp = [DirStamp; 2];
@@ -1120,16 +1145,10 @@ impl ResultDirs {
     pub fn load(&self) -> Option<LoadedResults> {
         let words = self.words.as_deref().and_then(ResultTemplates::load_dir);
         if let Some(templates) = words {
-            return Some(LoadedResults {
-                templates,
-                pack: ResultPack::WordsV1,
-            });
+            return Some(LoadedResults::new(templates, ResultPack::WordsV1));
         }
         let legacy = self.legacy.as_deref().and_then(ResultTemplates::load_dir);
-        legacy.map(|templates| LoadedResults {
-            templates,
-            pack: ResultPack::Legacy,
-        })
+        legacy.map(|templates| LoadedResults::new(templates, ResultPack::Legacy))
     }
 
     /// Load, or `None` when a folder changed while it loaded (a swap ran
@@ -1309,6 +1328,32 @@ impl LiveResults {
         if let Some(h) = handle {
             h.join().unwrap();
         }
+    }
+}
+
+// --------------------------------------------------------------- end title
+
+/// Is `id` an end-title layout: [`END_TITLE`] itself, or a variant of it
+/// named `end_title_<name>` (words-v1 ships `end_title_plain`)?
+pub fn is_end_title(id: &str) -> bool {
+    id.strip_prefix(END_TITLE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+}
+
+impl ResultTemplates {
+    /// The end-title templates alone: the centred VICTORY / DEFEAT / DRAW
+    /// over the world at the end of a match ([`is_end_title`] layouts). The
+    /// poller reads these on their own (`detect::match_end`, P3 under
+    /// `reader = "new"`): the accolade and rank-screen words are other
+    /// screens, and a read of them must not lend the end title a margin.
+    ///
+    /// `None` unless a VICTORY and a DEFEAT end-title template are loaded,
+    /// because a sure read is a lead over the best other word.
+    pub fn end_titles(&self) -> Option<ResultTemplates> {
+        let mut only = self.clone();
+        only.tpls.retain(|t| is_end_title(&t.layout.id));
+        let has = |o| only.tpls.iter().any(|t| t.outcome == o);
+        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(only)
     }
 }
 
@@ -1582,6 +1627,165 @@ mod tests {
         // an unsure VICTORY is kept, flagged
         let v = t.decide(&found([0.62, 0.30, 0.40]));
         assert_eq!((v.outcome, v.suspect), (Some(Outcome::Victory), true));
+    }
+
+    // ------------------------------------------ the end title on its own (O2)
+
+    fn end_title_plain() -> Layout {
+        Layout::new("end_title_plain", lay(END_TITLE).roi, Plane::Max)
+    }
+
+    /// Accolade words plus the end titles words-v1 ships: VICTORY, DEFEAT,
+    /// DRAW and a second VICTORY variant.
+    fn with_end_titles() -> ResultTemplates {
+        ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+            (lay(END_TITLE), Outcome::Victory, word(2, 90, 34)),
+            (lay(END_TITLE), Outcome::Defeat, word(4, 80, 34)),
+            (lay(END_TITLE), Outcome::Draw, word(6, 60, 34)),
+            (end_title_plain(), Outcome::Victory, word(5, 90, 34)),
+        ])
+        .unwrap()
+    }
+
+    fn dark_frame() -> RgbImage {
+        RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]))
+    }
+
+    #[test]
+    fn end_title_layouts_are_end_title_and_its_variants() {
+        for id in [END_TITLE, "end_title_plain", "end_title_x"] {
+            assert!(is_end_title(id), "{id}");
+        }
+        for id in [
+            ACCOLADE,
+            RANK_SCREEN,
+            TAB_HEADER,
+            "end_titles",
+            "end_titleplain",
+            "xend_title",
+            "end",
+            "",
+        ] {
+            assert!(!is_end_title(id), "{id}");
+        }
+    }
+
+    /// The end-title read sees the end-title templates only: another
+    /// screen's word neither names the result nor takes the margin away.
+    #[test]
+    fn the_end_title_is_read_on_its_own() {
+        let all = with_end_titles();
+        let titles = all.end_titles().expect("end-title templates");
+        assert_eq!(titles.sources(), vec![END_TITLE, "end_title_plain"]);
+
+        // an accolade DEFEAT and an end-title VICTORY on one frame
+        let mut both = dark_frame();
+        paint(&mut both, &lay(ACCOLADE), &word(3, 60, 30), [255, 220, 0]);
+        paint(&mut both, &lay(END_TITLE), &word(2, 90, 34), [150, 20, 160]);
+        let whole = all.read(&both);
+        assert_eq!(whole.sure(), None, "two words: {whole:?}");
+        let r = titles.read(&both);
+        assert_eq!(r.sure(), Some(Outcome::Victory), "{r:?}");
+        assert_eq!(r.source.as_deref(), Some(END_TITLE));
+
+        // the accolade word alone is no end title
+        let mut accolade = dark_frame();
+        paint(
+            &mut accolade,
+            &lay(ACCOLADE),
+            &word(3, 60, 30),
+            [255, 220, 0],
+        );
+        assert_eq!(all.read(&accolade).sure(), Some(Outcome::Defeat));
+        let r = titles.read(&accolade);
+        assert_eq!((r.outcome, r.suspect), (None, true), "{r:?}");
+
+        // every end-title template reads, in any colour
+        for (layout, seed, w, want) in [
+            (lay(END_TITLE), 4, 80, Outcome::Defeat),
+            (lay(END_TITLE), 6, 60, Outcome::Draw),
+            (end_title_plain(), 5, 90, Outcome::Victory),
+        ] {
+            let mut img = dark_frame();
+            paint(&mut img, &layout, &word(seed, w, 34), [40, 200, 255]);
+            let r = titles.read(&img);
+            assert_eq!(r.sure(), Some(want), "{r:?}");
+            assert_eq!(r.source.as_deref(), Some(layout.id.as_str()));
+        }
+    }
+
+    /// Only a sure end-title read names a word, and an unsure DRAW names
+    /// nothing at all.
+    #[test]
+    fn an_unsure_end_title_is_not_sure() {
+        let titles = with_end_titles().end_titles().unwrap();
+        let found = |s: [f64; 4]| -> Vec<Found> {
+            s.iter().map(|&score| Found { score, macs: 1 }).collect()
+        };
+        // templates are victory, defeat, draw, plain victory in load order
+        let sure = titles.decide(&found([0.85, 0.30, 0.20, 0.40]));
+        assert_eq!(sure.sure(), Some(Outcome::Victory));
+        // under the floor
+        let low = titles.decide(&found([0.65, 0.30, 0.20, 0.40]));
+        assert_eq!((low.outcome, low.sure()), (Some(Outcome::Victory), None));
+        // no lead over the best other word
+        let close = titles.decide(&found([0.85, 0.80, 0.20, 0.40]));
+        assert_eq!(close.sure(), None, "{close:?}");
+        // a second VICTORY template is the same word, not a rival
+        let twice = titles.decide(&found([0.85, 0.30, 0.20, 0.84]));
+        assert_eq!(twice.sure(), Some(Outcome::Victory), "{twice:?}");
+        // DRAW: sure or nothing
+        let draw = titles.decide(&found([0.40, 0.30, 0.90, 0.20]));
+        assert_eq!(draw.sure(), Some(Outcome::Draw));
+        let unsure_draw = titles.decide(&found([0.75, 0.30, 0.80, 0.20]));
+        assert_eq!((unsure_draw.outcome, unsure_draw.sure()), (None, None));
+        // nothing on the frame
+        let none = titles.decide(&found([0.20, 0.25, 0.10, 0.15]));
+        assert_eq!((none.outcome, none.sure()), (None, None));
+    }
+
+    /// A sure read is a lead over the best other word, so the end titles
+    /// need a VICTORY and a DEFEAT template of their own.
+    #[test]
+    fn end_titles_need_a_victory_and_a_defeat() {
+        assert!(templates().end_titles().is_none(), "no end-title template");
+        let one_word = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+            (lay(END_TITLE), Outcome::Victory, word(2, 90, 34)),
+            (end_title_plain(), Outcome::Victory, word(5, 90, 34)),
+            (lay(END_TITLE), Outcome::Draw, word(6, 60, 34)),
+        ])
+        .unwrap();
+        assert!(one_word.end_titles().is_none());
+    }
+
+    /// Each load cuts the end titles out of the folder it loaded.
+    #[test]
+    fn a_load_carries_its_end_titles() {
+        let data = tempfile::tempdir().unwrap();
+        let words = data.path().join(WORDS_SUBDIR);
+        write_pack(
+            &words,
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+            ],
+        );
+        let dirs = ResultDirs::in_data_dir(data.path());
+        assert!(dirs.load().unwrap().end_titles.is_none());
+        write_pack(
+            &words,
+            &[
+                ("end_title_victory.png", &word(2, 90, 34)),
+                ("end_title_defeat.png", &word(4, 80, 34)),
+            ],
+        );
+        let loaded = dirs.load().unwrap();
+        assert_eq!(loaded.pack, ResultPack::WordsV1);
+        assert_eq!(loaded.end_titles.unwrap().sources(), vec![END_TITLE]);
     }
 
     #[test]
