@@ -826,6 +826,7 @@ impl MapTemplates {
             .all(|f| crate::packs::is_glyph_name(f))
         {
             tracing::warn!(
+                folder = ?dir.file_name(),
                 "map pack atlas.json names a file outside the pack layout; pack not used"
             );
             return None;
