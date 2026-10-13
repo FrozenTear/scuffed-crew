@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let color_outcome = detect::match_end::detect_outcome(&img);
     let text_outcome = detect::match_end::detect_outcome_text(&img);
     println!("outcome (color flood): {color_outcome:?}");
-    println!("outcome (header text): {text_outcome:?}");
+    println!("outcome (end title): {text_outcome:?}");
 
     let player_match = matcher.match_player_hero(&scoreboard);
     match &player_match {

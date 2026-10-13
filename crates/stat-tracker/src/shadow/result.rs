@@ -73,6 +73,13 @@
 //! `tab_header` and 1080p-native accolade frames are untested.
 //! The tracker's colour-flood banner (gold or red over y 30-70%) is not read
 //! here: it depends on colour, and a word read covers the same screens.
+//!
+//! The words-v1 pack also ships `p4_final_score.png`, the FINAL SCORE line
+//! under the end title ([`FinalScoreTemplate`], region x 36-64%, y 70-84%,
+//! plane `min`). It is not a result word: under `reader = "new"` the
+//! end-title gate in `detect::match_end` reads it in place of ocr-v1's P4
+//! OCR, with the same search and certification against
+//! [`FINAL_SCORE_FLOOR`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -139,6 +146,14 @@ const PEAK_SEP: usize = 1;
 /// on every later level (pixels of that level).
 const REFINE_FIRST: usize = 3;
 const REFINE: usize = 2;
+
+/// Layout id and file stem of the FINAL SCORE line template (P4).
+pub const FINAL_SCORE: &str = "p4_final_score";
+/// Minimum score for a sure FINAL SCORE read. The words-v1 template scores
+/// 0.86 to 0.96 on 12 held-out real FINAL SCORE frames (12 games, 3
+/// creators, 1080p and 1440p), 0.90 to 0.93 on the 3 frames it was fit on,
+/// and at most 0.39 on 637 frames without the line (2026-10-13).
+pub const FINAL_SCORE_FLOOR: f32 = 0.70;
 
 /// Source ids of the built-in layouts.
 pub const ACCOLADE: &str = "accolade";
@@ -345,8 +360,7 @@ struct Proj {
     f: usize,
     cw: usize,
     ch: usize,
-    ct: Vec<f32>,
-    s_ct: f64,
+    ct: Vec<f64>,
     res: f64,
 }
 
@@ -358,18 +372,10 @@ impl Proj {
         }
         let f = 1usize << top;
         let mean = t.px.iter().map(|&v| v as f64).sum::<f64>() / (t.w * t.h) as f64;
-        let ct: Vec<f32> = px.iter().map(|&v| (v as f64 - mean) as f32).collect();
-        let s_ct = ct.iter().map(|&v| v as f64).sum();
-        let proj2 = (f * f) as f64 * ct.iter().map(|&v| v as f64 * v as f64).sum::<f64>();
+        let ct: Vec<f64> = px.iter().map(|&v| v as f64 - mean).collect();
+        let proj2 = (f * f) as f64 * ct.iter().map(|&v| v * v).sum::<f64>();
         let res = (norm * norm - proj2).max(0.0).sqrt();
-        Self {
-            f,
-            cw,
-            ch,
-            ct,
-            s_ct,
-            res,
-        }
+        Self { f, cw, ch, ct, res }
     }
 }
 
@@ -550,13 +556,46 @@ fn search_fast_with(
 
 // ---------------------------------------------------------- certification
 
+/// One phase image of box means, in f64, with its integral images.
+struct Means {
+    w: usize,
+    px: Vec<f64>,
+    s1: Vec<f64>,
+    s2: Vec<f64>,
+}
+
+impl Means {
+    fn new(w: usize, h: usize, px: Vec<f64>) -> Self {
+        let mut s1 = vec![0.0f64; (w + 1) * (h + 1)];
+        let mut s2 = vec![0.0f64; (w + 1) * (h + 1)];
+        for y in 0..h {
+            for x in 0..w {
+                let v = px[y * w + x];
+                let i = (y + 1) * (w + 1) + x + 1;
+                s1[i] = v + s1[i - 1] + s1[i - w - 1] - s1[i - w - 2];
+                s2[i] = v * v + s2[i - 1] + s2[i - w - 1] - s2[i - w - 2];
+            }
+        }
+        Self { w, px, s1, s2 }
+    }
+
+    /// Sum of `s` over the `tw` x `th` window at (x, y).
+    #[inline]
+    fn rect(&self, s: &[f64], x: usize, y: usize, tw: usize, th: usize) -> f64 {
+        let a = y * (self.w + 1) + x;
+        let b = (y + th) * (self.w + 1) + x;
+        s[b + tw] - s[b] - s[a + tw] + s[a]
+    }
+}
+
 /// Box means of a level-0 region over `f` x `f` squares at every position,
 /// split by phase: `phases[ay * f + ax]` holds the means at
 /// `(ax + f i, ay + f j)`, so a window's blocks are a contiguous
-/// `cw` x `ch` patch of one phase image.
+/// `cw` x `ch` patch of one phase image. The means stay in f64
+/// ([`bound_at`] subtracts the window mean from them).
 struct Phased {
     f: usize,
-    phases: Vec<Level>,
+    phases: Vec<Means>,
 }
 
 impl Phased {
@@ -570,14 +609,32 @@ impl Phased {
                 let mut px = Vec::with_capacity(pw * ph);
                 for j in 0..ph {
                     for i in 0..pw {
-                        px.push((p.rect(&p.s1, ax + f * i, ay + f * j, f, f) / ff) as f32);
+                        px.push(p.rect(&p.s1, ax + f * i, ay + f * j, f, f) / ff);
                     }
                 }
-                phases.push(Level::new(pw, ph, px));
+                phases.push(Means::new(pw, ph, px));
             }
         }
         Self { f, phases }
     }
+}
+
+/// `sum((a_i - m) * b_i)` in f64.
+#[inline]
+fn dot_centred(a: &[f64], b: &[f64], m: f64) -> f64 {
+    let mut acc = [0.0f64; 4];
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..4 {
+            acc[i] += (x[i] - m) * y[i];
+        }
+    }
+    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    for (x, y) in ra.iter().zip(rb) {
+        s += (x - m) * y;
+    }
+    s
 }
 
 /// An upper bound on the NCC of `k` at (x, y) of `p`, from the block
@@ -587,6 +644,10 @@ impl Phased {
 /// `<Pp, Pt>` is a dot product of `cw * ch` block means instead of the
 /// whole window. `None` on a flat window, where [`ncc_at`] has no score
 /// either.
+///
+/// The block means are centred on the window mean before the dot product,
+/// and the sum is in f64 (F253-11): on a bright, nearly flat window the
+/// uncentred f32 sum lost up to 1.2e-3 of the score to cancellation.
 #[inline]
 fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -> Option<f64> {
     let n = (k.w * k.h) as f64;
@@ -603,13 +664,14 @@ fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -
     let sb2 = q.rect(&q.s2, ox, oy, pr.cw, pr.ch);
     let mut db = 0.0f64;
     for j in 0..pr.ch {
-        db += dot(
+        db += dot_centred(
             &q.px[(oy + j) * q.w + ox..][..pr.cw],
             &pr.ct[j * pr.cw..][..pr.cw],
-        ) as f64;
+            m,
+        );
     }
     let ff = (f * f) as f64;
-    let pp = ff * (db - m * pr.s_ct);
+    let pp = ff * db;
     let proj2 = ff * (sb2 - 2.0 * m * sb + (pr.cw * pr.ch) as f64 * m * m);
     let res_p = (var - proj2).max(0.0).sqrt();
     Some((pp + res_p * pr.res) / (var.sqrt() * k.norm))
@@ -617,7 +679,10 @@ fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -
 
 /// Fewest blocks on a template side for a projection bound.
 const MIN_PROJ_BLOCKS: usize = 3;
-/// Slack on the bound for float rounding (f32 block means and dot).
+/// Slack on the bound for float rounding (the f32 region pixels; the
+/// projection itself is in f64). It covers the bound's own error, not
+/// [`ncc_at`]'s: that score is an uncentred f32 dot and overshoots the exact
+/// score by up to about 1.7e-4 on bright, nearly flat windows (F257-5).
 const BOUND_SLACK: f64 = 1e-4;
 /// Multiply-adds one read may spend on exact scores while certifying.
 const CERT_MACS: usize = 300_000_000;
@@ -637,8 +702,13 @@ enum Cert {
 /// window is ruled out when any bound of the chain ([`bound_at`], one per
 /// projection, coarsest and cheapest first) is below `tau`; every other
 /// window is scored with [`ncc_at`]. The same answer as [`search_full`]
-/// against `tau`, at a small part of its cost when the bounds are tight.
-/// Without projections the stack is searched in full.
+/// against `tau`, at a small part of its cost when the bounds are tight,
+/// up to [`ncc_at`]'s own f32 error (about 1.7e-4 at most, on bright,
+/// nearly flat windows; F257-5). Both ways: a window that error lifts over
+/// `tau` may be ruled out by its bound, so `certify` says `Below` where
+/// [`search_full`] reports a score at `tau`; and a window that is scored
+/// exactly can return `Above` on that error. For a result read `Above`
+/// only flags it. Without projections the stack is searched in full.
 fn certify(
     region: &[Level],
     chain: &[(&Proj, &Phased)],
@@ -777,6 +847,35 @@ struct Template {
 #[derive(Debug, Clone)]
 pub struct ResultTemplates {
     tpls: Vec<Template>,
+    /// The FINAL SCORE line under the end title (P4), when the folder has
+    /// `p4_final_score.png`.
+    final_score: Option<FinalScoreTemplate>,
+}
+
+/// An 8-bit grey PNG as a [`Gray`] in 0..1, or `None` (missing, unreadable,
+/// empty).
+fn load_gray(p: &Path) -> Option<Gray> {
+    let l = image::open(p).ok()?.to_luma8();
+    if l.width() == 0 || l.height() == 0 {
+        return None;
+    }
+    Some(Gray {
+        w: l.width() as usize,
+        h: l.height() as usize,
+        px: l.pixels().map(|p| p.0[0] as f32 / 255.0).collect(),
+    })
+}
+
+/// One template's stacks at the search scales ([`SCALES`]).
+fn scaled_stacks(t: &Gray) -> Vec<Stack> {
+    SCALES
+        .iter()
+        .filter_map(|sc| {
+            let tw = ((t.w as f64 * sc).round_ties_even() as usize).max(1);
+            let th = ((t.h as f64 * sc).round_ties_even() as usize).max(1);
+            Stack::new(&t.resize(tw, th))
+        })
+        .collect()
 }
 
 impl ResultTemplates {
@@ -797,8 +896,10 @@ impl ResultTemplates {
     /// entry and its templates, no code change. `None` unless at least one
     /// victory and one defeat template load.
     ///
-    /// The file comes from a downloaded pack, so a file that does not parse
-    /// refuses the folder, and each entry is checked:
+    /// The file comes from a downloaded pack, so a file that cannot be read
+    /// (not UTF-8, not a file, no permission) or does not parse refuses the
+    /// folder; only a missing file means no extra layouts. Each entry is
+    /// checked:
     /// * an id that is not a plain word id ([`crate::packs::is_word_id`]:
     ///   no `/`, no `..`, not absolute) or a region that is not inside the
     ///   game rect refuses the whole folder (`None`, so the caller falls
@@ -808,7 +909,17 @@ impl ResultTemplates {
     ///   and dropped when it starts inside it. Logged once per process.
     pub fn load_dir(dir: &Path) -> Option<Self> {
         let mut layouts = Layout::builtin();
-        if let Ok(text) = std::fs::read_to_string(dir.join("layouts.json")) {
+        let text = match std::fs::read_to_string(dir.join("layouts.json")) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // Not UTF-8, a directory, no permission: refused like a file that
+            // does not parse (F253-14).
+            Err(e) => {
+                tracing::warn!(error = %e, "result layouts.json unreadable; folder refused");
+                return None;
+            }
+        };
+        if let Some(text) = text {
             match serde_json::from_str::<Vec<Layout>>(&text) {
                 Ok(extra) => {
                     for l in extra {
@@ -827,32 +938,43 @@ impl ResultTemplates {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "result layouts.json unreadable; folder refused");
+                    tracing::warn!(error = %e, "result layouts.json does not parse; folder refused");
                     return None;
                 }
             }
         }
+        // The FINAL SCORE line is a phrase, not a result word: its layout
+        // (built in, or a `p4_final_score` entry above) is taken out of the
+        // word layouts and read on its own.
+        let final_layout = layouts
+            .iter()
+            .find(|l| l.id == FINAL_SCORE)
+            .cloned()
+            .unwrap_or_else(FinalScoreTemplate::builtin_layout);
+        layouts.retain(|l| l.id != FINAL_SCORE);
         let mut tpls = Vec::new();
         for layout in layouts {
             for outcome in Outcome::ALL {
                 let p = dir.join(format!("{}_{}.png", layout.id, outcome.as_str()));
-                let Ok(img) = image::open(&p) else { continue };
-                let l = img.to_luma8();
-                if l.width() == 0 || l.height() == 0 {
-                    continue;
+                if let Some(g) = load_gray(&p) {
+                    tpls.push((layout.clone(), outcome, g));
                 }
-                tpls.push((
-                    layout.clone(),
-                    outcome,
-                    Gray {
-                        w: l.width() as usize,
-                        h: l.height() as usize,
-                        px: l.pixels().map(|p| p.0[0] as f32 / 255.0).collect(),
-                    },
-                ));
             }
         }
-        Self::from_templates(tpls)
+        let final_score = load_gray(&dir.join(format!("{FINAL_SCORE}.png")))
+            .and_then(|g| FinalScoreTemplate::new(final_layout, &g));
+        Self::from_templates(tpls).map(|t| t.with_final_score(final_score))
+    }
+
+    /// These templates with this FINAL SCORE template (or none).
+    pub fn with_final_score(mut self, t: Option<FinalScoreTemplate>) -> Self {
+        self.final_score = t;
+        self
+    }
+
+    /// The FINAL SCORE template, when the folder has one.
+    pub fn final_score(&self) -> Option<&FinalScoreTemplate> {
+        self.final_score.as_ref()
     }
 
     /// Build from in-memory templates (tests). Same `None` rule as `load_dir`.
@@ -866,17 +988,13 @@ impl ResultTemplates {
             .map(|(layout, outcome, t)| Template {
                 layout,
                 outcome,
-                stacks: SCALES
-                    .iter()
-                    .filter_map(|sc| {
-                        let tw = ((t.w as f64 * sc).round_ties_even() as usize).max(1);
-                        let th = ((t.h as f64 * sc).round_ties_even() as usize).max(1);
-                        Stack::new(&t.resize(tw, th))
-                    })
-                    .collect(),
+                stacks: scaled_stacks(&t),
             })
             .collect();
-        Some(Self { tpls })
+        Some(Self {
+            tpls,
+            final_score: None,
+        })
     }
 
     /// The loaded layout with this id (tests).
@@ -1057,6 +1175,135 @@ fn flag(mut r: ResultRead) -> ResultRead {
     }
     r.suspect = true;
     r
+}
+
+// ------------------------------------------------------------- FINAL SCORE
+
+/// What one frame says about the FINAL SCORE line (P4).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum FinalScoreRead {
+    /// A window scores [`FINAL_SCORE_FLOOR`] or more: the line is on the
+    /// frame. The only read that is a signal.
+    Sure(f32),
+    /// The best window scores [`PRESENT`] or more but no window reaches the
+    /// floor, or the exact check ran out of budget. Not a signal.
+    Suspect(f32),
+    /// The fast search found no window at [`PRESENT`]. Not a signal.
+    Absent(f32),
+}
+
+impl FinalScoreRead {
+    /// Only a sure read says the FINAL SCORE line is on the frame.
+    pub fn is_signal(self) -> bool {
+        matches!(self, FinalScoreRead::Sure(_))
+    }
+
+    fn of(score: f64) -> Self {
+        let s = score.max(0.0) as f32;
+        if score >= FINAL_SCORE_FLOOR as f64 {
+            FinalScoreRead::Sure(s)
+        } else if score >= PRESENT as f64 {
+            FinalScoreRead::Suspect(s)
+        } else {
+            FinalScoreRead::Absent(s)
+        }
+    }
+}
+
+/// The words-v1 `p4_final_score` template: the FINAL SCORE line under the
+/// end title, which the end-title gate takes as end-of-match evidence when
+/// the title itself is too faint (ocr-v1's P4 reads it with Tesseract).
+#[derive(Debug, Clone)]
+pub struct FinalScoreTemplate {
+    layout: Layout,
+    stacks: Vec<Stack>,
+}
+
+impl FinalScoreTemplate {
+    /// The pack's region for the line (words-v1 `words.json`): x 36-64%,
+    /// y 70-84%, plane `min` (white text).
+    pub fn builtin_layout() -> Layout {
+        Layout::new(FINAL_SCORE, [0.36, 0.70, 0.64, 0.84], Plane::Min)
+    }
+
+    /// A template at the work scale, or `None` when it is flat.
+    pub fn new(layout: Layout, t: &Gray) -> Option<Self> {
+        let stacks = scaled_stacks(t);
+        (!stacks.is_empty()).then_some(Self { layout, stacks })
+    }
+
+    /// Read one frame with the coarse-to-fine search. A fast score at the
+    /// floor is a real window's score, so it is sure. A fast score between
+    /// [`PRESENT`] and the floor may be an under-read, so [`certify`]
+    /// decides exactly whether any window reaches the floor: a window that
+    /// does makes the read sure, and a check that runs out of budget leaves
+    /// it suspect. So a sure read here is a sure exhaustive read, and the
+    /// reverse holds whenever the fast score is at [`PRESENT`] (both up to
+    /// [`ncc_at`]'s f32 error at the floor, see [`certify`]).
+    ///
+    /// Cost note (F257-6): a suspect fast score certifies with the full
+    /// [`CERT_MACS`] budget, and the bound pass is not budgeted (F253-13).
+    /// On the poll tick that can repeat on every stable tick. No frame of
+    /// the 652 measured lands in the suspect band (others at most 0.39,
+    /// the line at least 0.86), so it has never run on a real frame.
+    pub fn read(&self, rgb: &RgbImage) -> FinalScoreRead {
+        self.read_with_budget(rgb, CERT_MACS)
+    }
+
+    fn read_with_budget(&self, rgb: &RgbImage, budget: usize) -> FinalScoreRead {
+        let Some(levels) = region(rgb, self.layout.roi, self.layout.plane) else {
+            return FinalScoreRead::Absent(0.0);
+        };
+        let fast = self
+            .stacks
+            .iter()
+            .map(|st| search_fast(&levels, st).score)
+            .fold(-1.0f64, f64::max);
+        self.settle(&levels, fast, budget)
+    }
+
+    /// The read for this fast score, certified against the floor when it is
+    /// suspect (tests hand it an under-read score).
+    fn settle(&self, levels: &[Level], fast: f64, mut budget: usize) -> FinalScoreRead {
+        let read = FinalScoreRead::of(fast);
+        if !matches!(read, FinalScoreRead::Suspect(_)) {
+            return read;
+        }
+        let tau = FINAL_SCORE_FLOOR as f64;
+        let mut phased: Vec<((usize, usize), Phased)> = Vec::new();
+        for st in &self.stacks {
+            for pr in &st.projs {
+                make_phased(&mut phased, 0, levels, pr.f);
+            }
+            let chain: Vec<(&Proj, &Phased)> = st
+                .projs
+                .iter()
+                .filter_map(|pr| {
+                    let ph = phased.iter().find(|(k, _)| *k == (0, pr.f))?;
+                    Some((pr, &ph.1))
+                })
+                .collect();
+            match certify(levels, &chain, st, tau, &mut budget) {
+                Cert::Below => {}
+                Cert::Above(v) => return FinalScoreRead::Sure(v as f32),
+                Cert::Unknown => return read,
+            }
+        }
+        read
+    }
+
+    /// [`Self::read`] with every window scored (tests, benches). Slow.
+    pub fn read_exhaustive(&self, rgb: &RgbImage) -> FinalScoreRead {
+        let Some(levels) = region(rgb, self.layout.roi, self.layout.plane) else {
+            return FinalScoreRead::Absent(0.0);
+        };
+        FinalScoreRead::of(
+            self.stacks
+                .iter()
+                .map(|st| search_full(&levels, st).score)
+                .fold(-1.0f64, f64::max),
+        )
+    }
 }
 
 /// The regions of one frame: one per distinct rect and plane, the region
@@ -2862,5 +3109,303 @@ mod tests {
         live.wait_reload();
         assert_eq!(reads_victory(&live, 7), (Some(ResultPack::WordsV1), true));
         assert_eq!(live.reload_spawns(), 2);
+    }
+
+    // ------------------------------------- bound precision (F253-11, F253-12)
+
+    /// Exact NCC of `k` at (x, y) of `p`, all in f64.
+    fn ncc64(p: &Level, k: &Kernel, x: usize, y: usize) -> f64 {
+        let n = (k.w * k.h) as f64;
+        let win = |tx: usize, ty: usize| p.px[(y + ty) * p.w + x + tx] as f64;
+        let mut mean = 0.0;
+        for ty in 0..k.h {
+            for tx in 0..k.w {
+                mean += win(tx, ty);
+            }
+        }
+        mean /= n;
+        let (mut num, mut pp, mut tt) = (0.0, 0.0, 0.0);
+        for ty in 0..k.h {
+            for tx in 0..k.w {
+                let (a, b) = (win(tx, ty) - mean, k.z[ty * k.w + tx] as f64);
+                num += a * b;
+                pp += a * a;
+                tt += b * b;
+            }
+        }
+        num / (pp.sqrt() * tt.sqrt())
+    }
+
+    /// The window `m + s (P t + lambda (I - P) t)`, with `t` the zero-mean
+    /// template and `P` the stack's coarsest block projection. Its residual
+    /// is `lambda s (I - P) t` for that projection and every finer one, so
+    /// Cauchy-Schwarz is an equality and the bound equals the score.
+    fn tight_window(st: &Stack, m: f64, s: f64, lambda: f64) -> Level {
+        let (k, pr) = (&st.levels[0], &st.projs[0]);
+        let mut px = vec![0.0f32; k.w * k.h];
+        for y in 0..k.h {
+            for x in 0..k.w {
+                let (bx, by) = (x / pr.f, y / pr.f);
+                let pt = if bx < pr.cw && by < pr.ch {
+                    pr.ct[by * pr.cw + bx]
+                } else {
+                    0.0
+                };
+                let z = k.z[y * k.w + x] as f64;
+                px[y * k.w + x] = (m + s * (pt + lambda * (z - pt))) as f32;
+            }
+        }
+        Level::new(k.w, k.h, px)
+    }
+
+    /// Glyph templates whose sides are multiples of 16, so every projection
+    /// (f = 16, 8, 4, 2) tiles them with no leftover strip.
+    fn tiled_stacks() -> Vec<Stack> {
+        [(96, 48, 801), (128, 48, 802), (160, 64, 803)]
+            .iter()
+            .map(|&(w, h, seed)| Stack::new(&glyphs(seed, w, h)).unwrap())
+            .collect()
+    }
+
+    /// On a tight window the bound is the score, to float precision, at
+    /// every projection: a bound that is a little too low (a residual norm
+    /// 1% short, a negative slack) is caught here.
+    #[test]
+    fn the_bound_is_exact_on_a_tight_window() {
+        let mut checked = 0;
+        for st in tiled_stacks() {
+            assert_eq!(st.projs.len(), 4, "f = 16, 8, 4, 2");
+            assert_eq!(st.projs[0].f, 16);
+            let k = &st.levels[0];
+            for (m, s, lambda) in [
+                (0.2, 0.3, 1.0),
+                (0.5, 0.2, 0.4),
+                (0.3, 0.25, 2.5),
+                (0.8, 0.05, 0.7),
+            ] {
+                let p = tight_window(&st, m, s, lambda);
+                let v = ncc64(&p, k, 0, 0);
+                for pr in &st.projs {
+                    let ub = bound_at(&p, &Phased::new(&p, pr.f), k, pr, 0, 0).unwrap();
+                    assert!(
+                        (ub - v).abs() < 1e-6,
+                        "f {} m {m} s {s} lambda {lambda}: bound {ub} score {v}",
+                        pr.f
+                    );
+                    assert!(ub + BOUND_SLACK >= v, "f {}: {ub} < {v}", pr.f);
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 48);
+    }
+
+    /// Bright, nearly flat windows (amplitude down to 1e-4 of full scale,
+    /// not quantized), and faint 8-bit copies: the bound stays at or above
+    /// the exact score within [`BOUND_SLACK`]. An uncentred f32 projection
+    /// lost up to 1.2e-3 here (F253-11).
+    #[test]
+    fn the_bound_holds_on_near_flat_windows() {
+        let mut worst = f64::INFINITY;
+        for st in tiled_stacks() {
+            let k = &st.levels[0];
+            let mut windows = Vec::new();
+            for m in [0.6, 0.9, 0.97] {
+                // sub-grey-level ghosts (1e-4 is 1/40 of a grey level); below
+                // about 1e-5 the window variance itself is lost to rounding in
+                // the integral images, for ncc_at as much as for the bound
+                for s in [1e-3, 3e-4, 1e-4] {
+                    for lambda in [0.5, 1.0, 2.0] {
+                        windows.push(tight_window(&st, m, s, lambda));
+                    }
+                }
+                // faint 8-bit copies: a few grey levels of contrast
+                for step in [2.0, 3.0, 6.0] {
+                    let mut p = tight_window(&st, m, step / 255.0, 1.0);
+                    for v in p.px.iter_mut() {
+                        *v = (*v * 255.0).round() / 255.0;
+                    }
+                    windows.push(Level::new(p.w, p.h, p.px));
+                }
+            }
+            for p in &windows {
+                let v = ncc64(p, k, 0, 0);
+                for pr in &st.projs {
+                    let Some(ub) = bound_at(p, &Phased::new(p, pr.f), k, pr, 0, 0) else {
+                        continue;
+                    };
+                    worst = worst.min(ub - v);
+                }
+            }
+        }
+        assert!(
+            worst + BOUND_SLACK >= 0.0,
+            "bound below the score by {}",
+            -worst
+        );
+    }
+
+    /// The certification threshold is `s1 - MARGIN`, exactly: a runner-up
+    /// whose exhaustive best is 0.002 above it flags the read, one 0.002
+    /// below it does not.
+    #[test]
+    fn the_certification_threshold_is_pinned() {
+        let title = Layout::new(END_TITLE, [0.40, 0.40, 0.62, 0.56], Plane::Max);
+        let (a, b) = (glyphs(611, 100, 48), glyphs(612, 90, 48));
+        let t = ResultTemplates::from_templates(vec![
+            (title.clone(), Outcome::Victory, a),
+            (title, Outcome::Defeat, b.clone()),
+        ])
+        .unwrap();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 1290, 650, &b, [240, 240, 240]);
+        let mut regions = t.regions(&img);
+        // DEFEAT's exhaustive best: the runner-up the certification must find
+        let r = t.scores_in(&regions, true)[1].score;
+        assert!(r > 0.5, "{r}");
+        for (gap, flagged) in [(-0.002, true), (0.002, false)] {
+            // VICTORY's fast score puts the threshold `gap` above DEFEAT's
+            // best; DEFEAT itself under-read
+            let s1 = r + MARGIN as f64 + gap;
+            let mut scores = t.scores_in(&regions, false);
+            scores[0].score = s1;
+            scores[1].score = 0.2;
+            assert!(!t.decide(&scores).suspect, "the fast scores alone are sure");
+            let read = t.settle(&mut regions, scores, CERT_MACS);
+            assert_eq!(read.suspect, flagged, "gap {gap}: {read:?}");
+            assert_eq!(read.outcome, Some(Outcome::Victory));
+        }
+    }
+
+    /// A layouts.json that cannot be read refuses the folder like one that
+    /// does not parse (F253-14); a missing one does not.
+    #[test]
+    fn an_unreadable_layouts_json_refuses_the_folder() {
+        let bad = tempfile::tempdir().unwrap();
+        pack(bad.path(), 1);
+        std::fs::write(bad.path().join("layouts.json"), [0xff, 0xfe, b'[', b']']).unwrap();
+        assert!(ResultTemplates::load_dir(bad.path()).is_none(), "not UTF-8");
+        let dir = tempfile::tempdir().unwrap();
+        pack(dir.path(), 1);
+        std::fs::create_dir(dir.path().join("layouts.json")).unwrap();
+        assert!(
+            ResultTemplates::load_dir(dir.path()).is_none(),
+            "a directory"
+        );
+        let none = tempfile::tempdir().unwrap();
+        pack(none.path(), 1);
+        assert!(ResultTemplates::load_dir(none.path()).is_some(), "no file");
+    }
+
+    // ------------------------------------------------- FINAL SCORE (O3)
+
+    /// A synthetic FINAL SCORE line at the work scale (the words-v1 one is
+    /// 123 x 28).
+    fn final_line() -> Gray {
+        glyphs(701, 123, 28)
+    }
+
+    fn final_template() -> FinalScoreTemplate {
+        FinalScoreTemplate::new(FinalScoreTemplate::builtin_layout(), &final_line()).unwrap()
+    }
+
+    /// A 1440p frame with `t` painted white inside the FINAL SCORE region.
+    fn final_frame(t: &Gray) -> RgbImage {
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 1102, 1060, t, [235, 235, 235]);
+        img
+    }
+
+    #[test]
+    fn the_final_score_line_reads_sure() {
+        let fs = final_template();
+        let r = fs.read(&final_frame(&final_line()));
+        assert!(matches!(r, FinalScoreRead::Sure(s) if s > 0.9), "{r:?}");
+        assert!(r.is_signal());
+        assert!(fs.read_exhaustive(&final_frame(&final_line())).is_signal());
+        let blank = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        assert!(matches!(fs.read(&blank), FinalScoreRead::Absent(_)));
+        // other text in the region is not the line
+        let other = fs.read(&final_frame(&glyphs(702, 123, 28)));
+        assert!(!other.is_signal(), "{other:?}");
+    }
+
+    /// Half the line's glyphs: present, below the floor. Not a signal.
+    #[test]
+    fn a_partial_final_score_line_is_not_a_signal() {
+        let line = final_line();
+        let other = glyphs(703, 123, 28);
+        let mut half = line.clone();
+        for y in 0..half.h {
+            for x in half.w / 2..half.w {
+                half.px[y * half.w + x] = other.px[y * other.w + x];
+            }
+        }
+        let fs = final_template();
+        let r = fs.read(&final_frame(&half));
+        assert!(matches!(r, FinalScoreRead::Suspect(_)), "{r:?}");
+        assert!(!r.is_signal());
+    }
+
+    /// A fast score in the suspect band is certified against the floor: the
+    /// line on the frame makes it sure, a frame without it stays suspect,
+    /// and a check without budget stays suspect.
+    #[test]
+    fn an_under_read_final_score_line_is_certified() {
+        let fs = final_template();
+        let levels = |img: &RgbImage| {
+            region(img, fs.layout.roi, fs.layout.plane).expect("region inside the frame")
+        };
+        let on = levels(&final_frame(&final_line()));
+        assert!(fs.settle(&on, 0.6, CERT_MACS).is_signal(), "certified");
+        assert!(
+            matches!(fs.settle(&on, 0.6, 0), FinalScoreRead::Suspect(_)),
+            "no budget"
+        );
+        let off = levels(&final_frame(&glyphs(704, 123, 28)));
+        assert!(
+            matches!(fs.settle(&off, 0.6, CERT_MACS), FinalScoreRead::Suspect(_)),
+            "no window at the floor"
+        );
+        assert!(matches!(
+            fs.settle(&off, 0.3, CERT_MACS),
+            FinalScoreRead::Absent(_)
+        ));
+    }
+
+    /// `p4_final_score.png` loads with the words; a `p4_final_score` entry
+    /// in layouts.json moves its region.
+    #[test]
+    fn the_final_score_template_loads_from_the_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        pack(dir.path(), 1);
+        assert!(
+            ResultTemplates::load_dir(dir.path())
+                .unwrap()
+                .final_score()
+                .is_none()
+        );
+        write_pack(dir.path(), &[("p4_final_score.png", &final_line())]);
+        let t = ResultTemplates::load_dir(dir.path()).unwrap();
+        assert!(
+            t.final_score()
+                .unwrap()
+                .read(&final_frame(&final_line()))
+                .is_signal()
+        );
+        std::fs::write(
+            dir.path().join("layouts.json"),
+            r#"[{"id": "p4_final_score", "roi": [0.05, 0.2, 0.35, 0.4], "plane": "min"}]"#,
+        )
+        .unwrap();
+        let t = ResultTemplates::load_dir(dir.path()).unwrap();
+        let fs = t.final_score().unwrap();
+        assert!(
+            !fs.read(&final_frame(&final_line())).is_signal(),
+            "old region"
+        );
+        let mut moved = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut moved, 300, 400, &final_line(), [235, 235, 235]);
+        assert!(fs.read(&moved).is_signal(), "new region");
     }
 }

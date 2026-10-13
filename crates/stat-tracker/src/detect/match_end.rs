@@ -21,6 +21,31 @@ pub enum OutcomeSource {
     EndTitle,
 }
 
+/// Who looks for the FINAL SCORE line under the end title (P4), the
+/// end-of-match evidence that lets the end-title read run when the title's
+/// colour mass is too low (see [`read_end_title`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinalScoreSource {
+    /// Tesseract over the line (`reader = "ocr-v1"`).
+    #[default]
+    Ocr,
+    /// The words-v1 `p4_final_score` template (`reader = "new"`). Only a
+    /// sure read is a signal; a suspect or absent read is not, and no OCR
+    /// runs. Without that template loaded the line is read with OCR.
+    Words,
+}
+
+impl FinalScoreSource {
+    /// The source for this reader setting (`reader = "new"` or not).
+    pub fn for_reader(use_new_reader: bool) -> Self {
+        if use_new_reader {
+            FinalScoreSource::Words
+        } else {
+            FinalScoreSource::Ocr
+        }
+    }
+}
+
 /// One frame's end-of-match titles, by reader: the centred end title
 /// VICTORY! / DEFEAT (P3, [`read_end_title`]) and the title card that wakes
 /// the poller (P5, [`detect_end_reel_with`]).
@@ -71,13 +96,18 @@ impl Titles {
 
 /// One-shot outcome read for a single frame (Tab captures, dev tools).
 pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
-    detect_outcome_with(img, &Titles::Ocr)
+    detect_outcome_with(img, FinalScoreSource::Ocr, &Titles::Ocr)
 }
 
-/// [`detect_outcome`] with the end title from `titles`.
-pub fn detect_outcome_with(img: &DynamicImage, titles: &Titles) -> MatchOutcome {
+/// [`detect_outcome`] with the FINAL SCORE line read by `p4` and the end
+/// title from `titles`.
+pub fn detect_outcome_with(
+    img: &DynamicImage,
+    p4: FinalScoreSource,
+    titles: &Titles,
+) -> MatchOutcome {
     let rgb = img.to_rgb8();
-    detect_outcome_signal_inner(img, &rgb, None, titles)
+    detect_outcome_signal_inner(img, &rgb, None, p4, titles)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
 }
@@ -101,7 +131,7 @@ pub fn detect_outcome_signal_with_rgb(
     img: &DynamicImage,
     rgb: &RgbImage,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, None, &Titles::Ocr)
+    detect_outcome_signal_inner(img, rgb, None, FinalScoreSource::Ocr, &Titles::Ocr)
 }
 
 /// Poll-tick outcome detection: identical to
@@ -112,6 +142,7 @@ pub fn detect_outcome_signal_with_rgb(
 /// detection shifts at most one tick later, inside the budget of screens that
 /// stay up 15–20s and already need two agreeing reads to confirm.
 ///
+/// `p4` says who reads the FINAL SCORE line ([`FinalScoreSource`]).
 /// `titles` is the frame's end title by reader ([`Titles`]). Under `reader =
 /// "new"` the end title is not gated on stability: its read is already
 /// made, and a first sighting is a signal.
@@ -119,15 +150,17 @@ pub fn detect_outcome_signal_polled(
     img: &DynamicImage,
     rgb: &RgbImage,
     stability: &mut FrameStability,
+    p4: FinalScoreSource,
     titles: &Titles,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, Some(stability), titles)
+    detect_outcome_signal_inner(img, rgb, Some(stability), p4, titles)
 }
 
 fn detect_outcome_signal_inner(
     img: &DynamicImage,
     rgb: &RgbImage,
     mut stability: Option<&mut FrameStability>,
+    p4: FinalScoreSource,
     titles: &Titles,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
     if let Some(outcome) = detect_banner(rgb) {
@@ -141,66 +174,49 @@ fn detect_outcome_signal_inner(
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::RankScreen)),
     }
-    match read_end_title(img, rgb, stability, titles) {
+    match read_end_title(img, rgb, stability, p4, titles) {
         MatchOutcome::Unknown => None,
         outcome => Some((outcome, OutcomeSource::EndTitle)),
     }
 }
 
-/// Text-based outcome fallback for the *captured scoreboard frame*.
+/// Text-based outcome fallback for the *captured Tab frame*: the centred
+/// end title ([`read_end_title`]), meant to be called only when
+/// `detect_outcome` returns `Unknown` and no outcome was carried over from
+/// the poller.
 ///
-/// The color-flood detectors above only fire on the brief full-screen
-/// VICTORY/DEFEAT banner and the blue commendation screen. The poller samples
-/// every few seconds and routinely misses that transient banner, so by the time
-/// the user presses Tab we're on the post-match scoreboard — which prints the
-/// VICTORY / DEFEAT header at top-center but has none of the color flood. This
-/// reads that header text directly, and is meant to be called only when
-/// `detect_outcome` returns `Unknown` and no outcome was carried over from the
-/// poller.
+/// It used to OCR a VICTORY / DEFEAT header at the top centre first (T1:
+/// x 30-70%, y 2-24% of the 16:9 rect). Removed in alpha.7 O4. T1's own
+/// crop and check found no result word on 652 frames (2026-10-13):
+/// * 257 Tab candidates from 67 games (member frames 2026-05-17 to
+///   2026-10-13, 2026 VOD boards), 8 of them end-of-match Tab frames from 7
+///   games (Escort, Hybrid, Control; 6 known competitive);
+/// * end titles, accolade and rank screens of Escort, Hybrid, Control, Push
+///   and Flashpoint, and two 2022-23 UI references.
+///
+/// Not covered: Push, Flashpoint and Clash end-of-match Tab frames, quick
+/// play, arcade, custom games, Stadium, and a DRAW. The full-board OCR's
+/// header line (`parse::outcome_from_board_header`, ET-2) is untouched and
+/// remains the only reader of a result word on the board itself.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
-    detect_outcome_text_with(img, &Titles::Ocr)
+    detect_outcome_text_with(img, FinalScoreSource::Ocr, &Titles::Ocr)
 }
 
-/// [`detect_outcome_text`] with the end title from `titles`.
-pub fn detect_outcome_text_with(img: &DynamicImage, titles: &Titles) -> MatchOutcome {
-    let rgb = img.to_rgb8();
-    let (fw, fh) = (img.width(), img.height());
-    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
-    // Top-center band where OW2 renders the result header (1/1000ths of 16:9).
-    let x = gx + gw * 300 / 1000;
-    let y = gy + gh * 20 / 1000;
-    let band_w = gw * 400 / 1000;
-    let band_h = gh * 220 / 1000;
-    if band_w == 0 || band_h == 0 || x + band_w > fw || y + band_h > fh {
-        return read_end_title(img, &rgb, None, titles);
-    }
-    let region = img.crop_imm(x, y, band_w, band_h);
-
-    match crate::ocr::recognize_region(&region) {
-        Ok(text) => {
-            let upper = text.to_uppercase();
-            if upper.contains("VICTORY") {
-                tracing::info!(text = %text.trim(), "outcome read from scoreboard header text");
-                MatchOutcome::Victory
-            } else if upper.contains("DEFEAT") {
-                tracing::info!(text = %text.trim(), "outcome read from scoreboard header text");
-                MatchOutcome::Defeat
-            } else if upper.contains("DRAW") {
-                MatchOutcome::Draw
-            } else {
-                tracing::debug!(text = %text.trim(), "scoreboard header text did not contain an outcome");
-                read_end_title(img, &rgb, None, titles)
-            }
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "scoreboard header OCR failed");
-            read_end_title(img, &rgb, None, titles)
-        }
-    }
+/// [`detect_outcome_text`] with the FINAL SCORE line read by `p4` and the
+/// end title from `titles`.
+pub fn detect_outcome_text_with(
+    img: &DynamicImage,
+    p4: FinalScoreSource,
+    titles: &Titles,
+) -> MatchOutcome {
+    read_end_title(img, &img.to_rgb8(), None, p4, titles)
 }
 
 /// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
 /// Cheap sat-mass / scoreline gate first so mid-fight ticks do not pay OCR.
+/// The gate passes on enough title colour mass, or, when the mass is low,
+/// on the FINAL SCORE line under the title (P4, read by `p4`). Either way
+/// the outcome itself is the title word's OCR below.
 ///
 /// Under `reader = "new"` ([`Titles::Words`]) the word is the frame's
 /// words-v1 end-title read and nothing else runs: no gate, no FINAL SCORE
@@ -210,14 +226,15 @@ fn read_end_title(
     img: &DynamicImage,
     rgb: &RgbImage,
     mut stability: Option<&mut FrameStability>,
+    p4: FinalScoreSource,
     titles: &Titles,
 ) -> MatchOutcome {
     if let Titles::Words(read) = titles {
         return end_title_from_words(read.as_ref());
     }
     let mass = center_title_mass(rgb);
-    let scoreline =
-        mass < END_TITLE_MASS_MIN && scoreline_looks_present(img, rgb, stability.as_deref_mut());
+    let scoreline = mass < END_TITLE_MASS_MIN
+        && scoreline_looks_present(img, rgb, stability.as_deref_mut(), p4);
     if mass < END_TITLE_MASS_MIN && !scoreline {
         return MatchOutcome::Unknown;
     }
@@ -428,10 +445,43 @@ fn center_title_mass(rgb: &RgbImage) -> f32 {
     locked as f32 / total as f32
 }
 
+/// P4: is the FINAL SCORE line under the end title on this frame? A cheap
+/// white-pixel gate and the crop's stability come first; then `p4` reads
+/// the line ([`FinalScoreSource`]).
 fn scoreline_looks_present(
     img: &DynamicImage,
     rgb: &RgbImage,
     stability: Option<&mut FrameStability>,
+    p4: FinalScoreSource,
+) -> bool {
+    scoreline_looks_present_with(img, rgb, stability, p4, crate::shadow::read_final_score)
+}
+
+/// Under `reader = "new"`, P4 fell back to OCR because no
+/// `p4_final_score` template is loaded (an older words-v1 pack, or none
+/// yet). Logged once per process (F257-1); S1 is to forbid the fallback.
+/// Returns whether this call logged (tests).
+fn warn_final_score_ocr_fallback() -> bool {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    if first {
+        tracing::warn!(
+            "reader = \"new\" but no p4_final_score template is loaded; \
+             the FINAL SCORE line is read with OCR"
+        );
+    }
+    first
+}
+
+/// [`scoreline_looks_present`] with the words-v1 read as an argument
+/// (tests). `words` is called only for [`FinalScoreSource::Words`]; `None`
+/// from it (no template loaded) falls back to the OCR read.
+fn scoreline_looks_present_with(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: Option<&mut FrameStability>,
+    p4: FinalScoreSource,
+    words: impl FnOnce(&RgbImage) -> Option<crate::shadow::result::FinalScoreRead>,
 ) -> bool {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
@@ -463,6 +513,19 @@ fn scoreline_looks_present(
     {
         tracing::trace!("scoreline crop not stable — deferring OCR");
         return false;
+    }
+    if p4 == FinalScoreSource::Words {
+        match words(rgb) {
+            Some(read) => {
+                tracing::trace!(?read, "final score line (words-v1)");
+                return read.is_signal();
+            }
+            // S1 (OCR off) must close this: under `reader = "new"` with no
+            // p4_final_score template loaded, P4 still runs Tesseract below.
+            None => {
+                warn_final_score_ocr_fallback();
+            }
+        }
     }
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
@@ -1334,6 +1397,9 @@ mod tests {
     use crate::ocr::ocr_calls;
     use crate::shadow::result::END_TITLE;
 
+    /// The FINAL SCORE source `reader = "new"` passes along with its titles.
+    const NEW: FinalScoreSource = FinalScoreSource::Words;
+
     fn dark_frame() -> (DynamicImage, RgbImage) {
         let rgb = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
         (DynamicImage::ImageRgb8(rgb.clone()), rgb)
@@ -1418,13 +1484,13 @@ mod tests {
         assert!(matches!(Titles::for_frame(true, &img), Titles::Words(_)));
         // past the colour-mass gate: one Tesseract call, on the title crop
         let before = ocr_calls();
-        let _ = read_end_title(&img, &rgb, None, &Titles::Ocr);
+        let _ = read_end_title(&img, &rgb, None, FinalScoreSource::Ocr, &Titles::Ocr);
         assert_eq!(ocr_calls() - before, 1);
         // a dark frame stays behind the gate
         let (img, rgb) = dark_frame();
         let before = ocr_calls();
         assert_eq!(
-            read_end_title(&img, &rgb, None, &Titles::Ocr),
+            read_end_title(&img, &rgb, None, FinalScoreSource::Ocr, &Titles::Ocr),
             MatchOutcome::Unknown
         );
         assert_eq!(ocr_calls(), before);
@@ -1438,7 +1504,13 @@ mod tests {
     fn only_a_sure_words_read_is_an_end_title() {
         let (bar_img, bar_rgb) = scoreline_bar_frame();
         let before = ocr_calls();
-        let _ = read_end_title(&bar_img, &bar_rgb, None, &Titles::Ocr);
+        let _ = read_end_title(
+            &bar_img,
+            &bar_rgb,
+            None,
+            FinalScoreSource::Ocr,
+            &Titles::Ocr,
+        );
         assert!(ocr_calls() > before, "ocr-v1 reads the FINAL SCORE line");
 
         let before = ocr_calls();
@@ -1448,12 +1520,12 @@ mod tests {
                 (Outcome::Defeat, MatchOutcome::Defeat),
                 (Outcome::Draw, MatchOutcome::Draw),
             ] {
-                let got = read_end_title(&img, &rgb, None, &words(Some(o), false));
+                let got = read_end_title(&img, &rgb, None, NEW, &words(Some(o), false));
                 assert_eq!(got, want);
             }
             for titles in unsure_words() {
                 assert_eq!(
-                    read_end_title(&img, &rgb, None, &titles),
+                    read_end_title(&img, &rgb, None, NEW, &titles),
                     MatchOutcome::Unknown,
                     "{titles:?}"
                 );
@@ -1471,22 +1543,28 @@ mod tests {
         let mut st = FrameStability::default();
         let before = ocr_calls();
         assert_eq!(
-            detect_outcome_signal_polled(&img, &rgb, &mut st, &words(Some(Outcome::Defeat), false)),
+            detect_outcome_signal_polled(
+                &img,
+                &rgb,
+                &mut st,
+                NEW,
+                &words(Some(Outcome::Defeat), false)
+            ),
             Some((MatchOutcome::Defeat, OutcomeSource::EndTitle))
         );
         for titles in unsure_words() {
             assert_eq!(
-                detect_outcome_signal_polled(&img, &rgb, &mut st, &titles),
+                detect_outcome_signal_polled(&img, &rgb, &mut st, NEW, &titles),
                 None,
                 "{titles:?}"
             );
         }
         assert_eq!(
-            detect_outcome_with(&img, &words(Some(Outcome::Victory), false)),
+            detect_outcome_with(&img, NEW, &words(Some(Outcome::Victory), false)),
             MatchOutcome::Victory
         );
         assert_eq!(
-            detect_outcome_with(&img, &Titles::Words(None)),
+            detect_outcome_with(&img, NEW, &Titles::Words(None)),
             MatchOutcome::Unknown
         );
         assert_eq!(ocr_calls(), before);
@@ -1494,7 +1572,7 @@ mod tests {
         let (img, rgb) = title_mass_frame();
         let mut st = FrameStability::default();
         assert_eq!(
-            detect_outcome_signal_polled(&img, &rgb, &mut st, &Titles::Ocr),
+            detect_outcome_signal_polled(&img, &rgb, &mut st, FinalScoreSource::Ocr, &Titles::Ocr),
             None
         );
         // the colour flood is read before any word
@@ -1504,6 +1582,7 @@ mod tests {
                 &gold,
                 &gold.to_rgb8(),
                 &mut st,
+                NEW,
                 &words(Some(Outcome::Defeat), false)
             ),
             Some((MatchOutcome::Victory, OutcomeSource::Banner))
@@ -1516,12 +1595,12 @@ mod tests {
     fn the_tab_text_fallback_takes_the_end_title_from_words() {
         let (img, _) = dark_frame();
         assert_eq!(
-            detect_outcome_text_with(&img, &words(Some(Outcome::Victory), false)),
+            detect_outcome_text_with(&img, NEW, &words(Some(Outcome::Victory), false)),
             MatchOutcome::Victory
         );
         for titles in unsure_words() {
             assert_eq!(
-                detect_outcome_text_with(&img, &titles),
+                detect_outcome_text_with(&img, NEW, &titles),
                 MatchOutcome::Unknown,
                 "{titles:?}"
             );
@@ -2136,5 +2215,110 @@ mod tests {
         ] {
             assert!(!read_end_reel_nameplate(&frame), "{what}");
         }
+    }
+
+    // ------------------------------------------------ FINAL SCORE line (O3)
+
+    use crate::shadow::result::FinalScoreRead;
+
+    /// A 1440p frame, with a white bar on the FINAL SCORE line when `white`
+    /// (enough for P4's white-pixel gate).
+    fn scoreline_frame(white: bool) -> (DynamicImage, RgbImage) {
+        let mut rgb = RgbImage::from_pixel(2560, 1440, Rgb([30, 34, 60]));
+        if white {
+            for y in 1080..1110 {
+                for x in 1080..1480 {
+                    rgb.put_pixel(x, y, Rgb([245, 245, 245]));
+                }
+            }
+        }
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    fn never(_: &RgbImage) -> Option<FinalScoreRead> {
+        panic!("the words-v1 template was read")
+    }
+
+    /// `reader = "ocr-v1"` reads the line with OCR only, through every
+    /// public entry point: the template is never consulted.
+    #[test]
+    fn ocr_v1_never_reads_the_final_score_template() {
+        assert_eq!(FinalScoreSource::default(), FinalScoreSource::Ocr);
+        assert_eq!(FinalScoreSource::for_reader(false), FinalScoreSource::Ocr);
+        assert_eq!(FinalScoreSource::for_reader(true), FinalScoreSource::Words);
+        let (img, rgb) = scoreline_frame(true);
+        let _ = scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Ocr, never);
+    }
+
+    /// Under `reader = "new"` the template's read decides: only a sure read
+    /// is a signal.
+    #[test]
+    fn words_v1_decides_the_final_score_line() {
+        let (img, rgb) = scoreline_frame(true);
+        for (read, want) in [
+            (FinalScoreRead::Sure(0.9), true),
+            (FinalScoreRead::Suspect(0.65), false),
+            (FinalScoreRead::Absent(0.2), false),
+        ] {
+            let got =
+                scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Words, |_| {
+                    Some(read)
+                });
+            assert_eq!(got, want, "{read:?}");
+        }
+        // no template loaded: the OCR read, which finds no words on a bar
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| None
+        ));
+    }
+
+    /// P4's white-pixel gate and crop stability still come first under
+    /// `reader = "new"`.
+    #[test]
+    fn the_final_score_gates_hold_under_words_v1() {
+        let (img, rgb) = scoreline_frame(false);
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            never
+        ));
+        let (img, rgb) = scoreline_frame(true);
+        let mut st = FrameStability::default();
+        assert!(
+            !scoreline_looks_present_with(
+                &img,
+                &rgb,
+                Some(&mut st),
+                FinalScoreSource::Words,
+                never
+            ),
+            "a first sighting is never stable"
+        );
+        assert!(scoreline_looks_present_with(
+            &img,
+            &rgb,
+            Some(&mut st),
+            FinalScoreSource::Words,
+            |_| Some(FinalScoreRead::Sure(0.9))
+        ));
+    }
+
+    /// Under `reader = "new"`, a P4 that falls back to OCR (no template) is
+    /// logged once per process (F257-1). Once this test's fallback has run,
+    /// the one log line is spent.
+    #[test]
+    fn a_final_score_ocr_fallback_is_logged() {
+        let (img, rgb) = scoreline_frame(true);
+        let _ = scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Words, |_| None);
+        assert!(
+            !warn_final_score_ocr_fallback(),
+            "the fallback logged already"
+        );
     }
 }
