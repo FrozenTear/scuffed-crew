@@ -27,6 +27,12 @@
 //! swapped after the reader started and re-loads it in the background. A map
 //! whose banner spelling needs a glyph the atlas lacks gets no template; the
 //! floor keeps that from turning into a sure read of another map.
+//!
+//! The after-match accolade screen prints the same name in the same face at
+//! the top left, right of the result word, with `MATCH TIME: m:ss` under it.
+//! [`locate_accolade`] cuts that line by its fixed place in the game rect
+//! and [`MapTemplates::read_accolade`] scores it against the same templates
+//! plus the accolade-only spellings in [`ACCOLADE_ALIASES`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +62,42 @@ pub const ELASTIC: usize = 3;
 /// Strip and template widths may differ by this share at most.
 const MAX_RATIO: f64 = 0.15;
 const STEP_COST: f64 = 0.02;
+
+/// Identifies the accolade map read. Bump on any change that can move one.
+pub const ACCOLADE_MAP_RECOGNIZER_ID: &str = "accolade-map-v1";
+/// Rows of an [`H`]-row glyph that hold a capital letter, top and bottom
+/// edge. The banner strip window is cut around the `|` (15% of its height
+/// above it, 12% below), which leaves the capitals of every maps-v1 glyph
+/// between these rows. The accolade line has no `|`, so its window is laid
+/// out from the capitals with the same proportions.
+const CAP_ROWS: (f64, f64) = (8.0, 25.0);
+/// Accolade map line search region, as fractions of the 16:9 game rect:
+/// right of the result word, from under an overlay's top rows down to the
+/// accolade result region's bottom edge, which stops above the nameplate
+/// ([`super::result::ACCOLADE_Y1`]). No name is inside it.
+const ACCOLADE_X: (f64, f64) = (0.125, 0.45);
+const ACCOLADE_Y: (f64, f64) = (0.030, super::result::ACCOLADE_Y1);
+/// Where the capitals of the accolade map line sit: top edge and height, as
+/// fractions of the game rect height, with the tolerance on each. Measured
+/// on native 1080p and 1440p frames (top 4.17%, height 1.48% to 1.53%).
+const ACCOLADE_CAP_TOP: (f64, f64) = (0.0417, 0.0030);
+const ACCOLADE_CAP_HEIGHT: (f64, f64) = (0.0125, 0.0180);
+/// Bottom edge of the row band that holds the line (a `Q` tail adds a row).
+const ACCOLADE_BAND_BOTTOM: (f64, f64) = (0.0535, 0.0605);
+/// Top edge of that band: the capitals' top, or an accent joined to it.
+const ACCOLADE_BAND_TOP: (f64, f64) = (0.0330, 0.0455);
+// The region ends above the nameplate and holds the line's rows (checked
+// at compile time).
+const _: () = assert!(
+    ACCOLADE_Y.1 < super::result::NAME_LINE_TOP
+        && ACCOLADE_Y.0 < ACCOLADE_BAND_TOP.0
+        && ACCOLADE_BAND_BOTTOM.1 < ACCOLADE_Y.1
+);
+
+/// Accolade spellings that are not a banner spelling of the map: (text on
+/// the accolade screen, [`MapInfo::key`]). `ADLERSBRUNN` is the Halloween
+/// label of Eichenwalde, which ocr-v1's table stores as Eichenwalde.
+pub const ACCOLADE_ALIASES: &[(&str, &str)] = &[("ADLERSBRUNN", "eichenwalde")];
 
 /// One map: stable key (OverFast API), the name ocr-v1 stores, banner
 /// spellings, and its single game mode (`None` when it has several).
@@ -650,6 +692,150 @@ pub fn locate(rgb: &RgbImage) -> Option<Located> {
     })
 }
 
+/// Maximal runs of `true` in `on`, as half-open ranges.
+fn true_runs(on: impl Iterator<Item = bool>) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    let mut n = 0;
+    for (i, v) in on.enumerate() {
+        match (v, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                runs.push((s, i));
+                start = None;
+            }
+            _ => {}
+        }
+        n = i + 1;
+    }
+    if let Some(s) = start {
+        runs.push((s, n));
+    }
+    runs
+}
+
+/// Find the map-name line of the after-match accolade screen, or `None`.
+///
+/// The line is white capitals at a fixed place in the game rect: right of
+/// the result word, above `MATCH TIME`. The darkest channel is used, so the
+/// team-coloured result word is not ink. The reader:
+///
+/// * takes the row band of white ink whose edges are where the line's are
+///   ([`ACCOLADE_BAND_TOP`], [`ACCOLADE_BAND_BOTTOM`]); the match time under
+///   it and a tab row above it are other bands, and a frame with ink through
+///   all those rows has no band. Ink that runs off the top of the region (an
+///   overlay) is cut away first,
+/// * splits the band's ink into glyph runs and keeps the one group of at
+///   least two runs with no gap wider than a capital,
+/// * takes the capitals' top and bottom as the median over the runs (an
+///   accent, an apostrophe or a `Q` tail moves one run, not the median) and
+///   checks them against [`ACCOLADE_CAP_TOP`] and [`ACCOLADE_CAP_HEIGHT`],
+/// * cuts the strip window around the capitals with the banner's proportions
+///   ([`CAP_ROWS`]) and normalises it to [`H`] rows.
+///
+/// Anything else is `None`: this is the only gate that says "accolade line".
+pub fn locate_accolade(rgb: &RgbImage) -> Option<Located> {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let (gwf, ghf) = (gw as f64, gh as f64);
+    let y0 = gy + (ACCOLADE_Y.0 * ghf) as u32;
+    let y1 = (gy + (ACCOLADE_Y.1 * ghf) as u32).min(h);
+    let x0 = gx + (ACCOLADE_X.0 * gwf) as u32;
+    let x1 = (gx + (ACCOLADE_X.1 * gwf) as u32).min(w);
+    if y1 <= y0 + 4 || x1 <= x0 + 4 {
+        return None;
+    }
+    let (bw, bh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let mut band = Gray::new(bw, bh);
+    for y in 0..bh {
+        for x in 0..bw {
+            let p = rgb.get_pixel(x0 + x as u32, y0 + y as u32).0;
+            band.px[y * bw + x] = p[0].min(p[1]).min(p[2]) as f32;
+        }
+    }
+    let mut tmp = band.px.clone();
+    let bg = percentile(&mut tmp, 30.0);
+    let pk = percentile(&mut tmp, 99.7);
+    if pk - bg < 50.0 {
+        return None;
+    }
+    let thr = bg + 0.5 * (pk - bg);
+    let ink = |x: usize, y: usize| band.at(x, y) > thr;
+    // rows of the region as fractions of the game rect height
+    let frac = |y: f64| (y0 as f64 + y - gy as f64) / ghf;
+    let within = |v: f64, (lo, hi): (f64, f64)| lo <= v && v <= hi;
+
+    let rows = true_runs((0..bh).map(|y| (0..bw).any(|x| ink(x, y))));
+    // Ink that runs off the top of the region is not the line's: a
+    // performance overlay's last text row ends just above the capitals.
+    // Those rows are no glyph's top and stay empty in the strip.
+    let clip = match rows.first() {
+        Some(&(0, end)) => end,
+        _ => 0,
+    };
+    let (bt, bb) = rows.into_iter().find(|&(t, b)| {
+        within(frac(t as f64), ACCOLADE_BAND_TOP) && within(frac(b as f64), ACCOLADE_BAND_BOTTOM)
+    })?;
+    let rough = (bb - bt) as f64;
+    // room for an accent above and a tail below, short of the match time
+    let rt = bt
+        .saturating_sub((0.40 * rough).round_ties_even() as usize)
+        .max(clip);
+    let rb = (bb + (0.25 * rough).round_ties_even() as usize).min(bh);
+    let cols = true_runs((0..bw).map(|x| (rt..rb).any(|y| ink(x, y))));
+    let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
+    for run in cols {
+        match groups.last_mut() {
+            Some(g) if (run.0 - g[g.len() - 1].1) as f64 <= rough => g.push(run),
+            _ => groups.push(vec![run]),
+        }
+    }
+    groups.retain(|g| g.len() >= 2);
+    let [name] = groups.as_slice() else {
+        return None;
+    };
+    let (mut tops, mut bots) = (Vec::new(), Vec::new());
+    for &(s, e) in name {
+        let lit = |y: &usize| (s..e).any(|x| ink(x, *y));
+        tops.push((rt..rb).find(lit)? as f64);
+        bots.push((rt..rb).rev().find(lit)? as f64 + 1.0);
+    }
+    let (ct, cb) = (median(tops), median(bots));
+    let cap = cb - ct;
+    let (top, tol) = ACCOLADE_CAP_TOP;
+    if (frac(ct) - top).abs() > tol || !within(cap / ghf, ACCOLADE_CAP_HEIGHT) {
+        return None;
+    }
+    let rows_per_cap = CAP_ROWS.1 - CAP_ROWS.0;
+    let wt = (ct - CAP_ROWS.0 / rows_per_cap * cap).round_ties_even() as i64;
+    let wb = (cb + (H as f64 - CAP_ROWS.1) / rows_per_cap * cap).round_ties_even() as i64;
+    let (xs, xe) = (name[0].0, name[name.len() - 1].1);
+    let wh = (wb - wt).max(1) as usize;
+    let mut native = Gray::new(xe - xs, wh);
+    for (row, y) in (wt..wb).enumerate() {
+        // rows outside the region stay empty, like the dark bar around
+        // them, and so do the overlay's
+        if y < clip as i64 || y as usize >= bh {
+            continue;
+        }
+        for x in xs..xe {
+            native.px[row * (xe - xs) + (x - xs)] =
+                ((band.at(x, y as usize) - bg) / (pk - bg)).clamp(0.0, 1.0);
+        }
+    }
+    let s = H as f64 / wh as f64;
+    let sw = (((xe - xs) as f64 * s).round_ties_even() as usize).max(1);
+    Some(Located {
+        strip: native.resize(sw, H),
+        window: (
+            x0 + xs as u32,
+            (y0 as i64 + wt).max(0) as u32,
+            x0 + xe as u32,
+            (y0 as i64 + wb).max(0) as u32,
+        ),
+    })
+}
+
 // ---------------------------------------------------------------- templates
 
 #[derive(Deserialize)]
@@ -792,6 +978,9 @@ fn base_char(c: char) -> char {
 pub struct MapTemplates {
     /// (index into [`MAPS`], banner spelling, template)
     tpls: Vec<(usize, &'static str, Tpl)>,
+    /// The same for [`ACCOLADE_ALIASES`]. Only the accolade read scores
+    /// these; a banner read is the same with or without them.
+    accolade: Vec<(usize, &'static str, Tpl)>,
     /// Banner spellings that need a glyph the atlas lacks.
     pub unrenderable: Vec<&'static str>,
 }
@@ -868,7 +1057,18 @@ impl MapTemplates {
                 }
             }
         }
-        Self { tpls, unrenderable }
+        let accolade = ACCOLADE_ALIASES
+            .iter()
+            .filter_map(|&(text, key)| {
+                let mi = MAPS.iter().position(|m| m.key == key)?;
+                Some((mi, text, compose(glyphs, gap, space, text)?))
+            })
+            .collect();
+        Self {
+            tpls,
+            accolade,
+            unrenderable,
+        }
     }
 
     pub fn template_count(&self) -> usize {
@@ -890,10 +1090,40 @@ impl MapTemplates {
         }
     }
 
-    /// Score a located strip against every map.
+    /// Read one frame's accolade map line ([`locate_accolade`]), with the
+    /// banner's floor and margin. `found_banner` is "the line was found".
+    pub fn read_accolade(&self, rgb: &RgbImage) -> MapRead {
+        match locate_accolade(rgb) {
+            Some(l) => self.read_accolade_strip(&l.strip),
+            None => MapRead {
+                map: None,
+                best: None,
+                score: 0.0,
+                margin: 0.0,
+                suspect: true,
+                found_banner: false,
+            },
+        }
+    }
+
+    /// Score a located banner strip against every map.
     pub fn read_strip(&self, strip: &Gray) -> MapRead {
+        self.read_strip_of(strip, self.tpls.iter())
+    }
+
+    /// Score a located accolade strip against every map, the
+    /// [`ACCOLADE_ALIASES`] spellings included.
+    pub fn read_accolade_strip(&self, strip: &Gray) -> MapRead {
+        self.read_strip_of(strip, self.tpls.iter().chain(&self.accolade))
+    }
+
+    fn read_strip_of<'a>(
+        &self,
+        strip: &Gray,
+        tpls: impl Iterator<Item = &'a (usize, &'static str, Tpl)>,
+    ) -> MapRead {
         let mut best = vec![f64::NEG_INFINITY; MAPS.len()];
-        for (mi, _, t) in &self.tpls {
+        for (mi, _, t) in tpls {
             best[*mi] = best[*mi].max(t.score(strip));
         }
         let mut order: Vec<usize> = (0..MAPS.len()).filter(|&i| best[i].is_finite()).collect();
@@ -1212,14 +1442,20 @@ pub(crate) mod test_fixtures {
     /// Synthetic 5x7-ish block glyphs, one distinct bit pattern per letter,
     /// scaled to `H` rows. Not the game font: only the pipeline is under test.
     pub(crate) fn glyph(c: char) -> Gray {
+        // cap rows 7..25: the bar window adds room above and below, like
+        // the real banner (the `|` reaches past the baseline)
+        glyph_rows(c, 7)
+    }
+
+    /// [`glyph`] with the capital between rows `top` and 25. The accolade
+    /// fixtures use 8, where maps-v1 keeps it ([`CAP_ROWS`]).
+    pub(crate) fn glyph_rows(c: char, top: usize) -> Gray {
         let w = 12;
         let mut g = Gray::new(w, H);
         let code = c as u32;
-        // cap rows 7..25: the bar window adds room above and below, like
-        // the real banner (the `|` reaches past the baseline)
-        for y in 7..25 {
+        for y in top..25 {
             for x in 1..w - 1 {
-                let cell = ((y - 7) / 3) * 3 + (x - 1) / 4;
+                let cell = ((y - top) / 3) * 3 + (x - 1) / 4;
                 let on = (code.wrapping_mul(2654435761) >> (cell % 29)) & 1 == 1 || x == 1;
                 if on {
                     g.px[y * w + x] = 1.0;
@@ -1240,10 +1476,19 @@ pub(crate) mod test_fixtures {
     /// Write a synthetic pack (`atlas.json` plus one PNG per glyph) the way
     /// maps-v1 lays it out, with every glyph in `letters`.
     pub(crate) fn write_pack(dir: &Path, letters: &str) {
+        write_pack_rows(dir, letters, 7);
+    }
+
+    /// [`write_pack`] with the [`accolade_atlas`] glyphs.
+    pub(crate) fn write_accolade_pack(dir: &Path, letters: &str) {
+        write_pack_rows(dir, letters, 8);
+    }
+
+    fn write_pack_rows(dir: &Path, letters: &str, top: usize) {
         std::fs::create_dir_all(dir).unwrap();
         let mut entries = Vec::new();
         for c in letters.chars() {
-            let g = glyph(c);
+            let g = glyph_rows(c, top);
             let file = format!("g{:04x}.png", c as u32);
             let img = GrayImage::from_fn(g.w as u32, H as u32, |x, y| {
                 image::Luma([(g.at(x as usize, y as usize) * 255.0).round() as u8])
@@ -1260,6 +1505,110 @@ pub(crate) mod test_fixtures {
             entries.join(", ")
         );
         std::fs::write(dir.join("atlas.json"), json).unwrap();
+    }
+
+    /// Glyphs with the capital where maps-v1 keeps it, for accolade frames.
+    pub(crate) fn accolade_atlas() -> HashMap<char, Gray> {
+        LETTERS.chars().map(|c| (c, glyph_rows(c, 8))).collect()
+    }
+
+    /// What an accolade frame holds besides the map line.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Accolade {
+        pub size: (u32, u32),
+        /// Left edge of the map line, as a fraction of the frame width
+        /// (17.4% after VICTORY, 15.5% after DEFEAT).
+        pub x: f64,
+        /// Top edge of the capitals, as a fraction of the frame height.
+        pub cap_top: f64,
+        /// Height of the capitals, as a fraction of the frame height.
+        pub cap: f64,
+        /// White accent marks above the first and third glyph, joined to
+        /// them (`Í`, `Ö`).
+        pub accents: bool,
+        /// The grey `MATCH TIME` line under the map.
+        pub match_time: bool,
+        /// A performance overlay's white text across the top of the frame,
+        /// down to this fraction of the frame height.
+        pub overlay_to: Option<f64>,
+    }
+
+    impl Accolade {
+        pub(crate) fn at(size: (u32, u32)) -> Self {
+            Self {
+                size,
+                x: 0.174,
+                cap_top: 0.0417,
+                cap: 0.015,
+                accents: false,
+                match_time: true,
+                overlay_to: None,
+            }
+        }
+    }
+
+    /// A dark frame with an accolade header: a team-coloured result word
+    /// block at the left, `text` in white from the [`accolade_atlas`] glyphs
+    /// with capitals `cap` of the frame height tall, and the match time line.
+    pub(crate) fn frame_with_accolade(text: &str, a: Accolade) -> RgbImage {
+        let (w, h) = a.size;
+        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 24]));
+        let (wf, hf) = (w as f64, h as f64);
+        // result word: tall, bright, team blue. Its darkest channel is dark.
+        for y in (0.036 * hf) as u32..(0.085 * hf) as u32 {
+            for x in (0.01 * wf) as u32..(0.145 * wf) as u32 {
+                img.put_pixel(x, y, Rgb([20, 190, 255]));
+            }
+        }
+        let t = compose(&accolade_atlas(), GAP, SPACE, text).unwrap();
+        let tpl = t.render(&vec![0; t.parts.len()]);
+        // 17 glyph rows hold the capital
+        let s = a.cap * hf / 17.0;
+        let (tw, th) = (
+            (tpl.w as f64 * s).round() as u32,
+            (H as f64 * s).round() as u32,
+        );
+        let scaled = tpl.resize(tw as usize, th as usize);
+        let sx = (a.x * wf) as u32;
+        let top = (a.cap_top * hf - 8.0 * s).round() as u32;
+        for y in 0..th {
+            for x in 0..tw {
+                let v = scaled.at(x as usize, y as usize).clamp(0.0, 1.0);
+                let c = (12.0 + 240.0 * v) as u8;
+                img.put_pixel(sx + x, top + y, Rgb([c, c, c.max(24)]));
+            }
+        }
+        if a.accents {
+            let cap_top = (a.cap_top * hf).round() as u32;
+            for (px, g) in [&t.parts[0], &t.parts[2]] {
+                let gx = sx + ((*px as f64 + 3.0) * s) as u32;
+                let gw = ((g.w as f64 - 6.0) * s) as u32;
+                for y in cap_top - (5.5 * s) as u32..cap_top {
+                    for x in gx..gx + gw {
+                        img.put_pixel(x, y, Rgb([250, 250, 250]));
+                    }
+                }
+            }
+        }
+        if let Some(to) = a.overlay_to {
+            for y in (0.022 * hf) as u32..(to * hf) as u32 {
+                for x in 0..w {
+                    if x % 11 < 6 {
+                        img.put_pixel(x, y, Rgb([255, 255, 255]));
+                    }
+                }
+            }
+        }
+        if a.match_time {
+            for y in (0.0667 * hf) as u32..(0.0815 * hf) as u32 {
+                for x in sx..sx + (0.11 * wf) as u32 {
+                    if (x - sx) % 14 < 9 {
+                        img.put_pixel(x, y, Rgb([160, 164, 172]));
+                    }
+                }
+            }
+        }
+        img
     }
 
     /// A dark 1920x1080 frame with a banner: `|` then `text` drawn from the
@@ -1304,9 +1653,225 @@ pub(crate) mod test_fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::test_fixtures::{GAP, LETTERS, SPACE, atlas, frame_with_banner, write_pack};
+    use super::test_fixtures::{
+        Accolade, GAP, LETTERS, SPACE, accolade_atlas, atlas, frame_with_accolade,
+        frame_with_banner, write_pack,
+    };
     use super::*;
     use image::Rgb;
+
+    const P1080: (u32, u32) = (1920, 1080);
+    const P1440: (u32, u32) = (2560, 1440);
+
+    fn accolade_templates() -> MapTemplates {
+        MapTemplates::compose_all(&accolade_atlas(), GAP, SPACE)
+    }
+
+    #[test]
+    fn synthetic_accolade_reads_back_sure_at_1080_and_1440() {
+        let t = accolade_templates();
+        for size in [P1080, P1440] {
+            for name in ["NEPAL", "KING'S ROW", "NEW QUEEN STREET", "ILIOS"] {
+                // after VICTORY and after the shorter DEFEAT
+                for x in [0.174, 0.155] {
+                    let a = Accolade {
+                        x,
+                        ..Accolade::at(size)
+                    };
+                    let r = t.read_accolade(&frame_with_accolade(name, a));
+                    assert!(r.found_banner, "{name} {size:?}: line not found");
+                    let m = r.map.expect("a map");
+                    assert!(m.banner.contains(&name), "{name}: read {}", m.key);
+                    assert!(!r.suspect, "{name}: score {} margin {}", r.score, r.margin);
+                }
+            }
+        }
+    }
+
+    /// The strip window is laid out from the capitals. An accent joined to
+    /// two of the glyphs moves those two runs' tops, not the line's.
+    #[test]
+    fn accents_above_the_accolade_line_do_not_move_the_window() {
+        let t = accolade_templates();
+        for size in [P1080, P1440] {
+            let plain = Accolade::at(size);
+            let accented = Accolade {
+                accents: true,
+                ..plain
+            };
+            let a = locate_accolade(&frame_with_accolade("SURAVASA", plain)).unwrap();
+            let b = locate_accolade(&frame_with_accolade("SURAVASA", accented)).unwrap();
+            assert_eq!(a.window, b.window, "{size:?}");
+            let r = t.read_accolade(&frame_with_accolade("SURAVASA", accented));
+            assert_eq!(r.map.map(|m| m.key), Some("suravasa"));
+            assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
+        }
+    }
+
+    /// An overlay's text row ends just above the capitals (the member's
+    /// 1440p frames: ink from the region's top edge down to 3.75%). It is
+    /// not part of the line: the window and the read are the same without it.
+    #[test]
+    fn an_overlay_above_the_accolade_line_is_cut_away() {
+        let t = accolade_templates();
+        for size in [P1080, P1440] {
+            let plain = Accolade::at(size);
+            let overlaid = Accolade {
+                overlay_to: Some(0.0375),
+                ..plain
+            };
+            let a = locate_accolade(&frame_with_accolade("NEPAL", plain)).unwrap();
+            let b = locate_accolade(&frame_with_accolade("NEPAL", overlaid)).expect("line found");
+            assert_eq!(a.window, b.window, "{size:?}");
+            // the overlay moves the white level a little, nothing else
+            assert_eq!((a.strip.w, a.strip.h), (b.strip.w, b.strip.h));
+            let worst = a
+                .strip
+                .px
+                .iter()
+                .zip(&b.strip.px)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 0.05, "{size:?}: overlay ink in the strip ({worst})");
+            let r = t.read_accolade(&frame_with_accolade("NEPAL", overlaid));
+            assert_eq!(r.map.map(|m| m.key), Some("nepal"));
+            assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
+            // an overlay that reaches the capitals leaves no clean line
+            let joined = Accolade {
+                overlay_to: Some(0.0430),
+                ..plain
+            };
+            assert!(locate_accolade(&frame_with_accolade("NEPAL", joined)).is_none());
+        }
+    }
+
+    /// White capitals of the right size in the wrong rows are not the map
+    /// line: the competitive progression screen has a tab row there.
+    #[test]
+    fn a_line_off_the_accolade_rows_is_not_located() {
+        let t = accolade_templates();
+        for size in [P1080, P1440] {
+            for cap_top in [0.0350, 0.0470] {
+                let a = Accolade {
+                    cap_top,
+                    match_time: false,
+                    ..Accolade::at(size)
+                };
+                let img = frame_with_accolade("NEPAL", a);
+                assert!(locate_accolade(&img).is_none(), "{size:?} {cap_top}");
+                let r = t.read_accolade(&img);
+                assert!(!r.found_banner && r.map.is_none() && r.suspect);
+            }
+        }
+    }
+
+    /// Capitals of another size in the line's rows are not the map line.
+    #[test]
+    fn a_line_of_another_size_is_not_located() {
+        for size in [P1080, P1440] {
+            for (cap_top, cap) in [(0.0380, 0.0220), (0.0430, 0.0105)] {
+                let a = Accolade {
+                    cap_top,
+                    cap,
+                    ..Accolade::at(size)
+                };
+                assert!(
+                    locate_accolade(&frame_with_accolade("NEPAL", a)).is_none(),
+                    "{size:?} {cap}"
+                );
+            }
+        }
+    }
+
+    /// The match time alone, a frame with no ink, and ink through every row
+    /// of the region are not a map line.
+    #[test]
+    fn frames_without_the_map_line_are_not_located() {
+        let blank = RgbImage::from_pixel(1920, 1080, Rgb([12, 14, 24]));
+        assert!(locate_accolade(&blank).is_none());
+        let mut only_time = frame_with_accolade("NEPAL", Accolade::at(P1080));
+        for y in 30..70 {
+            for x in 300..900 {
+                only_time.put_pixel(x, y, Rgb([12, 14, 24]));
+            }
+        }
+        assert!(locate_accolade(&only_time).is_none());
+        let mut flooded = frame_with_accolade("NEPAL", Accolade::at(P1080));
+        for y in 30..95 {
+            for x in 260..270 {
+                flooded.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+        assert!(locate_accolade(&flooded).is_none(), "no row band");
+    }
+
+    /// Two groups of glyphs on the line (something white beside the name)
+    /// is not a clean line: abstain rather than pick one.
+    #[test]
+    fn two_groups_on_the_accolade_line_abstain() {
+        let mut img = frame_with_accolade("NEPAL", Accolade::at(P1080));
+        // a second word 200 px right of the name, in the same rows
+        let second = frame_with_accolade(
+            "OASIS",
+            Accolade {
+                x: 0.174 + 0.12,
+                ..Accolade::at(P1080)
+            },
+        );
+        for y in 40..64 {
+            for x in 500..900 {
+                img.put_pixel(x, y, *second.get_pixel(x, y));
+            }
+        }
+        assert!(locate_accolade(&img).is_none());
+    }
+
+    /// A Tab banner is not an accolade line and the reverse.
+    #[test]
+    fn banner_and_accolade_frames_do_not_read_as_each_other() {
+        let t = MapTemplates::compose_all(&atlas(), GAP, SPACE);
+        let banner = frame_with_banner("NEPAL");
+        assert!(!t.read_accolade(&banner).found_banner);
+        let accolade = frame_with_accolade("NEPAL", Accolade::at(P1080));
+        assert!(!accolade_templates().read(&accolade).found_banner);
+    }
+
+    /// `ADLERSBRUNN` on the accolade screen is Eichenwalde. The banner read
+    /// has no such spelling and is the same with or without the alias.
+    #[test]
+    fn the_accolade_alias_reads_as_its_map_and_the_banner_ignores_it() {
+        assert!(
+            ACCOLADE_ALIASES
+                .iter()
+                .all(|(_, key)| MAPS.iter().any(|m| m.key == *key)),
+            "every alias names a map"
+        );
+        let t = accolade_templates();
+        let r = t.read_accolade(&frame_with_accolade("ADLERSBRUNN", Accolade::at(P1080)));
+        assert_eq!(r.map.map(|m| m.key), Some("eichenwalde"));
+        assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
+
+        let banners: usize = MAPS.iter().map(|m| m.banner.len()).sum();
+        let b = MapTemplates::compose_all(&atlas(), GAP, SPACE);
+        assert_eq!(
+            b.template_count(),
+            banners,
+            "aliases are not banner templates"
+        );
+        let on_banner = b.read(&frame_with_banner("ADLERSBRUNN"));
+        assert!(on_banner.found_banner && on_banner.suspect);
+    }
+
+    /// The strip window of a located line stays above the accolade
+    /// nameplate (the region itself is checked at compile time).
+    #[test]
+    fn the_accolade_region_stays_off_the_nameplate() {
+        use crate::shadow::result::NAME_LINE_TOP;
+        let img = frame_with_accolade("SHAMBALI MONASTERY", Accolade::at(P1440));
+        let l = locate_accolade(&img).unwrap();
+        let (_, y0, _, y1) = l.window;
+        assert!((y1 as f64) < NAME_LINE_TOP * 1440.0 && (y0 as f64) > 0.03 * 1440.0);
+    }
 
     #[test]
     fn every_map_has_a_banner_spelling_and_unique_key() {

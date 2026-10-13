@@ -314,6 +314,16 @@ impl Reader {
         Some(maps.templates.read(&rgb_of(frame)))
     }
 
+    /// The map on one after-match accolade frame, when its map line is
+    /// found and the read is sure and storable: the same gate as the top bar
+    /// ([`top_bar_map`]). `None` is an abstain: no map pack, no accolade map
+    /// line, a flagged read, or a name the tracker would not store. Nothing
+    /// is guessed and nothing else is read in its place.
+    pub fn read_accolade_map(&self, frame: &DynamicImage) -> Option<TopBarMap> {
+        let maps = self.maps.current()?;
+        top_bar_map(&maps.templates.read_accolade(&rgb_of(frame)))
+    }
+
     /// Read every field of one full Tab frame. `result` stays suspect.
     /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
     /// [`not_found`] with that status: no team size, no row fields, no map.
@@ -614,7 +624,8 @@ fn storable_map_name(n: &MapName) -> bool {
     n.known_to_ocr_v1 && crate::parse::map_is_known(&n.name)
 }
 
-/// A banner read the capture path may store as the top-bar map.
+/// A banner read the capture path may store as the top-bar map. The
+/// accolade map line gives the same type ([`Reader::read_accolade_map`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopBarMap {
     /// The tracker's display name ([`map_name`]).
@@ -754,6 +765,13 @@ pub fn read_banner(frame: &DynamicImage) -> Option<MapRead> {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_banner(frame)
+}
+
+/// [`Reader::read_accolade_map`] with the process-wide reader.
+pub fn read_accolade_map(frame: &DynamicImage) -> Option<TopBarMap> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_accolade_map(frame)
 }
 
 /// [`Reader::read_board_with_banner`] with the process-wide reader.
@@ -1925,6 +1943,64 @@ mod tests {
             Reader::load(&ReaderConfig::default()).read_top_bar(&frame),
             None,
             "no map pack"
+        );
+    }
+
+    /// The accolade map line reads through the same pack and the same gate
+    /// as the top bar ([`top_bar_map`], whose tests cover a name the tracker
+    /// does not store): the tracker's display name, or nothing.
+    #[test]
+    fn the_reader_reads_the_accolade_map_from_maps_v1() {
+        use crate::shadow::banner::test_fixtures::{
+            Accolade, LETTERS, frame_with_accolade, frame_with_banner, write_accolade_pack,
+        };
+        let data = tempfile::tempdir().unwrap();
+        write_accolade_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        for size in [(1920, 1080), (2560, 1440)] {
+            let frame =
+                |text| DynamicImage::ImageRgb8(frame_with_accolade(text, Accolade::at(size)));
+            let t = reader
+                .read_accolade_map(&frame("KING'S ROW"))
+                .expect("sure read");
+            assert_eq!((t.name.as_str(), t.mode), ("King's Row", Some("Hybrid")));
+            // the accolade spelling of Eichenwalde's Halloween label
+            let alias = reader
+                .read_accolade_map(&frame("ADLERSBRUNN"))
+                .expect("alias");
+            assert_eq!(alias.name, "Eichenwalde");
+            assert_eq!(
+                Reader::load(&ReaderConfig::default()).read_accolade_map(&frame("KING'S ROW")),
+                None,
+                "no map pack"
+            );
+        }
+        let blank =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([20, 24, 40])));
+        assert_eq!(reader.read_accolade_map(&blank), None, "no accolade line");
+        let tab = DynamicImage::ImageRgb8(frame_with_banner("KING'S ROW"));
+        assert_eq!(reader.read_accolade_map(&tab), None, "a Tab board");
+    }
+
+    /// The pack lacks a glyph NEPAL needs: the best map on the accolade
+    /// line is flagged, so there is no accolade map. Nothing is guessed.
+    #[test]
+    fn a_flagged_accolade_read_is_no_map() {
+        use crate::shadow::banner::test_fixtures::{
+            Accolade, LETTERS, frame_with_accolade, write_accolade_pack,
+        };
+        let data = tempfile::tempdir().unwrap();
+        write_accolade_pack(
+            &MapTemplates::dir_v1_in(data.path()),
+            &LETTERS.replace('P', ""),
+        );
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let frame =
+            |text| DynamicImage::ImageRgb8(frame_with_accolade(text, Accolade::at((1920, 1080))));
+        assert_eq!(reader.read_accolade_map(&frame("NEPAL")), None);
+        assert_eq!(
+            reader.read_accolade_map(&frame("ILIOS")).unwrap().name,
+            "Ilios"
         );
     }
 
