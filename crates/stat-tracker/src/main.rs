@@ -3901,7 +3901,8 @@ fn analyze_frame(
     // end-title read alone. T1, an OCR of the top-centre band for a result
     // header, is gone (alpha.7 O4; what that was measured on is in
     // `detect_outcome_text`). The full-board OCR's header line (ET-2, in
-    // `handle_capture`) still runs. `reader = "new"` reads the FINAL SCORE
+    // `handle_capture`) still runs under ocr-v1; the new reader never runs
+    // the full-board OCR (O10). `reader = "new"` reads the FINAL SCORE
     // line with the words-v1 template (O3). The end title is read once
     // (F257-3).
     let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);
