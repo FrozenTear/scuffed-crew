@@ -8,8 +8,8 @@
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::detect::match_end::{
-    FinalScoreSource, OutcomeSource, Titles, detect_end_reel_with, detect_outcome_signal_polled,
-    detect_outcome_text_with, detect_outcome_with,
+    FinalScoreSource, OutcomeSource, ResultWords, Titles, detect_end_reel_with,
+    detect_outcome_signal_polled, detect_outcome_text_with, detect_outcome_with,
 };
 use stat_tracker::detect::stability::FrameStability;
 use stat_tracker::shadow::reader::TEMPLATE_DIR_ENV;
@@ -58,6 +58,9 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
     // environment concurrently.
     unsafe { std::env::set_var(TEMPLATE_DIR_ENV, data.path()) };
     let new = FinalScoreSource::for_reader(true);
+    // The accolade and rank-screen words by reader (O11). These frames show
+    // neither screen, so nothing is read through them.
+    let new_words = || ResultWords::for_reader(true);
 
     for (word, outcome, want) in [
         (&victory, Outcome::Victory, MatchOutcome::Victory),
@@ -75,12 +78,12 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
         // the poll tick: a signal on the first sighting, and the wake
         let mut stability = FrameStability::default();
         assert_eq!(
-            detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
+            detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles, &new_words()),
             Some((want, OutcomeSource::EndTitle))
         );
         assert!(detect_end_reel_with(&img, &rgb, &titles));
         // the Tab frame's vision pass, with and without banner recovery
-        assert_eq!(detect_outcome_with(&img, new, &titles), want);
+        assert_eq!(detect_outcome_with(&img, new, &titles, &new_words()), want);
         assert_eq!(detect_outcome_text_with(&img, new, &titles), want);
 
         // reader = "ocr-v1" takes no read from the pack; bars are no text
@@ -88,7 +91,14 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
         assert_eq!(ocr, Titles::Ocr);
         let mut stability = FrameStability::default();
         assert_eq!(
-            detect_outcome_signal_polled(&img, &rgb, &mut stability, FinalScoreSource::Ocr, &ocr),
+            detect_outcome_signal_polled(
+                &img,
+                &rgb,
+                &mut stability,
+                FinalScoreSource::Ocr,
+                &ocr,
+                &ResultWords::ocr()
+            ),
             None
         );
         assert!(!detect_end_reel_with(&img, &rgb, &ocr));
@@ -104,7 +114,7 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
     assert_eq!((read.outcome, read.sure()), (None, None), "{read:?}");
     let mut stability = FrameStability::default();
     assert_eq!(
-        detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
+        detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles, &new_words()),
         None
     );
     assert!(!detect_end_reel_with(&img, &rgb, &titles));
