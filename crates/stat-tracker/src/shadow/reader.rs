@@ -50,7 +50,10 @@ use super::heroes::{
     HeroDirs, HeroFrameRead, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2,
     TEMPLATE_SUBDIR_V2_1080,
 };
-use super::result::{LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates};
+use super::result::phrase::{Phrase, PhraseRead};
+use super::result::{
+    FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates,
+};
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
 pub const STAT_FIELDS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -458,6 +461,22 @@ impl Reader {
         }
     }
 
+    /// The FINAL SCORE line read (P4) of one full frame, or `None` when the
+    /// loaded words pack has no `p4_final_score` template (or no words pack
+    /// is loaded). Only [`FinalScoreRead::Sure`] is a signal.
+    pub fn read_final_score(&self, frame: &RgbImage) -> Option<FinalScoreRead> {
+        let loaded = self.results.current()?;
+        Some(loaded.templates.final_score()?.read(frame))
+    }
+
+    /// One phase-screen title read (P7) of one full frame, or `None` when
+    /// the loaded words pack has no mask for `phrase` (or no words pack is
+    /// loaded). Only [`PhraseRead::Sure`] is a signal.
+    pub fn read_phrase(&self, phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
+        let loaded = self.results.current()?;
+        loaded.phrases.as_ref()?.read(phrase, frame)
+    }
+
     /// [`Self::read_board`] with the `result` field from a match's evidence.
     pub fn read_board_with_evidence(
         &self,
@@ -776,6 +795,20 @@ pub fn read_result(result_frame: &DynamicImage) -> ResultRead {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_result(result_frame)
+}
+
+/// [`Reader::read_final_score`] with the process-wide reader.
+pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_final_score(frame)
+}
+
+/// [`Reader::read_phrase`] with the process-wide reader.
+pub fn read_phrase(phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_phrase(phrase, frame)
 }
 
 #[cfg(test)]
@@ -2195,5 +2228,37 @@ mod tests {
         // and `None` is the board's own read
         let b = reader.read_board_with(&frame, None, None);
         assert_eq!(b.fields, own.fields);
+    }
+
+    /// The production wiring of P4's template (F257-2): a data dir with
+    /// words-v1's `p4_final_score.png` -> `Reader::load` -> `read_final_score`
+    /// reads the line; without the file it is `None` (P4 then uses OCR).
+    #[test]
+    fn the_reader_reads_the_final_score_line_from_the_words_pack() {
+        use crate::shadow::result::test_fixtures::{paint_at, word, write_pack};
+        use crate::shadow::result::{FinalScoreRead, WORDS_SUBDIR};
+        let line = word(4, 123, 28);
+        let mut frame = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        paint_at(&mut frame, 1102, 1060, &line, [235, 235, 235]);
+        let pack = |with_line: bool| {
+            let data = tempfile::tempdir().unwrap();
+            let words = data.path().join(WORDS_SUBDIR);
+            let (v, d) = (word(1, 70, 30), word(3, 60, 30));
+            let mut files = vec![("accolade_victory.png", &v), ("accolade_defeat.png", &d)];
+            if with_line {
+                files.push(("p4_final_score.png", &line));
+            }
+            write_pack(&words, &files);
+            data
+        };
+        let data = pack(true);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let r = reader.read_final_score(&frame);
+        assert!(matches!(r, Some(FinalScoreRead::Sure(_))), "{r:?}");
+        let blank = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        assert!(!reader.read_final_score(&blank).unwrap().is_signal());
+        let data = pack(false);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        assert_eq!(reader.read_final_score(&frame), None);
     }
 }
