@@ -484,6 +484,17 @@ impl Reader {
         Some(loaded.templates.final_score()?.read(frame))
     }
 
+    /// The end title of one full frame (the centred VICTORY / DEFEAT / DRAW
+    /// at the end of a match), read from the loaded end-title templates
+    /// alone. `None` when no words pack with end-title templates is loaded.
+    /// Only [`ResultRead::sure`] is a signal. This read runs on every poll
+    /// tick, so it is the one that skips the windows that cannot show a
+    /// word ([`ResultTemplates::read_skipping`]).
+    pub fn read_end_title(&self, frame: &RgbImage) -> Option<ResultRead> {
+        let loaded = self.results.current()?;
+        Some(loaded.end_titles.as_ref()?.read_skipping(frame))
+    }
+
     /// One phase-screen title read (P7) of one full frame, or `None` when
     /// the loaded words pack has no mask for `phrase` (or no words pack is
     /// loaded). Only [`PhraseRead::Sure`] is a signal.
@@ -836,6 +847,13 @@ pub fn read_result(result_frame: &DynamicImage) -> ResultRead {
         .read_result(result_frame)
 }
 
+/// [`Reader::read_end_title`] with the process-wide reader.
+pub fn read_end_title(frame: &RgbImage) -> Option<ResultRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_end_title(frame)
+}
+
 /// [`Reader::read_final_score`] with the process-wide reader.
 pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
     READER
@@ -1017,6 +1035,63 @@ mod tests {
         let f = result_field(&e);
         assert_eq!(f.value, Some(Value::Text("defeat".into())));
         assert!(!f.suspect);
+    }
+
+    /// The end-title read (alpha.7 O2) comes from the loaded words pack's
+    /// end-title templates. With no pack, or a pack without them, there is
+    /// no read at all.
+    #[test]
+    fn the_end_title_read_needs_end_title_templates() {
+        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
+        use crate::shadow::result::{ACCOLADE, END_TITLE, Outcome, WORDS_SUBDIR};
+        let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        let mut title = blank();
+        paint(
+            &mut title,
+            &lay(END_TITLE),
+            &word(4, 80, 34),
+            [150, 20, 160],
+        );
+
+        let none = Reader::load(&ReaderConfig::default());
+        assert_eq!(none.read_end_title(&title), None);
+
+        let data = tempfile::tempdir().unwrap();
+        let words = data.path().join(WORDS_SUBDIR);
+        write_pack(
+            &words,
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+            ],
+        );
+        let config = ReaderConfig {
+            words_dir: Some(words.clone()),
+            ..Default::default()
+        };
+        assert_eq!(Reader::load(&config).read_end_title(&title), None);
+
+        write_pack(
+            &words,
+            &[
+                ("end_title_victory.png", &word(2, 90, 34)),
+                ("end_title_defeat.png", &word(4, 80, 34)),
+            ],
+        );
+        let reader = Reader::load(&config);
+        let read = reader.read_end_title(&title).expect("a read");
+        assert_eq!(read.sure(), Some(Outcome::Defeat), "{read:?}");
+        assert_eq!(read.source.as_deref(), Some(END_TITLE));
+        let read = reader.read_end_title(&blank()).expect("a read");
+        assert_eq!((read.outcome, read.sure()), (None, None));
+        // an accolade word is not an end title
+        let mut other = blank();
+        paint(&mut other, &lay(ACCOLADE), &word(3, 60, 30), [255, 220, 0]);
+        assert_eq!(reader.read_end_title(&other).unwrap().sure(), None);
+        assert_eq!(
+            reader.read_result(&DynamicImage::ImageRgb8(other)).sure(),
+            Some(Outcome::Defeat)
+        );
     }
 
     /// Shadow-first, through the save merge `reader = "new"` uses: a sure
