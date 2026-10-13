@@ -45,7 +45,7 @@ pub enum Chat {
 
 impl Chat {
     /// Whether a crop row ending at `bot` may be under chat.
-    pub(super) fn covers(self, bot: u32, crop_h: u32) -> bool {
+    pub(crate) fn covers(self, bot: u32, crop_h: u32) -> bool {
         match self {
             Chat::None => false,
             Chat::Unknown => f64::from(bot) > REACH * f64::from(crop_h),
