@@ -549,10 +549,13 @@ impl TrackerApp {
         let own_exe = std::env::current_exe().unwrap_or_default();
         // Fixture runs are dev screenshots: they never ask to restart.
         let installed_gui = if live {
-            restart_prompt::stamp(&crate::instance::relaunch_target(
-                Some(&update::default_install_prefix()),
-                &own_exe,
-            ))
+            let target =
+                crate::instance::relaunch_target(Some(&update::default_install_prefix()), &own_exe);
+            restart_prompt::launch_baseline(
+                restart_prompt::stamp(&target),
+                crate::instance::relaunch_path(&own_exe) == target,
+                restart_prompt::own_exe_identity(),
+            )
         } else {
             None
         };
@@ -1561,17 +1564,23 @@ impl TrackerApp {
         self.restart_watch.need()
     }
 
-    /// The update banner (Overview and Settings) is drawn now.
-    fn update_banner_on_screen(&self) -> bool {
-        restart_prompt::update_banner_on_screen(self.update.is_some(), self.screen)
+    /// Which prompt is drawn: the update banner or the restart bar, never
+    /// both.
+    fn prompt_layout(&self) -> restart_prompt::PromptLayout {
+        restart_prompt::prompt_layout(
+            &self.restart_watch,
+            &self.update_progress,
+            restart_prompt::update_banner_on_screen(self.update.is_some(), self.screen),
+        )
     }
 
     pub fn restart_bar_visible(&self) -> bool {
-        restart_prompt::bar_visible(
-            &self.restart_watch,
-            &self.update_progress,
-            self.update_banner_on_screen(),
-        )
+        self.prompt_layout().bar
+    }
+
+    /// Overview and Settings draw the update banner only when this is true.
+    pub fn update_banner_visible(&self) -> bool {
+        self.prompt_layout().banner
     }
 
     /// After an in-app install the toast says "Press Restart now" until the

@@ -7,16 +7,21 @@
 //! device or size changes does it run that binary once with `--build-id`,
 //! off the UI thread, with a short timeout. It asks to restart only when the
 //! installed id differs from [`BUILD_ID`], the id compiled into this
-//! process. A daemon-only release keeps the id (see `build_id_hash.rs`), so
-//! it never asks.
+//! process. The id covers the GUI and the lib code it compiles (see
+//! `build_id_hash.rs`), so a release asks only when one of those changed. A
+//! release that only touches the daemon's `main.rs`, the version or the
+//! changelog does not ask. Most releases change some shared lib code, and
+//! those do ask.
 //!
 //! No probe runs while an in-app update is installing, and no prompt shows
 //! then. "Later" hides the prompt until the installed binary changes again.
+//! A failed probe is retried with a backoff ([`PROBE_BACKOFF`]); a binary
+//! that changes again gets a fresh set of tries.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use iced::widget::{button, container, row, text};
 use iced::{Alignment, Element, Fill, Padding};
@@ -39,8 +44,18 @@ pub const PROBE_ARGS: [&str; 2] = ["--build-id", "--help"];
 /// How long the probe may run before it is killed.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Failed probes of one binary before giving up on it until it changes.
-pub const MAX_PROBE_FAILURES: u8 = 3;
+/// Waits before the next probe of the same binary after 1, 2, 3 failures.
+/// A terminal install can put the GUI binary in place before the libraries
+/// it needs, so the first probes may fail for a while.
+pub const PROBE_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+];
+
+/// Failed probes of one binary before giving up on it until it changes:
+/// the first try plus one retry per [`PROBE_BACKOFF`] step.
+pub const MAX_PROBE_FAILURES: u8 = PROBE_BACKOFF.len() as u8 + 1;
 
 pub const PROMPT_TEXT: &str = "The app was updated. Restart now?";
 pub const RESTART_LABEL: &str = "Restart now";
@@ -104,18 +119,49 @@ pub fn verdict_for(own_id: &str, stdout: &str) -> Verdict {
     }
 }
 
+/// Failed probes of one stamp, and when the next try may start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retry {
+    stamp: BinStamp,
+    failures: u8,
+    not_before: Instant,
+}
+
+/// The baseline at launch: the installed binary as stamped now, taken to be
+/// this build. Not when this process runs from that same path and the file
+/// there is no longer the one it was started from (replaced between exec
+/// and now): then there is no baseline, and the first Tick probes it.
+/// `own` is `(dev, ino)` of `/proc/self/exe`.
+pub fn launch_baseline(
+    installed: Option<BinStamp>,
+    running_from_it: bool,
+    own: Option<(u64, u64)>,
+) -> Option<BinStamp> {
+    let stamp = installed?;
+    if running_from_it && own.is_some_and(|own| own != (stamp.dev, stamp.ino)) {
+        return None;
+    }
+    Some(stamp)
+}
+
+/// `(dev, ino)` of the file this process was started from.
+pub fn own_exe_identity() -> Option<(u64, u64)> {
+    let meta = std::fs::metadata("/proc/self/exe").ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
 #[derive(Debug, Clone)]
 pub struct RestartWatch {
     own_id: String,
-    /// Stamp of the newest verdict. At startup, the binary as it was then,
-    /// taken to match this process.
+    /// Stamp of the newest verdict. At startup, the [`launch_baseline`].
     checked: Option<BinStamp>,
     verdict: Verdict,
     /// The stamp seen on the latest Tick.
     latest: Option<BinStamp>,
     /// A probe in flight, for this stamp.
     probing: Option<BinStamp>,
-    failures: u8,
+    /// Failures of the stamp now being retried. Reset by any other stamp.
+    retry: Option<Retry>,
     /// "Later" was pressed for this stamp.
     dismissed: Option<BinStamp>,
 }
@@ -128,7 +174,7 @@ impl RestartWatch {
             verdict: Verdict::Same,
             latest: installed,
             probing: None,
-            failures: 0,
+            retry: None,
             dismissed: None,
         }
     }
@@ -137,6 +183,16 @@ impl RestartWatch {
     /// start now. Does nothing while an in-app update is installing: the
     /// change is picked up on the first Tick after it ends.
     pub fn on_tick(&mut self, now: Option<BinStamp>, update_running: bool) -> Option<BinStamp> {
+        self.on_tick_at(now, update_running, Instant::now())
+    }
+
+    /// [`Self::on_tick`] at a given time, for the backoff.
+    pub fn on_tick_at(
+        &mut self,
+        now: Option<BinStamp>,
+        update_running: bool,
+        at: Instant,
+    ) -> Option<BinStamp> {
         if update_running {
             self.on_update_started();
             return None;
@@ -147,6 +203,12 @@ impl RestartWatch {
         }
         let stamp = now?;
         if Some(stamp) == self.checked {
+            return None;
+        }
+        if let Some(retry) = self.retry
+            && retry.stamp == stamp
+            && at < retry.not_before
+        {
             return None;
         }
         self.probing = Some(stamp);
@@ -162,22 +224,39 @@ impl RestartWatch {
 
     /// Record a probe's result. `Ok` holds the binary's stdout.
     pub fn on_probe(&mut self, stamp: BinStamp, result: Result<String, String>) {
+        self.on_probe_at(stamp, result, Instant::now());
+    }
+
+    /// [`Self::on_probe`] at a given time, for the backoff.
+    pub fn on_probe_at(&mut self, stamp: BinStamp, result: Result<String, String>, at: Instant) {
         if self.probing == Some(stamp) {
             self.probing = None;
         }
         match result {
             Ok(stdout) => {
-                self.failures = 0;
+                self.retry = None;
                 self.checked = Some(stamp);
                 self.verdict = verdict_for(&self.own_id, &stdout);
             }
             Err(e) => {
-                self.failures = self.failures.saturating_add(1);
-                tracing::warn!(error = %e, failures = self.failures, "could not read the installed GUI's build id");
-                if self.failures >= MAX_PROBE_FAILURES {
-                    self.failures = 0;
+                let failures = match self.retry {
+                    Some(retry) if retry.stamp == stamp => retry.failures.saturating_add(1),
+                    _ => 1,
+                };
+                tracing::warn!(error = %e, failures, "could not read the installed GUI's build id");
+                if failures >= MAX_PROBE_FAILURES {
+                    // Given up until the binary changes again; a new stamp
+                    // starts from zero failures.
+                    self.retry = None;
                     self.checked = Some(stamp);
                     self.verdict = Verdict::Unknown;
+                } else {
+                    let wait = PROBE_BACKOFF[usize::from(failures - 1)];
+                    self.retry = Some(Retry {
+                        stamp,
+                        failures,
+                        not_before: at + wait,
+                    });
                 }
             }
         }
@@ -206,22 +285,47 @@ impl RestartWatch {
     }
 }
 
-/// Draw the prompt? Never while an update installs. After an in-app
-/// install, the update banner has its own Restart now; when that banner is
-/// on screen it is the one prompt.
-pub fn bar_visible(
+/// Which of the two prompts to draw. Never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptLayout {
+    /// The update banner (Overview, Settings).
+    pub banner: bool,
+    /// The restart bar.
+    pub bar: bool,
+}
+
+/// One prompt on screen in every state.
+/// - While an update installs: the banner only, no restart bar.
+/// - After an in-app install: the banner's own Restart now where it is
+///   drawn, the bar on the other screens.
+/// - Otherwise (Idle, Failed): a pending restart wins and the banner is
+///   hidden. Its offer is stale once another build is installed, for
+///   example from the banner's Copy command in a terminal.
+pub fn prompt_layout(
     watch: &RestartWatch,
     progress: &UpdateProgress,
-    update_banner_on_screen: bool,
-) -> bool {
-    if !watch.prompt_pending() {
-        return false;
-    }
+    banner_screen: bool,
+) -> PromptLayout {
+    let pending = watch.prompt_pending();
     match progress {
-        UpdateProgress::Running => false,
-        UpdateProgress::Succeeded(_) => !update_banner_on_screen,
-        UpdateProgress::Idle | UpdateProgress::Failed(_) => true,
+        UpdateProgress::Running => PromptLayout {
+            banner: banner_screen,
+            bar: false,
+        },
+        UpdateProgress::Succeeded(_) => PromptLayout {
+            banner: banner_screen,
+            bar: pending && !banner_screen,
+        },
+        UpdateProgress::Idle | UpdateProgress::Failed(_) => PromptLayout {
+            banner: banner_screen && !pending,
+            bar: pending,
+        },
     }
+}
+
+/// Draw the restart bar? See [`prompt_layout`].
+pub fn bar_visible(watch: &RestartWatch, progress: &UpdateProgress, banner_screen: bool) -> bool {
+    prompt_layout(watch, progress, banner_screen).bar
 }
 
 /// The binary "Restart now" starts ([`crate::instance::spawn_replacement`]
@@ -457,19 +561,160 @@ mod tests {
         assert!(watch.prompt_pending());
     }
 
+    fn secs(t0: Instant, s: u64) -> Instant {
+        t0 + Duration::from_secs(s)
+    }
+
     #[test]
     fn restart_prompt_retries_a_failed_probe_then_gives_up() {
+        let t0 = Instant::now();
         let mut watch = RestartWatch::new(OWN, Some(stamp_n(1)));
-        for _ in 0..MAX_PROBE_FAILURES {
-            let probe = watch.on_tick(Some(stamp_n(2)), false).expect("retry");
-            watch.on_probe(probe, Err("timed out".into()));
+        let mut at = t0;
+        for step in 0..MAX_PROBE_FAILURES {
+            let probe = watch
+                .on_tick_at(Some(stamp_n(2)), false, at)
+                .expect("retry");
+            watch.on_probe_at(probe, Err("timed out".into()), at);
             assert!(!watch.prompt_pending());
+            if let Some(wait) = PROBE_BACKOFF.get(usize::from(step)) {
+                at += *wait;
+            }
         }
-        assert_eq!(watch.on_tick(Some(stamp_n(2)), false), None, "gave up");
+        assert_eq!(
+            watch.on_tick_at(Some(stamp_n(2)), false, secs(at, 3600)),
+            None,
+            "gave up"
+        );
         assert_eq!(watch.need(), RestartNeed::Unknown);
-        let probe = watch.on_tick(Some(stamp_n(3)), false).expect("next change");
+        let probe = watch
+            .on_tick_at(Some(stamp_n(3)), false, at)
+            .expect("next change");
+        watch.on_probe_at(probe, id_line(OTHER), at);
+        assert!(watch.prompt_pending());
+    }
+
+    #[test]
+    fn restart_prompt_shows_once_the_install_finishes_after_two_failed_probes() {
+        // install.sh puts the GUI binary in place before its libraries; the
+        // first probes fail, then the finished install answers.
+        let t0 = Instant::now();
+        let mut watch = RestartWatch::new(OWN, Some(stamp_n(1)));
+        let probe = watch
+            .on_tick_at(Some(stamp_n(2)), false, t0)
+            .expect("try 1");
+        watch.on_probe_at(probe, Err("exited with 127".into()), t0);
+        assert_eq!(
+            watch.on_tick_at(Some(stamp_n(2)), false, t0),
+            None,
+            "backs off after one failure"
+        );
+        let at = secs(t0, 1);
+        let probe = watch
+            .on_tick_at(Some(stamp_n(2)), false, at)
+            .expect("try 2");
+        watch.on_probe_at(probe, Err("exited with 127".into()), at);
+        assert_eq!(
+            watch.on_tick_at(Some(stamp_n(2)), false, secs(t0, 3)),
+            None,
+            "waits 5 s after two failures"
+        );
+        let at = secs(t0, 6);
+        let probe = watch
+            .on_tick_at(Some(stamp_n(2)), false, at)
+            .expect("try 3");
+        watch.on_probe_at(probe, id_line(OTHER), at);
+        assert!(watch.prompt_pending(), "the finished install asks");
+    }
+
+    #[test]
+    fn restart_prompt_failures_do_not_carry_to_a_new_binary() {
+        let t0 = Instant::now();
+        let mut watch = RestartWatch::new(OWN, Some(stamp_n(1)));
+        let probe = watch.on_tick_at(Some(stamp_n(2)), false, t0).expect("A");
+        watch.on_probe_at(probe, Err("bad".into()), t0);
+        // Binary B lands; it gets every try, with no wait left from A.
+        let mut at = t0;
+        for step in 0..MAX_PROBE_FAILURES - 1 {
+            let probe = watch
+                .on_tick_at(Some(stamp_n(3)), false, at)
+                .expect("B retry");
+            watch.on_probe_at(probe, Err("bad".into()), at);
+            at += PROBE_BACKOFF[usize::from(step)];
+        }
+        let probe = watch
+            .on_tick_at(Some(stamp_n(3)), false, at)
+            .expect("B is not given up early");
+        watch.on_probe_at(probe, id_line(OTHER), at);
+        assert!(watch.prompt_pending());
+    }
+
+    #[test]
+    fn restart_prompt_launch_baseline_probes_a_binary_replaced_before_start() {
+        let installed = stamp_n(5);
+        assert_eq!(
+            launch_baseline(Some(installed), true, Some((1, 5))),
+            Some(installed),
+            "running the installed file"
+        );
+        assert_eq!(
+            launch_baseline(Some(installed), true, Some((1, 4))),
+            None,
+            "replaced between exec and start"
+        );
+        assert_eq!(
+            launch_baseline(Some(installed), false, Some((1, 4))),
+            Some(installed),
+            "a dev build elsewhere keeps the installed one as baseline"
+        );
+        assert_eq!(launch_baseline(None, true, Some((1, 5))), None);
+        let mut watch =
+            RestartWatch::new(OWN, launch_baseline(Some(installed), true, Some((1, 4))));
+        let probe = watch
+            .on_tick(Some(installed), false)
+            .expect("probe at start");
         watch.on_probe(probe, id_line(OTHER));
         assert!(watch.prompt_pending());
+    }
+
+    #[test]
+    fn restart_prompt_is_one_prompt_on_screen_in_every_state() {
+        let mut pending = RestartWatch::new(OWN, Some(stamp_n(1)));
+        let probe = pending.on_tick(Some(stamp_n(2)), false).expect("probe");
+        pending.on_probe(probe, id_line(OTHER));
+        let quiet = RestartWatch::new(OWN, Some(stamp_n(1)));
+        let states = [
+            UpdateProgress::Idle,
+            UpdateProgress::Running,
+            UpdateProgress::Succeeded("Installed v1.".into()),
+            UpdateProgress::Failed("no".into()),
+        ];
+        for watch in [&pending, &quiet] {
+            for progress in &states {
+                for banner_screen in [false, true] {
+                    let layout = prompt_layout(watch, progress, banner_screen);
+                    assert!(
+                        !(layout.banner && layout.bar),
+                        "{progress:?} banner_screen={banner_screen}"
+                    );
+                    if !banner_screen {
+                        assert!(!layout.banner);
+                    }
+                }
+            }
+        }
+        // A terminal install while the banner offers "Update now".
+        let idle = prompt_layout(&pending, &UpdateProgress::Idle, true);
+        assert_eq!(
+            idle,
+            PromptLayout {
+                banner: false,
+                bar: true
+            }
+        );
+        let failed = prompt_layout(&pending, &UpdateProgress::Failed("no".into()), true);
+        assert!(failed.bar && !failed.banner);
+        // Nothing pending: the banner stays.
+        assert!(prompt_layout(&quiet, &UpdateProgress::Idle, true).banner);
     }
 
     #[test]
@@ -527,7 +772,7 @@ mod tests {
                 RestartNeed::NotNeeded
             )
             .as_deref(),
-            Some("Installed v1. done The app itself did not change, so no restart is needed.")
+            Some("Installed v1. done.\nThe app itself did not change, so no restart is needed.")
         );
         assert_eq!(
             retoast(

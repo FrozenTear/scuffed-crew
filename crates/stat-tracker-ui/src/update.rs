@@ -875,7 +875,11 @@ fn truncate_clean(text: &str, max_chars: usize) -> String {
 pub const RESTART_HINT: &str = "Press Restart now to run the new version.";
 
 /// Shown after a successful in-app update that left the app's own build
-/// unchanged (a daemon-only release). The tracker service was restarted.
+/// unchanged (no GUI or shared lib code changed). The tracker service was
+/// restarted. This window keeps its compiled version until it next starts,
+/// so About, problem reports and a channel-switch update check still use the
+/// older version string; a recheck may offer the release that is already
+/// installed, which reinstalls the same files.
 pub const NO_RESTART_HINT: &str = "The app itself did not change, so no restart is needed.";
 
 /// Label of the banner's first button when no restart is needed.
@@ -890,9 +894,17 @@ pub fn success_hint(need: RestartNeed) -> &'static str {
     }
 }
 
-/// The installer's message plus [`success_hint`].
+/// The installer's message plus [`success_hint`], as its own sentence on its
+/// own line. The installer's last line often has no full stop
+/// ("Done. Launch with: stat-tracker-gui").
 pub fn success_line(msg: &str, need: RestartNeed) -> String {
-    format!("{} {}", msg.trim_end(), success_hint(need))
+    let msg = msg.trim_end();
+    let stop = if msg.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!("{msg}{stop}\n{}", success_hint(need))
 }
 
 /// Label and message of the banner's first button. After a successful
@@ -1272,6 +1284,20 @@ mod tests {
     }
 
     #[test]
+    fn success_hint_is_its_own_sentence_on_its_own_line() {
+        let installer =
+            "Installed stat-tracker-v1. [bootstrap] Done. Launch with: stat-tracker-gui";
+        assert_eq!(
+            success_line(installer, RestartNeed::Needed),
+            "Installed stat-tracker-v1. [bootstrap] Done. Launch with: stat-tracker-gui.\nPress Restart now to run the new version."
+        );
+        assert_eq!(
+            success_line("Installed v1. Done.  ", RestartNeed::NotNeeded),
+            "Installed v1. Done.\nThe app itself did not change, so no restart is needed."
+        );
+    }
+
+    #[test]
     fn daemon_only_update_says_no_restart_is_needed() {
         let done = UpdateProgress::Succeeded("Installed stat-tracker-v1.".into());
         let (label, msg) = primary_action(&done, false, RestartNeed::NotNeeded);
@@ -1280,7 +1306,7 @@ mod tests {
         let line = success_line("Installed stat-tracker-v1.", RestartNeed::NotNeeded);
         assert_eq!(
             line,
-            "Installed stat-tracker-v1. The app itself did not change, so no restart is needed."
+            "Installed stat-tracker-v1.\nThe app itself did not change, so no restart is needed."
         );
         assert!(!line.contains("Restart now"));
         for copy in [NO_RESTART_HINT, NO_RESTART_LABEL] {

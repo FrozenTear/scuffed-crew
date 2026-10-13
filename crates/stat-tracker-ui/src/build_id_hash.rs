@@ -1,6 +1,9 @@
 //! GUI build id (alpha.7 G3): a SHA-256 over the inputs compiled into
-//! `stat-tracker-gui`, so a release that changes only the daemon or the
-//! version string keeps the same id.
+//! `stat-tracker-gui`. A release keeps the id when it changes only the
+//! daemon's `main.rs`, the version string, the changelog or other files
+//! outside these inputs. A change to stat-tracker lib code counts even when
+//! only the daemon uses it, because the GUI compiles the whole lib; most
+//! releases change some lib code.
 //!
 //! `build.rs` includes this file with `#[path]` and embeds the result as
 //! `SST_GUI_BUILD_ID`. The lib compiles it only for its unit tests, which

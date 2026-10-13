@@ -1,7 +1,8 @@
 //! Embeds `SST_GUI_BUILD_ID`: a hash over the inputs compiled into the GUI
 //! (alpha.7 G3). See `src/build_id_hash.rs` for what counts. The release
-//! version and timestamps do not, so a daemon-only release keeps the id and
-//! a running GUI does not ask to restart.
+//! version, timestamps and the daemon's `main.rs` do not, so a release
+//! that changes none of the GUI or the lib code it compiles keeps the id
+//! and a running GUI does not ask to restart.
 
 #[path = "src/build_id_hash.rs"]
 mod build_id_hash;

@@ -37,7 +37,9 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     .width(Fill);
 
     let mut col = column![].spacing(24).width(Fill);
-    if let Some(info) = &app.update {
+    if let Some(info) = &app.update
+        && app.update_banner_visible()
+    {
         col = col.push(crate::update::banner(
             info,
             &app.update_progress,
