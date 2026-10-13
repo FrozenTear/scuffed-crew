@@ -58,10 +58,68 @@ pub fn tighten_private_tree(root: &Path) {
     }
 }
 
+/// Set this process's `RLIMIT_CORE` to 0, soft and hard, so a crash never
+/// writes a core file: the daemon holds full unblanked frames and the report
+/// kit's memory, and a core would put them on disk. The systemd unit sets
+/// `LimitCORE=0` too; this covers a daemon the GUI starts outside systemd.
+/// The hard limit 0 cannot be raised again by this process or its children.
+/// With `core_pattern` piped to systemd-coredump, the helper reads this limit
+/// and stores nothing.
+///
+/// `PR_SET_DUMPABLE` 0 is not used: it also makes `/proc/<pid>/exe`
+/// unreadable to the GUI, which identifies the daemon by it
+/// ([`crate::proc_id`]).
+///
+/// Async-signal-safe (one `setrlimit` call), so it may run in `pre_exec`.
+pub fn disable_core_dumps() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `setrlimit` reads the one `rlimit` passed by pointer and
+        // only changes this process's resource limit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn disable_core_dumps_sets_both_core_limits_to_zero() {
+        // R2-3 on #236. Run it in a child (after fork, before exec) so the
+        // test process keeps its limits; the limit is inherited across exec.
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "ulimit -S -c; ulimit -H -c"]);
+        // SAFETY: the closure makes only async-signal-safe calls
+        // (`getrlimit`, `setrlimit`) and allocates nothing.
+        unsafe {
+            cmd.pre_exec(|| {
+                // Raise the soft limit to the hard one first, so a host
+                // default of soft 0 does not hide a no-op.
+                let mut cur = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_CORE, &mut cur) == 0 {
+                    cur.rlim_cur = cur.rlim_max;
+                    libc::setrlimit(libc::RLIMIT_CORE, &cur);
+                }
+                disable_core_dumps()
+            });
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n0\n");
+    }
 
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777

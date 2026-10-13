@@ -478,6 +478,21 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
     Kit::default()
 }
 
+/// True when `kit` passes the checks [`load`] makes: reads blanked with
+/// this [`blank::BLANK_TABLE_VERSION`] and a scoreboard whose SHA-256 is
+/// the one in those reads. [`super::bundle::build_game_report`] checks again
+/// at the sink, since a [`Kit`] can also be built by hand.
+pub fn is_trusted(kit: &Kit) -> bool {
+    match (&kit.reads, &kit.scoreboard_png) {
+        (Some(reads), Some(png)) => {
+            reads.blank_table == blank::BLANK_TABLE_VERSION
+                && !reads.scoreboard_sha256.is_empty()
+                && super::bundle::sha256_hex(png) == reads.scoreboard_sha256
+        }
+        _ => false,
+    }
+}
+
 /// Delete a session's kit (the member deleted the game), its portrait
 /// memory, and any kit write still in flight for it.
 pub fn remove(data_dir: &Path, session_id: &str) {
@@ -985,29 +1000,48 @@ mod tests {
             .any(|(d, m)| *d == dir && m.holds_cells())
     }
 
+    /// Fill the session's portrait memory the way the blanker does with
+    /// portrait copying on, whatever [`blank::COPY_PORTRAITS`] says.
+    fn remember_gated(data_dir: &Path, session_id: &str) {
+        let dir = session_dir(data_dir, session_id).unwrap();
+        let mut memory = blank::PortraitMemory::new();
+        let at = blank::CaptureTime {
+            wall: reads().captured_at,
+            mono: std::time::Instant::now(),
+        };
+        let _ = blank::blanked_scoreboard_gated(&frame(), Some(6), &mut memory, at);
+        let mut all = portrait_memory().lock().unwrap();
+        all.retain(|(d, _)| *d != dir);
+        all.push((dir, memory));
+    }
+
     #[test]
     fn deleting_or_ending_a_game_drops_its_portrait_memory() {
         // R3-4 / K4: no unblanked portrait cell of a deleted or ended game
-        // stays in memory
+        // stays in memory. R2-5: the memory is filled with portrait copying
+        // on, so removal is exercised even while the switch is off.
         let tmp = tempfile::tempdir().unwrap();
         record_scoreboard(tmp.path(), "mem-del", &frame(), Some(6), &reads()).unwrap();
         record_scoreboard(tmp.path(), "mem-end", &frame(), Some(6), &reads()).unwrap();
         if !blank::COPY_PORTRAITS {
-            // portraits off: the memory holds no cell at all
-            let all = portrait_memory().lock().unwrap();
-            let dir = session_dir(tmp.path(), "mem-del").unwrap();
-            assert!(
-                all.iter()
-                    .filter(|(d, _)| *d == dir)
-                    .all(|(_, m)| !m.holds_cells())
-            );
-            return;
+            // portraits off: the daemon path keeps no cell at all
+            assert!(!memory_holds(tmp.path(), "mem-del"));
+            assert!(!memory_holds(tmp.path(), "mem-end"));
         }
+        remember_gated(tmp.path(), "mem-del");
+        remember_gated(tmp.path(), "mem-end");
+        remember_gated(tmp.path(), "mem-keep");
         assert!(memory_holds(tmp.path(), "mem-del"));
         assert!(memory_holds(tmp.path(), "mem-end"));
         remove(tmp.path(), "mem-del");
         assert!(!memory_holds(tmp.path(), "mem-del"));
+        assert!(memory_holds(tmp.path(), "mem-end"));
         forget_portraits(tmp.path(), "mem-end");
         assert!(!memory_holds(tmp.path(), "mem-end"));
+        assert!(
+            memory_holds(tmp.path(), "mem-keep"),
+            "only the named session is dropped"
+        );
+        forget_portraits(tmp.path(), "mem-keep");
     }
 }

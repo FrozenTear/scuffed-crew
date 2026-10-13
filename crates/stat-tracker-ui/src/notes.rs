@@ -404,7 +404,7 @@ fn notes_for_key(
         .iter()
         .find(|row| version_key(row.version).as_ref() == Some(&key))
     {
-        let mut from_remote = from_github_body(&label, row.body);
+        let (mut from_remote, remote_lead) = from_github_body(&label, row.body);
         if usable(&from_remote) {
             if from_remote.highlights.is_empty()
                 && let Some(bundled_notes) = &bundled_notes
@@ -412,8 +412,10 @@ fn notes_for_key(
                 from_remote.highlights.clone_from(&bundled_notes.highlights);
                 if !bundled_notes.summary.is_empty() && from_remote.summary != bundled_notes.summary
                 {
+                    // The moved summary goes into markdown, so keep its
+                    // original marks (bold, code) instead of the plain text.
                     let mut details = String::new();
-                    let lead = from_remote.summary.trim();
+                    let lead = remote_lead.trim();
                     let rest = from_remote.body_markdown.trim();
                     if !lead.is_empty() {
                         details.push_str(lead);
@@ -436,7 +438,9 @@ fn notes_for_key(
     })
 }
 
-fn from_github_body(version: &str, body: &str) -> ReleaseNotes {
+/// The notes from a GitHub release body, plus the summary paragraph as
+/// written (markdown), for when it moves into `body_markdown`.
+fn from_github_body(version: &str, body: &str) -> (ReleaseNotes, String) {
     let stripped = hide_sections(body, |_level, title| {
         title.eq_ignore_ascii_case("install")
             || title.starts_with("Commits since")
@@ -444,7 +448,7 @@ fn from_github_body(version: &str, body: &str) -> ReleaseNotes {
     });
     let stripped =
         drop_leading_paragraph_if(&stripped, |summary| summary.starts_with("Prebuilt Linux"));
-    player_text(version, &stripped)
+    player_text_with_lead(version, &stripped)
 }
 
 fn player_from_section(version: &str, raw: &str) -> ReleaseNotes {
@@ -453,19 +457,25 @@ fn player_from_section(version: &str, raw: &str) -> ReleaseNotes {
 }
 
 fn player_text(version: &str, raw: &str) -> ReleaseNotes {
+    player_text_with_lead(version, raw).0
+}
+
+/// [`player_text`], plus the summary paragraph before `plain_inline`.
+fn player_text_with_lead(version: &str, raw: &str) -> (ReleaseNotes, String) {
     let highlights = extract_highlights(raw)
         .iter()
         .map(|h| plain_inline(h))
         .collect();
     let stripped = strip_highlights(raw);
     let (summary, rest) = split_summary(&stripped);
-    ReleaseNotes {
+    let notes = ReleaseNotes {
         version: version.to_string(),
         summary: plain_inline(&summary),
         highlights,
         body_markdown: rest.trim().to_string(),
         published_on: None,
-    }
+    };
+    (notes, summary)
 }
 
 /// The summary and highlights are drawn as plain `text`, not markdown, so
@@ -1182,6 +1192,30 @@ Detail line with `inline`.
         assert_eq!(preferred[0].highlights, ["remote highlight"]);
         assert!(!preferred[0].body_markdown.contains("remote highlight"));
         assert!(preferred[0].body_markdown.contains("Detail line"));
+    }
+
+    #[test]
+    fn a_moved_remote_summary_keeps_its_markdown() {
+        // R2 N1 on #241: the remote summary moves into `body_markdown`,
+        // which renders markdown, so its bold must survive.
+        let notes = notes_for_update(
+            FIXTURE,
+            "0.4.1",
+            "0.4.2",
+            &[RemoteRelease {
+                version: "0.4.2",
+                body: "Player **summary** with `code` from GitHub.\n\nDetail line.\n",
+                published_at: None,
+            }],
+        );
+        assert_eq!(notes[0].summary, "Player summary for two. It stays short.");
+        assert!(
+            notes[0]
+                .body_markdown
+                .starts_with("Player **summary** with `code` from GitHub.\n\nDetail line."),
+            "{}",
+            notes[0].body_markdown
+        );
     }
 
     #[test]

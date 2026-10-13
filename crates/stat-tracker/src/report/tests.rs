@@ -791,6 +791,58 @@ mod game {
     }
 
     #[test]
+    fn a_mismatched_kit_is_never_put_in_a_report() {
+        // R2-4 on #236: a hand-built kit must pass kit::load's checks.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let good = input(tmp.path(), GameCategory::WrongStats);
+        assert!(kit::is_trusted(&good.kit));
+        assert_eq!(build_game_report(&good).unwrap().images.len(), 1);
+
+        let other_png = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([255, 0, 0])))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let mut old_table = good.clone();
+        if let Some(r) = old_table.kit.reads.as_mut() {
+            r.blank_table = crate::report::blank::BLANK_TABLE_VERSION - 1;
+        }
+        let mut swapped = good.clone();
+        swapped.kit.scoreboard_png = Some(other_png);
+        let mut unhashed = good.clone();
+        if let Some(r) = unhashed.kit.reads.as_mut() {
+            r.scoreboard_sha256.clear();
+        }
+        let mut no_board = good.clone();
+        no_board.kit.scoreboard_png = None;
+        for (what, bad) in [
+            ("older blank table", old_table),
+            ("scoreboard swapped", swapped),
+            ("no hash", unhashed),
+            ("reads without a scoreboard", no_board),
+        ] {
+            assert!(!kit::is_trusted(&bad.kit), "{what}");
+            assert!(build_game_report(&bad).is_err(), "{what}");
+            let mut missed = bad.clone();
+            missed.category = GameCategory::MissedGame;
+            let zip = build_game_report(&missed).unwrap();
+            assert!(
+                zip.images.is_empty(),
+                "{what}: no image of a mismatched kit"
+            );
+            let files = unzip(&zip.bytes);
+            assert!(!files.contains_key("crops/scoreboard.png"), "{what}");
+            assert!(!files.contains_key("crops/outcome.png"), "{what}");
+            let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+            assert_eq!(m["session_id"], "none", "{what}: its reads are dropped too");
+        }
+    }
+
+    #[test]
     fn a_game_without_a_kit_cannot_be_reported_except_as_missed() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(build_game_report(&input(tmp.path(), GameCategory::WrongStats)).is_err());
