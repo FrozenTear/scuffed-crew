@@ -1,7 +1,9 @@
 # Recognizer asset packs
 
-The stat tracker downloads private asset packs from the site. Today it reads
-one pack: the hero template pack, `heroes-v1.tar`. Those files are game art.
+The stat tracker downloads private asset packs from the site. It installs six
+packs (see [The packs the tracker installs](#the-packs-the-tracker-installs)).
+Only one of them is read today: the hero template pack, `heroes-v1.tar`. The
+others are downloaded so later readers can use them. Those files are game art.
 
 Do not commit them. Do not attach them to a GitHub release. Do not put them in
 fixtures or under `crates/stat-tracker/test-data/`. The server only reads files
@@ -71,26 +73,48 @@ A name that is not in this file is not served, including a path that tries to
 leave the directory. The server canonicalizes the file and requires it to stay
 inside `PACKS_DIR`.
 
-## The hero pack the tracker needs
+## The packs the tracker installs
 
-The server serves any valid name. The tracker only installs the entry named
-exactly `heroes-v1.tar`. If the list is empty, the tracker does nothing. If
-the list has entries but none is `heroes-v1.tar`, every tracker reports "The
-reader pack did not match the site" and keeps what it had. Other entries are
-ignored.
+The server serves any valid name. The tracker installs these names, each
+into its own folder under `<data_dir>/templates/`, and ignores every other
+entry:
 
-The file is a plain ustar archive. At the top level it holds:
+| Pack | Folder | What may be inside (besides `manifest.json`) | Read by |
+| --- | --- | --- | --- |
+| `heroes-v1.tar` | `templates/heroes/` | `<hero>.png`, `special/<name>.png` | hero reader |
+| `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | nothing yet |
+| `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | nothing yet |
+| `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
+| `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | nothing yet |
+| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | nothing yet |
+
+`<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
+(`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
+1 to 64 of `a-z`, `0-9`, `_`, `-`. For `words-v1.tar` it is 1 to 64 of `a-z`,
+`0-9`, `_` (`accolade_victory.png`, `words.json`). Glyph names are a `g` and
+four lowercase hex digits (`g003a.png`). `heroes-v1.tar` keeps its older rule:
+any one top-level file, or one file in `special/`.
+
+Each pack is checked on its own. A file outside its pack's layout, a bad
+sha256, or a failed download refuses that pack only. The other packs still
+install, and the refused pack's folder is left as it was.
+
+If the list is empty, the tracker does nothing. If the list has entries but
+none is `heroes-v1.tar`, every tracker reports "The reader pack did not match
+the site" for the hero pack, keeps its hero folder, and still installs the
+other packs it finds. A pack the list does not name is reported as not
+listed, and its installed folder is kept.
+
+Each file is a plain ustar archive. At the top level it holds:
 
 - `manifest.json`, exactly once.
-- `<hero>.png` for each hero. Use the `file` names from `HERO_NAMES` in
-  `crates/types/src/heroes.rs` (`ana.png`, `wrecking-ball.png`).
-- `special/` with the non-hero row images. Their names start with
-  `placeholder`, `skull`, or `empty` (`special/skull_01.png`).
+- The files from the table above. Only the hero packs may carry a
+  `special/` folder, and nothing goes deeper than `special/`.
 
-No other folder and nothing deeper than `special/`. Only regular files and the
-`special/` directory entry. A symlink, hard link, pax or GNU long-name header,
-or a `./` directory entry makes the tracker reject the pack. Build it with
-GNU tar and list the members, not `.`:
+Only regular files and, for the hero packs, the `special/` directory entry.
+A symlink, hard link, pax or GNU long-name header, or a `./` directory entry
+makes the tracker reject the pack. Build it with GNU tar and list the
+members, not `.`:
 
 ```bash
 cd /path/to/private-packs/heroes
@@ -119,27 +143,55 @@ archive:
 }
 ```
 
-`name` must be `heroes-v1.tar`. `version` must equal the `version` of the
-`heroes-v1.tar` entry in `PACKS_DIR/manifest.json`. `files` lists every
-regular file in the archive except `manifest.json` itself, once each, with its
-lowercase SHA-256 and byte length. Do not list the `special/` directory entry:
-the tracker skips directory entries, so listing one fails the pack. A file in the archive that is not listed, or a listed
-file that is missing, fails the pack.
+`name` must be the pack's own name (`heroes-v1.tar` above). `version` must
+equal the `version` of that entry in `PACKS_DIR/manifest.json`. `files` lists
+every regular file in the archive except `manifest.json` itself, once each,
+with its lowercase SHA-256 and byte length. Other keys (such as `source`) are
+ignored. Do not list the `special/` directory entry: the tracker skips
+directory entries, so listing one fails the pack. A file in the archive that
+is not listed, or a listed file that is missing, fails the pack.
 
-The tracker checks the downloaded file's size and sha256 against
-`PACKS_DIR/manifest.json` before it unpacks anything. It is capped at 32 MiB.
+The tracker checks each downloaded file's size and sha256 against
+`PACKS_DIR/manifest.json` before it unpacks anything. Each is capped at
+32 MiB.
 
-### Where it lands and when it is fetched again
+### Where they land and when they are fetched again
 
-The tracker unpacks into `<data_dir>/templates/heroes/` and records the
-installed version in `<data_dir>/templates/pack-versions.json`. A failed
-download or a rejected pack leaves the old folder in place.
+Each pack is unpacked into a staging folder next to its live folder and then
+swapped into place, so a failed download or a rejected pack leaves the old
+folder in place. Installed versions are recorded in
+`<data_dir>/templates/pack-versions.json`, one `"<name>": "<version>"` key per
+pack. A file written by an older tracker that names only `heroes-v1.tar` is
+read as is, and its entry is kept.
 
 It checks the list when the daemon starts and when the setup guide runs its
-reader pack step. It downloads again only when the listed `version` differs
-from the recorded one, or the `heroes` folder is gone. To ship new art, change
-`version` in both manifests. Replacing the file under the same version does
-not reach trackers that already have it.
+reader pack step. It downloads a pack again only when the listed `version`
+differs from the recorded one, or that pack's folder is gone. To ship new
+art, change `version` in both manifests. Replacing the file under the same
+version does not reach trackers that already have it.
+
+Packs are fetched one after another, `heroes-v1.tar` first. A first install
+of all six is seven requests (the list and six files), inside the burst of 8
+below.
+
+- **Daemon start** syncs `heroes-v1.tar` only (the list and one file, as
+  before) and then starts capture. The other five packs are synced in the
+  background with the same list, so capture never waits on them.
+- **Setup guide** ("Download reader pack") syncs all six.
+- **One sync at a time.** A sync holds an exclusive lock on
+  `<data_dir>/templates/.pack-sync.lock` before its first request. A second
+  sync (the daemon and the app at once) sends nothing and reports "A reader
+  pack sync is already running. Try again in a moment." That is not a failure.
+- A 401, 403, 429, or `packs_disabled` answer on one download stops the packs
+  after it for that run. Their folders are kept, a pack that is already
+  current is still reported as current, and the next run tries again.
+- Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
+  `templates/` by a killed sync are removed by the next sync once they are
+  an hour old.
+
+The setup guide shows the hero pack's line, plus "Extra reader packs ready:
+N of M." when the server lists any of the other packs, plus the rate-limit
+sentence when one of them was rate limited.
 
 ## Copy into the volume
 

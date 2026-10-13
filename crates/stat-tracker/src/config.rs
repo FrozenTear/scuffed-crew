@@ -68,9 +68,10 @@ pub struct Config {
     /// in-place edit as `shadow_recognizer`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_completed: bool,
-    /// Optional https address of a reader template pack. The setup guide
-    /// offers the download when this is set, and skips that step when it is
-    /// empty. Config-file only.
+    /// Not used. Reader packs come from the signed-in site
+    /// (`GET /api/tracker/packs`, see [`crate::packs`]) and the setup guide
+    /// always shows its pack step. Kept so a config.toml that still sets it
+    /// parses and saves back unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_pack_url: Option<String>,
     /// Which reader supplies saved and uploaded stats.
@@ -1387,6 +1388,31 @@ token = "secret"
             validate_sync_server_url(&sync.server_url),
             Err(SyncUrlReject::HttpsRequired)
         );
+    }
+
+    #[test]
+    fn a_config_with_the_unused_reader_pack_url_still_parses_and_keeps_it() {
+        let raw = r#"
+data_dir = "/tmp/sst-p1"
+setup_completed = true
+reader_pack_url = "https://crew.example/packs/reader.zip"
+"#;
+        let cfg = Config::parse_file_contents(raw).expect("reader_pack_url must still parse");
+        assert_eq!(cfg.data_dir, PathBuf::from("/tmp/sst-p1"));
+        assert!(cfg.setup_completed);
+        assert_eq!(
+            cfg.reader_pack_url.as_deref(),
+            Some("https://crew.example/packs/reader.zip")
+        );
+        let saved = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            saved.contains("reader_pack_url = \"https://crew.example/packs/reader.zip\""),
+            "{saved}"
+        );
+        let blank =
+            Config::parse_file_contents("data_dir = \"/tmp/sst-p1\"\nreader_pack_url = \"\"\n")
+                .expect("blank reader_pack_url must still parse");
+        assert_eq!(blank.reader_pack_url.as_deref(), Some(""));
     }
 
     fn sample(full: bool) -> Config {

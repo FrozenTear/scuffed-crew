@@ -408,6 +408,8 @@ async fn main() -> anyhow::Result<()> {
     // leaves sync off — including the startup player-name fetch — so the
     // bearer token is never sent. The daemon keeps running.
     let sync_client = open_sync_client(config.sync.as_ref());
+    // Packs no reader uses yet. Synced in the background once capture is up.
+    let mut extra_packs = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
@@ -416,8 +418,12 @@ async fn main() -> anyhow::Result<()> {
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
-            stat_tracker::packs::sync_on_startup(&creds.server_url, &creds.token, &config.data_dir)
-                .await;
+            extra_packs = stat_tracker::packs::sync_on_startup(
+                &creds.server_url,
+                &creds.token,
+                &config.data_dir,
+            )
+            .await;
         }
     }
 
@@ -515,6 +521,11 @@ async fn main() -> anyhow::Result<()> {
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
         use_new_reader: config.uses_new_reader(),
     });
+    // Capture never waits on the extra packs: a stalled download only
+    // delays this task.
+    if let Some(extras) = extra_packs {
+        tokio::spawn(extras.run());
+    }
     let result = run_loop(ctx).await;
     if result.is_ok()
         && let Some(guard) = run_marker
