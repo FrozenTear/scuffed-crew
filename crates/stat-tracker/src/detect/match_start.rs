@@ -4,17 +4,23 @@
 //!
 //! | phase | pixel gate | ocr-v1 title check (Tesseract, top-centre h/4 crop) | `reader = "new"` |
 //! |---|---|---|---|
-//! | [`GamePhase::MapVote`] | navy ≥ 0.40 in the top quarter | `VOTE` and `MAP`; map names from the same text | words-v1 `vote_for_a_map` |
+//! | [`GamePhase::MapVote`] | navy ≥ 0.40 in the top quarter | `VOTE` and `MAP`; map names from the same text | words-v1 `vote_for_a_map` or `selecting_map` |
 //! | [`GamePhase::HeroBan`] | red ≥ 0.003 and dark ≥ 0.30 in the top sixth | `BAN HERO`, `TEAM BAN SCORE` or `VOTE TO BAN` | words-v1 `ban_heroes` |
 //! | [`GamePhase::HeroSelect`] | dark ≥ 0.50 in the top eighth and grid variance ≥ 2000 | `ASSEMBLE`, `PREFERRED HERO`, or `SELECT` and `HERO` | words-v1 `select_a_preferred_hero` |
 //!
-//! The order is vote, ban, select; the first confirmed screen wins. Under
-//! `reader = "new"` ([`PhaseSource::Words`]) a screen whose mask is loaded
-//! is confirmed by that mask alone ([`crate::shadow::result::phrase`]): a
-//! sure read is the phase, a suspect or absent read is not, and no OCR
-//! runs. The map vote then names no maps. A screen without a loaded mask
-//! keeps the OCR check. The pixel gates, the stability deferral and the
-//! order are the same for both readers.
+//! The order is vote, ban, select; the first confirmed detector wins. Under
+//! `reader = "new"` ([`PhaseSource::Words`]) a detector with a loaded mask
+//! is confirmed by its masks alone ([`crate::shadow::result::phrase`]): a
+//! sure read of one of them is the phase, a suspect or absent read is not,
+//! and no OCR runs. The map vote then names no maps.
+//!
+//! The unit is the detector, not the title. A detector with none of its
+//! masks loaded keeps the OCR check, with all of its OCR phrases. A
+//! detector with a mask loaded reads only the titles it has masks for: the
+//! other titles in its OCR column are then not read at all (with words-v1:
+//! `TEAM BAN SCORE`, `VOTE TO BAN`, `ASSEMBLE`; and `SELECTING MAP` on a
+//! version 1 pack, which has no `selecting_map` mask). The pixel gates, the
+//! stability deferral and the order are the same for both readers.
 
 use image::{DynamicImage, RgbImage};
 
@@ -52,8 +58,8 @@ pub enum PhaseSource {
     #[default]
     Ocr,
     /// The words-v1 phrase masks (`reader = "new"`). Only a sure read is a
-    /// signal; a suspect or absent read is not, and no OCR runs. A screen
-    /// whose mask is not loaded keeps the OCR check.
+    /// signal; a suspect or absent read is not, and no OCR runs. A detector
+    /// with none of its masks loaded keeps the OCR check.
     Words,
 }
 
@@ -85,7 +91,7 @@ impl PhaseSource {
 /// Pixel gates, thresholds, phrase checks, and priority order are shared with
 /// the one-shot detectors — fixture parity holds by construction. `source`
 /// says who confirms ([`PhaseSource`]); under [`PhaseSource::Words`] the
-/// crop is recognized only for a gate-passing screen without a mask.
+/// crop is recognized only for a gate-passing detector without a mask.
 pub fn detect_phase_polled(
     img: &DynamicImage,
     rgb: &RgbImage,
@@ -178,13 +184,24 @@ fn detect_phase_polled_with(
     };
 
     if vote_gate {
-        match read(Phrase::VoteForAMap) {
-            Some(true) => {
+        // Two titles of one screen: VOTE FOR A MAP while the vote is open,
+        // SELECTING MAP once the map is drawn. A sure read of either is the
+        // vote. The second is read only when the first is not sure, and the
+        // OCR only when neither mask is loaded (a version 1 pack has the
+        // first alone, and then decides alone).
+        let vote = read(Phrase::VoteForAMap);
+        let selecting = if vote == Some(true) {
+            None
+        } else {
+            read(Phrase::SelectingMap)
+        };
+        match (vote, selecting) {
+            (Some(true), _) | (_, Some(true)) => {
                 tracing::info!(navy_ratio = navy, "map vote screen detected (words-v1)");
                 return GamePhase::MapVote { maps: Vec::new() };
             }
-            Some(false) => {}
-            None => {
+            (Some(false), _) | (_, Some(false)) => {}
+            (None, None) => {
                 if let Some(phase) = upper().and_then(|t| confirm_map_vote(&t, navy)) {
                     return phase;
                 }
@@ -848,6 +865,17 @@ mod tests {
         img
     }
 
+    /// Navy top with a red strip over a hero grid: passes all three gates.
+    fn all_gates_frame() -> RgbImage {
+        let mut img = select_frame([16, 25, 58]);
+        for y in 20..30 {
+            for x in 560..720 {
+                img.put_pixel(x, y, image::Rgb([200, 24, 24]));
+            }
+        }
+        img
+    }
+
     /// Two polled ticks of one frame (the first only primes stability).
     fn polled(
         rgb: &RgbImage,
@@ -935,7 +963,11 @@ mod tests {
     fn under_words_a_screen_without_a_mask_keeps_the_ocr_check() {
         // No mask for this screen's title: the OCR confirms it, as today.
         let unloaded = |missing: Phrase| {
-            move |p: Phrase, _: &RgbImage| (p != missing).then_some(PhraseRead::Absent(0.2))
+            move |p: Phrase, _: &RgbImage| {
+                let vote = |p| matches!(p, Phrase::VoteForAMap | Phrase::SelectingMap);
+                // the vote detector has two masks: both are missing
+                (p != missing && !(vote(p) && vote(missing))).then_some(PhraseRead::Absent(0.2))
+            }
         };
         let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
         let w = PhaseSource::Words;
@@ -1035,14 +1067,20 @@ mod tests {
                 );
             }
         }
-        // Only the gate-passing screen's phrase is read.
+        // Only the gate-passing screen's phrases are read.
         for (frame, open) in [
-            (vote_frame(), Phrase::VoteForAMap),
-            (ban_frame(), Phrase::BanHeroes),
-            (select_frame([10, 10, 10]), Phrase::SelectAPreferredHero),
+            (
+                vote_frame(),
+                vec![Phrase::VoteForAMap, Phrase::SelectingMap],
+            ),
+            (ban_frame(), vec![Phrase::BanHeroes]),
+            (
+                select_frame([10, 10, 10]),
+                vec![Phrase::SelectAPreferredHero],
+            ),
         ] {
             let only_open = move |p: Phrase, _: &RgbImage| {
-                assert_eq!(p, open, "a shut gate's phrase was read");
+                assert!(open.contains(&p), "a shut gate's phrase was read: {p:?}");
                 Some(PhraseRead::Absent(0.2))
             };
             assert_eq!(
@@ -1071,6 +1109,259 @@ mod tests {
                 no_ocr
             ),
             GamePhase::HeroSelect
+        );
+    }
+
+    /// F260-6: every position in the order, on one frame that passes all
+    /// three gates.
+    #[test]
+    fn under_words_the_order_holds_with_every_gate_open() {
+        let all = all_gates_frame();
+        let m = gate_metrics(&all);
+        assert!(m.navy_ratio >= 0.40);
+        assert!(m.ban_red_ratio >= 0.003 && m.ban_dark_ratio >= 0.30);
+        assert!(m.select_dark_header_ratio >= 0.50 && m.select_grid_variance >= 2000.0);
+        let sure = |these: &'static [Phrase]| {
+            move |p: Phrase, _: &RgbImage| {
+                Some(if these.contains(&p) {
+                    PhraseRead::Sure(0.95)
+                } else {
+                    PhraseRead::Absent(0.3)
+                })
+            }
+        };
+        let w = PhaseSource::Words;
+        let vote = GamePhase::MapVote { maps: Vec::new() };
+        use Phrase::{BanHeroes, SelectAPreferredHero, SelectingMap, VoteForAMap};
+        // vote before ban and select, by either title
+        assert_eq!(
+            polled(
+                &all,
+                w,
+                sure(&[VoteForAMap, BanHeroes, SelectAPreferredHero]),
+                no_ocr
+            ),
+            vote
+        );
+        assert_eq!(
+            polled(
+                &all,
+                w,
+                sure(&[SelectingMap, BanHeroes, SelectAPreferredHero]),
+                no_ocr
+            ),
+            vote
+        );
+        assert_eq!(
+            polled(&all, w, sure(&[VoteForAMap, BanHeroes]), no_ocr),
+            vote
+        );
+        assert_eq!(
+            polled(&all, w, sure(&[VoteForAMap, SelectAPreferredHero]), no_ocr),
+            vote
+        );
+        // ban before select
+        assert_eq!(
+            polled(&all, w, sure(&[BanHeroes, SelectAPreferredHero]), no_ocr),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(&all, w, sure(&[BanHeroes]), no_ocr),
+            GamePhase::HeroBan
+        );
+        // select last
+        assert_eq!(
+            polled(&all, w, sure(&[SelectAPreferredHero]), no_ocr),
+            GamePhase::HeroSelect
+        );
+        assert_eq!(polled(&all, w, sure(&[]), no_ocr), GamePhase::Unknown);
+        // The same order under ocr-v1, from one text.
+        let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
+        let o = PhaseSource::Ocr;
+        assert_eq!(
+            polled(
+                &all,
+                o,
+                no_words,
+                text("VOTE FOR A MAP  BAN HEROES  ASSEMBLE")
+            ),
+            vote
+        );
+        assert_eq!(
+            polled(&all, o, no_words, text("BAN HEROES  ASSEMBLE")),
+            GamePhase::HeroBan
+        );
+        assert_eq!(
+            polled(&all, o, no_words, text("ASSEMBLE")),
+            GamePhase::HeroSelect
+        );
+    }
+
+    /// F260-6: the OCR text is recognized once per tick and every detector
+    /// that needs it gets the same text.
+    #[test]
+    fn two_detectors_share_one_ocr_text_on_a_tick() {
+        use std::cell::Cell;
+        let all = all_gates_frame();
+        // The vote detector takes the text first and rejects it; the ban
+        // and select detectors then check the same text.
+        for (said, want) in [
+            ("TEAM BAN SCORE", GamePhase::HeroBan),
+            ("ASSEMBLE YOUR TEAM", GamePhase::HeroSelect),
+            ("NOTHING HERE", GamePhase::Unknown),
+        ] {
+            let calls = Cell::new(0);
+            let once = |_: &DynamicImage| {
+                calls.set(calls.get() + 1);
+                Some(said.to_string())
+            };
+            assert_eq!(
+                polled(&all, PhaseSource::Ocr, no_words, once),
+                want,
+                "{said}"
+            );
+            // two ticks; the first defers before any OCR
+            assert_eq!(calls.get(), 1, "{said}");
+            // Under words with no mask at all: the same, shared the same way.
+            let calls = Cell::new(0);
+            let once = |_: &DynamicImage| {
+                calls.set(calls.get() + 1);
+                Some(said.to_string())
+            };
+            let none = |_: Phrase, _: &RgbImage| None;
+            assert_eq!(polled(&all, PhaseSource::Words, none, once), want, "{said}");
+            assert_eq!(calls.get(), 1, "{said}");
+        }
+        // No text (OCR failed): asked once, no phase for any detector.
+        let calls = Cell::new(0);
+        let fails = |_: &DynamicImage| {
+            calls.set(calls.get() + 1);
+            None
+        };
+        assert_eq!(
+            polled(&all, PhaseSource::Ocr, no_words, fails),
+            GamePhase::Unknown
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    // ------------------------------------------- SELECTING MAP (O7b)
+
+    /// A read per phrase; a phrase not listed has no mask.
+    fn reads(list: &[(Phrase, PhraseRead)]) -> impl Fn(Phrase, &RgbImage) -> Option<PhraseRead> {
+        let list = list.to_vec();
+        move |p, _| list.iter().find(|(q, _)| *q == p).map(|(_, r)| *r)
+    }
+
+    #[test]
+    fn under_words_a_sure_selecting_map_is_the_map_vote_and_no_ocr_runs() {
+        let w = PhaseSource::Words;
+        let vote = GamePhase::MapVote { maps: Vec::new() };
+        let (sure, suspect, absent) = (
+            PhraseRead::Sure(0.95),
+            PhraseRead::Suspect(0.5),
+            PhraseRead::Absent(0.2),
+        );
+        const V: Phrase = Phrase::VoteForAMap;
+        const S: Phrase = Phrase::SelectingMap;
+        // SELECTING MAP on screen: the vote title half-matches (suspect).
+        assert_eq!(
+            polled(&vote_frame(), w, reads(&[(V, suspect), (S, sure)]), no_ocr),
+            vote
+        );
+        assert_eq!(
+            polled(&vote_frame(), w, reads(&[(V, absent), (S, sure)]), no_ocr),
+            vote
+        );
+        // A pack with the selecting mask alone still confirms by it.
+        assert_eq!(polled(&vote_frame(), w, reads(&[(S, sure)]), no_ocr), vote);
+        // VOTE FOR A MAP on screen: sure by the first title, as before.
+        assert_eq!(
+            polled(&vote_frame(), w, reads(&[(V, sure), (S, absent)]), no_ocr),
+            vote
+        );
+    }
+
+    #[test]
+    fn under_words_a_suspect_or_absent_selecting_map_is_no_phase_and_no_ocr_runs() {
+        let w = PhaseSource::Words;
+        const V: Phrase = Phrase::VoteForAMap;
+        const S: Phrase = Phrase::SelectingMap;
+        const SUSPECT: PhraseRead = PhraseRead::Suspect(0.69);
+        const ABSENT: PhraseRead = PhraseRead::Absent(0.2);
+        for list in [
+            &[(V, ABSENT), (S, SUSPECT)][..],
+            &[(V, ABSENT), (S, ABSENT)],
+            &[(V, SUSPECT), (S, SUSPECT)],
+            // one mask loaded and not sure: the detector is loaded, no OCR
+            &[(S, SUSPECT)],
+            &[(S, ABSENT)],
+            &[(V, SUSPECT)],
+        ] {
+            assert_eq!(
+                polled(&vote_frame(), w, reads(list), no_ocr),
+                GamePhase::Unknown,
+                "{list:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selecting_map_confirms_only_the_map_vote() {
+        let w = PhaseSource::Words;
+        // Sure on the ban and the select screens (their own titles absent):
+        // not a ban, not a select, and the vote gate is shut so not a vote.
+        let sel_only = sure_for(Phrase::SelectingMap);
+        assert_eq!(
+            polled(&ban_frame(), w, &sel_only, no_ocr),
+            GamePhase::Unknown
+        );
+        assert_eq!(
+            polled(&select_frame([10, 10, 10]), w, &sel_only, no_ocr),
+            GamePhase::Unknown
+        );
+        // With every gate open it is the vote, never the ban or the select.
+        assert_eq!(
+            polled(&all_gates_frame(), w, &sel_only, no_ocr),
+            GamePhase::MapVote { maps: Vec::new() }
+        );
+    }
+
+    /// A words-v1 version 1 pack has no `selecting_map` mask: the vote
+    /// detector behaves exactly as before (#260).
+    #[test]
+    fn a_pack_without_selecting_map_reads_the_vote_as_before() {
+        use std::cell::RefCell;
+        let w = PhaseSource::Words;
+        const V: Phrase = Phrase::VoteForAMap;
+        let asked = RefCell::new(Vec::new());
+        let v1 = |read: PhraseRead| {
+            let asked = &asked;
+            move |p: Phrase, _: &RgbImage| {
+                asked.borrow_mut().push(p);
+                (p == V).then_some(read)
+            }
+        };
+        // sure: the vote, and the missing mask is not even asked for
+        assert_eq!(
+            polled(&vote_frame(), w, v1(PhraseRead::Sure(0.95)), no_ocr),
+            GamePhase::MapVote { maps: Vec::new() }
+        );
+        assert_eq!(*asked.borrow(), vec![V]);
+        // not sure (SELECTING MAP reads 0.50 on the vote mask): no phase,
+        // and no OCR although the selecting mask is missing
+        for read in [PhraseRead::Suspect(0.5), PhraseRead::Absent(0.2)] {
+            assert_eq!(
+                polled(&vote_frame(), w, v1(read), no_ocr),
+                GamePhase::Unknown
+            );
+        }
+        // neither mask: the OCR check, with SELECTING MAP through "VOTES"
+        let text = |t: &'static str| move |_: &DynamicImage| Some(t.to_string());
+        let none = |_: Phrase, _: &RgbImage| None;
+        assert_eq!(
+            polled(&vote_frame(), w, none, text("SELECTING MAP  2 VOTES")),
+            GamePhase::MapVote { maps: Vec::new() }
         );
     }
 

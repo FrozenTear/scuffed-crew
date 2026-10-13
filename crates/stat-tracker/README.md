@@ -194,6 +194,61 @@ ocr_threads = 1
 
 The daemon reads config once at startup — restart it after changes.
 
+### OCR CPU use (`OMP_THREAD_LIMIT`)
+
+The daemon runs Tesseract with `OMP_THREAD_LIMIT=1`. Tesseract is built
+with OpenMP, and with no limit each OCR call also spins up its own thread
+team on top of the `ocr_threads` workers. The fields are still read in
+parallel by the `ocr_threads` workers.
+
+Measured with Tesseract 5 on the development machine: the reads are
+identical on 10,784 + 816 samples, text and confidence, for about a third
+of the CPU time. Release builds bundle Tesseract 4.1.1 (also built with
+OpenMP); that library was not measured.
+
+- The systemd unit sets it (`Environment=OMP_THREAD_LIMIT=1`). An update
+  rewrites the unit and restarts a running tracker. The app's Start button
+  starts the unit whenever the unit is installed.
+- A start outside systemd (a shell, or the app's Start button when no unit
+  is installed) has no such line. OpenMP reads the variable when the binary
+  loads, so the daemon starts itself again once, same pid and arguments,
+  with the variable set. `SCUFFED_OMP_REEXEC` marks that second start and
+  stops a loop. This happens before any flag is read, so `--version` and
+  `--help` also start themselves again once (same pid, same output), and a
+  `--version` process started by an installer or the app has
+  `SCUFFED_OMP_REEXEC=1` in its environment.
+- A value you set yourself is kept: `OMP_THREAD_LIMIT=4 scuffed-stat-tracker`,
+  or for the unit a drop-in (`systemctl --user edit scuffed-stat-tracker`).
+  That command writes
+  `~/.config/systemd/user/scuffed-stat-tracker.service.d/override.conf`.
+  The uninstallers do not remove that file, and it applies again after a
+  reinstall: delete it yourself when you no longer want it.
+- To run with no limit, leave `OMP_THREAD_LIMIT` unset and set
+  `SCUFFED_OMP_NO_REEXEC=1`. In a drop-in for the unit that is
+  `UnsetEnvironment=OMP_THREAD_LIMIT` and
+  `Environment=SCUFFED_OMP_NO_REEXEC=1`. An empty `OMP_THREAD_LIMIT=`
+  counts as unset, so on its own it ends up as 1.
+- `--generate-tessdata` does not restart: it runs Tesseract's training tools,
+  which would inherit the limit.
+- Only the daemon does this. The examples, the replay benchmark and the
+  fixture tests run with no limit unless you set the variable for them.
+
+To check what a process got:
+
+- `scuffed-stat-tracker --print-omp-limit` starts a new process and prints
+  the value that process ended up with and what OpenMP itself reports. It
+  says nothing about a tracker that is already running.
+- A running tracker logs one line at start (`OpenMP thread limit for OCR`,
+  with `omp_thread_limit` and `libgomp_thread_limit`), its thread count
+  after the first scoreboard OCR, and `omp_thread_limit` and `os_threads`
+  on each `capture timing` line. Under the unit these lines are in the
+  journal: `journalctl --user -u scuffed-stat-tracker`.
+  `systemctl --user show -p Environment scuffed-stat-tracker` shows what
+  the unit sets.
+- These lines are not in a problem report from a standard install. A
+  report's log is cut from `daemon.log`, which only a tracker the app
+  started itself (no unit installed) writes.
+
 ### Where the daemon writes
 
 The user unit sets `ProtectSystem=strict`. When that sandbox is applied,
