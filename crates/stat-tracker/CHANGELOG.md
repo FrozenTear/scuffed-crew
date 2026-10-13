@@ -17,25 +17,23 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.5.0-alpha.6
 
-This alpha lets you report a game the tracker got wrong, with a picture of the scoreboard in which every player name is blanked before the picture is saved. Updates now restart the tracker, the app opens only one window, and your own row is found again on 5v5 boards.
+This alpha lets you report a game the tracker got wrong, with a picture of the scoreboard in which every player name is blanked before the picture is saved.
 
 ### Highlights
 
-- **Report this game** is on each game card that has a saved scoreboard. Pick what was wrong (stats, hero, map, mode or result), look at the exact pictures and values that would be sent, then Send it or Save the zip. A game the tracker never recorded can be reported as Missed game from Report a problem, with no pictures. After you fix a game's result, stats, map or hero, the message offers **Send this fix to help training**. The training box stays visible, so you can untick it.
-- An update now restarts a tracker that is running, so the new version is the one that runs. Before, the old version kept running until you logged out.
-- Opening the app again brings up the window you already have, instead of a second window and a second tray icon (#234).
-- On 5v5, your own row is found again during the match, with or without perk icons. Before, most Tab reads in a 5v5 game failed with "player row not found".
+- Report this game is on each game card that has a saved scoreboard. Pick what was wrong (stats, hero, map, mode or result), look at the pictures and the list of files that would be sent, then Send it or Save the zip. A game the tracker never recorded can be reported as Missed game from Report a problem, with no pictures. After you fix a game's result, stats or hero, the message offers Send this fix to help training, which opens the report with training ticked; you can untick it before you send.
+- An update now restarts the tracker service if it is running, so the new version is the one that runs. A game in progress at that moment is not kept.
+- Only one copy of the app runs: opening it again brings up the window you already have (#241). Coming from alpha.5: when the update has finished, quit the app (from its tray icon, if it has one) and open it again, because the alpha.5 app cannot restart itself into the new version.
+- On 5v5, your own row is now also found by your name during the match, with or without perk icons, not only by the highlight (#239).
 
-**Coming from alpha.5:** when the update has finished, quit the app from its tray icon and open it again. The alpha.5 app cannot restart itself into the new version.
-
-Game reports (#236, #238, #246, #235). While a game is captured, the tracker keeps a report kit for it on this PC: the newest accepted scoreboard of the game, blanked when it is captured, the result word from the competitive rank screen, and the values the tracker read from that scoreboard. The kits of the last 20 games are kept, in folders only your user can open. On the scoreboard only the digits are copied; names, titles, badges, icons, chat and everything around the table are filled with a flat colour. Hero portraits are filled too in this alpha. They come back in alpha.7, pasted from the game's own portrait art instead of copied from the screen. Only 6v6 boards at 1440p and 1080p are kept; a 5v5 game or another resolution gets no scoreboard and can be reported only as Missed game. A kit that does not match its blanking checks is never put in a report. Training is off unless you tick it. Your edits go into the report as corrections next to the original reads, which stay unchanged.
+Game reports (#235, #236, #238, #246). While a game is captured, the tracker keeps a report kit for it on this PC: the newest accepted scoreboard of the game, blanked when it is captured, the result word from the competitive rank screen, and the values the tracker read from that scoreboard. The kits of the last 20 games are kept, in folders only your user can open. On the scoreboard only the digits are copied; names, titles, badges, icons, chat and everything around the table are filled with a flat colour. Hero portraits are filled too in this alpha; alpha.7 plans to bring them back, pasted from the game's own portrait art instead of copied from the screen. Only 6v6 boards at 1440p and 1080p are kept; a 5v5 game or another resolution gets no scoreboard and can be reported only as Missed game. A kit that does not match its blanking checks is never put in a report. Training is off unless you tick the box or open the report from Send this fix to help training. Your fixes to the result, stats or hero go into the report as corrections next to the original reads, which stay unchanged. A map fix is not carried yet.
 
 Other changes:
 
-- The debug folders `debug/accepted` and `debug/rejected` are written only while Settings → Save debug images is on (or `debug_ocr` in config.toml). They hold full scoreboards with other players' names and stay on this PC. Existing folders are left alone; the log says once at start that they are no longer written (#244).
-- An app launched while an update is installing no longer closes the running app mid-install, and Restart now starts the app the update installed (#245).
+- The debug folders `debug/accepted` and `debug/rejected` are written only while Settings → Save debug images from each capture is on (or `debug_ocr` in config.toml). They hold full scoreboards with other players' names and stay on this PC. Existing folders are left alone; if one is there, the log says once at start that it is no longer written (#244).
+- Restart now starts the app the update installed. An app opened while an update is installing never closes the running app in the middle of the install (#241, #245).
 - The tracker turns off core dumps when it starts, so a crash never writes a memory image that could hold a scoreboard (#245).
-- What's new shows bold and code as text styles, not as `**` marks (#241).
+- What's new shows its text without `**` and backtick marks (#241).
 - Hero portraits learned for heroes with accents or punctuation in their names (Soldier: 76, Torbjörn, D.Va, Lúcio) are saved under plain names. Files alpha.5 saved under the old names are moved aside, never deleted (#243).
 - Two OCR calls that ran on every end-of-match nameplate and whose result was thrown away are gone (#243).
 - The release build stops instead of hanging when a package mirror does not answer (#241).
