@@ -35,11 +35,12 @@ use super::{
 
 /// The phrase list in the words pack folder.
 pub const PHRASES_FILE: &str = "phrases.json";
-/// Minimum score for a sure phrase read. The words-v1 masks score 0.79 to
-/// 0.98 on the 66 gate-passing title frames of 3 VOD games (1080p; the masks
-/// were cut from 1440p member frames) and at most 0.41 on 751 frames
-/// without a phase title (2026-10-13), the same floor as the other words-v1
-/// reads.
+/// Minimum score for a sure phrase read, the floor of the other words-v1
+/// reads. Measured 2026-10-13 on frames none of the masks was cut from: each
+/// mask scores 0.79 to 0.98 on the 56 frames of 3 VOD games (1080p) that
+/// show its title, and no mask scores above 0.51 on a frame without its
+/// title (0.50 to 0.51 for the vote mask on 10 SELECTING MAP frames, at most
+/// 0.49 on the rest of the 205 VOD frames, at most 0.41 on 751 other frames).
 pub const PHRASE_FLOOR: f32 = 0.70;
 
 /// A phase-screen title the detectors read.
