@@ -498,12 +498,11 @@ pub fn recognize_name(
     })
 }
 
-/// Per-row OCR: extract name + all stat cells from a single player row.
-pub fn recognize_row(
+/// The name reads of one player row: the first window, then the alternates.
+fn recognize_row_names(
     row_img: &DynamicImage,
-    columns: &preprocess::StatColumns,
     team_size: usize,
-) -> RowOcrResult {
+) -> (Option<CellOcrResult>, Vec<Option<CellOcrResult>>) {
     // One read per name window. 5v5 has a window per table layout (in-match,
     // in-match with perks, centred); which one holds the name is only known
     // once the configured name is compared, so all of them are read.
@@ -518,7 +517,16 @@ pub fn recognize_row(
         name_reads.remove(0)
     };
     // Failed reads stay as `None` so each index keeps naming its window.
-    let name_alternates = name_reads;
+    (name, name_reads)
+}
+
+/// Per-row OCR: extract name + all stat cells from a single player row.
+pub fn recognize_row(
+    row_img: &DynamicImage,
+    columns: &preprocess::StatColumns,
+    team_size: usize,
+) -> RowOcrResult {
+    let (name, name_alternates) = recognize_row_names(row_img, team_size);
 
     // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
     // Run in parallel — each cell creates its own Tesseract instance so there is
@@ -626,6 +634,49 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     }
 
     results
+}
+
+/// The rows of a cropped scoreboard with their name cells only, for
+/// `reader = "new"`: the stat cells are the digit reader's, so no stat cell
+/// is read here (OCR site T3) and the stat columns are not calibrated (OCR
+/// site T2: calibration exists only to place the stat cell crops, and it is
+/// itself a run of stat cell OCR). `stats` is empty on every row.
+///
+/// The names are still OCR (site T4): they are how a configured player name
+/// finds the member's row. With `names` false nothing is read at all and
+/// every row is blank, which is what a tracker with no player name needs.
+pub fn recognize_scoreboard_names_pre_cropped(
+    cropped: &DynamicImage,
+    team_size: usize,
+    names: bool,
+) -> Vec<RowOcrResult> {
+    let blank = |name, name_alternates| RowOcrResult {
+        name,
+        name_alternates,
+        stats: Vec::new(),
+        mean_confidence: 0,
+    };
+    let total_rows = team_size * 2;
+    if !names {
+        return (0..total_rows).map(|_| blank(None, Vec::new())).collect();
+    }
+    // A row whose crop falls outside the board keeps its index, blank, so a
+    // row index means the same row here as in the digit reader's board.
+    let row_images: Vec<Option<DynamicImage>> = (0..total_rows)
+        .map(|i| preprocess::crop_player_row(cropped, i, team_size))
+        .collect();
+    ocr_pool().install(|| {
+        row_images
+            .par_iter()
+            .map(|row_img| match row_img {
+                Some(img) => {
+                    let (name, alternates) = recognize_row_names(img, team_size);
+                    blank(name, alternates)
+                }
+                None => blank(None, Vec::new()),
+            })
+            .collect()
+    })
 }
 
 /// Column calibration (CG-4 revision). Preferred path: anchor each stat
@@ -1094,6 +1145,30 @@ mod tests {
     fn better_offset_prefers_higher_score() {
         assert_eq!(better_offset((-0.1, 3), (-0.05, 5), None), (-0.05, 5));
         assert_eq!(better_offset((-0.1, 6), (-0.05, 5), None), (-0.1, 6));
+    }
+
+    /// `reader = "new"` rows (O10): one per board row, no stat cell at all.
+    /// A blank board has no name ink, so nothing here reaches Tesseract.
+    #[test]
+    fn name_only_rows_carry_no_stat_cells() {
+        let board = DynamicImage::new_rgb8(1664, 1007);
+        for team_size in [5usize, 6] {
+            let unnamed = recognize_scoreboard_names_pre_cropped(&board, team_size, false);
+            assert_eq!(unnamed.len(), team_size * 2);
+            assert!(unnamed.iter().all(|row| row.name.is_none()
+                && row.name_alternates.is_empty()
+                && row.stats.is_empty()
+                && row.mean_confidence == 0));
+            let named = recognize_scoreboard_names_pre_cropped(&board, team_size, true);
+            assert_eq!(named.len(), team_size * 2);
+            assert!(named.iter().all(|row| row.stats.is_empty()));
+            assert!(
+                named
+                    .iter()
+                    .all(|row| row.name.as_ref().is_some_and(|n| n.value.is_empty())),
+                "the name window is read (and is empty on a blank board)"
+            );
+        }
     }
 
     #[test]

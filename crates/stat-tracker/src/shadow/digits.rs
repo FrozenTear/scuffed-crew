@@ -1895,7 +1895,7 @@ mod tests {
     #[test]
     fn blank_rows_and_an_empty_frame_do_not_invent_a_team_size() {
         let reader = crate::shadow::Reader::load(&crate::shadow::ReaderConfig::default());
-        let ocr = crate::reader_apply::OcrSnapshot {
+        let ocr = crate::reader_apply::PolicyRow {
             map: "Busan".into(),
             mode: "Control".into(),
             result: "victory".into(),
@@ -2012,7 +2012,7 @@ mod tests {
             "a drawn 5v5 board with no packs"
         );
         let saved = crate::reader_apply::merge_saved(
-            &crate::reader_apply::OcrSnapshot {
+            &crate::reader_apply::PolicyRow {
                 map: "Busan".into(),
                 mode: "Control".into(),
                 result: "victory".into(),

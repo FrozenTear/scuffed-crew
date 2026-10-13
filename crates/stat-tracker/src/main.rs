@@ -2268,10 +2268,11 @@ fn stage_capture(
         req.session_id.clone()
     };
     let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-    let gate = capture_gate::apply_gate_with_trust(
+    let gate = capture_gate::apply_gate_held(
         gate_prev,
         facts.counters,
         facts.suspect,
+        facts.held,
         split,
         facts.trusted_cells,
     );
@@ -2436,9 +2437,16 @@ struct FrameAnalysis {
     /// inherited session outcome.
     frame_outcome: detect::MatchOutcome,
     /// Full-image OCR (hero/map name lookup); the per-cell rows carry stats.
+    /// OCR site T7, run under `reader = "ocr-v1"` only: always the empty
+    /// text under the new reader ([`full_board_text`]).
     ocr: Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>>,
-    /// Column-calibrated per-cell OCR rows, one per scoreboard row.
+    /// Column-calibrated per-cell OCR rows, one per scoreboard row. Under
+    /// `reader = "new"` only the name cells are read, and only when a player
+    /// name is configured: `stats` is empty on every row ([`read_tab_rows`]).
     rows: Vec<ocr::RowOcrResult>,
+    /// `reader = "new"`: the digit, icon and banner reads of this Tab, which
+    /// carry the trust gate and the stats. `None` under ocr-v1.
+    board: Option<shadow::BoardRead>,
     /// Portrait template match: (hero file stem, confidence).
     portrait_hero: Option<(String, f64)>,
     /// Career-panel hero title (most reliable source when present). OCR site
@@ -2451,10 +2459,6 @@ struct FrameAnalysis {
     /// has the career-panel title's authority
     /// ([`hero_auth::resolve_hero_new_reader`]). Always `None` under ocr-v1.
     pack_hero: Option<String>,
-    /// `reader = "new"`: this Tab's hero icon read, reused by the board read
-    /// in `apply_new_reader` so the icons are matched once per Tab. `None`
-    /// under ocr-v1, or after a caught panic.
-    tab_heroes: Option<shadow::TabHeroes>,
     /// Top-bar map label OCR, already canonicalized.
     map_from_panel: Option<String>,
     /// Top-bar OCR before canonicalization. The Adlersbrunn alias check
@@ -2462,10 +2466,6 @@ struct FrameAnalysis {
     map_panel_raw: Option<String>,
     /// `map_from_panel` is a sure banner read (`reader = "new"`).
     map_from_banner: bool,
-    /// The banner read made for the top bar, reused for the board's map
-    /// field: `Some(read)` when it ran (`read` is `None` without a map pack),
-    /// `None` when it did not run (ocr-v1, or a caught panic).
-    banner: Option<Option<shadow::banner::MapRead>>,
     /// Cropped scoreboard (portrait auto-collection reads from it). Shared
     /// with the shadow worker when it is on, never copied.
     scoreboard: Arc<image::DynamicImage>,
@@ -2782,9 +2782,13 @@ struct BoardFacts<'a> {
     counters: Counters,
     suspect: [bool; capture_gate::GATE_COLS],
     /// Per-cell parse succeeded. The capture gate treats false as low-trust.
-    /// The boundary plan's `row_counts` is this same bit: a raw-text
-    /// fallback does not count as a stat-reset row.
+    /// The boundary plan's `row_counts` is this bit with no held column: a
+    /// raw-text fallback does not count as a stat-reset row.
     trusted_cells: bool,
+    /// `reader = "new"`: columns the digit reader did not vouch for. The
+    /// capture has no number for them (`capture_gate::apply_gate_held`).
+    /// All false under ocr-v1.
+    held: [bool; capture_gate::GATE_COLS],
     row_id: Option<u32>,
     hero: &'a str,
     map_from_panel: Option<&'a str>,
@@ -2850,7 +2854,7 @@ fn plan_from_board(req: &CaptureRequest, facts: &BoardFacts<'_>) -> boundary::Ca
         age: gate_age,
         min_gap: STAT_SPLIT_MIN_GAP,
         classic_regressed,
-        row_counts: facts.trusted_cells,
+        row_counts: facts.trusted_cells && !facts.held.iter().any(|&held| held),
         row_id: facts.row_id,
         baseline_row: req.baseline_row,
         confirmed_end: req.game_outcome.is_decided(),
@@ -3942,7 +3946,17 @@ fn analyze_frame(
         team_size,
     );
 
-    let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
+    let rows = read_tab_rows(
+        use_new_reader,
+        || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size),
+        || {
+            ocr::recognize_scoreboard_names_pre_cropped(
+                &scoreboard,
+                team_size,
+                player_name_owned.is_some(),
+            )
+        },
+    );
 
     // Player row: if a player name is configured, scan ALL rows (both teams)
     // for a name match — this handles replays and post-match screens where the
@@ -3993,32 +4007,38 @@ fn analyze_frame(
     // it lazily. A portrait match alone satisfies the hero requirement:
     // replay/post-match layouts have no career panel, and the raw-text
     // hero guess loses to the portrait in the priority order anyway (H6).
-    let cells_parse = parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
+    //
+    // `reader = "new"` never runs it (OCR site T7): its stats, hero and map
+    // come from the digit, icon and banner readers, and a Tab those cannot
+    // read is refused or held, not rebuilt from text.
     let hero_identified = career_hero.is_some() || pack_hero.is_some() || portrait_match.is_some();
-    let need_full_ocr =
-        !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
-    let ocr = if need_full_ocr {
-        ocr::recognize(&img)
-    } else {
-        tracing::debug!("skipping full-board OCR — cell path supplied everything");
-        Ok(ocr::OcrResult {
-            raw_text: String::new(),
-            confidence: 0,
-        })
-    };
+    let ocr = full_board_text(
+        use_new_reader,
+        || {
+            let cells_parse =
+                parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
+            !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none())
+        },
+        || ocr::recognize(&img),
+    );
+    // The board the trust gate and the stats come from under the new reader,
+    // with the banner and the hero icons this pass already read, so the
+    // frame is read once per Tab (F251-3, O8).
+    let board = read_tab_board(use_new_reader, || {
+        shadow::read_board_with(&img, top_bar.banner, tab_heroes)
+    });
 
     FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
         frame_outcome,
         ocr,
         rows,
+        board,
         portrait_hero: portrait_match,
         career_hero,
         pack_hero,
-        tab_heroes,
         map_from_panel,
         map_panel_raw,
         map_from_banner: top_bar.from_banner,
-        banner: top_bar.banner,
         shadow_input: shadow::worker::ShadowInput::when(
             shadow_on,
             &scoreboard,
@@ -4031,6 +4051,65 @@ fn analyze_frame(
         team_size,
         frame: img,
     }))
+}
+
+/// The row reads of one Tab with the daemon's reader switch (OCR sites T2,
+/// T3 and T4).
+///
+/// * `reader = "ocr-v1"`: `cells` runs, exactly as before: the stat columns
+///   are calibrated (T2) and every name and stat cell is read (T4, T3).
+/// * `reader = "new"`: `cells` never runs, so there is no calibration and no
+///   stat cell OCR. `names` supplies the rows with their name cells only
+///   (T4, until the own row is found without OCR).
+fn read_tab_rows(
+    use_new_reader: bool,
+    cells: impl FnOnce() -> Vec<ocr::RowOcrResult>,
+    names: impl FnOnce() -> Vec<ocr::RowOcrResult>,
+) -> Vec<ocr::RowOcrResult> {
+    if use_new_reader { names() } else { cells() }
+}
+
+/// The full-board OCR text of one Tab with the daemon's reader switch (OCR
+/// site T7).
+///
+/// * `reader = "ocr-v1"`: `ocr` runs when `needed` says the cell path did
+///   not supply everything, exactly as before.
+/// * `reader = "new"`: neither closure runs. The text is empty, which every
+///   reader of it already takes as "no text": no stats, no hero, no map, no
+///   result header. An OCR failure can no longer fail the Tab.
+fn full_board_text(
+    use_new_reader: bool,
+    needed: impl FnOnce() -> bool,
+    ocr: impl FnOnce() -> Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>>,
+) -> Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    if !use_new_reader && needed() {
+        return ocr();
+    }
+    if !use_new_reader {
+        tracing::debug!("skipping full-board OCR — cell path supplied everything");
+    }
+    Ok(ocr::OcrResult {
+        raw_text: String::new(),
+        confidence: 0,
+    })
+}
+
+/// The new reader's board of one Tab. `None` under `reader = "ocr-v1"`,
+/// where `read` never runs. A panic in the reader is "no board": the Tab is
+/// refused, it does not fail and nothing else reads it.
+fn read_tab_board(
+    use_new_reader: bool,
+    read: impl FnOnce() -> shadow::BoardRead,
+) -> Option<shadow::BoardRead> {
+    if !use_new_reader {
+        return None;
+    }
+    Some(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|_| {
+            tracing::warn!("board reader panicked; no board for this Tab");
+            shadow::reader::not_found(shadow::BoardStatus::NotFound)
+        }),
+    )
 }
 
 /// The hero authority inputs of one Tab (OCR site T5).
@@ -4466,18 +4545,52 @@ async fn commit_capture_rows(
     Ok(created)
 }
 
+/// Put the game's last accepted value in each held stat column of `parsed`
+/// (0 when the game has none yet). The capture gate does the same on its
+/// own; this is for what reads the counters before the gate does.
+fn fill_held_cells(
+    parsed: &mut storage::PersonalMatch,
+    held: [bool; capture_gate::GATE_COLS],
+    prior: Option<capture_gate::Counters>,
+) {
+    let prior = prior.unwrap_or_default();
+    let prior = [
+        prior.elims,
+        prior.assists,
+        prior.deaths,
+        prior.damage,
+        prior.healing,
+        prior.mitigation,
+    ];
+    let cells = [
+        &mut parsed.elims,
+        &mut parsed.assists,
+        &mut parsed.deaths,
+        &mut parsed.damage,
+        &mut parsed.healing,
+        &mut parsed.mitigation,
+    ];
+    for (col, cell) in cells.into_iter().enumerate() {
+        if held[col] {
+            *cell = prior[col];
+        }
+    }
+}
+
 /// Run the capture gate on the new reader's stats.
 ///
-/// `apply_new_reader` overwrites the OCR numbers. A drop is clamped back
-/// and flagged. A single-field jump past the capture gate's limit waits
-/// until the next read matches. `suspect` and `trusted` are the old reader's
-/// marks for this capture, so a raw-text fallback stays low-trust when the
-/// new reader does not replace it. The returned gate is what the next
-/// capture compares against.
+/// `apply_new_reader` puts the sure digit reads back on the row. A drop is
+/// clamped back and flagged. A single-field jump past the capture gate's
+/// limit waits until the next read matches. A `held` column (the digit
+/// reader did not vouch for the cell) keeps the game's last accepted value
+/// and is flagged; whatever number sits in it on `parsed` is ignored.
+/// `suspect` and `trusted` are this capture's marks. The returned gate is
+/// what the next capture compares against.
 fn hold_new_reader_stats(
     parsed: &mut storage::PersonalMatch,
     prior: Option<(capture_gate::GateState, std::time::Duration)>,
     suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
     split: bool,
     trusted: bool,
 ) -> capture_gate::GateOutcome {
@@ -4489,7 +4602,7 @@ fn hold_new_reader_stats(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let held = capture_gate::apply_gate_with_trust(prior, read, suspect, split, trusted);
+    let held = capture_gate::apply_gate_held(prior, read, suspect, held_cells, split, trusted);
     parsed.elims = held.accepted.elims;
     parsed.assists = held.accepted.assists;
     parsed.deaths = held.accepted.deaths;
@@ -4541,50 +4654,25 @@ fn note_gate_suspects(
     parsed.suspect_fields = reader_apply::upload_suspect_fields(&parsed.suspect_fields);
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Replace stored fields from the new reader when the member's own row agrees.
+/// Replace stored fields from the new reader's board.
 ///
-/// A missing board, an unknown team size, or an uncertain own row leaves the
-/// ocr-v1 row unchanged, including its recognizer tag. The map and mode
+/// `board` is the board the capture path already accepted
+/// (`reader_apply::board_refusal`, `reader_apply::read_own_row`), and
+/// `parsed` is the policy row built from it: its stats are the capture
+/// gate's (a held cell carries the game's last accepted value), so a field
+/// the board does not supply never takes an OCR number. The map and mode
 /// already chosen by capture policy stay even when the board names another
 /// map; under this reader that policy map already took the banner read as
 /// its top-bar map ([`choose_top_bar_map`]). This does not touch the capture
 /// gate, the session map, or the report.
-async fn apply_new_reader(
+fn apply_new_reader(
     parsed: &mut storage::PersonalMatch,
-    frame: &image::DynamicImage,
     evidence: &shadow::result::ResultEvidence,
-    player_name: Option<&str>,
-    rows: &[ocr::RowOcrResult],
-    player_row_idx: Option<usize>,
-    team_size: usize,
-    board_override: Option<shadow::BoardRead>,
-    banner: Option<Option<shadow::banner::MapRead>>,
-    tab_heroes: Option<shadow::TabHeroes>,
+    own: reader_apply::OwnRow,
+    mut board: shadow::BoardRead,
 ) {
-    let board = if let Some(mut board) = board_override {
-        board.set_result(shadow::result_field(evidence));
-        board
-    } else {
-        let frame = frame.clone();
-        let evidence = evidence.clone();
-        tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // The banner the top bar already read and the hero icons the
-                // hero authority already read, so the frame is read once per
-                // Tab (F251-3, O8). `None` reads that part here.
-                let mut board = shadow::read_board_with(&frame, banner, tab_heroes);
-                board.set_result(shadow::result_field(&evidence));
-                board
-            }))
-            .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound))
-        })
-        .await
-        .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound))
-    };
-    let name_match = player_name.and_then(|name| parse::find_player_row_by_name(rows, name));
-    let own = reader_apply::own_row(player_name, name_match, player_row_idx, team_size);
-    let ocr = reader_apply::OcrSnapshot {
+    board.set_result(shadow::result_field(evidence));
+    let policy = reader_apply::PolicyRow {
         map: parsed.map_name.clone(),
         mode: parsed.game_mode.clone(),
         result: parsed.outcome.clone(),
@@ -4596,7 +4684,7 @@ async fn apply_new_reader(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let saved = reader_apply::merge_saved(&ocr, own, Some(&board));
+    let saved = reader_apply::merge_saved(&policy, own, Some(&board));
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
@@ -4636,10 +4724,9 @@ struct TopBarChoice {
 /// then goes through the same policy as the top-bar OCR: the session map, the
 /// vote-candidate veto, a hinted different-map split and the untracked-map
 /// rules. When the banner reader abstains (no pack, no banner, a flagged
-/// read, or a name the tracker would not store) the top-bar OCR is used, the
-/// way the new reader falls back to ocr-v1 for every other field. A panic in
-/// the banner reader is an abstain too: it never fails the Tab, the same
-/// isolation `apply_new_reader` gives the board read (F251-2). With
+/// read, or a name the tracker would not store) the top-bar OCR is used.
+/// A panic in the banner reader is an abstain too: it never fails the Tab,
+/// the same isolation [`read_tab_board`] gives the board read (F251-2). With
 /// `reader = "ocr-v1"` the banner is never read and the OCR label is
 /// returned unchanged.
 fn choose_top_bar_map(
@@ -4825,14 +4912,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         mut frame_outcome,
         ocr,
         rows,
+        board: analysis_board,
         portrait_hero,
         career_hero,
         pack_hero,
-        tab_heroes,
         map_from_panel,
         map_panel_raw,
         map_from_banner,
-        banner,
         scoreboard: scoreboard_img,
         player_row_idx,
         name_match,
@@ -4843,6 +4929,21 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     let ocr_result = ocr
         .map_err(anyhow::Error::from_boxed)
         .context("full-board OCR failed")?;
+    // `reader = "new"`: the board the trust gate and the stats come from.
+    // No board (a test injection without one) is a board that was not found.
+    let new_board = ctx.use_new_reader.then(|| {
+        board_override
+            .or(analysis_board)
+            .unwrap_or_else(|| shadow::reader::not_found(shadow::BoardStatus::NotFound))
+    });
+    // The member's row on that board: the configured name when it matches a
+    // row, else the highlight row, the same choice the stored row uses.
+    let own_row = reader_apply::own_row(
+        player_name,
+        player_name.and_then(|name| parse::find_player_row_by_name(&rows, name)),
+        player_row_idx,
+        team_size,
+    );
 
     // Last-resort outcome source: the result header printed inside the
     // scoreboard region itself. Observed 2026-08-16 22:19:24Z (session
@@ -4891,12 +4992,22 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         "scoreboard cell OCR complete"
     );
 
-    // Trust gate: don't parse frames that don't look like a scoreboard (menus,
-    // replay browser, desktop). Better to record nothing than to scrape stats
-    // out of a random screen.
-    if !parse::looks_like_scoreboard(&rows) {
+    // Trust gate (OCR site T3): don't parse frames that don't look like a
+    // scoreboard (menus, replay browser, desktop). Better to record nothing
+    // than to scrape stats out of a random screen. ocr-v1 decides on its
+    // cell text. The new reader decides on its own board: found, the same
+    // team size, digit values on it. A board it refuses is not handed to OCR.
+    let board_refusal = new_board
+        .as_ref()
+        .and_then(|board| reader_apply::board_refusal(board, team_size));
+    let looks_like_scoreboard = match &new_board {
+        Some(_) => board_refusal.is_none(),
+        None => parse::looks_like_scoreboard(&rows),
+    };
+    if !looks_like_scoreboard {
         tracing::warn!(
             rows = rows.len(),
+            board_refusal,
             "capture rejected — frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
         );
         archive_rejected_map_label_crop(
@@ -4938,17 +5049,42 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     // CG-4 C: mutates across this capture; carried back on CaptureReport.
     let mut hero_auth = req.hero_auth.clone();
 
-    let scoreboard_read = parse::read_scoreboard(
-        &rows,
-        player_row_idx,
-        &ocr_result.raw_text,
-        &outcome_label,
-        player_name,
-    );
+    // The member's stats. ocr-v1: the cell text, else the name-anchored
+    // raw-text fallback. New reader: the digit reads of the own row and
+    // nothing else; a cell it does not vouch for is held, and a row with no
+    // sure cell is refused (never a text fallback, never an OCR number).
+    let scoreboard_read = match &new_board {
+        Some(board) => reader_apply::read_own_row(board, own_row, &outcome_label)
+            .map(|read| (read.matched, true, read.held)),
+        None => parse::read_scoreboard(
+            &rows,
+            player_row_idx,
+            &ocr_result.raw_text,
+            &outcome_label,
+            player_name,
+        )
+        .map(|read| {
+            (
+                read.matched,
+                read.trusted_cells,
+                [false; capture_gate::GATE_COLS],
+            )
+        }),
+    };
     match scoreboard_read {
-        Ok(parsed_read) => {
-            let trusted_cells = parsed_read.trusted_cells;
-            let mut parsed = parsed_read.matched;
+        Ok((mut parsed, trusted_cells, held_cols)) => {
+            if held_cols.iter().any(|&held| held) {
+                // Until the gate runs, a held column reads as the game's
+                // last accepted value, so the split and reset checks see no
+                // move in it.
+                let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board)
+                    .map(|(state, _)| state.accepted);
+                fill_held_cells(&mut parsed, held_cols, prior);
+                tracing::info!(
+                    held = ?held_cols,
+                    "new reader held stat cells it does not vouch for"
+                );
+            }
             if !trusted_cells {
                 tracing::warn!(
                     ?player_row_idx,
@@ -5055,7 +5191,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // per-cell OCR the stats came from. Threaded into BOTH the split decision
             // (DUP-1: a suspect column must not vote as a regression) and the capture
             // gate (a suspect read never corroborates a jump or drives an un-latch).
-            let suspect = parse::player_row_suspect_mask(&rows, player_row_idx);
+            // Under the new reader the mask is its held cells: no OCR cell
+            // was read, so there is no edge ink to look at.
+            let suspect = if ctx.use_new_reader {
+                held_cols
+            } else {
+                parse::player_row_suspect_mask(&rows, player_row_idx)
+            };
 
             // Stat-regression boundary (detector-independent): scoreboard stats
             // are cumulative within a match, so if this capture's counters sit
@@ -5079,6 +5221,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 // `trusted_cells` is `stats_from_row` on the identified row,
                 // which is the same predicate as `parse::row_counts`.
                 trusted_cells,
+                held: held_cols,
                 row_id: identified_row_id(player_row_idx),
                 hero: &parsed.hero,
                 map_from_panel: map_from_panel.as_deref(),
@@ -5201,6 +5344,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             }
             let held_stats = gate.accepted;
             let held_cells = gate.holds.clone();
+            // Under `reader = "new"` there is no Tesseract read: these are the
+            // digit reads before the gate (a held cell: the game's last
+            // accepted value), and the kit's `ocr_v1` carries those.
             // The Tesseract stats as read, before the gate's held values
             // replace them: the report kit's `ocr_v1` (spec section 2).
             let tesseract_stats = (
@@ -5229,7 +5375,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 req.session_map.as_deref(),
                 map_panel_raw.as_deref(),
                 &ocr_result.raw_text,
-                parse::both_teams_have_stats(&rows, team_size),
+                match &new_board {
+                    Some(board) => reader_apply::both_teams_have_stats(board, team_size),
+                    None => parse::both_teams_have_stats(&rows, team_size),
+                },
             ) == PreparedRow::Drop
             {
                 return Ok(blank_rejected_report(outcome, session_id, hero_auth, &req));
@@ -5250,23 +5399,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ocr_parsed.healing,
                 ocr_parsed.mitigation,
             ) = tesseract_stats;
-            if ctx.use_new_reader {
-                apply_new_reader(
-                    &mut parsed,
-                    &frame_img,
-                    &req.result_evidence,
-                    player_name,
-                    &rows,
-                    player_row_idx,
-                    team_size,
-                    board_override,
-                    banner,
-                    tab_heroes,
-                )
-                .await;
+            if let Some(board) = new_board {
+                apply_new_reader(&mut parsed, &req.result_evidence, own_row, board);
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-                staged.gate =
-                    hold_new_reader_stats(&mut parsed, prior, suspect, split, trusted_cells);
+                staged.gate = hold_new_reader_stats(
+                    &mut parsed,
+                    prior,
+                    suspect,
+                    held_cols,
+                    split,
+                    trusted_cells,
+                );
                 // A member's own hero pick on this game is never overridden
                 // by a later Tab's read (O8): this row carries the pick too.
                 if !split && target_session == session_id {
@@ -5378,6 +5521,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     "noplayerrow"
                 }
                 parse::ScoreboardMiss::CellsUnreadable => {
+                    // Empty under the new reader: it reads no OCR cell.
                     let cells = player_row_idx.and_then(|i| rows.get(i)).map(|row| {
                         row.stats
                             .iter()
@@ -8309,9 +8453,9 @@ mod tests {
     }
 
     /// The vision pass reads the banner only through `choose_top_bar_map`,
-    /// with the daemon's reader switch, and hands the read to
-    /// `apply_new_reader`. Whitespace is ignored, so a reflow does not break
-    /// this; hard-wiring the switch or a second banner read does.
+    /// with the daemon's reader switch, and hands the read to the board
+    /// read. Whitespace is ignored, so a reflow does not break this;
+    /// hard-wiring the switch or a second banner read does.
     #[test]
     fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -8327,14 +8471,18 @@ mod tests {
             1,
             "one banner read"
         );
-        // ...and one hero icon read (O8), the only other shadow read
+        // ...one hero icon read (O8) and one board read (O10), which reuses
+        // both instead of reading again: the only other shadow reads
         assert_eq!(
             body.matches("shadow::read_heroes").count(),
             1,
             "one hero read"
         );
-        assert_eq!(body.matches("shadow::read_").count(), 2);
-        assert!(body.contains("map_from_banner: top_bar.from_banner, banner: top_bar.banner,"));
+        assert!(body.contains(
+            "let board = read_tab_board(use_new_reader, || { shadow::read_board_with(&img, top_bar.banner, tab_heroes) });"
+        ));
+        assert_eq!(body.matches("shadow::read_").count(), 3);
+        assert!(body.contains("map_from_banner: top_bar.from_banner,"));
         let hc = src
             .find("\nasync fn handle_capture(")
             .expect("handle_capture");
@@ -8344,19 +8492,19 @@ mod tests {
             "if ctx.use_new_reader { req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await; }"
         ));
         assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
-        assert!(hc_body.contains("board_override, banner, tab_heroes, ) .await;"));
+        assert!(
+            hc_body
+                .contains("apply_new_reader(&mut parsed, &req.result_evidence, own_row, board);")
+        );
         // the stored report carries the text-fallback replacement
         assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
-        // apply_new_reader reuses the banner and hero reads instead of
-        // reading again
+        // apply_new_reader reads nothing off the frame: it has no frame
         let an = src
-            .find("\nasync fn apply_new_reader(")
+            .find("\nfn apply_new_reader(")
             .expect("apply_new_reader");
         let an_body = norm(src[an..].split("\n}\n").next().unwrap());
-        assert!(
-            an_body
-                .contains("let mut board = shadow::read_board_with(&frame, banner, tab_heroes);")
-        );
+        assert_eq!(an_body.matches("shadow::read_").count(), 0);
+        assert_eq!(an_body.matches("ocr::").count(), 0);
     }
 
     /// T5 (O8): the vision pass reads the hero authority only through
@@ -8403,6 +8551,7 @@ mod tests {
             counters: Counters::default(),
             suspect: NIGHT_CLEAN,
             trusted_cells: true,
+            held: [false; capture_gate::GATE_COLS],
             row_id: Some(2),
             hero: "Ana",
             map_from_panel: Some(map),
@@ -9086,6 +9235,7 @@ mod tests {
             &mut parsed,
             Some((prior, Duration::from_secs(20))),
             clean,
+            clean,
             false,
             true,
         );
@@ -9106,6 +9256,7 @@ mod tests {
             &mut parsed,
             Some((prior, Duration::from_secs(20))),
             clean,
+            clean,
             false,
             true,
         );
@@ -9116,6 +9267,7 @@ mod tests {
         let matched = hold_new_reader_stats(
             &mut parsed,
             Some((jumped.state, Duration::from_secs(20))),
+            clean,
             clean,
             false,
             true,
@@ -9134,7 +9286,7 @@ mod tests {
         parsed.damage = 450;
         parsed.healing = 0;
         parsed.mitigation = 2;
-        let first = hold_new_reader_stats(&mut parsed, None, clean, false, false);
+        let first = hold_new_reader_stats(&mut parsed, None, clean, clean, false, false);
         assert_eq!((parsed.assists, parsed.deaths), (40, 18));
         assert!(first.state.low_trust);
         assert!(first.state.unconfirmed[1] && first.state.unconfirmed[2]);
@@ -9148,6 +9300,7 @@ mod tests {
         let second = hold_new_reader_stats(
             &mut parsed,
             Some((first.state, Duration::from_secs(20))),
+            clean,
             clean,
             false,
             true,
@@ -9166,6 +9319,7 @@ mod tests {
         let third = hold_new_reader_stats(
             &mut parsed,
             Some((second.state, Duration::from_secs(20))),
+            clean,
             clean,
             false,
             true,
@@ -9219,11 +9373,10 @@ mod tests {
                 portrait_hero: None,
                 career_hero: None,
                 pack_hero: None,
-                tab_heroes: None,
+                board: None,
                 map_from_panel: Some("Busan".into()),
                 map_panel_raw: Some("BUSAN".into()),
                 map_from_banner: false,
-                banner: None,
                 scoreboard: std::sync::Arc::new(frame.clone()),
                 player_row_idx: Some(0),
                 name_match: None,
@@ -9373,7 +9526,7 @@ mod tests {
                 portrait_hero: None,
                 career_hero: None,
                 pack_hero: None,
-                tab_heroes: None,
+                board: None,
                 map_from_panel: Some("Busan".into()),
                 map_panel_raw: Some("BUSAN".into()),
                 scoreboard: std::sync::Arc::new(frame.clone()),
@@ -9383,7 +9536,6 @@ mod tests {
                 frame,
                 shadow_input: None,
                 map_from_banner: false,
-                banner: None,
             }
         };
         let mut fields = vec![shadow::FieldRead {
@@ -9514,11 +9666,10 @@ mod tests {
             portrait_hero: None,
             career_hero: career.map(str::to_string),
             pack_hero: pack.map(str::to_string),
-            tab_heroes: None,
+            board: None,
             map_from_panel: Some("Busan".into()),
             map_panel_raw: Some("BUSAN".into()),
             map_from_banner: false,
-            banner: None,
             scoreboard: std::sync::Arc::new(frame.clone()),
             player_row_idx: Some(0),
             name_match: None,
@@ -10906,6 +11057,7 @@ mod tests {
                 counters: cur,
                 suspect,
                 trusted_cells: cells_trusted,
+                held: [false; capture_gate::GATE_COLS],
                 row_id: row,
                 hero: &hero_resolved,
                 map_from_panel: panel,
@@ -15439,7 +15591,7 @@ mod tests {
             }
         };
         let saved = reader_apply::merge_saved(
-            &reader_apply::OcrSnapshot {
+            &reader_apply::PolicyRow {
                 map: parsed.map_name.clone(),
                 mode: parsed.game_mode.clone(),
                 result: parsed.outcome.clone(),
@@ -16028,5 +16180,483 @@ mod tests {
         assert!(closed);
         assert!(st.active_game.is_none());
         assert_eq!(st.settle_closed_unknown.as_deref(), Some("long-busan"));
+    }
+
+    // ---- O10: cell trust (OCR sites T3, T7, T2) under each reader.
+
+    /// A row OCR that must not run.
+    fn o10_never() -> Vec<ocr::RowOcrResult> {
+        panic!("this read must not run")
+    }
+
+    #[test]
+    fn the_new_reader_reads_no_stat_cell_and_calibrates_nothing() {
+        let named = || {
+            vec![ocr::RowOcrResult {
+                name: None,
+                name_alternates: Vec::new(),
+                stats: Vec::new(),
+                mean_confidence: 0,
+            }]
+        };
+        // new: the cell pass (calibration, then every stat cell) never runs
+        let rows = read_tab_rows(true, o10_never, named);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].stats.is_empty());
+        // ocr-v1: the cell pass runs, the name-only pass does not
+        let rows = read_tab_rows(false, o8_rows, o10_never);
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0].stats.len(), 6);
+    }
+
+    #[test]
+    fn the_new_reader_never_runs_the_full_board_ocr() {
+        type Text = Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>>;
+        let text = |raw: &str| -> Text {
+            Ok(ocr::OcrResult {
+                raw_text: raw.into(),
+                confidence: 77,
+            })
+        };
+        // new: neither the "is it needed" check nor the OCR runs, even on a
+        // Tab where ocr-v1 would need it
+        let read = full_board_text(
+            true,
+            || panic!("needed() must not run"),
+            || panic!("the full-board OCR must not run"),
+        )
+        .unwrap();
+        assert_eq!((read.raw_text.as_str(), read.confidence), ("", 0));
+        // ocr-v1, needed: the OCR text, or its error, comes back as it is
+        let read = full_board_text(false, || true, || text("~ Defeat")).unwrap();
+        assert_eq!((read.raw_text.as_str(), read.confidence), ("~ Defeat", 77));
+        let failed = full_board_text(false, || true, || -> Text { Err("tesseract".into()) });
+        assert_eq!(failed.unwrap_err().to_string(), "tesseract");
+        // ocr-v1, not needed: skipped, the empty text
+        let read = full_board_text(false, || false, || panic!("not needed")).unwrap();
+        assert_eq!((read.raw_text.as_str(), read.confidence), ("", 0));
+    }
+
+    #[test]
+    fn the_board_is_read_only_under_the_new_reader() {
+        assert_eq!(
+            read_tab_board(false, || panic!("ocr-v1 reads no board")),
+            None
+        );
+        let board = read_tab_board(true, || o8_board(None)).unwrap();
+        assert_eq!(board.status, shadow::BoardStatus::Read);
+        // a panic in the reader is "no board", not a failed Tab
+        let board = read_tab_board(true, || panic!("board reader")).unwrap();
+        assert_eq!(board.status, shadow::BoardStatus::NotFound);
+        assert_eq!(board.team_size, None);
+    }
+
+    /// OCR sites T2, T3 and T7 run only through the reader switch, and the
+    /// trust gate and the stats take the board under the new reader.
+    /// Whitespace is ignored; hard-wiring a switch or a second OCR call
+    /// breaks this.
+    #[test]
+    fn the_cell_ocr_sites_go_through_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = include_str!("main.rs");
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        assert!(body.contains(
+            "let rows = read_tab_rows( use_new_reader, || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size), || { ocr::recognize_scoreboard_names_pre_cropped( &scoreboard, team_size, player_name_owned.is_some(), ) }, );"
+        ));
+        assert_eq!(body.matches("recognize_scoreboard_cells").count(), 1);
+        assert!(body.contains("let ocr = full_board_text( use_new_reader, || {"));
+        assert!(body.contains("|| ocr::recognize(&img), );"));
+        assert_eq!(body.matches("ocr::recognize(").count(), 1);
+        let hc = src
+            .find("\nasync fn handle_capture(")
+            .expect("handle_capture");
+        let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+        assert!(hc_body.contains(
+            "let looks_like_scoreboard = match &new_board { Some(_) => board_refusal.is_none(), None => parse::looks_like_scoreboard(&rows), };"
+        ));
+        assert!(hc_body.contains(
+            "let scoreboard_read = match &new_board { Some(board) => reader_apply::read_own_row(board, own_row, &outcome_label) .map(|read| (read.matched, true, read.held)), None => parse::read_scoreboard("
+        ));
+        assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 1);
+        assert!(hc_body.contains(
+            "let suspect = if ctx.use_new_reader { held_cols } else { parse::player_row_suspect_mask(&rows, player_row_idx) };"
+        ));
+        assert!(hc_body.contains(
+            "match &new_board { Some(board) => reader_apply::both_teams_have_stats(board, team_size), None => parse::both_teams_have_stats(&rows, team_size), },"
+        ));
+        assert!(hc_body.contains("let new_board = ctx.use_new_reader.then(|| {"));
+    }
+
+    /// `o8_board` with the own row's stats as given: `(value, suspect)` per
+    /// column, `None` for a cell with no number.
+    fn o10_board(cells: [Option<(u32, bool)>; 6]) -> shadow::BoardRead {
+        let mut board = o8_board(Some("ana"));
+        for (suffix, cell) in reader_apply::STAT_SUFFIXES.iter().zip(cells) {
+            let name = format!("r0.{suffix}");
+            let field = board.fields.iter_mut().find(|f| f.name == name).unwrap();
+            field.value = cell.map(|(value, _)| shadow::Value::Int(value));
+            field.suspect = cell.is_none_or(|(_, suspect)| suspect);
+            field.confidence = if field.suspect { 0.2 } else { 0.9 };
+        }
+        board
+    }
+
+    /// Run Tabs through `handle_capture` on one open game. Returns the
+    /// stored rows and, per Tab, whether it was recorded.
+    async fn o10_tabs(
+        ctx: &DaemonCtx,
+        tabs: Vec<(FrameAnalysis, Option<shadow::BoardRead>)>,
+    ) -> (Vec<storage::PersonalMatch>, Vec<bool>) {
+        o10_tabs_on(ctx, tabs, "Busan").await
+    }
+
+    /// [`o10_tabs`] on a game whose trusted map is `map`.
+    async fn o10_tabs_on(
+        ctx: &DaemonCtx,
+        tabs: Vec<(FrameAnalysis, Option<shadow::BoardRead>)>,
+        map: &str,
+    ) -> (Vec<storage::PersonalMatch>, Vec<bool>) {
+        let mut now = test_now();
+        let mut active = game(detect::MatchOutcome::Unknown, None, now);
+        active.session_id = "o10".into();
+        active.map = Some(map.into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        let mut st = session(Some(active), now);
+        let mut recorded = Vec::new();
+        for (i, (analysis, board)) in tabs.into_iter().enumerate() {
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(ctx, req).await.unwrap();
+            assert!(!report.split, "tab {i} must stay on this game");
+            recorded.push(report.recorded);
+            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "o10", Ok(report), now).await;
+            now += Duration::from_secs(20);
+        }
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        (rows, recorded)
+    }
+
+    fn o10_stats(row: &storage::PersonalMatch) -> [u32; 6] {
+        [
+            row.elims,
+            row.assists,
+            row.deaths,
+            row.damage,
+            row.healing,
+            row.mitigation,
+        ]
+    }
+
+    fn sure(value: u32) -> Option<(u32, bool)> {
+        Some((value, false))
+    }
+
+    /// The whole point of O10: a cell the digit reader does not vouch for is
+    /// held at the game's last accepted value. The OCR cells of the same Tab
+    /// (`o8_rows`: 10 4 2 3000 800 400) are never the number stored.
+    #[tokio::test]
+    async fn new_reader_holds_a_suspect_cell_and_never_takes_the_ocr_cell() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let tabs = vec![
+            // all six sure
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    sure(12),
+                    sure(5),
+                    sure(3),
+                    sure(3500),
+                    sure(700),
+                    sure(300),
+                ])),
+            ),
+            // healing suspect (a plausible 750), mitigation with no number
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    sure(13),
+                    sure(5),
+                    sure(3),
+                    sure(3700),
+                    Some((750, true)),
+                    None,
+                ])),
+            ),
+            // both read sure again
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    sure(13),
+                    sure(6),
+                    sure(3),
+                    sure(3900),
+                    sure(1000),
+                    sure(500),
+                ])),
+            ),
+        ];
+        let (rows, recorded) = o10_tabs(&ctx, tabs).await;
+        assert_eq!(recorded, vec![true, true, true]);
+        assert_eq!(o10_stats(&rows[0]), [12, 5, 3, 3500, 700, 300]);
+        assert!(
+            rows[0].suspect_fields.is_empty(),
+            "{:?}",
+            rows[0].suspect_fields
+        );
+        // held at the last accepted 700 and 300: not the suspect 750, not
+        // OCR's 800 and 400 (plausible growth, so no other hold would stop
+        // them), and not a 0 written over a good value
+        assert_eq!(o10_stats(&rows[1]), [13, 5, 3, 3700, 700, 300]);
+        assert_eq!(
+            rows[1].suspect_fields,
+            vec!["h".to_string(), "mit".to_string()]
+        );
+        assert_eq!(rows[1].recognizer, shadow::digits::RECOGNIZER_ID);
+        assert_eq!(o10_stats(&rows[2]), [13, 6, 3, 3900, 1000, 500]);
+        assert!(
+            rows[2].suspect_fields.is_empty(),
+            "{:?}",
+            rows[2].suspect_fields
+        );
+    }
+
+    /// With no earlier board there is nothing to hold: the cell is stored as
+    /// a flagged 0, and the first sure read of it is stored at once (no rate
+    /// cap or jump hold against the placeholder).
+    #[tokio::test]
+    async fn new_reader_first_board_stores_a_flagged_zero_for_a_held_cell() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let tabs = vec![
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    Some((27, true)),
+                    sure(5),
+                    sure(3),
+                    sure(3500),
+                    Some((351, true)),
+                    sure(450),
+                ])),
+            ),
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    sure(25),
+                    sure(5),
+                    sure(3),
+                    sure(3550),
+                    sure(3511),
+                    sure(450),
+                ])),
+            ),
+        ];
+        let (rows, recorded) = o10_tabs(&ctx, tabs).await;
+        assert_eq!(recorded, vec![true, true]);
+        assert_eq!(o10_stats(&rows[0]), [0, 5, 3, 3500, 0, 450]);
+        assert_eq!(
+            rows[0].suspect_fields,
+            vec!["e".to_string(), "h".to_string()]
+        );
+        assert_eq!(o10_stats(&rows[1]), [25, 5, 3, 3550, 3511, 450]);
+        assert!(
+            rows[1].suspect_fields.is_empty(),
+            "{:?}",
+            rows[1].suspect_fields
+        );
+    }
+
+    /// A Tab the new reader's board does not vouch for stores nothing, even
+    /// when ocr-v1's cells and text read it perfectly. ocr-v1 itself, on the
+    /// same Tabs, stores its own read and never looks at the board.
+    #[tokio::test]
+    async fn new_reader_refuses_a_tab_its_board_does_not_vouch_for() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let not_found = || shadow::reader::not_found(shadow::BoardStatus::NotFound);
+        let unsure_row = || {
+            o10_board([
+                Some((10, true)),
+                Some((4, true)),
+                Some((2, true)),
+                Some((3000, true)),
+                None,
+                None,
+            ])
+        };
+        let six_v_six = || {
+            let mut board = o8_board(Some("ana"));
+            board.team_size = Some(6);
+            board
+        };
+        let tabs = || {
+            vec![
+                (o8_analysis(None, Some("ana")), Some(not_found())),
+                (o8_analysis(None, Some("ana")), None),
+                (o8_analysis(None, Some("ana")), Some(unsure_row())),
+                (o8_analysis(None, Some("ana")), Some(six_v_six())),
+            ]
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, recorded) = o10_tabs(&ctx, tabs()).await;
+        assert_eq!(recorded, vec![false, false, false, false]);
+        assert!(rows.is_empty(), "nothing is written: {}", rows.len());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), false).await;
+        let (rows, recorded) = o10_tabs(&ctx, tabs()).await;
+        assert_eq!(recorded, vec![true, true, true, true]);
+        for row in &rows {
+            assert_eq!(o10_stats(row), [10, 4, 2, 3000, 800, 400]);
+            assert_eq!(row.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+            assert!(row.suspect_fields.is_empty());
+        }
+    }
+
+    /// Under the new reader the Tab's name-only rows have no stat cell, and
+    /// the board alone carries the capture: acceptance, stats, both teams.
+    #[tokio::test]
+    async fn new_reader_stores_from_the_board_with_no_ocr_cells_or_text() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        // what analyze_frame hands over under the new reader
+        let mut analysis = o8_analysis(None, Some("ana"));
+        analysis.rows = ocr::recognize_scoreboard_names_pre_cropped(
+            &image::DynamicImage::new_rgb8(64, 64),
+            5,
+            false,
+        );
+        analysis.ocr = Ok(ocr::OcrResult {
+            raw_text: String::new(),
+            confidence: 0,
+        });
+        analysis.board = Some(o10_board([
+            sure(12),
+            sure(5),
+            sure(3),
+            sure(3500),
+            sure(900),
+            sure(450),
+        ]));
+        let (rows, recorded) = o10_tabs(&ctx, vec![(analysis, None)]).await;
+        assert_eq!(recorded, vec![true]);
+        assert_eq!(o10_stats(&rows[0]), [12, 5, 3, 3500, 900, 450]);
+        assert_eq!(rows[0].recognizer, shadow::digits::RECOGNIZER_ID);
+        assert_eq!(rows[0].hero, "Ana");
+        assert_eq!(rows[0].map_name, "Busan");
+        // the same Tab under ocr-v1 has nothing to read
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), false).await;
+        let mut analysis = o8_analysis(None, Some("ana"));
+        analysis.rows = ocr::recognize_scoreboard_names_pre_cropped(
+            &image::DynamicImage::new_rgb8(64, 64),
+            5,
+            false,
+        );
+        let (rows, recorded) = o10_tabs(&ctx, vec![(analysis, None)]).await;
+        assert_eq!(recorded, vec![false]);
+        assert!(rows.is_empty());
+    }
+
+    /// The Junkenstein gate (an Adlersbrunn label with stats on one team only
+    /// is not stored as Eichenwalde) counts the teams on the board under the
+    /// new reader: its Tab rows have no stat cell to count.
+    #[tokio::test]
+    async fn new_reader_counts_both_teams_on_the_board_for_the_pve_gate() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let tab = |both_teams: bool| {
+            let mut analysis = o8_analysis(None, Some("ana"));
+            analysis.rows = ocr::recognize_scoreboard_names_pre_cropped(
+                &image::DynamicImage::new_rgb8(64, 64),
+                5,
+                false,
+            );
+            analysis.map_from_panel = Some("Eichenwalde".into());
+            analysis.map_panel_raw = Some("ADLERSBRUNN".into());
+            let mut board = o8_board(Some("ana"));
+            if both_teams {
+                for suffix in reader_apply::STAT_SUFFIXES {
+                    board.fields.push(shadow::FieldRead {
+                        name: format!("r7.{suffix}"),
+                        value: Some(shadow::Value::Int(3)),
+                        confidence: 0.9,
+                        suspect: false,
+                    });
+                }
+            }
+            (analysis, Some(board))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, recorded) = o10_tabs_on(&ctx, vec![tab(true)], "Eichenwalde").await;
+        assert_eq!(
+            recorded,
+            vec![true],
+            "a board with both teams is a real game"
+        );
+        assert_eq!(rows[0].map_name, "Eichenwalde");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, recorded) = o10_tabs_on(&ctx, vec![tab(false)], "Eichenwalde").await;
+        assert_eq!(recorded, vec![false], "one team only: the PvE board");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn fill_held_cells_puts_the_last_accepted_value_in_held_columns_only() {
+        let mut parsed = test_match("s", "unknown");
+        (parsed.elims, parsed.assists, parsed.deaths) = (13, 5, 3);
+        (parsed.damage, parsed.healing, parsed.mitigation) = (3700, 0, 0);
+        let held = [false, false, false, false, true, true];
+        let prior = capture_gate::Counters {
+            elims: 12,
+            assists: 5,
+            deaths: 3,
+            damage: 3500,
+            healing: 900,
+            mitigation: 450,
+        };
+        fill_held_cells(&mut parsed, held, Some(prior));
+        assert_eq!(o10_stats(&parsed), [13, 5, 3, 3700, 900, 450]);
+        // no earlier board: 0, and a sure column is never touched
+        fill_held_cells(&mut parsed, [true, false, false, false, true, false], None);
+        assert_eq!(o10_stats(&parsed), [0, 5, 3, 3700, 0, 450]);
+    }
+
+    /// A held column must not count toward a stat-reset split or refresh the
+    /// reset baseline: `row_counts` is false for that board.
+    #[test]
+    fn a_board_with_a_held_cell_is_not_a_stat_reset_row() {
+        let (game, now) = request_with_text_fallback();
+        let req = build_capture_request(&game, false, now);
+        let clean = banner_facts("Busan", true);
+        assert!(
+            plan_from_board(&req, &clean).refresh_baseline,
+            "an identified, fully read row re-anchors the reset baseline"
+        );
+        let mut held = banner_facts("Busan", true);
+        held.held[4] = true;
+        assert!(!plan_from_board(&req, &held).refresh_baseline);
+
+        let src = include_str!("main.rs");
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let at = src.find("\nfn plan_from_board(").expect("plan_from_board");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        assert!(
+            body.contains(
+                "row_counts: facts.trusted_cells && !facts.held.iter().any(|&held| held),"
+            )
+        );
+        let at = src.find("\nfn stage_capture(").expect("stage_capture");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        assert!(body.contains(
+            "capture_gate::apply_gate_held( gate_prev, facts.counters, facts.suspect, facts.held, split, facts.trusted_cells, );"
+        ));
     }
 }

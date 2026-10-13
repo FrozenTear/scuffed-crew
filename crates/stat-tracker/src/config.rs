@@ -77,9 +77,12 @@ pub struct Config {
     /// Which reader supplies saved and uploaded stats.
     ///
     /// Missing, or `"ocr-v1"`, keeps today's Tesseract reads. `"new"` stores
-    /// the shadow reader's values when a field is read and not suspect, and
-    /// falls back to ocr-v1 per field otherwise. Game start, game end, screen
-    /// detection, and plausibility holds stay on ocr-v1 either way.
+    /// the shadow reader's values when a field is read and not suspect. The
+    /// six stats then come from that reader only: a Tab whose board it does
+    /// not vouch for is not stored, and a stat cell it is unsure of keeps
+    /// the game's last accepted value and is marked, with no OCR number in
+    /// its place. The top-bar map still falls back to OCR when the banner
+    /// reader abstains. Game start and game end stay on ocr-v1 either way.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
     pub reader: ReaderSetting,
 }
