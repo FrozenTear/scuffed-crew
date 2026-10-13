@@ -88,6 +88,15 @@ pub const MIN_AGREE: usize = 2;
 /// by 8.4%), the nameplate's icon starts at 8.7% to 8.9% and its text at
 /// about 9.2%.
 pub const NAME_LINE_TOP: f64 = 0.0865;
+/// Bottom of the accolade region, above [`NAME_LINE_TOP`]. 74 rows at
+/// 1440p, so the 2:1 resample to the work scale is exact.
+pub const ACCOLADE_Y1: f64 = 0.0862;
+/// The accolade nameplate box (x0, y0, x1, y1): its icon and text under the
+/// result word, across the width of the accolade region. No layout's region
+/// may reach into it ([`ResultTemplates::load_dir`]).
+pub const NAMEPLATE: [f64; 4] = [0.0, NAME_LINE_TOP, 0.255, 0.115];
+// The accolade region ends above the nameplate (checked at compile time).
+const _: () = assert!(ACCOLADE_Y1 < NAME_LINE_TOP && NAMEPLATE[1] == NAME_LINE_TOP);
 /// Work scale relative to a 1440p game rect.
 const WORK: f64 = 0.5;
 const SCALES: [f64; 3] = [0.96, 1.0, 1.04];
@@ -173,7 +182,7 @@ impl Layout {
     /// The four ocr-v1 regions, the accolade one stopped above the nameplate.
     pub fn builtin() -> Vec<Layout> {
         vec![
-            Self::new(ACCOLADE, [0.005, 0.035, 0.255, 0.0862], Plane::Max),
+            Self::new(ACCOLADE, [0.005, 0.035, 0.255, ACCOLADE_Y1], Plane::Max),
             Self::new(RANK_SCREEN, [0.010, 0.145, 0.250, 0.225], Plane::Min),
             Self::new(END_TITLE, [0.320, 0.340, 0.680, 0.520], Plane::Max),
             Self::new(TAB_HEADER, [0.300, 0.020, 0.700, 0.240], Plane::Min),
@@ -447,6 +456,42 @@ fn search_fast(region: &[Level], st: &Stack) -> Found {
     Found { score: best, macs }
 }
 
+/// A region inside the game rect: finite, `0 <= x0 < x1 <= 1`, same for y.
+fn roi_is_valid([x0, y0, x1, y1]: [f64; 4]) -> bool {
+    [x0, y0, x1, y1].iter().all(|v| v.is_finite())
+        && 0.0 <= x0
+        && x0 < x1
+        && x1 <= 1.0
+        && 0.0 <= y0
+        && y0 < y1
+        && y1 <= 1.0
+}
+
+/// A layout whose region reaches into [`NAMEPLATE`]: cut to end at
+/// [`ACCOLADE_Y1`] when it starts above the nameplate, else dropped.
+fn keep_off_nameplate(mut l: Layout) -> Option<Layout> {
+    let [x0, y0, x1, y1] = l.roi;
+    let [nx0, ny0, nx1, ny1] = NAMEPLATE;
+    let overlaps = x0 < nx1 && nx0 < x1 && y0 < ny1 && ny0 < y1;
+    if !overlaps {
+        return Some(l);
+    }
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    if y0 < ACCOLADE_Y1 {
+        if first {
+            tracing::warn!(id = %l.id, "result layout reached the accolade nameplate; cut above it");
+        }
+        l.roi[3] = ACCOLADE_Y1;
+        Some(l)
+    } else {
+        if first {
+            tracing::warn!(id = %l.id, "result layout inside the accolade nameplate; dropped");
+        }
+        None
+    }
+}
+
 /// The region of a layout at the work scale, with its pyramid.
 fn region(rgb: &RgbImage, roi: [f64; 4], plane: Plane) -> Option<Vec<Level>> {
     let (w, h) = rgb.dimensions();
@@ -524,18 +569,39 @@ impl ResultTemplates {
     /// built-in id replaces it). A new result screen plugs in with a layout
     /// entry and its templates, no code change. `None` unless at least one
     /// victory and one defeat template load.
+    ///
+    /// The file comes from a downloaded pack, so a file that does not parse
+    /// refuses the folder, and each entry is checked:
+    /// * an id that is not a plain word id ([`crate::packs::is_word_id`]:
+    ///   no `/`, no `..`, not absolute) or a region that is not inside the
+    ///   game rect refuses the whole folder (`None`, so the caller falls
+    ///   back);
+    /// * a region that reaches into the accolade nameplate ([`NAMEPLATE`]) is
+    ///   cut to end at [`ACCOLADE_Y1`] when it starts above the nameplate,
+    ///   and dropped when it starts inside it. Logged once per process.
     pub fn load_dir(dir: &Path) -> Option<Self> {
         let mut layouts = Layout::builtin();
         if let Ok(text) = std::fs::read_to_string(dir.join("layouts.json")) {
             match serde_json::from_str::<Vec<Layout>>(&text) {
                 Ok(extra) => {
                     for l in extra {
+                        if !crate::packs::is_word_id(&l.id) || !roi_is_valid(l.roi) {
+                            tracing::warn!(
+                                dir = %dir.display(),
+                                "result layouts.json has an unsafe id or region; folder refused"
+                            );
+                            return None;
+                        }
+                        let Some(l) = keep_off_nameplate(l) else {
+                            continue;
+                        };
                         layouts.retain(|k| k.id != l.id);
                         layouts.push(l);
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "result layouts.json unreadable, built-ins only")
+                    tracing::warn!(error = %e, "result layouts.json unreadable; folder refused");
+                    return None;
                 }
             }
         }
@@ -584,6 +650,12 @@ impl ResultTemplates {
             })
             .collect();
         Some(Self { tpls })
+    }
+
+    /// The loaded layout with this id (tests).
+    #[cfg(test)]
+    fn layout(&self, id: &str) -> Option<&Layout> {
+        self.tpls.iter().map(|t| &t.layout).find(|l| l.id == id)
     }
 
     /// Source ids that have at least one template.
@@ -1332,6 +1404,110 @@ mod tests {
         name_line(&mut small_named2, 1080.0, [255, 255, 255]);
         assert_eq!(px(&small_named2, a.roi), px(&small, a.roi));
         assert_ne!(px(&small_named, old), px(&small, old));
+    }
+
+    /// F253-4: a pack's `layouts.json` cannot bring the nameplate back. An
+    /// `accolade` override that runs to ocr-v1's 9.5% is cut at
+    /// [`ACCOLADE_Y1`]; a layout that starts inside the nameplate is dropped.
+    #[test]
+    fn a_layouts_json_cannot_reach_the_nameplate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pack(
+            dir.path(),
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+                ("cards_victory.png", &word(5, 40, 12)),
+                ("cards_defeat.png", &word(7, 40, 12)),
+            ],
+        );
+        std::fs::write(
+            dir.path().join("layouts.json"),
+            r#"[{"id": "accolade", "roi": [0.005, 0.035, 0.255, 0.095], "plane": "max"},
+                {"id": "cards", "roi": [0.02, 0.09, 0.20, 0.112], "plane": "max"}]"#,
+        )
+        .unwrap();
+        let t = ResultTemplates::load_dir(dir.path()).expect("loads, clamped");
+        assert_eq!(
+            t.layout(ACCOLADE).unwrap().roi,
+            [0.005, 0.035, 0.255, ACCOLADE_Y1]
+        );
+        assert!(t.layout("cards").is_none(), "{:?}", t.sources());
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 64, 58, &word(1, 70, 30), [255, 220, 0]);
+        let mut named = img.clone();
+        name_line(&mut named, 1440.0, [255, 255, 255]);
+        assert_eq!(t.scores(&named, true), t.scores(&img, true));
+        assert_eq!(t.read(&img).outcome, Some(Outcome::Victory));
+    }
+
+    /// F253-5: layout ids are file stems. One that could leave the pack
+    /// folder (or is not a words-v1 word id), or a region outside the game
+    /// rect, refuses the folder, and the reader falls back to the old one.
+    #[test]
+    fn a_hostile_layouts_json_refuses_the_folder() {
+        let long = "x".repeat(65);
+        let bad_ids = [
+            "../evil",
+            "/tmp/evil",
+            "a/b",
+            "..",
+            ".",
+            "Evil",
+            "",
+            &long,
+            "e vil",
+            "e\\\\vil",
+        ];
+        let bad_rois = [
+            "[0.5, 0.5, 0.4, 0.6]",
+            "[-0.1, 0.4, 0.2, 0.6]",
+            "[0.0, 0.0, 1.5, 1.0]",
+            "[0.4, 0.6, 0.6, 0.6]",
+        ];
+        let cases = bad_ids
+            .iter()
+            .map(|id| format!(r#"[{{"id": "{id}", "roi": [0.4, 0.4, 0.6, 0.5], "plane": "max"}}]"#))
+            .chain([r#"[{"id": "cards", "roi": [0.4, 0.4], "plane": "max"}]"#.to_string()])
+            .chain(
+                bad_rois
+                    .iter()
+                    .map(|roi| format!(r#"[{{"id": "cards", "roi": {roi}, "plane": "max"}}]"#)),
+            );
+        for (k, json) in cases.enumerate() {
+            let data = tempfile::tempdir().unwrap();
+            let words = data.path().join(WORDS_SUBDIR);
+            pack(&words, 1);
+            // what `../evil` would open, one level above the pack folder
+            write_pack(
+                &data.path().join("templates"),
+                &[
+                    ("evil_victory.png", &word(9, 70, 30)),
+                    ("evil_defeat.png", &word(4, 60, 30)),
+                ],
+            );
+            std::fs::write(words.join("layouts.json"), &json).unwrap();
+            assert!(
+                ResultTemplates::load_dir(&words).is_none(),
+                "case {k}: {json}"
+            );
+            pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+            let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+            assert_eq!(
+                reads_victory(&live, 5),
+                (Some(ResultPack::Legacy), true),
+                "case {k}"
+            );
+        }
+        // the same folder with a plain id loads
+        let dir = tempfile::tempdir().unwrap();
+        pack(dir.path(), 1);
+        std::fs::write(
+            dir.path().join("layouts.json"),
+            r#"[{"id": "end_title_2", "roi": [0.4, 0.4, 0.6, 0.5], "plane": "max"}]"#,
+        )
+        .unwrap();
+        assert!(ResultTemplates::load_dir(dir.path()).is_some());
     }
 
     // ---------------------------------------------- fast search (O1 item 2)

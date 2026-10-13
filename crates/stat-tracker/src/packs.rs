@@ -1173,6 +1173,14 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
 }
 
+/// A word id the words-v1 layout allows as a file stem: 1 to 64 of `a-z`,
+/// `0-9`, `_`. No separator, no `..`, never absolute. The result reader
+/// checks layout ids from a pack's `layouts.json` with this before it joins
+/// them into a path.
+pub(crate) fn is_word_id(stem: &str) -> bool {
+    !stem.is_empty() && stem.len() <= MAX_STEM && stem.bytes().all(is_word_byte)
+}
+
 /// `g` plus four lowercase hex digits, then `.png`.
 pub(crate) fn is_glyph_name(raw: &str) -> bool {
     raw.strip_prefix('g')
