@@ -10704,9 +10704,9 @@ mod tests {
         ));
         assert_eq!(hc_body.matches("find_player_row_by_name").count(), 0);
         // a suspect own row is one low-trust bit for the plan and both gates
-        assert!(hc_body.contains(
-            "let own_row_suspect = own_row.is_some_and(|own| own.suspect());"
-        ));
+        assert!(
+            hc_body.contains("let own_row_suspect = own_row.is_some_and(|own| own.suspect());")
+        );
         assert!(hc_body.contains(".map(|read| (read.matched, !own_row_suspect, read.held)),"));
         assert!(hc_body.contains("let own_seeds = own_name_seeds(ctx.own_name.as_ref());"));
     }
@@ -18145,9 +18145,10 @@ mod tests {
     async fn new_reader_suspect_own_row_with_held_cells_is_low_trust_and_flagged() {
         use detect::own_row::combine;
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
-        let sure_row = Some(combine(Some(0), o9_lit(0, 1.5), true));
-        let suspect_row = Some(combine(Some(0), None, true));
-        assert!(suspect_row.unwrap().suspect() && !sure_row.unwrap().suspect());
+        let sure_row = combine(Some(0), o9_lit(0, 1.5), true);
+        let suspect_row = combine(Some(0), None, true);
+        assert!(suspect_row.suspect() && !sure_row.suspect());
+        let (sure_row, suspect_row) = (Some(sure_row), Some(suspect_row));
         let held_healing = |e: u32, dmg: u32| {
             [
                 sure(e),
@@ -18170,7 +18171,11 @@ mod tests {
             ],
         )
         .await;
-        assert!(seen[0].recorded && seen[0].refresh_baseline, "{:?}", seen[0]);
+        assert!(
+            seen[0].recorded && seen[0].refresh_baseline,
+            "{:?}",
+            seen[0]
+        );
         assert!(
             seen[1].recorded && !seen[1].refresh_baseline,
             "a suspect row is stored and is not a reset row: {:?}",
@@ -18180,7 +18185,10 @@ mod tests {
         // the sure cells are the board's, the held one keeps the last
         // accepted 700, and every field read off the row is flagged
         assert_eq!(o10_stats(&rows[1]), [13, 6, 3, 3900, 700, 450]);
-        assert_eq!(rows[1].suspect_fields, reader_apply::OWN_ROW_FIELDS.to_vec());
+        assert_eq!(
+            rows[1].suspect_fields,
+            reader_apply::OWN_ROW_FIELDS.to_vec()
+        );
         let gate = st.active_game.as_ref().unwrap().gate.unwrap();
         assert!(gate.low_trust, "the counters did not latch");
         // the moved columns are unconfirmed over the values they left; the
@@ -18206,7 +18214,11 @@ mod tests {
             ],
         )
         .await;
-        assert!(seen[0].pending && !seen[0].refresh_baseline, "{:?}", seen[0]);
+        assert!(
+            seen[0].pending && !seen[0].refresh_baseline,
+            "{:?}",
+            seen[0]
+        );
         assert!(seen[1].pending, "{:?}", seen[1]);
         assert!(seen[2].recorded, "{:?}", seen[2]);
         let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
@@ -18247,7 +18259,6 @@ mod tests {
         let rows: Vec<ocr::RowOcrResult> = (0..10).map(|_| named("MADEUP")).collect();
         assert_eq!(name_on_a_full_board(&rows, "MadeUp", 6), None);
     }
-
 
     /// Under the new reader every cell whose stored value is not this
     /// capture's read is flagged, a rate-cap hold too (F266-3). ocr-v1
