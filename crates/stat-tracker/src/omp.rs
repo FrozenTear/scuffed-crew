@@ -9,8 +9,9 @@
 //! libgomp reads `OMP_*` in its library constructor, before `main`. Setting
 //! the variable from inside the process is too late: it has to be in the
 //! environment at exec. The systemd unit sets it. For every other start (a
-//! shell, the app's Start button, a dev run) [`ensure_thread_limit`] runs
-//! first in `main` and starts the same binary again with the variable set.
+//! shell, the app when no unit is installed, a dev run)
+//! [`ensure_thread_limit`] runs first in `main` and starts the same binary
+//! again with the variable set.
 
 use std::ffi::{OsStr, OsString};
 
@@ -20,7 +21,8 @@ pub const LIMIT_VAR: &str = "OMP_THREAD_LIMIT";
 pub const LIMIT_VALUE: &str = "1";
 /// Set on the restarted process. A process that sees it never restarts again.
 pub const REEXEC_VAR: &str = "SCUFFED_OMP_REEXEC";
-/// Developer opt-out: any value but empty or `0` keeps the process as started.
+/// Opt-out, and with [`LIMIT_VAR`] unset the way to run with no limit: any
+/// value but empty or `0` keeps the process as started.
 pub const OPT_OUT_VAR: &str = "SCUFFED_OMP_NO_REEXEC";
 /// Prints the limit this process runs with and exits.
 pub const PRINT_FLAG: &str = "--print-omp-limit";
@@ -124,6 +126,12 @@ pub fn ensure_thread_limit() -> Startup {
 /// The path is the resolved binary, not `/proc/self/exe`: the kernel names
 /// the process after the last part of the path it was given, and a process
 /// called `exe` is not one the app or `proc_id` would take for the tracker.
+///
+/// Both variables stay in the environment, so every process the daemon
+/// starts inherits `OMP_THREAD_LIMIT=1` and `SCUFFED_OMP_REEXEC=1`. An
+/// OpenMP tool started from here would run on one thread. That is why a
+/// `--generate-tessdata` run is exempt ([`Kept::TrainingOnly`]); a new
+/// child that needs its threads has to clear the limit for itself.
 #[cfg(unix)]
 fn reexec_self(args: &[OsString]) -> String {
     use std::os::unix::process::CommandExt;
@@ -138,7 +146,42 @@ fn reexec_self(args: &[OsString]) -> String {
     cmd.args(args.iter().skip(1))
         .env(LIMIT_VAR, LIMIT_VALUE)
         .env(REEXEC_VAR, "1");
-    cmd.exec().to_string()
+    // `Command::exec` sets SIGPIPE back to its default action before it
+    // calls execve, and leaves it there when the exec fails. Rust started
+    // this process with SIGPIPE ignored. Without that, a later write to a
+    // closed stdout or stderr pipe would kill the daemon with no log line.
+    let sigpipe = sigpipe_action();
+    let error = cmd.exec();
+    restore_sigpipe(sigpipe);
+    error.to_string()
+}
+
+/// How this process handles SIGPIPE right now.
+#[cfg(unix)]
+fn sigpipe_action() -> Option<libc::sigaction> {
+    let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+    // SAFETY: with no new action, `sigaction` only writes the current one
+    // into `current`.
+    let read = unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), current.as_mut_ptr()) };
+    // SAFETY: on success the kernel filled the struct in.
+    (read == 0).then(|| unsafe { current.assume_init() })
+}
+
+/// Put back what [`sigpipe_action`] read, or ignore SIGPIPE when it could
+/// not be read (that is what Rust's start-up sets).
+#[cfg(unix)]
+fn restore_sigpipe(action: Option<libc::sigaction>) {
+    match action {
+        // SAFETY: `action` is a disposition the kernel handed out for this
+        // same signal in this same process.
+        Some(action) => unsafe {
+            libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+        },
+        // SAFETY: SIG_IGN is a valid disposition for SIGPIPE.
+        None => unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        },
+    }
 }
 
 #[cfg(not(unix))]
@@ -233,6 +276,15 @@ pub fn log_startup(startup: &Startup) {
                 libgomp_thread_limit = %libgomp,
                 restarted,
                 "OpenMP thread limit for OCR"
+            );
+        }
+        // The restart happened and the limit did not come with it: as bad
+        // as a restart that failed, and as loud.
+        Startup::Kept(Kept::AlreadyRestarted) => {
+            tracing::warn!(
+                omp_thread_limit = %limit,
+                libgomp_thread_limit = %libgomp,
+                "restarted for {LIMIT_VAR}={LIMIT_VALUE} but the variable is not set; OCR will use more CPU for the same reads"
             );
         }
         Startup::Kept(kept) => {

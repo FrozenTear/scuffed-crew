@@ -370,7 +370,8 @@ fn package_version() -> &'static str {
 fn main() -> anyhow::Result<()> {
     // First, before any thread, log line or Tesseract use: libgomp reads
     // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
-    // app's Start button) is replaced here by the same binary with it set.
+    // app with no unit installed) is replaced here by the same binary with
+    // it set.
     // Under the systemd unit the variable is already there and this returns.
     let omp = stat_tracker::omp::ensure_thread_limit();
     tokio::runtime::Builder::new_multi_thread()

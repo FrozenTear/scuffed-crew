@@ -7,6 +7,8 @@
 //! no display, so it reads no real config, holds no sync token, and captures
 //! nothing.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -35,8 +37,8 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
 
     let log_path = root.path().join("daemon.out");
     let log = std::fs::File::create(&log_path).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"))
-        .env_clear()
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scuffed-stat-tracker"));
+    cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -45,9 +47,10 @@ fn daemon_moves_a_stale_marker_and_sigterm_removes_its_own() {
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("spawn daemon");
+        .stderr(Stdio::from(log));
+    // Killed and reaped when `daemon` drops, on every way out of this test.
+    let mut daemon = common::spawn_daemon(cmd);
+    let child = &mut daemon.child;
     let pid = child.id();
 
     let marker = data_dir.join("run.marker");
