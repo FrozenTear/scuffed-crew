@@ -2030,7 +2030,7 @@ mod tests {
             let frame = |text| frame_with_accolade(text, Accolade::at(size));
             let t = sure(reader.read_accolade_map(&frame("KING'S ROW")));
             assert_eq!((t.name.as_str(), t.mode), ("King's Row", Some("Hybrid")));
-            // the accolade spelling of Eichenwalde's Halloween label
+            // Eichenwalde's Halloween label: its own entry in `MAPS` (M1)
             let alias = sure(reader.read_accolade_map(&frame("ADLERSBRUNN")));
             assert_eq!(alias.name, "Eichenwalde");
             // a cedilla under the line (F265-2)

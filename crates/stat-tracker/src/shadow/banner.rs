@@ -32,7 +32,7 @@
 //! the top left, right of the result word, with `MATCH TIME: m:ss` under it.
 //! [`locate_accolade`] cuts that line by its fixed place in the game rect
 //! and [`MapTemplates::read_accolade`] scores it against the same templates
-//! plus the accolade-only spellings in [`ACCOLADE_ALIASES`].
+//! plus the accolade-only spellings in [`ACCOLADE_ALIASES`] (none today).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -127,9 +127,13 @@ fn place_slack(gh: f64) -> f64 {
 }
 
 /// Accolade spellings that are not a banner spelling of the map: (text on
-/// the accolade screen, [`MapInfo::key`]). `ADLERSBRUNN` is the Halloween
-/// label of Eichenwalde, which ocr-v1's table stores as Eichenwalde.
-pub const ACCOLADE_ALIASES: &[(&str, &str)] = &[("ADLERSBRUNN", "eichenwalde")];
+/// the accolade screen, [`MapInfo::key`]). Empty today. `ADLERSBRUNN`, the
+/// Halloween label of Eichenwalde, was the one entry until it got its own
+/// entry in [`MAPS`] (alpha.7 M1, [`ADLERSBRUNN_KEY`]): the accolade read
+/// names that entry now, and the tracker stores it as Eichenwalde either
+/// way. As an alias of `eichenwalde` as well it would tie with its own
+/// entry and never be sure.
+pub const ACCOLADE_ALIASES: &[(&str, &str)] = &[];
 
 /// One map: stable key (OverFast API), the name ocr-v1 stores, banner
 /// spellings, and its single game mode (`None` when it has several).
@@ -1098,6 +1102,17 @@ impl MapTemplates {
 
     /// Build templates from glyphs (tests use synthetic glyphs).
     pub fn compose_all(glyphs: &HashMap<char, Gray>, gap: f64, space: f64) -> Self {
+        Self::compose_with(glyphs, gap, space, ACCOLADE_ALIASES)
+    }
+
+    /// [`Self::compose_all`] with the accolade-only spellings as an
+    /// argument (tests).
+    fn compose_with(
+        glyphs: &HashMap<char, Gray>,
+        gap: f64,
+        space: f64,
+        aliases: &[(&'static str, &str)],
+    ) -> Self {
         let mut tpls = Vec::new();
         let mut unrenderable = Vec::new();
         for (mi, m) in MAPS.iter().enumerate() {
@@ -1108,7 +1123,7 @@ impl MapTemplates {
                 }
             }
         }
-        let accolade = ACCOLADE_ALIASES
+        let accolade = aliases
             .iter()
             .filter_map(|&(text, key)| {
                 let mi = MAPS.iter().position(|m| m.key == key)?;
@@ -2372,30 +2387,42 @@ mod tests {
         assert!(!accolade_templates().read(&accolade).found_banner);
     }
 
-    /// `ADLERSBRUNN` on the accolade screen is Eichenwalde. The banner read
-    /// has no such spelling and is the same with or without the alias.
+    /// `ADLERSBRUNN` on the accolade screen is the Halloween label's own
+    /// entry in [`MAPS`] (M1), stored as Eichenwalde: it needs no alias, and
+    /// the table is empty. An accolade-only spelling, when there is one,
+    /// reads as its map on the accolade line and is no banner template.
     #[test]
     fn the_accolade_alias_reads_as_its_map_and_the_banner_ignores_it() {
         assert!(
-            ACCOLADE_ALIASES
-                .iter()
-                .all(|(_, key)| MAPS.iter().any(|m| m.key == *key)),
-            "every alias names a map"
+            ACCOLADE_ALIASES.iter().all(|(text, key)| {
+                MAPS.iter().any(|m| m.key == *key) && !MAPS.iter().any(|m| m.banner.contains(text))
+            }),
+            "every alias names a map and is not a banner spelling"
         );
         let t = accolade_templates();
-        let r = t.read_accolade(&frame_with_accolade("ADLERSBRUNN", Accolade::at(P1080)));
-        assert_eq!(r.map.map(|m| m.key), Some("eichenwalde"));
+        let r = t.read_accolade(&frame_with_accolade(ADLERSBRUNN, Accolade::at(P1080)));
+        assert_eq!(r.map.map(|m| m.key), Some(ADLERSBRUNN_KEY));
+        assert_eq!(r.map.map(|m| m.name), Some("Eichenwalde"));
         assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
 
+        // the alias path itself, with a spelling no map has
+        let aliased =
+            MapTemplates::compose_with(&accolade_atlas(), GAP, SPACE, &[("OLD NEPAL", "nepal")]);
+        let img = frame_with_accolade("OLD NEPAL", Accolade::at(P1080));
+        let r = aliased.read_accolade(&img);
+        assert_eq!(r.map.map(|m| m.key), Some("nepal"));
+        assert!(!r.suspect, "score {} margin {}", r.score, r.margin);
+        assert!(t.read_accolade(&img).suspect, "no alias, no sure read");
         let banners: usize = MAPS.iter().map(|m| m.banner.len()).sum();
-        let b = MapTemplates::compose_all(&atlas(), GAP, SPACE);
         assert_eq!(
-            b.template_count(),
+            aliased.template_count(),
             banners,
             "aliases are not banner templates"
         );
-        let on_banner = b.read(&frame_with_banner("ADLERSBRUNN"));
-        assert!(on_banner.found_banner && on_banner.suspect);
+        // a banner read does not score the alias
+        let strip = locate_accolade(&img).unwrap().strip;
+        assert_eq!(aliased.read_strip(&strip), t.read_strip(&strip));
+        assert!(aliased.read_strip(&strip).suspect);
     }
 
     /// The strip window of a located line stays above the accolade
