@@ -1,16 +1,20 @@
 //! Eval probe: map banner and result word reads of the shadow reader.
-//! Usage: shadow_meta <pack-root> <img>...  (pack-root holds templates/{maps,result})
+//! Usage: shadow_meta <pack-root> <img>...  (pack-root holds templates/result and
+//! templates/maps-v1, or templates/maps)
 //! Prints TSV: path, map key, map score, margin, suspect, result, score, margin, suspect.
 
 use std::path::Path;
 
-use stat_tracker::shadow::banner::MapTemplates;
+use stat_tracker::shadow::banner::MapDirs;
 use stat_tracker::shadow::result::ResultTemplates;
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let root = args.next().expect("pack root");
-    let maps = MapTemplates::load_dir(&MapTemplates::dir_in(Path::new(&root))).expect("map pack");
+    let maps = MapDirs::in_data_dir(Path::new(&root))
+        .load()
+        .expect("map pack")
+        .templates;
     let res =
         ResultTemplates::load_dir(&ResultTemplates::dir_in(Path::new(&root))).expect("result pack");
     for path in args {

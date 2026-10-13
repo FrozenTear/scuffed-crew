@@ -12,8 +12,11 @@
 //! `<hero-key>.png` or `special/<class>*.png`, the layout
 //! [`HeroTemplates::load_dir`] reads. `heroes-v2.tar` and
 //! `heroes-v2-1080.tar` use the same layout; the new reader prefers them
-//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]). The
-//! other packs are downloaded into folders no reader opens yet.
+//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]).
+//! `maps-v1.tar` is the new reader's map banner pack
+//! ([`crate::shadow::banner::MapDirs`]) and `words-v1.tar` its result word
+//! pack ([`crate::shadow::result::ResultDirs`]). The other packs are
+//! downloaded into folders no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -27,7 +30,8 @@
 //! back [`ExtraPacks`] to run in the background, so capture never waits on
 //! the extras. The new reader starts on heroes-v1 and re-loads its hero set
 //! once heroes-v2 or heroes-v2-1080 is swapped in
-//! ([`crate::shadow::heroes::LiveHeroSet`]). The setup guide
+//! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
+//! once it lands ([`crate::shadow::banner::LiveMaps`]). The setup guide
 //! ([`sync_reader_packs`]) syncs all of them. Every run holds an exclusive `flock` on
 //! `templates/.pack-sync.lock`; a second run at the same time is
 //! [`PackSync::Busy`] and sends no request.
@@ -93,7 +97,8 @@ impl PackSpec {
 /// first so a rate limit or refused token hits it the way it did in alpha.6.
 /// The hero packs are read by a reader today (heroes-v1 by the shadow log and
 /// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
-/// reader); the others are not yet.
+/// reader), and so is maps-v1 (the new reader's map banner); the others are
+/// not yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -355,8 +360,10 @@ fn log_report(report: &PackReport) {
 /// Daemon startup. Syncs `heroes-v1.tar` only, the same two requests as
 /// alpha.6, so capture waits on nothing new. The other packs come back as
 /// [`ExtraPacks`] for the caller to run in the background once capture is
-/// up. `None` when the list was not read (signed out, list error, busy).
-/// Logs a plain warning on failure and never the token.
+/// up. `None` when the list was not read (signed out, list error, busy),
+/// or when the heroes-v1 download hit a stop (refused token, rate limit,
+/// packs switched off): the extras would only repeat that request inside
+/// the same window. Logs a plain warning on failure and never the token.
 pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> Option<ExtraPacks> {
     sync_on_startup_capped(server_url, token, data_dir, PACK_MAX_BYTES).await
 }
@@ -434,7 +441,7 @@ pub async fn sync_reader_packs(
 }
 
 /// One run over `scope`. `listed` reuses a list already fetched. Returns the
-/// report and the list it used, when it got one.
+/// report and the list it used, when it got one and no download hit a stop.
 async fn run_sync(
     server_url: &str,
     token: &str,
@@ -513,7 +520,11 @@ async fn run_sync(
                     // Keep the other packs' versions, including an alpha.6
                     // file that only names heroes-v1.tar.
                     versions.insert(spec.name.to_string(), entry.version.clone());
-                    if let Err(message) = write_versions(data_dir, &versions) {
+                    let (dir, snapshot) = (data_dir.to_path_buf(), versions.clone());
+                    let written = off_runtime(move || write_versions(&dir, &snapshot))
+                        .await
+                        .unwrap_or_else(|| Err("version write did not finish".to_string()));
+                    if let Err(message) = written {
                         tracing::warn!(
                             pack = spec.name,
                             error = %message,
@@ -529,7 +540,9 @@ async fn run_sync(
             outcome,
         });
     }
-    (PackReport { packs }, Some(entries))
+    // After a stop the list is not handed on, so no later run reuses it to
+    // send the request the server just refused or rate limited.
+    (PackReport { packs }, stopped.is_none().then_some(entries))
 }
 
 async fn fetch_list(
@@ -616,29 +629,48 @@ const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Remove staging and backup folders left by a killed sync. Runs under the
 /// sync lock. Only names this module makes, only real folders (not links),
-/// and only when older than [`STALE_STAGING`].
+/// and only when older than [`STALE_STAGING`]. Also removes versions tmp
+/// files left by a kill.
 fn sweep_stale_staging(data_dir: &Path) {
     let templates = data_dir.join("templates");
     let Ok(entries) = std::fs::read_dir(&templates) else {
         return;
     };
-    let labels: Vec<String> = PACKS
-        .iter()
-        .map(|spec| dir_label(&spec.dir_in(data_dir)))
-        .collect();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let ours = name.strip_prefix('.').is_some_and(|rest| {
-            labels.iter().any(|label| {
-                rest.strip_prefix(label.as_str())
-                    .is_some_and(|tail| tail.starts_with("-next-") || tail.starts_with("-prev-"))
-            })
-        });
-        if !ours {
+        let path = entry.path();
+        if name.starts_with(VERSIONS_TMP_PREFIX) {
+            // Only a run holding this lock writes one, so this one is left.
+            if path.symlink_metadata().is_ok_and(|meta| meta.is_file())
+                && let Err(err) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(file = %name, error = %err, "left reader pack versions file was not removed");
+            }
             continue;
         }
-        let path = entry.path();
+        // The pack this name belongs to, and whether it is a `-prev-` backup.
+        let owner = name.strip_prefix('.').and_then(|rest| {
+            PACKS.iter().find_map(|spec| {
+                let tail = rest.strip_prefix(dir_label(&spec.dir_in(data_dir)).as_str())?;
+                if tail.starts_with("-next-") {
+                    Some((spec, false))
+                } else if tail.starts_with("-prev-") {
+                    Some((spec, true))
+                } else {
+                    None
+                }
+            })
+        });
+        let Some((spec, backup)) = owner else {
+            continue;
+        };
+        // A `-prev-` folder is the old live folder renamed, so its mtime is
+        // the old pack's. While the live folder is missing (a kill inside
+        // the fallback swap) it is the only copy of that pack: keep it.
+        if backup && !spec.dir_in(data_dir).exists() {
+            continue;
+        }
         let Ok(meta) = path.symlink_metadata() else {
             continue;
         };
@@ -677,14 +709,10 @@ struct Fetch<'a> {
 async fn sync_one(
     fetch: &Fetch<'_>,
     data_dir: &Path,
-    spec: &PackSpec,
+    spec: &'static PackSpec,
     entry: &PackListEntry,
 ) -> Step {
-    let live = spec.dir_in(data_dir);
-    let parent = live
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| data_dir.to_path_buf());
+    let parent = pack_parent(data_dir, spec);
     if let Err(message) = std::fs::create_dir_all(&parent) {
         tracing::warn!(pack = spec.name, error = %message, "reader pack directory was not created");
         return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
@@ -707,24 +735,53 @@ async fn sync_one(
         }
         Get::Failed(message) => return Step::Done(PackSync::Failed(message)),
     };
+    let (data_dir, entry) = (data_dir.to_path_buf(), entry.clone());
+    let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes))
+        .await
+        .unwrap_or_else(|| PackSync::Failed(PACK_FAILED.to_string()));
+    Step::Done(installed)
+}
+
+/// Run blocking file work (hashing, unpacking, fsync) on tokio's blocking
+/// pool, so the background extras job never holds up a runtime worker.
+/// `None` if the work panicked.
+async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(work).await.ok()
+}
+
+/// The file side of one download: check the bytes against the list, unpack
+/// into a staging folder and swap it in. Blocking; see [`off_runtime`].
+fn install_pack(data_dir: &Path, spec: &PackSpec, entry: &PackListEntry, bytes: &[u8]) -> PackSync {
+    #[cfg(test)]
+    tests::note_blocking_work(data_dir);
+    let live = spec.dir_in(data_dir);
+    let parent = pack_parent(data_dir, spec);
     // List size and sha256 are checked before any file is written.
-    if bytes.len() as u64 != entry.size || sha256_hex(&bytes) != entry.sha256 {
-        return Step::Done(PackSync::Failed(PACK_MISMATCH.to_string()));
+    if bytes.len() as u64 != entry.size || sha256_hex(bytes) != entry.sha256 {
+        return PackSync::Failed(PACK_MISMATCH.to_string());
     }
     let staging = parent.join(format!(".{}-next-{}", dir_label(&live), unique_suffix()));
     if std::fs::create_dir(&staging).is_err() {
-        return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
+        return PackSync::Failed(PACK_FAILED.to_string());
     }
-    if let Err(message) = unpack_pack(&bytes, spec.layout, &entry.name, &entry.version, &staging) {
+    if let Err(message) = unpack_pack(bytes, spec.layout, &entry.name, &entry.version, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
-        return Step::Done(PackSync::Failed(message.to_string()));
+        return PackSync::Failed(message.to_string());
     }
     if let Err(message) = swap_dir(&staging, &live) {
         let _ = std::fs::remove_dir_all(&staging);
         tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
-        return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
+        return PackSync::Failed(PACK_FAILED.to_string());
     }
-    Step::Done(PackSync::Installed)
+    PackSync::Installed
+}
+
+/// The folder a pack's live, staging and backup folders sit in.
+fn pack_parent(data_dir: &Path, spec: &PackSpec) -> PathBuf {
+    spec.dir_in(data_dir)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.to_path_buf())
 }
 
 /// Last path part of a pack folder, for staging and backup names.
@@ -745,7 +802,7 @@ fn unique_suffix() -> String {
     )
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct PackListEntry {
     name: String,
     version: String,
@@ -1034,13 +1091,19 @@ fn read_versions(data_dir: &Path) -> BTreeMap<String, String> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// Start of every tmp file [`write_versions`] makes. Only a run holding the
+/// sync lock writes one, so any found at the start of a run was left by a kill.
+const VERSIONS_TMP_PREFIX: &str = "pack-versions.json.tmp-";
+
 fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
+    #[cfg(test)]
+    tests::note_blocking_work(data_dir);
     let path = versions_path(data_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     // A name of its own, so two writers never share one tmp file.
-    let tmp = path.with_file_name(format!("pack-versions.json.tmp-{}", unique_suffix()));
+    let tmp = path.with_file_name(format!("{VERSIONS_TMP_PREFIX}{}", unique_suffix()));
     let bytes = serde_json::to_vec(versions).map_err(|err| err.to_string())?;
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
@@ -2368,11 +2431,17 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: only heroes-v1 lands in a folder a reader opens.
+        // Reader neutrality: only the hero packs, maps-v1 and words-v1 land
+        // in a folder a reader opens. The hand-installed maps and result
+        // folders are not pack folders.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
+            crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
+            crate::shadow::heroes::TEMPLATE_SUBDIR_V2_1080,
             crate::shadow::result::TEMPLATE_SUBDIR,
+            crate::shadow::result::WORDS_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR,
+            crate::shadow::banner::TEMPLATE_SUBDIR_V1,
         ];
         let mut seen = BTreeSet::new();
         for spec in PACKS {
@@ -2383,8 +2452,27 @@ mod tests {
             let used_by_reader = reader_dirs.iter().any(|sub| dir == data.join(sub));
             assert_eq!(
                 used_by_reader,
-                spec.name == HEROES_PACK_NAME,
+                matches!(
+                    spec.name,
+                    HEROES_PACK_NAME
+                        | "heroes-v2.tar"
+                        | "heroes-v2-1080.tar"
+                        | "maps-v1.tar"
+                        | "words-v1.tar"
+                ),
                 "{}",
+                spec.name
+            );
+            assert_ne!(
+                dir,
+                data.join(crate::shadow::banner::TEMPLATE_SUBDIR),
+                "{} would overwrite a hand-installed map pack",
+                spec.name
+            );
+            assert_ne!(
+                dir,
+                data.join(crate::shadow::result::TEMPLATE_SUBDIR),
+                "{} would overwrite hand-installed result templates",
                 spec.name
             );
         }
@@ -3066,10 +3154,15 @@ mod tests {
         age_folder(&foreign, two_hours);
         let live = plant_keep(dir.path(), pack_spec("bans-v1.tar").unwrap());
         age_folder(&live, two_hours);
+        // heroes is installed, so its old `-prev-` backup is not the only copy.
+        plant_keep(dir.path(), pack_spec(HEROES_PACK_NAME).unwrap());
         // A link with our name is not followed.
         let outside = tempfile::tempdir().expect("outside");
         std::fs::write(outside.path().join("keep.txt"), b"outside").unwrap();
-        std::os::unix::fs::symlink(outside.path(), templates.join(".heroes-v2-next-9-9")).unwrap();
+        let link = templates.join(".heroes-v2-next-9-9");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        // Old enough to sweep, so only "not a real folder" keeps it.
+        age_link(&link, two_hours);
 
         let served = serve(Vec::new(), BTreeMap::new());
         let report = sync(&served, dir.path()).await;
@@ -3084,6 +3177,7 @@ mod tests {
             std::fs::read(outside.path().join("keep.txt")).unwrap(),
             b"outside"
         );
+        assert!(link.symlink_metadata().is_ok(), "an old link is kept");
     }
 
     #[tokio::test]
@@ -3096,7 +3190,9 @@ mod tests {
             };
             let mut buf = [0u8; 2048];
             let _ = std::io::Read::read(&mut sock, &mut buf);
-            let head = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n{\"error\":";
+            // One byte over the 4 KiB cap, so any larger cap reads on and
+            // stalls.
+            let head = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4097\r\nConnection: close\r\n\r\n{\"error\":";
             let _ = std::io::Write::write_all(&mut sock, head);
             std::thread::sleep(std::time::Duration::from_secs(4));
         });
@@ -3109,6 +3205,287 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "error body was read to the end: {elapsed:?}"
+        );
+    }
+
+    // ---- review round 2 on #248 (F248-11..15, R248-B, N2) ----
+
+    /// The thread each blocking file job ran on, by data dir.
+    static BLOCKING_WORK: Mutex<Vec<(PathBuf, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+
+    pub(super) fn note_blocking_work(data_dir: &Path) {
+        BLOCKING_WORK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((data_dir.to_path_buf(), std::thread::current().id()));
+    }
+
+    fn blocking_work_threads(data_dir: &Path) -> Vec<std::thread::ThreadId> {
+        BLOCKING_WORK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|(dir, _)| dir == data_dir)
+            .map(|(_, thread)| *thread)
+            .collect()
+    }
+
+    /// Set a symlink's own mtime, not its target's.
+    fn age_link(path: &Path, age: std::time::Duration) {
+        use std::os::unix::ffi::OsStrExt;
+        let when = std::time::SystemTime::now() - age;
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_secs() as libc::time_t;
+        let times = [
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+        ];
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+        let rc = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(rc, 0, "utimensat: {}", std::io::Error::last_os_error());
+        let link_age = path
+            .symlink_metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(link_age >= STALE_STAGING, "link aged: {link_age:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_on_heroes_v1_at_startup_queues_no_extras() {
+        let stops: [(u16, &[u8]); 4] = [
+            (401, br#"{"error":"Unauthorized"}"#),
+            (403, br#"{"error":"forbidden"}"#),
+            (429, br#"{"error":"rate_limited","retry_after":30}"#),
+            (503, br#"{"error":"packs_disabled"}"#),
+        ];
+        for (status, body) in stops {
+            let served = all_packs_with_download(HEROES_PACK_NAME, status, body);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let extras =
+                sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
+                    .await;
+            assert!(extras.is_none(), "HTTP {status} queues no extras job");
+            assert_eq!(
+                served.downloaded(),
+                vec![HEROES_PACK_NAME.to_string()],
+                "HTTP {status}"
+            );
+        }
+        // A failure that is not a stop (a bad hash) still queues them.
+        let served = all_packs_with_download(HEROES_PACK_NAME, 200, b"not the listed pack");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extras =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
+                .await
+                .expect("a mismatch is not a stop");
+        let report = extras.sync().await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed),
+            "{report:?}"
+        );
+    }
+
+    struct Gated {
+        base: String,
+        arrived: tokio::sync::oneshot::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    /// A fake that serves `list` and `files` like [`serve`], but holds the
+    /// download of `gate` until `release` is sent. `arrived` fires once that
+    /// request is in.
+    fn serve_gated(list: Vec<serde_json::Value>, files: ServedFiles, gate: &str) -> Gated {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (arrived_tx, arrived) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let list = serde_json::to_vec(&list).unwrap();
+        let gate = gate.to_string();
+        std::thread::spawn(move || {
+            let mut arrived_tx = Some(arrived_tx);
+            for _ in 0..16 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                while !buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut sock, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let response = if path == "/api/tracker/packs" {
+                    http_bytes(200, &list, None, false)
+                } else if let Some(name) = path.strip_prefix("/api/tracker/packs/") {
+                    if name == gate
+                        && let Some(tx) = arrived_tx.take()
+                    {
+                        let _ = tx.send(());
+                        let _ = release_rx.recv();
+                    }
+                    match files.get(name) {
+                        Some((status, body)) => http_bytes(*status, body, None, false),
+                        None => http_bytes(404, br#"{"error":"pack_not_found"}"#, None, false),
+                    }
+                } else {
+                    http_bytes(404, br#"{"error":"pack_not_found"}"#, None, false)
+                };
+                let _ = std::io::Write::write_all(&mut sock, &response);
+            }
+        });
+        Gated {
+            base: format!("http://{addr}"),
+            arrived,
+            release,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_lock_is_held_for_the_whole_run() {
+        let (list, files, _) = all_packs();
+        let gated = serve_gated(list, files, "heroes-v2.tar");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (base, data_dir) = (gated.base.clone(), dir.path().to_path_buf());
+        let run = tokio::spawn(async move {
+            sync_reader_packs(&base, TOKEN, &data_dir, PACK_MAX_BYTES).await
+        });
+        // The run has the list and heroes-v1, and waits on heroes-v2.
+        gated.arrived.await.expect("the run reached heroes-v2");
+        assert!(
+            SyncLock::try_acquire(dir.path())
+                .expect("lock file")
+                .is_none(),
+            "the run still holds the lock mid-way"
+        );
+        let second = sync_reader_packs(&gated.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(
+            second.packs.iter().all(|s| s.outcome == PackSync::Busy),
+            "{second:?}"
+        );
+        gated.release.send(()).expect("release");
+        let report = run.await.expect("run");
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed),
+            "{report:?}"
+        );
+        assert!(
+            SyncLock::try_acquire(dir.path())
+                .expect("lock file")
+                .is_some(),
+            "released when the run ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prev_folder_is_kept_while_its_live_pack_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let templates = dir.path().join("templates");
+        let two_hours = std::time::Duration::from_secs(2 * 3600);
+        // Killed between rename(live, backup) and rename(staging, live):
+        // the backup is the only copy of bans-v1, and its mtime is old.
+        let only_copy = templates.join(".bans-v1-prev-11-22");
+        std::fs::create_dir_all(&only_copy).unwrap();
+        std::fs::write(only_copy.join("ana.png"), b"only copy").unwrap();
+        age_folder(&only_copy, two_hours);
+        // A backup whose live folder is in place still goes by age.
+        plant_keep(dir.path(), pack_spec("maps-v1.tar").unwrap());
+        let spare = templates.join(".maps-v1-prev-33-44");
+        std::fs::create_dir_all(&spare).unwrap();
+        age_folder(&spare, two_hours);
+
+        let served = serve(Vec::new(), BTreeMap::new());
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(report.heroes(), &PackSync::Current, "empty list");
+        assert_eq!(
+            std::fs::read(only_copy.join("ana.png")).unwrap(),
+            b"only copy"
+        );
+        assert!(
+            !spare.exists(),
+            "an old backup beside its live pack is swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_versions_tmp_left_by_a_kill_is_removed_under_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let templates = dir.path().join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        let left = templates.join(format!("{VERSIONS_TMP_PREFIX}123-456"));
+        std::fs::write(&left, br#"{"heroes-v1.tar":"1"}"#).unwrap();
+        let versions = br#"{"heroes-v1.tar":"1"}"#;
+        std::fs::write(versions_path(dir.path()), versions).unwrap();
+        let served = serve(Vec::new(), BTreeMap::new());
+
+        let held = SyncLock::try_acquire(dir.path())
+            .expect("lock file")
+            .expect("free");
+        let busy = sync(&served, dir.path()).await;
+        assert_eq!(busy.heroes(), &PackSync::Busy);
+        assert!(left.exists(), "not touched without the lock");
+        drop(held);
+
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(report.heroes(), &PackSync::Current, "empty list");
+        assert!(!left.exists(), "the left tmp file is removed");
+        assert_eq!(std::fs::read(versions_path(dir.path())).unwrap(), versions);
+    }
+
+    #[tokio::test]
+    async fn the_background_job_does_its_file_work_off_the_runtime_thread() {
+        // A current-thread runtime: every task runs on this thread, so file
+        // work done inline would be recorded with this thread's id.
+        let runtime_thread = std::thread::current().id();
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extras =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
+                .await
+                .expect("extras queued");
+        let report = extras.sync().await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed),
+            "{report:?}"
+        );
+        let threads = blocking_work_threads(dir.path());
+        // One install and one versions write per pack.
+        assert_eq!(threads.len(), 2 * PACKS.len(), "{threads:?}");
+        assert!(
+            threads.iter().all(|thread| *thread != runtime_thread),
+            "hashing, unpacking and fsync ran on the runtime thread"
         );
     }
 }

@@ -18,7 +18,9 @@
 //! * no hero icon pack (or no map / result pack): those fields are suspect,
 //! * `map` goes through ocr-v1's own name function
 //!   ([`crate::parse::canonical_map`], see [`map_name`]) so both readers store
-//!   the same string; a map ocr-v1 cannot name is kept but suspect,
+//!   the same string; a map ocr-v1 cannot name, or a name the tracker's map
+//!   table does not hold, is kept but suspect ([`top_bar_map`] is the same
+//!   gate),
 //! * `mode` comes from the map (single-mode maps only) and is suspect
 //!   whenever the map is,
 //! * `result` comes from result frames (accolade screen, rank screen, see
@@ -29,16 +31,20 @@
 //!   evidence it stays suspect.
 //!
 //! Packs load from a configurable directory ([`ReaderConfig`]). Nothing here
-//! writes stats; the caller decides what to store.
+//! writes stats; the caller decides what to store. With `reader = "new"` the
+//! capture path takes [`read_top_bar`] as the top-bar map
+//! (`boundary::MapSource::TopBar`) in place of the top-bar OCR, whenever it
+//! is a sure read.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use serde::Serialize;
 
-use super::banner::{MapInfo, MapTemplates};
+use super::banner::{LiveMaps, MapDirs, MapInfo, MapRead, MapTemplates};
 use super::digits;
 use super::heroes::{
     HeroDirs, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
@@ -166,19 +172,23 @@ pub struct ReaderConfig {
     pub hero_dir: Option<PathBuf>,
     pub hero_v2_dir: Option<PathBuf>,
     pub hero_v2_1080_dir: Option<PathBuf>,
+    /// maps-v1 as pack sync installs it. Preferred over `map_dir`.
+    pub map_v1_dir: Option<PathBuf>,
+    /// The hand-installed map pack, used when `map_v1_dir` does not load.
     pub map_dir: Option<PathBuf>,
     pub result_dir: Option<PathBuf>,
     pub words_dir: Option<PathBuf>,
 }
 
 impl ReaderConfig {
-    /// `<root>/templates/{heroes,heroes-v2,heroes-v2-1080,maps,result,words-v1}`;
+    /// `<root>/templates/{heroes,heroes-v2,heroes-v2-1080,maps-v1,maps,result,words-v1}`;
     /// `root` is the data dir.
     pub fn from_data_dir(root: &Path) -> Self {
         Self {
             hero_dir: Some(HeroTemplates::dir_in(root)),
             hero_v2_dir: Some(root.join(TEMPLATE_SUBDIR_V2)),
             hero_v2_1080_dir: Some(root.join(TEMPLATE_SUBDIR_V2_1080)),
+            map_v1_dir: Some(MapTemplates::dir_v1_in(root)),
             map_dir: Some(MapTemplates::dir_in(root)),
             result_dir: Some(ResultTemplates::dir_in(root)),
             words_dir: Some(ResultTemplates::words_dir_in(root)),
@@ -199,7 +209,9 @@ pub struct Reader {
     /// Re-loaded when a hero pack folder changes (pack sync installs
     /// heroes-v2 in the background after the reader is set up).
     heroes: LiveHeroSet,
-    maps: Option<MapTemplates>,
+    /// Re-loaded when a map pack folder changes (maps-v1 arrives after the
+    /// reader is set up, like heroes-v2).
+    maps: LiveMaps,
     /// Re-loaded when the words-v1 or the old result folder changes (pack
     /// sync installs words-v1 in the background).
     results: LiveResults,
@@ -212,12 +224,14 @@ impl Reader {
             v2: config.hero_v2_dir.clone(),
             v2_1080: config.hero_v2_1080_dir.clone(),
         });
-        let maps = config.map_dir.as_deref().and_then(MapTemplates::load_dir);
+        let maps = LiveMaps::load(MapDirs {
+            v1: config.map_v1_dir.clone(),
+            legacy: config.map_dir.clone(),
+        });
         let results = LiveResults::load(ResultDirs {
             words: config.words_dir.clone(),
             legacy: config.result_dir.clone(),
         });
-        tracing::info!(maps = maps.is_some(), "shadow reader packs");
         Self {
             heroes,
             maps,
@@ -227,6 +241,14 @@ impl Reader {
 
     pub fn has_heroes(&self) -> bool {
         self.heroes.current().is_some()
+    }
+
+    /// The top-bar map of one full frame, when the banner read is sure and
+    /// storable ([`top_bar_map`]). `None` is an abstain: no map pack, no
+    /// banner, a flagged read, or a name the tracker would not store.
+    pub fn read_top_bar(&self, frame: &DynamicImage) -> Option<TopBarMap> {
+        let maps = self.maps.current()?;
+        top_bar_map(&maps.templates.read(&rgb_of(frame)))
     }
 
     /// Read every field of one full Tab frame. `result` stays suspect.
@@ -275,11 +297,11 @@ impl Reader {
             digit_read.as_ref(),
             hero_read.as_ref().map(|h| &h.board.rows[..]),
         );
-        if let Some(maps) = &self.maps {
-            let m = maps.read(&frame.to_rgb8());
+        if let Some(maps) = self.maps.current() {
+            let m = maps.templates.read(&rgb_of(frame));
             if let Some(info) = m.map {
                 let n = map_name(info);
-                let suspect = m.suspect || !n.known_to_ocr_v1;
+                let suspect = m.suspect || !storable_map_name(&n);
                 set(&mut board, "map", Value::Text(n.name), m.score, suspect);
                 if let Some(mode) = n.mode {
                     set(
@@ -300,7 +322,7 @@ impl Reader {
     /// layout). Add the read to the match's [`ResultEvidence`].
     pub fn read_result(&self, result_frame: &DynamicImage) -> ResultRead {
         match self.results.current() {
-            Some(t) => t.templates.read(&result_frame.to_rgb8()),
+            Some(t) => t.templates.read(&rgb_of(result_frame)),
             None => ResultRead {
                 outcome: None,
                 source: None,
@@ -448,6 +470,53 @@ pub fn map_name(info: &MapInfo) -> MapName {
     }
 }
 
+/// The tracker stores this banner name: ocr-v1's table names it as this map
+/// ([`MapName::known_to_ocr_v1`]) and it is one of the tracker's display
+/// names ([`crate::parse::map_is_known`]), the same strings `scuffed_types::MapName`
+/// parses on the server for every tracked mode. Anything else would be held
+/// for review or split the map's aggregate rows, so it is never stored.
+fn storable_map_name(n: &MapName) -> bool {
+    n.known_to_ocr_v1 && crate::parse::map_is_known(&n.name)
+}
+
+/// A banner read the capture path may store as the top-bar map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopBarMap {
+    /// The tracker's display name ([`map_name`]).
+    pub name: String,
+    /// The map's mode from the tracker's table, as stored with it.
+    pub mode: Option<&'static str>,
+    pub score: f32,
+    pub margin: f32,
+}
+
+/// The storable map in one banner read, or `None` (abstain).
+///
+/// Only a sure read counts: the banner was found, the best map clears
+/// [`super::banner::FLOOR`] and leads by [`super::banner::MARGIN`], and its
+/// name passes [`storable_map_name`]. A flagged read, no banner, and an
+/// unknown name all abstain. Nothing is guessed.
+pub fn top_bar_map(read: &MapRead) -> Option<TopBarMap> {
+    if !read.found_banner || read.suspect {
+        return None;
+    }
+    let n = map_name(read.map?);
+    storable_map_name(&n).then_some(TopBarMap {
+        name: n.name,
+        mode: n.mode,
+        score: read.score,
+        margin: read.margin,
+    })
+}
+
+/// The frame as RGB, borrowed when it already is.
+fn rgb_of(frame: &DynamicImage) -> Cow<'_, RgbImage> {
+    match frame.as_rgb8() {
+        Some(rgb) => Cow::Borrowed(rgb),
+        None => Cow::Owned(frame.to_rgb8()),
+    }
+}
+
 /// The `result` field a match's evidence supports.
 pub fn result_field(evidence: &ResultEvidence) -> FieldRead {
     let d = evidence.decide();
@@ -538,6 +607,13 @@ pub fn read_board(frame: &DynamicImage) -> BoardRead {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_board(frame)
+}
+
+/// [`Reader::read_top_bar`] with the process-wide reader.
+pub fn read_top_bar(frame: &DynamicImage) -> Option<TopBarMap> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_top_bar(frame)
 }
 
 /// Read one result frame with the process-wide reader.
@@ -1545,5 +1621,185 @@ mod tests {
             serde_json::to_string(&f).unwrap(),
             r#"{"name":"r0.dmg","value":2674,"confidence":0.5,"suspect":false}"#
         );
+    }
+
+    // ------------------------------------------------------------ top bar
+
+    fn sure_read(info: &'static MapInfo) -> MapRead {
+        MapRead {
+            map: Some(info),
+            best: Some(info),
+            score: 0.93,
+            margin: 0.2,
+            suspect: false,
+            found_banner: true,
+        }
+    }
+
+    fn map_info(key: &str) -> &'static MapInfo {
+        crate::shadow::banner::MAPS
+            .iter()
+            .find(|m| m.key == key)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_sure_banner_read_is_the_top_bar_map() {
+        let t = top_bar_map(&sure_read(map_info("nepal"))).expect("sure read");
+        assert_eq!(t.name, "Nepal");
+        assert_eq!(t.mode, Some("Control"));
+        assert_eq!(crate::parse::stored_game_mode(&t.name), "Control");
+    }
+
+    #[test]
+    fn a_flagged_or_missing_banner_read_abstains() {
+        let nepal = map_info("nepal");
+        let mut flagged = sure_read(nepal);
+        flagged.suspect = true;
+        assert_eq!(top_bar_map(&flagged), None, "a suspect read is not stored");
+        let mut no_banner = sure_read(nepal);
+        no_banner.found_banner = false;
+        assert_eq!(top_bar_map(&no_banner), None);
+        let mut no_map = sure_read(nepal);
+        no_map.map = None;
+        assert_eq!(top_bar_map(&no_map), None, "not found is an abstain");
+    }
+
+    /// The banner name goes through ocr-v1's name table: Wuxing University
+    /// is stored the way every ocr-v1 row has it.
+    #[test]
+    fn a_banner_alias_is_stored_under_the_tracker_name() {
+        let info = map_info("wuxing-university");
+        assert_eq!(info.name, "Wuxing University");
+        let t = top_bar_map(&sure_read(info)).expect("sure read");
+        assert_eq!(t.name, "Wuxing University - Water College");
+        assert!(crate::parse::known_map_names().contains(&t.name.as_str()));
+        let g = top_bar_map(&sure_read(map_info("watchpoint-grimsvotn"))).unwrap();
+        assert_eq!(g.name, "Watchpoint: Grímsvötn");
+    }
+
+    #[test]
+    fn a_name_the_tracker_does_not_know_abstains() {
+        static ATLANTIS: MapInfo = MapInfo {
+            key: "atlantis",
+            name: "Atlantis",
+            banner: &["ATLANTIS"],
+            mode: Some("Control"),
+        };
+        assert!(!map_name(&ATLANTIS).known_to_ocr_v1);
+        assert_eq!(top_bar_map(&sure_read(&ATLANTIS)), None);
+    }
+
+    /// Both halves of the store gate: ocr-v1 names the map as itself, and the
+    /// name is in the tracker's own table.
+    #[test]
+    fn a_stored_name_needs_ocr_v1_and_the_tracker_table() {
+        let named = |name: &str, known_to_ocr_v1| MapName {
+            name: name.into(),
+            mode: None,
+            known_to_ocr_v1,
+        };
+        assert!(storable_map_name(&named("Ilios", true)));
+        assert!(!storable_map_name(&named("Ilios", false)));
+        assert!(!storable_map_name(&named("Atlantis", true)));
+        assert!(!storable_map_name(&named("", true)));
+    }
+
+    /// Every banner map the gate lets through is a tracker display name with
+    /// the tracker's own mode, and every tracked one parses as the server's
+    /// `MapName` with the same mode. A name the server would not group with
+    /// its ocr-v1 rows is never stored.
+    #[test]
+    fn every_storable_banner_map_is_a_name_the_server_accepts() {
+        use crate::parse::{known_map_names, stats_row_is_tracked, stored_game_mode};
+        let mut tracked = 0;
+        for info in crate::shadow::banner::MAPS {
+            let t = top_bar_map(&sure_read(info)).unwrap_or_else(|| panic!("{}", info.key));
+            assert!(known_map_names().contains(&t.name.as_str()), "{}", info.key);
+            let mode = stored_game_mode(&t.name);
+            assert_eq!(t.mode, Some(mode.as_str()), "{}", info.key);
+            if stats_row_is_tracked(&t.name, &mode) {
+                let server: scuffed_types::MapName = t
+                    .name
+                    .parse()
+                    .unwrap_or_else(|_| panic!("server rejects {}", info.key));
+                assert_eq!(
+                    scuffed_types::MapName::game_mode_label(&t.name),
+                    mode,
+                    "{}",
+                    info.key
+                );
+                assert_eq!(server.display_name().parse(), Ok(server));
+                tracked += 1;
+            }
+        }
+        assert_eq!(tracked, scuffed_types::MapName::ALL.len());
+    }
+
+    #[test]
+    fn the_reader_reads_the_top_bar_from_maps_v1() {
+        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        let data = tempfile::tempdir().unwrap();
+        write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let frame = DynamicImage::ImageRgb8(frame_with_banner("KING'S ROW"));
+        let t = reader.read_top_bar(&frame).expect("sure read");
+        assert_eq!(t.name, "King's Row");
+        assert_eq!(t.mode, Some("Hybrid"));
+        let blank =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([20, 24, 40])));
+        assert_eq!(reader.read_top_bar(&blank), None, "no banner");
+        assert_eq!(
+            Reader::load(&ReaderConfig::default()).read_top_bar(&frame),
+            None,
+            "no map pack"
+        );
+    }
+
+    /// The hand-installed pack lacks a glyph NEPAL needs: the best map is
+    /// flagged, so nothing is stored, while a map it can spell still reads.
+    #[test]
+    fn a_flagged_top_bar_read_is_not_stored() {
+        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        let data = tempfile::tempdir().unwrap();
+        write_pack(
+            &MapTemplates::dir_in(data.path()),
+            &LETTERS.replace('P', ""),
+        );
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let nepal = DynamicImage::ImageRgb8(frame_with_banner("NEPAL"));
+        assert_eq!(reader.read_top_bar(&nepal), None);
+        let ilios = DynamicImage::ImageRgb8(frame_with_banner("ILIOS"));
+        assert_eq!(reader.read_top_bar(&ilios).unwrap().name, "Ilios");
+    }
+
+    /// maps-v1 installed after the reader started: the read that notices it
+    /// keeps abstaining, the next one after the background load reads.
+    #[test]
+    fn maps_v1_installed_after_start_is_used_on_a_later_read() {
+        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        let data = tempfile::tempdir().unwrap();
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let frame = DynamicImage::ImageRgb8(frame_with_banner("ILIOS"));
+        assert_eq!(reader.read_top_bar(&frame), None);
+        let staging = data.path().join("templates/.maps-v1-staging");
+        write_pack(&staging, LETTERS);
+        crate::packs::swap_dir(&staging, &MapTemplates::dir_v1_in(data.path())).unwrap();
+        assert_eq!(reader.read_top_bar(&frame), None, "the noticing read");
+        reader.maps.wait_reload();
+        assert_eq!(reader.read_top_bar(&frame).unwrap().name, "Ilios");
+    }
+
+    #[test]
+    fn the_reader_config_points_at_both_map_folders() {
+        let root = Path::new("/data");
+        let c = ReaderConfig::from_data_dir(root);
+        assert_eq!(c.map_v1_dir, Some(root.join("templates/maps-v1")));
+        assert_eq!(c.map_dir, Some(root.join("templates/maps")));
+        let spec = crate::packs::PACKS
+            .iter()
+            .find(|s| s.name == "maps-v1.tar")
+            .unwrap();
+        assert_eq!(c.map_v1_dir, Some(spec.dir_in(root)));
     }
 }
