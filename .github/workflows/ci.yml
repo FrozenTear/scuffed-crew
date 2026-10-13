@@ -25,6 +25,8 @@ jobs:
         run: |
           bash scripts/test-backup-secrets.sh
           bash scripts/test-restic-access.sh
+      - name: Pack publish script checks (fake packs, no server)
+        run: bash scripts/test-publish-packs.sh
 
   fmt:
     name: Rustfmt

@@ -924,9 +924,20 @@ pub struct ResultTemplates {
     final_score: Option<FinalScoreTemplate>,
 }
 
+/// The largest template PNG [`load_gray`] decodes: the 16:9 game rect at the
+/// work scale. A template is a cut of a region of that rect, so a larger
+/// file is not a template (F260-7).
+const MAX_TEMPLATE_PX: (u32, u32) = (1280, 720);
+
 /// An 8-bit grey PNG as a [`Gray`] in 0..1, or `None` (missing, unreadable,
-/// empty).
+/// empty, or larger than [`MAX_TEMPLATE_PX`]). The size is read from the
+/// header, before any pixel is decoded.
 fn load_gray(p: &Path) -> Option<Gray> {
+    let (w, h) = image::image_dimensions(p).ok()?;
+    if w > MAX_TEMPLATE_PX.0 || h > MAX_TEMPLATE_PX.1 {
+        tracing::warn!(file = %p.display(), w, h, "template image too large; left out");
+        return None;
+    }
     let l = image::open(p).ok()?.to_luma8();
     if l.width() == 0 || l.height() == 0 {
         return None;
@@ -3632,6 +3643,25 @@ mod tests {
             assert_eq!(read.suspect, flagged, "gap {gap}: {read:?}");
             assert_eq!(read.outcome, Some(Outcome::Victory));
         }
+    }
+
+    /// F260-7: a template PNG larger than the work-scale game rect is not
+    /// decoded.
+    #[test]
+    fn an_oversized_template_png_is_not_loaded() {
+        let d = tempfile::tempdir().unwrap();
+        let save = |name: &str, w: u32, h: u32| {
+            let p = d.path().join(name);
+            image::GrayImage::from_pixel(w, h, image::Luma([200]))
+                .save(&p)
+                .unwrap();
+            p
+        };
+        assert!(load_gray(&save("ok.png", 1280, 720)).is_some());
+        assert!(load_gray(&save("wide.png", 1281, 4)).is_none());
+        assert!(load_gray(&save("tall.png", 4, 721)).is_none());
+        assert!(load_gray(&save("huge.png", 5000, 5000)).is_none());
+        assert_eq!(MAX_TEMPLATE_PX, (1280, 720));
     }
 
     /// A layouts.json that cannot be read refuses the folder like one that
