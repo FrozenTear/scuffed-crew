@@ -245,6 +245,10 @@ jobs:
           # smoke test — just proves the binary starts and parses flags.
           ./out/bin/stat-tracker-gui --help | grep -q 'stat-tracker-gui' \
             || { echo "stat-tracker-gui --help did not print usage" >&2; exit 1; }
+          # A running app runs the installed one with --build-id to see
+          # whether an update changed it (G3). It exits before any window.
+          ./out/bin/stat-tracker-gui --build-id | grep -Eqx '[0-9a-f]{64}' \
+            || { echo "stat-tracker-gui --build-id did not print a build id" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

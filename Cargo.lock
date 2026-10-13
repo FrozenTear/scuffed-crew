@@ -10996,6 +10996,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "sha2",
  "surrealdb-types",
  "tempfile",
  "tokio",

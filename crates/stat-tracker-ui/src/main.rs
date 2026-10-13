@@ -5,6 +5,13 @@ use stat_tracker_ui::instance;
 use stat_tracker_ui::theme;
 
 fn main() -> anyhow::Result<()> {
+    // Before logging, config, the instance lock and any window: a running
+    // GUI runs the installed binary with this to compare builds (G3).
+    if stat_tracker_ui::cli::wants_build_id(std::env::args().skip(1)) {
+        println!("{}", stat_tracker_ui::restart_prompt::BUILD_ID);
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
