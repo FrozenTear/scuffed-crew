@@ -3816,13 +3816,22 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // combat frames stop paying a Tesseract call per
                             // tick; static post-match/phase screens still read
                             // (one tick later at most).
-                            // `reader = "new"` reads the FINAL SCORE line with the
-                            // words-v1 template, not OCR (alpha.7 O3).
+                            // `reader = "new"` reads the end title from the
+                            // words-v1 pack, once per tick, for the outcome
+                            // signal and for the wake, and no OCR reads it
+                            // (alpha.7 O2). A first sure read only wakes;
+                            // the same word on the next tick is the signal.
+                            // With no end-title templates loaded the titles
+                            // fall back to OCR, as before O2. Only that
+                            // fallback still reads the FINAL SCORE line (its
+                            // gate), with the words-v1 template (alpha.7 O3).
+                            let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);
                             let signal = detect::match_end::detect_outcome_signal_polled(
                                 &img,
                                 &rgb,
                                 &mut stability,
                                 detect::match_end::FinalScoreSource::for_reader(use_new_reader),
+                                &titles,
                             );
                             // Cheap wake path: skip phase + accolade-map OCR
                             // so Tab cell OCR keeps the pool. Outcome signal
@@ -3863,7 +3872,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // Ban Heroes is a distinct hook (`detect_ban_screen`)
                             // and is excluded inside detect_end_reel; do not
                             // treat GamePhase::HeroBan as end_reel_wake_until.
-                            let end_reel = detect::match_end::detect_end_reel(&img, &rgb);
+                            // `reader = "new"`: a sure end title wakes, and
+                            // the title card's phrase OCR does not run.
+                            let end_reel =
+                                detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
                             // result only. It does not decide the game end.
@@ -4127,14 +4139,17 @@ fn analyze_frame(
     // header, is gone (alpha.7 O4; what that was measured on is in
     // `detect_outcome_text`). The full-board OCR's header line (ET-2, in
     // `handle_capture`) still runs under ocr-v1; the new reader never runs
-    // the full-board OCR (O10). `reader = "new"` reads the FINAL SCORE
-    // line with the words-v1 template (O3). The end title is read once
-    // (F257-3).
+    // the full-board OCR (O10). The end title is read once (F257-3).
+    // `reader = "new"` takes the end title from the words-v1 pack, not OCR
+    // (O2). With no end-title templates loaded it falls back to the OCR
+    // read, and only that fallback still reads the FINAL SCORE line (its
+    // gate), with the words-v1 template (O3).
     let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);
+    let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);
     let frame_outcome = if allow_banner_recovery {
-        detect::match_end::detect_outcome_with(&img, p4)
+        detect::match_end::detect_outcome_with(&img, p4, &titles)
     } else {
-        detect::match_end::detect_outcome_text_with(&img, p4)
+        detect::match_end::detect_outcome_text_with(&img, p4, &titles)
     };
     // The open session's outcome wins on a capture that stays in that session.
     // A gap split keeps this frame's own outcome. A reset split stores Unknown.
@@ -9041,14 +9056,14 @@ mod tests {
         // one end-title read per Tab frame (F257-3)
         assert!(body.contains(
             "let frame_outcome = if allow_banner_recovery { \
-             detect::match_end::detect_outcome_with(&img, p4) } else { \
-             detect::match_end::detect_outcome_text_with(&img, p4) };"
+             detect::match_end::detect_outcome_with(&img, p4, &titles) } else { \
+             detect::match_end::detect_outcome_text_with(&img, p4, &titles) };"
         ));
         assert_eq!(body.matches("detect::match_end::detect_outcome").count(), 2);
         let all = norm(src);
         assert!(all.contains(
             "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
-             detect::match_end::FinalScoreSource::for_reader(use_new_reader), );"
+             detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );"
         ));
         for ocr_only in [
             "detect::match_end::detect_outcome(",
@@ -9058,6 +9073,111 @@ mod tests {
         ] {
             assert!(!all.contains(ocr_only), "{ocr_only}");
         }
+    }
+
+    /// The end title (P3) and the end-of-match wake (P5) go through the
+    /// reader switch (alpha.7 O2): on the poll tick and in the Tab frame's
+    /// vision pass. Each reads the frame's titles once, and no daemon call
+    /// site uses the wake entry point that is hard-wired to OCR. Every
+    /// broken wire is named. Whitespace is ignored.
+    #[test]
+    fn the_end_titles_go_through_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let src = full.split("\nmod tests {").next().unwrap();
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        let all = norm(src);
+        let checks = [
+            (
+                "the Tab pass makes its titles from the switch",
+                body.contains(
+                    "let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);",
+                ),
+            ),
+            (
+                "the Tab pass hands them to both outcome reads",
+                body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles)")
+                    && body
+                        .contains("detect::match_end::detect_outcome_text_with(&img, p4, &titles)"),
+            ),
+            (
+                "the poll tick makes its titles from the switch",
+                all.contains(
+                    "let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);",
+                ),
+            ),
+            (
+                "the poll tick hands them to the outcome signal",
+                all.contains(
+                    "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
+                     detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );",
+                ),
+            ),
+            (
+                "the poll tick hands them to the wake",
+                all.contains("detect::match_end::detect_end_reel_with(&img, &rgb, &titles);")
+                    && !all.contains("detect::match_end::detect_end_reel("),
+            ),
+            (
+                "titles are made in those two places only",
+                all.matches("detect::match_end::Titles::").count() == 2
+                    && !all.contains("shadow::read_end_title"),
+            ),
+        ];
+        let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
+        assert!(broken.is_empty(), "{broken:?}");
+    }
+
+    /// `reader = "new"` on the poll tick (F263-2, F263-6): a sure end title
+    /// is nothing but a wake on its first poll, one unconfirmed word (a
+    /// hint) on its second, and confirmed on its third, the polls ocr-v1
+    /// needs. One sure read of one frame never reaches the session machine.
+    #[test]
+    fn a_sure_end_title_is_a_word_on_its_second_poll_and_confirms_on_its_third() {
+        use detect::match_end::{FinalScoreSource, OutcomeSource, Titles};
+        use shadow::result::{END_TITLE, Outcome, ResultRead};
+        let rgb = image::RgbImage::from_pixel(640, 360, image::Rgb([10, 10, 10]));
+        let img = image::DynamicImage::ImageRgb8(rgb.clone());
+        let titles = Titles::Words(ResultRead {
+            outcome: Some(Outcome::Defeat),
+            source: Some(END_TITLE.to_string()),
+            score: 0.9,
+            margin: 0.4,
+            suspect: false,
+        });
+        let mut stability = detect::stability::FrameStability::default();
+        let mut streak = None;
+        let t0 = Instant::now();
+        let mut ticks = Vec::new();
+        for n in 0..3 {
+            let signal = detect::match_end::detect_outcome_signal_polled(
+                &img,
+                &rgb,
+                &mut stability,
+                FinalScoreSource::Words,
+                &titles,
+            );
+            let wake = detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+            let tick =
+                resolve_word_tick(&mut streak, signal, t0 + Duration::from_secs(4 * n), None);
+            ticks.push((
+                wake,
+                signal.map(|s| s.1),
+                tick.signal,
+                tick.signal_confirmed,
+            ));
+        }
+        let defeat = Some(detect::MatchOutcome::Defeat);
+        let title = Some(OutcomeSource::EndTitle);
+        assert_eq!(
+            ticks,
+            vec![
+                (true, None, None, false),
+                (true, title, defeat, false),
+                (true, title, defeat, true),
+            ]
+        );
     }
 
     /// The poll tick confirms the vote, ban and select screens with the
