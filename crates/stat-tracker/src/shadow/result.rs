@@ -37,6 +37,15 @@
 //! The exhaustive search over the words-v1 end-title region took 8.6 s per
 //! frame.
 //!
+//! That alone does not make a fast read conservative: the margin is taken
+//! against the runner-up, and an under-read runner-up widens it. So a read
+//! the fast scores call sure is certified: for every template of another
+//! word, an exact bound (the block projection plus Cauchy-Schwarz on the
+//! rest, [`bound_at`]) rules out every window, and the windows it cannot
+//! rule out are scored exactly. Any window at `s1 - MARGIN` or above flags
+//! the read. A sure fast read is therefore a sure exhaustive read of the
+//! same word; a word the fast search under-reads can only lower confidence.
+//!
 //! Like ocr-v1, one sure read is not enough: [`ResultEvidence`] collects every
 //! read of one match (poll frames, the accolade screen, the rank screen) and
 //! the result is sure only with [`MIN_AGREE`] agreeing sure reads and no read
@@ -301,6 +310,47 @@ impl Kernel {
 #[derive(Debug, Clone)]
 struct Stack {
     levels: Vec<Kernel>,
+    /// The template's block projection at the coarsest level, for the
+    /// certification bound ([`certify`]). `None` with a single level.
+    proj: Option<Proj>,
+}
+
+/// A template projected onto `f` x `f` blocks: `ct` is each block's mean
+/// minus the whole template's mean (`cw` x `ch` blocks, the ones the
+/// coarse kernel covers), `res` the norm of what the projection leaves
+/// out. With `P` the block projection and `t` the zero-mean template,
+/// `|t|^2 = f^2 |ct|^2 + res^2`.
+#[derive(Debug, Clone)]
+struct Proj {
+    f: usize,
+    cw: usize,
+    ch: usize,
+    ct: Vec<f32>,
+    s_ct: f64,
+    res: f64,
+}
+
+impl Proj {
+    fn new(t: &Gray, top: usize, norm: f64) -> Self {
+        let (mut cw, mut ch, mut px) = (t.w, t.h, t.px.clone());
+        for _ in 0..top {
+            (cw, ch, px) = half(cw, ch, &px);
+        }
+        let f = 1usize << top;
+        let mean = t.px.iter().map(|&v| v as f64).sum::<f64>() / (t.w * t.h) as f64;
+        let ct: Vec<f32> = px.iter().map(|&v| (v as f64 - mean) as f32).collect();
+        let s_ct = ct.iter().map(|&v| v as f64).sum();
+        let proj2 = (f * f) as f64 * ct.iter().map(|&v| v as f64 * v as f64).sum::<f64>();
+        let res = (norm * norm - proj2).max(0.0).sqrt();
+        Self {
+            f,
+            cw,
+            ch,
+            ct,
+            s_ct,
+            res,
+        }
+    }
 }
 
 impl Stack {
@@ -316,7 +366,9 @@ impl Stack {
                 _ => break,
             }
         }
-        Some(Self { levels })
+        let top = levels.len() - 1;
+        let proj = (top > 0).then(|| Proj::new(t, top, levels[0].norm));
+        Some(Self { levels, proj })
     }
 }
 
@@ -454,6 +506,137 @@ fn search_fast(region: &[Level], st: &Stack) -> Found {
         }
     }
     Found { score: best, macs }
+}
+
+// ---------------------------------------------------------- certification
+
+/// Box means of a level-0 region over `f` x `f` squares at every position,
+/// split by phase: `phases[ay * f + ax]` holds the means at
+/// `(ax + f i, ay + f j)`, so a window's blocks are a contiguous
+/// `cw` x `ch` patch of one phase image.
+struct Phased {
+    f: usize,
+    phases: Vec<Level>,
+}
+
+impl Phased {
+    fn new(p: &Level, f: usize) -> Self {
+        let ff = (f * f) as f64;
+        let count = |n: usize, a: usize| if n >= f + a { (n - f - a) / f + 1 } else { 0 };
+        let mut phases = Vec::with_capacity(f * f);
+        for ay in 0..f {
+            for ax in 0..f {
+                let (pw, ph) = (count(p.w, ax), count(p.h, ay));
+                let mut px = Vec::with_capacity(pw * ph);
+                for j in 0..ph {
+                    for i in 0..pw {
+                        px.push((p.rect(&p.s1, ax + f * i, ay + f * j, f, f) / ff) as f32);
+                    }
+                }
+                phases.push(Level::new(pw, ph, px));
+            }
+        }
+        Self { f, phases }
+    }
+}
+
+/// An upper bound on the NCC of `k` at (x, y) of `p`, from the block
+/// projection. With `P` the projection onto the window's `f` x `f` block
+/// means, `<p, t> = <Pp, Pt> + <(I-P)p, (I-P)t> <= <Pp, Pt> + |(I-P)p| |(I-P)t|`
+/// (the two parts are orthogonal; Cauchy-Schwarz on the second).
+/// `<Pp, Pt>` is a dot product of `cw * ch` block means instead of the
+/// whole window. `None` on a flat window, where [`ncc_at`] has no score
+/// either.
+#[inline]
+fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -> Option<f64> {
+    let n = (k.w * k.h) as f64;
+    let sum = p.rect(&p.s1, x, y, k.w, k.h);
+    let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
+    if var <= 1e-9 {
+        return None;
+    }
+    let m = sum / n;
+    let f = ph.f;
+    let q = &ph.phases[(y % f) * f + x % f];
+    let (ox, oy) = (x / f, y / f);
+    let sb = q.rect(&q.s1, ox, oy, pr.cw, pr.ch);
+    let sb2 = q.rect(&q.s2, ox, oy, pr.cw, pr.ch);
+    let mut db = 0.0f64;
+    for j in 0..pr.ch {
+        db += dot(
+            &q.px[(oy + j) * q.w + ox..][..pr.cw],
+            &pr.ct[j * pr.cw..][..pr.cw],
+        ) as f64;
+    }
+    let ff = (f * f) as f64;
+    let pp = ff * (db - m * pr.s_ct);
+    let proj2 = ff * (sb2 - 2.0 * m * sb + (pr.cw * pr.ch) as f64 * m * m);
+    let res_p = (var - proj2).max(0.0).sqrt();
+    Some((pp + res_p * pr.res) / (var.sqrt() * k.norm))
+}
+
+/// Slack on the bound for float rounding (f32 block means and dot).
+const BOUND_SLACK: f64 = 1e-4;
+/// Multiply-adds one read may spend on exact scores while certifying.
+const CERT_MACS: usize = 300_000_000;
+
+/// Whether a template's exhaustive best reaches `tau`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cert {
+    /// No window scores `tau` or more.
+    Below,
+    /// A window scores this (`>= tau`).
+    Above(f64),
+    /// The exact-score budget ran out first.
+    Unknown,
+}
+
+/// Decide exactly whether any window of `st` scores at least `tau`: every
+/// window whose bound ([`bound_at`]) reaches `tau` is scored with
+/// [`ncc_at`]. The same answer as [`search_full`] against `tau`, at a
+/// small part of its cost when the bound is tight. A stack with one level
+/// is searched in full.
+fn certify(
+    region: &[Level],
+    phased: Option<&Phased>,
+    st: &Stack,
+    tau: f64,
+    budget: &mut usize,
+) -> Cert {
+    let (p, k) = (&region[0], &st.levels[0]);
+    if k.w > p.w || k.h > p.h {
+        return Cert::Below;
+    }
+    let (Some(pr), Some(ph)) = (&st.proj, phased) else {
+        let full = search_full(region, st);
+        *budget = budget.saturating_sub(full.macs);
+        return if full.score >= tau {
+            Cert::Above(full.score)
+        } else {
+            Cert::Below
+        };
+    };
+    for y in 0..=p.h - k.h {
+        for x in 0..=p.w - k.w {
+            let Some(ub) = bound_at(p, ph, k, pr, x, y) else {
+                continue;
+            };
+            if ub + BOUND_SLACK < tau {
+                continue;
+            }
+            let cost = k.w * k.h;
+            if *budget < cost {
+                return Cert::Unknown;
+            }
+            *budget -= cost;
+            if let Some(v) = ncc_at(p, k, x, y)
+                && v >= tau
+            {
+                return Cert::Above(v);
+            }
+        }
+    }
+    Cert::Below
 }
 
 /// A region inside the game rect: finite, `0 <= x0 < x1 <= 1`, same for y.
@@ -665,20 +848,38 @@ impl ResultTemplates {
         v
     }
 
-    /// Best score of each template (in load order) and the windows scored.
-    fn scores(&self, rgb: &RgbImage, exhaustive: bool) -> Vec<Found> {
-        let mut regions: Vec<([f64; 4], Plane, Option<Vec<Level>>)> = Vec::new();
-        let mut out = Vec::with_capacity(self.tpls.len());
+    /// Each template's region, cut once per rect and plane.
+    fn regions(&self, rgb: &RgbImage) -> Regions {
+        let mut cut: Vec<([f64; 4], Plane, Option<Vec<Level>>)> = Vec::new();
+        let mut of = Vec::with_capacity(self.tpls.len());
         for t in &self.tpls {
             let key = (t.layout.roi, t.layout.plane);
-            let idx = match regions.iter().position(|r| (r.0, r.1) == key) {
+            let idx = match cut.iter().position(|r| (r.0, r.1) == key) {
                 Some(i) => i,
                 None => {
-                    regions.push((key.0, key.1, region(rgb, key.0, key.1)));
-                    regions.len() - 1
+                    cut.push((key.0, key.1, region(rgb, key.0, key.1)));
+                    cut.len() - 1
                 }
             };
-            let Some(p) = &regions[idx].2 else {
+            of.push(idx);
+        }
+        Regions {
+            levels: cut.into_iter().map(|c| c.2).collect(),
+            of,
+            phased: Vec::new(),
+        }
+    }
+
+    /// Best score of each template (in load order) and the windows scored.
+    #[cfg(test)]
+    fn scores(&self, rgb: &RgbImage, exhaustive: bool) -> Vec<Found> {
+        self.scores_in(&self.regions(rgb), exhaustive)
+    }
+
+    fn scores_in(&self, regions: &Regions, exhaustive: bool) -> Vec<Found> {
+        let mut out = Vec::with_capacity(self.tpls.len());
+        for (i, t) in self.tpls.iter().enumerate() {
+            let Some(p) = &regions.levels[regions.of[i]] else {
                 out.push(NONE_FOUND);
                 continue;
             };
@@ -701,14 +902,67 @@ impl ResultTemplates {
 
     /// Read the result word from one result frame (any layout), with the
     /// coarse-to-fine search.
+    ///
+    /// A read the fast scores call sure is then certified: no template of
+    /// another word may score `s1 - MARGIN` or more anywhere in its region,
+    /// checked exactly with [`certify`]. Since the word's own fast score is
+    /// at most its exhaustive score, a sure read here is a sure exhaustive
+    /// read of the same word. A read that fails the check, or whose check
+    /// runs out of budget, is flagged (an unsure DRAW abstains).
     pub fn read(&self, rgb: &RgbImage) -> ResultRead {
-        self.decide(&self.scores(rgb, false))
+        let mut regions = self.regions(rgb);
+        let scores = self.scores_in(&regions, false);
+        self.settle(&mut regions, scores, CERT_MACS)
     }
 
     /// [`Self::read`] with every window of every region scored: the
     /// reference the fast search is checked against (tests, benches). Slow.
     pub fn read_exhaustive(&self, rgb: &RgbImage) -> ResultRead {
-        self.decide(&self.scores(rgb, true))
+        self.decide(&self.scores_in(&self.regions(rgb), true))
+    }
+
+    /// The read for these fast scores, certified when it is sure.
+    fn settle(
+        &self,
+        regions: &mut Regions,
+        mut scores: Vec<Found>,
+        mut budget: usize,
+    ) -> ResultRead {
+        let read = self.decide(&scores);
+        let Some(top) = read.outcome.filter(|_| !read.suspect) else {
+            return read;
+        };
+        let s1 = self
+            .tpls
+            .iter()
+            .zip(&scores)
+            .filter(|(t, _)| t.outcome == top)
+            .map(|(_, f)| f.score)
+            .fold(-1.0f64, f64::max);
+        let tau = s1 - MARGIN as f64;
+        for (i, t) in self.tpls.iter().enumerate() {
+            if t.outcome == top {
+                continue;
+            }
+            let ri = regions.of[i];
+            for st in &t.stacks {
+                let cert = {
+                    let Regions { levels, phased, .. } = &mut *regions;
+                    let Some(lv) = &levels[ri] else { break };
+                    let ph = st.proj.as_ref().map(|pr| phased_for(phased, ri, lv, pr.f));
+                    certify(lv, ph, st, tau, &mut budget)
+                };
+                match cert {
+                    Cert::Below => {}
+                    Cert::Above(v) => {
+                        scores[i].score = scores[i].score.max(v);
+                        return flag(self.decide(&scores));
+                    }
+                    Cert::Unknown => return flag(read),
+                }
+            }
+        }
+        read
     }
 
     fn decide(&self, scores: &[Found]) -> ResultRead {
@@ -739,6 +993,41 @@ impl ResultTemplates {
             suspect,
         }
     }
+}
+
+/// A read that must not be sure: flagged, or nothing for a DRAW (only a
+/// sure DRAW is named).
+fn flag(mut r: ResultRead) -> ResultRead {
+    if r.outcome == Some(Outcome::Draw) {
+        return ResultRead::nothing(r.score as f64, r.margin as f64);
+    }
+    r.suspect = true;
+    r
+}
+
+/// The regions of one frame: one per distinct rect and plane, the region
+/// index of each template, and box-mean phase images made on demand.
+struct Regions {
+    levels: Vec<Option<Vec<Level>>>,
+    of: Vec<usize>,
+    phased: Vec<((usize, usize), Phased)>,
+}
+
+/// The phase images of region `ri` at block size `f`, made once.
+fn phased_for<'a>(
+    cache: &'a mut Vec<((usize, usize), Phased)>,
+    ri: usize,
+    levels: &[Level],
+    f: usize,
+) -> &'a Phased {
+    let idx = match cache.iter().position(|(k, _)| *k == (ri, f)) {
+        Some(i) => i,
+        None => {
+            cache.push(((ri, f), Phased::new(&levels[0], f)));
+            cache.len() - 1
+        }
+    };
+    &cache[idx].1
 }
 
 // ------------------------------------------------------------ live reload
@@ -1730,6 +2019,122 @@ mod tests {
                 "{k}: fast {fast:?} full {full:?}"
             );
         }
+    }
+
+    // ------------------------------------------- certification (F253-3)
+
+    /// The projection bound is never below the exact score, at every
+    /// window, for 2x and 4x stacks, glyph and thin-bar words.
+    #[test]
+    fn the_certification_bound_is_never_below_the_score() {
+        let mut rng = Rng(31337);
+        let mut checked = 0;
+        for case in 0..8 {
+            let (tw, th) = [(60, 24), (100, 48)][case % 2];
+            let t = if case % 4 < 2 {
+                glyphs(case as u64 + 200, tw, th)
+            } else {
+                word(1 + case as u32, tw, th)
+            };
+            let other = glyphs(case as u64 + 300, tw * 9 / 10, th);
+            let p = pyramid(random_region(&mut rng, &t, &other, tw + 40, th + 24));
+            for tpl in [&t, &other] {
+                let st = Stack::new(tpl).unwrap();
+                let Some(pr) = &st.proj else { continue };
+                let ph = Phased::new(&p[0], pr.f);
+                let k = &st.levels[0];
+                for y in 0..=p[0].h - k.h {
+                    for x in 0..=p[0].w - k.w {
+                        if let (Some(ub), Some(v)) =
+                            (bound_at(&p[0], &ph, k, pr, x, y), ncc_at(&p[0], k, x, y))
+                        {
+                            assert!(ub + 1e-6 >= v, "case {case} ({x},{y}): bound {ub} < {v}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+
+    /// `certify` gives the exhaustive search's answer against any
+    /// threshold: `Above` exactly when the exhaustive best reaches it.
+    #[test]
+    fn certify_agrees_with_the_exhaustive_search() {
+        let mut rng = Rng(271828);
+        for case in 0..8 {
+            let (tw, th, rw, rh) = SIZES[case % SIZES.len()];
+            let t = glyphs(case as u64 + 400, tw, th);
+            let other = glyphs(case as u64 + 500, tw * 9 / 10, th);
+            let p = pyramid(random_region(&mut rng, &t, &other, rw, rh));
+            for tpl in [&t, &other] {
+                let st = Stack::new(tpl).unwrap();
+                let ph = st.proj.as_ref().map(|pr| Phased::new(&p[0], pr.f));
+                let full = search_full(&p, &st).score;
+                for tau in [0.3, 0.5, full - 0.02, full + 1e-3] {
+                    let mut budget = usize::MAX;
+                    let c = certify(&p, ph.as_ref(), &st, tau, &mut budget);
+                    match c {
+                        Cert::Above(v) => assert!(full >= tau && v >= tau && v <= full + 1e-9),
+                        Cert::Below => assert!(full < tau, "case {case} tau {tau}: full {full}"),
+                        Cert::Unknown => panic!("unbounded budget"),
+                    }
+                }
+                // no budget: any window that needs an exact score stops it
+                if full >= 0.5 {
+                    assert_eq!(
+                        certify(&p, ph.as_ref(), &st, full - 0.02, &mut 0),
+                        Cert::Unknown
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two present words, VICTORY and DEFEAT, in one region: the exhaustive
+    /// read is suspect (no margin). If the fast search under-read DEFEAT,
+    /// its scores alone would say sure; the certification finds DEFEAT and
+    /// flags the read. With no budget for exact scores it is flagged too.
+    #[test]
+    fn an_under_read_runner_up_never_makes_a_read_sure() {
+        let title = Layout::new(END_TITLE, [0.40, 0.40, 0.62, 0.56], Plane::Max);
+        let (a, b) = (glyphs(601, 100, 48), glyphs(602, 90, 48));
+        let t = ResultTemplates::from_templates(vec![
+            (title.clone(), Outcome::Victory, a.clone()),
+            (title.clone(), Outcome::Defeat, b.clone()),
+        ])
+        .unwrap();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 1050, 600, &a, [240, 240, 240]);
+        paint_at(&mut img, 1290, 650, &b, [240, 240, 240]);
+        let exhaustive = t.read_exhaustive(&img);
+        assert!(exhaustive.suspect, "{exhaustive:?}");
+        let mut regions = t.regions(&img);
+        let fast = t.scores_in(&regions, false);
+        assert!(
+            fast[1].score > 0.9,
+            "the fast search finds DEFEAT: {fast:?}"
+        );
+        // the same frame, as if the fast search had missed DEFEAT
+        let mut under = fast.clone();
+        under[1].score = 0.2;
+        let uncertified = t.decide(&under);
+        assert!(
+            !uncertified.suspect,
+            "the fast scores alone: {uncertified:?}"
+        );
+        let r = t.settle(&mut regions, under.clone(), CERT_MACS);
+        assert!(r.suspect, "{r:?}");
+        assert!(r.margin < MARGIN, "{r:?}");
+        let r = t.settle(&mut regions, under, 0);
+        assert!(r.suspect, "no budget: {r:?}");
+        // DEFEAT gone: the read is sure and stays sure
+        let mut one = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut one, 1050, 600, &a, [240, 240, 240]);
+        let r = t.read(&one);
+        assert!(r.outcome == Some(Outcome::Victory) && !r.suspect, "{r:?}");
+        assert_eq!(r, t.read_exhaustive(&one));
     }
 
     /// Frames without a word: the fast search finds nothing above the
