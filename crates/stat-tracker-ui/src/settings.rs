@@ -2625,7 +2625,7 @@ token = \"not-a-real-token\"
         words: true,
         result_words: true,
         phase_titles: true,
-        final_score: true,
+        end_titles: true,
     };
     const NO_MAPS: PackReadiness = PackReadiness {
         maps: false,

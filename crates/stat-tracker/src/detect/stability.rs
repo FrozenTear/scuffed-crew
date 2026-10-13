@@ -39,6 +39,8 @@ const STABLE_MAX_MEAN_DIFF: f32 = 6.0;
 #[derive(Debug, Default)]
 pub struct FrameStability {
     prev: HashMap<&'static str, Vec<u8>>,
+    /// The value each [`Self::repeats`] key held on the previous tick.
+    values: HashMap<&'static str, u8>,
 }
 
 impl FrameStability {
@@ -61,10 +63,26 @@ impl FrameStability {
         stable
     }
 
+    /// The same gate for a read that is already made: record this tick's
+    /// `value` under `key` and report whether the previous call with the
+    /// same key recorded the same value. `None` (this tick read nothing)
+    /// clears the key, so two sightings count only on calls in a row. The
+    /// caller calls this once per poll tick.
+    pub fn repeats(&mut self, key: &'static str, value: Option<u8>) -> bool {
+        match value {
+            Some(v) => self.values.insert(key, v) == Some(v),
+            None => {
+                self.values.remove(key);
+                false
+            }
+        }
+    }
+
     /// Drop all history — used when the game process goes away so a stale
     /// thumbnail can't count toward stability across sessions.
     pub fn reset(&mut self) {
         self.prev.clear();
+        self.values.clear();
     }
 }
 
@@ -135,7 +153,30 @@ mod tests {
     fn reset_clears_history() {
         let mut stab = FrameStability::default();
         stab.check("k", &solid(10, 10, 10));
+        stab.repeats("v", Some(1));
         stab.reset();
         assert!(!stab.check("k", &solid(10, 10, 10)));
+        assert!(!stab.repeats("v", Some(1)));
+    }
+
+    /// A value repeats only when the call before it, under the same key,
+    /// recorded the same value.
+    #[test]
+    fn a_value_repeats_on_two_calls_in_a_row() {
+        let mut stab = FrameStability::default();
+        assert!(!stab.repeats("v", Some(1)), "a first sighting");
+        assert!(stab.repeats("v", Some(1)));
+        assert!(stab.repeats("v", Some(1)));
+        // another value starts over
+        assert!(!stab.repeats("v", Some(2)));
+        assert!(stab.repeats("v", Some(2)));
+        // a tick with no value breaks the run
+        assert!(!stab.repeats("v", None));
+        assert!(!stab.repeats("v", Some(2)));
+        assert!(stab.repeats("v", Some(2)));
+        // keys are independent, and so are the thumbnails
+        assert!(!stab.repeats("w", Some(2)));
+        assert!(!stab.check("v", &solid(10, 10, 10)));
+        assert!(stab.repeats("v", Some(2)));
     }
 }

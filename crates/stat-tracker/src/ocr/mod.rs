@@ -133,6 +133,14 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Tesseract calls made on this thread so far (tests). A path that must run
+/// no OCR checks that this count does not move. It is the gate's counter
+/// ([`gate::tesseract_calls_on_this_thread`]): one count, kept in one place.
+#[cfg(test)]
+pub(crate) fn ocr_calls() -> usize {
+    gate::tesseract_calls_on_this_thread() as usize
+}
+
 /// Run Tesseract on `png` using a thread-local instance for `lang`, returning
 /// the recognized text and mean confidence. `whitelist` of `None` (or empty)
 /// disables character restriction.
@@ -154,6 +162,8 @@ fn ocr_with(
         })
         .into());
     }
+    // The one place a Tesseract read is counted, for the process and for
+    // this thread ([`gate::tesseract_calls`], [`ocr_calls`]).
     gate::note_tesseract_call();
     TESS_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();

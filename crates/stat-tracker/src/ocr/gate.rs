@@ -38,6 +38,8 @@ static BLOCKED: Mutex<BTreeMap<Site, u64>> = Mutex::new(BTreeMap::new());
 
 thread_local! {
     static SCOPE: RefCell<Option<Scope>> = const { RefCell::new(None) };
+    /// Tesseract reads made on this thread ([`tesseract_calls_on_this_thread`]).
+    static THREAD_TESSERACT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 struct Scope {
@@ -191,6 +193,7 @@ pub(crate) fn note_leptess_created() {
 
 pub(crate) fn note_tesseract_call() {
     TESSERACT_CALLS.fetch_add(1, Ordering::Relaxed);
+    THREAD_TESSERACT_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
 /// One line of [`blocked_calls`].
@@ -232,6 +235,12 @@ pub fn leptess_created() -> u64 {
 /// Tesseract reads run in this process.
 pub fn tesseract_calls() -> u64 {
     TESSERACT_CALLS.load(Ordering::Relaxed)
+}
+
+/// Tesseract reads made on the calling thread. Tests that run next to
+/// others use this one: the process-wide count moves under them.
+pub fn tesseract_calls_on_this_thread() -> u64 {
+    THREAD_TESSERACT_CALLS.with(|calls| calls.get())
 }
 
 /// A mode held for the current thread. Dropping it restores what was there.

@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use image::{DynamicImage, Rgb, RgbImage};
 use stat_tracker::config::{Config, OcrSetting, ReaderSetting};
-use stat_tracker::detect::match_end::{self, FinalScoreSource};
+use stat_tracker::detect::match_end::{self, FinalScoreSource, Titles};
 use stat_tracker::detect::match_start::{self, PhaseSource};
 use stat_tracker::detect::stability::FrameStability;
 use stat_tracker::detect::{GamePhase, MatchOutcome};
@@ -214,13 +214,22 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
     let blocked = blocked_during(|| {
         let mut stability = FrameStability::default();
         for _ in 0..2 {
+            // as the poll tick does: the titles first, then the signal
+            let titles = Titles::for_rgb(true, &end_rgb);
             assert_eq!(
-                match_end::detect_outcome_signal_polled(&end, &end_rgb, &mut stability, words),
+                match_end::detect_outcome_signal_polled(
+                    &end,
+                    &end_rgb,
+                    &mut stability,
+                    words,
+                    &titles
+                ),
                 None
             );
         }
+        // as the Tab pass does
         assert_eq!(
-            match_end::detect_outcome_with(&end, words),
+            match_end::detect_outcome_with(&end, words, &Titles::for_frame(true, &end)),
             MatchOutcome::Unknown
         );
     });
@@ -231,11 +240,13 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
         &blocked,
     );
 
-    // The centred end title.
+    // The centred end title. No end-title templates are loaded here, and
+    // with OCR off there is no OCR to fall back to: the title is held.
     let title = end_title_like();
+    assert_eq!(Titles::for_frame(true, &title), Titles::Held);
     let blocked = blocked_during(|| {
         assert_eq!(
-            match_end::detect_outcome_text_with(&title, words),
+            match_end::detect_outcome_text_with(&title, words, &Titles::for_frame(true, &title)),
             MatchOutcome::Unknown
         );
     });
@@ -246,7 +257,8 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
     let reel = end_reel_like();
     let reel_rgb = reel.to_rgb8();
     let blocked = blocked_during(|| {
-        let _ = match_end::detect_end_reel(&reel, &reel_rgb);
+        let titles = Titles::for_rgb(true, &reel_rgb);
+        let _ = match_end::detect_end_reel_with(&reel, &reel_rgb, &titles);
     });
     judge(
         Read::EndTitle,
@@ -271,7 +283,7 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
     let score = final_score_like();
     let blocked = blocked_during(|| {
         assert_eq!(
-            match_end::detect_outcome_text_with(&score, words),
+            match_end::detect_outcome_text_with(&score, words, &Titles::for_frame(true, &score)),
             MatchOutcome::Unknown
         );
     });

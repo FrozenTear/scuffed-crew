@@ -60,7 +60,9 @@ pub enum Read {
     ResultWord,
     /// The centred end title, and the end-of-match wake (P3, P5).
     EndTitle,
-    /// The FINAL SCORE line under a faint end title (P4).
+    /// The FINAL SCORE line under a faint end title (P4). It opens the gate
+    /// of the end title's OCR read. With OCR off the end title is the
+    /// words-v1 read, which has no gate, so the line is not read at all.
     FinalScore,
     /// Map vote, hero ban and hero select (P7).
     MatchStart,
@@ -101,7 +103,9 @@ impl Read {
             // #251: the map pack's banner read. The OCR label was its
             // fallback and is not asked for with OCR off.
             Read::TopBarMap => true,
-            // #257: the words-v1 `p4_final_score` template.
+            // #257 reads it from a words-v1 template, and since #263 it is
+            // read only on the way to the end title's OCR. With OCR off
+            // that way is shut and nothing asks for the line.
             Read::FinalScore => true,
             // #260: the words-v1 phrase masks.
             Read::MatchStart => true,
@@ -118,8 +122,11 @@ impl Read {
             Read::OwnRow => false,
             // Lane O11: the poll tick's result signal is still the OCR word.
             Read::ResultWord => false,
-            // Lane O2 (#263).
-            Read::EndTitle => false,
+            // #263 (O2): the words-v1 end-title templates read the end
+            // title and stand in for the end-reel title card. Without them
+            // loaded both are held with OCR off (`Titles::Held`), and the
+            // pack check asks for them ([`PackGroup::EndTitles`]).
+            Read::EndTitle => true,
             // Lane O5 (#265).
             Read::AccoladeMap => false,
             // Two lanes, and both have to be in. M1 (#271) is: ADLERSBRUNN
@@ -171,8 +178,9 @@ pub enum PackGroup {
     ResultWords,
     /// words-v1: every match-start title the phase detector reads.
     PhaseTitles,
-    /// words-v1: the FINAL SCORE line.
-    FinalScore,
+    /// words-v1: the centred end title, a VICTORY and a DEFEAT template
+    /// (`end_title_*`). The end-of-match wake reads the same templates.
+    EndTitles,
 }
 
 /// Every process-wide read of the new reader (`shadow::read_*`) and the
@@ -193,7 +201,10 @@ pub const READER_ENTRIES: &[(&str, &[PackGroup])] = &[
     ("read_banner", &[PackGroup::MapNames]),
     ("read_heroes", &[PackGroup::HeroIcons]),
     ("read_result", &[PackGroup::ResultWords]),
-    ("read_final_score", &[PackGroup::FinalScore]),
+    // The FINAL SCORE line only opens the gate of the end title's OCR
+    // read (#263). With OCR off nothing asks for it, so it needs no group.
+    ("read_final_score", &[]),
+    ("read_end_title", &[PackGroup::EndTitles]),
     ("read_phrase", &[PackGroup::PhaseTitles]),
 ];
 
@@ -216,8 +227,8 @@ pub struct PackReadiness {
     pub result_words: bool,
     /// [`PackGroup::PhaseTitles`].
     pub phase_titles: bool,
-    /// [`PackGroup::FinalScore`].
-    pub final_score: bool,
+    /// [`PackGroup::EndTitles`].
+    pub end_titles: bool,
 }
 
 /// One pack OCR-off cannot run without, and what is wrong with it.
@@ -231,8 +242,8 @@ pub enum PackProblem {
     WordsLackResultWords,
     /// words-v1 is there, without a match-start title.
     WordsLackPhaseTitles,
-    /// words-v1 is there, without the FINAL SCORE line.
-    WordsLackFinalScore,
+    /// words-v1 is there, without the end-title templates.
+    WordsLackEndTitles,
 }
 
 impl PackProblem {
@@ -257,8 +268,8 @@ impl PackProblem {
             Self::WordsLackPhaseTitles => {
                 "the word pack is out of date (it has no match-start titles)"
             }
-            Self::WordsLackFinalScore => {
-                "the word pack is out of date (it has no final score line)"
+            Self::WordsLackEndTitles => {
+                "the word pack is out of date (it has no end-of-match titles)"
             }
         }
     }
@@ -271,7 +282,7 @@ impl PackProblem {
             Self::WordsMissing => "results and match starts",
             Self::WordsLackResultWords => "results",
             Self::WordsLackPhaseTitles => "match starts",
-            Self::WordsLackFinalScore => "results on a faint end title",
+            Self::WordsLackEndTitles => "the end-of-match title",
         }
     }
 }
@@ -290,7 +301,7 @@ impl PackReadiness {
             PackGroup::MapNames => self.maps,
             PackGroup::ResultWords => self.result_words,
             PackGroup::PhaseTitles => self.phase_titles,
-            PackGroup::FinalScore => self.final_score,
+            PackGroup::EndTitles => self.end_titles,
         }
     }
 
@@ -313,8 +324,8 @@ impl PackReadiness {
             if !self.phase_titles {
                 out.push(PackProblem::WordsLackPhaseTitles);
             }
-            if !self.final_score {
-                out.push(PackProblem::WordsLackFinalScore);
+            if !self.end_titles {
+                out.push(PackProblem::WordsLackEndTitles);
             }
         }
         out
@@ -327,7 +338,7 @@ impl PackReadiness {
     /// `(ready, needed)` over the three packs. An out-of-date word pack is
     /// not ready.
     pub fn counts(&self) -> (usize, usize) {
-        let words = self.words && self.result_words && self.phase_titles && self.final_score;
+        let words = self.words && self.result_words && self.phase_titles && self.end_titles;
         let ready = [self.heroes, self.maps, words]
             .into_iter()
             .filter(|ok| *ok)
@@ -908,7 +919,7 @@ mod tests {
         words: true,
         result_words: true,
         phase_titles: true,
-        final_score: true,
+        end_titles: true,
     };
 
     #[test]
@@ -943,7 +954,7 @@ mod tests {
                     words: false,
                     result_words: false,
                     phase_titles: false,
-                    final_score: false,
+                    end_titles: false,
                     ..READY
                 },
                 PackProblem::WordsMissing,
@@ -970,12 +981,12 @@ mod tests {
             ),
             (
                 PackReadiness {
-                    final_score: false,
+                    end_titles: false,
                     ..READY
                 },
-                PackProblem::WordsLackFinalScore,
-                PackGroup::FinalScore,
-                "no final score line",
+                PackProblem::WordsLackEndTitles,
+                PackGroup::EndTitles,
+                "no end-of-match titles",
             ),
         ];
         for (packs, problem, group, named) in cases {
@@ -1066,7 +1077,6 @@ mod tests {
                 Read::StatCells,
                 Read::OwnRow,
                 Read::ResultWord,
-                Read::EndTitle,
                 Read::AccoladeMap,
                 Read::PveBoard
             ]
@@ -1147,7 +1157,7 @@ mod tests {
         let old = PackReadiness {
             result_words: false,
             phase_titles: false,
-            final_score: false,
+            end_titles: false,
             ..READY
         };
         assert_eq!(
@@ -1155,7 +1165,7 @@ mod tests {
             [
                 PackProblem::WordsLackResultWords,
                 PackProblem::WordsLackPhaseTitles,
-                PackProblem::WordsLackFinalScore
+                PackProblem::WordsLackEndTitles
             ]
         );
         assert_eq!(old.counts(), (2, 3));
@@ -1203,12 +1213,12 @@ mod tests {
         );
         let two = PackReadiness {
             heroes: false,
-            final_score: false,
+            end_titles: false,
             ..READY
         };
         let banner = two.hold_banner().unwrap();
         assert!(
-            banner.contains("so heroes and results on a faint end title are not read"),
+            banner.contains("so heroes and the end-of-match title are not read"),
             "{banner}"
         );
         // two problems that hold the same thing say it once
@@ -1217,7 +1227,7 @@ mod tests {
             words: false,
             result_words: false,
             phase_titles: false,
-            final_score: false,
+            end_titles: false,
             ..READY
         };
         assert!(
@@ -1369,7 +1379,7 @@ mod tests {
                 PackProblem::WordsMissing,
                 PackProblem::WordsLackResultWords,
                 PackProblem::WordsLackPhaseTitles,
-                PackProblem::WordsLackFinalScore,
+                PackProblem::WordsLackEndTitles,
             ],
         };
         let text = serde_json::to_string(&all).unwrap();
@@ -1429,7 +1439,7 @@ mod tests {
             "shadow/reader.rs and ocr_switch::READER_ENTRIES name different reads"
         );
         assert!(
-            found.len() >= 9,
+            found.len() >= 10,
             "the scan found the entry points: {found:?}"
         );
         // A reader with nothing loaded has none of the groups, and one with

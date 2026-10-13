@@ -36,7 +36,7 @@ const READY: PackReadiness = PackReadiness {
     words: true,
     result_words: true,
     phase_titles: true,
-    final_score: true,
+    end_titles: true,
 };
 
 // ------------------------------------------------------------- the gate
@@ -547,8 +547,8 @@ enum Words {
     NoBanTitle,
     /// A version 1 pack: no `selecting_map` (added in version 2, #269).
     Version1,
-    /// No FINAL SCORE line.
-    NoFinalScore,
+    /// No end-title templates.
+    NoEndTitles,
 }
 
 const PHRASES: [&str; 4] = [
@@ -570,9 +570,13 @@ fn words_pack(data_dir: &Path, which: Words) {
         );
         save_png(&dir.join("rank_screen_defeat.png"), &blocks(192, 48, 14, 5));
     }
-    if which != Words::NoFinalScore {
-        save_png(&dir.join("p4_final_score.png"), &blocks(256, 48, 12, 3));
+    if which != Words::NoEndTitles {
+        save_png(&dir.join("end_title_victory.png"), &blocks(224, 48, 9, 1));
+        save_png(&dir.join("end_title_defeat.png"), &blocks(192, 48, 13, 7));
     }
+    // The FINAL SCORE line: in the published pack, and not asked for by
+    // the switch (with OCR off nothing reads it).
+    save_png(&dir.join("p4_final_score.png"), &blocks(256, 48, 12, 3));
     let mut entries = Vec::new();
     for (i, id) in PHRASES.iter().enumerate() {
         if which == Words::Version1 && *id == "selecting_map" {
@@ -628,7 +632,7 @@ fn the_pack_check_follows_what_each_reader_needs() {
         // With it the map vote would go unconfirmed once the vote closed,
         // so off is refused until the version 2 pack is there.
         (Words::Version1, PackProblem::WordsLackPhaseTitles),
-        (Words::NoFinalScore, PackProblem::WordsLackFinalScore),
+        (Words::NoEndTitles, PackProblem::WordsLackEndTitles),
     ] {
         words_pack(data, which);
         let old = PackReadiness::on_disk(data);

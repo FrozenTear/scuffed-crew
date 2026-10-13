@@ -221,11 +221,13 @@ fn poll(
 ) -> serde_json::Value {
     use serde_json::json;
     let rgb = img.to_rgb8();
+    let titles = detect::match_end::Titles::for_rgb(new, &rgb);
     let signal = detect::match_end::detect_outcome_signal_polled(
         img,
         &rgb,
         stability,
         detect::match_end::FinalScoreSource::for_reader(new),
+        &titles,
     );
     let accolade_map = match &signal {
         Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
@@ -239,7 +241,7 @@ fn poll(
         stability,
         detect::match_start::PhaseSource::for_reader(new),
     );
-    let end_reel = detect::match_end::detect_end_reel(img, &rgb);
+    let end_reel = detect::match_end::detect_end_reel_with(img, &rgb, &titles);
     let result_read = (new && signal.is_some()).then(|| shadow::read_result(img));
     json!({
         "signal": signal.map(|(outcome, source)| json!([outcome.to_string(), format!("{source:?}")])),
