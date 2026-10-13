@@ -581,6 +581,15 @@ full-board text, while that game has shown no result or boundary signal; a
 session map from the top bar or an accolade is never replaced. With
 `reader = "ocr-v1"` the banner is not read.
 
+The pack holds letters, not map names: the names the banner read can return
+are a table in the tracker (`shadow::banner::MAPS`), and each is composed
+from the pack's glyphs. A new name needs a tracker release, and a new pack
+only when it uses a letter the pack lacks. `ADLERSBRUNN`, the Halloween
+event's label for Eichenwalde, is one of those names: a sure read of it is
+stored as Eichenwalde, the way the top-bar OCR stores it, and it marks the
+board for the Junkenstein check (a board with stats on one team only is not
+stored).
+
 Every glyph file that `atlas.json` names must be a `g<4 lowercase hex>.png`
 file in the pack folder, the same names pack sync allows. Any other path
 refuses the whole pack, and the reader falls back to the next folder.
