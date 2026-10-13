@@ -118,9 +118,9 @@ const MAX_LEVEL: usize = 2;
 /// share of its per-pixel variance there. Text strokes survive a 4x box
 /// filter (the words-v1 templates keep 0.84 to 0.97); fine stripes average
 /// out, and a coarse search over them would rank the wrong peaks.
-const MIN_KEPT: f64 = 0.6;
+const MIN_KEPT: f64 = 0.8;
 /// Coarse peaks refined per template and scale.
-const PEAKS: usize = 6;
+const PEAKS: usize = 12;
 /// Coarse peaks closer than this (coarse pixels, either axis) are one peak.
 const PEAK_SEP: usize = 1;
 /// Refine window half-width on the first level below the coarse one, then
@@ -356,6 +356,11 @@ impl Proj {
 
 impl Stack {
     fn new(t: &Gray) -> Option<Self> {
+        Self::with_kept(t, MIN_KEPT)
+    }
+
+    /// [`Stack::new`] with the kept-variance rule as an argument (tests).
+    fn with_kept(t: &Gray, min_kept: f64) -> Option<Self> {
         let base = Kernel::new(t.w, t.h, &t.px)?;
         let var0 = base.var();
         let mut levels = vec![base];
@@ -363,7 +368,7 @@ impl Stack {
         while levels.len() <= MAX_LEVEL && (w / 2).min(h / 2) >= MIN_COARSE_PX {
             (w, h, px) = half(w, h, &px);
             match Kernel::new(w, h, &px) {
-                Some(k) if k.var() >= MIN_KEPT * var0 => levels.push(k),
+                Some(k) if k.var() >= min_kept * var0 => levels.push(k),
                 _ => break,
             }
         }
@@ -446,6 +451,18 @@ fn search_full(region: &[Level], st: &Stack) -> Found {
 /// fits, then the best [`PEAKS`] peaks, each refined level by level in a
 /// small window around twice its position. The score is level 0's.
 fn search_fast(region: &[Level], st: &Stack) -> Found {
+    search_fast_with(region, st, PEAKS, REFINE_FIRST, REFINE)
+}
+
+/// [`search_fast`] with its peak count and refine windows as arguments
+/// (tests pin each one).
+fn search_fast_with(
+    region: &[Level],
+    st: &Stack,
+    n_peaks: usize,
+    refine_first: usize,
+    refine: usize,
+) -> Found {
     let fits = |l: usize| {
         l < region.len()
             && l < st.levels.len()
@@ -470,9 +487,9 @@ fn search_fast(region: &[Level], st: &Stack) -> Found {
         }
     }
     coarse.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut peaks: Vec<(usize, usize)> = Vec::with_capacity(PEAKS);
+    let mut peaks: Vec<(usize, usize)> = Vec::with_capacity(n_peaks);
     for &(_, x, y) in &coarse {
-        if peaks.len() == PEAKS {
+        if peaks.len() == n_peaks {
             break;
         }
         if peaks
@@ -487,7 +504,7 @@ fn search_fast(region: &[Level], st: &Stack) -> Found {
         let mut score = None;
         for l in (0..top).rev() {
             let (p, k) = (&region[l], &st.levels[l]);
-            let r = if l + 1 == top { REFINE_FIRST } else { REFINE };
+            let r = if l + 1 == top { refine_first } else { refine };
             let (cx, cy) = ((2 * x).min(p.w - k.w), (2 * y).min(p.h - k.h));
             let mut lvl_best: Option<(f64, usize, usize)> = None;
             for yy in cy.saturating_sub(r)..=(cy + r).min(p.h - k.h) {
@@ -1809,6 +1826,10 @@ mod tests {
 
     // ---------------------------------------------- fast search (O1 item 2)
 
+    /// The kept-variance rule the parity tests build stacks with: looser
+    /// than [`MIN_KEPT`], so the synthetic glyphs reach the 4x level.
+    const TEST_KEPT: f64 = 0.6;
+
     /// Deterministic xorshift.
     struct Rng(u64);
     impl Rng {
@@ -1916,7 +1937,9 @@ mod tests {
         let p = pyramid(random_region(rng, t, other, rw, rh));
         let (mut present, mut deep) = (0, 0);
         for tpl in [t, other] {
-            let st = Stack::new(tpl).unwrap();
+            // a looser kept rule than production, so these synthetic words
+            // reach the 4x level: the search must be exact on any stack
+            let st = Stack::with_kept(tpl, TEST_KEPT).unwrap();
             deep += usize::from(st.levels.len() == 3);
             let (fast, full) = (search_fast(&p, &st), search_full(&p, &st));
             assert!(
@@ -1972,7 +1995,13 @@ mod tests {
         assert!(present >= 12, "{present}");
         // glyph words of these sizes build 16 deep stacks in 16 cases
         assert!(deep < 8, "thin bars keep too little at 4x: {deep}");
-        assert_eq!(Stack::new(&glyphs(1, 120, 50)).unwrap().levels.len(), 3);
+        assert_eq!(
+            Stack::with_kept(&glyphs(1, 120, 50), TEST_KEPT)
+                .unwrap()
+                .levels
+                .len(),
+            3
+        );
     }
 
     /// A blocky copy of the word (each coarse pixel of the template blown up
@@ -2147,6 +2176,216 @@ mod tests {
         let r = t.read(&one);
         assert!(r.outcome == Some(Outcome::Victory) && !r.suspect, "{r:?}");
         assert_eq!(r, t.read_exhaustive(&one));
+    }
+
+    /// Random blocks of ink, a third kind of synthetic word.
+    fn blobs(seed: u64, w: usize, h: usize) -> Gray {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9) | 1);
+        let mut g = Gray::new(w, h);
+        for _ in 0..(w / 6).max(4) {
+            let (bw, bh) = (
+                2 + rng.next(10) as usize,
+                2 + rng.next((h / 2) as u64) as usize,
+            );
+            let (x0, y0) = (
+                rng.next((w - bw) as u64) as usize,
+                rng.next((h - bh) as u64) as usize,
+            );
+            for y in y0..y0 + bh {
+                for x in x0..x0 + bw {
+                    g.px[y * w + x] = 0.9;
+                }
+            }
+        }
+        g
+    }
+
+    /// Parity stress, run by hand: `O1_STRESS_CASES` (600), `O1_STRESS_SEED`,
+    /// `O1_PEAKS` and `O1_KEPT` (the shipped values) in a release test build.
+    /// Random word kind (glyphs, thin bars, blobs), template size, region
+    /// size, scale, noise, ink, 1 to 3 distractors, sometimes a blocky decoy;
+    /// three templates at the three search scales per case. Prints the
+    /// present matches the fast search missed, by kept variance.
+    #[test]
+    #[ignore]
+    fn fast_search_stress() {
+        let env = |k: &str| std::env::var(k).ok();
+        let n: usize = env("O1_STRESS_CASES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600);
+        let seed: u64 = env("O1_STRESS_SEED")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let peaks: usize = env("O1_PEAKS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PEAKS);
+        let kept: f64 = env("O1_KEPT")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MIN_KEPT);
+        let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+        let (mut present, mut miss, mut miss_hi, mut stacks) = (0usize, 0usize, 0usize, 0usize);
+        let make = |kind: u64, sd: u64, w: usize, h: usize| match kind {
+            0 => glyphs(sd, w, h),
+            1 => word(1 + (sd % 9) as u32, w, h),
+            _ => blobs(sd, w, h),
+        };
+        for case in 0..n {
+            let kind = rng.next(3);
+            let (tw, th) = (60 + rng.next(121) as usize, 24 + rng.next(37) as usize);
+            let base = seed * 100_000 + case as u64 * 10;
+            let tpls = [
+                make(kind, base, tw, th),
+                make(rng.next(3), base + 1, tw * 9 / 10, th),
+                make(rng.next(3), base + 2, tw * 11 / 10, th),
+            ];
+            let (rw, rh) = (
+                tw * 12 / 10 + 8 + rng.next(tw as u64) as usize,
+                th * 12 / 10 + 6 + rng.next(th as u64) as usize,
+            );
+            let mut g = Gray::new(rw, rh);
+            let (bg, amp) = (rng.next(60) as f32 / 255.0, 1 + rng.next(60));
+            for v in g.px.iter_mut() {
+                *v = bg + rng.next(amp) as f32 / 255.0;
+            }
+            let mut draw = |t: &Gray, rng: &mut Rng, blocky: bool| {
+                let sc = SCALES[rng.next(3) as usize];
+                let w = ((t.w as f64 * sc).round() as usize).min(rw);
+                let h = ((t.h as f64 * sc).round() as usize).min(rh);
+                let mut st = t.resize(w, h);
+                if blocky {
+                    let f = 4;
+                    for y in 0..h {
+                        for x in 0..w {
+                            st.px[y * w + x] =
+                                t.at(((x / f) * f).min(t.w - 1), ((y / f) * f).min(t.h - 1));
+                        }
+                    }
+                }
+                let ink = 0.45 + rng.next(55) as f32 / 100.0;
+                let (x0, y0) = (
+                    rng.next((rw - w + 1) as u64) as usize,
+                    rng.next((rh - h + 1) as u64) as usize,
+                );
+                for y in 0..h {
+                    for x in 0..w {
+                        let a = (st.at(x, y) / 0.9).min(1.0);
+                        let p = &mut g.px[(y0 + y) * rw + x0 + x];
+                        *p = (*p * (1.0 - a) + ink * a).min(1.0);
+                    }
+                }
+            };
+            for _ in 0..1 + rng.next(3) {
+                let k = 1 + rng.next(2) as usize;
+                draw(&tpls[k], &mut rng, false);
+            }
+            if rng.next(3) == 0 {
+                draw(&tpls[0], &mut rng, true);
+            }
+            draw(&tpls[0], &mut rng, false);
+            let p = pyramid(g);
+            for tpl in &tpls {
+                for sc in SCALES {
+                    let (w, h) = (
+                        ((tpl.w as f64 * sc).round_ties_even() as usize).max(1),
+                        ((tpl.h as f64 * sc).round_ties_even() as usize).max(1),
+                    );
+                    let Some(st) = Stack::with_kept(&tpl.resize(w, h), kept) else {
+                        continue;
+                    };
+                    stacks += 1;
+                    let fast = search_fast_with(&p, &st, peaks, REFINE_FIRST, REFINE);
+                    let full = search_full(&p, &st);
+                    assert!(fast.score <= full.score + 1e-9);
+                    if full.score >= PRESENT as f64 {
+                        present += 1;
+                        if full.score - fast.score > 1e-9 {
+                            miss += 1;
+                            let k = st.levels.last().unwrap().var() / st.levels[0].var();
+                            if k >= 0.84 {
+                                miss_hi += 1;
+                            }
+                            eprintln!(
+                                "MISS case {case} kind {kind} levels {} kept {k:.2} full {:.3} fast {:.3}",
+                                st.levels.len(),
+                                full.score,
+                                fast.score
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "STRESS seed {seed} cases {n} stacks {stacks} peaks {peaks} kept {kept}: present {present} miss {miss} (kept>=0.84: {miss_hi})"
+        );
+    }
+
+    /// F253-2: `MIN_KEPT` decides the depth. This glyph word keeps between
+    /// 0.6 and 0.8 of its variance at 4x: the shipped rule stops it at 2x,
+    /// where the stress runs found no misses, and a 0.6 rule would not.
+    #[test]
+    fn min_kept_stops_a_word_that_blurs_at_4x() {
+        let g = glyphs(1, 120, 50);
+        let (mut w, mut h, mut px) = (g.w, g.h, g.px.clone());
+        for _ in 0..2 {
+            (w, h, px) = half(w, h, &px);
+        }
+        let kept =
+            Kernel::new(w, h, &px).unwrap().var() / Kernel::new(g.w, g.h, &g.px).unwrap().var();
+        assert!((0.6..0.8).contains(&kept), "{kept}");
+        assert_eq!(Stack::new(&g).unwrap().levels.len(), 2);
+        assert_eq!(Stack::with_kept(&g, 0.6).unwrap().levels.len(), 3);
+    }
+
+    /// A sharp, noisy word and `n` blocky decoys (each the template itself
+    /// on the coarse level) in one region. Returns the region and stack.
+    fn decoy_region(seed: u64, n: usize) -> (Vec<Level>, Stack) {
+        let mut rng = Rng(seed);
+        let t = glyphs(seed + 70, 100, 48);
+        let st = Stack::new(&t).unwrap();
+        let top = st.levels.len() - 1;
+        let f = 1usize << top;
+        let (mut cw, mut ch, mut cpx) = (t.w, t.h, t.px.clone());
+        for _ in 0..top {
+            (cw, ch, cpx) = half(cw, ch, &cpx);
+        }
+        let step = (t.w + 3 * f).next_multiple_of(f);
+        let (rw, rh) = ((n + 1) * step + 4 * f, (t.h + 4 * f).next_multiple_of(f));
+        let mut g = Gray::new(rw, rh);
+        let (sx, sy) = (2 * f, 2 * f);
+        for y in 0..t.h {
+            for x in 0..t.w {
+                g.px[(sy + y) * rw + sx + x] = t.at(x, y) * 0.8 + rng.next(60) as f32 / 255.0;
+            }
+        }
+        for d in 0..n {
+            let (dx, dy) = (sx + (d + 1) * step, f + f * (d % 2));
+            for y in 0..ch * f {
+                for x in 0..cw * f {
+                    g.px[(dy + y) * rw + dx + x] = cpx[(y / f) * cw + x / f] * 0.8;
+                }
+            }
+        }
+        (pyramid(g), st)
+    }
+
+    /// F253-2: with 8 decoys ahead of the sharp word on the coarse level
+    /// (each takes one peak), 6 or 8 peaks do not reach it; the shipped 12 do.
+    #[test]
+    fn fast_search_refines_past_eight_decoys() {
+        for seed in [11, 12, 13] {
+            let (p, st) = decoy_region(seed, 8);
+            let full = search_full(&p, &st).score;
+            let fast = search_fast(&p, &st).score;
+            assert!(
+                (fast - full).abs() < 1e-9,
+                "{seed}: fast {fast} full {full}"
+            );
+            for peaks in [6, 8] {
+                let few = search_fast_with(&p, &st, peaks, REFINE_FIRST, REFINE).score;
+                assert!(few < full - 1e-6, "{seed}: {peaks} peaks {few} full {full}");
+            }
+        }
     }
 
     /// Frames without a word: the fast search finds nothing above the
