@@ -3273,6 +3273,50 @@ mod tests {
         assert!(store.get_unsynced().await.unwrap().is_empty());
     }
 
+    /// F252-5: a map change re-queues the session's rows for upload.
+    #[tokio::test]
+    async fn set_session_map_unsyncs_rows_when_the_map_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        let mut row = snap("s1", 5);
+        row.map_name = "Busan".into();
+        row.outcome = "victory".into();
+        store.insert_match(row).await.unwrap();
+        let claims = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+        store.mark_synced(&claims).await.unwrap();
+        assert!(store.get_all_matches().await.unwrap()[0].synced);
+        store.set_session_map("s1", "Ilios").await.unwrap();
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows[0].map_name, "Ilios");
+        assert!(!rows[0].synced, "a renamed row is uploaded again");
+    }
+
+    /// F252-3: a session rename keeps a member's own map choice: the
+    /// correction and its edited mark stay.
+    #[tokio::test]
+    async fn set_session_map_keeps_a_member_map_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        let mut row = snap("s1", 5);
+        row.map_name = "Busan".into();
+        store.insert_match(row).await.unwrap();
+        store
+            .apply_command(&StoreCommand::EditMatch {
+                session_id: "s1".into(),
+                edit: MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        store.set_session_map("s1", "Ilios").await.unwrap();
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert_eq!(rows[0].corrected_map_name.as_deref(), Some("King's Row"));
+        assert!(rows[0].field_edited("map_name"));
+        assert_eq!(rows[0].display_map_name(), "King's Row");
+    }
+
     #[tokio::test]
     async fn revised_sibling_keeps_whole_session_unsynced() {
         // Two snapshots, one session. Map back-fill touches only the older

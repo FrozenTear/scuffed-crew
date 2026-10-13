@@ -242,20 +242,44 @@ impl Reader {
     /// storable ([`top_bar_map`]). `None` is an abstain: no map pack, no
     /// banner, a flagged read, or a name the tracker would not store.
     pub fn read_top_bar(&self, frame: &DynamicImage) -> Option<TopBarMap> {
+        top_bar_map(&self.read_banner(frame)?)
+    }
+
+    /// The raw banner read of one full frame (sure or flagged), or `None`
+    /// when no map pack is loaded. The capture path reads it once per Tab and
+    /// hands it to both [`top_bar_map`] and [`Self::read_board_with_banner`].
+    pub fn read_banner(&self, frame: &DynamicImage) -> Option<MapRead> {
         let maps = self.maps.current()?;
-        top_bar_map(&maps.templates.read(&rgb_of(frame)))
+        Some(maps.templates.read(&rgb_of(frame)))
     }
 
     /// Read every field of one full Tab frame. `result` stays suspect.
     /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
     /// [`not_found`] with that status: no team size, no row fields, no map.
     pub fn read_board(&self, frame: &DynamicImage) -> BoardRead {
-        self.read_board_timed(frame, READ_BUDGET)
+        self.read_board_timed(frame, READ_BUDGET, None)
+    }
+
+    /// [`Self::read_board`] with the banner already read for this frame
+    /// ([`Self::read_banner`]), so the frame is not read a second time.
+    /// `None` is "no map pack", the same as [`Self::read_board`] without one.
+    pub fn read_board_with_banner(
+        &self,
+        frame: &DynamicImage,
+        banner: Option<MapRead>,
+    ) -> BoardRead {
+        self.read_board_timed(frame, READ_BUDGET, Some(banner))
     }
 
     /// [`Self::read_board`] with an explicit digit/hero budget (tests use a
     /// zero budget to force an empty digit read after columns are found).
-    fn read_board_timed(&self, frame: &DynamicImage, budget: Duration) -> BoardRead {
+    /// `banner` is a read the caller already made; `None` reads it here.
+    fn read_board_timed(
+        &self,
+        frame: &DynamicImage,
+        budget: Duration,
+        banner: Option<Option<MapRead>>,
+    ) -> BoardRead {
         let t0 = Instant::now();
         let scoreboard = crate::ocr::preprocess::crop_scoreboard(frame);
         let team_size = match board_layout(&scoreboard) {
@@ -292,21 +316,24 @@ impl Reader {
             digit_read.as_ref(),
             hero_read.as_ref().map(|h| &h.board.rows[..]),
         );
-        if let Some(maps) = self.maps.current() {
-            let m = maps.templates.read(&rgb_of(frame));
-            if let Some(info) = m.map {
-                let n = map_name(info);
-                let suspect = m.suspect || !storable_map_name(&n);
-                set(&mut board, "map", Value::Text(n.name), m.score, suspect);
-                if let Some(mode) = n.mode {
-                    set(
-                        &mut board,
-                        "mode",
-                        Value::Text(mode.into()),
-                        m.score,
-                        suspect,
-                    );
-                }
+        let banner = match banner {
+            Some(given) => given,
+            None => self.read_banner(frame),
+        };
+        if let Some(m) = banner
+            && let Some(info) = m.map
+        {
+            let n = map_name(info);
+            let suspect = m.suspect || !storable_map_name(&n);
+            set(&mut board, "map", Value::Text(n.name), m.score, suspect);
+            if let Some(mode) = n.mode {
+                set(
+                    &mut board,
+                    "mode",
+                    Value::Text(mode.into()),
+                    m.score,
+                    suspect,
+                );
             }
         }
         board.elapsed_ms = elapsed_ms(t0);
@@ -609,6 +636,20 @@ pub fn read_top_bar(frame: &DynamicImage) -> Option<TopBarMap> {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_top_bar(frame)
+}
+
+/// [`Reader::read_banner`] with the process-wide reader.
+pub fn read_banner(frame: &DynamicImage) -> Option<MapRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_banner(frame)
+}
+
+/// [`Reader::read_board_with_banner`] with the process-wide reader.
+pub fn read_board_with_banner(frame: &DynamicImage, banner: Option<MapRead>) -> BoardRead {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_board_with_banner(frame, banner)
 }
 
 /// Read one result frame with the process-wide reader.
@@ -1294,7 +1335,7 @@ mod tests {
         let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
         assert!(digits::stat_columns_found(&crop));
         assert_eq!(board_layout(&crop), Ok(6));
-        let b = reader.read_board_timed(&frame, Duration::ZERO);
+        let b = reader.read_board_timed(&frame, Duration::ZERO, None);
         assert_eq!(b.status, BoardStatus::NotFound);
         assert_eq!(b.team_size, None);
         assert!(b.fields.iter().all(|f| f.suspect && f.value.is_none()));
@@ -1711,5 +1752,86 @@ mod tests {
             .find(|s| s.name == "maps-v1.tar")
             .unwrap();
         assert_eq!(c.map_v1_dir, Some(spec.dir_in(root)));
+    }
+
+    /// F251-3: the board takes the banner read the top bar already made, so
+    /// the frame is read once per Tab. A given read is used as it is: a sure
+    /// one sets the map, a flagged one leaves it suspect, and "no pack"
+    /// (`None`) leaves it unread even when a pack is loaded.
+    #[test]
+    fn the_board_uses_the_banner_read_it_is_given() {
+        use crate::shadow::banner::test_fixtures::{LETTERS, write_pack};
+        let data = tempfile::tempdir().unwrap();
+        write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let frame = tab_stand_in(2560, 1440, 6, PITCH_6V6, BLUE_RED, true);
+        let own = reader.read_board(&frame);
+        assert_eq!(own.status, BoardStatus::Read);
+        assert_eq!(
+            own.get("map").unwrap().value,
+            None,
+            "no banner on the stand-in"
+        );
+
+        let sure = reader.read_board_with_banner(&frame, Some(sure_read(map_info("ilios"))));
+        let map = sure.get("map").unwrap();
+        assert_eq!(map.value, Some(Value::Text("Ilios".into())));
+        assert!(!map.suspect);
+        assert_eq!(
+            sure.get("mode").unwrap().value,
+            Some(Value::Text("Control".into()))
+        );
+
+        let mut flagged = sure_read(map_info("ilios"));
+        flagged.suspect = true;
+        let b = reader.read_board_with_banner(&frame, Some(flagged));
+        assert!(b.get("map").unwrap().suspect);
+
+        let none = reader.read_board_with_banner(&frame, None);
+        assert_eq!(none.get("map").unwrap().value, None);
+        // the rest of the board is the same read
+        let strip = |b: &BoardRead| {
+            b.fields
+                .iter()
+                .filter(|f| f.name != "map" && f.name != "mode")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip(&sure), strip(&own));
+    }
+
+    /// F251-6: the stored mode is the tracker's table mode for the stored
+    /// name, which is what `TopBarMap.mode` reports. The banner table's own
+    /// `MapInfo.mode` is a hint only; these maps differ from the stored mode,
+    /// each for a reason the tracker table owns.
+    #[test]
+    fn banner_table_modes_against_the_stored_mode() {
+        use crate::parse::stored_game_mode;
+        // Stadium maps: the banner table has the OverFast mode (Control or
+        // Push), the tracker files them as Stadium (kept local).
+        // Deathmatch maps: the banner table has no single mode, the tracker
+        // stores Deathmatch. Practice Range: the bucket is named Practice.
+        const EXPECTED_MODE_DIFFS: &[&str] = &[
+            "arena-victoriae",
+            "gogadoro",
+            "kanezaka",
+            "malevento",
+            "petra",
+            "place-lacroix",
+            "practice-range",
+            "redwood-dam",
+            "wuxing-university",
+        ];
+        let mut differ = Vec::new();
+        for info in crate::shadow::banner::MAPS {
+            let t = top_bar_map(&sure_read(info)).unwrap();
+            let stored = stored_game_mode(&t.name);
+            assert_eq!(t.mode, Some(stored.as_str()), "{}", info.key);
+            if info.mode != Some(stored.as_str()) {
+                differ.push((info.key, info.mode, stored));
+            }
+        }
+        let keys: Vec<_> = differ.iter().map(|d| d.0).collect();
+        assert_eq!(keys, EXPECTED_MODE_DIFFS, "{differ:?}");
     }
 }

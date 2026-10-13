@@ -340,6 +340,13 @@ struct CaptureRequest {
     hint: Option<detect::MatchOutcome>,
     pending_boundary: bool,
     awaiting_first_board: bool,
+    /// See [`ActiveGame::text_fallback_locked`]. A locked text-fallback map
+    /// is not replaced by a banner read either.
+    text_fallback_locked: bool,
+    /// A row of this session carries a member's own map choice
+    /// ([`session_has_member_map_edit`]). Filled by the capture path, false
+    /// from [`build_capture_request`].
+    member_map_edit: bool,
     /// Board held off the previous session. Written onto the session this
     /// capture actually stores, at `carried_deferred_at`.
     carried_deferred: Option<Counters>,
@@ -912,6 +919,12 @@ struct ActiveGame {
     /// except when recovery drops the hint because its timestamp cannot be
     /// mapped onto this boot: the lock stays.
     text_fallback_locked: bool,
+    /// The text-fallback name a sure banner read replaced on this session
+    /// ([`banner_replaces_text_fallback`]). The game's own accolade can still
+    /// name it (the full-board text and the accolade agreed on it), so the
+    /// poll path counts that accolade as this session's map, not as a
+    /// different-map end screen that would split the game (F252-1).
+    replaced_text_fallback_map: Option<String>,
     /// Result-word reads for `reader = "new"`. Memory only: a restart loses
     /// them and the next capture falls back the result field to ocr-v1.
     result_evidence: shadow::result::ResultEvidence,
@@ -959,6 +972,7 @@ impl ActiveGame {
             deferred_at: None,
             deferred_imported: false,
             text_fallback_locked: false,
+            replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
         }
     }
@@ -1124,6 +1138,10 @@ struct PersistedGame {
     /// mid-replacement, so recovery leaves the window open.
     #[serde(default)]
     text_fallback_locked: bool,
+    /// See [`ActiveGame::replaced_text_fallback_map`]. Missing on older
+    /// skeletons, which had no banner rename.
+    #[serde(default)]
+    replaced_text_fallback_map: Option<String>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1593,6 +1611,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         progressed_boards: g.progressed_boards,
         baseline_at: g.baseline_at.map(to_wall),
         text_fallback_locked: g.text_fallback_locked,
+        replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -1730,6 +1749,7 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
         // survive the restart. The arm is the other way around: it is
         // dropped in that same case, above.
         text_fallback_locked: p.text_fallback_locked,
+        replaced_text_fallback_map: p.replaced_text_fallback_map,
         result_evidence: shadow::result::ResultEvidence::default(),
     })
 }
@@ -2224,6 +2244,9 @@ struct StagedCapture {
     split: bool,
     /// Empty when no map was read. Callers store `None`, not `"Unknown"`.
     recorded_map: Option<String>,
+    /// `map_name` is a sure banner read that replaces the session's
+    /// untrusted text-fallback map ([`banner_replaces_text_fallback`]).
+    replaced_text_fallback: bool,
 }
 
 /// Gate, map, and carried-board decisions for one planned capture.
@@ -2252,7 +2275,7 @@ fn stage_capture(
         split,
         facts.trusted_cells,
     );
-    let (map_name, map_source) = if split {
+    let (mut map_name, mut map_source) = if split {
         resolved_map(None, facts.map_from_panel, facts.parsed_map, &[])
     } else {
         resolved_map(
@@ -2262,6 +2285,17 @@ fn stage_capture(
             &req.map_candidates,
         )
     };
+    let replacement = banner_replaces_text_fallback(req, facts, split);
+    let replaced_text_fallback = replacement.is_some();
+    if let Some(banner) = replacement {
+        tracing::info!(
+            text_fallback = %map_name,
+            banner = %banner,
+            "a sure top-bar banner read replaces the text-fallback session map"
+        );
+        map_name = banner;
+        map_source = Some(boundary::MapSource::TopBar);
+    }
     let carried = carried_counters_to_write(req.carried_deferred, split, req.deferred_imported);
     let carried_at = req
         .carried_deferred_at
@@ -2279,6 +2313,95 @@ fn stage_capture(
         carried_hero: req.carried_deferred_hero.clone(),
         carried_at,
         split,
+        replaced_text_fallback,
+    }
+}
+
+/// A sure banner read that renames the session's untrusted map (F251-1).
+///
+/// The session map came from the full-board text (or has no source), and
+/// this Tab's top-bar map is a sure banner read ([`choose_top_bar_map`])
+/// naming another map. It replaces the text-fallback name only while no
+/// boundary signal has been seen: no recorded outcome, no unconfirmed result
+/// hint (any hint, not only a conflicting one), no armed boundary, no
+/// text-fallback lock, no primed reset and no carried board. This is
+/// deliberately stricter than the accolade rule
+/// (`boundary::text_fallback_open_for_accolade`), which lets an agreeing hint
+/// through; do not loosen it to match. After any of those signals the Tab
+/// may already belong to the next game, so the old session keeps its name.
+///
+/// Two more bounds (F252-2, F252-3):
+/// * the session's last accepted capture is at most [`STAT_SPLIT_MIN_GAP`]
+///   (120 s) before this Tab, the same gap the stat-regression splitter uses
+///   to tell one match's boards from the next game's. A longer gap, or no
+///   earlier board, is where a missed game end hides, so game 2's first
+///   banner read never renames game 1's rows;
+/// * no row of the session carries a member's own map choice
+///   (`member_map_edit`): a member's pick is never renamed, and its stored
+///   mode is never rewritten.
+///
+/// The vote-candidate veto applies, and a split is a new session that takes
+/// the read anyway. A trusted session map (top bar, accolade) is never
+/// replaced: the first trusted map wins. The top-bar OCR never replaces it,
+/// so `reader = "ocr-v1"` is unchanged.
+fn banner_replaces_text_fallback(
+    req: &CaptureRequest,
+    facts: &BoardFacts<'_>,
+    split: bool,
+) -> Option<String> {
+    if split || !facts.panel_from_banner {
+        return None;
+    }
+    let banner = facts
+        .map_from_panel
+        .map(str::trim)
+        .filter(|m| !m.is_empty())?;
+    let session = req
+        .session_map
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())?;
+    let trusted = req
+        .session_map_source
+        .is_some_and(boundary::MapSource::trusted_for_board_split);
+    let window_open = !req.text_fallback_locked
+        && !req.pending_boundary
+        && !req.game_outcome.is_decided()
+        && req.hint.is_none()
+        && req.reset_streak == 0
+        && req.carried_deferred.is_none()
+        && !req.member_map_edit
+        && req
+            .prev_gate
+            .is_some_and(|(_, age)| age <= STAT_SPLIT_MIN_GAP);
+    let plausible = req.map_candidates.is_empty() || req.map_candidates.iter().any(|c| c == banner);
+    (!trusted && window_open && plausible && !session.eq_ignore_ascii_case(banner))
+        .then(|| banner.to_string())
+}
+
+/// A row of the open session carries a member's own map choice (a map edit
+/// or pick: `corrected_map_name`, or `map_name` in `edited_fields`). Only
+/// asked when the session map is untrusted, the one case a banner read could
+/// rename it; a store error answers true, so nothing is renamed.
+async fn session_has_member_map_edit(store: &storage::LocalStore, req: &CaptureRequest) -> bool {
+    let untrusted_map = req
+        .session_map
+        .as_deref()
+        .is_some_and(|m| !m.trim().is_empty())
+        && !req
+            .session_map_source
+            .is_some_and(boundary::MapSource::trusted_for_board_split);
+    if !untrusted_map {
+        return false;
+    }
+    match store.get_session_snapshots(&req.session_id).await {
+        Ok(rows) => rows
+            .iter()
+            .any(|m| m.corrected_map_name.is_some() || m.field_edited("map_name")),
+        Err(e) => {
+            tracing::warn!(error = %e, "session rows unreadable; no banner rename");
+            true
+        }
     }
 }
 
@@ -2301,6 +2424,12 @@ struct FrameAnalysis {
     /// Top-bar OCR before canonicalization. The Adlersbrunn alias check
     /// needs the raw label; a literal Eichenwalde read is not an alias.
     map_panel_raw: Option<String>,
+    /// `map_from_panel` is a sure banner read (`reader = "new"`).
+    map_from_banner: bool,
+    /// The banner read made for the top bar, reused for the board's map
+    /// field: `Some(read)` when it ran (`read` is `None` without a map pack),
+    /// `None` when it did not run (ocr-v1, or a caught panic).
+    banner: Option<Option<shadow::banner::MapRead>>,
     /// Cropped scoreboard (portrait auto-collection reads from it). Shared
     /// with the shadow worker when it is on, never copied.
     scoreboard: Arc<image::DynamicImage>,
@@ -2405,6 +2534,9 @@ struct CaptureReport {
     close_reason: Option<boundary::CloseReason>,
     /// Wall time of a deferred board, taken when that capture was parsed.
     held_at: Option<chrono::DateTime<Utc>>,
+    /// `map` is a sure banner read that replaces the session's text-fallback
+    /// map ([`banner_replaces_text_fallback`]).
+    map_replaces_text_fallback: bool,
 }
 
 /// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
@@ -2539,6 +2671,8 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
             .map(|mark| mark.outcome),
         pending_boundary: g.pending_boundary,
         awaiting_first_board: g.awaiting_first_board,
+        text_fallback_locked: g.text_fallback_locked,
+        member_map_edit: false,
         carried_deferred: g.deferred,
         carried_deferred_hero: g.deferred_hero.clone(),
         carried_deferred_at: g.deferred_at,
@@ -2618,6 +2752,8 @@ struct BoardFacts<'a> {
     row_id: Option<u32>,
     hero: &'a str,
     map_from_panel: Option<&'a str>,
+    /// `map_from_panel` is a sure banner read, not the top-bar OCR.
+    panel_from_banner: bool,
     parsed_map: &'a str,
     frame_outcome: detect::MatchOutcome,
 }
@@ -2885,6 +3021,14 @@ async fn apply_capture_report(
                         // A later top bar that names the map already stored
                         // upgrades a text fallback. The name stays.
                         g.map_source = report.map_source;
+                    } else if report.map_replaces_text_fallback && untrusted && incoming_trusted {
+                        // A sure banner read inside the text-fallback window
+                        // renames the session (banner_replaces_text_fallback).
+                        g.replaced_text_fallback_map = g.map.replace(map.clone());
+                        g.map_source = report.map_source;
+                        if let Err(e) = store.set_session_map(&g.session_id, &map).await {
+                            tracing::warn!(error = %e, "failed to replace session map");
+                        }
                     }
                 }
                 if !g.finished() && !matches!(report.outcome, detect::MatchOutcome::Unknown) {
@@ -3041,7 +3185,17 @@ fn poll_input_from_game<'a>(
         hero: game.hero_auth.accepted_hero.as_deref(),
         signal,
         signal_confirmed,
-        accolade_map,
+        accolade_map: accolade_map.map(|read| {
+            // The replaced text-fallback name is this session's own map
+            // (F252-1).
+            match (
+                game.replaced_text_fallback_map.as_deref(),
+                game.map.as_deref(),
+            ) {
+                (Some(old), Some(map)) if read.trim().eq_ignore_ascii_case(old.trim()) => map,
+                _ => read,
+            }
+        }),
         start_screen,
         block_map_vote,
         deferred: game.deferred.is_some(),
@@ -3653,23 +3807,39 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     }
 }
 
+/// Switches for one vision pass, by name, so two of them cannot be swapped at
+/// the call site (F251-4).
+#[derive(Debug, Clone, Copy)]
+struct FrameFlags {
+    /// Colour-flood outcome detection is plausible for this session's age.
+    allow_banner_recovery: bool,
+    /// The open session already has a map (the lazy full-board OCR may skip).
+    session_map_known: bool,
+    /// The shadow log worker is on.
+    shadow_on: bool,
+    /// `reader = "new"`: the banner read may supply the top-bar map.
+    use_new_reader: bool,
+}
+
 /// The blocking vision/OCR pass over one Tab frame, extracted from
 /// `handle_capture` so the async orchestration reads as a straight line
 /// (QUAL-001). Pure function of its inputs: decides the outcome, runs the
 /// pre-OCR preflight, and (when the frame is a scoreboard) the portrait match,
 /// per-cell OCR, career/map reads, and lazy full-board OCR. Returns everything
 /// the caller needs, or a cheap rejection when the frame has no scoreboard rows.
-#[allow(clippy::too_many_arguments)]
 fn analyze_frame(
     img: image::DynamicImage,
     matcher: Arc<detect::hero_portrait::PortraitMatcher>,
     player_name_owned: Option<String>,
     game_outcome: detect::MatchOutcome,
-    allow_banner_recovery: bool,
-    session_map_known: bool,
-    shadow_on: bool,
-    use_new_reader: bool,
+    flags: FrameFlags,
 ) -> FrameAnalysisOutcome {
+    let FrameFlags {
+        allow_banner_recovery,
+        session_map_known,
+        shadow_on,
+        use_new_reader,
+    } = flags;
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection (only when the
     // caller deems a banner plausible — see MIN_BANNER_SESSION_AGE); else
@@ -3758,11 +3928,12 @@ fn analyze_frame(
     } else {
         Some(map_text)
     };
-    let map_from_panel = choose_top_bar_map(
+    let top_bar = choose_top_bar_map(
         use_new_reader,
-        || shadow::read_top_bar(&img),
+        || shadow::read_banner(&img),
         map_panel_raw.as_deref().and_then(parse::match_map_in_text),
     );
+    let map_from_panel = top_bar.map;
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path —
@@ -3794,6 +3965,8 @@ fn analyze_frame(
         career_hero,
         map_from_panel,
         map_panel_raw,
+        map_from_banner: top_bar.from_banner,
+        banner: top_bar.banner,
         shadow_input: shadow::worker::ShadowInput::when(
             shadow_on,
             &scoreboard,
@@ -3957,6 +4130,7 @@ fn skipped_capture_report(
         seal: None,
         close_reason: None,
         held_at,
+        map_replaces_text_fallback: false,
     }
 }
 
@@ -4153,6 +4327,7 @@ fn blank_rejected_report(
         seal: None,
         close_reason: None,
         held_at: None,
+        map_replaces_text_fallback: false,
     }
 }
 
@@ -4276,6 +4451,7 @@ async fn apply_new_reader(
     player_row_idx: Option<usize>,
     team_size: usize,
     board_override: Option<shadow::BoardRead>,
+    banner: Option<Option<shadow::banner::MapRead>>,
 ) {
     let board = if let Some(mut board) = board_override {
         board.set_result(shadow::result_field(evidence));
@@ -4285,7 +4461,12 @@ async fn apply_new_reader(
         let evidence = evidence.clone();
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut board = shadow::read_board(&frame);
+                // The banner the top bar already read, so the frame is read
+                // once per Tab (F251-3).
+                let mut board = match banner {
+                    Some(read) => shadow::read_board_with_banner(&frame, read),
+                    None => shadow::read_board(&frame),
+                };
                 board.set_result(shadow::result_field(&evidence));
                 board
             }))
@@ -4329,37 +4510,67 @@ async fn apply_new_reader(
     );
 }
 
+/// The top-bar map of one Tab, and the banner read behind it.
+#[derive(Debug, Clone, PartialEq)]
+struct TopBarChoice {
+    map: Option<String>,
+    /// `map` is a sure banner read, not the top-bar OCR.
+    from_banner: bool,
+    /// The banner read, for the board's map field (see
+    /// [`FrameAnalysis::banner`]).
+    banner: Option<Option<shadow::banner::MapRead>>,
+}
+
 /// The top-bar map of one Tab: the read capture policy stores as
 /// [`boundary::MapSource::TopBar`].
 ///
-/// With `reader = "new"` a sure banner read ([`shadow::read_top_bar`]: the
-/// map pack's glyph match, no OCR) is the top-bar map. It then goes through
-/// the same policy as the top-bar OCR: the session map, the vote-candidate
-/// veto, a hinted different-map split and the untracked-map rules. When the
-/// banner reader abstains (no pack, no banner, a flagged read, or a name the
-/// tracker would not store) the top-bar OCR is used, the way the new reader
-/// falls back to ocr-v1 for every other field. With `reader = "ocr-v1"` the
-/// banner is never read and the OCR label is returned unchanged.
+/// With `reader = "new"` a sure banner read (`shadow::top_bar_map` over
+/// `banner()`: the map pack's glyph match, no OCR) is the top-bar map. It
+/// then goes through the same policy as the top-bar OCR: the session map, the
+/// vote-candidate veto, a hinted different-map split and the untracked-map
+/// rules. When the banner reader abstains (no pack, no banner, a flagged
+/// read, or a name the tracker would not store) the top-bar OCR is used, the
+/// way the new reader falls back to ocr-v1 for every other field. A panic in
+/// the banner reader is an abstain too: it never fails the Tab, the same
+/// isolation `apply_new_reader` gives the board read (F251-2). With
+/// `reader = "ocr-v1"` the banner is never read and the OCR label is
+/// returned unchanged.
 fn choose_top_bar_map(
     use_new_reader: bool,
-    banner: impl FnOnce() -> Option<shadow::TopBarMap>,
+    banner: impl FnOnce() -> Option<shadow::banner::MapRead>,
     ocr_map: Option<String>,
-) -> Option<String> {
+) -> TopBarChoice {
+    let ocr = |banner| TopBarChoice {
+        map: ocr_map.clone(),
+        from_banner: false,
+        banner,
+    };
     if !use_new_reader {
-        return ocr_map;
+        return ocr(None);
     }
-    match banner() {
-        Some(read) => {
+    let read = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(banner)) {
+        Ok(read) => read,
+        Err(_) => {
+            tracing::warn!("banner reader panicked; using the top-bar OCR for this Tab");
+            return ocr(None);
+        }
+    };
+    match read.as_ref().and_then(shadow::top_bar_map) {
+        Some(top) => {
             tracing::info!(
-                map = %read.name,
-                score = read.score,
-                margin = read.margin,
-                ocr_agrees = ocr_map.as_deref() == Some(read.name.as_str()),
+                map = %top.name,
+                score = top.score,
+                margin = top.margin,
+                ocr_agrees = ocr_map.as_deref() == Some(top.name.as_str()),
                 "top-bar map from the map pack"
             );
-            Some(read.name)
+            TopBarChoice {
+                map: Some(top.name),
+                from_banner: true,
+                banner: Some(read),
+            }
         }
-        None => ocr_map,
+        None => ocr(Some(read)),
     }
 }
 
@@ -4386,7 +4597,10 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
-async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
+async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Result<CaptureReport> {
+    if ctx.use_new_reader {
+        req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await;
+    }
     // QUAL-002 follow-up (multi-file seam split — parked for USER per DR-1 A4)
     // Ergonomic locals over the context/request (the body predates A1).
     let backend = &ctx.backend;
@@ -4413,21 +4627,15 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         let matcher = Arc::clone(&ctx.portrait_matcher);
         // Clone player_name so the blocking closure can own it.
         let player_name_owned = player_name.map(|s| s.to_string());
-        let session_map_known = session_map.is_some();
-        let shadow_on = ctx.shadow.is_some();
-        let use_new_reader = ctx.use_new_reader;
+        let flags = FrameFlags {
+            allow_banner_recovery,
+            session_map_known: session_map.is_some(),
+            shadow_on: ctx.shadow.is_some(),
+            use_new_reader: ctx.use_new_reader,
+        };
         let analysis = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let analysis = analyze_frame(
-                img,
-                matcher,
-                player_name_owned,
-                game_outcome,
-                allow_banner_recovery,
-                session_map_known,
-                shadow_on,
-                use_new_reader,
-            );
+            let analysis = analyze_frame(img, matcher, player_name_owned, game_outcome, flags);
             stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
             analysis
         })
@@ -4495,6 +4703,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     seal: None,
                     close_reason: None,
                     held_at: None,
+                    map_replaces_text_fallback: false,
                 });
             }
         };
@@ -4508,6 +4717,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         career_hero,
         map_from_panel,
         map_panel_raw,
+        map_from_banner,
+        banner,
         scoreboard: scoreboard_img,
         player_row_idx,
         name_match,
@@ -4605,6 +4816,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             seal: None,
             close_reason: None,
             held_at: None,
+            map_replaces_text_fallback: false,
         });
     }
 
@@ -4746,6 +4958,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 row_id: identified_row_id(player_row_idx),
                 hero: &parsed.hero,
                 map_from_panel: map_from_panel.as_deref(),
+                panel_from_banner: map_from_banner,
                 parsed_map: &parsed.map_name,
                 frame_outcome,
             };
@@ -4923,6 +5136,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     player_row_idx,
                     team_size,
                     board_override,
+                    banner,
                 )
                 .await;
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
@@ -5017,6 +5231,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 seal: plan.seal,
                 close_reason: plan.close_reason,
                 held_at: None,
+                map_replaces_text_fallback: staged.replaced_text_fallback,
             })
         }
         Err(miss) => {
@@ -5079,6 +5294,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 seal: None,
                 close_reason: None,
                 held_at: None,
+                map_replaces_text_fallback: false,
             })
         }
     }
@@ -6495,6 +6711,7 @@ mod tests {
             deferred_at: None,
             deferred_imported: false,
             text_fallback_locked: false,
+            replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
         }
     }
@@ -7331,6 +7548,7 @@ mod tests {
     fn stale_persisted_game_is_not_recovered() {
         let dir = tempfile::tempdir().expect("tempdir");
         let stale = PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -7533,6 +7751,35 @@ mod tests {
             "a lock written to disk must still be set after recovery"
         );
         assert_eq!(recovered.map.as_deref(), Some("Dorado"));
+    }
+
+    /// F252-1: the text-fallback name a banner read replaced survives a
+    /// restart, so the game's accolade still counts as this game.
+    #[test]
+    fn a_replaced_text_fallback_name_survives_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g =
+            ActiveGame::open_now("renamed".into(), detect::MatchOutcome::Unknown, Vec::new());
+        g.map = Some("Ilios".into());
+        g.map_source = Some(boundary::MapSource::TopBar);
+        g.replaced_text_fallback_map = Some("Busan".into());
+        persist_active_game(dir.path(), Some(&g));
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert_eq!(
+            recovered.replaced_text_fallback_map.as_deref(),
+            Some("Busan")
+        );
+        // an older skeleton without the field reads as no rename
+        let path = active_game_path(dir.path());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("replaced_text_fallback_map");
+        std::fs::write(&path, value.to_string()).unwrap();
+        let old = recover_active_game(dir.path()).expect("older skeleton recovers");
+        assert_eq!(old.replaced_text_fallback_map, None);
     }
 
     #[test]
@@ -7829,12 +8076,15 @@ mod tests {
         assert!(input.map_trusted);
     }
 
-    fn banner(name: &str) -> shadow::TopBarMap {
-        shadow::TopBarMap {
-            name: name.into(),
-            mode: None,
+    fn banner_read(key: &str, suspect: bool) -> shadow::banner::MapRead {
+        let info = shadow::banner::MAPS.iter().find(|m| m.key == key).unwrap();
+        shadow::banner::MapRead {
+            map: Some(info),
+            best: Some(info),
             score: 0.95,
             margin: 0.2,
+            suspect,
+            found_banner: true,
         }
     }
 
@@ -7842,27 +8092,37 @@ mod tests {
     /// map is the OCR label, read or not.
     #[test]
     fn ocr_v1_never_reads_the_banner_for_the_top_bar_map() {
-        let never = || -> Option<shadow::TopBarMap> { panic!("banner read under ocr-v1") };
-        assert_eq!(
-            choose_top_bar_map(false, never, Some("Busan".into())),
-            Some("Busan".to_string())
-        );
-        assert_eq!(choose_top_bar_map(false, never, None), None);
+        let called = std::cell::Cell::new(false);
+        let read = || {
+            called.set(true);
+            Some(banner_read("ilios", false))
+        };
+        let t = choose_top_bar_map(false, read, Some("Busan".into()));
+        assert_eq!(t.map.as_deref(), Some("Busan"));
+        assert!(!t.from_banner);
+        assert_eq!(t.banner, None);
+        assert_eq!(choose_top_bar_map(false, read, None).map, None);
+        assert!(!called.get(), "the banner was read under ocr-v1");
     }
 
     #[test]
     fn the_new_reader_takes_a_sure_banner_read_over_the_ocr_label() {
-        assert_eq!(
-            choose_top_bar_map(true, || Some(banner("Ilios")), Some("Busan".into())),
-            Some("Ilios".to_string())
+        let t = choose_top_bar_map(
+            true,
+            || Some(banner_read("ilios", false)),
+            Some("Busan".into()),
         );
+        assert_eq!(t.map.as_deref(), Some("Ilios"));
+        assert!(t.from_banner);
         assert_eq!(
-            choose_top_bar_map(true, || Some(banner("Ilios")), None),
-            Some("Ilios".to_string())
+            t.banner,
+            Some(Some(banner_read("ilios", false))),
+            "kept for the board"
         );
+        let top = choose_top_bar_map(true, || Some(banner_read("ilios", false)), None).map;
+        assert_eq!(top.as_deref(), Some("Ilios"));
         // The banner read is a top-bar read: a session without a map stores
         // it as MapSource::TopBar, and a session map still wins.
-        let top = choose_top_bar_map(true, || Some(banner("Ilios")), None);
         assert_eq!(
             resolved_map(None, top.as_deref(), "Nepal", &[]),
             ("Ilios".to_string(), Some(boundary::MapSource::TopBar))
@@ -7879,46 +8139,204 @@ mod tests {
         );
     }
 
-    /// The capture path reads the banner only through `choose_top_bar_map`,
-    /// with the daemon's reader switch. Hard-wiring `true` or `false`, or
-    /// reading the banner anywhere else in the vision pass, fails here.
+    /// An abstaining banner (no pack, a flagged read, an unknown name:
+    /// `shadow::top_bar_map` returns `None`) leaves the OCR label in place.
+    /// The read itself is still handed on, so the board does not read the
+    /// frame again.
+    #[test]
+    fn an_abstaining_banner_falls_back_to_the_ocr_label() {
+        let flagged = choose_top_bar_map(
+            true,
+            || Some(banner_read("ilios", true)),
+            Some("Busan".into()),
+        );
+        assert_eq!(flagged.map.as_deref(), Some("Busan"));
+        assert!(!flagged.from_banner);
+        assert_eq!(flagged.banner, Some(Some(banner_read("ilios", true))));
+        let no_pack = choose_top_bar_map(true, || None, Some("Busan".into()));
+        assert_eq!(no_pack.map.as_deref(), Some("Busan"));
+        assert_eq!(
+            no_pack.banner,
+            Some(None),
+            "no pack: the board reads no map either"
+        );
+        assert_eq!(choose_top_bar_map(true, || None, None).map, None);
+    }
+
+    /// F251-2: a panic in the banner reader is an abstain. The Tab keeps
+    /// the OCR label, and the board reads the banner again under its own
+    /// `catch_unwind`.
+    #[test]
+    fn a_panicking_banner_reader_falls_back_to_the_ocr_label() {
+        let t = choose_top_bar_map(
+            true,
+            || -> Option<shadow::banner::MapRead> { panic!("banner reader") },
+            Some("Busan".into()),
+        );
+        assert_eq!(t.map.as_deref(), Some("Busan"));
+        assert!(!t.from_banner);
+        assert_eq!(t.banner, None);
+    }
+
+    /// The vision pass reads the banner only through `choose_top_bar_map`,
+    /// with the daemon's reader switch, and hands the read to
+    /// `apply_new_reader`. Whitespace is ignored, so a reflow does not break
+    /// this; hard-wiring the switch or a second banner read does.
     #[test]
     fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let src = include_str!("main.rs");
         let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-        let body = src[at..].split("\n}\n").next().unwrap();
-        let call = body
-            .find("let map_from_panel = choose_top_bar_map(")
-            .expect("the top-bar map goes through choose_top_bar_map");
-        let args = &body[call..call + 220];
-        assert!(args.contains("use_new_reader,"), "{args}");
-        assert!(args.contains("|| shadow::read_top_bar(&img),"), "{args}");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
         assert!(
-            args.contains("map_panel_raw.as_deref().and_then(parse::match_map_in_text),"),
-            "{args}"
+            body.contains("choose_top_bar_map( use_new_reader, || shadow::read_banner(&img),"),
+            "the top-bar map goes through choose_top_bar_map with the switch"
         );
-        assert_eq!(body.matches("read_top_bar").count(), 1);
-        assert!(body.contains("    use_new_reader: bool,\n) -> FrameAnalysisOutcome {"));
+        assert_eq!(body.matches("shadow::read_").count(), 1, "one banner read");
+        assert!(body.contains("map_from_banner: top_bar.from_banner, banner: top_bar.banner,"));
         let hc = src
             .find("\nasync fn handle_capture(")
             .expect("handle_capture");
-        let hc_body = src[hc..].split("\n}\n").next().unwrap();
-        assert!(hc_body.contains("let use_new_reader = ctx.use_new_reader;"));
-        let call = hc_body.find("analyze_frame(").expect("analyze_frame call");
-        let args = hc_body[call..].split(");").next().unwrap();
-        assert!(args.trim_end().ends_with("use_new_reader,"), "{args}");
+        let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+        assert!(hc_body.contains("use_new_reader: ctx.use_new_reader,"));
+        assert!(hc_body.contains(
+            "if ctx.use_new_reader { req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await; }"
+        ));
+        assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
+        assert!(hc_body.contains("board_override, banner, ) .await;"));
+        // the stored report carries the text-fallback replacement
+        assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
+        // apply_new_reader reuses the banner read instead of reading again
+        let an = src
+            .find("\nasync fn apply_new_reader(")
+            .expect("apply_new_reader");
+        let an_body = norm(src[an..].split("\n}\n").next().unwrap());
+        assert!(an_body.contains("Some(read) => shadow::read_board_with_banner(&frame, read),"));
     }
 
-    /// An abstaining banner (no pack, no banner, a flagged read, an unknown
-    /// name: `shadow::top_bar_map` returns `None` for all of them) leaves the
-    /// OCR label in place.
+    fn request_with_text_fallback() -> (ActiveGame, Instant) {
+        let now = test_now();
+        let mut g =
+            ActiveGame::open_at("s1".into(), detect::MatchOutcome::Unknown, Vec::new(), now);
+        g.map = Some("Busan".into());
+        g.map_source = Some(boundary::MapSource::TextFallback);
+        // a board of this game was accepted just now
+        g.gate = Some(GateState::default());
+        g.last_stats_at = Some(now);
+        (g, now)
+    }
+
+    fn banner_facts(map: &str, from_banner: bool) -> BoardFacts<'_> {
+        BoardFacts {
+            counters: Counters::default(),
+            suspect: NIGHT_CLEAN,
+            trusted_cells: true,
+            row_id: Some(2),
+            hero: "Ana",
+            map_from_panel: Some(map),
+            panel_from_banner: from_banner,
+            parsed_map: "",
+            frame_outcome: detect::MatchOutcome::Unknown,
+        }
+    }
+
+    /// F251-1: the rule for a sure banner read against the session map.
     #[test]
-    fn an_abstaining_banner_falls_back_to_the_ocr_label() {
+    fn a_banner_read_replaces_only_an_open_text_fallback_map() {
+        let (g, now) = request_with_text_fallback();
+        let req = build_capture_request(&g, false, now);
+        let ilios = banner_facts("Ilios", true);
         assert_eq!(
-            choose_top_bar_map(true, || None, Some("Busan".into())),
-            Some("Busan".to_string())
+            banner_replaces_text_fallback(&req, &ilios, false).as_deref(),
+            Some("Ilios")
         );
-        assert_eq!(choose_top_bar_map(true, || None, None), None);
+        // the top-bar OCR, the same map, and a split never replace
+        assert_eq!(
+            banner_replaces_text_fallback(&req, &banner_facts("Ilios", false), false),
+            None
+        );
+        assert_eq!(
+            banner_replaces_text_fallback(&req, &banner_facts("busan", true), false),
+            None
+        );
+        assert_eq!(banner_replaces_text_fallback(&req, &ilios, true), None);
+        // a source-less map counts as text, like ActiveGame::map_is_trusted
+        let mut no_source = request_with_text_fallback().0;
+        no_source.map_source = None;
+        let req_none = build_capture_request(&no_source, false, now);
+        assert!(banner_replaces_text_fallback(&req_none, &ilios, false).is_some());
+
+        type Edit = fn(&mut ActiveGame);
+        let closed: [(&str, Edit); 9] = [
+            ("top bar", |g| {
+                g.map_source = Some(boundary::MapSource::TopBar)
+            }),
+            ("accolade", |g| {
+                g.map_source = Some(boundary::MapSource::Accolade)
+            }),
+            ("outcome", |g| g.outcome = detect::MatchOutcome::Victory),
+            ("pending boundary", |g| g.pending_boundary = true),
+            ("lock", |g| g.text_fallback_locked = true),
+            ("reset streak", |g| g.reset_streak = 1),
+            ("carried board", |g| g.deferred = Some(Counters::default())),
+            ("candidates", |g| {
+                g.map_candidates = vec!["Oasis".into(), "Busan".into()]
+            }),
+            ("hint", |g| {
+                g.result_mark = Some(boundary::ResultMark {
+                    outcome: detect::MatchOutcome::Defeat,
+                    confirmed: false,
+                    seen_at: test_now(),
+                })
+            }),
+        ];
+        for (what, edit) in closed {
+            let mut h = request_with_text_fallback().0;
+            edit(&mut h);
+            let req = build_capture_request(&h, false, now);
+            assert_eq!(
+                banner_replaces_text_fallback(&req, &ilios, false),
+                None,
+                "{what}"
+            );
+        }
+        let mut voted = request_with_text_fallback().0;
+        voted.map_candidates = vec!["Ilios".into(), "Busan".into()];
+        let req = build_capture_request(&voted, false, now);
+        assert!(
+            banner_replaces_text_fallback(&req, &ilios, false).is_some(),
+            "a candidate passes"
+        );
+
+        // F252-3: a member's own map choice is never renamed
+        let mut edited = build_capture_request(&request_with_text_fallback().0, false, now);
+        edited.member_map_edit = true;
+        assert_eq!(banner_replaces_text_fallback(&edited, &ilios, false), None);
+
+        // F252-2: the last board must be at most STAT_SPLIT_MIN_GAP old
+        // the game's own clock: test_now() moves between calls
+        let (g, at) = request_with_text_fallback();
+        let at_bound = build_capture_request(&g, false, at + STAT_SPLIT_MIN_GAP);
+        assert!(banner_replaces_text_fallback(&at_bound, &ilios, false).is_some());
+        let late = build_capture_request(
+            &g,
+            false,
+            at + STAT_SPLIT_MIN_GAP + Duration::from_millis(1),
+        );
+        assert_eq!(
+            banner_replaces_text_fallback(&late, &ilios, false),
+            None,
+            "gap"
+        );
+        let mut no_board = request_with_text_fallback().0;
+        no_board.gate = None;
+        no_board.last_stats_at = None;
+        let req = build_capture_request(&no_board, false, now);
+        assert_eq!(
+            banner_replaces_text_fallback(&req, &ilios, false),
+            None,
+            "no board"
+        );
     }
 
     #[test]
@@ -8629,6 +9047,8 @@ mod tests {
                 career_hero: None,
                 map_from_panel: Some("Busan".into()),
                 map_panel_raw: Some("BUSAN".into()),
+                map_from_banner: false,
+                banner: None,
                 scoreboard: std::sync::Arc::new(frame.clone()),
                 player_row_idx: Some(0),
                 name_match: None,
@@ -9458,6 +9878,9 @@ mod tests {
         /// Tab. `None` keeps that bit. `Some(false)` is an identified row
         /// whose cells were unreadable, so the text fallback was used.
         cells_trusted: Option<bool>,
+        /// The next Tab's top-bar label is a sure banner read
+        /// (`reader = "new"`), not the top-bar OCR.
+        panel_from_banner: bool,
     }
 
     impl Night {
@@ -9474,6 +9897,7 @@ mod tests {
                 syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 uploads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 cells_trusted: None,
+                panel_from_banner: false,
             }
         }
 
@@ -9704,6 +10128,12 @@ mod tests {
             .await;
         }
 
+        /// The top-bar label is a sure banner read (`reader = "new"`).
+        async fn tab_banner(&mut self, cur: Counters, hero: &str, row: Option<u32>, map: &str) {
+            self.panel_from_banner = true;
+            self.tab_once(cur, hero, row, Some(map), NIGHT_CLEAN).await;
+        }
+
         /// The map came from full-board text. There is no top-bar label.
         async fn tab_text(
             &mut self,
@@ -9740,7 +10170,8 @@ mod tests {
             let opened =
                 open_fresh_if_tab_starts_one(&mut self.st, &self.store, self.dir.path(), self.now)
                     .await;
-            let req = build_capture_request(self.game(), opened, self.now);
+            let mut req = build_capture_request(self.game(), opened, self.now);
+            req.member_map_edit = session_has_member_map_edit(&self.store, &req).await;
             let (hero_resolved, source, hero_auth) = hero_auth::resolve_hero(
                 Some(hero),
                 None,
@@ -9757,6 +10188,7 @@ mod tests {
                 row_id: row,
                 hero: &hero_resolved,
                 map_from_panel: panel,
+                panel_from_banner: std::mem::take(&mut self.panel_from_banner),
                 parsed_map: text_map,
                 frame_outcome: frame,
             };
@@ -9816,6 +10248,7 @@ mod tests {
                     seal: None,
                     close_reason: None,
                     held_at: None,
+                    map_replaces_text_fallback: false,
                 };
                 apply_capture_report(
                     &mut self.st,
@@ -9878,6 +10311,7 @@ mod tests {
                 seal: plan.seal,
                 close_reason: plan.close_reason,
                 held_at: None,
+                map_replaces_text_fallback: staged.replaced_text_fallback,
             };
             apply_capture_report(
                 &mut self.st,
@@ -11537,6 +11971,212 @@ mod tests {
         assert_eq!(night.id(), id);
     }
 
+    /// F251-1: a text-fallback session is renamed by a later sure banner
+    /// read, rows included, and keeps the new trusted map.
+    /// F252-3: a member's map pick on a text-fallback session is never
+    /// renamed by a banner read, and its stored mode is left alone.
+    #[tokio::test]
+    async fn a_banner_read_never_renames_a_member_map_pick() {
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night
+            .store
+            .apply_command(&storage::StoreCommand::EditMatch {
+                session_id: id.clone(),
+                edit: storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        let before = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(
+            before
+                .iter()
+                .all(|r| r.corrected_map_name.as_deref() == Some("King's Row"))
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_banner(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        let after = night.store.get_session_snapshots(&id).await.unwrap();
+        for row in &after[..before.len()] {
+            assert_eq!(row.corrected_map_name.as_deref(), Some("King's Row"));
+            assert_ne!(row.map_name, "Ilios");
+        }
+        for (b, a) in before.iter().zip(&after) {
+            assert_eq!(
+                a.game_mode, b.game_mode,
+                "the member's mode is not rewritten"
+            );
+        }
+    }
+
+    /// F252-2: a sure banner read after a gap longer than the splitter's
+    /// STAT_SPLIT_MIN_GAP does not rename the text-fallback session: game 1's
+    /// end may have been missed, and this Tab may be game 2.
+    #[tokio::test]
+    async fn a_banner_read_after_a_long_gap_does_not_rename() {
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night.advance(STAT_SPLIT_MIN_GAP + Duration::from_secs(30));
+        night
+            .tab_banner(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.map_name == "Busan"),
+            "{:?}",
+            snaps.iter().map(|r| r.map_name.clone()).collect::<Vec<_>>()
+        );
+        if night.id() == id {
+            assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        }
+    }
+
+    /// F252-1: after a rename, the game's own accolade that still names the
+    /// replaced text-fallback map is this game's end screen: the outcome
+    /// lands on the renamed session, not on a new empty one.
+    #[tokio::test]
+    async fn the_accolade_of_a_renamed_game_seals_it() {
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_banner(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(night.id(), id, "no split on the old name");
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(snaps.iter().all(|row| row.map_name == "Ilios"));
+    }
+
+    #[tokio::test]
+    async fn a_sure_banner_read_replaces_a_text_fallback_session_map() {
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_banner(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        assert_eq!(night.id(), id, "same game, no split");
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::TopBar));
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(!snaps.is_empty());
+        assert!(
+            snaps
+                .iter()
+                .all(|row| row.map_name == "Ilios" && row.game_mode == "Control"),
+            "{:?}",
+            snaps.iter().map(|r| r.map_name.clone()).collect::<Vec<_>>()
+        );
+        // first trusted map wins from here on
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_banner(
+                night_counters(18, 24, 8, 2800, 10400, 500),
+                "Zenyatta",
+                Some(2),
+                "Nepal",
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+    }
+
+    /// The other direction: a trusted session map is never replaced, the
+    /// top-bar OCR never replaces a text fallback (ocr-v1 unchanged), and a
+    /// banner read after a result does not rename the finished game.
+    #[tokio::test]
+    async fn a_banner_read_keeps_a_trusted_or_closed_session_map() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_banner(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        assert_eq!(
+            night.game().map.as_deref(),
+            Some("Busan"),
+            "trusted top bar"
+        );
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::TopBar));
+        let snaps = night
+            .store
+            .get_session_snapshots(&night.id())
+            .await
+            .unwrap();
+        assert!(!snaps.is_empty());
+        assert!(
+            snaps.iter().all(|row| row.map_name == "Busan"),
+            "the rows keep the trusted map"
+        );
+
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Busan"), "top-bar OCR");
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(snaps.iter().all(|row| row.map_name == "Busan"));
+
+        let mut night = Night::new().await;
+        let id = text_fallback(&mut night, "Busan").await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_banner(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                "Ilios",
+            )
+            .await;
+        assert_eq!(night.id(), id);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"), "after a result");
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(snaps.iter().all(|row| row.map_name == "Busan"));
+    }
+
     #[tokio::test]
     async fn a_text_fallback_map_does_not_split_on_a_later_top_bar() {
         let mut night = Night::new().await;
@@ -11716,6 +12356,7 @@ mod tests {
             seal: None,
             close_reason: None,
             held_at: None,
+            map_replaces_text_fallback: false,
         };
         apply_capture_report(
             &mut night.st,
@@ -12322,6 +12963,7 @@ mod tests {
             seal: None,
             close_reason: None,
             held_at: None,
+            map_replaces_text_fallback: false,
         }
     }
 
@@ -12396,6 +13038,7 @@ mod tests {
             carried_at: Utc::now(),
             split: false,
             recorded_map: Some("Busan".into()),
+            replaced_text_fallback: false,
         };
         write_staged_rows(
             &store,
@@ -12910,6 +13553,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: "stale-unfinished".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: Some("Busan".into()),
@@ -12962,6 +13606,7 @@ mod tests {
             .unwrap();
         let now = Utc::now();
         let fresh = PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: "still-this-match".into(),
             last_activity: now,
             opened_at: now - chrono::Duration::minutes(5),
@@ -13070,6 +13715,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: "colosseo-defeat".into(),
             outcome: detect::MatchOutcome::Defeat,
             map: Some("Colosseo".into()),
@@ -13243,6 +13889,7 @@ mod tests {
             carried_at: Utc::now() - chrono::Duration::seconds(30),
             split: false,
             recorded_map: Some(map.to_string()),
+            replaced_text_fallback: false,
         };
         (staged, parsed)
     }
@@ -13492,6 +14139,7 @@ mod tests {
         store.insert_match(decided).await.unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: "next-game".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -13585,6 +14233,7 @@ mod tests {
         last_activity: chrono::DateTime<Utc>,
     ) -> PersistedGame {
         PersistedGame {
+            replaced_text_fallback_map: None,
             session_id: session_id.into(),
             outcome,
             map: map.map(str::to_string),
