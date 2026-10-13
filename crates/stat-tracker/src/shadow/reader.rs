@@ -43,7 +43,7 @@ use super::digits;
 use super::heroes::{
     HeroDirs, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
 };
-use super::result::{ResultEvidence, ResultRead, ResultTemplates};
+use super::result::{LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates};
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
 pub const STAT_FIELDS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -158,7 +158,9 @@ pub fn field_names(team_size: usize) -> Vec<String> {
 
 /// Where the optional packs live. `None` skips that reader. The hero
 /// matcher uses heroes-v2 (`hero_v2_dir`, `hero_v2_1080_dir`) when complete
-/// and heroes-v1 (`hero_dir`) otherwise ([`super::heroes::HeroSet`]).
+/// and heroes-v1 (`hero_dir`) otherwise ([`super::heroes::HeroSet`]). The
+/// result reader uses words-v1 (`words_dir`) when it loads and the old
+/// manual folder (`result_dir`) otherwise ([`ResultDirs`]).
 #[derive(Debug, Clone, Default)]
 pub struct ReaderConfig {
     pub hero_dir: Option<PathBuf>,
@@ -166,10 +168,11 @@ pub struct ReaderConfig {
     pub hero_v2_1080_dir: Option<PathBuf>,
     pub map_dir: Option<PathBuf>,
     pub result_dir: Option<PathBuf>,
+    pub words_dir: Option<PathBuf>,
 }
 
 impl ReaderConfig {
-    /// `<root>/templates/{heroes,heroes-v2,heroes-v2-1080,maps,result}`;
+    /// `<root>/templates/{heroes,heroes-v2,heroes-v2-1080,maps,result,words-v1}`;
     /// `root` is the data dir.
     pub fn from_data_dir(root: &Path) -> Self {
         Self {
@@ -178,6 +181,7 @@ impl ReaderConfig {
             hero_v2_1080_dir: Some(root.join(TEMPLATE_SUBDIR_V2_1080)),
             map_dir: Some(MapTemplates::dir_in(root)),
             result_dir: Some(ResultTemplates::dir_in(root)),
+            words_dir: Some(ResultTemplates::words_dir_in(root)),
         }
     }
 
@@ -196,7 +200,9 @@ pub struct Reader {
     /// heroes-v2 in the background after the reader is set up).
     heroes: LiveHeroSet,
     maps: Option<MapTemplates>,
-    results: Option<ResultTemplates>,
+    /// Re-loaded when the words-v1 or the old result folder changes (pack
+    /// sync installs words-v1 in the background).
+    results: LiveResults,
 }
 
 impl Reader {
@@ -207,15 +213,11 @@ impl Reader {
             v2_1080: config.hero_v2_1080_dir.clone(),
         });
         let maps = config.map_dir.as_deref().and_then(MapTemplates::load_dir);
-        let results = config
-            .result_dir
-            .as_deref()
-            .and_then(ResultTemplates::load_dir);
-        tracing::info!(
-            maps = maps.is_some(),
-            results = results.is_some(),
-            "shadow reader packs"
-        );
+        let results = LiveResults::load(ResultDirs {
+            words: config.words_dir.clone(),
+            legacy: config.result_dir.clone(),
+        });
+        tracing::info!(maps = maps.is_some(), "shadow reader packs");
         Self {
             heroes,
             maps,
@@ -297,8 +299,8 @@ impl Reader {
     /// Read one result frame (accolade screen, rank screen, or a plugged-in
     /// layout). Add the read to the match's [`ResultEvidence`].
     pub fn read_result(&self, result_frame: &DynamicImage) -> ResultRead {
-        match &self.results {
-            Some(t) => t.read(&result_frame.to_rgb8()),
+        match self.results.current() {
+            Some(t) => t.templates.read(&result_frame.to_rgb8()),
             None => ResultRead {
                 outcome: None,
                 source: None,
@@ -712,6 +714,91 @@ mod tests {
         let f = result_field(&e);
         assert_eq!(f.value, Some(Value::Text("defeat".into())));
         assert!(!f.suspect);
+    }
+
+    /// Shadow-first, through the save merge `reader = "new"` uses: a sure
+    /// result (two agreeing sure reads from the words pack) is stored, a
+    /// suspect one never is (ocr-v1's result stays and `result` is marked),
+    /// and frames that read no word leave ocr-v1's result as it was, with no
+    /// mark.
+    #[test]
+    fn only_a_sure_result_from_the_words_pack_is_saved() {
+        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
+        use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, WORDS_SUBDIR};
+        let data = tempfile::tempdir().unwrap();
+        let words = data.path().join(WORDS_SUBDIR);
+        write_pack(
+            &words,
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+                ("rank_screen_victory.png", &word(5, 66, 20)),
+                ("rank_screen_defeat.png", &word(7, 50, 20)),
+            ],
+        );
+        let reader = Reader::load(&ReaderConfig {
+            words_dir: Some(words),
+            ..Default::default()
+        });
+        let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        let accolade = |seed: u32, w: usize| {
+            let mut img = blank();
+            paint(&mut img, &lay(ACCOLADE), &word(seed, w, 30), [255, 220, 0]);
+            DynamicImage::ImageRgb8(img)
+        };
+        let victory = accolade(1, 70);
+        let defeat = accolade(3, 60);
+        let mut rank_victory = image::RgbImage::from_pixel(2560, 1440, image::Rgb([150, 100, 30]));
+        paint(
+            &mut rank_victory,
+            &lay(RANK_SCREEN),
+            &word(5, 66, 20),
+            [245, 245, 245],
+        );
+        let rank_victory = DynamicImage::ImageRgb8(rank_victory);
+        let nothing = DynamicImage::ImageRgb8(blank());
+        let ocr = OcrSnapshot {
+            map: "Ilios".into(),
+            mode: "Control".into(),
+            result: "defeat".into(),
+            hero: "Ana".into(),
+            elims: 1,
+            assists: 2,
+            deaths: 3,
+            damage: 4,
+            healing: 5,
+            mitigation: 6,
+        };
+        let own = OwnRow::Identified {
+            index: 0,
+            team_size: 5,
+        };
+        let save = |frames: &[&DynamicImage]| {
+            let mut e = ResultEvidence::default();
+            for f in frames {
+                e.add(reader.read_result(f));
+            }
+            let mut board = assemble(5, Some(&digits_board(10)), None);
+            board.set_result(result_field(&e));
+            let saved = merge_saved(&ocr, own, Some(&board));
+            let marked = saved.suspect_fields.iter().any(|f| f == "result");
+            (saved.result, marked)
+        };
+        assert_eq!(reader.read_result(&victory).outcome, Some(Outcome::Victory));
+        assert!(!reader.read_result(&victory).suspect);
+        // sure: the accolade and the rank screen agree
+        assert_eq!(save(&[&victory, &rank_victory]), ("victory".into(), false));
+        // one sure read is suspect: not saved
+        assert_eq!(save(&[&victory]), ("defeat".into(), true));
+        // a conflicting read is suspect: not saved
+        assert_eq!(
+            save(&[&victory, &rank_victory, &defeat]),
+            ("defeat".into(), true)
+        );
+        // no word on any frame: ocr-v1's result, unmarked, as before O1
+        assert_eq!(save(&[&nothing, &nothing]), ("defeat".into(), false));
+        assert_eq!(save(&[]), ("defeat".into(), false));
     }
 
     #[test]

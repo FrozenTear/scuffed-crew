@@ -1079,10 +1079,10 @@ pub struct HeroDirs {
 /// Identity of one pack folder: device, inode and mtime, or `None` when it
 /// is missing. Pack sync swaps a folder in with `renameat2(RENAME_EXCHANGE)`
 /// or a rename, so a new pack gives the live path a new inode.
-type DirStamp = Option<(u64, u64, i64, i64)>;
+pub(crate) type DirStamp = Option<(u64, u64, i64, i64)>;
 type Stamp = [DirStamp; 3];
 
-fn dir_stamp(dir: Option<&Path>) -> DirStamp {
+pub(crate) fn dir_stamp(dir: Option<&Path>) -> DirStamp {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::metadata(dir?).ok()?;
     m.is_dir()
