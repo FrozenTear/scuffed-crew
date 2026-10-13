@@ -726,6 +726,16 @@ impl PackKeeper {
         }
     }
 
+    /// True when startup read the pack list, so the first try downloads
+    /// the other packs at once. False when the first thing this job does
+    /// is wait (startup got no list, or did not run): a caller that wants
+    /// to give the downloads a moment has nothing to wait for then.
+    pub fn starts_with_downloads(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|startup| startup.entries.is_some())
+    }
+
     /// Meant for `tokio::spawn`. Returns once every pack is settled.
     pub async fn run(mut self) {
         let mut backoff = Backoff::default();
@@ -4622,9 +4632,9 @@ mod tests {
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(startup.report.heroes(), &PackSync::Unavailable);
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
-            .run()
-            .await;
+        let rig = rig(&served.base, dir.path(), Some(startup), 8, no_nap);
+        assert!(!rig.keeper.starts_with_downloads(), "it waits first");
+        let (finished, waits) = rig.run().await;
         let logs = logs.text();
         assert!(finished);
         assert_eq!(waits, [secs(60), secs(300), secs(900)]);
@@ -4819,9 +4829,9 @@ mod tests {
             }
             no_nap(nap)
         };
-        let (finished, waits) = rig_with(credentials, dir.path(), None, 8, on_nap)
-            .run()
-            .await;
+        let rig = rig_with(credentials, dir.path(), None, 8, on_nap);
+        assert!(!rig.keeper.starts_with_downloads(), "no startup sync ran");
+        let (finished, waits) = rig.run().await;
         let logs = logs.text();
         assert!(finished);
         assert_eq!(waits, [secs(60), secs(300)]);
@@ -4898,9 +4908,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
-            .run()
-            .await;
+        let rig = rig(&served.base, dir.path(), Some(startup), 8, no_nap);
+        assert!(rig.keeper.starts_with_downloads(), "startup read the list");
+        let (finished, waits) = rig.run().await;
         let logs = logs.text();
         assert!(finished);
         assert_eq!(waits, Vec::<Duration>::new());

@@ -430,9 +430,10 @@ async fn main() -> anyhow::Result<()> {
     // heroes-v1 syncs here; the other packs sync in the background once
     // capture is up. The new reader picks up heroes-v2 and heroes-v2-1080
     // on a later board when they land (`shadow::heroes::LiveHeroSet`).
-    let mut pack_startup = None;
+    let mut extra_packs = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
+        let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
             tracing::error!(
                 "sync paused — the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
@@ -448,6 +449,18 @@ async fn main() -> anyhow::Result<()> {
                 .await,
             );
         }
+        // The background job for every pack. It is made for every daemon
+        // that has sync set up, whatever the startup sync came to (a busy
+        // lock, a 429, packs switched off, no network, or no startup sync
+        // at all while the token is paused), and it keeps trying while the
+        // daemon runs. The client clone shares the URL and token, so a pair
+        // saved in Settings later is the one it uses.
+        let (data_dir, client) = (config.data_dir.clone(), client.clone());
+        extra_packs = Some(stat_tracker::packs::PackKeeper::new(
+            &config.data_dir,
+            pack_startup,
+            move || pack_credentials(&data_dir, &client),
+        ));
     }
 
     // Single wiring point for OCR debug dumps — the lib reads this switch
@@ -539,18 +552,8 @@ async fn main() -> anyhow::Result<()> {
     });
     // Capture never waits on the extra packs: a stalled download only
     // delays this task.
-    // It runs for every daemon that has sync set up, whatever the startup
-    // sync came to (a busy lock, a 429, packs switched off, no network, or
-    // no startup sync at all while the token is paused), and it keeps
-    // trying while the daemon runs.
-    if let Some(client) = ctx.sync_client.clone() {
-        // The clone shares the client's URL and token, and the task holds
-        // no `DaemonCtx`, so the store is still dropped when the loop ends.
-        let data_dir = ctx.data_dir.clone();
-        let keeper = stat_tracker::packs::PackKeeper::new(&ctx.data_dir, pack_startup, move || {
-            pack_credentials(&data_dir, &client)
-        });
-        tokio::spawn(keeper.run());
+    if let Some(extras) = extra_packs {
+        tokio::spawn(extras.run());
     }
     let result = run_loop(ctx).await;
     if result.is_ok()
@@ -10564,16 +10567,22 @@ mod tests {
         }
         assert!(at("maybe_vacuum(") < at("marker::start_run("));
         assert!(at("packs::sync_on_startup(") < at("marker::start_run("));
-        let keeper = at("packs::PackKeeper::new(");
-        assert!(keeper < at("run_loop(ctx).await"));
-        let condition = body[..keeper]
-            .rfind("    if ")
-            .expect("the keeper's condition");
-        assert!(
-            body[condition..].starts_with("    if let Some(client) = ctx.sync_client.clone() {\n"),
-            "the keeper must not depend on what the startup sync returned: {}",
-            &body[condition..keeper]
+        // The keeper is made after the paused / not paused branches have
+        // both closed, so it does not depend on what the startup sync
+        // returned or on whether one ran.
+        let (sync, keeper) = (
+            at("packs::sync_on_startup("),
+            at("packs::PackKeeper::new("),
         );
+        assert!(sync < keeper);
+        assert!(
+            body[sync..keeper].contains("\n        }\n"),
+            "the keeper must be made outside the startup sync's branch: {}",
+            &body[sync..keeper]
+        );
+        let spawn =
+            at("    if let Some(extras) = extra_packs {\n        tokio::spawn(extras.run());\n");
+        assert!(keeper < spawn && spawn < at("run_loop(ctx).await"));
     }
 
     /// Deleting the command-tick call, or the upload inside the timer, fails
