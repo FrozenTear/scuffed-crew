@@ -498,35 +498,57 @@ pub fn recognize_name(
     })
 }
 
-/// The name reads of one player row: the first window, then the alternates.
-fn recognize_row_names(
-    row_img: &DynamicImage,
-    team_size: usize,
-) -> (Option<CellOcrResult>, Vec<Option<CellOcrResult>>) {
-    // One read per name window. 5v5 has a window per table layout (in-match,
-    // in-match with perks, centred); which one holds the name is only known
-    // once the configured name is compared, so all of them are read.
-    let mut name_reads: Vec<Option<CellOcrResult>> =
-        preprocess::crop_name_cells(row_img, team_size)
-            .par_iter()
-            .map(|crop| recognize_name(crop).ok())
-            .collect();
-    let name = if name_reads.is_empty() {
-        None
-    } else {
-        name_reads.remove(0)
-    };
-    // Failed reads stay as `None` so each index keeps naming its window.
-    (name, name_reads)
-}
-
 /// Per-row OCR: extract name + all stat cells from a single player row.
 pub fn recognize_row(
     row_img: &DynamicImage,
     columns: &preprocess::StatColumns,
     team_size: usize,
 ) -> RowOcrResult {
-    let (name, name_alternates) = recognize_row_names(row_img, team_size);
+    recognize_row_with(row_img, columns, team_size, Names::Read)
+}
+
+/// Whether the per-row OCR reads the name windows (OCR site T4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Names {
+    /// ocr-v1: every name window is read.
+    Read,
+    /// `reader = "new"`: no name window is cropped or read by the per-cell
+    /// pass. The own row comes from [`crate::detect::own_row`]. This is not
+    /// "no name is read on the Tab": the lazy full-board read still covers
+    /// the whole board when the cell path could not supply everything, and
+    /// a board with neither a seed match nor a highlight has its name
+    /// windows read by [`recognize_scoreboard_names_pre_cropped`].
+    ///
+    /// Since alpha.7 O10 the new reader does not run the per-cell pass at
+    /// all (its stats are the digit reader's; the daemon hands over
+    /// [`unread_rows`]), so the daemon has no caller of `Skip` left. It
+    /// stays for tools and tests.
+    Skip,
+}
+
+fn recognize_row_with(
+    row_img: &DynamicImage,
+    columns: &preprocess::StatColumns,
+    team_size: usize,
+    names: Names,
+) -> RowOcrResult {
+    // One read per name window. 5v5 has a window per table layout (in-match,
+    // in-match with perks, centred); which one holds the name is only known
+    // once the configured name is compared, so all of them are read.
+    let mut name_reads: Vec<Option<CellOcrResult>> = match names {
+        Names::Read => preprocess::crop_name_cells(row_img, team_size)
+            .par_iter()
+            .map(|crop| recognize_name(crop).ok())
+            .collect(),
+        Names::Skip => Vec::new(),
+    };
+    let name = if name_reads.is_empty() {
+        None
+    } else {
+        name_reads.remove(0)
+    };
+    // Failed reads stay as `None` so each index keeps naming its window.
+    let name_alternates = name_reads;
 
     // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
     // Run in parallel — each cell creates its own Tesseract instance so there is
@@ -604,6 +626,17 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     cropped: &DynamicImage,
     team_size: usize,
 ) -> Vec<RowOcrResult> {
+    recognize_scoreboard_cells_pre_cropped_with(cropped, team_size, Names::Read)
+}
+
+/// [`recognize_scoreboard_cells_pre_cropped`] with the name windows read or
+/// skipped. With [`Names::Skip`] every row's `name` is `None` and
+/// `name_alternates` is empty; the stat cells are read exactly the same.
+pub fn recognize_scoreboard_cells_pre_cropped_with(
+    cropped: &DynamicImage,
+    team_size: usize,
+    names: Names,
+) -> Vec<RowOcrResult> {
     let total_rows = team_size * 2;
     let columns = calibrate_columns(cropped, team_size);
 
@@ -617,7 +650,12 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     let mut results: Vec<(usize, RowOcrResult)> = ocr_pool().install(|| {
         row_images
             .par_iter()
-            .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns, team_size)))
+            .map(|(idx, row_img)| {
+                (
+                    *idx,
+                    recognize_row_with(row_img, &columns, team_size, names),
+                )
+            })
             .collect()
     });
 
@@ -636,47 +674,59 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     results
 }
 
-/// The rows of a cropped scoreboard with their name cells only, for
-/// `reader = "new"`: the stat cells are the digit reader's, so no stat cell
-/// is read here (OCR site T3) and the stat columns are not calibrated (OCR
-/// site T2: calibration exists only to place the stat cell crops, and it is
-/// itself a run of stat cell OCR). `stats` is empty on every row.
+/// The name windows of every row, and nothing else: no stat cell is read.
 ///
-/// The names are still OCR (site T4): they are how a configured player name
-/// finds the member's row. With `names` false nothing is read at all and
-/// every row is blank, which is what a tracker with no player name needs.
+/// `reader = "new"` skips the name windows in the per-cell pass
+/// ([`Names::Skip`]). This is its fallback for a board on which neither an
+/// own-name seed nor the highlight names a row: the same crops and the same
+/// read ocr-v1 makes, so [`crate::parse::match_player_row_by_name`] sees
+/// what it sees on main. Rows are in board order; `stats` is empty.
 pub fn recognize_scoreboard_names_pre_cropped(
     cropped: &DynamicImage,
     team_size: usize,
-    names: bool,
 ) -> Vec<RowOcrResult> {
-    let blank = |name, name_alternates| RowOcrResult {
-        name,
-        name_alternates,
-        stats: Vec::new(),
-        mean_confidence: 0,
-    };
-    let total_rows = team_size * 2;
-    if !names {
-        return (0..total_rows).map(|_| blank(None, Vec::new())).collect();
-    }
-    // A row whose crop falls outside the board keeps its index, blank, so a
-    // row index means the same row here as in the digit reader's board.
-    let row_images: Vec<Option<DynamicImage>> = (0..total_rows)
-        .map(|i| preprocess::crop_player_row(cropped, i, team_size))
+    let row_images: Vec<DynamicImage> = (0..team_size * 2)
+        .filter_map(|i| preprocess::crop_player_row(cropped, i, team_size))
         .collect();
     ocr_pool().install(|| {
         row_images
             .par_iter()
-            .map(|row_img| match row_img {
-                Some(img) => {
-                    let (name, alternates) = recognize_row_names(img, team_size);
-                    blank(name, alternates)
+            .map(|row_img| {
+                let mut reads: Vec<Option<CellOcrResult>> =
+                    preprocess::crop_name_cells(row_img, team_size)
+                        .par_iter()
+                        .map(|crop| recognize_name(crop).ok())
+                        .collect();
+                let name = if reads.is_empty() {
+                    None
+                } else {
+                    reads.remove(0)
+                };
+                RowOcrResult {
+                    name,
+                    name_alternates: reads,
+                    stats: Vec::new(),
+                    mean_confidence: 0,
                 }
-                None => blank(None, Vec::new()),
             })
             .collect()
     })
+}
+
+/// The rows of a board nothing was read on: `2 * team_size` rows in board
+/// order with no name and no stat cell. `reader = "new"` hands these to the
+/// capture path in place of the per-cell pass: its stats are the digit
+/// reader's and its own row comes from [`crate::detect::own_row`], so no
+/// OCR runs for them, and this starts no OCR worker.
+pub fn unread_rows(team_size: usize) -> Vec<RowOcrResult> {
+    (0..team_size * 2)
+        .map(|_| RowOcrResult {
+            name: None,
+            name_alternates: Vec::new(),
+            stats: Vec::new(),
+            mean_confidence: 0,
+        })
+        .collect()
 }
 
 /// Column calibration (CG-4 revision). Preferred path: anchor each stat
@@ -1075,6 +1125,54 @@ fn run_ocr(
 mod tests {
     use super::*;
 
+    /// alpha.7 O9 (OCR site T4): with [`Names::Skip`] no name window is read,
+    /// on either table. ocr-v1 ([`Names::Read`]) still reads every window:
+    /// one on 6v6, three on 5v5.
+    #[test]
+    fn skipping_names_reads_no_name_window() {
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        for (team_size, alternates) in [(5usize, 2usize), (6, 0)] {
+            let skipped =
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Skip);
+            assert_eq!(skipped.len(), 2 * team_size);
+            for row in &skipped {
+                assert!(row.name.is_none(), "{team_size}v{team_size}");
+                assert!(row.name_alternates.is_empty(), "{team_size}v{team_size}");
+                assert_eq!(row.stats.len(), STATS_PER_ROW);
+            }
+            for rows in [
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Read),
+                recognize_scoreboard_cells_pre_cropped(&board, team_size),
+            ] {
+                assert_eq!(rows.len(), 2 * team_size);
+                for row in &rows {
+                    assert!(row.name.is_some(), "the first window is read");
+                    assert_eq!(row.name_alternates.len(), alternates);
+                }
+            }
+        }
+    }
+
+    /// alpha.7 O10: the rows the new reader hands over carry nothing that
+    /// was read, one per board row.
+    #[test]
+    fn unread_rows_carry_no_name_and_no_stat_cell() {
+        for team_size in [5usize, 6] {
+            let rows = unread_rows(team_size);
+            assert_eq!(rows.len(), 2 * team_size);
+            for row in &rows {
+                assert!(row.name.is_none() && row.name_alternates.is_empty());
+                assert!(row.stats.is_empty());
+                assert_eq!(row.mean_confidence, 0);
+            }
+        }
+        assert!(unread_rows(0).is_empty());
+    }
+
     #[test]
     fn dim_zero_cell_reads_as_zero() {
         // The primary mask erases this glyph (ink under the empty-cell
@@ -1145,30 +1243,6 @@ mod tests {
     fn better_offset_prefers_higher_score() {
         assert_eq!(better_offset((-0.1, 3), (-0.05, 5), None), (-0.05, 5));
         assert_eq!(better_offset((-0.1, 6), (-0.05, 5), None), (-0.1, 6));
-    }
-
-    /// `reader = "new"` rows (O10): one per board row, no stat cell at all.
-    /// A blank board has no name ink, so nothing here reaches Tesseract.
-    #[test]
-    fn name_only_rows_carry_no_stat_cells() {
-        let board = DynamicImage::new_rgb8(1664, 1007);
-        for team_size in [5usize, 6] {
-            let unnamed = recognize_scoreboard_names_pre_cropped(&board, team_size, false);
-            assert_eq!(unnamed.len(), team_size * 2);
-            assert!(unnamed.iter().all(|row| row.name.is_none()
-                && row.name_alternates.is_empty()
-                && row.stats.is_empty()
-                && row.mean_confidence == 0));
-            let named = recognize_scoreboard_names_pre_cropped(&board, team_size, true);
-            assert_eq!(named.len(), team_size * 2);
-            assert!(named.iter().all(|row| row.stats.is_empty()));
-            assert!(
-                named
-                    .iter()
-                    .all(|row| row.name.as_ref().is_some_and(|n| n.value.is_empty())),
-                "the name window is read (and is empty on a blank board)"
-            );
-        }
     }
 
     #[test]

@@ -619,11 +619,7 @@ mod tests {
 
         // reader = "new" hands over rows with no stat cell: there is no
         // ocr-v1 side, so only the two suspect cells are listed
-        let rows = crate::ocr::recognize_scoreboard_names_pre_cropped(
-            &DynamicImage::new_rgb8(4, 4),
-            5,
-            false,
-        );
+        let rows = crate::ocr::unread_rows(5);
         let cv_only = ShadowJob::new(&input(), &rows, Some(0), "s3", Utc::now());
         let r = compare(&cv_only, Ok(board_clone), 0);
         assert_eq!((r.cells, r.agree), (6, 0));

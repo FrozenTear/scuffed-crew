@@ -84,9 +84,11 @@ pub struct Config {
     /// its place. A game has no stored row until each of the six stats has
     /// had a sure read on some Tab of it: a stat never read is not stored
     /// or uploaded as 0, and a game that ends that way is not stored at
-    /// all. The top-bar map still falls back to OCR when the banner reader
-    /// abstains, and the name cells are read with OCR when a player name is
-    /// set. Under `"new"` the result words, the FINAL SCORE line and the
+    /// all. The member's own row is found from the own-name seeds and the
+    /// highlight; a name is read with OCR only on a board where neither
+    /// names a row and a player name is set. The top-bar map still falls
+    /// back to OCR when the banner reader abstains. Under `"new"` the
+    /// result words, the FINAL SCORE line and the
     /// game-start screens are read from the words pack, with OCR only where
     /// a template or mask is not loaded; the accolade and rank words and
     /// the accolade map are still OCR.

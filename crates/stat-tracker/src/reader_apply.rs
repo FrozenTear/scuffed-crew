@@ -2,7 +2,7 @@
 //!
 //! Under `reader = "new"` the six stats of the member's row come from the
 //! digit reader only (alpha.7 O10). The capture path refuses a board this
-//! reader cannot vouch for ([`board_refusal`], [`read_own_row`]) and stores
+//! reader cannot vouch for ([`board_refusal`], [`read_own_row_stats`]) and stores
 //! nothing from that Tab. On an accepted board each stat cell is either
 //! sure, and stored, or held ([`crate::shadow::confirm::CellTrust`]): a
 //! suspect or empty digit read is never stored and no OCR number takes its
@@ -150,9 +150,12 @@ pub fn board_refusal(board: &BoardRead, team_size: usize) -> Option<&'static str
     }
 }
 
-/// The member's row off an accepted board ([`board_refusal`] is `None`).
+/// The stats of the member's row off an accepted board ([`board_refusal`]
+/// is `None`). Which row that is, and how sure, is not decided here: that
+/// is `detect::own_row` (`OwnRow`, `OwnRowRead`, `read_own_row`), whose
+/// names these are kept apart from.
 #[derive(Debug)]
-pub struct OwnRowRead {
+pub struct OwnRowStats {
     /// A fresh row with the sure stats. A held cell is 0 here: the capture
     /// gate puts the game's last accepted value in its place.
     pub matched: PersonalMatch,
@@ -185,11 +188,11 @@ pub const MIN_SURE_CELLS: usize = 4;
 /// and a row with fewer than [`MIN_SURE_CELLS`] sure cells is
 /// [`ScoreboardMiss::CellsUnreadable`]. There is no third path: a row is
 /// never rebuilt from text.
-pub fn read_own_row(
+pub fn read_own_row_stats(
     board: &BoardRead,
     own: OwnRow,
     outcome: &str,
-) -> Result<OwnRowRead, ScoreboardMiss> {
+) -> Result<OwnRowStats, ScoreboardMiss> {
     let OwnRow::Identified { index, team_size } = own else {
         return Err(ScoreboardMiss::PlayerRowNotFound);
     };
@@ -204,7 +207,7 @@ pub fn read_own_row(
         CellTrust::Sure(n) => n,
         CellTrust::Held => 0,
     });
-    Ok(OwnRowRead {
+    Ok(OwnRowStats {
         matched: crate::parse::match_from_stats(stats, outcome),
         held: cells.map(|cell| cell == CellTrust::Held),
     })
@@ -356,6 +359,24 @@ pub fn upload_suspect_fields(stored: &[String]) -> Vec<String> {
         .filter(|(idx, _)| seen[*idx])
         .map(|(_, name)| (*name).to_string())
         .collect()
+}
+
+/// The fields read off the member's own row: the hero and the six stats.
+/// The map, the mode and the result are the same on every row.
+pub const OWN_ROW_FIELDS: [&str; 7] = ["hero", "e", "a", "d", "dmg", "h", "mit"];
+
+/// Mark every own-row field suspect.
+///
+/// `reader = "new"` finds the own row from the own-name seeds and the
+/// highlight ([`crate::detect::own_row`]). When only one of the two named
+/// the row where both could have, the row is still used, but the values on
+/// it may be another player's: each of them is marked. The upload allowlist
+/// has no name for the row itself, so the row's fields carry the mark.
+pub fn mark_own_row_suspect(fields: &mut Vec<String>) {
+    for name in OWN_ROW_FIELDS {
+        push_suspect(fields, name);
+    }
+    *fields = upload_suspect_fields(fields);
 }
 
 /// Drop suspect names cleared by a manual edit.
@@ -667,7 +688,7 @@ mod tests {
                 _ => {}
             }
         }
-        let read = read_own_row(&board, identified(2, 5), "defeat").unwrap();
+        let read = read_own_row_stats(&board, identified(2, 5), "defeat").unwrap();
         assert_eq!(read.held, [false, false, false, false, true, true]);
         let m = &read.matched;
         assert_eq!(
@@ -703,11 +724,11 @@ mod tests {
     fn read_own_row_refuses_without_a_row_or_with_under_four_sure_cells() {
         let board = confident_board(5, 2);
         assert_eq!(
-            read_own_row(&board, OwnRow::Uncertain, "unknown").unwrap_err(),
+            read_own_row_stats(&board, OwnRow::Uncertain, "unknown").unwrap_err(),
             ScoreboardMiss::PlayerRowNotFound
         );
         assert_eq!(
-            read_own_row(&board, identified(10, 5), "unknown").unwrap_err(),
+            read_own_row_stats(&board, identified(10, 5), "unknown").unwrap_err(),
             ScoreboardMiss::PlayerRowNotFound
         );
         // the row is on the board, but every cell of it is suspect
@@ -718,7 +739,7 @@ mod tests {
             }
         }
         assert_eq!(
-            read_own_row(&unsure, identified(2, 5), "unknown").unwrap_err(),
+            read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap_err(),
             ScoreboardMiss::CellsUnreadable
         );
         // one, two and three sure cells are still not a row (F266-6): a
@@ -731,14 +752,14 @@ mod tests {
         for (suffix, value) in [("e", 4), ("a", 2), ("d", 1)] {
             sure(&mut unsure, suffix, value);
             assert_eq!(
-                read_own_row(&unsure, identified(2, 5), "unknown").unwrap_err(),
+                read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap_err(),
                 ScoreboardMiss::CellsUnreadable,
                 "sure up to {suffix}"
             );
         }
         // the fourth makes it a row: the other two are held
         sure(&mut unsure, "dmg", 900);
-        let read = read_own_row(&unsure, identified(2, 5), "unknown").unwrap();
+        let read = read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap();
         assert_eq!(read.held, [false, false, false, false, true, true]);
         assert_eq!(
             (
@@ -1275,6 +1296,30 @@ mod tests {
         assert!(
             flat.iter()
                 .all(|name| SUSPECT_FIELD_NAMES.contains(&name.as_str()))
+        );
+    }
+
+    #[test]
+    fn a_suspect_own_row_marks_the_fields_read_off_the_row_and_no_other() {
+        let mut fields = Vec::new();
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, ["hero", "e", "a", "d", "dmg", "h", "mit"]);
+        // the map, the mode and the result are not read off the row
+        for shared in ["map", "mode", "result"] {
+            assert!(!fields.iter().any(|f| f == shared));
+        }
+        // marks already there stay, nothing repeats, the order is the API's
+        let mut fields = vec!["mit".to_string(), "map".into(), "r2.e".into()];
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, ["map", "hero", "e", "a", "d", "dmg", "h", "mit"]);
+        let again = fields.clone();
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, again);
+        // every name is one the server accepts
+        assert!(
+            OWN_ROW_FIELDS
+                .iter()
+                .all(|f| SUSPECT_FIELD_NAMES.contains(f))
         );
     }
 

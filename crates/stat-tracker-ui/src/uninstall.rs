@@ -605,6 +605,13 @@ pub fn preview(
             paths: vec![],
         });
     }
+    if let Some(seed) = own_name_seed_dir(data_dir, home, prefix) {
+        groups.push(PreviewGroup {
+            heading: "Crops of your own name",
+            note: "Small pictures of your own in-game name, kept to find your row. Always removed.",
+            paths: vec![seed],
+        });
+    }
     if delete_data {
         let data_note = if !confined_path(data_dir, home, prefix) {
             "This folder is outside your home folder, so it will be left in place."
@@ -693,6 +700,10 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
     }
     let _ = run_systemctl(&req.systemctl, &["--user", "daemon-reload"]);
 
+    // The crops of the member's own name never outlive the program, kept
+    // data or not.
+    remove_own_name_seed(&req.data_dir, &req.home, &req.prefix);
+
     if req.delete_data {
         let config = spec_path(&req.home, &req.prefix, PathClass::Config);
         if let Err(still) = purge_saved_games(&req.data_dir, &req.home, &req.prefix) {
@@ -709,6 +720,36 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
         skipped: false,
         removed_files: removed.len(),
     })
+}
+
+fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+}
+
+/// `<data_dir>/private/own-name` when it is there to remove: the crops of
+/// the member's own in-game name that `reader = "new"` keeps to find the own
+/// row. `None` when the saved-games folder is outside the home and install
+/// folders, or when a part of the path is a link or not a folder.
+fn own_name_seed_dir(data_dir: &Path, home: &Path, prefix: &Path) -> Option<PathBuf> {
+    if !confined_path(data_dir, home, prefix) {
+        return None;
+    }
+    let seed = stat_tracker::detect::own_row::seed_dir(data_dir);
+    let private = seed.parent()?;
+    (is_real_dir(data_dir) && is_real_dir(private) && is_real_dir(&seed)).then_some(seed)
+}
+
+/// Delete the own-name crops. They go on every uninstall, with the saved
+/// games kept or not. A link on the way is not followed, and a `private`
+/// folder that holds anything else stays.
+fn remove_own_name_seed(data_dir: &Path, home: &Path, prefix: &Path) {
+    let Some(seed) = own_name_seed_dir(data_dir, home, prefix) else {
+        return;
+    };
+    let _ = fs::remove_dir_all(&seed);
+    if let Some(private) = seed.parent() {
+        let _ = fs::remove_dir(private);
+    }
 }
 
 fn partial_message(removed: &[PathBuf], left: &[PathBuf]) -> String {
@@ -1542,6 +1583,73 @@ mod tests {
             units
                 .iter()
                 .any(|unit| unit == "scuffed-stat-tracker-session.service")
+        );
+    }
+
+    /// alpha.7 O9: the crops of the member's own name go on every uninstall,
+    /// with the saved games kept. Nothing else in the data folder goes with
+    /// them, and a link is not followed.
+    #[test]
+    fn the_own_name_crops_are_removed_even_when_data_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        let data = spec_path(&home, &prefix, PathClass::Data);
+        let seed = data.join("private/own-name");
+        let exe = prefix.join("bin/stat-tracker-gui");
+
+        // listed in the dialog, and removed with the data kept
+        layout(&home, &prefix);
+        write(&seed.join("seeds.json"), "seed");
+        let groups = preview(&home, &prefix, false, &data, None);
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.heading == "Crops of your own name" && g.paths == vec![seed.clone()])
+        );
+        let origin = decide(&exe, &home, None);
+        apply(&request(&home, &prefix, false, origin)).unwrap();
+        assert!(!seed.exists(), "the crops survived a keep-data uninstall");
+        assert!(!data.join("private").exists(), "the empty folder was left");
+        assert!(data.join("stats.surrealkv/db").is_file(), "games database");
+
+        // another file in private/ stays, and so does its folder
+        layout(&home, &prefix);
+        write(&seed.join("seeds.json"), "seed");
+        write(&data.join("private/keep.txt"), "mine");
+        let origin = decide(&exe, &home, None);
+        apply(&request(&home, &prefix, false, origin)).unwrap();
+        assert!(!seed.exists());
+        assert_eq!(
+            fs::read_to_string(data.join("private/keep.txt")).unwrap(),
+            "mine"
+        );
+
+        // a linked private folder is not followed, and not listed
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(data.join("private")).unwrap();
+            let elsewhere = dir.path().join("elsewhere");
+            write(&elsewhere.join("own-name/seeds.json"), "not ours");
+            std::os::unix::fs::symlink(&elsewhere, data.join("private")).unwrap();
+            layout(&home, &prefix);
+            assert!(
+                !preview(&home, &prefix, false, &data, None)
+                    .iter()
+                    .any(|g| g.heading == "Crops of your own name")
+            );
+            let origin = decide(&exe, &home, None);
+            apply(&request(&home, &prefix, false, origin)).unwrap();
+            assert!(elsewhere.join("own-name/seeds.json").is_file());
+        }
+
+        // no crops: no group in the dialog
+        let _ = fs::remove_file(data.join("private"));
+        assert!(
+            !preview(&home, &prefix, false, &data, None)
+                .iter()
+                .any(|g| g.heading == "Crops of your own name")
         );
     }
 
