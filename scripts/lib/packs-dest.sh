@@ -7,31 +7,51 @@
 # follow this script on stdin are the upload stream (see `apply`). bash reads
 # a script from a pipe one byte at a time, so the stream stays intact.
 #
-# It needs bash and coreutils. No jq, no python. podman only for --volume.
-# It never unpacks a tar.
+# It needs bash 4.4+, GNU coreutils 8.24+ (`sync FILE`) and flock from
+# util-linux. No jq, no python. podman only for --volume. It never unpacks a
+# tar, and it never calls a bare `sync`: only the files it wrote are flushed.
 #
 # Verbs:
-#   state   Print what is published: the folder, the manifest, every file.
-#   apply   Read the upload stream, check it, then switch manifest.json.
+#   state    Print what is there: the folder, the manifest, every file, and
+#            what an interrupted publish left behind. Changes nothing.
+#   repair   Put back the old file(s) of an interrupted publish.
+#   apply    Read the upload stream, check it, then switch manifest.json.
 #
 # Where:
 #   --dir PATH       a plain directory
-#   --volume NAME    a podman volume; `auto` picks the one named *packs-data
-#   --backups PATH   where old manifests go (default: ~/scuffed-crew-backups)
+#   --volume NAME    a podman volume, exact name; `auto` picks the one named
+#                    packs-data or <project>_packs-data
+#   --backups PATH   where old manifests and old tars go
+#                    (default: ~/scuffed-crew-backups)
 #
 # shellcheck shell=bash
 
 set -euo pipefail
 umask 022
 
+if [[ -z "${BASH_VERSINFO[0]:-}" ]] || [[ "${BASH_VERSINFO[0]}" -lt 4 ]] \
+    || [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 4 ]]; then
+    echo "error: the destination needs bash 4.4 or newer; it has ${BASH_VERSION:-an unknown shell}" >&2
+    exit 1
+fi
+
 MAX_MANIFEST_BYTES=65536
 NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 SHA_RE='^[0-9a-f]{64}$'
+STAMP_RE='^[0-9]{8}T[0-9]{6}Z$'
+RUN_RE='^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$'
+# Temp names this script (and its printed rollback line) uses inside DEST.
+TMP_RE='^\.[A-Za-z0-9][A-Za-z0-9._-]*\.(publish|restore|rollback)-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.tmp$'
 # One entry per line, exactly as publish-packs.sh writes it.
 ENTRY_RE='^  \{"name":"([A-Za-z0-9][A-Za-z0-9._-]*)","version":"([A-Za-z0-9._-]+)","sha256":"([0-9a-f]{64})","size":([0-9]+)\},?$'
 
 DEST=""
 BACKUPS=""
+JOURNAL=""
+STAMP=""
+EXPECT_OLD=""
+FIRST_PUBLISH=0
+WAIT=0
 
 die() {
     echo "error: $*" >&2
@@ -46,35 +66,71 @@ size_of() {
     stat -c %s -- "$1"
 }
 
-# fsync one path when this coreutils can, else flush everything.
+# fsync one file or one folder. Never the whole machine: a bare `sync` stalls
+# a busy host and flushes filesystems this script has nothing to do with.
 flush_path() {
-    sync -- "$1" 2>/dev/null || sync 2>/dev/null || true
+    sync -- "$1"
+}
+
+preflight() {
+    local tool help
+    for tool in sha256sum stat base64 head cut cp mv mkdir chmod rm sync; do
+        command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required on the destination"
+    done
+    command -v flock >/dev/null 2>&1 \
+        || die "flock is required on the destination (it is part of util-linux). Without a lock two publishes can overwrite each other, so nothing is done without it."
+    help="$(LC_ALL=C sync --help 2>&1 || true)"
+    [[ "${help}" == *FILE* ]] \
+        || die "the destination's sync cannot flush one file (GNU coreutils 8.24 or newer is required)"
+}
+
+# A path with its symlinks resolved, also when its last folders do not exist yet.
+physical_path() {
+    local path="$1" tail=""
+    [[ "${path}" == /* ]] || path="${PWD}/${path}"
+    path="${path%/}"
+    case "${path}/" in
+        */../* | */./*) die "the backups path must not hold . or .. parts: $1" ;;
+    esac
+    while [[ -n "${path}" && ! -d "${path}" ]]; do
+        tail="/${path##*/}${tail}"
+        path="${path%/*}"
+    done
+    path="$(cd "${path:-/}" && pwd -P)"
+    echo "${path%/}${tail}"
 }
 
 # Mountpoint of the packs volume. backup.sh reads other volumes the same way.
-# A publish writes, so two candidate volumes are refused instead of guessed.
+# A publish writes, so two candidate volumes are refused instead of guessed,
+# and a name must match exactly: `podman volume inspect` also takes a prefix.
 resolve_volume() {
-    local want="$1" name path
+    local want="$1" name info
     local -a found=()
     command -v podman >/dev/null 2>&1 || die "podman is required to find the packs volume"
-    if [[ "${want}" != "auto" ]]; then
-        found=("${want}")
-    else
-        while IFS= read -r name; do
+    while IFS= read -r name; do
+        if [[ "${want}" == "auto" ]]; then
             case "${name}" in
                 packs-data | *_packs-data) found+=("${name}") ;;
             esac
-        done < <(podman volume ls --format '{{.Name}}' 2>/dev/null || true)
-    fi
+        elif [[ "${name}" == "${want}" ]]; then
+            found+=("${name}")
+        fi
+    done < <(podman volume ls --format '{{.Name}}' 2>/dev/null < /dev/null || true)
     if [[ "${#found[@]}" -eq 0 ]]; then
-        die "no podman volume named *packs-data here; start the stack once or pass PACKS_VOLUME"
+        if [[ "${want}" == "auto" ]]; then
+            die "no podman volume named packs-data or <project>_packs-data here; start the stack once or pass PACKS_VOLUME"
+        fi
+        die "no podman volume is named exactly ${want} here (PACKS_VOLUME takes the full name)"
     fi
     if [[ "${#found[@]}" -gt 1 ]]; then
         die "more than one packs volume (${found[*]}); set PACKS_VOLUME to the one compose mounts"
     fi
-    path="$(podman volume inspect "${found[0]}" --format '{{.Mountpoint}}' 2>/dev/null || true)"
-    [[ -n "${path}" && -d "${path}" ]] || die "podman volume ${found[0]} has no readable mountpoint"
-    echo "${path}"
+    info="$(podman volume inspect "${found[0]}" --format '{{.Name}}|{{.Mountpoint}}' 2>/dev/null < /dev/null || true)"
+    [[ "${info%%|*}" == "${found[0]}" ]] \
+        || die "podman answered for another volume than ${found[0]}"
+    info="${info#*|}"
+    [[ -n "${info}" && -d "${info}" ]] || die "podman volume ${found[0]} has no readable mountpoint"
+    echo "${info}"
 }
 
 parse_where() {
@@ -86,6 +142,8 @@ parse_where() {
             --backups) BACKUPS="$2"; shift 2 ;;
             --stamp) STAMP="$2"; shift 2 ;;
             --expect-old) EXPECT_OLD="$2"; shift 2 ;;
+            --wait) WAIT="$2"; shift 2 ;;
+            --first-publish) FIRST_PUBLISH=1; shift ;;
             *) die "unknown destination argument: $1" ;;
         esac
     done
@@ -98,8 +156,26 @@ parse_where() {
     fi
     [[ -d "${DEST}" ]] || die "destination is not a directory: ${DEST}"
     DEST="$(cd "${DEST}" && pwd -P)"
-    BACKUPS="${BACKUPS:-${HOME}/scuffed-crew-backups}"
+    BACKUPS="$(physical_path "${BACKUPS:-${HOME}/scuffed-crew-backups}")"
+    [[ "${DEST}" != *$'\n'* && "${BACKUPS}" != *$'\n'* ]] || die "a path with a line break in it is refused"
+    case "${BACKUPS}/" in
+        "${DEST}/"*) die "the backups folder (${BACKUPS}) must be outside the destination (${DEST})" ;;
+    esac
+    [[ -z "${STAMP}" || "${STAMP}" =~ ${STAMP_RE} ]] || die "bad --stamp"
+    [[ "${WAIT}" =~ ^[0-9]{1,4}$ ]] || die "bad --wait"
     [[ ! -L "${DEST}/manifest.json" ]] || die "manifest.json is a symlink in ${DEST}"
+    JOURNAL="${DEST}/.publish-journal"
+}
+
+# One publish at a time. $1 is how many seconds to wait for the lock; 0 fails
+# at once. The lock is on the folder itself and goes away with the process.
+take_lock() {
+    exec 9< "${DEST}"
+    if [[ "$1" == "0" ]]; then
+        flock -n 9
+    else
+        flock -w "$1" 9
+    fi
 }
 
 manifest_sha() {
@@ -109,6 +185,110 @@ manifest_sha() {
         echo absent
     fi
 }
+
+# ---------------------------------------------------------------- journal
+#
+# An update keeps the pack's name, so its tar and the manifest are two
+# renames. Before the first of them, the journal says which tars are about to
+# be swapped, what their old bytes were and where the old copy is. Whatever
+# stops the run after that, the journal is enough to tell "switched" from
+# "not switched" and to put the old files back.
+
+declare -a J_NAMES=() J_SIZE=() J_SHA=() J_SAVED=()
+J_RUN=""
+J_MANIFEST=""
+
+load_journal() {
+    local kind a b c d ended=0
+    J_RUN=""
+    J_MANIFEST=""
+    J_NAMES=()
+    J_SIZE=()
+    J_SHA=()
+    J_SAVED=()
+    while IFS=' ' read -r kind a b c d; do
+        case "${kind}" in
+            JOURNAL) J_RUN="${a}" ;;
+            MANIFEST) J_MANIFEST="${a}" ;;
+            TAR)
+                [[ "${a}" =~ ${NAME_RE} && "${b}" =~ ^[0-9]+$ && "${c}" =~ ${SHA_RE} && -n "${d}" ]] || return 1
+                J_NAMES+=("${a}")
+                J_SIZE+=("${b}")
+                J_SHA+=("${c}")
+                J_SAVED+=("${d}")
+                ;;
+            END) ended=1 ;;
+            *) return 1 ;;
+        esac
+    done < "${JOURNAL}"
+    [[ "${ended}" == "1" && "${J_RUN}" =~ ${RUN_RE} && "${J_MANIFEST}" =~ ${SHA_RE} ]]
+}
+
+# True when DEST/$1 is a plain file with the sha256 $2.
+file_is() {
+    [[ -f "${DEST}/$1" && ! -L "${DEST}/$1" ]] && [[ "$(sha_of "${DEST}/$1")" == "$2" ]]
+}
+
+# Finish what an interrupted publish left. The live manifest decides, not a
+# flag in a process that may be gone: if it is the manifest that publish was
+# switching to, the switch happened and nothing is undone. If it is not, every
+# tar that publish had already swapped gets its old bytes back, by rename.
+# Called through `||` and `if`, so every step is checked by hand.
+recover_journal() {
+    local i name tmp
+    [[ -e "${JOURNAL}" || -L "${JOURNAL}" ]] || return 0
+    if [[ ! -f "${JOURNAL}" || -L "${JOURNAL}" ]] || ! load_journal; then
+        echo "error: ${JOURNAL} cannot be read. Compare the packs with manifest.json by hand, then remove that file." >&2
+        return 1
+    fi
+    if [[ "$(manifest_sha)" != "${J_MANIFEST}" ]]; then
+        for i in "${!J_NAMES[@]}"; do
+            name="${J_NAMES[${i}]}"
+            if file_is "${name}" "${J_SHA[${i}]}"; then
+                continue
+            fi
+            tmp="${DEST}/.${name}.restore-${J_RUN}.tmp"
+            if [[ -f "${J_SAVED[${i}]}" && ! -L "${J_SAVED[${i}]}" ]] \
+                && cp -p -- "${J_SAVED[${i}]}" "${tmp}" \
+                && [[ "$(sha_of "${tmp}")" == "${J_SHA[${i}]}" ]] \
+                && flush_path "${tmp}" \
+                && mv -fT -- "${tmp}" "${DEST}/${name}"; then
+                echo "RESTORED ${name}"
+            else
+                rm -f -- "${tmp}"
+                echo "error: could not put the old ${name} back. Its saved copy is ${J_SAVED[${i}]}" >&2
+                return 1
+            fi
+        done
+        flush_path "${DEST}" || true
+    fi
+    rm -f -- "${JOURNAL}"
+}
+
+emit_journal() {
+    local i saved
+    [[ -e "${JOURNAL}" || -L "${JOURNAL}" ]] || return 0
+    if [[ ! -f "${JOURNAL}" || -L "${JOURNAL}" ]] || ! load_journal; then
+        echo "JOURNAL unreadable"
+        return 0
+    fi
+    if [[ "$(manifest_sha)" == "${J_MANIFEST}" ]]; then
+        echo "JOURNAL committed ${J_RUN}"
+        return 0
+    fi
+    echo "JOURNAL open ${J_RUN}"
+    for i in "${!J_NAMES[@]}"; do
+        file_is "${J_NAMES[${i}]}" "${J_SHA[${i}]}" && continue
+        saved=lost
+        if [[ -f "${J_SAVED[${i}]}" && ! -L "${J_SAVED[${i}]}" ]] \
+            && [[ "$(sha_of "${J_SAVED[${i}]}")" == "${J_SHA[${i}]}" ]]; then
+            saved=ok
+        fi
+        echo "HALF ${J_NAMES[${i}]} ${J_SIZE[${i}]} ${J_SHA[${i}]} ${saved} ${J_SAVED[${i}]}"
+    done
+}
+
+# ---------------------------------------------------------------- state
 
 emit_state() {
     local f name size
@@ -124,58 +304,121 @@ emit_state() {
     else
         echo "MANIFEST absent"
     fi
-    for f in "${DEST}"/*; do
-        [[ -f "${f}" && ! -L "${f}" ]] || continue
+    for f in "${DEST}"/* "${DEST}"/.[!.]* "${DEST}"/..?*; do
+        [[ -e "${f}" || -L "${f}" ]] || continue
         name="${f##*/}"
-        [[ "${name}" =~ ${NAME_RE} ]] || continue
-        [[ "${name}" != "manifest.json" && "${name}" != "manifest.json.new" ]] || continue
-        echo "FILE ${name} $(size_of "${f}") $(sha_of "${f}")"
+        [[ "${name}" != "manifest.json" && "${f}" != "${JOURNAL}" ]] || continue
+        if [[ -f "${f}" && ! -L "${f}" && "${name}" =~ ${TMP_RE} ]]; then
+            echo "LEFTOVER ${name}"
+        elif [[ -f "${f}" && ! -L "${f}" && "${name}" =~ ${NAME_RE} ]]; then
+            echo "FILE ${name} $(size_of "${f}") $(sha_of "${f}")"
+        else
+            printf 'EXTRA %q\n' "${name}"
+        fi
     done
+    emit_journal
+    # What this run saved, with hashes, so the rollback line is built from
+    # files that were checked and not from a path that was only printed.
+    if [[ -n "${STAMP}" ]]; then
+        for f in "${BACKUPS}/packs-manifest-pre-${STAMP}"*.json; do
+            [[ -f "${f}" && ! -L "${f}" ]] || continue
+            echo "SAVEDMANIFEST $(sha_of "${f}") ${f}"
+        done
+        for f in "${BACKUPS}/packs-tars-pre-${STAMP}"*/*; do
+            [[ -f "${f}" && ! -L "${f}" && "${f##*/}" =~ ${NAME_RE} ]] || continue
+            echo "SAVEDTAR ${f##*/} $(sha_of "${f}") ${f}"
+        done
+    fi
     echo "END"
+}
+
+state() {
+    if [[ "${WAIT}" != "0" ]]; then
+        # After a failed publish: wait for a destination half that is still
+        # running, so the answer is the final one.
+        if take_lock "${WAIT}"; then
+            echo "LOCK free"
+        else
+            echo "LOCK held"
+        fi
+    elif take_lock 0; then
+        flock -u 9
+        echo "LOCK free"
+    else
+        echo "LOCK held"
+    fi
+    emit_state
+}
+
+# Temp files of a publish that was killed. Only called with the lock held, so
+# no running publish owns them, and nothing lists them. Only this script's own
+# temp names: any other file in the folder is left alone.
+sweep_leftovers() {
+    local f
+    for f in "${DEST}"/.[!.]*; do
+        if [[ -f "${f}" && ! -L "${f}" && "${f##*/}" =~ ${TMP_RE} ]]; then
+            rm -f -- "${f}"
+            echo "CLEANED ${f##*/}"
+        fi
+    done
+}
+
+repair() {
+    take_lock 0 || die "another publish is running on ${DEST}"
+    recover_journal || die "the interrupted publish could not be repaired"
+    sweep_leftovers
+    emit_state
 }
 
 # ---------------------------------------------------------------- apply
 
-STAMP=""
-EXPECT_OLD=""
-COMMITTED=0
+RUN_ID=""
 TAR_BACKUPS=""
+MANIFEST_TMP=""
+NEW_MANIFEST_SHA=""
 declare -a TMP_FILES=()
-declare -a REPLACED_DONE=()
 declare -A UP_SIZE=()
 declare -A UP_SHA=()
 declare -A UP_MODE=()
+declare -A OLD_SIZE=()
+declare -A OLD_SHA=()
 declare -a UP_ORDER=()
-declare -a DROPS=()
 
 # shellcheck disable=SC2317  # reached through the EXIT trap in apply
 cleanup() {
-    local name f
-    if [[ "${COMMITTED}" != "1" ]]; then
-        # Put back any tar that was swapped for a replacement.
-        for name in "${REPLACED_DONE[@]}"; do
-            if cp -p -- "${TAR_BACKUPS}/${name}" "${DEST}/.${name}.restore-${STAMP}.tmp" \
-                && mv -fT -- "${DEST}/.${name}.restore-${STAMP}.tmp" "${DEST}/${name}"; then
-                echo "restored ${name} after the failed publish" >&2
-            else
-                echo "error: could not restore ${name}; the old copy is ${TAR_BACKUPS}/${name}" >&2
-            fi
-        done
-        rm -f -- "${DEST}/manifest.json.new"
+    local f
+    # Nothing may stop this half way. If kill -9 does, the journal is still
+    # there and the next run finishes the job.
+    trap '' TERM INT HUP PIPE
+    if [[ -e "${JOURNAL}" || -L "${JOURNAL}" ]]; then
+        recover_journal >&2 \
+            || echo "error: the old file(s) are not back in place. Run the publish again: it repairs this first." >&2
     fi
     for f in "${TMP_FILES[@]}"; do
         rm -f -- "${f}"
     done
 }
 
+# shellcheck disable=SC2317  # reached through the signal traps in apply
+stopped() {
+    echo "error: the destination half was stopped by SIG$1" >&2
+    exit "$2"
+}
+
 read_stream() {
-    local kind a b c d tmp ended=0 have_manifest=0
-    while IFS=' ' read -r kind a b c d; do
+    local kind a b c d e f tmp ended=0
+    while IFS=' ' read -r kind a b c d e f; do
         case "${kind}" in
             PACK)
                 [[ "${a}" =~ ${NAME_RE} && "${a}" != manifest.json* ]] || die "bad pack name in the stream"
                 [[ "${b}" =~ ^[0-9]+$ && "${c}" =~ ${SHA_RE} ]] || die "bad pack record for ${a}"
-                [[ "${d}" == new || "${d}" == repair || "${d}" == replace ]] || die "bad pack mode for ${a}"
+                [[ "${d}" == new || "${d}" == repair || "${d}" == update ]] || die "bad pack mode for ${a}"
+                [[ -z "${UP_SHA[${a}]:-}" ]] || die "${a} is in the stream twice"
+                if [[ "${d}" == update ]]; then
+                    [[ "${e}" =~ ^[0-9]+$ && "${f}" =~ ${SHA_RE} ]] || die "bad update record for ${a}"
+                    OLD_SIZE["${a}"]="${e}"
+                    OLD_SHA["${a}"]="${f}"
+                fi
                 [[ ! -L "${DEST}/${a}" ]] || die "${a} is a symlink in ${DEST}"
                 tmp="${DEST}/.${a}.publish-${STAMP}.tmp"
                 TMP_FILES+=("${tmp}")
@@ -193,16 +436,14 @@ read_stream() {
             MANIFEST)
                 [[ "${a}" =~ ^[0-9]+$ && "${b}" =~ ${SHA_RE} ]] || die "bad manifest record"
                 [[ "${a}" -le "${MAX_MANIFEST_BYTES}" ]] || die "new manifest is larger than 64 KiB"
-                head -c "${a}" > "${DEST}/manifest.json.new"
-                [[ "$(size_of "${DEST}/manifest.json.new")" == "${a}" ]] || die "manifest.json.new: wrong size"
-                [[ "$(sha_of "${DEST}/manifest.json.new")" == "${b}" ]] || die "manifest.json.new: wrong sha256"
-                chmod 0644 -- "${DEST}/manifest.json.new"
-                flush_path "${DEST}/manifest.json.new"
-                have_manifest=1
-                ;;
-            DROP)
-                [[ "${a}" =~ ${NAME_RE} && "${a}" != manifest.json* ]] || die "bad drop record"
-                DROPS+=("${a}")
+                [[ -z "${NEW_MANIFEST_SHA}" ]] || die "two manifests in the stream"
+                TMP_FILES+=("${MANIFEST_TMP}")
+                head -c "${a}" > "${MANIFEST_TMP}"
+                [[ "$(size_of "${MANIFEST_TMP}")" == "${a}" ]] || die "the new manifest arrived with the wrong size"
+                [[ "$(sha_of "${MANIFEST_TMP}")" == "${b}" ]] || die "the new manifest arrived with the wrong sha256"
+                chmod 0644 -- "${MANIFEST_TMP}"
+                flush_path "${MANIFEST_TMP}"
+                NEW_MANIFEST_SHA="${b}"
                 ;;
             END)
                 ended=1
@@ -214,7 +455,7 @@ read_stream() {
         esac
     done
     [[ "${ended}" == "1" ]] || die "the upload stream ended early; nothing was switched"
-    [[ "${have_manifest}" == "1" ]] || die "the upload stream had no manifest; nothing was switched"
+    [[ -n "${NEW_MANIFEST_SHA}" ]] || die "the upload stream had no manifest; nothing was switched"
 }
 
 # Every pack the new manifest lists must be here with that sha256 and size,
@@ -223,7 +464,7 @@ check_new_manifest() {
     local line name sha size count=0
     while IFS= read -r line; do
         [[ "${line}" == "[" || "${line}" == "]" ]] && continue
-        [[ "${line}" =~ ${ENTRY_RE} ]] || die "manifest.json.new has a line this script did not write"
+        [[ "${line}" =~ ${ENTRY_RE} ]] || die "the new manifest has a line this script did not write"
         name="${BASH_REMATCH[1]}"
         sha="${BASH_REMATCH[3]}"
         size="${BASH_REMATCH[4]}"
@@ -239,113 +480,178 @@ check_new_manifest() {
             || die "${name}: size at the destination does not match the new manifest"
         [[ "$(sha_of "${DEST}/${name}")" == "${sha}" ]] \
             || die "${name}: sha256 at the destination does not match the new manifest"
-    done < "${DEST}/manifest.json.new"
+    done < "${MANIFEST_TMP}"
     for name in "${UP_ORDER[@]}"; do
-        grep -qF "\"name\":\"${name}\"" "${DEST}/manifest.json.new" \
+        grep -qF "\"name\":\"${name}\"" "${MANIFEST_TMP}" \
             || die "${name} was uploaded but the new manifest does not list it"
-    done
-    for name in "${DROPS[@]}"; do
-        if grep -qF "\"name\":\"${name}\"" "${DEST}/manifest.json.new"; then
-            die "refusing to drop ${name}: the new manifest still lists it"
-        fi
     done
     echo "CHECKED ${count}"
 }
 
+# A folder without manifest.json is a first publish only when the operator
+# said so, and only when nothing else is in it. A folder that holds other
+# files is the wrong folder or a damaged one, and this script does not guess.
+check_first_publish() {
+    local f name
+    [[ "${FIRST_PUBLISH}" == "1" ]] \
+        || die "there is no manifest.json in ${DEST}. That is right only for a first publish (--first-publish); nothing was switched"
+    for f in "${DEST}"/* "${DEST}"/.[!.]* "${DEST}"/..?*; do
+        [[ -e "${f}" || -L "${f}" ]] || continue
+        name="${f##*/}"
+        if [[ -f "${f}" && ! -L "${f}" ]]; then
+            [[ "${name}" =~ ${TMP_RE} || -n "${UP_SHA[${name}]:-}" ]] && continue
+        fi
+        die "$(printf '%q' "${name}") is in ${DEST} and is not a pack of this publish. A first publish needs a folder with nothing else in it; nothing was switched"
+    done
+}
+
+write_journal() {
+    local name tmp="${DEST}/.publish-journal.publish-${STAMP}.tmp"
+    TMP_FILES+=("${tmp}")
+    {
+        echo "JOURNAL ${RUN_ID}"
+        echo "MANIFEST ${NEW_MANIFEST_SHA}"
+        for name in "${UP_ORDER[@]}"; do
+            [[ "${UP_MODE[${name}]}" == update ]] || continue
+            echo "TAR ${name} ${OLD_SIZE[${name}]} ${OLD_SHA[${name}]} ${TAR_BACKUPS}/${name}"
+        done
+        echo "END"
+    } > "${tmp}"
+    flush_path "${tmp}"
+    mv -fT -- "${tmp}" "${JOURNAL}"
+    flush_path "${DEST}"
+}
+
 apply() {
-    local name backup f run_id n
-    [[ "${STAMP}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "bad --stamp"
+    local name n tmp saved updates=0
+    [[ "${STAMP}" =~ ${STAMP_RE} ]] || die "bad --stamp"
     [[ -n "${EXPECT_OLD}" ]] || die "missing --expect-old"
     [[ -w "${DEST}" ]] || die "destination is not writable: ${DEST}"
-    case "${BACKUPS}/" in
-        "${DEST}/"*) die "the backups folder must be outside ${DEST}" ;;
-    esac
-    if command -v flock >/dev/null 2>&1; then
-        exec 9< "${DEST}"
-        flock -n 9 || die "another publish is running on ${DEST}"
-    fi
-    [[ ! -L "${DEST}/manifest.json.new" ]] || die "manifest.json.new is a symlink in ${DEST}"
-    # Leftovers from a publish that was killed. Nothing lists them.
-    for f in "${DEST}"/.*.publish-*.tmp "${DEST}"/.*.restore-*.tmp "${DEST}/manifest.json.new"; do
-        if [[ -f "${f}" || -L "${f}" ]]; then
-            rm -f -- "${f}"
-            echo "CLEANED ${f##*/}"
+    take_lock 0 || die "another publish is running on ${DEST}"
+
+    if [[ -e "${JOURNAL}" || -L "${JOURNAL}" ]]; then
+        if [[ -f "${JOURNAL}" && ! -L "${JOURNAL}" ]] && load_journal && [[ "$(manifest_sha)" == "${J_MANIFEST}" ]]; then
+            # That publish did switch. Only its note is left.
+            rm -f -- "${JOURNAL}"
+            echo "CLEANED ${JOURNAL##*/}"
+        else
+            die "an interrupted publish has to be repaired first; run the publish again"
         fi
-    done
+    fi
+    sweep_leftovers
     # Two publishes in one second must not share a backup name.
-    run_id="${STAMP}"
+    RUN_ID="${STAMP}"
     n=1
-    while [[ -e "${BACKUPS}/packs-manifest-pre-${run_id}.json" || -e "${BACKUPS}/packs-tars-pre-${run_id}" ]]; do
+    while [[ -e "${BACKUPS}/packs-manifest-pre-${RUN_ID}.json" || -e "${BACKUPS}/packs-tars-pre-${RUN_ID}" ]]; do
         n=$((n + 1))
-        run_id="${STAMP}-${n}"
+        RUN_ID="${STAMP}-${n}"
     done
-    TAR_BACKUPS="${BACKUPS}/packs-tars-pre-${run_id}"
+    TAR_BACKUPS="${BACKUPS}/packs-tars-pre-${RUN_ID}"
+    MANIFEST_TMP="${DEST}/.manifest.json.publish-${STAMP}.tmp"
     trap cleanup EXIT
+    trap 'stopped TERM 143' TERM
+    trap 'stopped INT 130' INT
+    trap 'stopped HUP 129' HUP
+    # A closed connection must end in an error this script handles, not in a
+    # silent death half way through a line of output.
+    trap '' PIPE
 
     read_stream
     [[ "$(manifest_sha)" == "${EXPECT_OLD}" ]] \
         || die "manifest.json changed at the destination since it was read; run again"
+    if [[ "${EXPECT_OLD}" == "absent" ]]; then
+        check_first_publish
+    elif [[ "${FIRST_PUBLISH}" == "1" ]]; then
+        die "--first-publish, but ${DEST} already has a manifest.json; nothing was switched"
+    fi
     check_new_manifest
 
-    # New names first. The live manifest does not list them yet.
-    for name in "${UP_ORDER[@]}"; do
-        [[ "${UP_MODE[${name}]}" != replace ]] || continue
-        mv -fT -- "${DEST}/.${name}.publish-${STAMP}.tmp" "${DEST}/${name}"
-    done
-
-    mkdir -p -- "${BACKUPS}"
-    chmod 0700 -- "${BACKUPS}"
+    # ---- save what the switch replaces. The slow part, and all of it can
+    # still be dropped without a trace.
+    if [[ ! -d "${BACKUPS}" ]]; then
+        mkdir -p -- "${BACKUPS}"
+        chmod 0700 -- "${BACKUPS}"
+    fi
     if [[ -f "${DEST}/manifest.json" ]]; then
-        backup="${BACKUPS}/packs-manifest-pre-${run_id}.json"
-        [[ ! -e "${backup}" ]] || die "backup already exists: ${backup}"
-        cp -p -- "${DEST}/manifest.json" "${backup}"
-        flush_path "${backup}"
-        echo "BACKUP ${backup}"
+        saved="${BACKUPS}/packs-manifest-pre-${RUN_ID}.json"
+        tmp="${BACKUPS}/.packs-manifest-pre-${RUN_ID}.json.tmp"
+        TMP_FILES+=("${tmp}")
+        cp -p -- "${DEST}/manifest.json" "${tmp}"
+        [[ "$(sha_of "${tmp}")" == "${EXPECT_OLD}" ]] || die "the copy of the old manifest is not the old manifest"
+        flush_path "${tmp}"
+        mv -T -- "${tmp}" "${saved}"
+        echo "BACKUP ${saved}"
     else
         echo "BACKUP none"
     fi
-
-    # A replaced pack keeps its name, so its file and the manifest cannot
-    # switch in one step. Save every old file first (the slow part), then do
-    # the renames back to back. cleanup puts the old files back on a failure.
     for name in "${UP_ORDER[@]}"; do
-        [[ "${UP_MODE[${name}]}" == replace && -f "${DEST}/${name}" ]] || continue
-        mkdir -p -- "${TAR_BACKUPS}"
-        cp -p -- "${DEST}/${name}" "${TAR_BACKUPS}/${name}"
-        flush_path "${TAR_BACKUPS}/${name}"
-        echo "TARS ${TAR_BACKUPS}"
+        [[ "${UP_MODE[${name}]}" == update ]] || continue
+        # The file that is saved as "the old tar" must be the one the old
+        # manifest names. After a damaged or half-done publish it is not.
+        if ! file_is "${name}" "${OLD_SHA[${name}]}" || [[ "$(size_of "${DEST}/${name}")" != "${OLD_SIZE[${name}]}" ]]; then
+            die "${name} at the destination is not the file the published list names; it was not saved and nothing was switched"
+        fi
+        if [[ "${updates}" == "0" ]]; then
+            mkdir -m 0700 -- "${TAR_BACKUPS}"
+        fi
+        updates=$((updates + 1))
+        saved="${TAR_BACKUPS}/${name}"
+        tmp="${TAR_BACKUPS}/.${name}.tmp"
+        TMP_FILES+=("${tmp}")
+        cp -p -- "${DEST}/${name}" "${tmp}"
+        [[ "$(sha_of "${tmp}")" == "${OLD_SHA[${name}]}" ]] || die "the saved copy of ${name} is not the old file"
+        flush_path "${tmp}"
+        mv -T -- "${tmp}" "${saved}"
+        echo "SAVED ${name} ${saved}"
     done
+    if [[ "${updates}" != "0" ]]; then
+        flush_path "${TAR_BACKUPS}"
+    fi
+
+    # ---- new names. The live manifest does not list them, so nobody is
+    # served them yet. A repaired pack was already broken; now it is whole.
     for name in "${UP_ORDER[@]}"; do
-        [[ "${UP_MODE[${name}]}" == replace ]] || continue
-        [[ ! -f "${TAR_BACKUPS}/${name}" ]] || REPLACED_DONE+=("${name}")
+        [[ "${UP_MODE[${name}]}" != update ]] || continue
         mv -fT -- "${DEST}/.${name}.publish-${STAMP}.tmp" "${DEST}/${name}"
     done
-
-    mv -fT -- "${DEST}/manifest.json.new" "${DEST}/manifest.json"
-    COMMITTED=1
     flush_path "${DEST}"
-    echo "COMMITTED"
 
-    # Only now, when the live manifest no longer lists them.
-    for name in "${DROPS[@]}"; do
-        [[ -f "${DEST}/${name}" && ! -L "${DEST}/${name}" ]] || continue
-        mkdir -p -- "${TAR_BACKUPS}"
-        if mv -fT -- "${DEST}/${name}" "${TAR_BACKUPS}/${name}"; then
-            echo "TARS ${TAR_BACKUPS}"
-        else
-            echo "warning: could not move the dropped ${name}; it is no longer listed" >&2
-        fi
+    # ---- the switch. For an update the tar goes first and the manifest
+    # last: in between, the old list is live with the new bytes under it. The
+    # server answers 404 for that pack when the size differs, and a tracker
+    # refuses bytes whose sha256 is not the listed one, so nobody installs the
+    # wrong pack. A tracker that already has the old version asks for nothing.
+    # Signals are held off for these renames. kill -9 and power loss are not;
+    # the journal covers them.
+    if [[ "${updates}" != "0" ]]; then
+        write_journal
+    fi
+    trap '' TERM INT HUP
+    for name in "${UP_ORDER[@]}"; do
+        [[ "${UP_MODE[${name}]}" == update ]] || continue
+        mv -fT -- "${DEST}/.${name}.publish-${STAMP}.tmp" "${DEST}/${name}"
     done
+    mv -fT -- "${MANIFEST_TMP}" "${DEST}/manifest.json"
+    trap 'stopped TERM 143' TERM
+    trap 'stopped INT 130' INT
+    trap 'stopped HUP 129' HUP
 
+    # The new list is live. From here on nothing is undone: cleanup reads the
+    # live manifest and sees that for itself.
+    flush_path "${DEST}" || echo "warning: could not flush ${DEST} after the switch" >&2
+    rm -f -- "${JOURNAL}"
+    echo "COMMITTED"
     emit_state
 }
 
 main() {
     local verb="${1:-}"
     [[ "$#" -gt 0 ]] && shift
+    preflight
     parse_where "$@"
     case "${verb}" in
-        state) emit_state ;;
+        state) state ;;
+        repair) repair ;;
         apply) apply ;;
         *) die "unknown verb: ${verb}" ;;
     esac

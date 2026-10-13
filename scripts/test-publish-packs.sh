@@ -7,6 +7,10 @@
 # this script writes into the temp folder. The site check runs against a
 # small stub on 127.0.0.1. Neither proves a real sshd, a real podman volume
 # or the real site.
+#
+# Failures are injected from outside: stand-ins for mv, cp, sync and rm come
+# first in PATH and stop, fail or signal the destination half at one chosen
+# step. The scripts themselves hold no test hooks.
 
 set -euo pipefail
 
@@ -29,16 +33,17 @@ pass() {
     echo "ok ${PASSED}: $*"
 }
 
-for tool in python3 tar sha256sum curl; do
+for tool in python3 tar sha256sum curl flock gzip; do
     command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required for this test"
 done
 
 TMP="$(mktemp -d)"
 STUB_PID=""
 AGENT_PID=""
+BG_PID=""
 cleanup() {
     local pid
-    for pid in "${STUB_PID}" "${AGENT_PID}"; do
+    for pid in "${STUB_PID}" "${AGENT_PID}" "${BG_PID}"; do
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
             kill -9 "${pid}" 2>/dev/null || true
             wait "${pid}" 2>/dev/null || true
@@ -51,6 +56,90 @@ trap cleanup EXIT
 DEST="${TMP}/dest"
 BACKUPS="${TMP}/backups"
 mkdir -p "${DEST}"
+
+# ---- stand-ins that come first in PATH ---------------------------------------
+
+# Every sync in this test goes through this one. A sync without a file would
+# flush the whole machine; the scripts must never do that.
+REAL_SYNC="$(command -v sync)"
+mkdir -p "${TMP}/guard"
+cat > "${TMP}/guard/sync" <<EOF
+#!/usr/bin/env bash
+named=0
+for arg in "\$@"; do
+    case "\${arg}" in
+        --help | --version) exec "${REAL_SYNC}" "\$@" ;;
+        -*) ;;
+        *) named=1 ;;
+    esac
+done
+if [[ "\${named}" == "0" ]]; then
+    echo "sync \$*" >> "${TMP}/bare-sync"
+    exit 0
+fi
+# PACKS_TEST_NO_FSYNC=1 skips the real flush. For a machine whose disk is
+# busy; the checks do not depend on the flush itself.
+[[ "\${PACKS_TEST_NO_FSYNC:-0}" != "1" ]] || exit 0
+exec "${REAL_SYNC}" "\$@"
+EOF
+chmod +x "${TMP}/guard/sync"
+PATH="${TMP}/guard:${PATH}"
+
+# One stand-in for mv, cp, sync and rm on the destination side. HOOK_AT is a
+# glob over "<tool> <arguments>"; the first call that matches does HOOK_DO:
+#   after:SIG    do the real thing, then send SIG to the destination half
+#   before:SIG   send SIG and do not do the real thing
+#   fail-after   do the real thing, then report failure
+#   partial      write the first bytes of a copy, then report failure
+#   hold         wait for <HOOK_FILE>.go, then do the real thing
+mkdir -p "${TMP}/hook"
+cat > "${TMP}/hook/tool" <<'EOF'
+#!/usr/bin/env bash
+tool="${0##*/}"
+PATH="${PATH#"${0%/*}":}"
+# shellcheck disable=SC2053  # HOOK_AT is a glob on purpose
+if [[ -n "${HOOK_AT:-}" && ! -e "${HOOK_FILE}.fired" && "${tool} $*" == ${HOOK_AT} ]]; then
+    : > "${HOOK_FILE}.fired"
+    case "${HOOK_DO}" in
+        after:*)
+            "${tool}" "$@"
+            status=$?
+            kill "-${HOOK_DO#after:}" "${PPID}"
+            exit "${status}"
+            ;;
+        before:*)
+            kill "-${HOOK_DO#before:}" "${PPID}"
+            exit 1
+            ;;
+        fail-after)
+            "${tool}" "$@"
+            exit 1
+            ;;
+        partial)
+            head -c 10 -- "${@: -2:1}" > "${@: -1}"
+            exit 1
+            ;;
+        hold)
+            : > "${HOOK_FILE}.reached"
+            while [[ ! -e "${HOOK_FILE}.go" ]]; do
+                sleep 0.05
+            done
+            ;;
+    esac
+fi
+exec "${tool}" "$@"
+EOF
+chmod +x "${TMP}/hook/tool"
+for tool in mv cp sync rm; do
+    ln -s tool "${TMP}/hook/${tool}"
+done
+HOOK_FILE="${TMP}/hook-state"
+export HOOK_FILE
+hook_reset() {
+    rm -f "${HOOK_FILE}.fired" "${HOOK_FILE}.reached" "${HOOK_FILE}.go"
+}
+
+# ---- helpers -------------------------------------------------------------------
 
 sha_of() {
     sha256sum -- "$1" | cut -d' ' -f1
@@ -127,6 +216,30 @@ names_in() {
     python3 -I -c 'import json, sys; print(" ".join(e["name"] for e in json.load(open(sys.argv[1]))))' "$1"
 }
 
+# intact <dest>: "ok" when every pack manifest.json lists is there with the
+# listed size and sha256. Anything else names the first pack that is not.
+intact() {
+    python3 -I - "$1" <<'PY'
+import hashlib, json, os, sys
+dest = sys.argv[1]
+for entry in json.load(open(os.path.join(dest, "manifest.json"))):
+    path = os.path.join(dest, entry["name"])
+    if not os.path.isfile(path) or os.path.islink(path):
+        print("%s is missing" % entry["name"])
+        sys.exit(0)
+    data = open(path, "rb").read()
+    if len(data) != entry["size"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        print("%s has other bytes than the list says" % entry["name"])
+        sys.exit(0)
+print("ok")
+PY
+}
+
+# No file of a publish that is over may stay behind in the folder.
+no_leftovers() {
+    [[ -z "$(find "$1" -mindepth 1 -name '.*' 2>/dev/null)" ]]
+}
+
 publish() {
     PACKS_DEST="${DEST}" PACKS_BACKUP_DIR="${BACKUPS}" bash "${PUBLISH}" "$@"
 }
@@ -135,6 +248,14 @@ publish() {
 run() {
     RC=0
     OUT="$(publish "$@" 2>&1)" || RC=$?
+}
+
+# run_in <dest> <backups> <args...>: the same, into another folder.
+run_in() {
+    local dest="$1" backups="$2"
+    shift 2
+    RC=0
+    OUT="$(PACKS_DEST="${dest}" PACKS_BACKUP_DIR="${backups}" bash "${PUBLISH}" "$@" 2>&1)" || RC=$?
 }
 
 # refused <text> <args...>: the publish fails, says <text>, and changes nothing.
@@ -166,7 +287,32 @@ refused_early() {
 }
 
 status_of() {
-    awk -v name="$1" '$1 == name { print $4 }' <<< "${OUT}" | head -n1
+    awk -v name="$1" '$1 == name { print $5 }' <<< "${OUT}" | head -n1
+}
+
+# The destination half on its own. The upload stream comes on stdin.
+# dest_apply <dest> <backups> <stamp> <expect-old> [more arguments]
+dest_apply() {
+    local dest="$1" backups="$2" stamp="$3" expect="$4"
+    shift 4
+    RC=0
+    OUT="$({ cat "${AGENT}"; cat; } | bash -s -- apply --dir "${dest}" --backups "${backups}" \
+        --stamp "${stamp}" --expect-old "${expect}" "$@" 2>&1)" || RC=$?
+}
+
+# Records of the upload stream.
+rec_pack() {
+    local file="$1"
+    shift
+    printf 'PACK %s %s %s' "$1" "$(stat -c %s "${file}")" "$(sha_of "${file}")"
+    shift
+    printf ' %s' "$@"
+    printf '\n'
+    cat "${file}"
+}
+rec_manifest() {
+    printf 'MANIFEST %s %s\n' "$(stat -c %s "$1")" "$(sha_of "$1")"
+    cat "$1"
 }
 
 # ---- fake packs ------------------------------------------------------------
@@ -176,35 +322,106 @@ make_pack "${TMP}/out1" words-v1 1 a
 write_manifest "${TMP}/out1"
 make_pack "${TMP}/out2" maps-v1 1 a
 write_manifest "${TMP}/out2"
-make_pack "${TMP}/out3" words-v1 1 changed
-write_manifest "${TMP}/out3"
+make_pack "${TMP}/out-same" words-v1 1 other-bytes
+write_manifest "${TMP}/out-same"
+make_pack "${TMP}/out-up" words-v1 2 a
+write_manifest "${TMP}/out-up"
 make_pack "${TMP}/out4" words-v2 2 a
 make_pack "${TMP}/out4" heroes-v2 154088.1 a
 write_manifest "${TMP}/out4"
+make_pack "${TMP}/out-mx" words-v1 2 a
+make_pack "${TMP}/out-mx" bans-v1 1 a
+write_manifest "${TMP}/out-mx"
 
-# ---- dry run, first publish, nothing to do -----------------------------------
+# ---- options -------------------------------------------------------------------
+
+RC=0
+OUT="$(bash "${PUBLISH}" --help 2> "${TMP}/help.err")" || RC=$?
+[[ "${RC}" -eq 0 ]] || fail "--help did not exit 0"
+grep -qF -- "--update" <<< "${OUT}" || fail "--help did not print the options on stdout"
+[[ ! -s "${TMP}/help.err" ]] || fail "--help wrote to stderr"
+RC=0
+OUT="$(PACKS_DEST="${DEST}" bash "${PUBLISH}" --token abc "${TMP}/out2" 2>&1 >/dev/null)" || RC=$?
+[[ "${RC}" -eq 2 ]] || fail "an unknown option (a token on the command line) was not a usage error"
+grep -qF "usage:" <<< "${OUT}" || fail "a usage error did not print the usage line on stderr"
+OUT="$(env -u PACKS_DEST bash "${PUBLISH}" "${TMP}/out2" 2>&1)" && fail "no destination was accepted"
+grep -qF "no destination" <<< "${OUT}" || fail "missing destination: wrong message"
+RC=0
+OUT="$(env -u PACKS_DEST bash "${PUBLISH}" --check "${TMP}/out1" 2>&1)" || RC=$?
+[[ "${RC}" -eq 0 ]] || fail "--check of a good outdir failed"
+grep -qF "Checked 2 pack(s)" <<< "${OUT}" || fail "--check did not check the outdir"
+grep -qF "Reading what is published" <<< "${OUT}" && fail "--check read a destination"
+refused "--replace is gone" --replace "${TMP}/out1"
+refused "--keep is gone" --keep 1 "${TMP}/out1"
+pass "--help exits 0 on stdout; an unknown option is a usage error; no token option; --check reads no destination; --replace and --keep are refused"
+
+# ---- first publish ---------------------------------------------------------------
+
+refused "has no manifest.json" "${TMP}/out1"
+grep -qF -- "--first-publish" <<< "${OUT}" || fail "a folder without manifest.json: the option was not named"
+pass "a destination without manifest.json is refused unless --first-publish is given"
+
+mkdir -p "${TMP}/strange"
+: > "${TMP}/strange/avatar-1.png"
+: > "${TMP}/strange/.x.publish-old.tmp"
+: > "${TMP}/strange/manifest.json.new"
+cp "${TMP}/out4/words-v2.tar" "${TMP}/strange/words-v2.tar"
+before="$(snapshot "${TMP}/strange")"
+run_in "${TMP}/strange" "${TMP}/backups-s" --first-publish "${TMP}/out1"
+[[ "${RC}" -ne 0 ]] || fail "--first-publish into a folder with other files succeeded"
+grep -qF "needs a folder with nothing else in it" <<< "${OUT}" || fail "--first-publish with other files: wrong message"
+grep -qF "avatar-1.png" <<< "${OUT}" || fail "--first-publish with other files: the file was not named"
+grep -qF "Publishing" <<< "${OUT}" && fail "--first-publish with other files: refused only after the upload had started"
+[[ "$(snapshot "${TMP}/strange")" == "${before}" ]] || fail "a refused first publish changed or removed a file"
+# The destination half makes the same two checks under the lock.
+before="$(snapshot "${TMP}/strange")"
+{
+    rec_pack "${TMP}/out2/maps-v1.tar" maps-v1.tar new
+    printf '[\n  {"name":"maps-v1.tar","version":"1","sha256":"%s","size":%s}\n]\n' \
+        "$(sha_of "${TMP}/out2/maps-v1.tar")" "$(stat -c %s "${TMP}/out2/maps-v1.tar")" > "${TMP}/one.json"
+    rec_manifest "${TMP}/one.json"
+    printf 'END\n'
+} > "${TMP}/first.stream"
+dest_apply "${TMP}/strange" "${TMP}/backups-s" 20260101T000010Z absent < "${TMP}/first.stream"
+[[ "${RC}" -ne 0 ]] || fail "the destination half took a folder without manifest.json as a first publish"
+grep -qF "right only for a first publish" <<< "${OUT}" || fail "destination half, no --first-publish: wrong message"
+dest_apply "${TMP}/strange" "${TMP}/backups-s" 20260101T000011Z absent --first-publish < "${TMP}/first.stream"
+[[ "${RC}" -ne 0 ]] || fail "the destination half published into a folder with other files"
+grep -qF "is not a pack of this publish" <<< "${OUT}" || fail "destination half, other files: wrong message"
+[[ "$(snapshot "${TMP}/strange")" == "${before}" ]] || fail "the destination half changed or removed a file it did not bring"
+pass "--first-publish refuses a folder that holds anything else, and removes nothing (script and destination half)"
 
 before="$(snapshot "${DEST}")"
-run --dry-run "${TMP}/out1"
+run --dry-run --first-publish "${TMP}/out1"
 [[ "${RC}" -eq 0 ]] || fail "dry run of a first publish failed"
 grep -qF "DRY RUN: nothing was changed" <<< "${OUT}" || fail "dry run did not say so"
 grep -qF "upload heroes-v1.tar" <<< "${OUT}" || fail "dry run did not list the upload"
-grep -qF "rename manifest.json.new over manifest.json" <<< "${OUT}" || fail "dry run did not list the switch"
+grep -qF "rename the new manifest over manifest.json" <<< "${OUT}" || fail "dry run did not list the switch"
 [[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "dry run changed the destination"
 [[ ! -e "${BACKUPS}" ]] || fail "dry run created the backups folder"
 pass "--dry-run on an empty destination prints the steps and changes nothing"
 
-run "${TMP}/out1"
+run --first-publish "${TMP}/out1"
 [[ "${RC}" -eq 0 ]] || fail "first publish failed"
 [[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar" ]] || fail "first publish: wrong manifest"
 [[ "$(status_of heroes-v1.tar)" == "new" && "$(status_of words-v1.tar)" == "new" ]] || fail "first publish: wrong table"
 cmp -s "${TMP}/out1/words-v1.tar" "${DEST}/words-v1.tar" || fail "first publish: tar differs"
 [[ "$(stat -c %a "${DEST}/words-v1.tar")" == "644" ]] || fail "published tar is not mode 644"
 [[ "$(stat -c %a "${DEST}/manifest.json")" == "644" ]] || fail "manifest.json is not mode 644"
-[[ -z "$(find "${DEST}" -mindepth 1 -name '.*')" ]] || fail "first publish left temp files"
+no_leftovers "${DEST}" || fail "first publish left temp files"
 grep -qF "Backup: none" <<< "${OUT}" || fail "first publish should report no backup"
 grep -qF "Authenticated check: SKIPPED" <<< "${OUT}" || fail "no token: the skipped check was not stated"
+grep -qF "warning: the list has no" <<< "${OUT}" && fail "a list with heroes-v1.tar got the missing-pack warning"
 pass "first publish into an empty directory (2 packs, mode 644, no temp files)"
+
+refused "already has a manifest.json" --first-publish "${TMP}/out2"
+mkdir -p "${TMP}/dest-w"
+run_in "${TMP}/dest-w" "${TMP}/backups-w" --dry-run --first-publish "${TMP}/out2"
+grep -qF "warning: the list has no heroes-v1.tar" <<< "${OUT}" || fail "dry run: no warning for a list without heroes-v1.tar"
+run_in "${TMP}/dest-w" "${TMP}/backups-w" --first-publish "${TMP}/out2"
+[[ "${RC}" -eq 0 ]] || fail "first publish without heroes-v1.tar failed"
+grep -qF "warning: the list has no heroes-v1.tar" <<< "${OUT}" || fail "no warning for a list without heroes-v1.tar"
+pass "--first-publish on a folder that has a manifest is refused; a list without heroes-v1.tar gets a warning"
 
 before="$(snapshot "${DEST}")"
 run "${TMP}/out1"
@@ -217,6 +434,7 @@ pass "same name and same sha is skipped; nothing is rewritten"
 # ---- merge and rollback --------------------------------------------------------
 
 cp "${DEST}/manifest.json" "${TMP}/manifest-two.json"
+cp -r "${DEST}" "${TMP}/dest-two"
 run "${TMP}/out2"
 [[ "${RC}" -eq 0 ]] || fail "merge publish failed"
 [[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] \
@@ -226,65 +444,112 @@ backup="$(sed -n 's/^Backup: //p' <<< "${OUT}")"
 [[ -f "${backup}" ]] || fail "merge: no backup file at ${backup}"
 [[ "${backup}" =~ /packs-manifest-pre-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.json$ ]] || fail "backup name has no UTC stamp: ${backup}"
 cmp -s "${backup}" "${TMP}/manifest-two.json" || fail "backup is not the old manifest"
+[[ "$(stat -c %a "${BACKUPS}")" == "700" ]] || fail "a backups folder the script made is not mode 700"
+no_leftovers "${BACKUPS}" || fail "the backups folder holds a temp file"
 pass "merge keeps packs the outdir does not mention; heroes-v1 stays first; old manifest backed up"
 
 rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
-[[ -n "${rollback}" ]] || fail "no rollback line"
+[[ "${rollback}" == "sh -c '"*"'" ]] || fail "the rollback line is not one sh -c command: ${rollback}"
 bash -c "${rollback}" || fail "the rollback line failed"
 cmp -s "${DEST}/manifest.json" "${TMP}/manifest-two.json" || fail "rollback did not restore the old manifest"
-[[ ! -e "${DEST}/manifest.json.new" ]] || fail "rollback left manifest.json.new"
+no_leftovers "${DEST}" || fail "rollback left a temp file"
 still_valid "${TMP}/out1" "after rollback the old packs do not verify"
 run "${TMP}/out2"
 [[ "${RC}" -eq 0 ]] || fail "publish after a rollback failed"
 [[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] || fail "publish after rollback: wrong manifest"
 pass "rollback from the backup restores the old manifest, and a later publish works"
 
-# ---- same name, other bytes ------------------------------------------------------
+# ---- update in place: same name, new version -----------------------------------------
 
-refused "already published with other bytes" "${TMP}/out3"
-grep -qF "new name" <<< "${OUT}" || fail "conflict did not explain the naming rule"
-pass "same name with a different sha is refused"
+refused "under the same version" "${TMP}/out-same"
+refused "under the same version" --update "${TMP}/out-same"
+grep -qF "new version" <<< "${OUT}" || fail "same version: the fix was not named"
+pass "same name, other bytes and the SAME version is refused, with and without --update"
+
+refused "run again with --update" "${TMP}/out-up"
+grep -qF "version 1" <<< "${OUT}" || fail "update without --update: the published version is not shown"
+grep -qF "version 2" <<< "${OUT}" || fail "update without --update: the new version is not shown"
+pass "same name with a new version is refused without --update, and the message names the option"
 
 old_words_sha="$(sha_of "${DEST}/words-v1.tar")"
+old_words_inode="$(stat -c %i "${DEST}/words-v1.tar")"
 cp "${DEST}/manifest.json" "${TMP}/manifest-three.json"
 before="$(snapshot "${DEST}")"
 backups_before="$(snapshot "${BACKUPS}")"
-run --dry-run --replace "${TMP}/out3"
-[[ "${RC}" -eq 0 ]] || fail "dry run with --replace failed"
-[[ "$(status_of words-v1.tar)" == "replaced" ]] || fail "dry run with --replace: wrong table"
-[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "dry run with --replace changed the destination"
-[[ "$(snapshot "${BACKUPS}")" == "${backups_before}" ]] || fail "dry run with --replace wrote a backup"
-pass "--dry-run --replace changes nothing in the destination or the backups folder"
+run --dry-run --update "${TMP}/out-up"
+[[ "${RC}" -eq 0 ]] || fail "dry run with --update failed"
+[[ "$(status_of words-v1.tar)" == "updated" ]] || fail "dry run with --update: wrong table"
+grep -qF "updated (1 -> 2)" <<< "${OUT}" || fail "dry run with --update: the versions are not in the table"
+grep -qF "the update window opens" <<< "${OUT}" || fail "dry run with --update did not show the two renames"
+[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "dry run with --update changed the destination"
+[[ "$(snapshot "${BACKUPS}")" == "${backups_before}" ]] || fail "dry run with --update wrote a backup"
+pass "--dry-run --update shows updated (1 -> 2) and changes nothing in the destination or the backups folder"
 
-run --replace "${TMP}/out3"
-[[ "${RC}" -eq 0 ]] || fail "--replace failed"
-[[ "$(status_of words-v1.tar)" == "replaced" ]] || fail "--replace: wrong table"
-cmp -s "${TMP}/out3/words-v1.tar" "${DEST}/words-v1.tar" || fail "--replace did not put the new tar in place"
-[[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] || fail "--replace changed the order"
-grep -qF "$(sha_of "${TMP}/out3/words-v1.tar")" "${DEST}/manifest.json" || fail "--replace: manifest has the old sha"
-grep -qF "will not download it again" <<< "${OUT}" || fail "--replace under the same version did not warn"
-saved="$(sed -n 's/^Old tars: //p' <<< "${OUT}")"
-[[ "$(sha_of "${saved}words-v1.tar")" == "${old_words_sha}" ]] || fail "--replace did not save the old tar"
-pass "--replace swaps the tar, keeps the order, saves the old tar, warns about the version"
+chmod 750 "${DEST}"
+run --update "${TMP}/out-up"
+[[ "${RC}" -eq 0 ]] || fail "--update failed"
+grep -qF "updated (1 -> 2)" <<< "${OUT}" || fail "--update: the table does not say updated (1 -> 2)"
+cmp -s "${TMP}/out-up/words-v1.tar" "${DEST}/words-v1.tar" || fail "--update did not put the new tar in place"
+[[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] || fail "--update changed the order"
+grep -qF "$(sha_of "${TMP}/out-up/words-v1.tar")" "${DEST}/manifest.json" || fail "--update: manifest has the old sha"
+grep -qF '"version":"2"' "${DEST}/manifest.json" || fail "--update: manifest has the old version"
+[[ "$(intact "${DEST}")" == "ok" ]] || fail "--update: $(intact "${DEST}")"
+new_words_inode="$(stat -c %i "${DEST}/words-v1.tar")"
+[[ "${new_words_inode}" != "${old_words_inode}" ]] || fail "--update wrote over the live tar instead of renaming a new file in"
+saved="$(sed -n 's/^Old tar: //p' <<< "${OUT}")"
+[[ "$(sha_of "${saved}")" == "${old_words_sha}" ]] || fail "--update did not save the old tar"
+no_leftovers "${DEST}" || fail "--update left a temp file or its journal"
+[[ "$(stat -c %a "${DEST}")" == "750" ]] || fail "--update changed the mode of the destination folder"
+pass "--update swaps the tar by rename, keeps the order, lists the new version, saves the old tar"
 
 rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
-bash -c "${rollback}" || fail "the rollback line after --replace failed"
-cmp -s "${DEST}/manifest.json" "${TMP}/manifest-three.json" || fail "rollback after --replace: manifest not restored"
-[[ "$(sha_of "${DEST}/words-v1.tar")" == "${old_words_sha}" ]] || fail "rollback after --replace: old tar not restored"
-still_valid "${TMP}/out1" "after the --replace rollback the packs do not verify"
-pass "rollback after --replace restores the old tar and the old manifest"
+grep -qF "cp -pR" <<< "${rollback}" && fail "the rollback line copies a folder over the destination"
+bash -c "${rollback}" || fail "the rollback line after --update failed"
+cmp -s "${DEST}/manifest.json" "${TMP}/manifest-three.json" || fail "rollback after --update: manifest not restored"
+[[ "$(sha_of "${DEST}/words-v1.tar")" == "${old_words_sha}" ]] || fail "rollback after --update: old tar not restored"
+[[ "$(stat -c %i "${DEST}/words-v1.tar")" != "${new_words_inode}" ]] \
+    || fail "the rollback line wrote over the live tar; a download in flight would get mixed bytes"
+[[ "$(stat -c %a "${DEST}")" == "750" ]] || fail "the rollback line changed the mode of the destination folder"
+no_leftovers "${DEST}" || fail "the rollback line left a temp file"
+chmod 755 "${DEST}"
+still_valid "${TMP}/out1" "after the --update rollback the packs do not verify"
+pass "rollback after --update puts the old tar and manifest back by rename; folder mode untouched"
+
+# The listed file is already damaged: the update still goes in, and nothing
+# is saved or offered as "the old tar".
+cp -r "${DEST}" "${TMP}/dest-dmg"
+printf 'not the published bytes' > "${TMP}/dest-dmg/words-v1.tar"
+run_in "${TMP}/dest-dmg" "${TMP}/backups-dmg" --update "${TMP}/out-up"
+[[ "${RC}" -eq 0 ]] || fail "--update over a damaged pack failed"
+grep -qF "Old tar: none for words-v1.tar" <<< "${OUT}" || fail "--update over a damaged pack offered an old tar"
+[[ "$(intact "${TMP}/dest-dmg")" == "ok" ]] || fail "--update over a damaged pack: $(intact "${TMP}/dest-dmg")"
+[[ -z "$(find "${TMP}/backups-dmg" -name 'words-v1.tar')" ]] || fail "damaged bytes were saved as the old tar"
+# And the destination half refuses to save a file that is not the old one.
+cp -r "${DEST}" "${TMP}/dest-lie"
+before="$(snapshot "${TMP}/dest-lie")"
+{
+    rec_pack "${TMP}/out-up/words-v1.tar" words-v1.tar update 10240 "$(sha_of "${TMP}/out2/maps-v1.tar")"
+    rec_manifest "${TMP}/dest-dmg/manifest.json"
+    printf 'END\n'
+} > "${TMP}/stream"
+dest_apply "${TMP}/dest-lie" "${TMP}/backups-lie" 20260101T000020Z "$(sha_of "${TMP}/dest-lie/manifest.json")" < "${TMP}/stream"
+[[ "${RC}" -ne 0 ]] || fail "the destination half saved a file that is not the old tar"
+grep -qF "is not the file the published list names" <<< "${OUT}" || fail "wrong old sha: wrong message"
+[[ "$(snapshot "${TMP}/dest-lie")" == "${before}" ]] || fail "a refused update changed the destination"
+[[ -z "$(find "${TMP}/backups-lie" -name 'words-v1.tar' 2>/dev/null)" ]] || fail "a refused update left a saved tar"
+pass "an update never saves other bytes as the old tar: damaged file (script) and wrong old sha256 (destination half)"
 
 # ---- outdir refusals ---------------------------------------------------------
 
 mkdir -p "${TMP}/bad-sha"
-cp "${TMP}/out2/maps-v1.tar" "${TMP}/bad-sha/"
+cp "${TMP}/out4/words-v2.tar" "${TMP}/bad-sha/"
 write_manifest "${TMP}/bad-sha"
 sed -i 's/"sha256":"[0-9a-f]\{8\}/"sha256":"00000000/' "${TMP}/bad-sha/manifest.json"
 refused_early "has sha256" "${TMP}/bad-sha"
 pass "sha256 mismatch between manifest and tar is refused"
 
 mkdir -p "${TMP}/bad-size"
-cp "${TMP}/out2/maps-v1.tar" "${TMP}/bad-size/"
+cp "${TMP}/out4/words-v2.tar" "${TMP}/bad-size/"
 write_manifest "${TMP}/bad-size"
 sed -i 's/"size":[0-9]*/"size":7/' "${TMP}/bad-size/manifest.json"
 refused_early "manifest.json says 7" "${TMP}/bad-size"
@@ -315,6 +580,12 @@ evil_pack "${TMP}/evil-device" device
 refused_early "holds a device node" "${TMP}/evil-device"
 pass "a tar with a device node is refused"
 
+mkdir -p "${TMP}/gz"
+gzip -c "${TMP}/out4/words-v2.tar" > "${TMP}/gz/words-v2.tar"
+write_manifest "${TMP}/gz"
+refused_early "is not a plain tar" "${TMP}/gz"
+pass "a gzip file under a .tar name is refused"
+
 mkdir -p "${TMP}/bad-name"
 cp "${TMP}/out2/maps-v1.tar" "${TMP}/bad-name/Maps_V1.tar"
 write_manifest "${TMP}/bad-name"
@@ -343,137 +614,146 @@ sed -i 's/"version":"2"/"version":"3"/' "${TMP}/inner/manifest.json"
 refused_early "inner manifest.json has version" "${TMP}/inner"
 pass "a pack whose inner manifest.json disagrees with the list is refused"
 
+# ---- the backups folder ----------------------------------------------------------
+
+before="$(snapshot "${DEST}")"
+run_in "${DEST}" "${DEST}/bk" "${TMP}/out4"
+[[ "${RC}" -ne 0 ]] || fail "a backups folder inside the destination was accepted"
+grep -qF "must be outside" <<< "${OUT}" || fail "backups inside the destination: wrong message"
+ln -s "${DEST}" "${TMP}/dest-link"
+run_in "${DEST}" "${TMP}/dest-link/bk" "${TMP}/out4"
+[[ "${RC}" -ne 0 ]] || fail "a backups path that is a symlink into the destination was accepted"
+grep -qF "must be outside" <<< "${OUT}" || fail "backups through a symlink: wrong message"
+[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a refused backups folder changed the destination"
+pass "a backups folder inside the destination is refused, also when it is reached through a symlink"
+
+mkdir -p "${TMP}/shared"
+chmod 1777 "${TMP}/shared"
+cp -r "${DEST}" "${TMP}/dest-sh"
+run_in "${TMP}/dest-sh" "${TMP}/shared" "${TMP}/out4"
+[[ "${RC}" -eq 0 ]] || fail "a publish with an existing backups folder failed"
+[[ "$(stat -c %a "${TMP}/shared")" == "1777" ]] || fail "the mode of an existing backups folder was changed"
+pass "an existing backups folder keeps its mode"
+
+# The copy of the old manifest fails half way: no partial backup file stays.
+cp -r "${DEST}" "${TMP}/dest-pc"
+before="$(snapshot "${TMP}/dest-pc")"
+hook_reset
 RC=0
-OUT="$(PACKS_DEST="${DEST}" bash "${PUBLISH}" --token abc "${TMP}/out2" 2>&1)" || RC=$?
-[[ "${RC}" -eq 2 ]] || fail "a token on the command line was not a usage error"
-OUT="$(env -u PACKS_DEST bash "${PUBLISH}" "${TMP}/out2" 2>&1)" && fail "no destination was accepted"
-grep -qF "no destination" <<< "${OUT}" || fail "missing destination: wrong message"
-pass "no token argument exists, and a run without a destination is refused"
+OUT="$(PATH="${TMP}/hook:${PATH}" HOOK_AT='cp * */manifest.json */.packs-manifest-pre-*' HOOK_DO=partial \
+    PACKS_DEST="${TMP}/dest-pc" PACKS_BACKUP_DIR="${TMP}/backups-pc" bash "${PUBLISH}" "${TMP}/out4" 2>&1)" || RC=$?
+[[ -e "${HOOK_FILE}.fired" ]] || fail "the copy of the old manifest was never reached"
+[[ "${RC}" -ne 0 ]] || fail "a publish whose backup copy failed succeeded"
+grep -qF "The OLD list is still live" <<< "${OUT}" || fail "failed backup copy: the outcome was not stated"
+[[ -z "$(find "${TMP}/backups-pc" -mindepth 1)" ]] || fail "a failed backup copy left a partial file: $(find "${TMP}/backups-pc" -mindepth 1)"
+[[ "$(snapshot "${TMP}/dest-pc")" == "${before}" ]] || fail "a failed backup copy changed the destination"
+pass "a backup copy that fails half way leaves no partial file and no change"
 
-# ---- interrupted publishes ------------------------------------------------------
+# ---- the lock ----------------------------------------------------------------------
 
-# The backups folder cannot be made, so the run fails after the new tar has
-# its final name and before the manifest switch.
+exec 8< "${DEST}"
+flock -n 8 || fail "the test could not take the lock"
+refused "another publish is running" "${TMP}/out4"
+before="$(snapshot "${DEST}")"
+{
+    rec_manifest "${DEST}/manifest.json"
+    printf 'END\n'
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000030Z "$(sha_of "${DEST}/manifest.json")" < "${TMP}/stream"
+[[ "${RC}" -ne 0 ]] || fail "the destination half published while another publish held the lock"
+grep -qF "another publish is running" <<< "${OUT}" || fail "held lock: wrong message from the destination half"
+[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a publish without the lock changed the destination"
+run --dry-run "${TMP}/out4"
+[[ "${RC}" -eq 0 ]] || fail "a dry run while a publish runs failed"
+grep -qF "another publish is running there right now" <<< "${OUT}" || fail "a dry run did not mention the running publish"
+flock -u 8
+exec 8<&-
+pass "a second publish while one holds the lock is refused (script and destination half); a dry run says so"
+
+mkdir -p "${TMP}/noflock"
+for tool in sha256sum stat base64 head cut cp mv mkdir chmod rm grep; do
+    ln -s "$(command -v "${tool}")" "${TMP}/noflock/${tool}"
+done
+ln -s "${TMP}/guard/sync" "${TMP}/noflock/sync"
+RC=0
+OUT="$(env -i PATH="${TMP}/noflock" HOME="${TMP}" "$(command -v bash)" -s -- state --dir "${DEST}" < "${AGENT}" 2>&1)" || RC=$?
+[[ "${RC}" -ne 0 ]] || fail "the destination half ran without flock"
+grep -qF "flock is required on the destination" <<< "${OUT}" || fail "no flock: wrong message"
+pass "without flock on the destination nothing runs, and the message says why"
+
+# ---- what the destination half refuses ------------------------------------------------
+
 cp "${DEST}/manifest.json" "${TMP}/manifest-before-fail.json"
-: > "${TMP}/not-a-folder"
-RC=0
-OUT="$(PACKS_DEST="${DEST}" PACKS_BACKUP_DIR="${TMP}/not-a-folder" bash "${PUBLISH}" "${TMP}/out4" 2>&1)" || RC=$?
-[[ "${RC}" -ne 0 ]] || fail "a publish that cannot write its backup succeeded"
-grep -qF "failed before the switch" <<< "${OUT}" || fail "failed publish did not say the manifest is unchanged"
-cmp -s "${DEST}/manifest.json" "${TMP}/manifest-before-fail.json" || fail "failed publish changed manifest.json"
-[[ -f "${DEST}/words-v2.tar" ]] || fail "expected the new tar to be in place already (the failure point moved)"
-[[ ! -e "${DEST}/manifest.json.new" ]] || fail "failed publish left manifest.json.new"
-[[ -z "$(find "${DEST}" -mindepth 1 -name '.*')" ]] || fail "failed publish left temp files"
-still_valid "${TMP}/out1" "after a failed publish the old packs do not verify"
-still_valid "${TMP}/out2" "after a failed publish the old packs do not verify"
-pass "a failure between the tar rename and the manifest rename leaves the old manifest valid"
-
-# The connection drops in the middle of the upload stream.
 before="$(snapshot "${DEST}")"
 pack="${TMP}/out4/words-v2.tar"
-RC=0
-OUT="$({
-    cat "${AGENT}"
+expect="$(sha_of "${DEST}/manifest.json")"
+# The connection drops in the middle of the upload stream.
+{
     printf 'PACK cut-v1.tar %s %s new\n' "$(stat -c %s "${pack}")" "$(sha_of "${pack}")"
     cat "${pack}"
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000000Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" 2>&1)" || RC=$?
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000000Z "${expect}" < "${TMP}/stream"
 [[ "${RC}" -ne 0 ]] || fail "a cut upload stream was accepted"
 grep -qF "ended early" <<< "${OUT}" || fail "a cut upload stream: wrong message"
 [[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a cut upload stream changed the destination"
-# The destination script on its own: bytes that were damaged on the way, no
-# manifest in the stream, and a manifest that changed after it was read.
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'PACK cut-v1.tar %s %s new\n' "$(stat -c %s "${pack}")" "$(sha_of "${DEST}/manifest.json")"
+# Bytes that were damaged on the way.
+{
+    printf 'PACK cut-v1.tar %s %s new\n' "$(stat -c %s "${pack}")" "${expect}"
     cat "${pack}"
     printf 'END\n'
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000002Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" 2>&1)" || RC=$?
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000002Z "${expect}" < "${TMP}/stream"
 [[ "${RC}" -ne 0 ]] || fail "an upload with the wrong sha256 was accepted"
 grep -qF "sha256 at the destination does not match" <<< "${OUT}" || fail "damaged upload: wrong message"
-[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a damaged upload changed the destination"
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'END\n'
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000002Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" 2>&1)" || RC=$?
+# No manifest in the stream.
+printf 'END\n' > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000002Z "${expect}" < "${TMP}/stream"
 [[ "${RC}" -ne 0 ]] || fail "a stream without a manifest was accepted"
 grep -qF "had no manifest" <<< "${OUT}" || fail "a stream without a manifest: wrong message"
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'MANIFEST %s %s\n' "$(stat -c %s "${DEST}/manifest.json")" "$(sha_of "${DEST}/manifest.json")"
-    cat "${DEST}/manifest.json"
+# The manifest changed after it was read.
+{
+    rec_manifest "${DEST}/manifest.json"
     printf 'END\n'
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000002Z \
-    --expect-old "$(sha_of "${pack}")" 2>&1)" || RC=$?
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000002Z "$(sha_of "${pack}")" < "${TMP}/stream"
 [[ "${RC}" -ne 0 ]] || fail "a manifest that changed since it was read was overwritten"
 grep -qF "changed at the destination since it was read" <<< "${OUT}" || fail "changed manifest: wrong message"
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'DROP heroes-v1.tar\n'
-    printf 'MANIFEST %s %s\n' "$(stat -c %s "${DEST}/manifest.json")" "$(sha_of "${DEST}/manifest.json")"
-    cat "${DEST}/manifest.json"
-    printf 'END\n'
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000002Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" 2>&1)" || RC=$?
-[[ "${RC}" -ne 0 ]] || fail "a tar the new manifest still lists was dropped"
-grep -qF "refusing to drop heroes-v1.tar" <<< "${OUT}" || fail "drop of a listed tar: wrong message"
+# The new manifest lists a tar that is not there.
 printf '[\n  {"name":"ghost-v1.tar","version":"1","sha256":"%s","size":10240}\n]\n' \
     "$(sha_of "${pack}")" > "${TMP}/ghost.json"
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'MANIFEST %s %s\n' "$(stat -c %s "${TMP}/ghost.json")" "$(sha_of "${TMP}/ghost.json")"
-    cat "${TMP}/ghost.json"
+{
+    rec_manifest "${TMP}/ghost.json"
     printf 'END\n'
-} | bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000002Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" 2>&1)" || RC=$?
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000002Z "${expect}" < "${TMP}/stream"
 [[ "${RC}" -ne 0 ]] || fail "a manifest that lists a missing tar was switched in"
 grep -qF "ghost-v1.tar is listed in the new manifest but is not at the destination" <<< "${OUT}" \
     || fail "manifest with a missing tar: wrong message"
-[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a refused upload stream changed the destination"
-pass "the destination refuses a damaged upload, a cut stream, no manifest, a raced manifest, a missing tar, and dropping a listed tar"
-
-# A replaced tar is put back when the manifest switch itself fails. Here the
-# switch cannot happen because manifest.json is a folder with a file in it.
-mkdir -p "${TMP}/dest-r/manifest.json"
-: > "${TMP}/dest-r/manifest.json/in-the-way"
-cp "${TMP}/out1/words-v1.tar" "${TMP}/dest-r/words-v1.tar"
-printf '[\n  {"name":"words-v1.tar","version":"1","sha256":"%s","size":%s}\n]\n' \
-    "$(sha_of "${TMP}/out3/words-v1.tar")" "$(stat -c %s "${TMP}/out3/words-v1.tar")" > "${TMP}/replace.json"
-RC=0
-OUT="$({
-    cat "${AGENT}"
-    printf 'PACK words-v1.tar %s %s replace\n' "$(stat -c %s "${TMP}/out3/words-v1.tar")" "$(sha_of "${TMP}/out3/words-v1.tar")"
-    cat "${TMP}/out3/words-v1.tar"
-    printf 'MANIFEST %s %s\n' "$(stat -c %s "${TMP}/replace.json")" "$(sha_of "${TMP}/replace.json")"
-    cat "${TMP}/replace.json"
+# The new manifest lists a tar that is there, with the right size and the wrong sha256.
+printf '[\n  {"name":"maps-v1.tar","version":"1","sha256":"%s","size":%s}\n]\n' \
+    "$(sha_of "${pack}")" "$(stat -c %s "${DEST}/maps-v1.tar")" > "${TMP}/wrong-sha.json"
+{
+    rec_manifest "${TMP}/wrong-sha.json"
     printf 'END\n'
-} | bash -s -- apply --dir "${TMP}/dest-r" --backups "${TMP}/backups-r" --stamp 20260101T000003Z \
-    --expect-old absent 2>&1)" || RC=$?
-[[ "${RC}" -ne 0 ]] || fail "a manifest switch onto a folder succeeded"
-grep -qF "restored words-v1.tar" <<< "${OUT}" || fail "a failed --replace did not report the restore"
-cmp -s "${TMP}/dest-r/words-v1.tar" "${TMP}/out1/words-v1.tar" || fail "a failed --replace did not put the old tar back"
-[[ ! -e "${TMP}/dest-r/manifest.json.new" ]] || fail "a failed --replace left manifest.json.new"
-[[ -z "$(find "${TMP}/dest-r" -mindepth 1 -maxdepth 1 -name '.*')" ]] || fail "a failed --replace left temp files"
-pass "a --replace whose manifest switch fails puts the old tar back"
+} > "${TMP}/stream"
+dest_apply "${DEST}" "${BACKUPS}" 20260101T000002Z "${expect}" < "${TMP}/stream"
+[[ "${RC}" -ne 0 ]] || fail "a manifest whose sha256 does not match the tar at the destination was switched in"
+grep -qF "maps-v1.tar: sha256 at the destination does not match the new manifest" <<< "${OUT}" \
+    || fail "manifest with a wrong sha256 for a kept tar: wrong message"
+[[ "$(snapshot "${DEST}")" == "${before}" ]] || fail "a refused upload stream changed the destination"
+pass "the destination refuses a damaged upload, a cut stream, no manifest, a raced manifest, a missing tar, and a kept tar with the wrong sha256"
 
 # kill -9 after the tar is uploaded and before the manifest is sent.
 mkfifo "${TMP}/fifo"
 bash -s -- apply --dir "${DEST}" --backups "${BACKUPS}" --stamp 20260101T000001Z \
-    --expect-old "$(sha_of "${DEST}/manifest.json")" < "${TMP}/fifo" > "${TMP}/killed.out" 2>&1 &
+    --expect-old "${expect}" < "${TMP}/fifo" > "${TMP}/killed.out" 2>&1 &
 AGENT_PID=$!
 exec 7> "${TMP}/fifo"
 cat "${AGENT}" >&7
 printf 'PACK killed-v1.tar %s %s new\n' "$(stat -c %s "${pack}")" "$(sha_of "${pack}")" >&7
 cat "${pack}" >&7
 stale="${DEST}/.killed-v1.tar.publish-20260101T000001Z.tmp"
-for _ in $(seq 1 200); do
+for _ in $(seq 1 400); do
     grep -q '^UPLOADED killed-v1.tar ' "${TMP}/killed.out" 2>/dev/null && break
     sleep 0.05
 done
@@ -486,41 +766,247 @@ AGENT_PID=""
 [[ -f "${stale}" ]] || fail "expected the killed publish to leave its temp tar"
 cmp -s "${DEST}/manifest.json" "${TMP}/manifest-before-fail.json" || fail "a killed publish changed manifest.json"
 still_valid "${TMP}/out1" "after kill -9 the old packs do not verify"
-pass "kill -9 between the tar upload and the manifest rename leaves the old manifest valid"
-
-# ---- --keep ------------------------------------------------------------------
-
-run --keep 1 "${TMP}/out4"
-[[ "${RC}" -eq 0 ]] || fail "--keep 1 publish failed"
+: > "${DEST}/.not-ours.tmp"
+run "${TMP}/out4"
+[[ "${RC}" -eq 0 ]] || fail "the publish after a killed one failed"
 [[ ! -e "${stale}" ]] || fail "the next publish did not clean the killed publish's temp tar"
-[[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar maps-v1.tar heroes-v2.tar words-v2.tar" ]] \
-    || fail "--keep 1: wrong manifest: $(names_in "${DEST}/manifest.json")"
-[[ "$(status_of words-v1.tar)" == "dropped" ]] || fail "--keep 1 did not drop words-v1"
-[[ "$(status_of heroes-v1.tar)" == "kept" ]] || fail "--keep 1 dropped the pinned heroes-v1"
-[[ ! -e "${DEST}/words-v1.tar" ]] || fail "--keep 1 left the dropped tar in the destination"
-saved="$(sed -n 's/^Old tars: //p' <<< "${OUT}")"
-[[ "$(sha_of "${saved}words-v1.tar")" == "${old_words_sha}" ]] || fail "--keep 1 did not move the dropped tar to the backups"
-for name in heroes-v1.tar maps-v1.tar words-v2.tar heroes-v2.tar; do
-    [[ -f "${DEST}/${name}" ]] || fail "--keep 1 removed ${name}, which is still listed"
-done
-rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
-bash -c "${rollback}" || fail "the rollback line after --keep failed"
-[[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] || fail "rollback after --keep: wrong manifest"
-still_valid "${TMP}/out1" "rollback after --keep: the dropped pack does not verify"
-pass "--keep 1 drops the older generation, never a listed tar, keeps pinned heroes-v1, and rolls back"
+[[ -e "${DEST}/.not-ours.tmp" ]] || fail "the next publish removed a dot file that is not one of its temp names"
+rm -f "${DEST}/.not-ours.tmp"
+[[ "$(names_in "${DEST}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar heroes-v2.tar words-v2.tar" ]] \
+    || fail "publish after a killed one: wrong manifest: $(names_in "${DEST}/manifest.json")"
+pass "kill -9 during the upload leaves the old list valid; the next publish removes only its own temp names"
 
-# A pack that is in the outdir is published even when --keep would drop it.
-mkdir -p "${TMP}/dest-k"
+# ---- a signal at every step of an update -------------------------------------------
+#
+# One update (words-v1.tar 1 -> 2) and one new pack (bans-v1.tar) in one
+# publish, straight into the destination half. MX is the folder before,
+# NEW_MX the manifest after.
+
+cp -r "${DEST}" "${TMP}/mx-template"
+cp -r "${DEST}" "${TMP}/mx-done"
+run_in "${TMP}/mx-done" "${TMP}/backups-mx-done" --update "${TMP}/out-mx"
+[[ "${RC}" -eq 0 ]] || fail "the reference update failed"
+NEW_MX="${TMP}/mx-done/manifest.json"
+OLD_MX="${TMP}/mx-template/manifest.json"
+MX="${TMP}/mx"
+MXB="${TMP}/mx-backups"
+{
+    rec_pack "${TMP}/out-mx/bans-v1.tar" bans-v1.tar new
+    rec_pack "${TMP}/out-mx/words-v1.tar" words-v1.tar update \
+        "$(stat -c %s "${TMP}/mx-template/words-v1.tar")" "$(sha_of "${TMP}/mx-template/words-v1.tar")"
+    rec_manifest "${NEW_MX}"
+    printf 'END\n'
+} > "${TMP}/mx.stream"
+
+mx_fresh() {
+    rm -rf "${MX}" "${MXB}"
+    cp -r "${TMP}/mx-template" "${MX}"
+    hook_reset
+}
+
+# mx_apply <glob> <action>: the reference update with one step tampered with.
+mx_apply() {
+    mx_fresh
+    PATH="${TMP}/hook:${PATH}" HOOK_AT="$1" HOOK_DO="$2" \
+        dest_apply "${MX}" "${MXB}" 20260101T000100Z "$(sha_of "${OLD_MX}")" < "${TMP}/mx.stream"
+    [[ -e "${HOOK_FILE}.fired" ]] || fail "step never reached: $1"
+}
+
+# The folder must be exactly one of the two lists, whole.
+mx_is() {
+    local want="$1" what="$2"
+    if [[ "${want}" == "old" ]]; then
+        cmp -s "${MX}/manifest.json" "${OLD_MX}" || fail "${what}: the old list is not live"
+    else
+        cmp -s "${MX}/manifest.json" "${NEW_MX}" || fail "${what}: the new list is not live"
+    fi
+    [[ "$(intact "${MX}")" == "ok" ]] || fail "${what}: $(intact "${MX}")"
+    no_leftovers "${MX}" || fail "${what}: temp files or a journal were left: $(find "${MX}" -mindepth 1 -name '.*')"
+    no_leftovers "${MXB}" || fail "${what}: a temp file was left in the backups folder"
+}
+
+BEFORE_SWITCH=(
+    'sync -- */.bans-v1.tar.publish-*.tmp'
+    'sync -- */.manifest.json.publish-*.tmp'
+    'cp * */manifest.json */.packs-manifest-pre-*'
+    'mv * */.packs-manifest-pre-*.tmp *'
+    'cp * */words-v1.tar */packs-tars-pre-*/.words-v1.tar.tmp'
+    'mv -fT -- */.bans-v1.tar.publish-*.tmp */bans-v1.tar'
+    'mv -fT -- */.publish-journal.publish-*.tmp */.publish-journal'
+)
+for sig in TERM INT HUP; do
+    for at in "${BEFORE_SWITCH[@]}"; do
+        mx_apply "${at}" "after:${sig}"
+        [[ "${RC}" -ne 0 ]] || fail "SIG${sig} after [${at}]: the destination half reported success"
+        mx_is old "SIG${sig} after [${at}]"
+    done
+    mx_apply 'sync -- */.bans-v1.tar.publish-*.tmp' "before:${sig}"
+    [[ "${RC}" -ne 0 ]] || fail "SIG${sig} during the first upload: the destination half reported success"
+    mx_is old "SIG${sig} during the first upload"
+done
+pass "TERM, INT or HUP at any of 8 steps before the switch leaves the old list whole, with no temp file or journal"
+
+# Inside the two renames a signal is held off: the publish goes through.
+for sig in TERM INT HUP; do
+    for at in 'mv -fT -- */.words-v1.tar.publish-*.tmp */words-v1.tar' 'mv -fT -- */.manifest.json.publish-*.tmp */manifest.json'; do
+        mx_apply "${at}" "after:${sig}"
+        [[ "${RC}" -eq 0 ]] || fail "SIG${sig} after [${at}]: the publish did not go through"
+        grep -qx 'COMMITTED' <<< "${OUT}" || fail "SIG${sig} after [${at}]: no COMMITTED"
+        mx_is new "SIG${sig} after [${at}]"
+    done
+done
+pass "TERM, INT or HUP between the tar rename and the manifest rename is held off; the new list goes live whole"
+
+# After the switch a signal ends the run, and nothing is undone.
+for sig in TERM INT HUP; do
+    mx_apply 'rm -f -- */.publish-journal' "before:${sig}"
+    [[ "${RC}" -ne 0 ]] || fail "SIG${sig} after the switch: the destination half reported success"
+    mx_is new "SIG${sig} after the switch"
+done
+# The manifest rename happens and then reports failure: still nothing is undone.
+mx_apply 'mv -fT -- */.manifest.json.publish-*.tmp */manifest.json' fail-after
+[[ "${RC}" -ne 0 ]] || fail "a failed manifest rename was reported as success"
+grep -qF "RESTORED" <<< "${OUT}" && fail "the old tar was put back under the new manifest"
+mx_is new "manifest rename that reports failure after renaming"
+# The tar rename fails: the old tar is put back from the saved copy.
+mx_apply 'mv -fT -- */.words-v1.tar.publish-*.tmp */words-v1.tar' fail-after
+[[ "${RC}" -ne 0 ]] || fail "a failed tar rename was reported as success"
+grep -qx 'RESTORED words-v1.tar' <<< "${OUT}" || fail "a failed update did not put the old tar back"
+mx_is old "tar rename that reports failure after renaming"
+pass "once the manifest is renamed nothing is undone (signal, or a rename that reports failure); before it, the old tar goes back"
+
+# kill -9 cannot be held off. The journal is what the next run reads.
+dest_verb() {
+    RC=0
+    OUT="$(bash -s -- "$1" --dir "${MX}" --backups "${MXB}" < "${AGENT}" 2>&1)" || RC=$?
+}
+mx_apply 'mv -fT -- */.words-v1.tar.publish-*.tmp */words-v1.tar' after:KILL
+cmp -s "${MX}/manifest.json" "${OLD_MX}" || fail "kill -9 between the renames: the old list should still be live"
+cmp -s "${MX}/words-v1.tar" "${TMP}/out-mx/words-v1.tar" || fail "kill -9 between the renames: expected the new bytes under the old list"
+dest_verb state
+grep -q '^JOURNAL open ' <<< "${OUT}" || fail "state did not report the interrupted publish"
+grep -q '^HALF words-v1.tar [0-9]* [0-9a-f]* ok ' <<< "${OUT}" || fail "state did not name the half-switched pack and its saved copy"
+[[ "$(intact "${MX}")" != "ok" ]] || fail "state repaired the folder; it must only read"
+{
+    rec_manifest "${OLD_MX}"
+    printf 'END\n'
+} > "${TMP}/noop.stream"
 RC=0
-OUT="$(PACKS_DEST="${TMP}/dest-k" PACKS_BACKUP_DIR="${TMP}/backups-k" bash "${PUBLISH}" "${TMP}/out4" 2>&1)" || RC=$?
-[[ "${RC}" -eq 0 ]] || fail "--keep setup publish failed"
+OUT="$({ cat "${AGENT}"; cat "${TMP}/noop.stream"; } | bash -s -- apply --dir "${MX}" --backups "${MXB}" \
+    --stamp 20260101T000101Z --expect-old "$(sha_of "${OLD_MX}")" 2>&1)" || RC=$?
+[[ "${RC}" -ne 0 ]] || fail "apply ran on top of an interrupted publish"
+grep -qF "has to be repaired first" <<< "${OUT}" || fail "apply on an interrupted publish: wrong message"
+dest_verb repair
+[[ "${RC}" -eq 0 ]] || fail "repair failed"
+grep -qx 'RESTORED words-v1.tar' <<< "${OUT}" || fail "repair did not put the old tar back"
+mx_is old "repair after kill -9 between the renames"
+# kill -9 right after the manifest rename: the publish did switch.
+mx_apply 'mv -fT -- */.manifest.json.publish-*.tmp */manifest.json' after:KILL
+dest_verb state
+grep -q '^JOURNAL committed ' <<< "${OUT}" || fail "state did not see that the killed publish had switched"
+dest_verb repair
+[[ "${RC}" -eq 0 ]] || fail "repair after a switched publish failed"
+grep -qF "RESTORED" <<< "${OUT}" && fail "repair put the old tar back under the new manifest"
+mx_is new "repair after kill -9 right after the manifest rename"
+# kill -9 with the journal written and nothing renamed yet.
+mx_apply 'mv -fT -- */.publish-journal.publish-*.tmp */.publish-journal' after:KILL
+dest_verb repair
+[[ "${RC}" -eq 0 ]] || fail "repair with nothing to put back failed"
+grep -qF "RESTORED" <<< "${OUT}" && fail "repair put a tar back that had not been touched"
+mx_is old "repair after kill -9 before the renames"
+pass "kill -9 at 3 points around the switch: state names it, apply refuses, repair puts the old tar back only when the old list is live"
+
+# ---- the same through the script: it says what is live -------------------------------
+
+# hooked <dest> <backups> <glob> <action> <args...>
+hooked() {
+    local dest="$1" backups="$2" at="$3" action="$4"
+    shift 4
+    hook_reset
+    RC=0
+    OUT="$(PATH="${TMP}/hook:${PATH}" HOOK_AT="${at}" HOOK_DO="${action}" \
+        PACKS_DEST="${dest}" PACKS_BACKUP_DIR="${backups}" bash "${PUBLISH}" "$@" 2>&1)" || RC=$?
+    [[ -e "${HOOK_FILE}.fired" ]] || fail "step never reached: ${at}"
+}
+
+mx_fresh
+hooked "${MX}" "${MXB}" 'mv -fT -- */.publish-journal.publish-*.tmp */.publish-journal' after:TERM --update "${TMP}/out-mx"
+[[ "${RC}" -ne 0 ]] || fail "a publish stopped before the switch reported success"
+grep -qF "The OLD list is still live" <<< "${OUT}" || fail "stopped before the switch: the script did not say the old list is live"
+grep -qF "Rollback:" <<< "${OUT}" && fail "stopped before the switch: a rollback line was printed for nothing"
+mx_is old "script, stopped before the switch"
+
+mx_fresh
+hooked "${MX}" "${MXB}" 'rm -f -- */.publish-journal' before:TERM --update "${TMP}/out-mx"
+[[ "${RC}" -ne 0 ]] || fail "a publish stopped after the switch reported success"
+grep -qF "the NEW list is live and every pack it lists is in place" <<< "${OUT}" \
+    || fail "stopped after the switch: the script did not say the new list is live"
+grep -qF "were not changed" <<< "${OUT}" && fail "stopped after the switch: the script claims nothing changed"
+grep -q '^Backup: ' <<< "${OUT}" || fail "stopped after the switch: no Backup line"
+rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
+[[ -n "${rollback}" ]] || fail "stopped after the switch: no Rollback line"
+mx_is new "script, stopped after the switch"
+bash -c "${rollback}" || fail "the rollback line of a run that was stopped after the switch failed"
+mx_is old "script, rollback after a stop after the switch"
+pass "stopped before the switch the script reads back and says OLD; stopped after it, NEW, with Backup and a working Rollback"
+
+mx_fresh
+hooked "${MX}" "${MXB}" 'mv -fT -- */.words-v1.tar.publish-*.tmp */words-v1.tar' after:KILL --update "${TMP}/out-mx"
+[[ "${RC}" -ne 0 ]] || fail "a publish killed between the renames reported success"
+grep -qF "The OLD list is live, but these packs do not match it: words-v1.tar" <<< "${OUT}" \
+    || fail "killed between the renames: the script did not say which pack is half switched"
+grep -qF "were not changed" <<< "${OUT}" && fail "killed between the renames: the script claims nothing changed"
+grep -qF "Repair: run the same command again" <<< "${OUT}" || fail "killed between the renames: no repair advice"
+by_hand="$(sed -n 's/^  Or by hand: //p' <<< "${OUT}")"
+[[ -n "${by_hand}" ]] || fail "killed between the renames: no by-hand line"
+before="$(snapshot "${MX}")"
+run_in "${MX}" "${MXB}" --dry-run --update "${TMP}/out-mx"
+[[ "${RC}" -eq 0 ]] || fail "a dry run on an interrupted publish failed"
+grep -qF "was interrupted between its renames" <<< "${OUT}" || fail "a dry run did not report the interrupted publish"
+grep -qF "put the old words-v1.tar back from" <<< "${OUT}" || fail "a dry run did not list the repair as a step"
+[[ "$(snapshot "${MX}")" == "${before}" ]] || fail "a dry run on an interrupted publish changed the destination"
+run_in "${MX}" "${MXB}" --update "${TMP}/out-mx"
+[[ "${RC}" -eq 0 ]] || fail "the run after an interrupted publish failed"
+grep -qF "put the old words-v1.tar back" <<< "${OUT}" || fail "the run after an interrupted publish did not repair first"
+mx_is new "script, run after an interrupted publish"
+saved="$(sed -n 's/^Old tar: //p' <<< "${OUT}")"
+cmp -s "${saved}" "${TMP}/mx-template/words-v1.tar" || fail "after a repair the saved old tar is not the old tar"
+rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
+bash -c "${rollback}" || fail "the rollback line after a repaired publish failed"
+mx_is old "script, rollback after a repaired publish"
+# The by-hand line of the killed run does the same repair.
+mx_fresh
+hooked "${MX}" "${MXB}" 'mv -fT -- */.words-v1.tar.publish-*.tmp */words-v1.tar' after:KILL --update "${TMP}/out-mx"
+by_hand="$(sed -n 's/^  Or by hand: //p' <<< "${OUT}")"
+bash -c "${by_hand}" || fail "the by-hand repair line failed"
+[[ "$(intact "${MX}")" == "ok" ]] || fail "after the by-hand repair line: $(intact "${MX}")"
+pass "killed between the renames: the script names the half-switched pack; the next run (and the by-hand line) puts the old tar back, and a dry run only says so"
+
+# SIGTERM to the script alone, while the destination half is at the switch.
+mx_fresh
+PATH="${TMP}/hook:${PATH}" HOOK_AT='mv -fT -- */.manifest.json.publish-*.tmp */manifest.json' HOOK_DO=hold \
+    PACKS_DEST="${MX}" PACKS_BACKUP_DIR="${MXB}" bash "${PUBLISH}" --update "${TMP}/out-mx" > "${TMP}/term.out" 2>&1 &
+BG_PID=$!
+for _ in $(seq 1 1200); do
+    [[ -e "${HOOK_FILE}.reached" ]] && break
+    sleep 0.05
+done
+[[ -e "${HOOK_FILE}.reached" ]] || fail "the destination half never reached the switch"
+kill -TERM "${BG_PID}"
+sleep 0.3
+kill -0 "${BG_PID}" 2>/dev/null || fail "the script exited on SIGTERM while the destination half was still switching"
+: > "${HOOK_FILE}.go"
 RC=0
-OUT="$(PACKS_DEST="${TMP}/dest-k" PACKS_BACKUP_DIR="${TMP}/backups-k" PACKS_PIN="" bash "${PUBLISH}" --keep 1 "${TMP}/out1" 2>&1)" || RC=$?
-[[ "${RC}" -eq 0 ]] || fail "--keep 1 with older packs in the outdir failed"
-[[ "$(names_in "${TMP}/dest-k/manifest.json")" == "heroes-v2.tar words-v2.tar heroes-v1.tar words-v1.tar" ]] \
-    || fail "--keep 1 dropped a pack that was in the outdir: $(names_in "${TMP}/dest-k/manifest.json")"
-grep -qw "dropped" <<< "${OUT}" && fail "--keep 1 reported a drop for packs in the outdir"
-pass "--keep never drops a pack that is in the outdir"
+wait "${BG_PID}" || RC=$?
+BG_PID=""
+OUT="$(cat "${TMP}/term.out")"
+[[ "${RC}" -eq 143 ]] || fail "after SIGTERM the script exited ${RC}, not 143"
+grep -q '^Backup: ' <<< "${OUT}" || fail "after SIGTERM: no Backup line"
+grep -q '^Rollback: ' <<< "${OUT}" || fail "after SIGTERM: no Rollback line"
+grep -qF "Verified:" <<< "${OUT}" || fail "after SIGTERM: the outcome was not verified"
+grep -qF "SIGTERM arrived during the publish" <<< "${OUT}" || fail "after SIGTERM: the signal was not reported"
+mx_is new "script, SIGTERM during the switch"
+pass "SIGTERM to the script during the switch: it waits, prints Backup and Rollback, verifies, and exits 143"
 
 # ---- --host through stand-ins for ssh and podman -----------------------------------
 
@@ -529,6 +1015,7 @@ cat > "${TMP}/shim/ssh" <<'EOF'
 #!/usr/bin/env bash
 # Stand-in for ssh. No network. It drops the options and the host, then gives
 # the remaining words to a shell as one string, which is what sshd does.
+# SHIM_MODE makes the link or the far side misbehave.
 while [[ "$#" -gt 0 && "$1" == -* ]]; do
     if [[ "$1" == "--" ]]; then
         shift
@@ -538,16 +1025,38 @@ while [[ "$#" -gt 0 && "$1" == -* ]]; do
 done
 echo "$1" >> "${SHIM_DIR}/ssh.log"
 shift
-exec sh -c "$*"
+verb="${4:-}"
+case "${SHIM_MODE:-plain}:${verb}" in
+    cut-after-backup:apply)
+        sh -c "$*" | sed '/^BACKUP /q'
+        exit 255
+        ;;
+    drop-committed:apply) sh -c "$*" | grep -vx 'COMMITTED' ;;
+    tamper-manifest:apply) sh -c "$*" | sed '/^COMMITTED$/,$ s/^\(MANIFEST [0-9a-f]* \)W/\1X/' ;;
+    tamper-file:apply) sh -c "$*" | sed '/^COMMITTED$/,$ s/^\(FILE maps-v1.tar [0-9]* \)[0-9a-f]\{8\}/\100000000/' ;;
+    gone:apply)
+        cat > /dev/null
+        exit 255
+        ;;
+    gone:state)
+        case " $* " in
+            *" --wait "*) exit 255 ;;
+        esac
+        exec sh -c "$*"
+        ;;
+    *) exec sh -c "$*" ;;
+esac
 EOF
 cat > "${TMP}/shim/podman" <<'EOF'
 #!/usr/bin/env bash
-# Stand-in for podman: `volume ls` and `volume inspect` only.
+# Stand-in for podman: `volume ls` and `volume inspect` only. Like the real
+# one, inspect also answers for a prefix of a volume name.
 case "$1 $2" in
     "volume ls") cat "${SHIM_DIR}/volumes" ;;
     "volume inspect")
-        grep -qxF "$3" "${SHIM_DIR}/volumes" || exit 125
-        echo "${SHIM_DIR%/shim}/volume/_data"
+        name="$(grep -m1 -- "^$3" "${SHIM_DIR}/volumes" || true)"
+        [[ -n "${name}" ]] || exit 125
+        echo "${name}|${SHIM_DIR%/shim}/volume/_data"
         ;;
     *) exit 125 ;;
 esac
@@ -562,7 +1071,7 @@ remote() {
         PATH="${TMP}/shim:${PATH}" bash "${PUBLISH}" --host root@vps.invalid "$@" 2>&1)" || RC=$?
 }
 
-remote "${TMP}/out1"
+remote --first-publish "${TMP}/out1"
 [[ "${RC}" -eq 0 ]] || fail "--host first publish failed"
 [[ "$(names_in "${VOLUME}/manifest.json")" == "heroes-v1.tar words-v1.tar" ]] || fail "--host: wrong manifest in the volume"
 cmp -s "${TMP}/out1/heroes-v1.tar" "${VOLUME}/heroes-v1.tar" || fail "--host: tar differs after the trip through ssh"
@@ -573,30 +1082,115 @@ backup="$(sed -n 's/^Backup: //p' <<< "${OUT}")"
 [[ "${backup}" == "${TMP}/home/scuffed-crew-backups/packs-manifest-pre-"*.json && -f "${backup}" ]] \
     || fail "--host: the default backups folder is not ~/scuffed-crew-backups on the host"
 [[ "$(sort -u "${TMP}/shim/ssh.log")" == "root@vps.invalid" ]] || fail "--host: ssh was not called with the host"
+remote --update "${TMP}/out-up"
+[[ "${RC}" -eq 0 ]] || fail "--host update failed"
+cmp -s "${TMP}/out-up/words-v1.tar" "${VOLUME}/words-v1.tar" || fail "--host update: the new tar is not in place"
 rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
-[[ "${rollback}" == "ssh root@vps.invalid '"*"'" ]] || fail "--host: the rollback line is not an ssh command: ${rollback}"
+[[ "${rollback}" == "ssh root@vps.invalid \"sh -c '"*"'\"" ]] || fail "--host: the rollback line is not an ssh command for sh -c: ${rollback}"
 SHIM_DIR="${TMP}/shim" PATH="${TMP}/shim:${PATH}" bash -c "${rollback}" || fail "--host: the rollback line failed"
-[[ "$(names_in "${VOLUME}/manifest.json")" == "heroes-v1.tar words-v1.tar" ]] || fail "--host: rollback did not restore the manifest"
-pass "--host publishes, merges and rolls back through stand-in ssh and podman (not a real server)"
+cmp -s "${TMP}/out1/words-v1.tar" "${VOLUME}/words-v1.tar" || fail "--host: rollback did not restore the old tar"
+[[ "$(intact "${VOLUME}")" == "ok" ]] || fail "--host: after the rollback: $(intact "${VOLUME}")"
+pass "--host publishes, merges, updates and rolls back through stand-in ssh and podman (not a real server)"
 
 printf 'packs-data\n' >> "${TMP}/shim/volumes"
 before="$(snapshot "${VOLUME}")"
-remote "${TMP}/out2"
+remote "${TMP}/out4"
 [[ "${RC}" -ne 0 ]] || fail "two packs volumes were accepted"
 grep -qF "more than one packs volume" <<< "${OUT}" || fail "two packs volumes: wrong message"
 [[ "$(snapshot "${VOLUME}")" == "${before}" ]] || fail "two packs volumes: the volume changed"
+printf 'scuffed-crew_uploads-data\nscuffed-crew_packs-data\n' > "${TMP}/shim/volumes"
+RC=0
+OUT="$(env -u PACKS_DEST -u PACKS_BACKUP_DIR SHIM_DIR="${TMP}/shim" HOME="${TMP}/home" PATH="${TMP}/shim:${PATH}" \
+    PACKS_VOLUME=scuffed-crew_packs bash "${PUBLISH}" --host root@vps.invalid --dry-run "${TMP}/out4" 2>&1)" || RC=$?
+[[ "${RC}" -ne 0 ]] || fail "a prefix of a volume name was accepted as PACKS_VOLUME"
+grep -qF "is named exactly scuffed-crew_packs" <<< "${OUT}" || fail "prefix volume name: wrong message"
 RC=0
 OUT="$(env -u PACKS_DEST SHIM_DIR="${TMP}/shim" HOME="${TMP}/home" PATH="${TMP}/shim:${PATH}" \
-    PACKS_BACKUP_DIR='/root/back ups' bash "${PUBLISH}" --host root@vps.invalid "${TMP}/out2" 2>&1)" || RC=$?
+    PACKS_BACKUP_DIR='/root/back ups' bash "${PUBLISH}" --host root@vps.invalid "${TMP}/out4" 2>&1)" || RC=$?
 [[ "${RC}" -ne 0 ]] || fail "--host accepted a path the remote shell would split"
 grep -qF "may only use letters" <<< "${OUT}" || fail "--host: the path was not refused before ssh ran"
-pass "--host refuses two candidate volumes and a path the remote shell would split"
+pass "--host refuses two candidate volumes, a prefix of a volume name, and a path the remote shell would split"
+
+# The link and the far side misbehave. The script must find out what is live.
+remote_mode() {
+    local mode="$1"
+    shift
+    RC=0
+    OUT="$(env -u PACKS_DEST -u PACKS_BACKUP_DIR SHIM_MODE="${mode}" SHIM_DIR="${TMP}/shim" HOME="${TMP}/home" \
+        PATH="${TMP}/shim:${PATH}" bash "${PUBLISH}" --host root@vps.invalid "$@" 2>&1)" || RC=$?
+}
+volume_reset() {
+    rm -rf "${VOLUME}"
+    cp -r "${TMP}/dest-two" "${VOLUME}"
+}
+
+volume_reset
+remote_mode cut-after-backup "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a dropped link was reported as success"
+grep -qF "were not changed" <<< "${OUT}" && fail "a dropped link: the script claims nothing changed without looking"
+[[ "$(names_in "${VOLUME}/manifest.json")" == "heroes-v1.tar words-v1.tar maps-v1.tar" ]] \
+    || fail "a dropped link: expected the destination half to have switched"
+grep -qF "the NEW list is live and every pack it lists is in place" <<< "${OUT}" \
+    || fail "a dropped link after the upload: the script did not say the new list is live"
+grep -q '^Backup: ' <<< "${OUT}" || fail "a dropped link: no Backup line"
+rollback="$(sed -n 's/^Rollback: //p' <<< "${OUT}")"
+SHIM_DIR="${TMP}/shim" PATH="${TMP}/shim:${PATH}" bash -c "${rollback}" || fail "a dropped link: the rollback line failed"
+cmp -s "${VOLUME}/manifest.json" "${TMP}/manifest-two.json" || fail "a dropped link: the rollback line did not restore the old list"
+
+volume_reset
+remote_mode drop-committed "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a publish without the destination's COMMITTED line was reported as clean"
+grep -qF "did not end cleanly" <<< "${OUT}" || fail "missing COMMITTED: the script did not say the run was not clean"
+grep -qF "the NEW list is live" <<< "${OUT}" || fail "missing COMMITTED: the script did not read back what is live"
+
+volume_reset
+remote_mode tamper-manifest "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a manifest that reads back different was accepted"
+grep -qF "neither the list from before this run nor the new one" <<< "${OUT}" || fail "manifest read back different: wrong message"
+grep -qF "Verified:" <<< "${OUT}" && fail "a manifest that reads back different was reported as verified"
+
+volume_reset
+remote_mode tamper-file "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a pack that reads back with another sha256 was accepted"
+grep -qF "the NEW list is live, but these packs do not match it: maps-v1.tar" <<< "${OUT}" \
+    || fail "pack read back different: wrong message"
+grep -qF "Verified:" <<< "${OUT}" && fail "a pack that reads back different was reported as verified"
+
+volume_reset
+before="$(snapshot "${VOLUME}")"
+remote_mode gone "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a publish over a dead link was reported as success"
+grep -qF "what is live is NOT known" <<< "${OUT}" || fail "dead link: the script did not say the outcome is unknown"
+grep -qF "were not changed" <<< "${OUT}" && fail "dead link: the script claims nothing changed without knowing"
+grep -qF "packs-manifest-pre-" <<< "${OUT}" || fail "dead link: the backup name was not given"
+[[ "$(snapshot "${VOLUME}")" == "${before}" ]] || fail "dead link: the volume changed"
+pass "after a dropped link, a missing COMMITTED, a manifest or pack that reads back wrong, or a dead link, the script reports what it read, never a guess"
 
 # ---- the check through the site, against a stub on 127.0.0.1 ---------------------
 
 cat > "${TMP}/stub.py" <<'PY'
 import http.server, json, os, sys
-root, port_file, token = sys.argv[1], sys.argv[2], os.environ["STUB_TOKEN"]
+root, port_file, leaks, token = sys.argv[1], sys.argv[2], sys.argv[3], os.environ["STUB_TOKEN"]
+limited = [int(os.environ.get("STUB_429", "0"))]
+needle = token.encode()
+
+def scan():
+    """While a request is open, curl is alive: look for the token in every
+    command line, and in the environment of every curl."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            argv = open("/proc/%s/cmdline" % pid, "rb").read()
+            comm = open("/proc/%s/comm" % pid).read().strip()
+            env = open("/proc/%s/environ" % pid, "rb").read() if comm == "curl" else b""
+        except OSError:
+            continue
+        if needle in argv:
+            open(leaks, "a").write("in the command line of %s\n" % comm)
+        if needle in env:
+            open(leaks, "a").write("in the environment of %s\n" % comm)
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -608,6 +1202,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
+        scan()
+        if limited[0] > 0:
+            limited[0] -= 1
+            return self.send(429, b'{"error":"rate_limited","retry_after":1}', [("Retry-After", "1")])
         if self.headers.get("Authorization") != "Bearer " + token:
             return self.send(401, b'{"error":"Unauthorized"}')
         entries = json.load(open(os.path.join(root, "manifest.json")))
@@ -623,14 +1221,25 @@ server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 open(port_file, "w").write(str(server.server_address[1]))
 server.serve_forever()
 PY
-STUB_TOKEN="stub-token-0123456789" python3 -I "${TMP}/stub.py" "${DEST}" "${TMP}/stub.port" &
-STUB_PID=$!
-for _ in $(seq 1 100); do
-    [[ -s "${TMP}/stub.port" ]] && break
-    sleep 0.05
-done
-[[ -s "${TMP}/stub.port" ]] || fail "the stub site did not start"
-SITE="http://127.0.0.1:$(cat "${TMP}/stub.port")"
+# Not the same in two runs of this test: the stub looks at every process.
+TOKEN="stub-token-$$-${RANDOM}${RANDOM}"
+stub_start() {
+    rm -f "${TMP}/stub.port"
+    STUB_TOKEN="${TOKEN}" STUB_429="${1:-0}" python3 -I "${TMP}/stub.py" "${DEST}" "${TMP}/stub.port" "${TMP}/leaks" &
+    STUB_PID=$!
+    for _ in $(seq 1 200); do
+        [[ -s "${TMP}/stub.port" ]] && break
+        sleep 0.05
+    done
+    [[ -s "${TMP}/stub.port" ]] || fail "the stub site did not start"
+    SITE="http://127.0.0.1:$(cat "${TMP}/stub.port")"
+}
+stub_stop() {
+    kill "${STUB_PID}"
+    wait "${STUB_PID}" 2>/dev/null || true
+    kill -0 "${STUB_PID}" 2>/dev/null && fail "the stub site is still running"
+    STUB_PID=""
+}
 
 site_run() {
     RC=0
@@ -638,24 +1247,50 @@ site_run() {
         PACKS_TRACKER_TOKEN="$1" bash "${PUBLISH}" "$2" 2>&1)" || RC=$?
 }
 
-site_run "stub-token-0123456789" "${TMP}/out2"
+stub_start
+site_run "${TOKEN}" "${TMP}/out2"
 [[ "${RC}" -eq 0 ]] || fail "the check through the site failed"
 grep -qF "Authenticated check: OK" <<< "${OUT}" || fail "the check through the site did not report OK"
 grep -qF "maps-v1.tar: 200, ETag, Content-Length and downloaded sha256 match" <<< "${OUT}" || fail "site check: no per-pack line"
 grep -qF "stub-token" <<< "${OUT}" && fail "the token was printed"
+# Traced with bash -x, every line the script runs is in the log. The token must not be.
+RC=0
+PACKS_DEST="${DEST}" PACKS_BACKUP_DIR="${BACKUPS}" PACKS_SITE_URL="${SITE}" PACKS_TRACKER_TOKEN="${TOKEN}" \
+    bash -x "${PUBLISH}" "${TMP}/out2" > "${TMP}/trace.log" 2>&1 || RC=$?
+[[ "${RC}" -eq 0 ]] || fail "the traced check through the site failed"
+grep -qF "Authenticated check: OK" "${TMP}/trace.log" || fail "the traced run did not do the check"
+grep -qF "site_get /api/tracker/packs" "${TMP}/trace.log" || fail "the traced run has no trace in its log"
+grep -qF "stub-token" "${TMP}/trace.log" && fail "bash -x shows the token"
+[[ ! -e "${TMP}/leaks" ]] || fail "the token was visible to other processes: $(sort -u "${TMP}/leaks" | tr '\n' ';')"
 site_run "wrong-token" "${TMP}/out2"
 [[ "${RC}" -ne 0 ]] || fail "a wrong token passed the check through the site"
 grep -qF "answered 401" <<< "${OUT}" || fail "wrong token: expected the 401 to be reported"
 grep -qF "wrong-token" <<< "${OUT}" && fail "the wrong token was printed"
 RC=0
 OUT="$(PACKS_DEST="${DEST}" PACKS_BACKUP_DIR="${BACKUPS}" PACKS_SITE_URL="http://example.org" \
-    PACKS_TRACKER_TOKEN="stub-token-0123456789" bash "${PUBLISH}" "${TMP}/out2" 2>&1)" || RC=$?
+    PACKS_TRACKER_TOKEN="${TOKEN}" bash "${PUBLISH}" "${TMP}/out2" 2>&1)" || RC=$?
 [[ "${RC}" -ne 0 ]] || fail "a token was accepted for a plain http site"
-kill "${STUB_PID}"
-wait "${STUB_PID}" 2>/dev/null || true
-kill -0 "${STUB_PID}" 2>/dev/null && fail "the stub site is still running"
-STUB_PID=""
-pass "with PACKS_TRACKER_TOKEN the list and every pack are fetched through the (stub) site; the token is never printed"
+grep -qF "must be an https:// origin" <<< "${OUT}" || fail "plain http site: wrong message"
+grep -qF "Reading what is published" <<< "${OUT}" && fail "plain http site: refused only after the destination was read"
+stub_stop
+pass "with PACKS_TRACKER_TOKEN the list and every pack are fetched through the (stub) site; the token is in no output, no bash -x trace, no command line and no child's environment"
+
+stub_start 3
+site_run "${TOKEN}" "${TMP}/out2"
+[[ "${RC}" -eq 0 ]] || fail "the check through the site failed after 429 answers"
+[[ "$(grep -cF "rate limited (429): waiting 1 s" <<< "${OUT}")" == "3" ]] || fail "three 429 answers were not waited out one by one"
+grep -qF "Authenticated check: OK" <<< "${OUT}" || fail "after the 429 answers the check did not report OK"
+stub_stop
+stub_start 999
+site_run "${TOKEN}" "${TMP}/out2"
+[[ "${RC}" -ne 0 ]] || fail "a site that always answers 429 passed the check"
+grep -qF "still rate limited (429)" <<< "${OUT}" || fail "endless 429: wrong message"
+[[ "$(grep -cF "rate limited (429): waiting" <<< "${OUT}")" == "6" ]] || fail "endless 429: the waits are not bounded at 6"
+stub_stop
+pass "a 429 from the site is waited out (Retry-After) and tried again, at most 6 times per request"
+
+[[ ! -e "${TMP}/bare-sync" ]] || fail "a sync without a file was called: $(sort -u "${TMP}/bare-sync" | tr '\n' ';')"
+pass "no sync without a file: only the files and folders the scripts wrote were flushed"
 
 OUT=""
 echo "ok: publish-packs checks (${PASSED} cases)"
