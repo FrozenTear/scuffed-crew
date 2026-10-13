@@ -76,6 +76,9 @@
 //! end-title gate in `detect::match_end` reads it in place of ocr-v1's P4
 //! OCR, with the same search and certification against
 //! [`FINAL_SCORE_FLOOR`].
+//!
+//! The words-v1 folder also holds the phase-screen titles ([`phrase`]),
+//! loaded with the result words and read with the same search.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,6 +89,8 @@ use serde::{Deserialize, Serialize};
 use super::banner::Gray;
 use super::heroes::{DirStamp, dir_stamp};
 use crate::ocr::preprocess::game_rect_16_9;
+
+pub mod phrase;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
 /// Nothing reads it yet: no snapshot, manifest or log carries it, so a field
@@ -1343,6 +1348,9 @@ impl ResultPack {
 pub struct LoadedResults {
     pub templates: ResultTemplates,
     pub pack: ResultPack,
+    /// The phase-screen titles, from the words-v1 folder only (the old
+    /// folder has none), whichever folder the result words came from.
+    pub phrases: Option<phrase::PhraseTemplates>,
 }
 
 type Stamp = [DirStamp; 2];
@@ -1365,17 +1373,23 @@ impl ResultDirs {
     /// Templates from the first folder that loads: words-v1, then the old
     /// manual folder.
     pub fn load(&self) -> Option<LoadedResults> {
+        let phrases = self
+            .words
+            .as_deref()
+            .and_then(phrase::PhraseTemplates::load_dir);
         let words = self.words.as_deref().and_then(ResultTemplates::load_dir);
         if let Some(templates) = words {
             return Some(LoadedResults {
                 templates,
                 pack: ResultPack::WordsV1,
+                phrases,
             });
         }
         let legacy = self.legacy.as_deref().and_then(ResultTemplates::load_dir);
         legacy.map(|templates| LoadedResults {
             templates,
             pack: ResultPack::Legacy,
+            phrases,
         })
     }
 
@@ -1457,6 +1471,7 @@ impl LiveInner {
             results = loaded.is_some(),
             result_pack = loaded.as_ref().map(|l| l.pack.as_str()),
             result_sources = ?loaded.as_ref().map(|l| l.templates.sources()),
+            phrases = ?loaded.as_ref().and_then(|l| l.phrases.as_ref()).map(|p| p.ids()),
             "new reader result words loaded"
         );
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = (loaded.map(Arc::new), stamp);
