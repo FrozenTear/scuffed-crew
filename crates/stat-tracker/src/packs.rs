@@ -10,8 +10,10 @@
 //! The hero pack [`HEROES_PACK_NAME`] lands in
 //! [`crate::shadow::heroes::HeroTemplates::dir_in`] as a top-level
 //! `<hero-key>.png` or `special/<class>*.png`, the layout
-//! [`HeroTemplates::load_dir`] reads. It is the only pack a reader uses
-//! today. The other packs are downloaded into folders no reader opens yet.
+//! [`HeroTemplates::load_dir`] reads. `heroes-v2.tar` and
+//! `heroes-v2-1080.tar` use the same layout; the new reader prefers them
+//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]). The
+//! other packs are downloaded into folders no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -22,9 +24,11 @@
 //! written to a log.
 //!
 //! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
-//! back [`ExtraPacks`] to run in the background, so capture never waits on a
-//! pack no reader uses. The setup guide ([`sync_reader_packs`]) syncs all of
-//! them. Every run holds an exclusive `flock` on
+//! back [`ExtraPacks`] to run in the background, so capture never waits on
+//! the extras. The new reader starts on heroes-v1 and re-loads its hero set
+//! once heroes-v2 or heroes-v2-1080 is swapped in
+//! ([`crate::shadow::heroes::LiveHeroSet`]). The setup guide
+//! ([`sync_reader_packs`]) syncs all of them. Every run holds an exclusive `flock` on
 //! `templates/.pack-sync.lock`; a second run at the same time is
 //! [`PackSync::Busy`] and sends no request.
 
@@ -87,7 +91,9 @@ impl PackSpec {
 
 /// Every pack the tracker syncs, in download order. `heroes-v1.tar` goes
 /// first so a rate limit or refused token hits it the way it did in alpha.6.
-/// Only `heroes-v1.tar` is read by a reader today.
+/// The hero packs are read by a reader today (heroes-v1 by the shadow log and
+/// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
+/// reader); the others are not yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -381,7 +387,9 @@ async fn sync_on_startup_capped(
 }
 
 /// The packs other than `heroes-v1.tar`, still to sync after daemon
-/// startup. No reader uses them yet, so they never hold up capture. Reuses
+/// startup. They never hold up capture: heroes-v1 is the new reader's
+/// fallback until the v2 hero packs land, and the other packs have no reader
+/// yet. Reuses
 /// the startup list, so a first install is still seven requests in all.
 /// Holds the token; it has no `Debug` so the token cannot reach a log.
 pub struct ExtraPacks {
@@ -950,7 +958,7 @@ struct InnerFile {
     size: u64,
 }
 
-fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
+pub(crate) fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
     let _ = sync_dir(staging);
     if live.exists() {
         match exchange_paths(staging, live) {

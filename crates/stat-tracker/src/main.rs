@@ -408,7 +408,9 @@ async fn main() -> anyhow::Result<()> {
     // leaves sync off — including the startup player-name fetch — so the
     // bearer token is never sent. The daemon keeps running.
     let sync_client = open_sync_client(config.sync.as_ref());
-    // Packs no reader uses yet. Synced in the background once capture is up.
+    // heroes-v1 syncs here; the other packs sync in the background once
+    // capture is up. The new reader picks up heroes-v2 and heroes-v2-1080
+    // on a later board when they land (`shadow::heroes::LiveHeroSet`).
     let mut extra_packs = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
