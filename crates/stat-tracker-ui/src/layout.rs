@@ -77,8 +77,9 @@ pub fn seasons_columns(available: f32) -> usize {
 /// their cap.
 pub const MIN_SETTINGS_CARD: f32 = 480.0;
 /// Widest a settings card gets in a multi-column pane. It also sets where the
-/// next column appears: 2 → 3 above 1612 px of content (a 1920 window gets 3),
-/// 3 → 4 above 2424 px (a 2560 window keeps 3, a 3440 ultrawide gets 4).
+/// next column appears: 2 → 3 above 1612 px of usable width (a 1920 window
+/// gets 3), 3 → 4 above 2424 px (a 2560 window keeps 3, a 3440 ultrawide
+/// gets 4). Usable width is the content width less [`SETTINGS_SCROLL_GUTTER`].
 pub const MAX_SETTINGS_CARD: f32 = 800.0;
 /// One settings column stays readable on a narrow or portrait window.
 pub const SETTINGS_SINGLE_MAX: f32 = 720.0;
@@ -87,7 +88,8 @@ pub const SETTINGS_SINGLE_MAX: f32 = 720.0;
 pub const MAX_SETTINGS_COLUMNS: usize = 4;
 
 /// Fewest columns that keep cards at most [`MAX_SETTINGS_CARD`] wide, never
-/// so many that a card drops under [`MIN_SETTINGS_CARD`].
+/// so many that a card drops under [`MIN_SETTINGS_CARD`]. `available` is the
+/// usable width; the screen goes through [`settings_layout`].
 pub fn settings_columns(available: f32) -> usize {
     let fit = columns_fit(available, MIN_SETTINGS_CARD, GRID_GAP);
     columns_needed(available, MAX_SETTINGS_CARD, GRID_GAP)
@@ -102,9 +104,9 @@ pub const WINDOW_PREF_H: f32 = 860.0;
 pub const WINDOW_MIN_W: f32 = 720.0;
 pub const WINDOW_MIN_H: f32 = 480.0;
 
-/// Settings pane width. One column stops at [`SETTINGS_SINGLE_MAX`]. More
-/// columns fill the content width until each card reaches
-/// [`MAX_SETTINGS_CARD`], which only happens past 3236 px of content (wider
+/// Settings pane width for `available` px of usable width. One column stops
+/// at [`SETTINGS_SINGLE_MAX`]. More columns fill the usable width until each
+/// card reaches [`MAX_SETTINGS_CARD`], which only happens past 3236 px (wider
 /// than a 3440 window). The pane is left-aligned like every other page.
 pub fn settings_pane_max(available: f32) -> f32 {
     if !available.is_finite() || available <= 0.0 {
@@ -117,6 +119,40 @@ pub fn settings_pane_max(available: f32) -> f32 {
         span(cols, MAX_SETTINGS_CARD, GRID_GAP)
     };
     available.min(cap)
+}
+
+/// Width of the settings scrollbar. The view pins the bar to this.
+pub const SCROLLBAR_WIDTH: f32 = 10.0;
+/// Space kept at the right of the settings pane: the scrollbar plus one
+/// grid gap. Settings scrolls inside the padded page (the header stays
+/// put), so without it the bar is drawn on top of the right edge of the
+/// cards. The other pages scroll the whole page and their bar sits in the
+/// page padding.
+pub const SETTINGS_SCROLL_GUTTER: f32 = SCROLLBAR_WIDTH + GRID_GAP;
+
+/// How the settings screen splits the content width it is given.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsLayout {
+    pub columns: usize,
+    /// Width of the card pane (the body's max width). The pane is
+    /// left-aligned, so it ends [`SETTINGS_SCROLL_GUTTER`] or more before
+    /// the right edge of the content, where the scrollbar is drawn.
+    pub pane: f32,
+}
+
+/// Settings columns and pane for `content` px. The gutter comes off first,
+/// always, so the cards do not jump when the scrollbar appears; columns and
+/// pane are then worked out on what is left.
+pub fn settings_layout(content: f32) -> SettingsLayout {
+    let usable = if content.is_finite() {
+        (content - SETTINGS_SCROLL_GUTTER).max(0.0)
+    } else {
+        0.0
+    };
+    SettingsLayout {
+        columns: settings_columns(usable),
+        pane: settings_pane_max(usable),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -174,7 +210,7 @@ mod tests {
             seasons_columns(w),
             heroes_columns(w),
             tonight_compact_columns(w),
-            settings_columns(w),
+            settings_layout(w).columns,
         )
     }
 
@@ -316,40 +352,104 @@ mod tests {
         assert_eq!(settings_columns(1613.0), 3);
         assert_eq!(settings_columns(2424.0), 3);
         assert_eq!(settings_columns(2425.0), 4);
-        assert_eq!(settings_columns(10_000.0), MAX_SETTINGS_COLUMNS);
+        // The literal, not the constant: eight cards in five columns would
+        // leave columns of one card.
+        assert_eq!(settings_columns(10_000.0), 4);
+        assert_eq!(MAX_SETTINGS_COLUMNS, 4);
     }
 
     /// (window width, settings columns, settings pane width).
+    ///
+    /// The pane is the content width less the 22 px scrollbar gutter. The
+    /// first version of G4 filled the whole content width (488, 1048, 1368,
+    /// 1688, 2328, 3208) and the scrollbar was drawn over the last 10 px of
+    /// the right-hand cards.
     const SETTINGS_BY_WINDOW: &[(f32, usize, f32)] = &[
-        (720.0, 1, 488.0),
-        (1280.0, 2, 1048.0),
-        (1600.0, 2, 1368.0),
-        (1920.0, 3, 1688.0),
-        (2560.0, 3, 2328.0),
-        (3440.0, 4, 3208.0),
+        (720.0, 1, 466.0),
+        (1280.0, 2, 1026.0),
+        (1600.0, 2, 1346.0),
+        (1920.0, 3, 1666.0),
+        (2560.0, 3, 2306.0),
+        (3440.0, 4, 3186.0),
+        // Still four on a 5120 window: four 800 px cards, 3236 px.
+        (5120.0, 4, 3236.0),
     ];
 
     #[test]
     fn settings_columns_and_pane_by_window_width() {
         for &(window, cols, pane) in SETTINGS_BY_WINDOW {
-            let content = content_width_for_window(window);
-            assert_eq!(settings_columns(content), cols, "cols at window {window}");
-            let got = settings_pane_max(content);
-            assert!(close(got, pane), "pane {got} at window {window}");
+            let got = settings_layout(content_width_for_window(window));
+            assert_eq!(got.columns, cols, "cols at window {window}");
+            assert!(
+                close(got.pane, pane),
+                "pane {} at window {window}",
+                got.pane
+            );
         }
         // Portrait 1080x1920: fit_window keeps 1032 px, one 720 px column.
         let fit = fit_window(1080.0, 1920.0);
         let content = content_width_for_window(fit.width);
         assert!(close(content, 800.0), "portrait content {content}");
-        assert_eq!(settings_columns(content), 1);
-        assert!(close(settings_pane_max(content), SETTINGS_SINGLE_MAX));
+        let got = settings_layout(content);
+        assert_eq!(got.columns, 1);
+        assert!(close(got.pane, SETTINGS_SINGLE_MAX));
     }
 
     #[test]
     fn settings_at_2560_use_most_of_the_content_width() {
         let content = content_width_for_window(2560.0);
-        let pane = settings_pane_max(content);
+        let pane = settings_layout(content).pane;
         assert!(pane >= 0.85 * content, "pane {pane} of {content}");
+    }
+
+    #[test]
+    fn settings_pane_never_reaches_under_the_scrollbar() {
+        // The bar is drawn in the last SCROLLBAR_WIDTH px of the content
+        // width. The pane must end at least a grid gap before it.
+        assert!(close(SCROLLBAR_WIDTH, 10.0));
+        assert!(close(SETTINGS_SCROLL_GUTTER, 22.0));
+        let mut content = 0.0_f32;
+        while content <= 6000.0 {
+            let pane = settings_layout(content).pane;
+            let bar_left = content - SCROLLBAR_WIDTH;
+            assert!(pane >= 0.0, "at {content}");
+            if content >= SETTINGS_SCROLL_GUTTER {
+                assert!(
+                    pane <= bar_left - GRID_GAP + 0.01,
+                    "pane {pane} reaches the bar at {bar_left} (content {content})"
+                );
+            } else {
+                assert!(close(pane, 0.0), "pane {pane} at {content}");
+            }
+            content += 3.0;
+        }
+        // Below 3258 px of content the multi-column pane uses all of the rest.
+        for window in [1280.0, 1600.0, 1920.0, 2560.0, 3440.0] {
+            let content = content_width_for_window(window);
+            let pane = settings_layout(content).pane;
+            assert!(
+                close(pane + SETTINGS_SCROLL_GUTTER, content),
+                "window {window}: pane {pane} of {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_columns_come_from_the_width_left_of_the_gutter() {
+        // 972 px is the least that holds two 480 px cards. With the gutter
+        // that is 994 px of content, not 972.
+        assert_eq!(settings_layout(993.0).columns, 1);
+        assert_eq!(settings_layout(994.0).columns, 2);
+        assert_eq!(settings_layout(1634.0).columns, 2);
+        assert_eq!(settings_layout(1635.0).columns, 3);
+        assert_eq!(settings_layout(2446.0).columns, 3);
+        assert_eq!(settings_layout(2447.0).columns, 4);
+        let two = settings_layout(994.0);
+        let card = cell_width(two.pane, two.columns, GRID_GAP);
+        assert!(card >= MIN_SETTINGS_CARD - 0.01, "card {card}");
+        assert_eq!(settings_layout(0.0).columns, 1);
+        assert!(close(settings_layout(f32::NAN).pane, 0.0));
+        assert!(close(settings_layout(10.0).pane, 0.0));
     }
 
     #[test]
@@ -392,11 +492,15 @@ mod tests {
         assert!((fit.width - WINDOW_PREF_W).abs() < f32::EPSILON);
         assert!((fit.height - WINDOW_PREF_H).abs() < f32::EPSILON);
         let content = content_width_for_window(fit.width);
-        assert_eq!(settings_columns(content), 2);
+        let got = settings_layout(content);
+        assert_eq!(got.columns, 2);
         // G4: was capped at two 480 px cards (976 px); now the two cards
-        // share the whole 1048 px pane.
-        let pane = settings_pane_max(content);
-        assert!(close(pane, content), "pane {pane} of {content}");
+        // share the 1048 px content less the scrollbar gutter (1026 px).
+        assert!(
+            close(got.pane, content - SETTINGS_SCROLL_GUTTER),
+            "pane {} of {content}",
+            got.pane
+        );
     }
 
     #[test]

@@ -8,14 +8,15 @@
 //! The new reader switch writes `reader`. The alpha updates switch writes
 //! `update_channel`.
 
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    Row, button, checkbox, column, container, row, scrollable, space, text, text_input,
+    Column, Row, button, checkbox, column, container, row, scrollable, space, text, text_input,
 };
-use iced::{Alignment, Element, Fill, Padding};
+use iced::{Alignment, Element, Fill, Length, Padding};
 use stat_tracker::config::{AutoDetectConfig, Config, ShadowRecognizerControl, SyncConfig};
 
 use crate::app::{Message, TrackerApp};
-use crate::layout::{settings_columns, settings_pane_max};
+use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SINGLE_MAX, SettingsLayout, settings_layout};
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_LABEL,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
@@ -30,13 +31,15 @@ pub(crate) const FIELD_SHORT: f32 = 280.0;
 /// URL, token, process list. Capped so they do not become a full-pane bar.
 pub(crate) const FIELD_TEXT: f32 = 480.0;
 
-/// Help copy wraps here even when the card is wider (about 90 characters at
-/// `SIZE_LABEL`). A 768 px card on a 2560 window would otherwise make
-/// lines of 130 characters.
-pub(crate) const HELP_MEASURE: f32 = 520.0;
-/// A field with a hint is at least this wide, so the hint under a 168 px
-/// numeric input does not wrap every two or three words.
-pub(crate) const FIELD_HINT_MIN: f32 = FIELD_SHORT;
+/// Help copy follows the card up to this width (about 130 characters at
+/// `SIZE_LABEL`). At 520 px the two-line hints on a 760-790 px card ended in
+/// a line of one or two words.
+pub(crate) const HELP_MEASURE: f32 = 640.0;
+/// Widest a "text … button" row gets inside a card that spans the pane
+/// (Report a problem, Uninstall, the Save strip). Past this the button was
+/// 2200-3000 px from its label on a wide window. It equals the one-column
+/// pane cap, so those rows are unchanged on a narrow or portrait window.
+pub(crate) const ACTION_ROW_MAX: f32 = SETTINGS_SINGLE_MAX;
 
 const _: () = {
     assert!(FIELD_TEXT <= HELP_MEASURE);
@@ -375,14 +378,17 @@ pub(crate) fn field_max_width(field: SettingsField) -> f32 {
     }
 }
 
-/// Width cap of a field's label + input + hint column. The input keeps
-/// [`field_max_width`]; a hint gets at least [`FIELD_HINT_MIN`] to wrap in.
-pub(crate) fn field_column_max(field: SettingsField, has_hint: bool) -> f32 {
-    let input = field_max_width(field);
-    if has_hint {
-        input.max(FIELD_HINT_MIN)
-    } else {
-        input
+/// Share of a [`compact_row`] this field's column takes. Iced makes each
+/// `Fill` child of a row exactly its share wide (a max width on the column
+/// does nothing there), so the share is what the hint wraps at; the input
+/// keeps its own cap inside the column. The in-game name has the longest
+/// hint (about 243 px) next to the session window's shorter one (about
+/// 178 px), so it takes 4 parts to 3. An even split left it 241 px on a 1280
+/// window and the hint wrapped a lone "#1234." onto a second line.
+pub(crate) fn field_fill_portion(field: SettingsField) -> u16 {
+    match field {
+        SettingsField::PlayerName => 4,
+        _ => 3,
     }
 }
 
@@ -456,7 +462,8 @@ pub(crate) fn pack_columns(sections: &[SettingsSection], cols: usize) -> Vec<Vec
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
-    let cols = settings_columns(content_width);
+    let layout = settings_layout(content_width);
+    let cols = layout.columns;
     let mut col = column![].spacing(GRID_GAP).width(Fill);
 
     if let Some(info) = &app.update
@@ -501,8 +508,25 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         .push(report_row())
         .push(uninstall_row());
 
-    let body = col.width(Fill).max_width(settings_pane_max(content_width));
-    scrollable(body).width(Fill).height(Fill).into()
+    scroll_frame(layout, col)
+}
+
+/// The scrolling settings pane. The body is left-aligned and stops at
+/// `layout.pane`, which leaves the scrollbar gutter free at the right
+/// whether or not the bar shows, so the cards do not move when the page
+/// starts to scroll. (`Scrollable::spacing` only reserves the space while
+/// the bar shows, and the column count could not follow that.)
+fn scroll_frame<'a>(layout: SettingsLayout, col: Column<'a, Message>) -> Element<'a, Message> {
+    let body = col.width(Fill).max_width(layout.pane);
+    scrollable(body)
+        .direction(Direction::Vertical(
+            Scrollbar::new()
+                .width(SCROLLBAR_WIDTH)
+                .scroller_width(SCROLLBAR_WIDTH),
+        ))
+        .width(Fill)
+        .height(Fill)
+        .into()
 }
 
 fn section_card(id: SettingsSection, app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -760,27 +784,40 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     settings_card("Companion", body.into())
 }
 
+/// In-game name and session window, side by side.
+fn player_fields_row<'a>(
+    player_name: &'a str,
+    session_window_secs: &'a str,
+    demo: bool,
+) -> Element<'a, Message> {
+    compact_row(
+        Some(field_input(
+            "In-game name",
+            "e.g. FROZEN",
+            player_name,
+            SettingsField::PlayerName,
+            false,
+            demo,
+            Some("Scoreboard name as shown in-game — no #1234."),
+        )),
+        Some(field_input(
+            "Session window (seconds)",
+            "1800",
+            session_window_secs,
+            SettingsField::SessionWindow,
+            false,
+            demo,
+            Some("Nearby games count as one session."),
+        )),
+    )
+}
+
 fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let body = column![
-        compact_row(
-            Some(field_input(
-                "In-game name",
-                "e.g. FROZEN",
-                &app.settings.player_name,
-                SettingsField::PlayerName,
-                false,
-                demo,
-                Some("Scoreboard name as shown in-game — no #1234."),
-            )),
-            Some(field_input(
-                "Session window (seconds)",
-                "1800",
-                &app.settings.session_window_secs,
-                SettingsField::SessionWindow,
-                false,
-                demo,
-                Some("Nearby games count as one session."),
-            )),
+        player_fields_row(
+            &app.settings.player_name,
+            &app.settings.session_window_secs,
+            demo,
         ),
         field_input(
             "Game process names",
@@ -988,12 +1025,9 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
 
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
-    let mut copy = column![
-        text("Compact rewrites the store and keeps one backup. Delete removes local matches only — not the website.")
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    ]
+    let mut copy = column![hint(
+        "Compact rewrites the store and keeps one backup. Delete removes local matches only — not the website."
+    ),]
     .spacing(6);
 
     if running {
@@ -1021,8 +1055,9 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
 
+    let show_actions = !demo && !running && !app.vacuum_busy;
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
-    if !demo && !running && !app.vacuum_busy {
+    if show_actions {
         actions = actions.push(action_btn("Compact stored data", false, Message::Vacuum));
         if app.confirm_clear {
             actions = actions
@@ -1053,60 +1088,74 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         }
     }
 
-    let body = row![copy.width(Fill), actions]
-        .align_y(Alignment::Start)
-        .spacing(GRID_GAP)
-        .width(Fill);
+    // Buttons under the copy, like the other cards. Side by side, this card
+    // spans the pane, so the buttons sat up to 3000 px from the text on a
+    // wide window and squeezed the text to a sliver on a narrow one.
+    let mut body = column![copy.width(Fill)].spacing(8).width(Fill);
+    if show_actions {
+        body = body.push(actions.wrap());
+    }
     settings_card("Stored data", body.into())
+}
+
+/// A "text … button" row in a card that spans the pane: left-aligned and no
+/// wider than [`ACTION_ROW_MAX`], so the button stays near its label.
+fn action_row<'a>(row: Row<'a, Message>) -> Element<'a, Message> {
+    container(row.width(Fill))
+        .width(Fill)
+        .max_width(ACTION_ROW_MAX)
+        .into()
 }
 
 fn report_row() -> Element<'static, Message> {
     settings_card(
         "Report a problem",
-        row![
-            text("Crash, low FPS, or anything else. You see the report before it is sent.")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3)
-                .width(Fill),
-            button(
-                text("Report a problem")
+        action_row(
+            row![
+                text("Crash, low FPS, or anything else. You see the report before it is sent.")
                     .size(SIZE_META)
-                    .font(FONT_SEMIBOLD)
-                    .color(TEXT),
-            )
-            .padding(Padding::from([8, 16]))
-            .style(theme::ghost_btn())
-            .on_press(Message::Report(crate::report::ReportMessage::Open(None))),
-        ]
-        .align_y(Alignment::Center)
-        .spacing(GRID_GAP)
-        .into(),
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3)
+                    .width(Fill),
+                button(
+                    text("Report a problem")
+                        .size(SIZE_META)
+                        .font(FONT_SEMIBOLD)
+                        .color(TEXT),
+                )
+                .padding(Padding::from([8, 16]))
+                .style(theme::ghost_btn())
+                .on_press(Message::Report(crate::report::ReportMessage::Open(None))),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(GRID_GAP),
+        ),
     )
 }
 
 fn uninstall_row() -> Element<'static, Message> {
     settings_card(
         "Uninstall",
-        row![
-            text("Removes the tracker from this computer.")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3)
-                .width(Fill),
-            button(
-                text("Uninstall")
+        action_row(
+            row![
+                text("Removes the tracker from this computer.")
                     .size(SIZE_META)
-                    .font(FONT_SEMIBOLD)
-                    .color(theme::DANGER),
-            )
-            .padding(Padding::from([8, 16]))
-            .style(theme::danger_btn(false))
-            .on_press(Message::OpenUninstall),
-        ]
-        .align_y(Alignment::Center)
-        .spacing(GRID_GAP)
-        .into(),
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3)
+                    .width(Fill),
+                button(
+                    text("Uninstall")
+                        .size(SIZE_META)
+                        .font(FONT_SEMIBOLD)
+                        .color(theme::DANGER),
+                )
+                .padding(Padding::from([8, 16]))
+                .style(theme::danger_btn(false))
+                .on_press(Message::OpenUninstall),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(GRID_GAP),
+        ),
     )
 }
 
@@ -1114,7 +1163,7 @@ fn save_footer(demo: bool) -> Element<'static, Message> {
     if demo {
         return space().height(0).into();
     }
-    container(
+    container(action_row(
         row![
             text("Writes config and the companion shortcut.")
                 .size(SIZE_META)
@@ -1125,7 +1174,7 @@ fn save_footer(demo: bool) -> Element<'static, Message> {
         ]
         .align_y(Alignment::Center)
         .spacing(GRID_GAP),
-    )
+    ))
     .padding(PAD_INNER)
     .width(Fill)
     .style(theme::surface_panel)
@@ -1165,10 +1214,11 @@ fn hint(copy: impl Into<String>) -> Element<'static, Message> {
     .into()
 }
 
-/// One or two compact fields, left-aligned. Each field's own max width keeps
-/// it from stretching across an ultrawide card. There is no trailing spacer:
-/// Iced splits a row's Fill space evenly, so a spacer took a third of the row
-/// and squeezed both fields (and wrapped their hints) on a narrow card.
+/// One or two compact fields. Each field's column is its share of the row
+/// ([`field_fill_portion`]); the input inside keeps its own cap, so it does
+/// not stretch across an ultrawide card. There is no trailing spacer: it
+/// took a third of the row and squeezed both fields (and wrapped their
+/// hints) on a narrow card.
 fn compact_row<'a>(
     left: Option<Element<'a, Message>>,
     right: Option<Element<'a, Message>>,
@@ -1211,8 +1261,9 @@ fn field_input<'a>(
     if let Some(copy) = hint_copy {
         col = col.push(hint(copy));
     }
-    col.width(Fill)
-        .max_width(field_column_max(field, hint_copy.is_some()))
+    // No max width on the column: a row ignores it (see `field_fill_portion`).
+    // The input is capped above and the hint by `HELP_MEASURE`.
+    col.width(Length::FillPortion(field_fill_portion(field)))
         .into()
 }
 
@@ -1467,31 +1518,223 @@ mod tests {
         assert_eq!(settings_columns(972.0), 2);
         assert_eq!(settings_columns(1688.0), 3);
         assert_eq!(settings_columns(3208.0), 4);
-        assert_eq!(settings_columns(10_000.0), MAX_SETTINGS_COLUMNS);
-        assert!(MAX_SETTINGS_COLUMNS <= MASONRY_SECTIONS.len());
+        // The literal: five columns would leave some with one card.
+        assert_eq!(settings_columns(10_000.0), 4);
+        assert!(MAX_SETTINGS_COLUMNS * 2 <= MASONRY_SECTIONS.len());
+    }
+
+    // ---- Headless layout -------------------------------------------------
+    //
+    // Iced's own layout pass on the real view pieces, with the software
+    // renderer and the app fonts. No window is opened. None of these build a
+    // `TrackerApp`, so no tray icon is made and no companion is started.
+
+    use iced::advanced::layout::{Limits, Node};
+    use iced::advanced::widget::Tree;
+    use iced::widget::column;
+
+    fn headless() -> iced::Renderer {
+        use iced::advanced::renderer::Headless;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            FONT_MEDIUM,
+            iced::Pixels(SIZE_BODY),
+            Some("tiny-skia"),
+        ))
+        .expect("the tiny-skia renderer needs no display");
+        for bytes in [
+            theme::FONT_BYTES_MEDIUM,
+            theme::FONT_BYTES_SEMIBOLD,
+            theme::FONT_BYTES_BOLD,
+            theme::FONT_BYTES_EXTRABOLD,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system lock")
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+        renderer
+    }
+
+    /// Lay `element` out in a `width` x 900 px box.
+    fn lay_out(mut element: Element<'_, Message>, width: f32) -> Node {
+        let renderer = headless();
+        let mut tree = Tree::new(&element);
+        element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(iced::Size::ZERO, iced::Size::new(width, 900.0)),
+        )
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.5
+    }
+
+    fn tall_card<'a>() -> Element<'a, Message> {
+        container(space().height(700)).width(Fill).into()
+    }
+
+    /// The visual finding on #258: the scrollbar was drawn over the last
+    /// 10 px of the right-hand cards whenever the page scrolled.
+    #[test]
+    fn cards_stop_a_grid_gap_short_of_the_scrollbar() {
+        use crate::layout::{cell_width, content_width_for_window};
+        for window in [1280.0, 1600.0, 1920.0, 2560.0, 3440.0] {
+            let content = content_width_for_window(window);
+            let layout = settings_layout(content);
+            assert!(layout.columns >= 2, "window {window}");
+            let cards = section_columns(
+                (0..layout.columns)
+                    .map(|_| vec![tall_card(), tall_card()])
+                    .collect(),
+            );
+            let col = column![cards, tall_card()].spacing(GRID_GAP).width(Fill);
+            let frame = lay_out(scroll_frame(layout, col), content);
+
+            // The scrollable fills the content width; its bar is the last
+            // SCROLLBAR_WIDTH px of that.
+            assert!(near(frame.size().width, content), "window {window}");
+            let bar_left = content - SCROLLBAR_WIDTH;
+            let pane = &frame.children()[0];
+            assert!(
+                pane.size().height > frame.size().height,
+                "window {window}: the page must scroll for this test"
+            );
+            let clear = bar_left - GRID_GAP + 0.01;
+            let pane_x = pane.bounds().x;
+            assert!(near(pane.bounds().width, layout.pane), "window {window}");
+            assert!(pane_x + pane.bounds().width <= clear, "window {window}");
+
+            let row = &pane.children()[0];
+            assert_eq!(row.children().len(), layout.columns, "window {window}");
+            let card = cell_width(layout.pane, layout.columns, GRID_GAP);
+            for column in row.children() {
+                let right = pane_x + row.bounds().x + column.bounds().x + column.bounds().width;
+                assert!(right <= clear, "window {window}: card ends at {right}");
+                assert!(near(column.bounds().width, card), "window {window}");
+            }
+            let strip = &pane.children()[1];
+            let right = pane_x + strip.bounds().x + strip.bounds().width;
+            assert!(right <= clear, "window {window}: strip ends at {right}");
+        }
+    }
+
+    /// Card inner width on a window: the card less its padding.
+    fn card_inner(window: f32) -> f32 {
+        use crate::layout::{cell_width, content_width_for_window};
+        let layout = settings_layout(content_width_for_window(window));
+        cell_width(layout.pane, layout.columns, GRID_GAP) - 2.0 * PAD_INNER
+    }
+
+    /// One line of `SIZE_LABEL` help copy is about 14 px tall, two are 29.
+    const ONE_HINT_LINE: f32 = 20.0;
+
+    #[test]
+    fn name_and_session_fields_share_the_row_four_to_three() {
+        // 1280 is the default window. An even split wrapped the name hint to
+        // a second line holding only "#1234."; a third spacer child (the old
+        // row) squeezed both fields to a third.
+        let inner = card_inner(1280.0);
+        let row = lay_out(player_fields_row("", "1800", true), inner);
+        assert_eq!(row.children().len(), 2, "no trailing spacer");
+        let (name, session) = (&row.children()[0], &row.children()[1]);
+        let free = inner - GRID_GAP;
+        assert!(near(name.bounds().width, free * 4.0 / 7.0), "{name:?}");
+        assert!(
+            near(session.bounds().width, free * 3.0 / 7.0),
+            "{session:?}"
+        );
+        // Field column: caption, input, hint.
+        for (label, field) in [("name", name), ("session", session)] {
+            assert_eq!(field.children().len(), 3, "{label}");
+            let hint = field.children()[2].bounds();
+            assert!(
+                hint.width > 100.0,
+                "{label} hint was not measured: {hint:?}"
+            );
+            assert!(
+                hint.height < ONE_HINT_LINE,
+                "{label} hint wraps at 1280: {hint:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_hinted_numeric_field_gives_its_hint_room() {
-        // The input stays compact; the hint column does not wrap at 168 px.
-        assert_eq!(
-            field_column_max(SettingsField::SessionWindow, true),
-            FIELD_HINT_MIN
+    fn inputs_keep_their_caps_when_the_card_is_wide() {
+        // 2560: a 761 px card. Both field columns are wider than their
+        // inputs; the inputs must not follow them.
+        let inner = card_inner(2560.0);
+        let row = lay_out(player_fields_row("", "1800", true), inner);
+        let (name, session) = (&row.children()[0], &row.children()[1]);
+        assert!(name.bounds().width > FIELD_SHORT + 50.0, "{name:?}");
+        assert!(near(name.children()[1].bounds().width, FIELD_SHORT));
+        assert!(near(session.children()[1].bounds().width, FIELD_NUMERIC));
+
+        // A field on its own in a card: the input stops at its cap too.
+        let alone = lay_out(
+            field_input(
+                "Website URL",
+                "https://your-site.com",
+                "",
+                SettingsField::SyncUrl,
+                false,
+                true,
+                None,
+            ),
+            inner,
         );
-        assert_eq!(
-            field_column_max(SettingsField::SessionWindow, false),
-            FIELD_NUMERIC
+        assert!(near(alone.bounds().width, inner));
+        assert!(near(alone.children()[1].bounds().width, FIELD_TEXT));
+
+        // Narrower than its cap, an input takes what the column has.
+        let narrow = lay_out(player_fields_row("", "1800", true), card_inner(1280.0));
+        let name = &narrow.children()[0];
+        assert!(name.bounds().width < FIELD_SHORT);
+        assert!(near(name.children()[1].bounds().width, name.bounds().width));
+    }
+
+    #[test]
+    fn help_copy_follows_the_card_up_to_the_measure() {
+        let wide = lay_out(
+            column![hint(DEBUG_IMAGES_HELP)].width(Fill).into(),
+            card_inner(2560.0),
         );
-        assert_eq!(
-            field_column_max(SettingsField::PollInterval, false),
-            FIELD_NUMERIC
+        let w = wide.children()[0].bounds().width;
+        assert!(w <= HELP_MEASURE + 0.01, "hint is {w} px wide");
+        assert!(
+            w > 520.0,
+            "hint is {w} px wide; the old 520 px wrap is back"
         );
-        assert_eq!(
-            field_column_max(SettingsField::PlayerName, true),
-            FIELD_SHORT
+
+        let inner = card_inner(1280.0);
+        let narrow = lay_out(column![hint(DEBUG_IMAGES_HELP)].width(Fill).into(), inner);
+        let w = narrow.children()[0].bounds().width;
+        assert!(w <= inner + 0.01, "hint is {w} px in a {inner} px card");
+        assert!(w > 300.0, "hint is {w} px wide");
+    }
+
+    #[test]
+    fn a_full_width_row_keeps_its_button_near_the_text() {
+        // Report a problem spans the pane. At 2560 the button was 2200 px
+        // from the label.
+        let pane = settings_layout(crate::layout::content_width_for_window(2560.0)).pane;
+        let card = lay_out(report_row(), pane);
+        assert!(near(card.bounds().width, pane), "the card still spans");
+        // Card: column [title, action row]. Action row: [text, button].
+        let action = &card.children()[0].children()[1];
+        assert!(near(action.bounds().width, ACTION_ROW_MAX), "{action:?}");
+        let row = &action.children()[0];
+        let button = row.children()[1].bounds();
+        assert!(
+            button.x + button.width <= ACTION_ROW_MAX + 0.5,
+            "{button:?}"
         );
-        assert_eq!(field_column_max(SettingsField::SyncToken, true), FIELD_TEXT);
-        assert_eq!(field_max_width(SettingsField::SessionWindow), FIELD_NUMERIC);
+
+        // One column (720 minimum window): unchanged, the row fills the card.
+        let pane = settings_layout(crate::layout::content_width_for_window(720.0)).pane;
+        let card = lay_out(uninstall_row(), pane);
+        let action = &card.children()[0].children()[1];
+        assert!(near(action.bounds().width, pane - 2.0 * PAD_INNER));
     }
 
     #[test]
@@ -1641,11 +1884,11 @@ mod tests {
 
     #[test]
     fn pack_columns_for_every_settings_width_fills_each_column() {
-        use crate::layout::{content_width_for_window, settings_columns};
+        use crate::layout::content_width_for_window;
         for window in [
             720.0, 1080.0, 1280.0, 1600.0, 1920.0, 2560.0, 3440.0, 5120.0,
         ] {
-            let cols = settings_columns(content_width_for_window(window));
+            let cols = settings_layout(content_width_for_window(window)).columns;
             let packed = pack_columns(MASONRY_SECTIONS, cols);
             assert_eq!(packed.len(), cols, "window {window}");
             assert!(packed.iter().all(|c| !c.is_empty()), "window {window}");
