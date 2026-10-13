@@ -588,7 +588,8 @@ fn search_fast_once(
             let mut lvl_best: Option<(f64, usize, usize)> = None;
             for yy in cy.saturating_sub(r)..=(cy + r).min(p.h - k.h) {
                 for xx in cx.saturating_sub(r)..=(cx + r).min(p.w - k.w) {
-                    let v = match scored.get(&(l, xx, yy)) {
+                    let key = (l, xx, yy);
+                    let v = match scored.get(&key) {
                         Some(&v) if once => v,
                         _ => {
                             // a flat window has no score either way
@@ -603,7 +604,7 @@ fn search_fast_once(
                                 macs += k.w * k.h;
                                 ncc_at(p, k, xx, yy)
                             };
-                            scored.insert((l, xx, yy), v);
+                            scored.insert(key, v);
                             v
                         }
                     };
