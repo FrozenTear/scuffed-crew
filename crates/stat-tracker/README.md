@@ -133,6 +133,16 @@ nothing else. A recorded path that leaves your home folder, or that contains
 files that are still there and asks first. Settings stay unless you also
 delete saved games.
 
+One thing in the saved-games folder goes on every uninstall, kept data or
+not: `private/own-name/`, the small crops of your own in-game name that
+`reader = "new"` keeps to find your row (see below). The uninstaller never
+follows a link and never deletes outside your home folder or the install
+folder, so it leaves the crops when the saved-games folder is a link, lies
+outside your home folder, or when a system package owns this copy.
+`scuffed-stat-tracker-uninstall` says so; the app's Uninstall does not list
+them in that case. You can delete `private/own-name/` by hand at any time:
+the tracker learns the crops again.
+
 If a system package owns this copy, nothing is removed. The app shows
 `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` and can copy that command.
 An AppImage is removed like any other copy, including the AppImage file.
@@ -268,6 +278,37 @@ folder under `$HOME` — is read-only under the sandbox. `install.sh` writes
 that path. Reinstall after you change `data_dir`. If the directory is
 still not writable, the daemon exits and prints the same drop-in. A
 relative `data_dir` is not put in the unit.
+
+With `reader = "new"` in config.toml, `{data_dir}` also holds
+`private/own-name/seeds.json` (folder 0700, file 0600). The new reader does
+not read player names to find your row. It keeps a few crops of your own
+name as it is drawn on the scoreboard, and compares each row with them. A
+crop is taken only from a board where your row is clearly highlighted, the
+hero panel shows the same hero as that row, and no chat covers it. It is
+trusted only after three boards from two games gave matching crops in one
+run of the tracker. Crops that keep pointing at another row than a clearly
+highlighted one are dropped and learned again.
+
+Names are still read in two places while Tesseract is on. When neither a
+crop nor the highlight finds your row, the tracker reads the name column
+of that one scoreboard and looks for your configured `player_name`, as
+`reader = "ocr-v1"` does on every scoreboard. And the full-scoreboard text
+read still runs when the per-cell read could not supply everything (#266
+removes it under the new reader).
+
+Only trusted crops are written to the file: crops confirmed as your own
+name line. A crop that is still waiting for confirmation could be another
+player's name, so it is kept in memory only and is gone when the tracker
+stops. If you restart the tracker between games the count starts again,
+and until your name is trusted your row is found by its highlight alone.
+The file holds pixels and a hash of the configured `player_name`, never
+the name. It is cleared when another name is configured, which the tracker
+notices when it next starts with `reader = "new"`; a start where the name
+is not known (not set here and not fetched) keeps it. It is removed on
+uninstall, and never put in a report, an upload or the log.
+`reader = "ocr-v1"` (the default) does not create it and does not read it;
+after a switch back to `ocr-v1` an existing file stays, unused, until
+uninstall or until you delete it.
 
 `%h` in the unit is `$HOME`. It does not follow `XDG_DATA_HOME` or
 `XDG_CONFIG_HOME`. On a user manager that cannot apply the sandbox, the

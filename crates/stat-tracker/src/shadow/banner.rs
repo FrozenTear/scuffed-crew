@@ -44,7 +44,8 @@ use serde::Deserialize;
 use crate::ocr::preprocess::game_rect_16_9;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
-pub const MAP_RECOGNIZER_ID: &str = "map-v1";
+/// `map-v2` (alpha.7 M1): `ADLERSBRUNN` is a banner the reader can name.
+pub const MAP_RECOGNIZER_ID: &str = "map-v2";
 /// Hand-installed template directory under the data dir (the
 /// `reader_pack_url` location before alpha.7). The fallback for
 /// [`TEMPLATE_SUBDIR_V1`].
@@ -150,6 +151,19 @@ pub const MAPS: &[MapInfo] = &[
         name: "Aatlis",
         banner: &["AATLIS"],
         mode: Some("Flashpoint"),
+    },
+    // Not an OverFast map: the Halloween event's label for Eichenwalde
+    // (Junkenstein's Revenge and its variants are played there). ocr-v1
+    // stores it as Eichenwalde (`parse::MAPS`), so `name` is that name. It
+    // has its own entry, not a second spelling of `eichenwalde`, so that
+    // (a) a banner between the two names is flagged by the margin instead
+    // of named, and (b) the read says which label it saw: the capture
+    // path's Junkenstein check needs that ([`MapRead::is_adlersbrunn`]).
+    MapInfo {
+        key: ADLERSBRUNN_KEY,
+        name: "Eichenwalde",
+        banner: &[ADLERSBRUNN],
+        mode: Some("Hybrid"),
     },
     MapInfo {
         key: "antarctic-peninsula",
@@ -500,6 +514,13 @@ pub const MAPS: &[MapInfo] = &[
         mode: Some("Control"),
     },
 ];
+
+/// [`MapInfo::key`] of the Halloween label of Eichenwalde in [`MAPS`].
+pub const ADLERSBRUNN_KEY: &str = "adlersbrunn";
+/// That label as the top bar prints it. `parse::is_adlersbrunn_alias`
+/// accepts this text, which is how a banner read reaches the same check as
+/// ocr-v1's top-bar label.
+pub const ADLERSBRUNN: &str = "ADLERSBRUNN";
 
 /// Float grey image, row-major, values 0..1.
 #[derive(Debug, Clone, PartialEq)]
@@ -1262,6 +1283,16 @@ pub struct MapRead {
     pub margin: f32,
     pub suspect: bool,
     pub found_banner: bool,
+}
+
+impl MapRead {
+    /// A sure read of the Halloween label [`ADLERSBRUNN`]: the banner was
+    /// found, and that name clears [`FLOOR`] and leads every other map,
+    /// `EICHENWALDE` included, by [`MARGIN`]. A flagged read is not one:
+    /// nothing is guessed, the same rule as the top-bar map.
+    pub fn is_adlersbrunn(&self) -> bool {
+        self.found_banner && !self.suspect && self.map.is_some_and(|m| m.key == ADLERSBRUNN_KEY)
+    }
 }
 
 // ---------------------------------------------------------------- live pack
@@ -2788,5 +2819,154 @@ mod tests {
         let mut v = vec![1.0, 2.0, 3.0, 4.0];
         assert_eq!(percentile(&mut v, 50.0), 2.5);
         assert!((percentile(&mut v, 30.0) - 1.9).abs() < 1e-6);
+    }
+
+    // ---- M1: ADLERSBRUNN, the Halloween label of Eichenwalde.
+
+    fn by_key(key: &str) -> &'static MapInfo {
+        MAPS.iter().find(|m| m.key == key).unwrap()
+    }
+
+    /// The templates as they were before the `ADLERSBRUNN` entry.
+    fn without_adlersbrunn(t: &MapTemplates) -> MapTemplates {
+        let mut before = t.clone();
+        before
+            .tpls
+            .retain(|(mi, _, _)| MAPS[*mi].key != ADLERSBRUNN_KEY);
+        assert_eq!(before.tpls.len() + 1, t.tpls.len());
+        before
+    }
+
+    /// The label is its own entry and is stored as Eichenwalde: same name
+    /// and mode as the `eichenwalde` entry, and no other two entries share
+    /// a name.
+    #[test]
+    fn adlersbrunn_is_its_own_entry_with_eichenwaldes_name_and_mode() {
+        let (alias, own) = (by_key(ADLERSBRUNN_KEY), by_key("eichenwalde"));
+        assert_eq!(alias.banner, &[ADLERSBRUNN]);
+        assert_eq!(ADLERSBRUNN, "ADLERSBRUNN");
+        assert_eq!((alias.name, alias.mode), (own.name, own.mode));
+        assert_eq!((own.name, own.mode), ("Eichenwalde", Some("Hybrid")));
+        assert_eq!(own.banner, &["EICHENWALDE"]);
+        for m in MAPS {
+            let same = MAPS.iter().filter(|o| o.name == m.name).count();
+            let want = if m.name == "Eichenwalde" { 2 } else { 1 };
+            assert_eq!(same, want, "{}", m.key);
+        }
+        let spelled = MAPS.iter().filter(|o| o.banner.contains(&ADLERSBRUNN));
+        assert_eq!(spelled.count(), 1);
+    }
+
+    #[test]
+    fn a_synthetic_adlersbrunn_banner_is_a_sure_read_of_the_label() {
+        let t = MapTemplates::compose_all(&atlas(), GAP, SPACE);
+        assert!(t.unrenderable.is_empty());
+        let r = t.read(&frame_with_banner(ADLERSBRUNN));
+        assert!(r.found_banner);
+        assert_eq!(r.map.map(|m| m.key), Some(ADLERSBRUNN_KEY));
+        assert!(
+            r.score >= FLOOR && r.margin >= MARGIN,
+            "score {} margin {}",
+            r.score,
+            r.margin
+        );
+        assert!(!r.suspect && r.is_adlersbrunn());
+        // the map it shares a name with is still read as itself
+        let e = t.read(&frame_with_banner("EICHENWALDE"));
+        assert_eq!(e.map.map(|m| m.key), Some("eichenwalde"));
+        assert!(!e.suspect && !e.is_adlersbrunn());
+    }
+
+    /// Only a sure read of the label counts, the rule the top-bar map has.
+    #[test]
+    fn only_a_sure_read_of_the_label_is_adlersbrunn() {
+        let read = |key: &str, suspect: bool, found_banner: bool| MapRead {
+            map: Some(by_key(key)),
+            best: Some(by_key(key)),
+            score: 0.95,
+            margin: 0.3,
+            suspect,
+            found_banner,
+        };
+        assert!(read(ADLERSBRUNN_KEY, false, true).is_adlersbrunn());
+        assert!(
+            !read(ADLERSBRUNN_KEY, true, true).is_adlersbrunn(),
+            "flagged"
+        );
+        assert!(!read(ADLERSBRUNN_KEY, false, false).is_adlersbrunn());
+        assert!(!read("eichenwalde", false, true).is_adlersbrunn());
+        assert!(!read("ilios", false, true).is_adlersbrunn());
+        let none = MapRead {
+            map: None,
+            best: Some(by_key(ADLERSBRUNN_KEY)),
+            ..read(ADLERSBRUNN_KEY, false, true)
+        };
+        assert!(!none.is_adlersbrunn());
+    }
+
+    /// The new template takes no read from another map: every other
+    /// spelling's own strip names the same map, as sure and with the same
+    /// score as before the entry, and `ADLERSBRUNN` trails it by at least
+    /// the margin.
+    #[test]
+    fn adlersbrunn_takes_no_read_from_another_map() {
+        let t = MapTemplates::compose_all(&atlas(), GAP, SPACE);
+        let before = without_adlersbrunn(&t);
+        let alias = t
+            .tpls
+            .iter()
+            .find(|(mi, _, _)| MAPS[*mi].key == ADLERSBRUNN_KEY)
+            .map(|(_, _, tpl)| tpl.clone())
+            .unwrap();
+        let mut closest = f64::NEG_INFINITY;
+        for (mi, text, tpl) in &before.tpls {
+            let strip = tpl.render(&vec![0; tpl.parts.len()]);
+            let (now, was) = (t.read_strip(&strip), before.read_strip(&strip));
+            assert_eq!(now.map.map(|m| m.key), Some(MAPS[*mi].key), "{text}");
+            assert_eq!(
+                (now.map, now.suspect, now.score),
+                (was.map, was.suspect, was.score),
+                "{text}"
+            );
+            assert!(!now.suspect, "{text}: margin {}", now.margin);
+            let cross = alias.score(&strip);
+            assert!(
+                cross <= now.score as f64 - MARGIN as f64,
+                "{text}: ADLERSBRUNN scores {cross} against {}",
+                now.score
+            );
+            closest = closest.max(cross);
+        }
+        assert!(closest < FLOOR as f64, "closest {closest}");
+    }
+
+    /// A pack that cannot spell the label (here: no `B`) composes no
+    /// template for it, and every read is what it was before the entry: an
+    /// `ADLERSBRUNN` banner is not named.
+    #[test]
+    fn a_pack_that_cannot_spell_adlersbrunn_reads_as_before() {
+        let mut glyphs = atlas();
+        glyphs.remove(&'B');
+        let t = MapTemplates::compose_all(&glyphs, GAP, SPACE);
+        assert!(t.unrenderable.contains(&ADLERSBRUNN));
+        assert!(
+            t.tpls
+                .iter()
+                .all(|(mi, _, _)| MAPS[*mi].key != ADLERSBRUNN_KEY)
+        );
+        let full = MapTemplates::compose_all(&atlas(), GAP, SPACE);
+        let before = without_adlersbrunn(&full);
+        for text in [ADLERSBRUNN, "EICHENWALDE", "NEPAL", "ILIOS"] {
+            let frame = frame_with_banner(text);
+            let r = t.read(&frame);
+            assert!(!r.is_adlersbrunn(), "{text}");
+            // templates without a `B` score what the full set scores for
+            // every map they still spell
+            let mut same = before.clone();
+            same.tpls.retain(|(_, v, _)| !v.contains('B'));
+            assert_eq!(r, same.read(&frame), "{text}");
+        }
+        let r = t.read(&frame_with_banner(ADLERSBRUNN));
+        assert!(r.suspect, "named {:?}", r.map.map(|m| m.key));
     }
 }
