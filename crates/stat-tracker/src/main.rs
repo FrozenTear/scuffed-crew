@@ -411,6 +411,18 @@ async fn main() -> anyhow::Result<()> {
     // tree before the store opens so the DB and command queue are owner-only.
     stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
 
+    // Refuse to start alongside a live daemon. On drop the guard removes
+    // daemon.pid only if the file still names this process. Held across
+    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
+    // The store-directory flock (see LocalStore::open) is the single-writer
+    // lock; this file is how the GUI finds the process.
+    // Taken before anything talks to the site: a start that is going to
+    // exit here must not sync reader packs first. It used to, and by
+    // holding the pack lock it left the daemon that stayed without its
+    // packs. The app also sees the daemon from here on, not only once the
+    // startup sync is over.
+    let _pid_guard = acquire_pid_guard(&config.data_dir)?;
+
     // One client for the whole process. An unsafe URL logs once here and
     // leaves sync off — including the startup player-name fetch — so the
     // bearer token is never sent. The daemon keeps running.
@@ -418,7 +430,7 @@ async fn main() -> anyhow::Result<()> {
     // heroes-v1 syncs here; the other packs sync in the background once
     // capture is up. The new reader picks up heroes-v2 and heroes-v2-1080
     // on a later board when they land (`shadow::heroes::LiveHeroSet`).
-    let mut extra_packs = None;
+    let mut pack_startup = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
@@ -427,12 +439,14 @@ async fn main() -> anyhow::Result<()> {
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
-            extra_packs = stat_tracker::packs::sync_on_startup(
-                &creds.server_url,
-                &creds.token,
-                &config.data_dir,
-            )
-            .await;
+            pack_startup = Some(
+                stat_tracker::packs::sync_on_startup(
+                    &creds.server_url,
+                    &creds.token,
+                    &config.data_dir,
+                )
+                .await,
+            );
         }
     }
 
@@ -448,13 +462,6 @@ async fn main() -> anyhow::Result<()> {
         configured = ?config.ocr_threads,
         "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
     );
-
-    // Refuse to start alongside a live daemon. On drop the guard removes
-    // daemon.pid only if the file still names this process. Held across
-    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
-    // The store-directory flock (see LocalStore::open) is the single-writer
-    // lock; this file is how the GUI finds the process.
-    let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
     if maybe_vacuum(&config.data_dir).await? {
@@ -532,8 +539,18 @@ async fn main() -> anyhow::Result<()> {
     });
     // Capture never waits on the extra packs: a stalled download only
     // delays this task.
-    if let Some(extras) = extra_packs {
-        tokio::spawn(extras.run());
+    // It runs for every daemon that has sync set up, whatever the startup
+    // sync came to (a busy lock, a 429, packs switched off, no network, or
+    // no startup sync at all while the token is paused), and it keeps
+    // trying while the daemon runs.
+    if let Some(client) = ctx.sync_client.clone() {
+        // The clone shares the client's URL and token, and the task holds
+        // no `DaemonCtx`, so the store is still dropped when the loop ends.
+        let data_dir = ctx.data_dir.clone();
+        let keeper = stat_tracker::packs::PackKeeper::new(&ctx.data_dir, pack_startup, move || {
+            pack_credentials(&data_dir, &client)
+        });
+        tokio::spawn(keeper.run());
     }
     let result = run_loop(ctx).await;
     if result.is_ok()
@@ -638,6 +655,24 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
             None
         }
     }
+}
+
+/// The server URL and token for one try of the reader pack job, read from
+/// the sync client each time, so a pair saved in Settings while the daemon
+/// runs is the one used. `None` while sync is paused on a rejected token:
+/// that token is not sent again.
+fn pack_credentials(
+    data_dir: &std::path::Path,
+    client: &sync::SyncClient,
+) -> Option<stat_tracker::packs::PackCredentials> {
+    if sync_credentials_rejected(data_dir, Some(client)) {
+        return None;
+    }
+    let creds = client.credentials();
+    Some(stat_tracker::packs::PackCredentials {
+        server_url: creds.server_url,
+        token: creds.token,
+    })
 }
 
 /// When `player_name` isn't set locally, fetch it from the server. This is the
@@ -10489,6 +10524,55 @@ mod tests {
         assert_eq!(
             session_close_log("superseded by Tab-opened game"),
             "closed session at new-game boundary"
+        );
+    }
+
+    /// P1c. A start that the pid guard is going to refuse must not reach
+    /// the site or the pack files first, and the reader pack job must be
+    /// started for every signed-in daemon, not only when the startup sync
+    /// got a list. The crash marker stays where it was: after the guard and
+    /// after the vacuum exit.
+    #[test]
+    fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper() {
+        let src = include_str!("main.rs");
+        let begin = src
+            .find("    lock_down_umask();\n")
+            .expect("startup begins");
+        let body = &src[begin..];
+        let end = body
+            .find("\nfn handle_preinit_flags()")
+            .expect("startup ends before handle_preinit_flags");
+        let body = &body[..end];
+        let at = |needle: &str| {
+            assert_eq!(body.matches(needle).count(), 1, "{needle} once in startup");
+            body.find(needle).expect("counted above")
+        };
+        let guard = at("acquire_pid_guard(&config.data_dir)?");
+        for later in [
+            "open_sync_client(",
+            "auth_pause_matches(",
+            "fetch_player_name_if_needed(",
+            "packs::sync_on_startup(",
+            "maybe_vacuum(",
+            "marker::start_run(",
+            "startup_maintenance(",
+            "open_store(",
+            "packs::PackKeeper::new(",
+            "run_loop(ctx).await",
+        ] {
+            assert!(guard < at(later), "{later} must come after the pid guard");
+        }
+        assert!(at("maybe_vacuum(") < at("marker::start_run("));
+        assert!(at("packs::sync_on_startup(") < at("marker::start_run("));
+        let keeper = at("packs::PackKeeper::new(");
+        assert!(keeper < at("run_loop(ctx).await"));
+        let condition = body[..keeper]
+            .rfind("    if ")
+            .expect("the keeper's condition");
+        assert!(
+            body[condition..].starts_with("    if let Some(client) = ctx.sync_client.clone() {\n"),
+            "the keeper must not depend on what the startup sync returned: {}",
+            &body[condition..keeper]
         );
     }
 

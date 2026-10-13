@@ -27,18 +27,22 @@
 //! written to a log.
 //!
 //! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
-//! back [`ExtraPacks`] to run in the background, so capture never waits on
-//! the extras. The new reader starts on heroes-v1 and re-loads its hero set
-//! once heroes-v2 or heroes-v2-1080 is swapped in
+//! its result to [`PackKeeper`], which runs in the background, so capture
+//! never waits on the other packs. The keeper syncs them and, while the
+//! daemon runs, keeps trying whatever is not in place: after a busy lock, a
+//! 429, packs switched off, a network error or a refused download (the
+//! waits are the table on `Backoff`). The new reader starts on heroes-v1 and
+//! re-loads its hero set once heroes-v2 or heroes-v2-1080 is swapped in
 //! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
-//! once it lands ([`crate::shadow::banner::LiveMaps`]). The setup guide
-//! ([`sync_reader_packs`]) syncs all of them. Every run holds an exclusive `flock` on
-//! `templates/.pack-sync.lock`; a second run at the same time is
-//! [`PackSync::Busy`] and sends no request.
+//! once it lands ([`crate::shadow::banner::LiveMaps`]), however late that
+//! is. The setup guide ([`sync_reader_packs`]) syncs all of them. Every run
+//! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
+//! at the same time is [`PackSync::Busy`] and sends no request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -221,6 +225,26 @@ impl PackSync {
             _ => None,
         }
     }
+
+    /// The seconds a 429 asked for, when this is a 429 failure. Read back
+    /// from [`rate_limit_message`], the one place a run keeps that wait.
+    fn rate_limit_secs(&self) -> Option<u64> {
+        self.rate_limited()?
+            .strip_prefix(RATE_LIMIT_PREFIX)?
+            .split(' ')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    /// Nothing a later try would change: in place, not offered by the
+    /// site, or a server without reader packs.
+    fn is_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::Installed | Self::Current | Self::Missing | Self::Unsupported
+        )
+    }
 }
 
 /// One line of a [`PackReport`].
@@ -253,6 +277,12 @@ impl PackReport {
                 })
                 .collect(),
         }
+    }
+
+    /// This run's packs, then the packs of the run after it.
+    fn followed_by(mut self, next: PackReport) -> Self {
+        self.packs.extend(next.packs);
+        self
     }
 
     pub fn get(&self, name: &str) -> Option<&PackSync> {
@@ -339,32 +369,22 @@ impl Scope {
     }
 }
 
-fn log_report(report: &PackReport) {
+/// Log each pack a run installed.
+fn log_installed(report: &PackReport) {
     for status in &report.packs {
-        let pack = status.name;
-        match &status.outcome {
-            PackSync::Installed => tracing::info!(pack, "reader pack installed"),
-            PackSync::Current | PackSync::Unavailable => {}
-            PackSync::Missing => tracing::debug!(pack, "reader pack not listed by the server"),
-            PackSync::Busy => tracing::info!(pack, "another reader pack sync is running"),
-            PackSync::Unsupported => {
-                tracing::info!(pack, "reader packs are not supported on this server yet");
-            }
-            PackSync::Failed(message) => {
-                tracing::warn!(pack, message, "reader pack left in place");
-            }
+        if status.outcome == PackSync::Installed {
+            tracing::info!(pack = status.name, "reader pack installed");
         }
     }
 }
 
 /// Daemon startup. Syncs `heroes-v1.tar` only, the same two requests as
-/// alpha.6, so capture waits on nothing new. The other packs come back as
-/// [`ExtraPacks`] for the caller to run in the background once capture is
-/// up. `None` when the list was not read (signed out, list error, busy),
-/// or when the heroes-v1 download hit a stop (refused token, rate limit,
-/// packs switched off): the extras would only repeat that request inside
-/// the same window. Logs a plain warning on failure and never the token.
-pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> Option<ExtraPacks> {
+/// alpha.6, so capture waits on nothing new. The result goes to
+/// [`PackKeeper`], which the daemon runs in the background once capture is
+/// up: it syncs the other packs and keeps trying whatever is not in place.
+/// Only an install is logged here. What went wrong, and that there will be
+/// another try, is the keeper's line to write. Never logs the token.
+pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> StartupSync {
     sync_on_startup_capped(server_url, token, data_dir, PACK_MAX_BYTES).await
 }
 
@@ -373,7 +393,7 @@ async fn sync_on_startup_capped(
     token: &str,
     data_dir: &Path,
     max_bytes: u64,
-) -> Option<ExtraPacks> {
+) -> StartupSync {
     let (report, entries) = run_sync(
         server_url,
         token,
@@ -383,48 +403,381 @@ async fn sync_on_startup_capped(
         None,
     )
     .await;
-    log_report(&report);
-    entries.map(|entries| ExtraPacks {
-        server_url: server_url.to_string(),
-        token: token.to_string(),
-        data_dir: data_dir.to_path_buf(),
-        max_bytes,
-        entries,
-    })
+    log_installed(&report);
+    StartupSync { report, entries }
 }
 
-/// The packs other than `heroes-v1.tar`, still to sync after daemon
-/// startup. They never hold up capture: heroes-v1 is the new reader's
-/// fallback until the v2 hero packs land, and the other packs have no reader
-/// yet. Reuses
-/// the startup list, so a first install is still seven requests in all.
-/// Holds the token; it has no `Debug` so the token cannot reach a log.
-pub struct ExtraPacks {
-    server_url: String,
-    token: String,
-    data_dir: PathBuf,
-    max_bytes: u64,
-    entries: Vec<PackListEntry>,
+/// What [`sync_on_startup`] came to, for [`PackKeeper`] to carry on from.
+pub struct StartupSync {
+    report: PackReport,
+    /// The list, when it was read and the heroes-v1 download hit no stop
+    /// (refused token, rate limit, packs switched off). The keeper's first
+    /// try reuses it, so a first install is still seven requests in all.
+    entries: Option<Vec<PackListEntry>>,
 }
 
-impl ExtraPacks {
-    /// Sync the extra packs and log each outcome. Meant for `tokio::spawn`.
-    pub async fn run(self) {
-        let report = self.sync().await;
-        log_report(&report);
+/// Waits, in seconds, while another process holds the pack sync lock. The
+/// last one repeats.
+const BUSY_WAITS_SECS: [u64; 3] = [5, 15, 60];
+/// Waits, in seconds, after packs switched off (503), a network error, a
+/// refused token or a refused download. The last one repeats.
+const FAILED_WAITS_SECS: [u64; 4] = [60, 300, 900, 1800];
+/// No wait between two tries is shorter than this.
+const RETRY_FLOOR_SECS: u64 = 5;
+/// The longest wait the keeper takes from a 429.
+const RATE_LIMIT_RETRY_MAX_SECS: u64 = 120;
+
+/// `waits[tries]` as a wait, or the last one once `tries` is past the end.
+fn nth_wait(waits: &[u64], tries: usize) -> Duration {
+    let last = waits.len().saturating_sub(1);
+    Duration::from_secs(waits.get(tries.min(last)).copied().unwrap_or(0))
+}
+
+/// Added to a 429 wait, so trackers behind one address (they share the
+/// server's rate limit) do not all come back in the same second. Fixed for
+/// one process: 0 to 4.75 s in quarter seconds, from the pid.
+fn pid_jitter(pid: u32) -> Duration {
+    Duration::from_millis(u64::from(pid % 20) * 250)
+}
+
+/// What one try left undone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Verdict {
+    /// Another process held the pack sync lock.
+    busy: bool,
+    /// A 429, with the seconds it asked for.
+    limited: Option<u64>,
+    /// The site has packs switched off (503 `packs_disabled`).
+    disabled: bool,
+    /// Anything else that left a pack not in place.
+    failed: bool,
+}
+
+/// The one reason a wait is logged with, when a try had several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    Failed,
+    Disabled,
+    Limited,
+    Busy,
+}
+
+impl Verdict {
+    fn of(report: &PackReport) -> Self {
+        let mut verdict = Self::default();
+        for status in &report.packs {
+            match &status.outcome {
+                outcome if outcome.is_settled() => {}
+                PackSync::Busy => verdict.busy = true,
+                PackSync::Unavailable => verdict.disabled = true,
+                outcome => match outcome.rate_limit_secs() {
+                    Some(seconds) => verdict.limited = verdict.limited.max(Some(seconds)),
+                    None => verdict.failed = true,
+                },
+            }
+        }
+        verdict
     }
 
-    async fn sync(self) -> PackReport {
-        run_sync(
-            &self.server_url,
-            &self.token,
+    /// Every pack is settled: there is nothing to try again.
+    fn settled(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn why(&self) -> Why {
+        if self.failed {
+            Why::Failed
+        } else if self.disabled {
+            Why::Disabled
+        } else if self.limited.is_some() {
+            Why::Limited
+        } else {
+            Why::Busy
+        }
+    }
+}
+
+/// How long [`PackKeeper`] waits between two tries.
+///
+/// | The try ended on | Wait before the next try |
+/// | --- | --- |
+/// | another process holds the lock | 5 s, 15 s, then 60 s each time |
+/// | a 429 | the server's `Retry-After`, kept to 1..=120 s, plus [`pid_jitter`] |
+/// | packs switched off (503), network error, refused token, refused download | 1 min, 5 min, 15 min, then 30 min each time |
+///
+/// No wait is under [`RETRY_FLOOR_SECS`]. A try that ended on several of
+/// these waits the longest of them. The busy step starts over once the
+/// lock was free. The failure step never starts over while the daemon
+/// runs, so a pack the tracker refuses is fetched no more often than the
+/// last row, also when a 429 or a busy lock comes in between.
+#[derive(Debug, Default)]
+struct Backoff {
+    busy_tries: usize,
+    failed_tries: usize,
+}
+
+impl Backoff {
+    /// The wait before the next try, or `None` when nothing is left to try.
+    fn wait_after(&mut self, verdict: Verdict, jitter: Duration) -> Option<Duration> {
+        if verdict.settled() {
+            return None;
+        }
+        let mut wait = Duration::from_secs(RETRY_FLOOR_SECS);
+        if verdict.busy {
+            wait = wait.max(nth_wait(&BUSY_WAITS_SECS, self.busy_tries));
+            self.busy_tries += 1;
+        } else {
+            self.busy_tries = 0;
+        }
+        if let Some(seconds) = verdict.limited {
+            let asked = seconds.clamp(RETRY_AFTER_MIN_SECS, RATE_LIMIT_RETRY_MAX_SECS);
+            wait = wait.max(Duration::from_secs(asked) + jitter);
+        }
+        if verdict.failed || verdict.disabled {
+            wait = wait.max(nth_wait(&FAILED_WAITS_SECS, self.failed_tries));
+            self.failed_tries += 1;
+        }
+        Some(wait)
+    }
+}
+
+/// The packs that are not on disk and that this try did not settle. A
+/// pack the try did not cover counts (startup looks at heroes-v1 only); a
+/// pack the site does not offer does not.
+fn missing_packs(data_dir: &Path, report: &PackReport) -> Vec<&'static str> {
+    let versions = read_versions(data_dir);
+    PACKS
+        .iter()
+        .filter(|spec| !(versions.contains_key(spec.name) && spec.dir_in(data_dir).is_dir()))
+        .filter(|spec| !report.get(spec.name).is_some_and(PackSync::is_settled))
+        .map(|spec| spec.name)
+        .collect()
+}
+
+/// `a, b, c`, or `None` for no names, which leaves the field out of the line.
+fn name_list(names: &[&str]) -> Option<String> {
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// [`PackKeeper`]'s log lines. A wait is written when its reason or the
+/// set of missing packs changes, not on every try, so hours without the
+/// site are one line. The lines carry pack names, the wait and a fixed
+/// sentence: never the server URL, a header or the token.
+#[derive(Default)]
+struct Voice {
+    said: Option<(Why, Vec<&'static str>)>,
+    arrived: Vec<&'static str>,
+    waits: u32,
+}
+
+impl Voice {
+    fn arrivals(&mut self, report: &PackReport) {
+        let installed = report
+            .packs
+            .iter()
+            .filter(|status| status.outcome == PackSync::Installed);
+        self.arrived.extend(installed.map(|status| status.name));
+    }
+
+    fn waiting(&mut self, data_dir: &Path, report: &PackReport, verdict: Verdict, wait: Duration) {
+        self.waits += 1;
+        let why = verdict.why();
+        let missing = missing_packs(data_dir, report);
+        let wait_secs = wait.as_secs();
+        if self
+            .said
+            .as_ref()
+            .is_some_and(|(said, packs)| *said == why && *packs == missing)
+        {
+            tracing::debug!(wait_secs, "reader packs: nothing new, trying again later");
+            return;
+        }
+        let names = name_list(&missing);
+        let names = names.as_deref();
+        match why {
+            Why::Busy => tracing::info!(
+                wait_secs,
+                "another reader pack sync is running; the tracker will try again"
+            ),
+            Why::Limited => tracing::info!(
+                wait_secs,
+                missing = names,
+                "the site asked the tracker to wait before it downloads more reader packs; the tracker will try again"
+            ),
+            Why::Disabled => tracing::info!(
+                wait_secs,
+                missing = names,
+                "the site has reader pack downloads turned off; the tracker will try again"
+            ),
+            Why::Failed => {
+                let failed: Vec<(&str, &str)> = report
+                    .packs
+                    .iter()
+                    .filter_map(|status| match &status.outcome {
+                        PackSync::Failed(message) if status.outcome.rate_limit_secs().is_none() => {
+                            Some((status.name, message.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let reason = failed.first().map_or(PACK_FAILED, |(_, message)| *message);
+                // When every pack carries the failure it came before any
+                // pack was looked at (the list, the sign-in). Naming them
+                // all would name packs that are installed and fine.
+                let own: Vec<&str> = if failed.len() < report.packs.len() {
+                    failed.iter().map(|(name, _)| *name).collect()
+                } else {
+                    Vec::new()
+                };
+                let refused = name_list(&own);
+                let refused = refused.as_deref();
+                if missing.is_empty() {
+                    tracing::warn!(
+                        wait_secs,
+                        refused,
+                        reason,
+                        "reader packs could not be checked for updates; the tracker keeps the installed packs and will try again"
+                    );
+                } else {
+                    tracing::warn!(
+                        wait_secs,
+                        missing = names,
+                        refused,
+                        reason,
+                        "reader packs are still missing; the tracker will try again"
+                    );
+                }
+            }
+        }
+        self.said = Some((why, missing));
+    }
+
+    fn done(&self, report: &PackReport) {
+        for status in &report.packs {
+            if status.outcome == PackSync::Missing {
+                tracing::debug!(pack = status.name, "reader pack not listed by the server");
+            }
+        }
+        let unsupported = |status: &PackStatus| status.outcome == PackSync::Unsupported;
+        if report.packs.iter().any(unsupported) {
+            tracing::info!("reader packs are not supported on this server yet");
+        }
+        if self.waits > 0 {
+            let arrived = name_list(&self.arrived);
+            tracing::info!(
+                tries = self.waits + 1,
+                arrived = arrived.as_deref(),
+                "reader pack sync finished; the tracker stopped retrying"
+            );
+        }
+    }
+}
+
+/// The server URL and token for one try. It has no `Debug`, so the token
+/// cannot reach a log.
+pub struct PackCredentials {
+    pub server_url: String,
+    pub token: String,
+}
+
+type Nap = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// The daemon's one background job for reader packs: make every pack in
+/// [`PACKS`] current, and keep trying while the daemon runs.
+///
+/// Its first try carries on from [`sync_on_startup`]: with that run's list
+/// it syncs the other packs, so a first install is still seven requests.
+/// If startup did not get that far (busy lock, 429, packs switched off, a
+/// network error, a refused token) nothing is sent now and that outcome
+/// sets the first wait. Every later try is one list request plus only the
+/// packs that are missing or out of date. It stops once every pack is in
+/// place or not offered; until then it waits as `Backoff` says and tries
+/// again, one try at a time. Each try takes the pack sync lock, so the
+/// setup guide and a second process still take turns with it.
+///
+/// Capture never waits on it. Dropping it (the daemon stopping) between
+/// tries leaves nothing behind; a download in flight is dropped before
+/// anything is written.
+pub struct PackKeeper {
+    data_dir: PathBuf,
+    startup: Option<StartupSync>,
+    credentials: Box<dyn Fn() -> Option<PackCredentials> + Send>,
+    max_bytes: u64,
+    jitter: Duration,
+    sleep: Box<dyn FnMut(Duration) -> Nap + Send>,
+}
+
+impl PackKeeper {
+    /// `startup` is `None` when no startup sync ran. `credentials` is asked
+    /// before every try, so a token changed in Settings is picked up; while
+    /// it gives `None` (sync paused on a rejected token) nothing is sent.
+    pub fn new(
+        data_dir: &Path,
+        startup: Option<StartupSync>,
+        credentials: impl Fn() -> Option<PackCredentials> + Send + 'static,
+    ) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            startup,
+            credentials: Box::new(credentials),
+            max_bytes: PACK_MAX_BYTES,
+            jitter: pid_jitter(std::process::id()),
+            sleep: Box::new(|wait| Box::pin(tokio::time::sleep(wait))),
+        }
+    }
+
+    /// Meant for `tokio::spawn`. Returns once every pack is settled.
+    pub async fn run(mut self) {
+        let mut backoff = Backoff::default();
+        let mut voice = Voice::default();
+        let mut report = self.first_try().await;
+        loop {
+            voice.arrivals(&report);
+            let verdict = Verdict::of(&report);
+            let Some(wait) = backoff.wait_after(verdict, self.jitter) else {
+                voice.done(&report);
+                return;
+            };
+            voice.waiting(&self.data_dir, &report, verdict, wait);
+            (self.sleep)(wait).await;
+            report = self.attempt(Scope::All, None).await;
+        }
+    }
+
+    /// The startup outcome plus, when startup left a list to reuse, the
+    /// packs it did not cover.
+    async fn first_try(&mut self) -> PackReport {
+        match self.startup.take() {
+            Some(StartupSync {
+                report,
+                entries: Some(entries),
+            }) => {
+                let rest = self.attempt(Scope::ExtrasOnly, Some(entries)).await;
+                report.followed_by(rest)
+            }
+            Some(StartupSync {
+                report,
+                entries: None,
+            }) => report,
+            None => self.attempt(Scope::All, None).await,
+        }
+    }
+
+    async fn attempt(&mut self, scope: Scope, listed: Option<Vec<PackListEntry>>) -> PackReport {
+        let Some(credentials) = (self.credentials)() else {
+            return PackReport::all(scope, PackSync::Failed(PACK_SIGN_IN.to_string()));
+        };
+        let (report, _) = run_sync(
+            &credentials.server_url,
+            &credentials.token,
             &self.data_dir,
             self.max_bytes,
-            Scope::ExtrasOnly,
-            Some(self.entries),
+            scope,
+            listed,
         )
-        .await
-        .0
+        .await;
+        log_installed(&report);
+        report
     }
 }
 
@@ -743,7 +1096,7 @@ async fn sync_one(
 }
 
 /// Run blocking file work (hashing, unpacking, fsync) on tokio's blocking
-/// pool, so the background extras job never holds up a runtime worker.
+/// pool, so the background pack job never holds up a runtime worker.
 /// `None` if the work panicked.
 async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     tokio::task::spawn_blocking(work).await.ok()
@@ -1954,6 +2307,7 @@ mod tests {
             "size": bytes.len(),
         }]))
         .unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fake = Arc::new(Fake {
             token: token.into(),
             list_status: 200,
@@ -1963,7 +2317,7 @@ mod tests {
             file_body: bytes,
             file_chunked: false,
             named_files: BTreeMap::new(),
-            file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            file_hits: hits.clone(),
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
@@ -1975,13 +2329,32 @@ mod tests {
             .with_writer(move || SharedWriter(writer.clone()))
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
-        sync_on_startup(base.as_str(), token, dir.path()).await;
+        let startup = sync_on_startup(base.as_str(), token, dir.path()).await;
+        // The keeper says what went wrong, then tries the pack twice more.
+        let creds = move || {
+            Some(PackCredentials {
+                server_url: base.clone(),
+                token: token.to_string(),
+            })
+        };
+        let (finished, waits) = rig_with(creds, dir.path(), Some(startup), 2, no_nap)
+            .run()
+            .await;
         drop(_guard);
+        assert!(!finished, "a pack that never matches is never settled");
+        assert_eq!(waits, [secs(60), secs(300), secs(900)]);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
         let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert!(logs.contains(PACK_MISMATCH), "{logs}");
+        assert_eq!(
+            logs.matches("reader packs are still missing").count(),
+            1,
+            "{logs}"
+        );
         assert!(!logs.contains(token), "{logs}");
+        assert_no_address_in_pack_lines(&logs);
     }
 
     #[tokio::test]
@@ -2909,18 +3282,23 @@ mod tests {
         let (list, files, contents) = all_packs();
         let served = serve(list, files);
         let dir = tempfile::tempdir().expect("tempdir");
-        let extras =
-            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
-                .await
-                .expect("the list was read, so the extras are queued");
+        let startup =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(startup.entries.is_some(), "the list was read and is kept");
         // Capture starts after this: only the alpha.6 requests happened.
         assert_eq!(served.downloaded(), vec![HEROES_PACK_NAME.to_string()]);
         assert_eq!(list_requests(&served), 1);
         for spec in &PACKS[1..] {
             assert!(!spec.dir_in(dir.path()).exists(), "{}", spec.name);
         }
-        let report = extras.sync().await;
-        assert_eq!(report.packs.len(), PACKS.len() - 1);
+        let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
+        let report = keeper.first_try().await;
+        assert_eq!(
+            report.packs.len(),
+            PACKS.len(),
+            "startup's pack, then the rest"
+        );
+        assert_eq!(report.heroes(), &PackSync::Installed);
         for spec in &PACKS[1..] {
             assert_eq!(
                 outcome(&report, spec.name),
@@ -2963,16 +3341,23 @@ mod tests {
             .with_writer(move || SharedWriter(writer.clone()))
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
-        let extras = sync_on_startup(base.as_str(), TOKEN, dir.path()).await;
+        let startup = sync_on_startup(base.as_str(), TOKEN, dir.path()).await;
+        assert!(startup.entries.is_none());
+        // The keeper writes the line, with the wait before its next try.
+        let (finished, waits) = rig(&base, dir.path(), Some(startup), 0, no_nap).run().await;
         drop(_guard);
-        assert!(extras.is_none());
+        assert!(!finished);
+        assert_eq!(waits, [secs(60)]);
         let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert_eq!(
-            logs.matches("reader pack left in place").count(),
+            logs.matches("reader packs are still missing").count(),
             1,
             "{logs}"
         );
+        assert!(logs.contains(PACK_FORBIDDEN), "{logs}");
+        assert!(logs.contains("wait_secs=60"), "{logs}");
         assert!(!logs.contains(TOKEN), "{logs}");
+        assert_no_address_in_pack_lines(&logs);
     }
 
     #[tokio::test]
@@ -2991,11 +3376,11 @@ mod tests {
         assert!(served.requested.lock().unwrap().is_empty(), "no request");
         assert!(!versions_path(dir.path()).exists());
         assert_eq!(report.guide_result(), Ok(PACK_BUSY.to_string()));
-        assert!(
-            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
-                .await
-                .is_none()
-        );
+        let startup =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(startup.report.heroes(), &PackSync::Busy);
+        assert!(startup.entries.is_none());
+        assert!(served.requested.lock().unwrap().is_empty(), "no request");
         drop(held);
         let report = sync(&served, dir.path()).await;
         assert!(
@@ -3278,40 +3663,55 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_on_heroes_v1_at_startup_queues_no_extras() {
-        let stops: [(u16, &[u8]); 4] = [
-            (401, br#"{"error":"Unauthorized"}"#),
-            (403, br#"{"error":"forbidden"}"#),
-            (429, br#"{"error":"rate_limited","retry_after":30}"#),
-            (503, br#"{"error":"packs_disabled"}"#),
+        let stops: [(u16, &[u8], Duration); 4] = [
+            (401, br#"{"error":"Unauthorized"}"#, secs(60)),
+            (403, br#"{"error":"forbidden"}"#, secs(60)),
+            (
+                429,
+                br#"{"error":"rate_limited","retry_after":30}"#,
+                secs(30) + TEST_JITTER,
+            ),
+            (503, br#"{"error":"packs_disabled"}"#, secs(60)),
         ];
-        for (status, body) in stops {
+        for (status, body, wait) in stops {
             let served = all_packs_with_download(HEROES_PACK_NAME, status, body);
             let dir = tempfile::tempdir().expect("tempdir");
-            let extras =
+            let startup =
                 sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
                     .await;
-            assert!(extras.is_none(), "HTTP {status} queues no extras job");
+            assert!(startup.entries.is_none(), "HTTP {status} hands on no list");
+            // The keeper sends nothing more before its first wait is over.
+            let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 0, no_nap)
+                .run()
+                .await;
+            assert!(!finished, "HTTP {status}");
+            assert_eq!(waits, [wait], "HTTP {status}");
             assert_eq!(
                 served.downloaded(),
                 vec![HEROES_PACK_NAME.to_string()],
                 "HTTP {status}"
             );
+            assert_eq!(list_requests(&served), 1, "HTTP {status}");
         }
-        // A failure that is not a stop (a bad hash) still queues them.
+        // A failure that is not a stop (a bad hash) does not hold the others.
         let served = all_packs_with_download(HEROES_PACK_NAME, 200, b"not the listed pack");
         let dir = tempfile::tempdir().expect("tempdir");
-        let extras =
-            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
-                .await
-                .expect("a mismatch is not a stop");
-        let report = extras.sync().await;
+        let startup =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(startup.entries.is_some(), "a mismatch is not a stop");
+        let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
+        let report = keeper.first_try().await;
+        assert_eq!(
+            report.heroes(),
+            &PackSync::Failed(PACK_MISMATCH.to_string())
+        );
         assert!(
-            report
-                .packs
+            report.packs[1..]
                 .iter()
                 .all(|s| s.outcome == PackSync::Installed),
             "{report:?}"
         );
+        assert_eq!(list_requests(&served), 1, "the startup list is reused");
     }
 
     struct Gated {
@@ -3476,11 +3876,10 @@ mod tests {
         let (list, files, _) = all_packs();
         let served = serve(list, files);
         let dir = tempfile::tempdir().expect("tempdir");
-        let extras =
-            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
-                .await
-                .expect("extras queued");
-        let report = extras.sync().await;
+        let startup =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let mut keeper = rig(&served.base, dir.path(), Some(startup), 0, no_nap).keeper;
+        let report = keeper.first_try().await;
         assert!(
             report
                 .packs
@@ -3495,5 +3894,1317 @@ mod tests {
             threads.iter().all(|thread| *thread != runtime_thread),
             "hashing, unpacking and fsync ran on the runtime thread"
         );
+    }
+
+    // ---- P1c: the keeper retries while the daemon runs ----
+    // The waits are recorded, not slept, so these tests check the real
+    // schedule and still take milliseconds.
+
+    const LIST_PATH: &str = "/api/tracker/packs";
+    /// The jitter every keeper under test uses instead of its pid's.
+    const TEST_JITTER: Duration = Duration::from_millis(750);
+
+    fn secs(seconds: u64) -> Duration {
+        Duration::from_secs(seconds)
+    }
+
+    /// A keeper under test, the waits it asked for, and a signal for "it
+    /// went to sleep for good".
+    struct Rig {
+        keeper: PackKeeper,
+        naps: Arc<Mutex<Vec<Duration>>>,
+        parked: Arc<tokio::sync::Notify>,
+    }
+
+    impl Rig {
+        /// Run the keeper. `true` when it finished by itself, `false` when
+        /// it was still waiting after its last allowed nap (the test then
+        /// drops it, as the daemon stopping does). With every wait it asked
+        /// for.
+        async fn run(self) -> (bool, Vec<Duration>) {
+            let finished = tokio::select! {
+                () = self.keeper.run() => true,
+                () = self.parked.notified() => false,
+            };
+            let waits = self.naps.lock().expect("naps").clone();
+            (finished, waits)
+        }
+    }
+
+    /// A nap that is over at once.
+    fn no_nap(_: usize) -> Nap {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// A keeper whose waits are recorded and replaced by `on_nap(n)` for
+    /// nap `n` (from 0). Nap number `max_naps` never ends.
+    fn rig_with(
+        credentials: impl Fn() -> Option<PackCredentials> + Send + 'static,
+        data_dir: &Path,
+        startup: Option<StartupSync>,
+        max_naps: usize,
+        mut on_nap: impl FnMut(usize) -> Nap + Send + 'static,
+    ) -> Rig {
+        let mut keeper = PackKeeper::new(data_dir, startup, credentials);
+        keeper.jitter = TEST_JITTER;
+        let naps = Arc::new(Mutex::new(Vec::new()));
+        let parked = Arc::new(tokio::sync::Notify::new());
+        let (seen, park) = (naps.clone(), parked.clone());
+        keeper.sleep = Box::new(move |wait| {
+            let nap = {
+                let mut seen = seen.lock().expect("naps");
+                seen.push(wait);
+                seen.len() - 1
+            };
+            if nap >= max_naps {
+                park.notify_one();
+                return Box::pin(std::future::pending());
+            }
+            on_nap(nap)
+        });
+        Rig {
+            keeper,
+            naps,
+            parked,
+        }
+    }
+
+    /// [`rig_with`] for one server and [`TOKEN`].
+    fn rig(
+        base: &str,
+        data_dir: &Path,
+        startup: Option<StartupSync>,
+        max_naps: usize,
+        on_nap: impl FnMut(usize) -> Nap + Send + 'static,
+    ) -> Rig {
+        let base = base.to_string();
+        let credentials = move || {
+            Some(PackCredentials {
+                server_url: base.clone(),
+                token: TOKEN.to_string(),
+            })
+        };
+        rig_with(credentials, data_dir, startup, max_naps, on_nap)
+    }
+
+    /// One answer of a [`serve_script`] fake: status, body, `Retry-After`.
+    /// `None` hangs up without an answer, which the tracker sees as a
+    /// network error.
+    type Answer = Option<(u16, Vec<u8>, Option<u64>)>;
+
+    /// A fake whose answer depends on the path and on how many times that
+    /// path was asked before. A request without the bearer token is a 401.
+    fn serve_script(script: impl Fn(&str, usize) -> Answer + Send + 'static) -> Served {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requested = requested_paths();
+        let (file_hits, paths) = (hits.clone(), requested.clone());
+        std::thread::spawn(move || {
+            for _ in 0..256 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("timeout");
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                while !buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut sock, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let authed = head.lines().any(|line| {
+                    line.eq_ignore_ascii_case(&format!("authorization: bearer {TOKEN}"))
+                });
+                let asked = {
+                    let mut paths = paths.lock().expect("paths");
+                    let asked = paths.iter().filter(|seen| **seen == path).count();
+                    paths.push(path.clone());
+                    asked
+                };
+                if path != LIST_PATH {
+                    file_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let answer = if authed {
+                    script(&path, asked)
+                } else {
+                    Some((401, br#"{"error":"Unauthorized"}"#.to_vec(), None))
+                };
+                if let Some((status, body, retry_after)) = answer {
+                    let response = http_bytes(status, &body, retry_after, false);
+                    let _ = std::io::Write::write_all(&mut sock, &response);
+                }
+            }
+        });
+        Served {
+            base: format!("http://{addr}"),
+            hits,
+            requested,
+        }
+    }
+
+    /// The answer of a site with every pack: the list, or the named tar.
+    fn healthy(list: &[u8], files: &ServedFiles, path: &str) -> Answer {
+        if path == LIST_PATH {
+            return Some((200, list.to_vec(), None));
+        }
+        let file = path
+            .strip_prefix("/api/tracker/packs/")
+            .and_then(|name| files.get(name));
+        Some(match file {
+            Some((status, body)) => (*status, body.clone(), None),
+            None => (404, br#"{"error":"pack_not_found"}"#.to_vec(), None),
+        })
+    }
+
+    /// The list and files of [`all_packs`], ready for a [`serve_script`]
+    /// closure to answer with [`healthy`].
+    fn all_packs_for_script() -> (Vec<u8>, ServedFiles, PackContents) {
+        let (list, files, contents) = all_packs();
+        (serde_json::to_vec(&list).unwrap(), files, contents)
+    }
+
+    fn requests(served: &Served) -> Vec<String> {
+        served.requested.lock().expect("paths").clone()
+    }
+
+    /// `/api/tracker/packs/<name>` for each name.
+    fn tar_paths(names: &[&str]) -> Vec<String> {
+        names
+            .iter()
+            .map(|name| format!("/api/tracker/packs/{name}"))
+            .collect()
+    }
+
+    fn pack_names() -> Vec<&'static str> {
+        PACKS.iter().map(|spec| spec.name).collect()
+    }
+
+    /// The list request, then one download per name.
+    fn list_then(names: &[&str]) -> Vec<String> {
+        let mut paths = vec![LIST_PATH.to_string()];
+        paths.extend(tar_paths(names));
+        paths
+    }
+
+    fn assert_all_installed(data_dir: &Path, contents: &PackContents) {
+        for spec in PACKS {
+            for (path, data) in &contents[spec.name] {
+                assert_eq!(
+                    &std::fs::read(spec.dir_in(data_dir).join(path)).expect(spec.name),
+                    data,
+                    "{} {path}",
+                    spec.name
+                );
+            }
+        }
+        assert_eq!(stored_versions(data_dir).len(), PACKS.len());
+        assert_eq!(leftovers(data_dir), Vec::<String>::new());
+    }
+
+    /// Everything under `templates/` that is not a pack folder, the
+    /// versions file or the lock file: staging and backup folders, tmp files.
+    fn leftovers(data_dir: &Path) -> Vec<String> {
+        let live: Vec<String> = PACKS
+            .iter()
+            .map(|spec| dir_label(&spec.dir_in(data_dir)))
+            .collect();
+        let mut left: Vec<String> = std::fs::read_dir(data_dir.join("templates"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        left.retain(|name| {
+            !live.contains(name) && name != "pack-versions.json" && name != ".pack-sync.lock"
+        });
+        left.sort();
+        left
+    }
+
+    /// Log lines of this thread while a test runs.
+    struct Logs {
+        buf: Arc<Mutex<Vec<u8>>>,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    fn capture_logs() -> Logs {
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || SharedWriter(writer.clone()))
+            .finish();
+        Logs {
+            buf,
+            _guard: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    impl Logs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.buf.lock().expect("log")).into_owned()
+        }
+    }
+
+    /// The pack module's own lines, at the levels a member's log has.
+    fn pack_lines(logs: &str) -> Vec<&str> {
+        logs.lines()
+            .filter(|line| line.contains("stat_tracker::packs"))
+            .filter(|line| line.contains(" INFO ") || line.contains(" WARN "))
+            .collect()
+    }
+
+    /// No pack line carries the server address, a URL, a query or a header.
+    fn assert_no_address_in_pack_lines(logs: &str) {
+        for line in pack_lines(logs) {
+            let lower = line.to_ascii_lowercase();
+            for banned in ["http", "127.0.0.1", "?", "authorization", "bearer", "/api/"] {
+                assert!(!lower.contains(banned), "{banned:?} in {line}");
+            }
+        }
+    }
+
+    /// No token anywhere, and no address in a pack line.
+    fn assert_no_secrets(logs: &str) {
+        assert!(!logs.contains(TOKEN), "{logs}");
+        assert_no_address_in_pack_lines(logs);
+    }
+
+    fn lines_with<'a>(logs: &'a str, needle: &str) -> Vec<&'a str> {
+        pack_lines(logs)
+            .into_iter()
+            .filter(|line| line.contains(needle))
+            .collect()
+    }
+
+    const SAID_OFF: &str =
+        "the site has reader pack downloads turned off; the tracker will try again";
+    const SAID_LIMITED: &str = "the site asked the tracker to wait";
+    const SAID_BUSY: &str = "another reader pack sync is running; the tracker will try again";
+    const SAID_MISSING: &str = "reader packs are still missing; the tracker will try again";
+    const SAID_UNCHECKED: &str = "reader packs could not be checked for updates";
+    const SAID_DONE: &str = "reader pack sync finished; the tracker stopped retrying";
+
+    fn verdict(outcomes: &[PackSync]) -> Verdict {
+        Verdict::of(&PackReport {
+            packs: outcomes
+                .iter()
+                .map(|outcome| PackStatus {
+                    name: HEROES_PACK_NAME,
+                    outcome: outcome.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    const BUSY: Verdict = Verdict {
+        busy: true,
+        limited: None,
+        disabled: false,
+        failed: false,
+    };
+    const FAILED: Verdict = Verdict {
+        busy: false,
+        limited: None,
+        disabled: false,
+        failed: true,
+    };
+    const DISABLED: Verdict = Verdict {
+        busy: false,
+        limited: None,
+        disabled: true,
+        failed: false,
+    };
+
+    fn limited(seconds: u64) -> Verdict {
+        Verdict {
+            limited: Some(seconds),
+            ..Verdict::default()
+        }
+    }
+
+    /// The waits a fresh [`Backoff`] gives for `verdicts`, in whole
+    /// milliseconds, with [`TEST_JITTER`].
+    fn waits_ms(verdicts: &[Verdict]) -> Vec<u128> {
+        let mut backoff = Backoff::default();
+        verdicts
+            .iter()
+            .map(|verdict| {
+                backoff
+                    .wait_after(*verdict, TEST_JITTER)
+                    .expect("not settled")
+                    .as_millis()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nothing_left_to_try_is_no_wait() {
+        let mut backoff = Backoff::default();
+        assert_eq!(backoff.wait_after(Verdict::default(), TEST_JITTER), None);
+        assert!(Verdict::default().settled());
+        for unsettled in [BUSY, FAILED, DISABLED, limited(1)] {
+            assert!(!unsettled.settled(), "{unsettled:?}");
+            assert!(backoff.wait_after(unsettled, TEST_JITTER).is_some());
+        }
+    }
+
+    #[test]
+    fn a_busy_lock_waits_5_then_15_then_60_seconds() {
+        assert_eq!(
+            waits_ms(&[BUSY; 5]),
+            [5_000, 15_000, 60_000, 60_000, 60_000]
+        );
+        // The step starts over once the lock was free.
+        assert_eq!(
+            waits_ms(&[BUSY, BUSY, limited(9), BUSY, BUSY]),
+            [5_000, 15_000, 9_750, 5_000, 15_000]
+        );
+    }
+
+    #[test]
+    fn a_failure_waits_1_then_5_then_15_then_30_minutes() {
+        assert_eq!(
+            waits_ms(&[FAILED; 6]),
+            [60_000, 300_000, 900_000, 1_800_000, 1_800_000, 1_800_000]
+        );
+        // Packs switched off walks the same steps.
+        assert_eq!(
+            waits_ms(&[DISABLED, FAILED, DISABLED, DISABLED, FAILED]),
+            [60_000, 300_000, 900_000, 1_800_000, 1_800_000]
+        );
+        // The step does not start over after a 429 or a busy lock, so a
+        // refused pack is not fetched sooner than the row it has reached.
+        assert_eq!(
+            waits_ms(&[FAILED, limited(9), BUSY, FAILED, limited(9), FAILED]),
+            [60_000, 9_750, 5_000, 300_000, 9_750, 900_000]
+        );
+    }
+
+    #[test]
+    fn a_429_waits_what_the_server_asked_within_1_to_120_seconds_plus_jitter() {
+        // 7 s is taken as asked, plus the jitter.
+        assert_eq!(waits_ms(&[limited(7)]), [7_750]);
+        // Under the floor: 0 counts as 1, and 1 s + jitter is still 5 s.
+        assert_eq!(waits_ms(&[limited(0), limited(1), limited(4)]), [5_000; 3]);
+        assert_eq!(waits_ms(&[limited(5)]), [5_750]);
+        // Over the cap: 120 s, however long the server said.
+        assert_eq!(
+            waits_ms(&[limited(120), limited(121), limited(3600), limited(u64::MAX)]),
+            [120_750; 4]
+        );
+        // The same wait every time: a 429 has no step of its own.
+        assert_eq!(waits_ms(&[limited(30); 3]), [30_750; 3]);
+        // No jitter, no extra.
+        let mut backoff = Backoff::default();
+        assert_eq!(
+            backoff.wait_after(limited(7), Duration::ZERO),
+            Some(secs(7))
+        );
+    }
+
+    #[test]
+    fn a_try_that_ended_on_several_things_waits_the_longest() {
+        let both = |seconds: u64, failed: bool, busy: bool| Verdict {
+            busy,
+            limited: Some(seconds),
+            disabled: false,
+            failed,
+        };
+        // A refused pack and a 429 in one try: the minute, not 10 s.
+        assert_eq!(waits_ms(&[both(10, true, false)]), [60_000]);
+        // The 429 asks for longer than the failure row.
+        assert_eq!(waits_ms(&[both(100, true, false)]), [100_750]);
+        // Later rows are longer than any 429.
+        assert_eq!(
+            waits_ms(&[FAILED, both(120, true, false)]),
+            [60_000, 300_000]
+        );
+        // Busy and a 429.
+        assert_eq!(
+            waits_ms(&[
+                both(2, false, true),
+                both(2, false, true),
+                both(2, false, true)
+            ]),
+            [5_000, 15_000, 60_000]
+        );
+        // A try with both steps moves both on.
+        let busy_and_failed = Verdict {
+            busy: true,
+            failed: true,
+            ..Verdict::default()
+        };
+        assert_eq!(
+            waits_ms(&[busy_and_failed, BUSY, FAILED]),
+            [60_000, 15_000, 300_000]
+        );
+    }
+
+    #[test]
+    fn the_jitter_comes_from_the_pid_and_stays_under_five_seconds() {
+        assert_eq!(pid_jitter(0), Duration::ZERO);
+        assert_eq!(pid_jitter(1), Duration::from_millis(250));
+        assert_eq!(pid_jitter(19), Duration::from_millis(4750));
+        assert_eq!(pid_jitter(20), Duration::ZERO);
+        assert_eq!(pid_jitter(4_194_303), Duration::from_millis(750));
+        assert!((0..5000).all(|pid| pid_jitter(pid) < secs(5)));
+        assert_eq!(pid_jitter(u32::MAX), Duration::from_millis(3750));
+    }
+
+    #[test]
+    fn a_verdict_reads_every_outcome() {
+        let settled = [
+            PackSync::Installed,
+            PackSync::Current,
+            PackSync::Missing,
+            PackSync::Unsupported,
+        ];
+        assert_eq!(verdict(&settled), Verdict::default());
+        for outcome in &settled {
+            assert!(outcome.is_settled(), "{outcome:?}");
+        }
+        assert_eq!(verdict(&[PackSync::Current, PackSync::Busy]), BUSY);
+        assert_eq!(verdict(&[PackSync::Unavailable]), DISABLED);
+        for message in [
+            PACK_FAILED,
+            PACK_MISMATCH,
+            PACK_UNSAFE,
+            PACK_AUTH,
+            PACK_FORBIDDEN,
+            PACK_SIGN_IN,
+        ] {
+            let outcome = PackSync::Failed(message.to_string());
+            assert!(!outcome.is_settled());
+            assert_eq!(outcome.rate_limit_secs(), None);
+            assert_eq!(
+                verdict(&[PackSync::Installed, outcome]),
+                FAILED,
+                "{message}"
+            );
+        }
+        // A 429 keeps its seconds; of two, the longer one counts.
+        let limit = |seconds| PackSync::Failed(rate_limit_message(seconds));
+        assert_eq!(verdict(&[limit(30)]), limited(30));
+        assert_eq!(verdict(&[limit(30), limit(90), limit(45)]), limited(90));
+        for (asked, kept) in [
+            (0, 1),
+            (1, 1),
+            (10, 10),
+            (120, 120),
+            (3600, 3600),
+            (99_999, 3600),
+        ] {
+            assert_eq!(limit(asked).rate_limit_secs(), Some(kept), "{asked}");
+        }
+        for other in [PackSync::Installed, PackSync::Busy, PackSync::Unavailable] {
+            assert_eq!(other.rate_limit_secs(), None);
+        }
+        // Everything at once, and the one reason the log line names.
+        let all = verdict(&[
+            PackSync::Busy,
+            PackSync::Unavailable,
+            limit(8),
+            PackSync::Failed(PACK_MISMATCH.to_string()),
+        ]);
+        assert_eq!(
+            all,
+            Verdict {
+                busy: true,
+                limited: Some(8),
+                disabled: true,
+                failed: true
+            }
+        );
+        assert_eq!(all.why(), Why::Failed);
+        assert_eq!(
+            Verdict {
+                failed: false,
+                ..all
+            }
+            .why(),
+            Why::Disabled
+        );
+        assert_eq!(
+            Verdict {
+                failed: false,
+                disabled: false,
+                ..all
+            }
+            .why(),
+            Why::Limited
+        );
+        assert_eq!(BUSY.why(), Why::Busy);
+    }
+
+    /// Finding 1 of the pack download test, step for step: two starts on
+    /// one data dir. The one that takes the pack lock loses the pid guard
+    /// and exits; the one that found the lock busy is the daemon that stays.
+    #[tokio::test]
+    async fn the_start_that_lost_the_pack_lock_still_gets_every_pack() {
+        let (list, files, contents) = all_packs_for_script();
+        let (gate, hold) = gate();
+        let served = serve_script(move |path, _| {
+            if path.ends_with(HEROES_PACK_NAME) {
+                hold.hold();
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Start A has the lock and is downloading heroes-v1.
+        let (base, data_dir) = (served.base.clone(), dir.path().to_path_buf());
+        let start_a = tokio::spawn(async move {
+            sync_on_startup_capped(&base, TOKEN, &data_dir, PACK_MAX_BYTES).await
+        });
+        gate.arrived.await.expect("A asked for heroes-v1");
+        // Start B finds the lock busy: no request, no list.
+        let start_b = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(start_b.report.heroes(), &PackSync::Busy);
+        assert!(start_b.entries.is_none());
+        assert_eq!(requests(&served), list_then(&[HEROES_PACK_NAME]), "A only");
+        // A finishes heroes-v1, then finds B's pid file and exits. Its
+        // keeper never runs.
+        gate.release.send(()).expect("release");
+        let start_a = start_a.await.expect("A");
+        assert_eq!(start_a.report.heroes(), &PackSync::Installed);
+        drop(start_a);
+        // B is the daemon that stays, and its keeper gets the other five.
+        let (finished, waits) = rig(&served.base, dir.path(), Some(start_b), 8, no_nap)
+            .run()
+            .await;
+        assert!(finished);
+        assert_eq!(waits, [secs(5)], "one busy wait, then the try");
+        assert_all_installed(dir.path(), &contents);
+        let mut expected = list_then(&[HEROES_PACK_NAME]);
+        expected.extend(list_then(&pack_names()[1..]));
+        assert_eq!(requests(&served), expected, "no pack is fetched twice");
+    }
+
+    #[tokio::test]
+    async fn while_the_lock_stays_busy_the_keeper_waits_5_15_60_and_sends_nothing() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let other = SyncLock::try_acquire(dir.path())
+            .expect("lock file")
+            .expect("free");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        // The other sync lets go during the fourth wait.
+        let held = Arc::new(Mutex::new(Some(other)));
+        let sent_by_nap = Arc::new(Mutex::new(Vec::new()));
+        let (release, sent, paths) = (held.clone(), sent_by_nap.clone(), served.requested.clone());
+        let on_nap = move |nap| {
+            sent.lock().unwrap().push(paths.lock().unwrap().len());
+            if nap == 3 {
+                release.lock().unwrap().take();
+            }
+            no_nap(nap)
+        };
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, on_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(5), secs(15), secs(60), secs(60)]);
+        assert_eq!(
+            *sent_by_nap.lock().unwrap(),
+            [0, 0, 0, 0],
+            "busy sends nothing"
+        );
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(requests(&served), list_then(&pack_names()));
+        assert_eq!(lines_with(&logs, SAID_BUSY).len(), 1, "{logs}");
+        assert!(
+            lines_with(&logs, SAID_BUSY)[0].contains("wait_secs=5"),
+            "{logs}"
+        );
+        let done = lines_with(&logs, SAID_DONE);
+        assert_eq!(done.len(), 1, "{logs}");
+        assert!(done[0].contains("tries=5"), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_429_wait_is_the_servers_retry_after_and_then_the_packs_arrive() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path.ends_with("/heroes-v2.tar") && asked == 0 {
+                let body = br#"{"error":"rate_limited","retry_after":7}"#;
+                return Some((429, body.to_vec(), Some(7)));
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(startup.entries.is_some());
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(7) + TEST_JITTER]);
+        assert_all_installed(dir.path(), &contents);
+        // Startup (2), the refused download, then one list and the five.
+        let mut expected = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
+        expected.extend(list_then(&pack_names()[1..]));
+        assert_eq!(requests(&served), expected);
+        let said = lines_with(&logs, SAID_LIMITED);
+        assert_eq!(said.len(), 1, "{logs}");
+        assert!(said[0].contains("wait_secs=7"), "{logs}");
+        assert!(
+            said[0].contains(
+                "missing=\"heroes-v2.tar, heroes-v2-1080.tar, bans-v1.tar, maps-v1.tar, words-v1.tar\""
+            ),
+            "{logs}"
+        );
+        let done = lines_with(&logs, SAID_DONE);
+        assert_eq!(done.len(), 1, "{logs}");
+        assert!(done[0].contains("tries=2"), "{logs}");
+        assert!(
+            done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
+            "{logs}"
+        );
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_429_on_the_startup_list_holds_every_request_for_at_most_two_minutes() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path == LIST_PATH && asked == 0 {
+                // No header: the wait is in the body, as the site sends it.
+                let body = br#"{"error":"rate_limited","retry_after":300}"#;
+                return Some((429, body.to_vec(), None));
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(startup.entries.is_none());
+        let sent_by_nap = Arc::new(Mutex::new(Vec::new()));
+        let (sent, paths) = (sent_by_nap.clone(), served.requested.clone());
+        let on_nap = move |nap| {
+            sent.lock().unwrap().push(paths.lock().unwrap().len());
+            no_nap(nap)
+        };
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, on_nap)
+            .run()
+            .await;
+        assert!(finished);
+        assert_eq!(waits, [secs(120) + TEST_JITTER], "300 s is cut to 120 s");
+        assert_eq!(*sent_by_nap.lock().unwrap(), [1], "only the refused list");
+        assert_all_installed(dir.path(), &contents);
+        let mut expected = vec![LIST_PATH.to_string()];
+        expected.extend(list_then(&pack_names()));
+        assert_eq!(requests(&served), expected);
+    }
+
+    #[tokio::test]
+    async fn packs_switched_off_is_said_once_and_they_install_when_the_site_turns_them_on() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path == LIST_PATH && asked < 3 {
+                return Some((503, br#"{"error":"packs_disabled"}"#.to_vec(), None));
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(startup.report.heroes(), &PackSync::Unavailable);
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(60), secs(300), secs(900)]);
+        assert_all_installed(dir.path(), &contents);
+        // Three lists refused (startup and two tries), then list and six.
+        let mut expected = vec![LIST_PATH.to_string(); 3];
+        expected.extend(list_then(&pack_names()));
+        assert_eq!(requests(&served), expected);
+        let said = lines_with(&logs, SAID_OFF);
+        assert_eq!(said.len(), 1, "once, not on every try:\n{logs}");
+        assert!(said[0].contains(" INFO "), "{logs}");
+        assert!(said[0].contains("wait_secs=60"), "{logs}");
+        assert!(
+            said[0].contains(&format!("missing=\"{}\"", pack_names().join(", "))),
+            "{logs}"
+        );
+        let done = lines_with(&logs, SAID_DONE);
+        assert_eq!(done.len(), 1, "{logs}");
+        assert!(done[0].contains("tries=4"), "{logs}");
+        assert!(
+            done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
+            "{logs}"
+        );
+        assert_eq!(
+            lines_with(&logs, "reader pack installed").len(),
+            6,
+            "{logs}"
+        );
+        assert!(lines_with(&logs, " WARN ").is_empty(), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_is_tried_again_after_a_minute() {
+        let (list, files, contents) = all_packs_for_script();
+        let served = serve_script(move |path, asked| {
+            if path == LIST_PATH && asked == 0 {
+                return None;
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(
+            startup.report.heroes(),
+            &PackSync::Failed(PACK_FAILED.to_string())
+        );
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(60)]);
+        assert_all_installed(dir.path(), &contents);
+        let mut expected = vec![LIST_PATH.to_string()];
+        expected.extend(list_then(&pack_names()));
+        assert_eq!(requests(&served), expected);
+        assert_eq!(lines_with(&logs, SAID_MISSING).len(), 1, "{logs}");
+        assert_eq!(lines_with(&logs, SAID_DONE).len(), 1, "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    /// An address that refuses connections while the socket is kept: bound
+    /// and never listening, so no other test can be given the port.
+    fn refusing_base() -> (String, std::os::fd::OwnedFd) {
+        use std::os::fd::FromRawFd;
+        let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: socket, bind and getsockname on a new fd that `socket`
+        // owns from the next line on; `addr` is a zeroed sockaddr_in of
+        // the length passed.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+            let socket = std::os::fd::OwnedFd::from_raw_fd(fd);
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+            let raw = std::ptr::addr_of_mut!(addr).cast::<libc::sockaddr>();
+            assert_eq!(libc::bind(fd, raw, len), 0, "bind");
+            let mut got = len;
+            assert_eq!(libc::getsockname(fd, raw, &mut got), 0, "getsockname");
+            let port = u16::from_be(addr.sin_port);
+            (format!("http://127.0.0.1:{port}"), socket)
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_site_unreachable_the_log_names_the_missing_packs_and_not_heroes_v1() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        // An earlier run installed heroes-v1 and nothing else.
+        let earlier = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(earlier.report.heroes(), &PackSync::Installed);
+        drop(earlier);
+        // This start: the site does not answer (no network yet).
+        let (dead, _refusing) = refusing_base();
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&dead, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(
+            startup.report.heroes(),
+            &PackSync::Failed(PACK_FAILED.to_string())
+        );
+        // It answers again during the keeper's second wait.
+        let base = Arc::new(Mutex::new(dead));
+        let (now, live) = (base.clone(), served.base.clone());
+        let credentials = move || {
+            Some(PackCredentials {
+                server_url: base.lock().unwrap().clone(),
+                token: TOKEN.to_string(),
+            })
+        };
+        let on_nap = move |nap| {
+            if nap == 1 {
+                *now.lock().unwrap() = live.clone();
+            }
+            no_nap(nap)
+        };
+        let (finished, waits) = rig_with(credentials, dir.path(), Some(startup), 8, on_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(60), secs(300)]);
+        assert_all_installed(dir.path(), &contents);
+        let said = lines_with(&logs, SAID_MISSING);
+        assert_eq!(said.len(), 1, "two failed tries, one line:\n{logs}");
+        assert!(said[0].contains(" WARN "), "{logs}");
+        assert!(
+            said[0].contains(
+                "missing=\"heroes-v2.tar, heroes-v2-1080.tar, bans-v1.tar, maps-v1.tar, words-v1.tar\""
+            ),
+            "{logs}"
+        );
+        assert!(!said[0].contains(HEROES_PACK_NAME), "{logs}");
+        assert!(!said[0].contains("refused="), "{logs}");
+        assert!(said[0].contains(PACK_FAILED), "{logs}");
+        let done = lines_with(&logs, SAID_DONE);
+        assert_eq!(done.len(), 1, "{logs}");
+        assert!(
+            done[0].contains(&format!("arrived=\"{}\"", pack_names()[1..].join(", "))),
+            "{logs}"
+        );
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn with_every_pack_installed_an_unreachable_site_is_an_update_check_that_failed() {
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        sync(&served, dir.path()).await;
+        let (dead, _refusing) = refusing_base();
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&dead, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&dead, dir.path(), Some(startup), 1, no_nap).run().await;
+        let logs = logs.text();
+        assert!(!finished);
+        assert_eq!(waits, [secs(60), secs(300)]);
+        let said = lines_with(&logs, SAID_UNCHECKED);
+        assert_eq!(said.len(), 1, "{logs}");
+        assert!(!said[0].contains(".tar"), "no pack is named:\n{logs}");
+        assert!(lines_with(&logs, SAID_MISSING).is_empty(), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn while_sync_is_paused_nothing_is_sent_and_a_new_token_is_used_when_it_comes() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        // No startup sync ran (the token was rejected earlier). Settings
+        // gets a working token during the second wait.
+        let signed_in = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready, base) = (signed_in.clone(), served.base.clone());
+        let credentials = move || {
+            ready
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| PackCredentials {
+                    server_url: base.clone(),
+                    token: TOKEN.to_string(),
+                })
+        };
+        let sent_by_nap = Arc::new(Mutex::new(Vec::new()));
+        let (sent, paths) = (sent_by_nap.clone(), served.requested.clone());
+        let on_nap = move |nap| {
+            sent.lock().unwrap().push(paths.lock().unwrap().len());
+            if nap == 1 {
+                signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            no_nap(nap)
+        };
+        let (finished, waits) = rig_with(credentials, dir.path(), None, 8, on_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, [secs(60), secs(300)]);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [0, 0]);
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(requests(&served), list_then(&pack_names()));
+        let said = lines_with(&logs, SAID_MISSING);
+        assert_eq!(said.len(), 1, "{logs}");
+        assert!(said[0].contains(PACK_SIGN_IN), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_refused_pack_is_fetched_once_per_backoff_step_and_the_others_once() {
+        let served = all_packs_with_download("heroes-v2.tar", 200, b"not the listed pack");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        // Five waits pass; the keeper is still waiting in the sixth.
+        let sent_by_nap = Arc::new(Mutex::new(Vec::new()));
+        let (sent, paths) = (sent_by_nap.clone(), served.requested.clone());
+        let on_nap = move |nap| {
+            sent.lock().unwrap().push(paths.lock().unwrap().len());
+            no_nap(nap)
+        };
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 5, on_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(!finished, "a pack that never matches is never settled");
+        assert_eq!(
+            waits,
+            [
+                secs(60),
+                secs(300),
+                secs(900),
+                secs(1800),
+                secs(1800),
+                secs(1800)
+            ]
+        );
+        // One download of the refused pack per try, and nothing in between.
+        let asked = requests(&served);
+        let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
+        assert_eq!(fetched("/heroes-v2.tar"), 6, "the first try and five more");
+        for spec in PACKS.iter().filter(|spec| spec.name != "heroes-v2.tar") {
+            assert_eq!(fetched(&format!("/{}", spec.name)), 1, "{}", spec.name);
+        }
+        assert_eq!(list_requests(&served), 6, "startup's list and five more");
+        // Startup and the first try are 7 requests; every later try is 2.
+        assert_eq!(*sent_by_nap.lock().unwrap(), [7, 9, 11, 13, 15]);
+        assert_eq!(asked.len(), 17);
+        assert!(
+            !pack_spec("heroes-v2.tar")
+                .unwrap()
+                .dir_in(dir.path())
+                .exists()
+        );
+        assert_eq!(stored_versions(dir.path()).len(), PACKS.len() - 1);
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+        let said = lines_with(&logs, SAID_MISSING);
+        assert_eq!(said.len(), 1, "six refusals, one line:\n{logs}");
+        assert!(said[0].contains("missing=\"heroes-v2.tar\""), "{logs}");
+        assert!(said[0].contains("refused=\"heroes-v2.tar\""), "{logs}");
+        assert!(said[0].contains(PACK_MISMATCH), "{logs}");
+        assert!(lines_with(&logs, SAID_DONE).is_empty(), "{logs}");
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_is_seven_requests_and_no_wait() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, Vec::<Duration>::new());
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(requests(&served), list_then(&pack_names()));
+        // As before this change: one line per pack, nothing else.
+        let lines = pack_lines(&logs);
+        assert_eq!(lines.len(), 6, "{logs}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.contains("reader pack installed"))
+        );
+        assert_no_secrets(&logs);
+    }
+
+    #[tokio::test]
+    async fn a_current_install_is_one_request_per_start_and_the_keeper_stops() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        sync(&served, dir.path()).await;
+        assert_all_installed(dir.path(), &contents);
+        let before = requests(&served).len();
+        let logs = capture_logs();
+        for start in 0..3 {
+            let startup =
+                sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+            let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+                .run()
+                .await;
+            assert!(finished, "start {start}");
+            assert_eq!(waits, Vec::<Duration>::new(), "start {start}");
+        }
+        let logs = logs.text();
+        assert_eq!(
+            requests(&served)[before..],
+            vec![LIST_PATH.to_string(); 3],
+            "the list, once per start"
+        );
+        assert_eq!(pack_lines(&logs), Vec::<&str>::new(), "nothing to say");
+    }
+
+    #[tokio::test]
+    async fn packs_the_site_does_not_offer_are_not_waited_for() {
+        let (list, files, _) = all_packs();
+        let only_heroes: Vec<serde_json::Value> = list
+            .into_iter()
+            .filter(|entry| entry["name"] == HEROES_PACK_NAME)
+            .collect();
+        let served = serve(only_heroes, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished, "an older site is not polled for packs it lacks");
+        assert_eq!(waits, Vec::<Duration>::new());
+        assert_eq!(requests(&served), list_then(&[HEROES_PACK_NAME]));
+        assert_eq!(pack_lines(&logs).len(), 1, "{logs}");
+        assert!(
+            pack_lines(&logs)[0].contains("reader pack installed"),
+            "{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_without_packs_is_said_once_and_not_asked_again() {
+        let served = serve_script(|_, _| Some((404, br#"{"error":"not_found"}"#.to_vec(), None)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = capture_logs();
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(startup.report.heroes(), &PackSync::Unsupported);
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+            .run()
+            .await;
+        let logs = logs.text();
+        assert!(finished);
+        assert_eq!(waits, Vec::<Duration>::new());
+        assert_eq!(requests(&served), [LIST_PATH]);
+        assert_eq!(
+            lines_with(&logs, "reader packs are not supported on this server yet").len(),
+            1,
+            "{logs}"
+        );
+    }
+
+    /// Lets a test hold one answer of a [`serve_script`] fake.
+    struct Gate {
+        arrived: tokio::sync::oneshot::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    /// The fake's side of a [`Gate`].
+    struct Hold {
+        arrived: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    fn gate() -> (Gate, Hold) {
+        let (arrived_tx, arrived) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let hold = Hold {
+            arrived: Mutex::new(Some(arrived_tx)),
+            release: Mutex::new(release_rx),
+        };
+        (Gate { arrived, release }, hold)
+    }
+
+    impl Hold {
+        /// The first call tells the test the request is in and waits for
+        /// the release (or for the test to drop its end). Later calls
+        /// return at once.
+        fn hold(&self) {
+            let first = self.arrived.lock().expect("gate").take();
+            if let Some(arrived) = first {
+                let _ = arrived.send(());
+                let _ = self.release.lock().expect("gate").recv();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn two_keepers_and_the_setup_guide_take_turns_on_the_lock() {
+        let (list, files, contents) = all_packs_for_script();
+        let (gate, hold) = gate();
+        let served = serve_script(move |path, _| {
+            if path.ends_with("/heroes-v2.tar") {
+                hold.hold();
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Daemon A: startup done, its keeper is in the middle of heroes-v2.
+        let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let a_done = Arc::new(tokio::sync::Notify::new());
+        let (rig_a, done) = (
+            rig(&served.base, dir.path(), Some(startup), 8, no_nap),
+            a_done.clone(),
+        );
+        let keeper_a = tokio::spawn(async move {
+            let ran = rig_a.run().await;
+            done.notify_one();
+            ran
+        });
+        gate.arrived.await.expect("A asked for heroes-v2");
+        let in_flight = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
+        assert_eq!(requests(&served), in_flight);
+        // The setup guide at the same time: busy, and it sends nothing.
+        let guide = sync(&served, dir.path()).await;
+        assert!(
+            guide.packs.iter().all(|s| s.outcome == PackSync::Busy),
+            "{guide:?}"
+        );
+        assert_eq!(requests(&served), in_flight);
+        // A second keeper on the same data dir: busy, it waits its 5 s.
+        // During that wait A is let go and finishes.
+        let release = Mutex::new(Some(gate.release));
+        let on_nap = move |_| -> Nap {
+            release.lock().unwrap().take();
+            let done = a_done.clone();
+            Box::pin(async move { done.notified().await })
+        };
+        let (b_finished, b_waits) = rig(&served.base, dir.path(), None, 8, on_nap).run().await;
+        let (a_finished, a_waits) = keeper_a.await.expect("A");
+        assert!(a_finished && b_finished);
+        assert_eq!(a_waits, Vec::<Duration>::new());
+        assert_eq!(b_waits, [secs(5)]);
+        assert_all_installed(dir.path(), &contents);
+        // A: list and six. B: nothing while busy, then one list. No pack
+        // is downloaded twice.
+        let mut expected = list_then(&pack_names());
+        expected.push(LIST_PATH.to_string());
+        assert_eq!(requests(&served), expected);
+        // And the setup guide afterwards: one list, all current.
+        let guide = sync(&served, dir.path()).await;
+        assert!(
+            guide.packs.iter().all(|s| s.outcome == PackSync::Current),
+            "{guide:?}"
+        );
+        assert_eq!(requests(&served).len(), expected.len() + 1);
+    }
+
+    fn lock_is_free(data_dir: &Path) -> bool {
+        SyncLock::try_acquire(data_dir)
+            .expect("lock file")
+            .is_some()
+    }
+
+    /// The daemon's own runtime shape, so a test can stop it the way
+    /// `main` returning on SIGTERM does: by dropping the runtime.
+    fn daemon_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    #[test]
+    fn stopping_the_daemon_while_the_keeper_sleeps_is_prompt_and_leaves_nothing_behind() {
+        let served =
+            serve_script(|_, _| Some((503, br#"{"error":"packs_disabled"}"#.to_vec(), None)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = daemon_runtime();
+        let startup = runtime.block_on(sync_on_startup_capped(
+            &served.base,
+            TOKEN,
+            dir.path(),
+            PACK_MAX_BYTES,
+        ));
+        // The real sleep, here a minute. The test only learns that it began.
+        let base = served.base.clone();
+        let mut keeper = PackKeeper::new(dir.path(), Some(startup), move || {
+            Some(PackCredentials {
+                server_url: base.clone(),
+                token: TOKEN.to_string(),
+            })
+        });
+        let (asleep_tx, asleep) = std::sync::mpsc::channel();
+        keeper.sleep = Box::new(move |wait| {
+            let _ = asleep_tx.send(wait);
+            Box::pin(tokio::time::sleep(wait))
+        });
+        let task = runtime.spawn(keeper.run());
+        let wait = asleep
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the keeper went to sleep");
+        assert_eq!(wait, secs(60));
+        let stopping = std::time::Instant::now();
+        drop(runtime);
+        let took = stopping.elapsed();
+        assert!(took < Duration::from_secs(5), "stopping took {took:?}");
+        assert!(task.is_finished(), "the keeper is gone with the runtime");
+        assert_eq!(
+            requests(&served),
+            [LIST_PATH],
+            "nothing sent on the way out"
+        );
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+        assert!(!versions_path(dir.path()).exists());
+        assert!(lock_is_free(dir.path()));
+    }
+
+    #[test]
+    fn stopping_the_daemon_during_a_download_leaves_no_partial_folder() {
+        let (list, files, contents) = all_packs_for_script();
+        let (gate, hold) = gate();
+        let served = serve_script(move |path, _| {
+            if path.ends_with("/heroes-v2.tar") {
+                hold.hold();
+            }
+            healthy(&list, &files, path)
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = daemon_runtime();
+        let startup = runtime.block_on(sync_on_startup_capped(
+            &served.base,
+            TOKEN,
+            dir.path(),
+            PACK_MAX_BYTES,
+        ));
+        let task = runtime.spawn(rig(&served.base, dir.path(), Some(startup), 8, no_nap).run());
+        gate.arrived
+            .blocking_recv()
+            .expect("the keeper asked for heroes-v2");
+        assert!(!lock_is_free(dir.path()), "held while the download runs");
+        let stopping = std::time::Instant::now();
+        drop(runtime);
+        let took = stopping.elapsed();
+        assert!(took < Duration::from_secs(5), "stopping took {took:?}");
+        assert!(task.is_finished());
+        drop(gate.release);
+        // heroes-v1 from startup is whole; nothing of heroes-v2 was written.
+        let heroes = &contents[HEROES_PACK_NAME][0];
+        assert_eq!(
+            &std::fs::read(heroes_spec().dir_in(dir.path()).join(&heroes.0)).unwrap(),
+            &heroes.1
+        );
+        for spec in &PACKS[1..] {
+            assert!(!spec.dir_in(dir.path()).exists(), "{}", spec.name);
+        }
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+        assert_eq!(
+            stored_versions(dir.path()).keys().collect::<Vec<_>>(),
+            [HEROES_PACK_NAME]
+        );
+        assert!(lock_is_free(dir.path()), "freed when the try was dropped");
+        // The next start carries on: one list and the five that are missing.
+        let before = requests(&served).len();
+        let restart = daemon_runtime();
+        let startup = restart.block_on(sync_on_startup_capped(
+            &served.base,
+            TOKEN,
+            dir.path(),
+            PACK_MAX_BYTES,
+        ));
+        let (finished, waits) =
+            restart.block_on(rig(&served.base, dir.path(), Some(startup), 8, no_nap).run());
+        assert!(finished);
+        assert_eq!(waits, Vec::<Duration>::new());
+        assert_all_installed(dir.path(), &contents);
+        assert_eq!(requests(&served)[before..], list_then(&pack_names()[1..]));
     }
 }
