@@ -102,10 +102,6 @@ pub fn should_auto_open(config_existed: bool, setup_completed: bool) -> bool {
     !config_existed || !setup_completed
 }
 
-pub fn reader_pack_configured(url: Option<&str>) -> bool {
-    url.is_some_and(|value| !value.trim().is_empty())
-}
-
 pub fn connected_as(display_name: &str) -> String {
     format!("Connected as {display_name}")
 }
@@ -132,6 +128,7 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         stat_tracker::packs::PACK_CURRENT,
         stat_tracker::packs::PACK_UNAVAILABLE,
         stat_tracker::packs::PACK_UNSUPPORTED,
+        stat_tracker::packs::PACK_NOT_LISTED,
         stat_tracker::packs::PACK_MISMATCH,
         stat_tracker::packs::PACK_UNSAFE,
         stat_tracker::packs::PACK_FAILED,
@@ -1830,12 +1827,12 @@ mod tests {
     }
 
     #[test]
-    fn steps_skip_the_reader_pack_unless_one_is_configured() {
+    fn steps_include_the_reader_pack_only_when_asked() {
         let mut plain = GuideFlow::new(false);
         assert_eq!(
             plain.position(),
             (1, 3),
-            "reader pack is not a step without a url"
+            "reader pack is not a step when the flow leaves it out"
         );
         assert_eq!(plain.current(), GuideStep::Capture);
         assert!(!plain.can_go_back());
@@ -1848,11 +1845,6 @@ mod tests {
 
         let mut with_pack = GuideFlow::new(true);
         assert_eq!(with_pack.position(), (1, 4));
-        assert!(!reader_pack_configured(None));
-        assert!(!reader_pack_configured(Some("  ")));
-        assert!(reader_pack_configured(Some(
-            "https://crew.example/pack.zip"
-        )));
         assert_eq!(with_pack.advance(), Advance::Step(GuideStep::Overwatch));
         assert_eq!(with_pack.advance(), Advance::Step(GuideStep::Sync));
         assert_eq!(with_pack.advance(), Advance::Step(GuideStep::ReaderPack));

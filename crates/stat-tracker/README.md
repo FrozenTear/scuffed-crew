@@ -183,7 +183,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `ocr_threads` | Parallel OCR workers (1–8). Each keeps a ~23 MB Tesseract model in RAM. Omit for auto (`(cores/2)` clamped 2–4). Also env `STAT_TRACKER_OCR_THREADS` or CLI `--ocr-threads N`. Use `1` to minimize RAM; higher speeds Tab OCR. |
 | `shadow_recognizer` | Experimental, off by default. Runs a template digit matcher on each accepted scoreboard in a background thread and logs where it disagrees with OCR to `{data_dir}/shadow/digits.jsonl` (values and confidences only, capped at about 4 MB). Stored stats and uploads are unchanged. Settings toggle: Extra number reader (test). Also env `SCUFFED_SHADOW_RECOGNIZER=1` for one run, which is not written to this file. The tracker reads the file when it starts, so restart it after saving. |
 | `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
-| `reader_pack_url` | Optional https address of a reader template pack. The setup guide offers the download when this is set, and skips that step when it is empty. |
+| `reader_pack_url` | Not used. Reader packs come from the signed-in site, and the setup guide always shows its reader pack step. Older files that still set it load fine. |
 
 Example low-RAM:
 

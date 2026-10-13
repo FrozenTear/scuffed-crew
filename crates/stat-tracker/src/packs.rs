@@ -1,16 +1,25 @@
 //! Reader packs from `GET /api/tracker/packs`.
 //!
 //! The list is a JSON array of `name`, `version`, `sha256`, and `size`.
-//! The hero pack is [`HEROES_PACK_NAME`]. Its sha256 and size come from that
+//! The tracker installs every pack in [`PACKS`], each into its own folder
+//! under `<data_dir>/templates/`. Each pack's sha256 and size come from that
 //! signed-in list, not from a hash pinned in this crate. The daemon token is
-//! the same bearer used for stat uploads. The file is a plain ustar archive
-//! with one top-level `manifest.json`. Template files land in
+//! the same bearer used for stat uploads. Each file is a plain ustar archive
+//! with one top-level `manifest.json`.
+//!
+//! The hero pack [`HEROES_PACK_NAME`] lands in
 //! [`crate::shadow::heroes::HeroTemplates::dir_in`] as a top-level
 //! `<hero-key>.png` or `special/<class>*.png`, the layout
-//! [`HeroTemplates::load_dir`] reads. Any deeper path or other folder is
-//! refused. Size and sha256 are checked against the list before anything is
-//! unpacked. A failed download leaves that directory as it was. The token is
-//! never written to a log.
+//! [`HeroTemplates::load_dir`] reads. It is the only pack a reader uses
+//! today. The other packs are downloaded into folders no reader opens yet.
+//! Each pack has its own [`PackLayout`]; any path outside it refuses that
+//! pack only.
+//!
+//! Size and sha256 are checked against the list before anything is
+//! unpacked. Each pack is staged and swapped into place on its own, so one
+//! bad or failed pack never blocks, rolls back, or deletes another. A pack
+//! the server does not list keeps whatever is installed. The token is never
+//! written to a log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -33,10 +42,94 @@ pub const PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// File name of the hero template pack on the pack list.
 pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
+/// What may sit inside one pack. Paths are checked before anything is
+/// written, and a path outside the layout refuses that pack only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackLayout {
+    /// `heroes-v1.tar`, unchanged from alpha.6: one top-level file, or one
+    /// file in `special/`.
+    HeroesV1,
+    /// Hero portraits: top-level `<hero-key>.png` or `special/<name>.png`.
+    Portraits,
+    /// Ban icons: top-level `<hero-key>.png` only.
+    BanIcons,
+    /// Map-name glyphs: `atlas.json` and `g<4 hex digits>.png`.
+    MapGlyphs,
+    /// Word art: top-level `<word_id>.png` and `<name>.json`.
+    Words,
+}
+
+/// One pack the tracker installs.
+#[derive(Debug, Clone, Copy)]
+pub struct PackSpec {
+    /// Exact `name` on the server list and in the inner manifest.
+    pub name: &'static str,
+    /// Folder under the data dir this pack is unpacked into.
+    pub dir: fn(&Path) -> PathBuf,
+    pub layout: PackLayout,
+    /// When the server lists packs but not this one, report a mismatch
+    /// instead of [`PackSync::Missing`]. Only `heroes-v1.tar`, as in alpha.6.
+    pub required: bool,
+}
+
+impl PackSpec {
+    pub fn dir_in(&self, data_dir: &Path) -> PathBuf {
+        (self.dir)(data_dir)
+    }
+}
+
+/// Every pack the tracker syncs, in download order. `heroes-v1.tar` goes
+/// first so a rate limit or refused token hits it the way it did in alpha.6.
+/// Only `heroes-v1.tar` is read by a reader today.
+pub const PACKS: &[PackSpec] = &[
+    PackSpec {
+        name: HEROES_PACK_NAME,
+        dir: HeroTemplates::dir_in,
+        layout: PackLayout::HeroesV1,
+        required: true,
+    },
+    PackSpec {
+        name: "heroes-v2.tar",
+        dir: |data_dir| data_dir.join("templates").join("heroes-v2"),
+        layout: PackLayout::Portraits,
+        required: false,
+    },
+    PackSpec {
+        name: "heroes-v2-1080.tar",
+        dir: |data_dir| data_dir.join("templates").join("heroes-v2-1080"),
+        layout: PackLayout::Portraits,
+        required: false,
+    },
+    PackSpec {
+        name: "bans-v1.tar",
+        dir: |data_dir| data_dir.join("templates").join("bans-v1"),
+        layout: PackLayout::BanIcons,
+        required: false,
+    },
+    PackSpec {
+        name: "maps-v1.tar",
+        dir: |data_dir| data_dir.join("templates").join("maps-v1"),
+        layout: PackLayout::MapGlyphs,
+        required: false,
+    },
+    PackSpec {
+        name: "words-v1.tar",
+        dir: |data_dir| data_dir.join("templates").join("words-v1"),
+        layout: PackLayout::Words,
+        required: false,
+    },
+];
+
+/// The spec for `name`, if the tracker installs that pack.
+pub fn pack_spec(name: &str) -> Option<&'static PackSpec> {
+    PACKS.iter().find(|spec| spec.name == name)
+}
+
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const PACK_CURRENT: &str = "The reader pack is already installed.";
 pub const PACK_UNAVAILABLE: &str = "Reader packs aren't set up on the server yet. The tracker still works. Try again later or ask an admin.";
 pub const PACK_UNSUPPORTED: &str = "This server does not offer reader packs yet.";
+pub const PACK_NOT_LISTED: &str = "The site does not offer this reader pack yet.";
 pub const PACK_TOO_BIG: &str = "The reader pack is too large to save.";
 pub const PACK_MISMATCH: &str =
     "The reader pack did not match the site. The installed pack was left in place.";
@@ -63,6 +156,7 @@ pub fn rate_limit_message(seconds: u64) -> String {
     format!("Too many tries, wait {seconds} seconds and try again")
 }
 
+/// Outcome for one pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackSync {
     Installed,
@@ -72,6 +166,9 @@ pub enum PackSync {
     Unavailable,
     /// HTTP 404 on the list. This server does not have the route yet.
     Unsupported,
+    /// The server list does not name this optional pack. Its installed
+    /// folder, if any, is kept.
+    Missing,
     Failed(String),
 }
 
@@ -82,21 +179,114 @@ impl PackSync {
             Self::Current => Ok(PACK_CURRENT.to_string()),
             Self::Unavailable => Ok(PACK_UNAVAILABLE.to_string()),
             Self::Unsupported => Ok(PACK_UNSUPPORTED.to_string()),
+            Self::Missing => Ok(PACK_NOT_LISTED.to_string()),
             Self::Failed(message) => Err(message),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self, Self::Installed | Self::Current)
+    }
+}
+
+/// One line of a [`PackReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackStatus {
+    pub name: &'static str,
+    pub outcome: PackSync,
+}
+
+/// Outcome of one sync: one entry per [`PACKS`] spec, in that order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackReport {
+    pub packs: Vec<PackStatus>,
+}
+
+impl PackReport {
+    /// The same outcome for every pack, for failures before any pack is
+    /// looked at (sign-in, list errors).
+    fn all(outcome: PackSync) -> Self {
+        Self {
+            packs: PACKS
+                .iter()
+                .map(|spec| PackStatus {
+                    name: spec.name,
+                    outcome: outcome.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&PackSync> {
+        self.packs
+            .iter()
+            .find(|status| status.name == name)
+            .map(|status| &status.outcome)
+    }
+
+    /// Outcome for `heroes-v1.tar`, the pack the hero reader uses.
+    pub fn heroes(&self) -> &PackSync {
+        self.get(HEROES_PACK_NAME)
+            .expect("PACKS always holds heroes-v1.tar")
+    }
+
+    /// `(ready, listed)` for the packs other than `heroes-v1.tar`. A pack
+    /// is listed when the server named it, and ready when it is installed
+    /// or already current.
+    pub fn extras_ready(&self) -> (usize, usize) {
+        let extras = self
+            .packs
+            .iter()
+            .filter(|status| status.name != HEROES_PACK_NAME);
+        let mut ready = 0;
+        let mut listed = 0;
+        for status in extras {
+            if status.outcome != PackSync::Missing {
+                listed += 1;
+            }
+            if status.outcome.is_ready() {
+                ready += 1;
+            }
+        }
+        (ready, listed)
+    }
+
+    /// The setup guide line: the `heroes-v1.tar` message, plus a count of
+    /// the other packs when the hero pack is ready and the server lists any
+    /// of them. A server that lists only `heroes-v1.tar` gets the alpha.6
+    /// message unchanged.
+    pub fn guide_result(self) -> Result<String, String> {
+        let heroes = self.heroes().clone();
+        let ready_heroes = heroes.is_ready();
+        let (ready, listed) = self.extras_ready();
+        let message = heroes.guide_result()?;
+        if ready_heroes && listed > 0 {
+            Ok(format!("{message} {}", extra_packs_message(ready, listed)))
+        } else {
+            Ok(message)
         }
     }
 }
 
+pub fn extra_packs_message(ready: usize, listed: usize) -> String {
+    format!("Extra reader packs ready: {ready} of {listed}.")
+}
+
 /// Daemon startup. Logs a plain warning on failure and never the token.
 pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) {
-    match sync_reader_packs(server_url, token, data_dir, PACK_MAX_BYTES).await {
-        PackSync::Installed => tracing::info!("reader pack installed"),
-        PackSync::Current | PackSync::Unavailable => {}
-        PackSync::Unsupported => {
-            tracing::info!("reader packs are not supported on this server yet");
-        }
-        PackSync::Failed(message) => {
-            tracing::warn!(message, "reader pack left in place");
+    let report = sync_reader_packs(server_url, token, data_dir, PACK_MAX_BYTES).await;
+    for status in &report.packs {
+        let pack = status.name;
+        match &status.outcome {
+            PackSync::Installed => tracing::info!(pack, "reader pack installed"),
+            PackSync::Current | PackSync::Unavailable => {}
+            PackSync::Missing => tracing::debug!(pack, "reader pack not listed by the server"),
+            PackSync::Unsupported => {
+                tracing::info!(pack, "reader packs are not supported on this server yet");
+            }
+            PackSync::Failed(message) => {
+                tracing::warn!(pack, message, "reader pack left in place");
+            }
         }
     }
 }
@@ -106,12 +296,12 @@ pub async fn sync_reader_packs(
     token: &str,
     data_dir: &Path,
     max_bytes: u64,
-) -> PackSync {
+) -> PackReport {
     if token.trim().is_empty() || server_url.trim().is_empty() {
-        return PackSync::Failed(PACK_SIGN_IN.to_string());
+        return PackReport::all(PackSync::Failed(PACK_SIGN_IN.to_string()));
     }
     if validate_sync_server_url(server_url).is_err() {
-        return PackSync::Failed(PACK_FAILED.to_string());
+        return PackReport::all(PackSync::Failed(PACK_FAILED.to_string()));
     }
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -119,7 +309,7 @@ pub async fn sync_reader_packs(
         .build()
     {
         Ok(client) => client,
-        Err(_) => return PackSync::Failed(PACK_FAILED.to_string()),
+        Err(_) => return PackReport::all(PackSync::Failed(PACK_FAILED.to_string())),
     };
     let base = server_url.trim().trim_end_matches('/');
     let listed = match get_bytes(
@@ -131,103 +321,165 @@ pub async fn sync_reader_packs(
     .await
     {
         Get::Ok(bytes) => bytes,
-        Get::Unavailable => return PackSync::Unavailable,
-        Get::Unsupported => return PackSync::Unsupported,
-        Get::Auth => return PackSync::Failed(PACK_AUTH.to_string()),
-        Get::Forbidden => return PackSync::Failed(PACK_FORBIDDEN.to_string()),
-        Get::Limited(seconds) => return PackSync::Failed(rate_limit_message(seconds)),
-        Get::Failed(message) => return PackSync::Failed(message),
+        Get::Unavailable => return PackReport::all(PackSync::Unavailable),
+        Get::Unsupported => return PackReport::all(PackSync::Unsupported),
+        Get::Auth => return PackReport::all(PackSync::Failed(PACK_AUTH.to_string())),
+        Get::Forbidden => return PackReport::all(PackSync::Failed(PACK_FORBIDDEN.to_string())),
+        Get::Limited(seconds) => {
+            return PackReport::all(PackSync::Failed(rate_limit_message(seconds)));
+        }
+        Get::Failed(message) => return PackReport::all(PackSync::Failed(message)),
     };
     let entries: Vec<PackListEntry> = match serde_json::from_slice(&listed) {
         Ok(entries) => entries,
-        Err(_) => return PackSync::Failed(PACK_MISMATCH.to_string()),
+        Err(_) => return PackReport::all(PackSync::Failed(PACK_MISMATCH.to_string())),
     };
-    let entry = match select_heroes_pack(&entries) {
-        Ok(entry) => entry,
-        Err(outcome) => return outcome,
+    let fetch = Fetch {
+        client: &client,
+        base,
+        token,
+        max_bytes,
     };
-    let heroes_dir = HeroTemplates::dir_in(data_dir);
-    let installed = read_versions(data_dir);
-    let version_matches = installed
-        .get(HEROES_PACK_NAME)
-        .is_some_and(|version| version == &entry.version);
-    // pack-versions.json can outlive a deleted heroes folder. Download again.
-    if version_matches && heroes_dir.is_dir() {
-        return PackSync::Current;
+    let mut versions = read_versions(data_dir);
+    let mut packs = Vec::with_capacity(PACKS.len());
+    // A refused token, a rate limit, or packs switched off applies to every
+    // download, so the packs after it are not tried. Their folders stay.
+    let mut stopped: Option<PackSync> = None;
+    for spec in PACKS {
+        let skipped = match (select_pack(&entries, spec), &stopped) {
+            (Err(outcome), _) => Err(outcome),
+            (Ok(_), Some(outcome)) => Err(outcome.clone()),
+            (Ok(entry), None) => Ok(entry),
+        };
+        let entry = match skipped {
+            Ok(entry) => entry,
+            Err(outcome) => {
+                packs.push(PackStatus {
+                    name: spec.name,
+                    outcome,
+                });
+                continue;
+            }
+        };
+        let step = sync_one(&fetch, data_dir, spec, entry, &versions).await;
+        let outcome = match step {
+            Step::Done(outcome) => outcome,
+            Step::Stop(outcome) => {
+                stopped = Some(outcome.clone());
+                outcome
+            }
+        };
+        if outcome == PackSync::Installed {
+            // Keep the other packs' versions, including an alpha.6 file
+            // that only names heroes-v1.tar.
+            versions.insert(spec.name.to_string(), entry.version.clone());
+            if let Err(message) = write_versions(data_dir, &versions) {
+                tracing::warn!(
+                    pack = spec.name,
+                    error = %message,
+                    "reader pack version was not stored"
+                );
+            }
+        }
+        packs.push(PackStatus {
+            name: spec.name,
+            outcome,
+        });
     }
-    let parent = heroes_dir
+    PackReport { packs }
+}
+
+/// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
+enum Step {
+    Done(PackSync),
+    Stop(PackSync),
+}
+
+/// What every pack download in one sync shares.
+struct Fetch<'a> {
+    client: &'a reqwest::Client,
+    base: &'a str,
+    token: &'a str,
+    max_bytes: u64,
+}
+
+async fn sync_one(
+    fetch: &Fetch<'_>,
+    data_dir: &Path,
+    spec: &PackSpec,
+    entry: &PackListEntry,
+    installed: &BTreeMap<String, String>,
+) -> Step {
+    let live = spec.dir_in(data_dir);
+    let version_matches = installed
+        .get(spec.name)
+        .is_some_and(|version| version == &entry.version);
+    // pack-versions.json can outlive a deleted pack folder. Download again.
+    if version_matches && live.is_dir() {
+        return Step::Done(PackSync::Current);
+    }
+    let parent = live
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| data_dir.to_path_buf());
     if let Err(message) = std::fs::create_dir_all(&parent) {
-        tracing::warn!(error = %message, "reader pack directory was not created");
-        return PackSync::Failed(PACK_FAILED.to_string());
+        tracing::warn!(pack = spec.name, error = %message, "reader pack directory was not created");
+        return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
     }
-    let staging = parent.join(format!(
-        ".heroes-next-{}-{}",
+    let bytes = match get_bytes(
+        fetch.client,
+        &format!("{}/api/tracker/packs/{}", fetch.base, spec.name),
+        fetch.token,
+        fetch.max_bytes,
+    )
+    .await
+    {
+        Get::Ok(bytes) => bytes,
+        Get::Unavailable => return Step::Stop(PackSync::Unavailable),
+        Get::Unsupported => return Step::Done(PackSync::Failed(PACK_FAILED.to_string())),
+        Get::Auth => return Step::Stop(PackSync::Failed(PACK_AUTH.to_string())),
+        Get::Forbidden => return Step::Stop(PackSync::Failed(PACK_FORBIDDEN.to_string())),
+        Get::Limited(seconds) => {
+            return Step::Stop(PackSync::Failed(rate_limit_message(seconds)));
+        }
+        Get::Failed(message) => return Step::Done(PackSync::Failed(message)),
+    };
+    // List size and sha256 are checked before any file is written.
+    if bytes.len() as u64 != entry.size || sha256_hex(&bytes) != entry.sha256 {
+        return Step::Done(PackSync::Failed(PACK_MISMATCH.to_string()));
+    }
+    let staging = parent.join(format!(".{}-next-{}", dir_label(&live), unique_suffix()));
+    if std::fs::create_dir(&staging).is_err() {
+        return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
+    }
+    if let Err(message) = unpack_pack(&bytes, spec.layout, &entry.name, &entry.version, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Step::Done(PackSync::Failed(message.to_string()));
+    }
+    if let Err(message) = swap_dir(&staging, &live) {
+        let _ = std::fs::remove_dir_all(&staging);
+        tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
+        return Step::Done(PackSync::Failed(PACK_FAILED.to_string()));
+    }
+    Step::Done(PackSync::Installed)
+}
+
+/// Last path part of a pack folder, for staging and backup names.
+fn dir_label(live: &Path) -> String {
+    live.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "pack".to_string())
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0)
-    ));
-    if std::fs::create_dir(&staging).is_err() {
-        return PackSync::Failed(PACK_FAILED.to_string());
-    }
-    let bytes = match get_bytes(
-        &client,
-        &format!("{base}/api/tracker/packs/{HEROES_PACK_NAME}"),
-        token,
-        max_bytes,
     )
-    .await
-    {
-        Get::Ok(bytes) => bytes,
-        Get::Unavailable => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Unavailable;
-        }
-        Get::Unsupported => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(PACK_FAILED.to_string());
-        }
-        Get::Auth => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(PACK_AUTH.to_string());
-        }
-        Get::Forbidden => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(PACK_FORBIDDEN.to_string());
-        }
-        Get::Limited(seconds) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(rate_limit_message(seconds));
-        }
-        Get::Failed(message) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(message);
-        }
-    };
-    // List size and sha256 are checked before any file is written.
-    if bytes.len() as u64 != entry.size || sha256_hex(&bytes) != entry.sha256 {
-        let _ = std::fs::remove_dir_all(&staging);
-        return PackSync::Failed(PACK_MISMATCH.to_string());
-    }
-    if let Err(message) = unpack_pack(&bytes, &entry.name, &entry.version, &staging) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return PackSync::Failed(message.to_string());
-    }
-    let mut versions = BTreeMap::new();
-    versions.insert(HEROES_PACK_NAME.to_string(), entry.version.clone());
-    if let Err(message) = swap_dir(&staging, &heroes_dir) {
-        let _ = std::fs::remove_dir_all(&staging);
-        tracing::warn!(error = %message, "reader pack was not swapped into place");
-        return PackSync::Failed(PACK_FAILED.to_string());
-    }
-    if let Err(message) = write_versions(data_dir, &versions) {
-        tracing::warn!(error = %message, "reader pack version was not stored");
-    }
-    PackSync::Installed
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -238,14 +490,22 @@ struct PackListEntry {
     size: u64,
 }
 
-/// The hero template pack is the entry named [`HEROES_PACK_NAME`].
-/// Other names are ignored. An empty list means there is nothing to install.
-fn select_heroes_pack(entries: &[PackListEntry]) -> Result<&PackListEntry, PackSync> {
-    if entries.is_empty() {
-        return Err(PackSync::Current);
-    }
-    let Some(entry) = entries.iter().find(|entry| entry.name == HEROES_PACK_NAME) else {
-        return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
+/// The list entry named exactly `spec.name`. Other names are ignored. An
+/// empty list means there is nothing to install. A required pack that a
+/// non-empty list leaves out is a mismatch; an optional one is
+/// [`PackSync::Missing`].
+fn select_pack<'a>(
+    entries: &'a [PackListEntry],
+    spec: &PackSpec,
+) -> Result<&'a PackListEntry, PackSync> {
+    let Some(entry) = entries.iter().find(|entry| entry.name == spec.name) else {
+        return Err(if !spec.required {
+            PackSync::Missing
+        } else if entries.is_empty() {
+            PackSync::Current
+        } else {
+            PackSync::Failed(PACK_MISMATCH.to_string())
+        });
     };
     if !is_sha256(&entry.sha256) || !is_version(&entry.version) {
         return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
@@ -337,11 +597,12 @@ async fn read_body_capped(
 
 fn unpack_pack(
     bytes: &[u8],
+    layout: PackLayout,
     expected_name: &str,
     expected_version: &str,
     staging: &Path,
 ) -> Result<(), &'static str> {
-    let files = read_ustar(bytes)?;
+    let files = read_ustar(bytes, layout)?;
     if files
         .iter()
         .filter(|(path, _)| path == "manifest.json")
@@ -365,7 +626,7 @@ fn unpack_pack(
     }
     let mut listed = BTreeSet::new();
     for file in &manifest.files {
-        let path = reader_file_path(&file.path)?;
+        let path = layout.file_path(&file.path)?;
         if path == "manifest.json" || !listed.insert(path) {
             return Err(PACK_UNSAFE);
         }
@@ -384,7 +645,7 @@ fn unpack_pack(
         let listed_file = manifest
             .files
             .iter()
-            .find(|file| reader_file_path(&file.path).ok().as_deref() == Some(path.as_str()))
+            .find(|file| layout.file_path(&file.path).ok().as_deref() == Some(path.as_str()))
             .ok_or(PACK_MISMATCH)?;
         if data.len() as u64 != listed_file.size || sha256_hex(data) != listed_file.sha256 {
             return Err(PACK_MISMATCH);
@@ -448,14 +709,7 @@ fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
     }
 
     let parent = live.parent().unwrap_or_else(|| Path::new("."));
-    let backup = parent.join(format!(
-        ".heroes-prev-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
-    ));
+    let backup = parent.join(format!(".{}-prev-{}", dir_label(live), unique_suffix()));
     std::fs::rename(live, &backup).map_err(|err| err.to_string())?;
     if let Err(err) = std::fs::rename(staging, live) {
         let _ = std::fs::rename(&backup, live);
@@ -542,14 +796,86 @@ fn is_version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-/// A template is one file next to `manifest.json`, or one file in `special/`.
-fn reader_file_path(raw: &str) -> Result<String, &'static str> {
+/// heroes-v1: a template is one file next to `manifest.json`, or one file in
+/// `special/`. Unchanged from alpha.6.
+fn heroes_v1_file_path(raw: &str) -> Result<String, &'static str> {
     let path = safe_rel_path(raw).ok_or(PACK_UNSAFE)?;
     let mut parts = path.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(_), None, None) => Ok(path),
         (Some("special"), Some(file), None) if !file.is_empty() => Ok(path),
         _ => Err(PACK_UNSAFE),
+    }
+}
+
+/// Longest file stem the strict layouts accept.
+const MAX_STEM: usize = 64;
+
+/// `<stem><ext>` where the stem is 1 to [`MAX_STEM`] bytes that all pass `allowed`.
+fn is_plain_name(raw: &str, ext: &str, allowed: fn(u8) -> bool) -> bool {
+    raw.strip_suffix(ext)
+        .is_some_and(|stem| !stem.is_empty() && stem.len() <= MAX_STEM && stem.bytes().all(allowed))
+}
+
+/// Hero keys as in `HERO_PACK_FILES`: lowercase, digits, `_` and `-`.
+fn is_key_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+}
+
+/// Word ids: lowercase, digits and `_`.
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+}
+
+/// `g` plus four lowercase hex digits, then `.png`.
+fn is_glyph_name(raw: &str) -> bool {
+    raw.strip_prefix('g')
+        .and_then(|rest| rest.strip_suffix(".png"))
+        .is_some_and(|hex| {
+            hex.len() == 4
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+}
+
+impl PackLayout {
+    /// The path a file is stored under, or [`PACK_UNSAFE`] when the layout
+    /// does not allow it. `manifest.json` is accepted at the top level for
+    /// every layout; [`unpack_pack`] reads it and never writes it.
+    fn file_path(self, raw: &str) -> Result<String, &'static str> {
+        if self == Self::HeroesV1 {
+            return heroes_v1_file_path(raw);
+        }
+        if raw == "manifest.json" {
+            return Ok(raw.to_string());
+        }
+        let ok = match self {
+            Self::HeroesV1 => false,
+            Self::Portraits => match raw.strip_prefix("special/") {
+                Some(file) => is_plain_name(file, ".png", is_key_byte),
+                None => is_plain_name(raw, ".png", is_key_byte),
+            },
+            Self::BanIcons => is_plain_name(raw, ".png", is_key_byte),
+            Self::MapGlyphs => raw == "atlas.json" || is_glyph_name(raw),
+            Self::Words => {
+                is_plain_name(raw, ".png", is_word_byte)
+                    || is_plain_name(raw, ".json", is_word_byte)
+            }
+        };
+        if ok {
+            Ok(raw.to_string())
+        } else {
+            Err(PACK_UNSAFE)
+        }
+    }
+
+    /// The one directory entry a layout may carry: `special/` for hero packs.
+    fn allows_dir(self, raw: &str) -> bool {
+        match self {
+            Self::HeroesV1 | Self::Portraits => safe_rel_path(raw).as_deref() == Some("special"),
+            Self::BanIcons | Self::MapGlyphs | Self::Words => false,
+        }
     }
 }
 
@@ -576,7 +902,7 @@ fn safe_rel_path(raw: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn read_ustar(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
+fn read_ustar(bytes: &[u8], layout: PackLayout) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
     let mut offset = 0usize;
     let mut files = Vec::new();
     while offset + 512 <= bytes.len() {
@@ -603,12 +929,11 @@ fn read_ustar(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
         offset = offset.saturating_add(padded as usize);
         match typeflag {
             b'0' | b'\0' => {
-                let path = reader_file_path(&name)?;
+                let path = layout.file_path(&name)?;
                 files.push((path, data));
             }
             b'5' => {
-                let path = safe_rel_path(&name).ok_or(PACK_UNSAFE)?;
-                if path != "special" {
+                if !layout.allows_dir(&name) {
                     return Err(PACK_UNSAFE);
                 }
             }
@@ -764,9 +1089,20 @@ mod tests {
         bytes
     }
 
+    fn heroes_spec() -> &'static PackSpec {
+        pack_spec(HEROES_PACK_NAME).expect("heroes-v1 spec")
+    }
+
     fn unpack_result(bytes: &[u8]) -> Result<tempfile::TempDir, &'static str> {
         let dir = tempfile::tempdir().expect("tempdir");
-        unpack_pack(bytes, HEROES_PACK_NAME, "1", dir.path()).map(|()| dir)
+        unpack_pack(
+            bytes,
+            PackLayout::HeroesV1,
+            HEROES_PACK_NAME,
+            "1",
+            dir.path(),
+        )
+        .map(|()| dir)
     }
 
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -792,13 +1128,16 @@ mod tests {
         file_chunked: bool,
         file_hits: Arc<std::sync::atomic::AtomicUsize>,
         requested: Arc<Mutex<Vec<String>>>,
+        /// Per-name `(status, body)` for `/api/tracker/packs/<name>`. A name
+        /// not here gets `file_status` and `file_body`.
+        named_files: BTreeMap<String, (u16, Vec<u8>)>,
     }
 
     fn spawn_fake(fake: Arc<Fake>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
-            for _ in 0..8 {
+            for _ in 0..64 {
                 let Ok((mut sock, _)) = listener.accept() else {
                     break;
                 };
@@ -833,10 +1172,15 @@ mod tests {
                     http_bytes(401, br#"{"error":"Unauthorized"}"#, None, false)
                 } else if path == "/api/tracker/packs" {
                     http_bytes(fake.list_status, &fake.list_body, fake.list_retry, false)
-                } else if path.starts_with("/api/tracker/packs/") {
+                } else if let Some(name) = path.strip_prefix("/api/tracker/packs/") {
                     fake.file_hits
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    http_bytes(fake.file_status, &fake.file_body, None, fake.file_chunked)
+                    match fake.named_files.get(name) {
+                        Some((status, body)) => http_bytes(*status, body, None, false),
+                        None => {
+                            http_bytes(fake.file_status, &fake.file_body, None, fake.file_chunked)
+                        }
+                    }
                 } else {
                     http_bytes(404, br#"{"error":"pack_not_found"}"#, None, false)
                 };
@@ -912,7 +1256,7 @@ mod tests {
         let raw =
             format!(r#"[{{"name":"heroes-v1.tar","version":"1","sha256":"{sha}","size":12}}]"#);
         let entries: Vec<PackListEntry> = serde_json::from_str(&raw).expect("list");
-        let entry = select_heroes_pack(&entries).expect("named pack");
+        let entry = select_pack(&entries, heroes_spec()).expect("named pack");
         assert_eq!(entry.name, HEROES_PACK_NAME);
         assert_eq!(entry.sha256, sha);
         assert_eq!(entry.size, 12);
@@ -923,10 +1267,13 @@ mod tests {
             size: 12,
         }];
         assert_eq!(
-            select_heroes_pack(&other).unwrap_err(),
+            select_pack(&other, heroes_spec()).unwrap_err(),
             PackSync::Failed(PACK_MISMATCH.into())
         );
-        assert_eq!(select_heroes_pack(&[]).unwrap_err(), PackSync::Current);
+        assert_eq!(
+            select_pack(&[], heroes_spec()).unwrap_err(),
+            PackSync::Current
+        );
         let named = vec![
             PackListEntry {
                 name: "other.tar".into(),
@@ -941,7 +1288,7 @@ mod tests {
                 size: 9,
             },
         ];
-        let picked = select_heroes_pack(&named).expect("heroes by name");
+        let picked = select_pack(&named, heroes_spec()).expect("heroes by name");
         assert_eq!(picked.version, "3");
         assert_eq!(picked.size, 9);
         assert!(PACK_FORBIDDEN.contains("403"));
@@ -1065,9 +1412,15 @@ mod tests {
     #[test]
     fn ustar_rejects_absolute_paths_dotdot_and_links() {
         let escape = ustar_file("../escape.txt", b"nope");
-        assert_eq!(read_ustar(&escape).unwrap_err(), PACK_UNSAFE);
+        assert_eq!(
+            read_ustar(&escape, PackLayout::HeroesV1).unwrap_err(),
+            PACK_UNSAFE
+        );
         let absolute = ustar_file("/tmp/escape.txt", b"nope");
-        assert_eq!(read_ustar(&absolute).unwrap_err(), PACK_UNSAFE);
+        assert_eq!(
+            read_ustar(&absolute, PackLayout::HeroesV1).unwrap_err(),
+            PACK_UNSAFE
+        );
         let mut link = ustar_header("link.txt", 0, b'2');
         link[157..161].copy_from_slice(b"dest");
         let sum: u64 = {
@@ -1079,7 +1432,10 @@ mod tests {
         };
         let checksum = format!("{sum:06o}\0 ");
         link[148..156].copy_from_slice(checksum.as_bytes());
-        assert_eq!(read_ustar(&link).unwrap_err(), PACK_UNSAFE);
+        assert_eq!(
+            read_ustar(&link, PackLayout::HeroesV1).unwrap_err(),
+            PACK_UNSAFE
+        );
     }
 
     #[tokio::test]
@@ -1093,6 +1449,7 @@ mod tests {
             file_status: 200,
             file_body: body.to_vec(),
             file_chunked: true,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
@@ -1131,6 +1488,7 @@ mod tests {
             file_status: 200,
             file_body: bytes,
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: hits.clone(),
             requested: requested.clone(),
         });
@@ -1138,7 +1496,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let heroes = HeroTemplates::dir_in(dir.path());
         assert_eq!(heroes, dir.path().join("templates/heroes"));
-        let first = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        let first = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(first, PackSync::Installed);
         assert_eq!(std::fs::read(heroes.join("ana.png")).expect("hero"), hero);
         assert_eq!(
@@ -1158,13 +1519,19 @@ mod tests {
                 .any(|path| path == "/api/tracker/packs/heroes-v1.tar")
         );
 
-        let second = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        let second = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(second, PackSync::Current);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         std::fs::remove_dir_all(&heroes).expect("remove heroes");
         assert!(!heroes.exists());
-        let again = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        let again = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(again, PackSync::Installed);
         assert_eq!(
             std::fs::read(heroes.join("ana.png")).expect("redownloaded"),
@@ -1190,11 +1557,15 @@ mod tests {
             file_status: 200,
             file_body: bytes,
             file_chunked: true,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let result = sync_reader_packs(base.as_str(), token, dir.path(), 64).await;
+        let result = sync_reader_packs(base.as_str(), token, dir.path(), 64)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(result, PackSync::Failed(PACK_TOO_BIG.into()));
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
@@ -1208,7 +1579,9 @@ mod tests {
             Path::new("/tmp"),
             PACK_MAX_BYTES,
         )
-        .await;
+        .await
+        .heroes()
+        .clone();
         assert_eq!(result, PackSync::Failed(PACK_FAILED.into()));
     }
 
@@ -1235,6 +1608,7 @@ mod tests {
             file_status: 200,
             file_body: bytes,
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
@@ -1271,12 +1645,16 @@ mod tests {
             file_status: 200,
             file_body: Vec::new(),
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(disabled);
         assert_eq!(
-            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+                .await
+                .heroes()
+                .clone(),
             PackSync::Unavailable
         );
         assert_eq!(
@@ -1293,12 +1671,16 @@ mod tests {
             file_status: 200,
             file_body: Vec::new(),
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(missing);
         assert_eq!(
-            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+                .await
+                .heroes()
+                .clone(),
             PackSync::Unsupported
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
@@ -1320,11 +1702,15 @@ mod tests {
                 file_status: 200,
                 file_body: Vec::new(),
                 file_chunked: false,
+                named_files: BTreeMap::new(),
                 file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 requested: requested_paths(),
             });
             let base = spawn_fake(fake);
-            let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+            let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+                .await
+                .heroes()
+                .clone();
             assert_eq!(
                 result,
                 PackSync::Failed(
@@ -1352,11 +1738,15 @@ mod tests {
             file_status: 200,
             file_body: Vec::new(),
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let result = sync_reader_packs(base.as_str(), token, Path::new("/tmp"), 32).await;
+        let result = sync_reader_packs(base.as_str(), token, Path::new("/tmp"), 32)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(
             result,
             PackSync::Failed("Too many tries, wait 3600 seconds and try again".into())
@@ -1373,11 +1763,15 @@ mod tests {
             file_status: 200,
             file_body: Vec::new(),
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32).await;
+        let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(
             result,
             PackSync::Failed("Your sync token isn't valid. Sign in again from Settings.".into())
@@ -1435,12 +1829,16 @@ mod tests {
             file_status: 200,
             file_body: bytes,
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested.clone(),
         });
         let base = spawn_fake(fake);
         let dir = tempfile::tempdir().expect("tempdir");
-        let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES)
+            .await
+            .heroes()
+            .clone();
         assert_eq!(result, PackSync::Installed);
         let paths = requested.lock().expect("paths").clone();
         assert!(
@@ -1472,12 +1870,13 @@ mod tests {
             file_status: 200,
             file_body: Vec::new(),
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: hits.clone(),
             requested: requested_paths(),
         });
         let base = spawn_fake(listed);
         assert_eq!(
-            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await.heroes().clone(),
             PackSync::Failed(
                 "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
             )
@@ -1494,17 +1893,613 @@ mod tests {
             file_status: 403,
             file_body: bytes,
             file_chunked: false,
+            named_files: BTreeMap::new(),
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             requested: requested_paths(),
         });
         let base = spawn_fake(file);
         assert_eq!(
-            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await,
+            sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await.heroes().clone(),
             PackSync::Failed(
                 "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.".into()
             )
         );
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
+    }
+
+    // ---- multi-pack sync (alpha.7 P1) ----
+    // Every pack below is built here from 1x1 PNGs this test generates.
+    // No game art is read or stored.
+
+    /// A 1x1 PNG made in the test, never game art.
+    fn tiny_png(seed: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([seed, 7, 9, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("png");
+        out.into_inner()
+    }
+
+    fn version_of(name: &str) -> &'static str {
+        match name {
+            "heroes-v2.tar" | "heroes-v2-1080.tar" | "bans-v1.tar" => "154088.1",
+            _ => "1",
+        }
+    }
+
+    /// File names in each pack's own layout, shaped like the real packs.
+    fn sample_files(name: &str) -> Vec<(String, Vec<u8>)> {
+        let names: &[&str] = match name {
+            "heroes-v1.tar" => &["ana.png", "special/skull_01.png"],
+            "heroes-v2.tar" | "heroes-v2-1080.tar" => {
+                &["ana.png", "wrecking-ball.png", "special/placeholder_01.png"]
+            }
+            "bans-v1.tar" => &["ana.png", "soldier-76.png"],
+            "maps-v1.tar" => &["atlas.json", "g0041.png", "g003a.png"],
+            "words-v1.tar" => &["accolade_victory.png", "end_title_defeat.png", "words.json"],
+            other => panic!("no sample for {other}"),
+        };
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let data = if path.ends_with(".json") {
+                    format!(r#"{{"synthetic":"{name}"}}"#).into_bytes()
+                } else {
+                    tiny_png(index as u8 ^ name.len() as u8)
+                };
+                (path.to_string(), data)
+            })
+            .collect()
+    }
+
+    fn build_pack(name: &str, version: &str, files: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
+            .collect();
+        pack_bytes(name, version, &refs)
+    }
+
+    fn entry_json(name: &str, version: &str, bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "version": version,
+            "sha256": sha256_hex(bytes),
+            "size": bytes.len(),
+        })
+    }
+
+    struct Served {
+        base: String,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        requested: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Served {
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn downloaded(&self) -> Vec<String> {
+            self.requested
+                .lock()
+                .expect("paths")
+                .iter()
+                .filter_map(|path| path.strip_prefix("/api/tracker/packs/"))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    const TOKEN: &str = "pack-token";
+
+    fn serve(list: Vec<serde_json::Value>, files: ServedFiles) -> Served {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requested = requested_paths();
+        let fake = Arc::new(Fake {
+            token: TOKEN.into(),
+            list_status: 200,
+            list_body: serde_json::to_vec(&list).unwrap(),
+            list_retry: None,
+            file_status: 404,
+            file_body: br#"{"error":"pack_not_found"}"#.to_vec(),
+            file_chunked: false,
+            file_hits: hits.clone(),
+            requested: requested.clone(),
+            named_files: files,
+        });
+        Served {
+            base: spawn_fake(fake),
+            hits,
+            requested,
+        }
+    }
+
+    /// `(status, body)` per pack name, as the fake serves it.
+    type ServedFiles = BTreeMap<String, (u16, Vec<u8>)>;
+    /// The inner files of each synthetic pack, by pack name.
+    type PackContents = BTreeMap<String, Vec<(String, Vec<u8>)>>;
+
+    /// The server side of all six packs: list entries plus files.
+    fn all_packs() -> (Vec<serde_json::Value>, ServedFiles, PackContents) {
+        let mut list = Vec::new();
+        let mut files = BTreeMap::new();
+        let mut contents = BTreeMap::new();
+        for spec in PACKS {
+            let inner = sample_files(spec.name);
+            let bytes = build_pack(spec.name, version_of(spec.name), &inner);
+            list.push(entry_json(spec.name, version_of(spec.name), &bytes));
+            files.insert(spec.name.to_string(), (200, bytes));
+            contents.insert(spec.name.to_string(), inner);
+        }
+        (list, files, contents)
+    }
+
+    async fn sync(served: &Served, data_dir: &Path) -> PackReport {
+        sync_reader_packs(served.base.as_str(), TOKEN, data_dir, PACK_MAX_BYTES).await
+    }
+
+    fn stored_versions(data_dir: &Path) -> BTreeMap<String, String> {
+        serde_json::from_slice(&std::fs::read(versions_path(data_dir)).expect("versions"))
+            .expect("versions json")
+    }
+
+    fn plant_keep(data_dir: &Path, spec: &PackSpec) -> PathBuf {
+        let dir = spec.dir_in(data_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keep.txt"), b"old").unwrap();
+        dir
+    }
+
+    fn outcome<'a>(report: &'a PackReport, name: &str) -> &'a PackSync {
+        report
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} in report"))
+    }
+
+    #[test]
+    fn heroes_v1_keeps_its_alpha6_folder_and_the_others_get_their_own() {
+        let data = Path::new("/data");
+        let heroes = heroes_spec();
+        assert_eq!(
+            PACKS[0].name, HEROES_PACK_NAME,
+            "heroes-v1 is fetched first"
+        );
+        assert_eq!(heroes.dir_in(data), HeroTemplates::dir_in(data));
+        assert_eq!(heroes.dir_in(data), data.join("templates/heroes"));
+        assert_eq!(heroes.layout, PackLayout::HeroesV1);
+        let expected = [
+            ("heroes-v2.tar", "templates/heroes-v2"),
+            ("heroes-v2-1080.tar", "templates/heroes-v2-1080"),
+            ("bans-v1.tar", "templates/bans-v1"),
+            ("maps-v1.tar", "templates/maps-v1"),
+            ("words-v1.tar", "templates/words-v1"),
+        ];
+        assert_eq!(PACKS.len(), expected.len() + 1);
+        for (name, dir) in expected {
+            let spec = pack_spec(name).expect(name);
+            assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
+            assert!(!spec.required, "{name} is optional");
+        }
+        // Reader neutrality: only heroes-v1 lands in a folder a reader opens.
+        let reader_dirs = [
+            crate::shadow::heroes::TEMPLATE_SUBDIR,
+            crate::shadow::result::TEMPLATE_SUBDIR,
+            crate::shadow::banner::TEMPLATE_SUBDIR,
+        ];
+        let mut seen = BTreeSet::new();
+        for spec in PACKS {
+            let dir = spec.dir_in(data);
+            assert!(seen.insert(dir.clone()), "{} shares a folder", spec.name);
+            assert_ne!(dir, data.join("templates"));
+            assert!(!versions_path(data).starts_with(&dir));
+            let used_by_reader = reader_dirs.iter().any(|sub| dir == data.join(sub));
+            assert_eq!(
+                used_by_reader,
+                spec.name == HEROES_PACK_NAME,
+                "{}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn each_layout_accepts_its_own_names_and_refuses_the_rest() {
+        let ok: &[(PackLayout, &str)] = &[
+            (PackLayout::Portraits, "ana.png"),
+            (PackLayout::Portraits, "wrecking-ball.png"),
+            (PackLayout::Portraits, "soldier-76.png"),
+            (PackLayout::Portraits, "special/skull_01.png"),
+            (PackLayout::BanIcons, "junker-queen.png"),
+            (PackLayout::MapGlyphs, "atlas.json"),
+            (PackLayout::MapGlyphs, "g0041.png"),
+            (PackLayout::MapGlyphs, "g003a.png"),
+            (PackLayout::Words, "accolade_victory.png"),
+            (PackLayout::Words, "layouts.json"),
+        ];
+        for (layout, raw) in ok {
+            assert_eq!(
+                layout.file_path(raw).as_deref(),
+                Ok(*raw),
+                "{layout:?} {raw}"
+            );
+        }
+        let long = format!("{}.png", "a".repeat(MAX_STEM + 1));
+        let refused: &[(PackLayout, &str)] = &[
+            (PackLayout::Portraits, "../x.png"),
+            (PackLayout::Portraits, "special/a/b.png"),
+            (PackLayout::Portraits, "other/x.png"),
+            (PackLayout::Portraits, "./ana.png"),
+            (PackLayout::Portraits, "Ana.png"),
+            (PackLayout::Portraits, "ana.jpg"),
+            (PackLayout::Portraits, "special/x.txt"),
+            (PackLayout::Portraits, ".png"),
+            (PackLayout::Portraits, "sp\\ana.png"),
+            (PackLayout::Portraits, long.as_str()),
+            (PackLayout::BanIcons, "special/skull_01.png"),
+            (PackLayout::BanIcons, "ana.json"),
+            (PackLayout::MapGlyphs, "g41.png"),
+            (PackLayout::MapGlyphs, "g00zz.png"),
+            (PackLayout::MapGlyphs, "g00411.png"),
+            (PackLayout::MapGlyphs, "G0041.png"),
+            (PackLayout::MapGlyphs, "other.json"),
+            (PackLayout::MapGlyphs, "ana.png"),
+            (PackLayout::Words, "end-title.png"),
+            (PackLayout::Words, "sub/words.json"),
+            (PackLayout::Words, "words.txt"),
+        ];
+        for (layout, raw) in refused {
+            assert_eq!(layout.file_path(raw), Err(PACK_UNSAFE), "{layout:?} {raw}");
+        }
+        for layout in [
+            PackLayout::HeroesV1,
+            PackLayout::Portraits,
+            PackLayout::BanIcons,
+            PackLayout::MapGlyphs,
+            PackLayout::Words,
+        ] {
+            assert_eq!(
+                layout.file_path("manifest.json").as_deref(),
+                Ok("manifest.json")
+            );
+        }
+        // heroes-v1 keeps the alpha.6 rule: any one top-level file.
+        assert_eq!(
+            PackLayout::HeroesV1.file_path("./Ana.txt").as_deref(),
+            Ok("Ana.txt")
+        );
+        assert_eq!(
+            PackLayout::HeroesV1.file_path("special/a/b.png"),
+            Err(PACK_UNSAFE)
+        );
+
+        let mut dir = ustar_header("special/", 0, b'5').to_vec();
+        dir.extend(ustar_file("ana.png", b"x"));
+        assert!(read_ustar(&dir, PackLayout::Portraits).is_ok());
+        assert!(read_ustar(&dir, PackLayout::HeroesV1).is_ok());
+        assert_eq!(
+            read_ustar(&dir, PackLayout::BanIcons).unwrap_err(),
+            PACK_UNSAFE
+        );
+        assert_eq!(
+            read_ustar(&dir, PackLayout::Words).unwrap_err(),
+            PACK_UNSAFE
+        );
+    }
+
+    #[tokio::test]
+    async fn all_six_packs_install_into_a_fresh_data_dir() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = sync(&served, dir.path()).await;
+        for spec in PACKS {
+            assert_eq!(
+                outcome(&report, spec.name),
+                &PackSync::Installed,
+                "{}",
+                spec.name
+            );
+            let live = spec.dir_in(dir.path());
+            for (path, data) in &contents[spec.name] {
+                assert_eq!(
+                    &std::fs::read(live.join(path)).unwrap_or_default(),
+                    data,
+                    "{} {path}",
+                    spec.name
+                );
+            }
+            assert!(!live.join("manifest.json").exists());
+        }
+        assert_eq!(served.hits(), PACKS.len());
+        let versions = stored_versions(dir.path());
+        for spec in PACKS {
+            assert_eq!(
+                versions.get(spec.name).map(String::as_str),
+                Some(version_of(spec.name))
+            );
+        }
+        let templates = dir.path().join("templates");
+        let leftovers: Vec<String> = std::fs::read_dir(&templates)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(report.extras_ready(), (5, 5));
+        assert_eq!(
+            report.guide_result(),
+            Ok("Reader pack saved. Extra reader packs ready: 5 of 5.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resync_with_the_same_versions_downloads_nothing() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = sync(&served, dir.path()).await;
+        assert!(first.packs.iter().all(|s| s.outcome == PackSync::Installed));
+        assert_eq!(served.hits(), PACKS.len());
+        let before = stored_versions(dir.path());
+
+        let second = sync(&served, dir.path()).await;
+        for spec in PACKS {
+            assert_eq!(
+                outcome(&second, spec.name),
+                &PackSync::Current,
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(served.hits(), PACKS.len(), "no pack was downloaded again");
+        assert_eq!(stored_versions(dir.path()), before);
+        let bans = pack_spec("bans-v1.tar").unwrap().dir_in(dir.path());
+        assert_eq!(
+            std::fs::read(bans.join("ana.png")).unwrap(),
+            contents["bans-v1.tar"][0].1
+        );
+        assert_eq!(
+            second.guide_result(),
+            Ok("The reader pack is already installed. Extra reader packs ready: 5 of 5.".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_sha_rejects_only_that_pack() {
+        let (mut list, files, _) = all_packs();
+        for entry in &mut list {
+            if entry["name"] == "bans-v1.tar" {
+                entry["sha256"] = serde_json::json!("ab".repeat(32));
+            }
+        }
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bans = plant_keep(dir.path(), pack_spec("bans-v1.tar").unwrap());
+        let report = sync(&served, dir.path()).await;
+        for spec in PACKS {
+            let expected = if spec.name == "bans-v1.tar" {
+                PackSync::Failed(PACK_MISMATCH.into())
+            } else {
+                PackSync::Installed
+            };
+            assert_eq!(outcome(&report, spec.name), &expected, "{}", spec.name);
+        }
+        assert_eq!(std::fs::read(bans.join("keep.txt")).unwrap(), b"old");
+        assert!(!bans.join("ana.png").exists());
+        let versions = stored_versions(dir.path());
+        assert!(!versions.contains_key("bans-v1.tar"));
+        assert_eq!(versions.len(), PACKS.len() - 1);
+        assert_eq!(report.extras_ready(), (4, 5));
+    }
+
+    #[tokio::test]
+    async fn a_bad_path_rejects_only_that_pack() {
+        let bad: &[(&str, &str)] = &[
+            ("heroes-v2.tar", "../x.png"),
+            ("bans-v1.tar", "sub/ana.png"),
+            ("words-v1.tar", "accolade_victory.jpg"),
+            ("maps-v1.tar", "g0041.webp"),
+        ];
+        for (bad_pack, bad_path) in bad {
+            let (mut list, mut files, _) = all_packs();
+            let mut inner = sample_files(bad_pack);
+            inner.push((bad_path.to_string(), tiny_png(3)));
+            let bytes = build_pack(bad_pack, version_of(bad_pack), &inner);
+            for entry in &mut list {
+                if entry["name"] == *bad_pack {
+                    *entry = entry_json(bad_pack, version_of(bad_pack), &bytes);
+                }
+            }
+            files.insert(bad_pack.to_string(), (200, bytes));
+            let served = serve(list, files);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let live = plant_keep(dir.path(), pack_spec(bad_pack).unwrap());
+            let report = sync(&served, dir.path()).await;
+            for spec in PACKS {
+                let got = outcome(&report, spec.name);
+                if spec.name == *bad_pack {
+                    assert_eq!(got, &PackSync::Failed(PACK_UNSAFE.into()), "{bad_path}");
+                } else {
+                    assert_eq!(got, &PackSync::Installed, "{} with {bad_path}", spec.name);
+                }
+            }
+            assert_eq!(std::fs::read(live.join("keep.txt")).unwrap(), b"old");
+            assert!(!dir.path().join("x.png").exists());
+            assert!(!dir.path().join("templates/x.png").exists());
+            assert!(!stored_versions(dir.path()).contains_key(*bad_pack));
+        }
+    }
+
+    #[tokio::test]
+    async fn packs_disabled_keeps_every_live_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live: Vec<PathBuf> = PACKS
+            .iter()
+            .map(|spec| plant_keep(dir.path(), spec))
+            .collect();
+        let disabled = Arc::new(Fake {
+            token: TOKEN.into(),
+            list_status: 503,
+            list_body: br#"{"error":"packs_disabled"}"#.to_vec(),
+            list_retry: None,
+            file_status: 200,
+            file_body: Vec::new(),
+            file_chunked: false,
+            file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
+            named_files: BTreeMap::new(),
+        });
+        let base = spawn_fake(disabled);
+        let report = sync_reader_packs(base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Unavailable),
+            "{report:?}"
+        );
+        assert_eq!(report.guide_result(), Ok(PACK_UNAVAILABLE.to_string()));
+
+        // Packs switched off between the list and a download: nothing after
+        // it is fetched, and nothing installed is touched.
+        let (list, mut files, _) = all_packs();
+        files.insert(
+            HEROES_PACK_NAME.to_string(),
+            (503, br#"{"error":"packs_disabled"}"#.to_vec()),
+        );
+        let served = serve(list, files);
+        let report = sync(&served, dir.path()).await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Unavailable),
+            "{report:?}"
+        );
+        assert_eq!(served.hits(), 1, "{:?}", served.downloaded());
+        for dir in &live {
+            assert_eq!(std::fs::read(dir.join("keep.txt")).unwrap(), b"old");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_mid_sync_stops_the_rest_and_keeps_what_installed() {
+        let (list, mut files, _) = all_packs();
+        files.insert(
+            "heroes-v2.tar".to_string(),
+            (429, br#"{"error":"rate_limited"}"#.to_vec()),
+        );
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let words = plant_keep(dir.path(), pack_spec("words-v1.tar").unwrap());
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Installed);
+        let limited = PackSync::Failed(rate_limit_message(RATE_LIMIT_FALLBACK_SECS));
+        for spec in &PACKS[1..] {
+            assert_eq!(outcome(&report, spec.name), &limited, "{}", spec.name);
+        }
+        assert_eq!(
+            served.downloaded(),
+            vec![HEROES_PACK_NAME.to_string(), "heroes-v2.tar".to_string()]
+        );
+        assert_eq!(std::fs::read(words.join("keep.txt")).unwrap(), b"old");
+        assert!(heroes_spec().dir_in(dir.path()).join("ana.png").exists());
+    }
+
+    #[tokio::test]
+    async fn a_list_with_only_heroes_v1_syncs_it_and_marks_the_rest_missing() {
+        let inner = sample_files(HEROES_PACK_NAME);
+        let bytes = build_pack(HEROES_PACK_NAME, "1", &inner);
+        let mut files = BTreeMap::new();
+        files.insert(HEROES_PACK_NAME.to_string(), (200, bytes.clone()));
+        let served = serve(vec![entry_json(HEROES_PACK_NAME, "1", &bytes)], files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        // An extra pack installed earlier stays when the list drops it.
+        let maps = plant_keep(dir.path(), pack_spec("maps-v1.tar").unwrap());
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Installed);
+        for spec in &PACKS[1..] {
+            assert_eq!(
+                outcome(&report, spec.name),
+                &PackSync::Missing,
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(served.downloaded(), vec![HEROES_PACK_NAME.to_string()]);
+        assert_eq!(std::fs::read(maps.join("keep.txt")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(HeroTemplates::dir_in(dir.path()).join("ana.png")).unwrap(),
+            inner[0].1
+        );
+        assert_eq!(report.extras_ready(), (0, 0));
+        // The alpha.6 guide line, unchanged.
+        assert_eq!(report.guide_result(), Ok(PACK_SAVED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_list_without_heroes_v1_is_still_a_heroes_mismatch() {
+        let (list, files, _) = all_packs();
+        let list: Vec<_> = list
+            .into_iter()
+            .filter(|entry| entry["name"] != HEROES_PACK_NAME)
+            .collect();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(
+            outcome(&report, HEROES_PACK_NAME),
+            &PackSync::Failed(PACK_MISMATCH.into())
+        );
+        for spec in &PACKS[1..] {
+            assert_eq!(
+                outcome(&report, spec.name),
+                &PackSync::Installed,
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(report.guide_result(), Err(PACK_MISMATCH.to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_alpha6_versions_file_is_read_and_kept() {
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        // What alpha.6 leaves behind: the heroes folder and a one-key file.
+        let heroes = plant_keep(dir.path(), heroes_spec());
+        std::fs::write(versions_path(dir.path()), br#"{"heroes-v1.tar":"1"}"#).unwrap();
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Current);
+        for spec in &PACKS[1..] {
+            assert_eq!(
+                outcome(&report, spec.name),
+                &PackSync::Installed,
+                "{}",
+                spec.name
+            );
+        }
+        assert!(
+            !served
+                .downloaded()
+                .iter()
+                .any(|name| name == HEROES_PACK_NAME)
+        );
+        assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
+        let versions = stored_versions(dir.path());
+        assert_eq!(
+            versions.get(HEROES_PACK_NAME).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(versions.len(), PACKS.len());
+        // The file stays a flat name-to-version map an alpha.6 build reads.
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(versions_path(dir.path())).unwrap()).unwrap();
+        assert!(raw.as_object().unwrap().values().all(|v| v.is_string()));
     }
 }
