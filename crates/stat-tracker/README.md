@@ -133,6 +133,10 @@ nothing else. A recorded path that leaves your home folder, or that contains
 files that are still there and asks first. Settings stay unless you also
 delete saved games.
 
+One thing in the saved-games folder goes on every uninstall, kept data or
+not: `private/own-name/`, the small crops of your own in-game name that
+`reader = "new"` keeps to find your row (see below).
+
 If a system package owns this copy, nothing is removed. The app shows
 `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` and can copy that command.
 An AppImage is removed like any other copy, including the AppImage file.
@@ -213,6 +217,18 @@ folder under `$HOME` — is read-only under the sandbox. `install.sh` writes
 that path. Reinstall after you change `data_dir`. If the directory is
 still not writable, the daemon exits and prints the same drop-in. A
 relative `data_dir` is not put in the unit.
+
+With `reader = "new"` in config.toml, `{data_dir}` also holds
+`private/own-name/seeds.json` (folder 0700, file 0600). The new reader does
+not read player names. To find your row it keeps a few crops of your own
+name as it is drawn on the scoreboard, and compares each row with them. A
+crop is taken only from a board where your row is clearly highlighted, the
+hero panel shows the hero on that row, and no chat covers it, and it is
+trusted only after three boards from two games gave matching crops. The
+file holds pixels and a hash of the configured `player_name`, never the
+name. It is cleared when that name changes and on uninstall, and it is
+never put in a report, an upload or the log. `reader = "ocr-v1"` (the
+default) does not create it.
 
 `%h` in the unit is `$HOME`. It does not follow `XDG_DATA_HOME` or
 `XDG_CONFIG_HOME`. On a user manager that cannot apply the sandbox, the

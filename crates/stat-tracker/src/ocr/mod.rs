@@ -504,14 +504,36 @@ pub fn recognize_row(
     columns: &preprocess::StatColumns,
     team_size: usize,
 ) -> RowOcrResult {
+    recognize_row_with(row_img, columns, team_size, Names::Read)
+}
+
+/// Whether the per-row OCR reads the name windows (OCR site T4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Names {
+    /// ocr-v1: every name window is read.
+    Read,
+    /// `reader = "new"`: no name window is cropped or read. The own row
+    /// comes from [`crate::detect::own_row`], and other players' names are
+    /// never read at all.
+    Skip,
+}
+
+fn recognize_row_with(
+    row_img: &DynamicImage,
+    columns: &preprocess::StatColumns,
+    team_size: usize,
+    names: Names,
+) -> RowOcrResult {
     // One read per name window. 5v5 has a window per table layout (in-match,
     // in-match with perks, centred); which one holds the name is only known
     // once the configured name is compared, so all of them are read.
-    let mut name_reads: Vec<Option<CellOcrResult>> =
-        preprocess::crop_name_cells(row_img, team_size)
+    let mut name_reads: Vec<Option<CellOcrResult>> = match names {
+        Names::Read => preprocess::crop_name_cells(row_img, team_size)
             .par_iter()
             .map(|crop| recognize_name(crop).ok())
-            .collect();
+            .collect(),
+        Names::Skip => Vec::new(),
+    };
     let name = if name_reads.is_empty() {
         None
     } else {
@@ -596,6 +618,17 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     cropped: &DynamicImage,
     team_size: usize,
 ) -> Vec<RowOcrResult> {
+    recognize_scoreboard_cells_pre_cropped_with(cropped, team_size, Names::Read)
+}
+
+/// [`recognize_scoreboard_cells_pre_cropped`] with the name windows read or
+/// skipped. With [`Names::Skip`] every row's `name` is `None` and
+/// `name_alternates` is empty; the stat cells are read exactly the same.
+pub fn recognize_scoreboard_cells_pre_cropped_with(
+    cropped: &DynamicImage,
+    team_size: usize,
+    names: Names,
+) -> Vec<RowOcrResult> {
     let total_rows = team_size * 2;
     let columns = calibrate_columns(cropped, team_size);
 
@@ -609,7 +642,12 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     let mut results: Vec<(usize, RowOcrResult)> = ocr_pool().install(|| {
         row_images
             .par_iter()
-            .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns, team_size)))
+            .map(|(idx, row_img)| {
+                (
+                    *idx,
+                    recognize_row_with(row_img, &columns, team_size, names),
+                )
+            })
             .collect()
     });
 
@@ -1023,6 +1061,38 @@ fn run_ocr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// alpha.7 O9 (OCR site T4): with [`Names::Skip`] no name window is read,
+    /// on either table. ocr-v1 ([`Names::Read`]) still reads every window:
+    /// one on 6v6, three on 5v5.
+    #[test]
+    fn skipping_names_reads_no_name_window() {
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        for (team_size, alternates) in [(5usize, 2usize), (6, 0)] {
+            let skipped =
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Skip);
+            assert_eq!(skipped.len(), 2 * team_size);
+            for row in &skipped {
+                assert!(row.name.is_none(), "{team_size}v{team_size}");
+                assert!(row.name_alternates.is_empty(), "{team_size}v{team_size}");
+                assert_eq!(row.stats.len(), STATS_PER_ROW);
+            }
+            for rows in [
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Read),
+                recognize_scoreboard_cells_pre_cropped(&board, team_size),
+            ] {
+                assert_eq!(rows.len(), 2 * team_size);
+                for row in &rows {
+                    assert!(row.name.is_some(), "the first window is read");
+                    assert_eq!(row.name_alternates.len(), alternates);
+                }
+            }
+        }
+    }
 
     #[test]
     fn dim_zero_cell_reads_as_zero() {

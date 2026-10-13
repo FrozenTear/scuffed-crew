@@ -876,3 +876,154 @@ mod game {
         );
     }
 }
+
+// --- The own-name seeds (alpha.7 O9) never reach a report ---
+
+#[cfg(unix)]
+mod own_name_seeds {
+    use super::*;
+    use crate::detect::own_row;
+    use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
+    use crate::report::kit;
+    use std::collections::BTreeMap;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// Stands in for seed pixels: it must be in no report entry.
+    const MARKER: &str = "QXSEEDPIXELSQX";
+
+    fn fifo(path: &std::path::Path) {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the whole call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+    }
+
+    fn game_input(dir: &std::path::Path) -> GameReportInput {
+        GameReportInput {
+            session_id: "sess-1".into(),
+            category: GameCategory::MissedGame,
+            text: "the game was missed".into(),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            ui_scale: None,
+            system: system(),
+            training: true,
+            scrub: ctx(),
+            window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
+            log_dir: dir.to_path_buf(),
+            kit: kit::load(dir, "sess-1"),
+            corrections: BTreeMap::new(),
+            built_at: t("2026-10-09T13:00:00Z"),
+        }
+    }
+
+    /// Every way a report is put together, over one data dir.
+    fn build_everything(dir: &std::path::Path) -> Vec<Vec<u8>> {
+        let _ = crate::report::scrub::read_daemon_logs(dir);
+        let _ = kit::sessions(dir);
+        let _ = kit::has_kit(dir, "sess-1");
+        let log =
+            bundle::build_log_report(&input(dir, LogWindow::log_only(t("2026-10-09T12:10:00Z"))))
+                .expect("log report");
+        let game = build_game_report(&game_input(dir)).expect("game report");
+        kit::prune(dir, 1);
+        vec![log.bytes, game.bytes]
+    }
+
+    /// Reading a FIFO blocks until someone writes to it. With FIFOs where
+    /// the seed file and its temp file live, any report code that opens
+    /// something under `private/` never returns.
+    #[test]
+    fn no_report_build_opens_the_private_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        seed_logs(&dir);
+        let seeds = own_row::seed_dir(&dir);
+        std::fs::create_dir_all(&seeds).unwrap();
+        fifo(&seeds.join("seeds.json"));
+        fifo(&seeds.join("seeds.json.tmp"));
+        fifo(&dir.join("private").join("anything"));
+        let (done, built) = std::sync::mpsc::channel();
+        let worker_dir = dir.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(build_everything(&worker_dir));
+        });
+        let zips = built
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a report build opened a file under private/ and is stuck on it");
+        assert_eq!(zips.len(), 2);
+    }
+
+    #[test]
+    fn no_report_entry_holds_a_seed_its_hash_or_its_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        seed_logs(dir);
+        // A seed file as the daemon writes it, with marked pixels.
+        let seeds = own_row::seed_dir(dir);
+        std::fs::create_dir_all(&seeds).unwrap();
+        let hash = own_row::name_hash(Some(SELF_NAME));
+        std::fs::write(
+            seeds.join("seeds.json"),
+            format!(
+                r#"{{"version":1,"name_hash":"{hash}","trusted":[],"pending":[],"x":"{MARKER}"}}"#
+            ),
+        )
+        .unwrap();
+        // The daemon's own-row log lines (numbers and labels only), and a
+        // line that names the private file the way an I/O error would.
+        let mut log = std::fs::read_to_string(dir.join("daemon.log")).unwrap();
+        log.push_str(&line(
+            "2026-10-09T12:05:30.000001Z",
+            "scuffed_stat_tracker",
+            "own row from seeds and highlight row=Some(2) source=\"both\" trust=Sure best=0.97 next=0.41",
+        ));
+        log.push_str(&line(
+            "2026-10-09T12:05:31.000001Z",
+            "scuffed_stat_tracker",
+            "own-row seed crop offered offer=Promoted trusted=3 pending=0",
+        ));
+        log.push_str(&line(
+            "2026-10-09T12:05:32.000001Z",
+            "stat_tracker::detect::own_row",
+            "own-row seeds not saved kind=PermissionDenied",
+        ));
+        log.push_str(&line(
+            "2026-10-09T12:05:33.000001Z",
+            "x",
+            "open /home/qxuser/.local/share/scuffed-stat-tracker/private/own-name/seeds.json failed",
+        ));
+        std::fs::write(dir.join("daemon.log"), log).unwrap();
+
+        for bytes in build_everything(dir) {
+            // nothing of it in the raw zip (entry names included)...
+            for needle in [MARKER, hash.as_str()] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                    "{needle} is in the zip"
+                );
+            }
+            // ...and nothing in any unpacked entry
+            for (name, body) in unzip(&bytes) {
+                assert!(!name.contains("private"), "{name}");
+                let text = String::from_utf8_lossy(&body);
+                for needle in [MARKER, hash.as_str(), "qxuser", SELF_NAME] {
+                    assert!(!text.contains(needle), "{needle} is in {name}");
+                }
+                if name == "log.txt" {
+                    // the own-row lines carry no name and stay readable
+                    assert!(text.contains("own row from seeds and highlight"), "{text}");
+                    assert!(text.contains("best=0.97"), "{text}");
+                    assert!(text.contains("own-row seed crop offered"), "{text}");
+                }
+            }
+        }
+        // the seed file was not touched
+        assert!(
+            std::fs::read_to_string(seeds.join("seeds.json"))
+                .unwrap()
+                .contains(MARKER)
+        );
+    }
+}

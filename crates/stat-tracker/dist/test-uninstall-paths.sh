@@ -460,4 +460,54 @@ for broad in ".config" "Documents" "Games"; do
 done
 pass "purge uses data-dir.conf and leaves other files in broad folders"
 
+# The crops of the member's own name (private/own-name) go on every
+# uninstall, with the saved games kept. A neighbor in private/ stays, a
+# linked private folder is not followed, and --purge takes them too.
+DATA="$HOME_DIR/.local/share/scuffed-stat-tracker"
+SEED="$DATA/private/own-name"
+run_install "$HOME_DIR" "$PREFIX"
+plant_canaries "$HOME_DIR" "$PREFIX"
+mkdir -p "$SEED"
+printf 'seed\n' > "$SEED/seeds.json"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ ! -e "$SEED" ]] || fail "own-name crops survived a keep-data uninstall"
+[[ ! -e "$DATA/private" ]] || fail "the empty private folder was left"
+assert_data_kept "$HOME_DIR"
+assert_canaries "$HOME_DIR" "$PREFIX"
+
+run_install "$HOME_DIR" "$PREFIX"
+mkdir -p "$SEED"
+printf 'seed\n' > "$SEED/seeds.json"
+printf 'mine\n' > "$DATA/private/keep.txt"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ ! -e "$SEED" ]] || fail "own-name crops survived next to another file"
+[[ "$(cat "$DATA/private/keep.txt")" == "mine" ]] || fail "a neighbor in private/ was removed"
+assert_data_kept "$HOME_DIR"
+
+rm -rf "$DATA/private"
+mkdir -p "$TMP/elsewhere/own-name"
+printf 'not ours\n' > "$TMP/elsewhere/own-name/seeds.json"
+ln -s "$TMP/elsewhere" "$DATA/private"
+run_install "$HOME_DIR" "$PREFIX"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null 2>&1
+[[ "$(cat "$TMP/elsewhere/own-name/seeds.json")" == "not ours" ]] \
+    || fail "own-name removal followed a linked private folder"
+rm -f "$DATA/private"
+
+run_install "$HOME_DIR" "$PREFIX"
+plant_canaries "$HOME_DIR" "$PREFIX"
+mkdir -p "$SEED"
+printf 'seed\n' > "$SEED/seeds.json"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --purge --yes >/dev/null
+[[ ! -e "$DATA" ]] || fail "purge left the data dir with own-name crops in it"
+pass "own-name crops are removed on every uninstall"
+
 echo "all uninstall path checks passed"
