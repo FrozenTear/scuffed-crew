@@ -10540,49 +10540,57 @@ mod tests {
     }
 
     /// F261-1. The check that drops a co-op event board (Junkenstein on
-    /// Adlersbrunn: stats on one team) has no source without OCR: it is fed
-    /// by the top-bar label or the board text, and neither is asked for
-    /// with OCR off. So `off` stays refused for it
-    /// ([`stat_tracker::ocr_switch::Read::PveBoard`]).
+    /// Adlersbrunn: stats on one team) needs two things without OCR before
+    /// `off` may be granted ([`stat_tracker::ocr_switch::Read::PveBoard`]):
     ///
-    /// This test holds the flag: while the Tab pass with OCR off hands the
-    /// check nothing to see "Adlersbrunn" in, the flag has to be `false`.
-    /// The lanes that give it a source (M1 for the word, O10 for "both
-    /// teams have stats" from the new reader's cells) replace the last
-    /// assertion with the functional one: with OCR off a one-team
-    /// Adlersbrunn board is not stored, and a two-team one is stored as
-    /// Eichenwalde.
+    /// 1. The word. Since #271 a sure `ADLERSBRUNN` banner read sets the raw
+    ///    top-bar label ([`top_bar_raw_label`]), with no OCR.
+    /// 2. "Both teams have stats". It is counted on the OCR cell rows, and
+    ///    with OCR off there are none. So with the word alone, every
+    ///    Adlersbrunn board would be dropped: the co-op one, and a real
+    ///    two-team game too.
+    ///
+    /// This test holds the flag `false` for as long as the second is so.
+    /// The lane that counts both teams on the new reader's cells (#266)
+    /// replaces the last part with the functional test: with OCR off a
+    /// one-team Adlersbrunn board is not stored, and a two-team one is
+    /// stored as Eichenwalde.
     #[test]
-    fn the_pve_board_check_has_no_source_without_ocr_so_off_stays_refused() {
+    fn the_pve_board_check_cannot_count_both_teams_without_ocr_so_off_stays_refused() {
         use stat_tracker::config::OcrSetting;
         use stat_tracker::ocr_switch::{self, PackReadiness, Read};
-        // What the Tab pass hands over with OCR off.
+        // 1. The word has a source without OCR.
+        let banner = Some(banner_read(shadow::banner::ADLERSBRUNN_KEY, false));
+        let label = top_bar_raw_label(Some(&banner), None);
+        assert_eq!(label.as_deref(), Some(shadow::banner::ADLERSBRUNN));
+        assert!(parse::is_adlersbrunn_alias(label.as_deref().unwrap()));
+        // No banner read of it: nothing says the word, as before #271.
+        assert_eq!(top_bar_raw_label(Some(&None), None), None);
+
+        // 2. What the Tab pass with OCR off has to count the teams on.
         let unread = s1_unread_analysis();
-        assert_eq!(unread.map_panel_raw, None, "no top-bar label");
-        assert_eq!(
-            unread.ocr.as_ref().map(|text| text.raw_text.as_str()).ok(),
-            Some(""),
-            "no board text"
-        );
-        let one_team = |label: Option<&str>, board_text: &str| {
+        assert!(unread.rows.is_empty(), "no OCR cell rows");
+        let both_teams = parse::both_teams_have_stats(&unread.rows, 5);
+        let stored = |label: Option<&str>, both_teams: bool| {
             let (mut staged, mut parsed) =
                 staged_row("ew", "Eichenwalde", Some(boundary::MapSource::TopBar));
-            prepare_capture_row(&mut parsed, &mut staged, None, label, board_text, false)
+            prepare_capture_row(&mut parsed, &mut staged, None, label, "", both_teams)
         };
-        // With OCR the label says Adlersbrunn and the one-team board is dropped.
-        assert_eq!(one_team(Some("ADLERSBRUNN"), ""), PreparedRow::Drop);
-        assert_eq!(one_team(None, "ADLERSBRUNN"), PreparedRow::Drop);
-        // With OCR off there is no label and no text: the same board is kept.
-        let without_ocr = one_team(unread.map_panel_raw.as_deref(), "");
-        assert_eq!(
-            without_ocr,
-            PreparedRow::Store,
-            "the check now has a source without OCR: test it by function here (see the doc \
-             comment) and flip Read::PveBoard with it"
+        // The check itself is right when it is told the truth.
+        assert_eq!(stored(label.as_deref(), true), PreparedRow::Store);
+        assert_eq!(stored(label.as_deref(), false), PreparedRow::Drop);
+        // With no rows it is told "one team" for every board, so a real
+        // two-team Adlersbrunn game is dropped like the co-op board.
+        assert!(
+            !both_teams,
+            "both teams are now counted without OCR rows: test the check by function here \
+             (see the doc comment) and flip Read::PveBoard with it"
         );
+        assert_eq!(stored(label.as_deref(), both_teams), PreparedRow::Drop);
         assert!(
             !Read::PveBoard.without_ocr(),
-            "with OCR off a co-op board would be stored: the flag has to keep off refused"
+            "with OCR off the check cannot tell a co-op board from a game: the flag has to \
+             keep off refused"
         );
         let every_pack = PackReadiness {
             heroes: true,

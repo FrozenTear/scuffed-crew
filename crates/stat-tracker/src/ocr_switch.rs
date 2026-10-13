@@ -68,10 +68,10 @@ pub enum Read {
     AccoladeMap,
     /// The check that drops a co-op event board (Junkenstein's Revenge on
     /// Adlersbrunn, stats on one team only) instead of storing it as an
-    /// Eichenwalde game. It has no OCR call of its own. It needs two inputs
-    /// that only OCR supplies today: the word "Adlersbrunn" (the top-bar
-    /// label or the board text, neither asked for with OCR off) and "both
-    /// teams have stats" (counted on the OCR cell rows).
+    /// Eichenwalde game. It has no OCR call of its own. It needs two inputs:
+    /// the word "Adlersbrunn", which a sure banner read supplies without
+    /// OCR (#271), and "both teams have stats", which is still counted on
+    /// the OCR cell rows.
     PveBoard,
 }
 
@@ -122,10 +122,11 @@ impl Read {
             Read::EndTitle => false,
             // Lane O5 (#265).
             Read::AccoladeMap => false,
-            // Two lanes, and both have to be in: M1 (ADLERSBRUNN from the
-            // Tab banner under the new reader) and O10 (#266, both teams
-            // counted on the new reader's cells). Until then, with OCR off
-            // a co-op board would be stored and uploaded as a game.
+            // Two lanes, and both have to be in. M1 (#271) is: ADLERSBRUNN
+            // from the Tab banner under the new reader. O10 (#266) is not:
+            // both teams counted on the new reader's cells. Until then, with
+            // OCR off the count runs on no rows at all, so every Adlersbrunn
+            // board would be dropped, a real two-team game too.
             Read::PveBoard => false,
         }
     }

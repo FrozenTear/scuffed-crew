@@ -16,7 +16,7 @@
 //! The reads of the Tab pass (stat cells, own row, hero, top-bar map) need
 //! the binary's `analyze_frame`: they have the same check in `main.rs`,
 //! also alone in a process. The co-op board check has no OCR call of its
-//! own and is held by a test of its inputs there.
+//! own and is held by a test of its two inputs there.
 //!
 //! The process-wide mode and reader are set here, so this file holds one
 //! test.
@@ -41,7 +41,7 @@ enum Checked {
     Here,
     /// `main.rs`: `own_process_tab_pass_with_ocr_off`.
     TabPass,
-    /// `main.rs`: `the_pve_board_check_has_no_source_without_ocr_so_off_stays_refused`.
+    /// `main.rs`: `the_pve_board_check_cannot_count_both_teams_without_ocr_so_off_stays_refused`.
     PveBoard,
 }
 
