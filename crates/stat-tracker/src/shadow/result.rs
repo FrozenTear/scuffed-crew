@@ -2388,6 +2388,49 @@ mod tests {
         }
     }
 
+    /// One region and its two 3-level stacks, from a seed (the cases below
+    /// were found by a search over seeds).
+    fn refine_case(seed: u64) -> (Vec<Level>, Vec<Stack>) {
+        let mut rng = Rng(seed * 7919 + 1);
+        let (tw, th) = [(100, 48), (120, 50), (140, 64)][(seed % 3) as usize];
+        let t = if seed.is_multiple_of(2) {
+            glyphs(seed, tw, th)
+        } else {
+            blobs(seed, tw, th)
+        };
+        let other = glyphs(seed + 9999, tw * 9 / 10, th);
+        let p = pyramid(random_region(&mut rng, &t, &other, tw + 60, th + 40));
+        let stacks = [&t, &other]
+            .into_iter()
+            .filter_map(|g| Stack::with_kept(g, TEST_KEPT))
+            .filter(|st| st.levels.len() == 3)
+            .collect();
+        (p, stacks)
+    }
+
+    /// F253-9: the refine windows are load-bearing. Seed 5 needs the ±3
+    /// window on the first finer level (±2 misses it), seed 1116 needs ±2
+    /// on the last (±1 misses it, with ±3 first), and seed 1449 misses with
+    /// ±1 on both. The shipped windows find all three.
+    #[test]
+    fn the_refine_windows_are_pinned() {
+        for (seed, narrow) in [(5, (2, 2)), (1116, (3, 1)), (1449, (1, 1))] {
+            let (p, stacks) = refine_case(seed);
+            let mut missed = false;
+            for st in &stacks {
+                let full = search_full(&p, st).score;
+                let fast = search_fast(&p, st).score;
+                assert!(
+                    (fast - full).abs() < 1e-9,
+                    "{seed}: fast {fast} full {full}"
+                );
+                let n = search_fast_with(&p, st, PEAKS, narrow.0, narrow.1).score;
+                missed |= full >= PRESENT as f64 && n < full - 1e-6;
+            }
+            assert!(missed, "{seed}: the narrower windows {narrow:?} miss");
+        }
+    }
+
     /// Frames without a word: the fast search finds nothing above the
     /// exhaustive search.
     #[test]
@@ -2548,6 +2591,24 @@ mod tests {
         live.wait_reload();
         assert_eq!(reads_victory(&live, 7), (Some(ResultPack::WordsV1), true));
         assert_eq!(live.reload_spawns(), 2);
+    }
+
+    /// F253-8: a change to the old `templates/result/` folder alone is
+    /// picked up too (the stamp covers both folders).
+    #[test]
+    fn a_new_legacy_folder_is_picked_up() {
+        let data = tempfile::tempdir().unwrap();
+        let legacy = data.path().join(TEMPLATE_SUBDIR);
+        pack(&legacy, 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        let staging = data.path().join("templates/.result-staging");
+        pack(&staging, 7);
+        crate::packs::swap_dir(&staging, &legacy).unwrap();
+        live.current();
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 7), (Some(ResultPack::Legacy), true));
+        assert_eq!(live.reload_spawns(), 1);
     }
 
     /// A slow load never holds up a read, and only one load runs at a time.
