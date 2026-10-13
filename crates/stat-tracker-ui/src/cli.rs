@@ -21,6 +21,14 @@ pub struct Cli {
     pub replace: bool,
 }
 
+/// `--build-id`: print [`crate::restart_prompt::BUILD_ID`] and exit. `main`
+/// checks this before anything else (no config read, no instance lock, no
+/// window), because a running GUI runs the installed binary with it to see
+/// whether an update changed the app. It wins over every other flag.
+pub fn wants_build_id(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
+    args.into_iter().any(|arg| arg.as_ref() == "--build-id")
+}
+
 impl Cli {
     pub fn parse() -> Self {
         Self::parse_args(std::env::args().skip(1))
@@ -64,6 +72,8 @@ impl Cli {
                 }
                 "--companion" => companion = true,
                 "--replace" => replace = true,
+                // Handled in `main` before parsing; see `wants_build_id`.
+                "--build-id" => {}
                 "--seasons-url" => {
                     if let Some(v) = args.get(i + 1) {
                         seasons_url = Some(v.clone());
@@ -133,6 +143,8 @@ OPTIONS:
                         (used by Restart now after an update)
   -h, --help            Show this help
   -V, --version         Print the tracker version and exit
+  --build-id            Print this app's build id and exit (an update that
+                        changes it asks a running window to restart)
 "
     }
 }
@@ -152,5 +164,14 @@ mod tests {
         assert!(help.contains("--version"));
         assert!(!help.contains('\u{2014}'));
         assert!(!help.contains('\u{2013}'));
+    }
+
+    #[test]
+    fn build_id_flag_wins_over_the_rest() {
+        assert!(super::wants_build_id(["--build-id"]));
+        assert!(super::wants_build_id(crate::restart_prompt::PROBE_ARGS));
+        assert!(super::wants_build_id(["--replace", "--build-id"]));
+        assert!(!super::wants_build_id(["--version", "--help"]));
+        assert!(Cli::help_text().contains("--build-id"));
     }
 }

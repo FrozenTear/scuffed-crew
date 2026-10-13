@@ -40,6 +40,12 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.23"
 
+# GUI build id (build.rs + src/build_id_hash.rs). Same sha2 the tracker lib
+# already links, so no new crate.
+[build-dependencies]
+sha2 = "0.10"
+
 [dev-dependencies]
+sha2 = "0.10"
 tempfile = "3"
 toml = "1"

@@ -16,6 +16,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Padding};
 
 use crate::app::Message;
+use crate::restart_prompt::RestartNeed;
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, PAD_INNER, SIZE_BODY, SIZE_META, SIZE_TITLE, TEXT,
     TEXT_2, TEXT_3,
@@ -409,6 +410,16 @@ pub fn default_install_prefix() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/usr/local"))
 }
 
+/// Prefix "Restart now" starts the new binary from: the one the in-app
+/// update installed to, else the default install prefix. The restart
+/// prompt watches the binary under the same prefix.
+pub fn restart_prefix(plan: &UpdatePlan) -> PathBuf {
+    match plan {
+        UpdatePlan::Ready { prefix, .. } => prefix.clone(),
+        UpdatePlan::Blocked { .. } => default_install_prefix(),
+    }
+}
+
 pub fn prefix_from_exe(exe: &Path) -> Option<PathBuf> {
     let bin = exe.parent()?;
     if bin.file_name()? != "bin" {
@@ -794,10 +805,9 @@ async fn download_and_run_bootstrap(
             tail_useful(&combined)
         ));
     }
-    Ok(format!(
-        "Installed {tag}. {RESTART_HINT} {}",
-        tail_useful(&combined)
-    ))
+    // The restart hint is added where the message is shown, once the GUI
+    // knows whether this install changed the app (G3).
+    Ok(format!("Installed {tag}. {}", tail_useful(&combined)))
 }
 
 /// Notes stay closed until the player presses What's new.
@@ -864,12 +874,39 @@ fn truncate_clean(text: &str, max_chars: usize) -> String {
 /// the button starts the new binary and quits this one.
 pub const RESTART_HINT: &str = "Press Restart now to run the new version.";
 
+/// Shown after a successful in-app update that left the app's own build
+/// unchanged (a daemon-only release). The tracker service was restarted.
+pub const NO_RESTART_HINT: &str = "The app itself did not change, so no restart is needed.";
+
+/// Label of the banner's first button when no restart is needed.
+pub const NO_RESTART_LABEL: &str = "No restart needed";
+
+/// The hint after "Installed vX.". Until the installed build is read, it
+/// offers Restart now, as before G3.
+pub fn success_hint(need: RestartNeed) -> &'static str {
+    match need {
+        RestartNeed::NotNeeded => NO_RESTART_HINT,
+        RestartNeed::Needed | RestartNeed::Unknown => RESTART_HINT,
+    }
+}
+
+/// The installer's message plus [`success_hint`].
+pub fn success_line(msg: &str, need: RestartNeed) -> String {
+    format!("{} {}", msg.trim_end(), success_hint(need))
+}
+
 /// Label and message of the banner's first button. After a successful
 /// install it restarts the GUI, because the single-instance lock means a
-/// relaunch would only bring back this (old) process.
-pub fn primary_action(progress: &UpdateProgress, can_run: bool) -> (&'static str, Option<Message>) {
+/// relaunch would only bring back this (old) process. When the install did
+/// not change the app's build, there is nothing to restart.
+pub fn primary_action(
+    progress: &UpdateProgress,
+    can_run: bool,
+    need: RestartNeed,
+) -> (&'static str, Option<Message>) {
     match progress {
         UpdateProgress::Running => ("Installing…", None),
+        UpdateProgress::Succeeded(_) if need == RestartNeed::NotNeeded => (NO_RESTART_LABEL, None),
         UpdateProgress::Succeeded(_) => ("Restart now", Some(Message::RestartGui)),
         _ if can_run => ("Update now", Some(Message::RunUpdate)),
         _ => ("Update now", None),
@@ -883,6 +920,7 @@ pub fn banner<'a>(
     notes: &'a [crate::notes::ShownRelease],
     notes_ui: crate::notes::NotesUi<'a>,
     notes_expanded: bool,
+    restart: RestartNeed,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
@@ -916,7 +954,7 @@ pub fn banner<'a>(
         }
         UpdateProgress::Succeeded(msg) => {
             body = body.push(
-                text(msg.clone())
+                text(success_line(msg, restart))
                     .size(SIZE_META)
                     .font(FONT_MEDIUM)
                     .color(theme::OK),
@@ -950,7 +988,7 @@ pub fn banner<'a>(
             .color(theme::ACCENT),
     );
 
-    let (label, on_press) = primary_action(progress, can_run);
+    let (label, on_press) = primary_action(progress, can_run, restart);
     let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
         .padding(Padding::from([8, 16]))
         .style(theme::chip(on_press.is_some()));
@@ -1207,18 +1245,47 @@ mod tests {
 
     #[test]
     fn success_offers_restart_now() {
-        let (label, msg) = primary_action(&UpdateProgress::Succeeded("ok".into()), false);
-        assert_eq!(label, "Restart now");
-        assert!(matches!(msg, Some(Message::RestartGui)));
-        let (label, msg) = primary_action(&UpdateProgress::Idle, true);
+        let done = UpdateProgress::Succeeded("ok".into());
+        for need in [RestartNeed::Unknown, RestartNeed::Needed] {
+            let (label, msg) = primary_action(&done, false, need);
+            assert_eq!(label, "Restart now", "{need:?}");
+            assert!(matches!(msg, Some(Message::RestartGui)));
+            assert!(success_line("Installed v1.", need).ends_with(RESTART_HINT));
+        }
+        let (label, msg) = primary_action(&UpdateProgress::Idle, true, RestartNeed::Unknown);
         assert_eq!(label, "Update now");
         assert!(matches!(msg, Some(Message::RunUpdate)));
-        assert!(primary_action(&UpdateProgress::Idle, false).1.is_none());
-        assert!(primary_action(&UpdateProgress::Running, true).1.is_none());
+        assert!(
+            primary_action(&UpdateProgress::Idle, false, RestartNeed::Unknown)
+                .1
+                .is_none()
+        );
+        assert!(
+            primary_action(&UpdateProgress::Running, true, RestartNeed::Needed)
+                .1
+                .is_none()
+        );
         assert!(
             !RESTART_HINT.contains("window"),
             "without a tray, closing the window is not a restart"
         );
+    }
+
+    #[test]
+    fn daemon_only_update_says_no_restart_is_needed() {
+        let done = UpdateProgress::Succeeded("Installed stat-tracker-v1.".into());
+        let (label, msg) = primary_action(&done, false, RestartNeed::NotNeeded);
+        assert_eq!(label, NO_RESTART_LABEL);
+        assert!(msg.is_none(), "nothing to restart");
+        let line = success_line("Installed stat-tracker-v1.", RestartNeed::NotNeeded);
+        assert_eq!(
+            line,
+            "Installed stat-tracker-v1. The app itself did not change, so no restart is needed."
+        );
+        assert!(!line.contains("Restart now"));
+        for copy in [NO_RESTART_HINT, NO_RESTART_LABEL] {
+            assert!(!copy.contains('\u{2014}') && !copy.contains('\u{2013}'));
+        }
     }
 
     #[test]

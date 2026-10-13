@@ -14,6 +14,9 @@
 
 pub mod aggregate;
 pub mod app;
+/// Shared with build.rs; the lib only compiles it for its tests.
+#[cfg(test)]
+mod build_id_hash;
 pub mod capture;
 pub mod cli;
 pub mod clipboard;
@@ -33,6 +36,7 @@ pub mod overlay;
 pub mod overlay_shell;
 pub mod overview;
 pub mod report;
+pub mod restart_prompt;
 pub mod seasons;
 pub mod settings;
 pub mod setup_guide;

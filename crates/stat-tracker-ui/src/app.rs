@@ -21,6 +21,7 @@ use crate::model::{
 };
 use crate::notes::{self, ShownRelease};
 use crate::overlay::{self, CompanionChild, OverlayHold};
+use crate::restart_prompt::{self, BinStamp, RestartNeed, RestartWatch};
 use crate::seasons::{self, SeasonCache};
 use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
@@ -241,6 +242,14 @@ pub enum Message {
     UpdateFinished(Result<String, String>),
     /// "Restart now" after an update: start the new binary, then quit.
     RestartGui,
+    /// The installed GUI's `--build-id` output (G3), for the binary as
+    /// stamped when the probe started.
+    GuiBuildProbed {
+        stamp: BinStamp,
+        result: Result<String, String>,
+    },
+    /// "Later" on the restart prompt.
+    RestartLater,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     Tray(TrayAction),
@@ -422,6 +431,10 @@ pub struct TrackerApp {
     pub overlay_hotkey: OverlayHotkey,
     companion_toggle_mtime: Option<SystemTime>,
     pub setup: crate::setup_guide::GuideUi,
+    /// This process's path at launch, for [`TrackerApp::restart_target`].
+    own_exe: PathBuf,
+    /// Watches the installed GUI binary for a changed build (G3).
+    restart_watch: RestartWatch,
 }
 
 impl TrackerApp {
@@ -533,6 +546,17 @@ impl TrackerApp {
             tracing::warn!(error = %e, "failed to persist overlay hold");
         }
         let game_running = session_key.is_some();
+        let own_exe = std::env::current_exe().unwrap_or_default();
+        // Fixture runs are dev screenshots: they never ask to restart.
+        let installed_gui = if live {
+            restart_prompt::stamp(&crate::instance::relaunch_target(
+                Some(&update::default_install_prefix()),
+                &own_exe,
+            ))
+        } else {
+            None
+        };
+        let restart_watch = RestartWatch::new(restart_prompt::BUILD_ID, installed_gui);
         let setup = crate::setup_guide::GuideUi::startup(
             cli.fixture.is_none()
                 && crate::setup_guide::should_auto_open(
@@ -610,6 +634,8 @@ impl TrackerApp {
             overlay_hotkey,
             companion_toggle_mtime: None,
             setup,
+            own_exe,
+            restart_watch,
         };
         app.refresh_kit_sessions();
 
@@ -1439,6 +1465,7 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.update_progress = UpdateProgress::Running;
+                self.restart_watch.on_update_started();
                 Task::perform(
                     update::run_in_app_update(update::UpdateRunRequest {
                         latest: info.latest,
@@ -1452,8 +1479,8 @@ impl TrackerApp {
             Message::UpdateFinished(result) => {
                 match result {
                     Ok(msg) => {
-                        self.update_progress = UpdateProgress::Succeeded(msg.clone());
-                        self.replace_toast(msg);
+                        self.replace_toast(update::success_line(&msg, self.restart_need()));
+                        self.update_progress = UpdateProgress::Succeeded(msg);
                     }
                     Err(e) => {
                         self.update_progress = UpdateProgress::Failed(e.clone());
@@ -1463,11 +1490,18 @@ impl TrackerApp {
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
                 Task::none()
             }
+            Message::GuiBuildProbed { stamp, result } => {
+                let before = self.restart_need();
+                self.restart_watch.on_probe(stamp, result);
+                self.retoast_update_success(before);
+                Task::none()
+            }
+            Message::RestartLater => {
+                self.restart_watch.later();
+                Task::none()
+            }
             Message::RestartGui => {
-                match crate::instance::spawn_replacement(Some(&match &self.update_plan {
-                    UpdatePlan::Ready { prefix, .. } => prefix.clone(),
-                    UpdatePlan::Blocked { .. } => update::default_install_prefix(),
-                })) {
+                match crate::instance::spawn_replacement(Some(&self.restart_prefix())) {
                     Ok(()) => self.apply_tray(TrayAction::Quit),
                     Err(e) => {
                         self.replace_toast(format!(
@@ -1509,6 +1543,69 @@ impl TrackerApp {
 
     fn replace_toast(&mut self, text: impl Into<String>) {
         show_plain_toast(&mut self.toast, &mut self.toast_action, text.into());
+    }
+
+    /// Prefix "Restart now" starts the new binary from: the one the in-app
+    /// update installed to, else the default install prefix.
+    pub fn restart_prefix(&self) -> PathBuf {
+        update::restart_prefix(&self.update_plan)
+    }
+
+    /// The binary "Restart now" starts, and so the one the restart prompt
+    /// watches.
+    pub fn restart_target(&self) -> PathBuf {
+        restart_prompt::watched_binary(&self.restart_prefix(), &self.own_exe)
+    }
+
+    pub fn restart_need(&self) -> RestartNeed {
+        self.restart_watch.need()
+    }
+
+    /// The update banner (Overview and Settings) is drawn now.
+    fn update_banner_on_screen(&self) -> bool {
+        restart_prompt::update_banner_on_screen(self.update.is_some(), self.screen)
+    }
+
+    pub fn restart_bar_visible(&self) -> bool {
+        restart_prompt::bar_visible(
+            &self.restart_watch,
+            &self.update_progress,
+            self.update_banner_on_screen(),
+        )
+    }
+
+    /// After an in-app install the toast says "Press Restart now" until the
+    /// installed build is read. If it turns out unchanged, say so instead.
+    fn retoast_update_success(&mut self, before: RestartNeed) {
+        if let Some(line) = restart_prompt::retoast(
+            &self.update_progress,
+            self.toast.as_deref(),
+            before,
+            self.restart_need(),
+        ) {
+            self.replace_toast(line);
+        }
+    }
+
+    /// One stat of the installed GUI per Tick; a probe only when it changed.
+    fn watch_installed_gui(&mut self) -> Option<Task<Message>> {
+        if self.fixture.is_some() {
+            return None;
+        }
+        let target = self.restart_target();
+        let running = matches!(self.update_progress, UpdateProgress::Running);
+        let before = self.restart_need();
+        let probe = self
+            .restart_watch
+            .on_tick(restart_prompt::stamp(&target), running);
+        // An install that left the GUI binary alone is settled here, with
+        // no probe.
+        self.retoast_update_success(before);
+        let stamp = probe?;
+        Some(Task::perform(
+            restart_prompt::probe_build_id(target),
+            move |result| Message::GuiBuildProbed { stamp, result },
+        ))
     }
 
     fn refresh_kit_sessions(&mut self) {
@@ -2117,6 +2214,9 @@ impl TrackerApp {
         }
 
         let mut tasks = Vec::new();
+        if let Some(probe) = self.watch_installed_gui() {
+            tasks.push(probe);
+        }
         if let Some((url, code)) = self.setup.poll_request_if_due(std::time::Instant::now()) {
             tasks.push(Task::perform(
                 crate::setup_guide::poll_link(url, code),
@@ -2238,6 +2338,9 @@ impl TrackerApp {
             });
         if let Some(t) = &self.toast {
             content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
+        }
+        if self.restart_bar_visible() {
+            content = content.push(restart_prompt::bar());
         }
         content = content.push(
             responsive(|size| match self.screen {
