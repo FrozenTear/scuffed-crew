@@ -5269,7 +5269,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // An earlier run installed heroes-v1 and nothing else.
         let earlier = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
-        assert_eq!(earlier.report.heroes(), &PackSync::Installed);
+        assert_eq!(earlier.run.report.heroes(), &PackSync::Installed);
         drop(earlier);
         // This start: the site does not answer (no network yet).
         let (dead, _refusing) = refusing_base();
