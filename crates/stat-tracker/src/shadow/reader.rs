@@ -49,7 +49,9 @@ use super::digits;
 use super::heroes::{
     HeroDirs, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
 };
-use super::result::{LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates};
+use super::result::{
+    FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates,
+};
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
 pub const STAT_FIELDS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -360,6 +362,14 @@ impl Reader {
         }
     }
 
+    /// The FINAL SCORE line read (P4) of one full frame, or `None` when the
+    /// loaded words pack has no `p4_final_score` template (or no words pack
+    /// is loaded). Only [`FinalScoreRead::Sure`] is a signal.
+    pub fn read_final_score(&self, frame: &RgbImage) -> Option<FinalScoreRead> {
+        let loaded = self.results.current()?;
+        Some(loaded.templates.final_score()?.read(frame))
+    }
+
     /// [`Self::read_board`] with the `result` field from a match's evidence.
     pub fn read_board_with_evidence(
         &self,
@@ -662,6 +672,13 @@ pub fn read_result(result_frame: &DynamicImage) -> ResultRead {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_result(result_frame)
+}
+
+/// [`Reader::read_final_score`] with the process-wide reader.
+pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_final_score(frame)
 }
 
 #[cfg(test)]
