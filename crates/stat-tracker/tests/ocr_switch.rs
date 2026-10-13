@@ -157,10 +157,11 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
             "a call is counted where it was made, not inside ocr: {}",
             b.site
         );
-        assert!(
-            b.site.key().starts_with("tests/ocr_switch.rs:"),
-            "the key that leaves the process has no folder above the crate: {}",
-            b.site.key()
+        assert_eq!(
+            b.site.key(),
+            format!("other.rs:1 {}", b.site.entry),
+            "this file is not below the tracker's source folder, so the key \
+             that leaves the process has no path"
         );
     }
     assert_eq!(gate::blocked_total(), 12);
@@ -306,13 +307,37 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         .find(|b| b.site.entry == "recognize_region")
         .map(|b| b.site.key())
         .unwrap();
-    assert!(region_key.ends_with(" recognize_region"), "{region_key}");
+    assert_eq!(region_key, "other.rs:1 recognize_region");
     assert!(
         status
             .blocked
             .iter()
-            .any(|s| s.site == region_key && s.count == 1),
+            .any(|s| s.site == region_key && s.count >= 1),
         "the status file names the call sites: {:?}",
+        status.blocked
+    );
+    // One line per key, every key one the site's report validator takes,
+    // and the lines add up to the total.
+    let keys: std::collections::BTreeSet<&str> =
+        status.blocked.iter().map(|s| s.site.as_str()).collect();
+    assert_eq!(keys.len(), status.blocked.len(), "{:?}", status.blocked);
+    for s in &status.blocked {
+        assert!(
+            scuffed_types::stat_report::is_ocr_call_site(&s.site),
+            "{:?}",
+            s.site
+        );
+    }
+    assert_eq!(
+        status.blocked.iter().map(|s| s.count).sum::<u64>(),
+        status.blocked_total
+    );
+    assert!(
+        status
+            .blocked
+            .iter()
+            .any(|s| s.site.starts_with("detect/match_end.rs:")),
+        "a call made inside the tracker's source keeps its file: {:?}",
         status.blocked
     );
     // A call blocked later reaches the file on the next check, and the

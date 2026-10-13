@@ -183,9 +183,8 @@ impl SystemInfo {
     }
 }
 
-/// Most call sites `system.ocr_blocked_calls` carries (the validator's
-/// cap, `scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX`).
-pub const OCR_BLOCKED_SITES_MAX: usize = 64;
+/// Most call sites `system.ocr_blocked_calls` carries: the validator's cap.
+pub const OCR_BLOCKED_SITES_MAX: usize = scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX;
 
 /// The status the report may use. With a daemon running, only the file that
 /// daemon wrote (its pid). With none running, the last run's file.
@@ -197,16 +196,33 @@ pub(super) fn switch_for_report(
     status.filter(|s| !daemon_running || running_pid == Some(s.pid))
 }
 
-/// The blocked call sites of a run with OCR off, the busiest first, at most
-/// [`OCR_BLOCKED_SITES_MAX`]. Empty when the run had OCR on.
+/// The blocked call sites of a run with OCR off, as the report sends them.
+/// Empty when the run had OCR on.
+///
+/// The status is a file read from disk, so nothing in it is trusted to fit
+/// what the site takes (`docs/report-bundle.md`, section 2):
+/// - a key that is not a call site
+///   ([`scuffed_types::stat_report::is_ocr_call_site`]: an absolute path,
+///   free text, over 96 bytes) is left out, so one key can not make the
+///   site refuse the whole report;
+/// - the same key twice is one site, counts added;
+/// - a count above `u32::MAX` is sent as `u32::MAX`;
+/// - only the [`OCR_BLOCKED_SITES_MAX`] sites with the largest counts go,
+///   the busiest first.
 pub(super) fn blocked_sites(status: &crate::ocr_switch::Status) -> Vec<(String, u32)> {
     if status.effective.is_on() {
         return Vec::new();
     }
-    let mut sites: Vec<(String, u32)> = status
-        .blocked
-        .iter()
-        .map(|s| (s.site.clone(), u32::try_from(s.count).unwrap_or(u32::MAX)))
+    let mut by_key: std::collections::BTreeMap<&str, u64> = Default::default();
+    for s in &status.blocked {
+        if scuffed_types::stat_report::is_ocr_call_site(&s.site) {
+            let count = by_key.entry(s.site.as_str()).or_default();
+            *count = count.saturating_add(s.count);
+        }
+    }
+    let mut sites: Vec<(String, u32)> = by_key
+        .into_iter()
+        .map(|(site, count)| (site.to_string(), u32::try_from(count).unwrap_or(u32::MAX)))
         .collect();
     sites.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     sites.truncate(OCR_BLOCKED_SITES_MAX);

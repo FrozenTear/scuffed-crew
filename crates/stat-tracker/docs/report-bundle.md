@@ -4,7 +4,7 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
-Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4).
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4). Revision 7 (2026-10-13) adds two optional keys to `system`, `ocr` and `ocr_blocked_calls` (section 2).
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
@@ -100,15 +100,31 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 | `ocr_threads` | positive integer, the OCR worker count in use | `4` |
 | `reader` | `ocr-v1` or `new` | `new` |
 | `ocr` | optional: `on` or `off`, whether classic OCR (Tesseract) ran | `off` |
-| `ocr_blocked_calls` | optional: object, call site to count of OCR calls stopped there while OCR was off | `{ "main.rs:3966 recognize_scoreboard_cells_pre_cropped": 4 }` |
+| `ocr_blocked_calls` | optional, only with `ocr` `off`: object, call site to count of OCR calls stopped there | `{ "main.rs:3966 recognize_scoreboard_cells_pre_cropped": 4 }` |
 | `shadow_recognizer` | boolean, the Extra number reader setting | `false` |
 | `update_channel` | `stable` or `prerelease` | `prerelease` |
 | `daemon_running` | boolean, whether the daemon answered when the report was built | `true` |
 | `last_exit` | `clean`, `crashed`, or `unknown` | `crashed` |
 
-`ocr` and `ocr_blocked_calls` are the two keys that may be left out. Neither may be `null`. A manifest without `ocr` means `on`: that is every tracker from before the OCR on/off switch, and those manifests validate as before. `ocr_blocked_calls` has at most 64 entries. A key is a place in the tracker's source (file, line, function), 1 to 96 bytes of ASCII letters, digits, `_`, `.`, `/`, `:`, `-` and single spaces, with no space at either end. A value is an integer from 0 to 4294967295. A key is never text read from a screen, and the character set keeps a name or free text out.
+`ocr` and `ocr_blocked_calls` are the two keys that may be left out. Neither may be `null`. A manifest without `ocr` means `on`: that is every tracker from before the OCR on/off switch, and those manifests validate as before.
 
-`last_exit` comes from the crash marker in section 7. There is no hostname, user name, GPU serial, path, or display name in `system`, and the app does not add one.
+`ocr_blocked_calls` is allowed only when `ocr` is `off`; with `ocr` `on` or left out it is a 400, an empty object too. It has at most 64 entries. A value is an integer from 0 to 4294967295. A key is a place in the tracker's source and has this shape, at most 96 bytes in all:
+
+- `<path>.rs:<line>`, optionally followed by one space and the function that was called there. Example: `detect/match_end.rs:1133 recognize_prepared`.
+- `<path>` is relative to the tracker's source folder: segments of `a-z`, `0-9` and `_`, joined by `/`. No leading `/`, no `..`, no `~`, no drive letter, no `-`.
+- `<line>` is 1 to 6 digits and does not start with `0`.
+- The function is identifiers (`A-Z`, `a-z`, `0-9`, `_`, not starting with a digit) joined by `::`.
+
+Anything else is a 400. The shape keeps an absolute path, a sentence and most names out; it cannot tell a folder name from a user name (`soot/main.rs:1` has the shape). That a key is a source location and never text read from a screen is the tracker's side of the contract:
+
+- The tracker builds a key from the place in its own source that made the call, and cuts everything up to and including `crates/stat-tracker/src/` from the file. A place that is not below that folder is sent as `other.rs:1` and the function, never with its path. Places that share a key are sent as one entry, their counts added.
+- It sends the 64 sites with the largest counts and leaves the rest out.
+- It leaves out a key that does not have the shape or is over 96 bytes, so one key cannot make the whole report a 400.
+- It sends a count above 4294967295 as 4294967295.
+
+The server checks nothing between the counts and the rest of the report.
+
+`last_exit` comes from the crash marker in section 7. There is no hostname, user name, GPU serial, path on the member's machine, or display name in `system` (the keys of `ocr_blocked_calls` are places in the tracker's source), and the app does not add one.
 
 `corrections` is the member's edits, if any. Keys are a subset of the nine names above. Values are strings of 1 to 64 characters. An empty object means the member changed nothing. A correction does not replace the original read. The original stays in `reads`.
 
@@ -521,7 +537,7 @@ Revision 2 fixtures, required:
 
 - Version: a `bundle_version` 1 manifest without `system` passes. A `bundle_version` 1 manifest with `system`, or with category `crash` or `performance`, is a 400. Version 3 is a 400.
 - `system`: every key present passes. A missing key, an unknown key, `cpu_threads` 0, or a `session_type` outside the list is a 400.
-- `system.ocr` and `system.ocr_blocked_calls`: a manifest without either passes. `ocr` `on` or `off` passes, with or without `ocr_blocked_calls`. `ocr` `null`, a boolean or any other word is a 400. `ocr_blocked_calls` with 64 call sites passes and with 65 is a 400. A key longer than 96 bytes, an empty key, a key with a character outside the list, a negative or fractional count, and a count above 4294967295 are each a 400.
+- `system.ocr` and `system.ocr_blocked_calls`: a manifest without either passes. `ocr` `on` or `off` passes. `ocr` `null`, a boolean or any other word is a 400. `ocr_blocked_calls` passes only with `ocr` `off`: with `ocr` `on` or left out it is a 400. With 64 call sites it passes and with 65 it is a 400. The keys `main.rs:1`, `detect/match_end.rs:1133 recognize_prepared` and `tests/ocr_switch.rs:7 Reader::read_cells` pass. Each of these keys is a 400: a key longer than 96 bytes, an empty key, a bare word (`player`), a sentence (`PLAYER said hi`), an absolute path (`/home/alice/src/main.rs:3966 recognize_prepared`), a path with `..`, `~`, `-` or an uppercase letter, a host and port (`192.168.1.20:3030`), a line of `0`, with a leading `0` or with 7 digits, two spaces, a space at either end, and any of `#`, `=`, `!`, `@`, `~` anywhere. A negative or fractional count and a count above 4294967295 are each a 400.
 - Log-only `other`: a version 2 `other` report with `game: null` follows the log-only rules below. A version 1 `other` report still needs a game.
 - Log-only: a `crash` report with `game: null`, nine read objects whose `value`, `confidence`, and `ocr_v1` are null and `suspect` is true, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
 - `team_size: null` passes on a game report.

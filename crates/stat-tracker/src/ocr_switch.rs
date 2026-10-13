@@ -686,6 +686,13 @@ impl Switch {
     }
 
     fn status(&self) -> Status {
+        // Two places can share a key (calls from outside the source
+        // folder are all `other.rs:1`): one line per key, counts added.
+        let mut by_key: std::collections::BTreeMap<String, u64> = Default::default();
+        for b in gate::blocked_calls() {
+            let count = by_key.entry(b.site.key()).or_default();
+            *count = count.saturating_add(b.count);
+        }
         Status {
             pid: std::process::id(),
             requested: self.decision.requested,
@@ -693,12 +700,9 @@ impl Switch {
             refusal: self.decision.refusal.clone(),
             packs: self.packs,
             blocked_total: gate::blocked_total(),
-            blocked: gate::blocked_calls()
+            blocked: by_key
                 .into_iter()
-                .map(|b| StatusSite {
-                    site: b.site.key(),
-                    count: b.count,
-                })
+                .map(|(site, count)| StatusSite { site, count })
                 .collect(),
             leptess_created: gate::leptess_created(),
         }

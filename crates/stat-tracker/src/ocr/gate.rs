@@ -55,43 +55,42 @@ pub struct Site {
     pub entry: &'static str,
 }
 
-/// Longest [`Site::key`], in bytes. The report validator's cap for a call
-/// site (`scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES`).
-pub const SITE_KEY_MAX_BYTES: usize = 96;
+/// Longest [`Site::key`], in bytes: the report validator's cap for a call
+/// site.
+pub const SITE_KEY_MAX_BYTES: usize = scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES;
+
+/// The tracker's source folder, as it is in a call's file path.
+const SOURCE_ROOT: &str = "crates/stat-tracker/src/";
+
+/// The place given for a call made from outside [`SOURCE_ROOT`].
+const OTHER_PLACE: &str = "other.rs:1";
 
 impl Site {
-    /// `detect/match_end.rs:1133 recognize_prepared`: the file below `src/`
-    /// (or from `tests/`), the line and the function.
+    /// `detect/match_end.rs:1133 recognize_prepared`: the file below the
+    /// tracker's source folder, the line and the function.
     ///
     /// This is what leaves the process (log, status file, problem report).
-    /// Nothing above the crate's own folders is in it, so a build path can
-    /// not carry a user name out, and it holds only ASCII letters, digits,
-    /// `_`, `.`, `/`, `:`, `-` and single spaces, at most
-    /// [`SITE_KEY_MAX_BYTES`] bytes.
+    /// Everything up to and including `crates/stat-tracker/src/` is cut
+    /// from the file, so a build path can not carry a user name out. A
+    /// call from anywhere else (a test under `tests/`, a build with other
+    /// paths) is `other.rs:1` and the function, with no path at all.
+    /// Every key has the shape the report validator takes
+    /// ([`scuffed_types::stat_report::is_ocr_call_site`]).
     pub fn key(&self) -> String {
-        let file = self.file.replace('\\', "/");
-        let file = match (file.rfind("/src/"), file.rfind("/tests/")) {
-            (Some(at), _) => &file[at + "/src/".len()..],
-            (None, Some(at)) => &file[at + 1..],
-            (None, None) => file
-                .strip_prefix("src/")
-                .unwrap_or(file.rsplit('/').next().unwrap_or("")),
-        };
-        let mut key: String = format!("{file}:{} {}", self.line, self.entry)
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "_./:- ".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        while key.contains("  ") {
-            key = key.replace("  ", " ");
+        use scuffed_types::stat_report::is_ocr_call_site;
+        if let Some(at) = self.file.rfind(SOURCE_ROOT) {
+            let file = &self.file[at + SOURCE_ROOT.len()..];
+            let key = format!("{file}:{} {}", self.line, self.entry);
+            if is_ocr_call_site(&key) {
+                return key;
+            }
         }
-        key.truncate(SITE_KEY_MAX_BYTES);
-        key.trim().to_string()
+        let other = format!("{OTHER_PLACE} {}", self.entry);
+        if is_ocr_call_site(&other) {
+            other
+        } else {
+            OTHER_PLACE.to_string()
+        }
     }
 }
 
@@ -318,59 +317,83 @@ mod tests {
     }
 
     #[test]
-    fn a_site_key_names_the_source_place_and_nothing_above_the_crate() {
+    fn a_site_key_is_the_place_below_the_source_folder_and_never_a_path() {
+        use scuffed_types::stat_report::is_ocr_call_site;
         let site = |file: &'static str| Site {
             file,
             line: 1133,
             entry: "recognize_prepared",
         };
+        let other = "other.rs:1 recognize_prepared";
         for (file, key) in [
             (
                 "crates/stat-tracker/src/detect/match_end.rs",
                 "detect/match_end.rs:1133 recognize_prepared",
             ),
             (
-                "/home/some user/build/crates/stat-tracker/src/main.rs",
+                "crates/stat-tracker/src/main.rs",
                 "main.rs:1133 recognize_prepared",
             ),
-            ("src/ocr/mod.rs", "ocr/mod.rs:1133 recognize_prepared"),
+            // a build that gives the compiler absolute paths
             (
-                "crates/stat-tracker/tests/ocr_switch.rs",
-                "tests/ocr_switch.rs:1133 recognize_prepared",
+                "/home/alice/github/scuffed-crew/crates/stat-tracker/src/ocr/mod.rs",
+                "ocr/mod.rs:1133 recognize_prepared",
             ),
             (
-                "C:\\Users\\m\u{00fc}ller\\tracker\\src\\main.rs",
+                "/home/some user/m\u{00fc}ller/crates/stat-tracker/src/main.rs",
                 "main.rs:1133 recognize_prepared",
             ),
+            // not below the tracker's source folder: no path at all
+            ("crates/stat-tracker/tests/ocr_switch.rs", other),
+            ("src/ocr/mod.rs", other),
+            ("/home/alice/odd.rs", other),
             (
-                "/home/m\u{00fc}ller/odd.rs",
-                "odd.rs:1133 recognize_prepared",
+                "/home/alice/.cargo/registry/src/index/dep-1.0.0/src/lib.rs",
+                other,
             ),
+            ("C:\\Users\\alice\\tracker\\src\\main.rs", other),
+            // below it, but not a file name the report takes
+            ("crates/stat-tracker/src/../../../alice/main.rs", other),
+            ("crates/stat-tracker/src/we\"ird name.rs", other),
+            ("crates/stat-tracker/src/Upper.rs", other),
+            ("crates/stat-tracker/src/a-b.rs", other),
+            ("crates/stat-tracker/src/notes.txt", other),
         ] {
             let got = site(file).key();
             assert_eq!(got, key, "{file}");
             assert_eq!(site(file).to_string(), key, "Display is the key");
+            assert!(is_ocr_call_site(&got), "{got}");
         }
-        // bounded, and only the characters the report validator takes
+        // a path, a line or a function that does not fit
         let long = Site {
-            file: "src/a/very/long/path/that/goes/on/and/on/and/on/and/on/and/on/and/on/and/on/and/on/x.rs",
-            line: 4_000_000,
-            entry: "recognize_scoreboard_cells_pre_cropped_with_everything",
-        }
-        .key();
-        assert!(long.len() <= SITE_KEY_MAX_BYTES, "{}", long.len());
+            file: "crates/stat-tracker/src/a/very/long/path/that/goes/on/and/on/and/on/and/on/and/on/and/on/and/on/and/on/and/on/x.rs",
+            line: 4,
+            entry: "recognize_prepared",
+        };
+        assert_eq!(long.key(), other, "over the byte cap");
+        let far = Site {
+            file: "crates/stat-tracker/src/main.rs",
+            line: 1_000_000,
+            entry: "recognize_prepared",
+        };
+        assert_eq!(far.key(), other, "a line the report does not take");
         let odd = Site {
-            file: "src/we\"ird name\u{00e9}.rs",
+            file: "crates/stat-tracker/src/main.rs",
             line: 2,
-            entry: "x",
-        }
-        .key();
-        assert!(
-            odd.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_./:- ".contains(c)),
-            "{odd}"
+            entry: "not a function",
+        };
+        assert_eq!(odd.key(), "other.rs:1");
+        // the longest function the gate has, at the deepest file today
+        let deep = Site {
+            file: "crates/stat-tracker/src/detect/match_start.rs",
+            line: 99_999,
+            entry: "recognize_scoreboard_cells_pre_cropped",
+        };
+        assert_eq!(
+            deep.key(),
+            "detect/match_start.rs:99999 recognize_scoreboard_cells_pre_cropped"
         );
-        assert!(!odd.contains("  ") && odd == odd.trim(), "{odd:?}");
+        assert!(deep.key().len() <= SITE_KEY_MAX_BYTES);
     }
 
     #[test]

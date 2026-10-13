@@ -558,23 +558,122 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
     assert!(!used(true, None), "a daemon without a pid file");
     assert!(bundle::switch_for_report(None, false, None).is_none());
 
-    // The map is capped at what the site takes.
-    let many: Vec<(String, u64)> = (0..100u64)
-        .map(|i| (format!("main.rs:{i} recognize"), 100 - i))
-        .collect();
-    let many: Vec<(&str, u64)> = many.iter().map(|(s, n)| (s.as_str(), *n)).collect();
-    let capped = bundle::blocked_sites(&status(1, OcrSetting::Off, &many));
-    assert_eq!(capped.len(), bundle::OCR_BLOCKED_SITES_MAX);
-    assert_eq!(capped[0], ("main.rs:0 recognize".to_string(), 100));
-    assert_eq!(
-        bundle::OCR_BLOCKED_SITES_MAX,
-        scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX
-    );
-    assert_eq!(
-        crate::ocr::gate::SITE_KEY_MAX_BYTES,
-        scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES
-    );
     assert!(bundle::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
+}
+
+/// Whatever the status file holds, the call sites a report sends pass the
+/// site's validator: a populated map, an empty one, more than 64 sites, a
+/// key with an absolute path, free text, an over-long key, the same key
+/// twice and a count above `u32`.
+#[test]
+fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
+    use crate::ocr_switch::{Status, StatusSite};
+    use scuffed_types::stat_report::{OCR_BLOCKED_SITE_MAX_BYTES, is_ocr_call_site};
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    let status = |sites: &[(String, u64)]| Status {
+        pid: 1,
+        requested: OcrSetting::Off,
+        effective: OcrSetting::Off,
+        refusal: None,
+        packs: None,
+        blocked_total: sites
+            .iter()
+            .map(|(_, n)| n)
+            .fold(0, |a, n| a.saturating_add(*n)),
+        blocked: sites
+            .iter()
+            .map(|(site, count)| StatusSite {
+                site: site.clone(),
+                count: *count,
+            })
+            .collect(),
+        leptess_created: 0,
+    };
+    // The manifest a report with these sites carries, through the validator.
+    let sent = |sites: &[(String, u64)]| -> Value {
+        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
+        inp.system = SystemInfo {
+            ocr: OcrSetting::Off,
+            ocr_blocked_calls: bundle::blocked_sites(&status(sites)),
+            ..system()
+        };
+        let json = bundle::build_log_report(&inp).unwrap().manifest_json;
+        scuffed_types::stat_report::parse_bundle_manifest(json.as_bytes())
+            .expect("the site's validator takes the manifest");
+        let manifest: Value = serde_json::from_str(&json).unwrap();
+        manifest["system"]["ocr_blocked_calls"].clone()
+    };
+    let site = |key: &str, count: u64| (key.to_string(), count);
+
+    assert_eq!(sent(&[]), serde_json::json!({}), "nothing blocked");
+    assert_eq!(
+        sent(&[
+            site("detect/match_end.rs:1133 recognize_prepared", 7),
+            site("other.rs:1 recognize", 2)
+        ]),
+        serde_json::json!({
+            "detect/match_end.rs:1133 recognize_prepared": 7,
+            "other.rs:1 recognize": 2
+        })
+    );
+
+    // Keys the site refuses. Each alone would make the report a 400.
+    let over_long = format!("{}.rs:1 x", "a".repeat(OCR_BLOCKED_SITE_MAX_BYTES));
+    let refused = [
+        "/home/alice/github/scuffed-crew/crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+        "crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+        "PLAYER said hi",
+        "player",
+        "main.rs:0 recognize",
+        "",
+        over_long.as_str(),
+    ];
+    for key in refused {
+        assert!(!is_ocr_call_site(key), "{key:?}");
+        assert_eq!(
+            sent(&[site(key, 5), site("main.rs:1 recognize", 3)]),
+            serde_json::json!({ "main.rs:1 recognize": 3 }),
+            "{key:?} is left out and the rest goes"
+        );
+    }
+
+    // More than 64 sites, with the odd ones among them.
+    let mut many: Vec<(String, u64)> = (1..=100u64)
+        .map(|i| (format!("main.rs:{i} recognize"), 1000 - i))
+        .collect();
+    many.extend(refused.iter().map(|key| site(key, 5000)));
+    many.push(site("main.rs:7 recognize_cell", u64::from(u32::MAX) + 9));
+    many.push(site("detect/match_end.rs:1133 recognize_prepared", 4000));
+    many.push(site("detect/match_end.rs:1133 recognize_prepared", 500));
+    let capped = bundle::blocked_sites(&status(&many));
+    assert_eq!(capped.len(), bundle::OCR_BLOCKED_SITES_MAX);
+    assert_eq!(
+        capped[0],
+        ("main.rs:7 recognize_cell".to_string(), u32::MAX),
+        "a count above u32 is sent as the largest u32"
+    );
+    assert_eq!(
+        capped[1],
+        (
+            "detect/match_end.rs:1133 recognize_prepared".to_string(),
+            4500
+        ),
+        "the same key twice is one site"
+    );
+    assert_eq!(capped[2], ("main.rs:1 recognize".to_string(), 999));
+    assert_eq!(
+        capped[63],
+        ("main.rs:62 recognize".to_string(), 938),
+        "the 64 largest counts are kept"
+    );
+    assert!(capped.iter().all(|(key, _)| is_ocr_call_site(key)));
+    let map = sent(&many);
+    assert_eq!(
+        map.as_object().unwrap().len(),
+        bundle::OCR_BLOCKED_SITES_MAX
+    );
+    assert_eq!(map["main.rs:7 recognize_cell"], u32::MAX);
 }
 
 #[test]

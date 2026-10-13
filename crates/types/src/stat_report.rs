@@ -241,9 +241,10 @@ struct RawSystem {
     /// which means `on`. Present, it is not `null`.
     #[serde(default, deserialize_with = "present")]
     ocr: Option<String>,
-    /// Optional. OCR calls the tracker stopped while OCR was off, per call
-    /// site: a place in the tracker's source, never text read from a
-    /// screen. See [`check_ocr_blocked_calls`] for the bounds.
+    /// Optional, and only with `ocr` `off`. OCR calls the tracker stopped
+    /// while OCR was off, per call site: a place in the tracker's source,
+    /// never text read from a screen. See [`is_ocr_call_site`] for the
+    /// shape of a key and [`check_ocr_blocked_calls`] for the bounds.
     #[serde(default, deserialize_with = "present")]
     ocr_blocked_calls: Option<BTreeMap<String, u32>>,
     #[allow(dead_code)]
@@ -702,6 +703,10 @@ fn check_system(system: &RawSystem) -> Result<(), String> {
         pick("ocr", ocr, OCR_SETTINGS)?;
     }
     if let Some(blocked) = &system.ocr_blocked_calls {
+        // The counts are from a run with OCR off, so they come with it.
+        if system.ocr.as_deref() != Some("off") {
+            return Err("system.ocr_blocked_calls needs system.ocr off".into());
+        }
         check_ocr_blocked_calls(blocked)?;
     }
     pick("update_channel", &system.update_channel, UPDATE_CHANNELS)?;
@@ -715,29 +720,67 @@ fn check_system(system: &RawSystem) -> Result<(), String> {
     Ok(())
 }
 
-/// `system.ocr_blocked_calls`: at most [`OCR_BLOCKED_SITES_MAX`] entries.
-/// A key is a source location such as `detect/match_end.rs:1133
-/// recognize_prepared`: 1 to [`OCR_BLOCKED_SITE_MAX_BYTES`] bytes of ASCII
-/// letters, digits, `_`, `.`, `/`, `:`, `-` and single spaces, so it cannot
-/// carry a name, a home directory with other characters, or free text. A
-/// value is a count that fits a `u32` (the type already says so).
+/// `system.ocr_blocked_calls`: at most [`OCR_BLOCKED_SITES_MAX`] entries,
+/// every key a call site ([`is_ocr_call_site`]). A value is a count that
+/// fits a `u32` (the type already says so).
 fn check_ocr_blocked_calls(blocked: &BTreeMap<String, u32>) -> Result<(), String> {
     if blocked.len() > OCR_BLOCKED_SITES_MAX {
         return Err("system.ocr_blocked_calls names too many call sites".into());
     }
-    for site in blocked.keys() {
-        let ok_char = |c: char| c.is_ascii_alphanumeric() || "_./:- ".contains(c);
-        if site.is_empty()
-            || site.len() > OCR_BLOCKED_SITE_MAX_BYTES
-            || !site.chars().all(ok_char)
-            || site.starts_with(' ')
-            || site.ends_with(' ')
-            || site.contains("  ")
-        {
-            return Err("system.ocr_blocked_calls has a key that is not a call site".into());
-        }
+    if blocked.keys().any(|site| !is_ocr_call_site(site)) {
+        return Err("system.ocr_blocked_calls has a key that is not a call site".into());
     }
     Ok(())
+}
+
+/// True when `key` has the shape of a place in the tracker's source:
+/// `<path>.rs:<line>`, optionally followed by one space and the function
+/// that was called there. For example `detect/match_end.rs:1133
+/// recognize_prepared`.
+///
+/// - `<path>` is relative: segments of `a-z`, `0-9` and `_` joined by `/`.
+///   So no leading `/`, no `..`, no `~`, no drive letter and no `-`.
+/// - `<line>` is 1 to 6 digits and does not start with `0`.
+/// - The function is identifiers (`A-Z`, `a-z`, `0-9`, `_`, not starting
+///   with a digit) joined by `::`.
+/// - The whole key is at most [`OCR_BLOCKED_SITE_MAX_BYTES`] bytes.
+///
+/// The shape keeps an absolute path, a sentence and most names out. It
+/// cannot tell a folder name from a user name: `soot/main.rs:1` passes.
+/// The tracker uses the same function, so it never sends a key the site
+/// refuses.
+pub fn is_ocr_call_site(key: &str) -> bool {
+    if key.len() > OCR_BLOCKED_SITE_MAX_BYTES {
+        return false;
+    }
+    let (place, entry) = match key.split_once(' ') {
+        Some((place, entry)) => (place, Some(entry)),
+        None => (key, None),
+    };
+    let Some((path, line)) = place.rsplit_once(':') else {
+        return false;
+    };
+    let Some(stem) = path.strip_suffix(".rs") else {
+        return false;
+    };
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    let ident = |s: &str| {
+        let mut bytes = s.bytes();
+        bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    let line_ok = (1..=6).contains(&line.len())
+        && line.bytes().all(|b| b.is_ascii_digit())
+        && !line.starts_with('0');
+    stem.split('/').all(segment)
+        && line_ok
+        && entry.is_none_or(|entry| entry.split("::").all(ident))
 }
 
 /// In a report without a game, every read is the empty-read object:
@@ -1083,22 +1126,35 @@ mod tests {
         let sites = serde_json::json!({
             "detect/match_end.rs:1133 recognize_prepared": 2396,
             "main.rs:3966 recognize_scoreboard_cells_pre_cropped": 273,
-            "ocr/mod.rs:140 ocr_with": 0
+            "ocr/mod.rs:140 ocr_with": 0,
+            "tests/ocr_switch.rs:7 Reader::read_cells": 1,
+            "other.rs:1": u32::MAX
         });
         for ocr in OCR_SETTINGS {
             let mut v = sample_v2();
             v["system"]["ocr"] = serde_json::json!(ocr);
             parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} alone: {e}"));
-            v["system"]["ocr_blocked_calls"] = sites.clone();
-            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with call sites: {e}"));
-            v["system"]["ocr_blocked_calls"] = serde_json::json!({});
-            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with no call site: {e}"));
         }
-        // the counts without the setting, and at the type's edge
-        let mut alone = sample_v2();
-        alone["system"]["ocr_blocked_calls"] =
-            serde_json::json!({ "main.rs:1 recognize": u32::MAX });
-        parse(&alone).expect("call sites alone");
+        let mut off = sample_v2();
+        off["system"]["ocr"] = serde_json::json!("off");
+        off["system"]["ocr_blocked_calls"] = sites.clone();
+        parse(&off).expect("off with call sites");
+        off["system"]["ocr_blocked_calls"] = serde_json::json!({});
+        parse(&off).expect("off with no call site");
+
+        // The counts are from a run with OCR off: without `ocr`, or with
+        // `on`, a map is refused, a good one and an empty one alike.
+        for ocr in [None, Some("on")] {
+            for map in [sites.clone(), serde_json::json!({})] {
+                let mut v = sample_v2();
+                if let Some(ocr) = ocr {
+                    v["system"]["ocr"] = serde_json::json!(ocr);
+                }
+                v["system"]["ocr_blocked_calls"] = map.clone();
+                let err = parse(&v).unwrap_err();
+                assert!(err.contains("needs system.ocr off"), "{ocr:?} {map}: {err}");
+            }
+        }
 
         for bad in ["OFF", "no", ""] {
             let mut v = sample_v2();
@@ -1125,6 +1181,10 @@ mod tests {
             ),
             (
                 "ocr_blocked_calls",
+                serde_json::json!({ "main.rs:1 recognize": 1.0 }),
+            ),
+            (
+                "ocr_blocked_calls",
                 serde_json::json!({ "main.rs:1 recognize": "3" }),
             ),
             (
@@ -1133,6 +1193,7 @@ mod tests {
             ),
         ] {
             let mut v = sample_v2();
+            v["system"]["ocr"] = serde_json::json!("off");
             v["system"][key] = bad.clone();
             assert!(
                 parse(&v).unwrap_err().contains("schema"),
@@ -1141,43 +1202,124 @@ mod tests {
         }
     }
 
-    /// The call-site map is bounded: how many sites, how long a key is, and
-    /// which characters it may hold.
+    /// The call-site map is bounded: how many sites it names, and the shape
+    /// of a key. A key is a place in the tracker's source, so a name, a
+    /// sentence, an absolute path and a host are each refused.
     #[test]
     fn system_ocr_blocked_calls_is_bounded() {
-        let with = |sites: serde_json::Value| {
+        let with = |ocr: Option<&str>, sites: serde_json::Value| {
             let mut v = sample_v2();
-            v["system"]["ocr"] = serde_json::json!("off");
+            if let Some(ocr) = ocr {
+                v["system"]["ocr"] = serde_json::json!(ocr);
+            }
             v["system"]["ocr_blocked_calls"] = sites;
             parse(&v)
         };
         let many = |n: usize| {
-            let map: serde_json::Map<String, serde_json::Value> = (0..n)
+            let map: serde_json::Map<String, serde_json::Value> = (1..=n)
                 .map(|i| (format!("main.rs:{i} recognize"), serde_json::json!(1)))
                 .collect();
             serde_json::Value::Object(map)
         };
-        with(many(OCR_BLOCKED_SITES_MAX)).expect("the cap itself is allowed");
-        let err = with(many(OCR_BLOCKED_SITES_MAX + 1)).unwrap_err();
+        with(Some("off"), many(OCR_BLOCKED_SITES_MAX)).expect("the cap itself is allowed");
+        let err = with(Some("off"), many(OCR_BLOCKED_SITES_MAX + 1)).unwrap_err();
         assert!(err.contains("too many call sites"), "{err}");
 
-        let key = |k: &str| with(serde_json::json!({ k: 1 }));
-        key(&"a".repeat(OCR_BLOCKED_SITE_MAX_BYTES)).expect("the longest key");
-        for bad in [
-            "a".repeat(OCR_BLOCKED_SITE_MAX_BYTES + 1),
-            String::new(),
-            " main.rs:1 recognize".into(),
-            "main.rs:1 recognize ".into(),
-            "main.rs:1  recognize".into(),
-            "main.rs:1\nrecognize".into(),
-            "main.rs:1\trecognize".into(),
-            "/home/m\u{00fc}ller/main.rs:1 recognize".into(),
-            "name=PLAYER#1234".into(),
-            "a\"b".into(),
-            "C:\\Users\\x\\main.rs:1".into(),
+        let tail = ".rs:1 x";
+        let longest = format!(
+            "{}{tail}",
+            "a".repeat(OCR_BLOCKED_SITE_MAX_BYTES - tail.len())
+        );
+        assert_eq!(longest.len(), OCR_BLOCKED_SITE_MAX_BYTES);
+        for good in [
+            longest.as_str(),
+            "main.rs:1",
+            "main.rs:999999 recognize",
+            "a/b_2/c9.rs:10 Reader::read_cells",
+            "detect/match_end.rs:1133 _x9",
+            "tests/ocr_switch.rs:7 A::b::C",
         ] {
-            let err = key(&bad).unwrap_err();
+            assert!(is_ocr_call_site(good), "{good:?}");
+            with(Some("off"), serde_json::json!({ good: 1 }))
+                .unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
+
+        let mut refused: Vec<String> = [
+            // too long, empty
+            format!("a{longest}").as_str(),
+            "",
+            // a name, a sentence, a host
+            "xXFrozenTearXx",
+            "player",
+            "PLAYER said hi",
+            "my battletag is soot-1234 on eu",
+            "192.168.1.20:3030",
+            "desktop-ab12cd.lan",
+            "name=PLAYER#1234",
+            // a path that is not relative to the tracker's source
+            "/home/alice/x.rs:12",
+            "/home/alice/github/scuffed-crew/crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+            "crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+            "C:/Users/Alice/main.rs:1",
+            "c:/users/alice/main.rs:1",
+            "C:\\Users\\x\\main.rs:1",
+            "../../etc/passwd",
+            "../main.rs:1 x",
+            "./main.rs:1 x",
+            "~/main.rs:1 x",
+            "a//b.rs:1 x",
+            "/main.rs:1 x",
+            "main.rs/:1 x",
+            "Main.rs:1 x",
+            "main.txt:1 x",
+            ".rs:1 x",
+            "/home/m\u{00fc}ller/main.rs:1 recognize",
+            "m\u{00fc}.rs:1 x",
+            // the line
+            "main.rs",
+            "main.rs recognize",
+            "main.rs:",
+            "main.rs: x",
+            "main.rs:0 x",
+            "main.rs:01 x",
+            "main.rs:1234567 x",
+            "main.rs:1x x",
+            "main.rs:-1 x",
+            // the function, and the one space before it
+            "main.rs:1 ",
+            " main.rs:1 x",
+            "main.rs:1  x",
+            "main.rs:1 x ",
+            "main.rs:1 x y",
+            "main.rs:1\nx",
+            "main.rs:1\tx",
+            "main.rs:1 9x",
+            "main.rs:1 a:b",
+            "main.rs:1 a::",
+            "main.rs:1 ::a",
+            "main.rs:1 a.b",
+            "main.rs:1 \u{00fc}",
+            "a\"b",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // 96 letters, and one character that is not in the shape, alone, in
+        // the path and in the function
+        refused.push("a".repeat(OCR_BLOCKED_SITE_MAX_BYTES));
+        for c in "#=!@~-. %$\\'+?*,;()[]{}<>|&^`\"".chars() {
+            refused.push(format!("a{c}b.rs:1 x"));
+            refused.push(format!("main.rs:1 a{c}b"));
+        }
+        for bad in &refused {
+            assert!(!is_ocr_call_site(bad), "{bad:?}");
+            let err = with(Some("off"), serde_json::json!({ bad.as_str(): 1 })).unwrap_err();
             assert!(err.contains("not a call site"), "{bad:?}: {err}");
+            // and never accepted because `ocr` is not `off`
+            for ocr in [None, Some("on")] {
+                with(ocr, serde_json::json!({ bad.as_str(): 1 }))
+                    .expect_err("a bad key without ocr off");
+            }
         }
     }
 

@@ -2344,7 +2344,7 @@ async fn system_ocr_switch_keys_store_and_an_oversized_call_site_map_is_400() {
     let sites = |n: usize| -> Value {
         Value::Object(
             (0..n)
-                .map(|i| (format!("main.rs:{i} recognize"), json!(1)))
+                .map(|i| (format!("main.rs:{} recognize", i + 1), json!(1)))
                 .collect(),
         )
     };
@@ -2359,11 +2359,18 @@ async fn system_ocr_switch_keys_store_and_an_oversized_call_site_map_is_400() {
         ),
         (
             "a key longer than the cap",
-            json!({ "a".repeat(scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES + 1): 1 }),
+            json!({
+                format!(
+                    "{}.rs:1 x",
+                    "a".repeat(scuffed_types::stat_report::OCR_BLOCKED_SITE_MAX_BYTES)
+                ): 1
+            }),
         ),
+        ("a key that is a sentence", json!({ "PLAYER said hi": 1 })),
+        ("a key that is a name", json!({ "player": 1 })),
         (
-            "a key that is free text",
-            json!({ "PLAYER#1234 said hi!": 1 }),
+            "a key that is an absolute path",
+            json!({ "/home/alice/src/main.rs:3966 recognize_prepared": 1 }),
         ),
         ("a negative count", json!({ "main.rs:1 recognize": -1 })),
         (
@@ -2380,6 +2387,16 @@ async fn system_ocr_switch_keys_store_and_an_oversized_call_site_map_is_400() {
     word["ocr"] = json!("maybe");
     let (status, _) = post(word).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "an unknown ocr word");
+    // the counts are from a run with OCR off
+    for (what, ocr) in [("no ocr key", None), ("ocr on", Some("on"))] {
+        let mut system = system_block();
+        if let Some(ocr) = ocr {
+            system["ocr"] = json!(ocr);
+        }
+        system["ocr_blocked_calls"] = json!({ "main.rs:1 recognize": 1 });
+        let (status, _) = post(system).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "call sites with {what}");
+    }
     assert_eq!(
         zip_count(&h.reports_dir),
         4,
