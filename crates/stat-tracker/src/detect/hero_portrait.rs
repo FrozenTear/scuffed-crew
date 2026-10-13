@@ -173,6 +173,34 @@ pub fn resolve_player_row(
 /// measures the mean of background-range pixels [15, 90], filtering out both deep
 /// shadows and bright icon/title-text outliers.
 fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Option<usize> {
+    highlighted_row(&team1_row_brightness(scoreboard, team_size))
+}
+
+/// The highlighted row ([`resolve_player_row`]'s own rule) and how far its
+/// background leads the next brightest team 1 row's (`brightest / next`).
+/// The own-row seeding gate ([`crate::detect::own_row`]) needs the lead: a
+/// cursor hover or a party tint lights a second row. A board with one
+/// measurable row has no lead (`f64::INFINITY`).
+pub fn player_row_highlight(scoreboard: &DynamicImage, team_size: usize) -> Option<(usize, f64)> {
+    let brightnesses = team1_row_brightness(scoreboard, team_size);
+    let row = highlighted_row(&brightnesses)?;
+    let top = brightnesses.iter().find(|(r, _)| *r == row)?.1;
+    let next = brightnesses
+        .iter()
+        .filter(|(r, _)| *r != row)
+        .map(|(_, b)| *b)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let lead = if next > 0.0 {
+        top / next
+    } else {
+        f64::INFINITY
+    };
+    Some((row, lead))
+}
+
+/// Mean background brightness of each team 1 row that has enough background
+/// pixels to measure, as `(row, brightness)`.
+fn team1_row_brightness(scoreboard: &DynamicImage, team_size: usize) -> Vec<(usize, f64)> {
     let mut brightnesses: Vec<(usize, f64)> = Vec::new();
 
     for row in 0..team_size {
@@ -213,7 +241,11 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
 
         brightnesses.push((row, total as f64 / count as f64));
     }
+    brightnesses
+}
 
+/// The row whose background is more than 12% brighter than the rows' mean.
+fn highlighted_row(brightnesses: &[(usize, f64)]) -> Option<usize> {
     if brightnesses.is_empty() {
         return None;
     }
@@ -2155,6 +2187,36 @@ mod player_row_fallback_tests {
             }
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    /// alpha.7 O9: the own-row seeding gate needs how far the highlighted
+    /// row leads the next brightest one. The row is `resolve_player_row`'s.
+    #[test]
+    fn the_highlight_reports_its_lead_over_the_next_brightest_row() {
+        let board = board_with_highlight(2);
+        let (row, lead) = super::player_row_highlight(&board, 5).expect("highlight");
+        assert_eq!(Some(row), resolve_player_row(None, &board, 5));
+        assert_eq!(row, 2);
+        assert!((lead - 62.0 / 40.0).abs() < 0.01, "lead {lead}");
+        // A second lit row (a cursor hover): the same row, a small lead.
+        let mut two = board.to_rgb8();
+        let slot = crate::ocr::preprocess::row_slot_height(900, 5);
+        let top = (900.0 * 0.025) as u32 + 4 * slot;
+        for y in top..top + slot {
+            for x in 0..1600 {
+                two.put_pixel(x, y, Rgb([58, 58, 58]));
+            }
+        }
+        let two = DynamicImage::ImageRgb8(two);
+        let (row, lead) = super::player_row_highlight(&two, 5).expect("highlight");
+        assert_eq!(Some(row), resolve_player_row(None, &two, 5));
+        assert_eq!(row, 2);
+        assert!((lead - 62.0 / 58.0).abs() < 0.01, "lead {lead}");
+        assert!(lead < crate::detect::own_row::SEED_HIGHLIGHT_LEAD);
+        // No lit row: no highlight, as before.
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(1600, 900, Rgb([40, 40, 40])));
+        assert_eq!(super::player_row_highlight(&flat, 5), None);
+        assert_eq!(resolve_player_row(None, &flat, 5), None);
     }
 
     #[test]

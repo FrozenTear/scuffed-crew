@@ -7,6 +7,7 @@
 #   scuffed-stat-tracker-uninstall [--purge] [--yes]
 #
 #   --purge   also delete saved games and settings
+#             (the saved crops of your own name are deleted either way)
 #   --yes     do not ask (keeps saved games unless --purge)
 #
 # Removes the files the installer recorded. It does not guess by name.
@@ -73,7 +74,7 @@ for arg in "$@"; do
         --purge) PURGE=1 ;;
         --yes|-y) ASSUME_YES=1 ;;
         -h|--help)
-            sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+            sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
             exit 0
             ;;
         *)
@@ -365,6 +366,33 @@ DESKTOP_DIR="$(dirname "$(require_path "desktop entry" desktop scuffed-stat-trac
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 fi
+
+# The crops of your own in-game name (`reader = "new"` keeps them to find
+# your row) never outlive the program: they go with or without --purge.
+# A link on the way is not followed. Other files in private/ stay.
+remove_own_name_seed() {
+    local d="$1" private seed resolved
+    private="$d/private"
+    seed="$private/own-name"
+    [[ -e "$seed" || -L "$seed" ]] || return 0
+    if [[ -L "$d" || -L "$private" || -L "$seed" || ! -d "$seed" ]]; then
+        warn "not removing $seed (a link, not a folder; delete it by hand)"
+        return 0
+    fi
+    resolved=""
+    if ! resolved="$(confine_file "$seed")"; then
+        warn "not removing $seed (outside your home folder and the install folder; delete it by hand)"
+        return 0
+    fi
+    # A failure here must not stop the uninstall before --purge runs.
+    if ! rm -rf -- "$resolved"; then
+        warn "could not remove $seed (delete it by hand)"
+        return 0
+    fi
+    rmdir -- "$(dirname "$resolved")" 2>/dev/null || true
+    info "Removed the saved crops of your own name."
+}
+remove_own_name_seed "$DATA_DIR"
 
 if [[ $PURGE -eq 0 && $ASSUME_YES -eq 0 && -t 0 && -t 2 ]]; then
     reply=""
