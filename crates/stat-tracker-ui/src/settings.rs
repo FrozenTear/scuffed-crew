@@ -944,6 +944,11 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
     !locked
 }
 
+/// Help under "Save debug images from each capture". The accepted and
+/// rejected scoreboard frames are not blanked, so it says whose names they
+/// show and where they stay.
+const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture — leave off unless diagnosing.";
+
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
         checkbox(app.settings.debug_ocr)
@@ -952,7 +957,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        text("Writes Tab crops plus poll Victory/Defeat evidence frames (not every tick). Slows capture — leave off unless diagnosing.")
+        text(DEBUG_IMAGES_HELP)
             .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
@@ -1232,6 +1237,18 @@ fn checkbox_style(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_images_help_names_the_scoreboard_frames_and_where_they_stay() {
+        // R2 on #244: the setting also saves unblanked scoreboard frames.
+        for part in [
+            "accepted and rejected scoreboard frames",
+            "other players' names",
+            "stay on this PC only",
+        ] {
+            assert!(super::DEBUG_IMAGES_HELP.contains(part), "{part}");
+        }
+    }
+
     use super::*;
     use std::path::PathBuf;
 

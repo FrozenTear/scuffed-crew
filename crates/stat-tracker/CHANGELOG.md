@@ -15,6 +15,41 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.6
+
+This alpha lets you report a game the tracker got wrong, with a picture of the scoreboard in which every player name is blanked before the picture is saved.
+
+### Highlights
+
+- Report this game is on each game card that has a saved scoreboard. Pick what was wrong (stats, hero, map, mode or result), look at the pictures and the list of files that would be sent, then Send it or Save the zip. A game the tracker never recorded can be reported as Missed game from Report a problem, with no pictures. After you fix a game's result, stats or hero, the message offers Send this fix to help training, which opens the report with training ticked; you can untick it before you send.
+- An update now restarts the tracker service if it is running, so the new version is the one that runs. A game in progress at that moment is not kept.
+- Only one copy of the app runs: opening it again brings up the window you already have (#241). Coming from alpha.5: when the update has finished, quit the app (from its tray icon, if it has one) and open it again, because the alpha.5 app cannot restart itself into the new version.
+- On 5v5, your own row is now also found by your name during the match, with or without perk icons, not only by the highlight (#239).
+
+Game reports (#235, #236, #238, #246). While a game is captured, the tracker keeps a report kit for it on this PC: the newest accepted scoreboard of the game, blanked when it is captured, the result word from the competitive rank screen, and the values the tracker read from that scoreboard. The kits of the last 20 games are kept, in folders only your user can open. On the scoreboard only the digits are copied; names, titles, badges, icons, chat and everything around the table are filled with a flat colour. Hero portraits are filled too in this alpha; alpha.7 plans to bring them back, pasted from the game's own portrait art instead of copied from the screen. Only 6v6 boards at 1440p and 1080p are kept; a 5v5 game or another resolution gets no scoreboard and can be reported only as Missed game. A kit that does not match its blanking checks is never put in a report. Training is off unless you tick the box or open the report from Send this fix to help training. Your fixes to the result, stats or hero go into the report as corrections next to the original reads, which stay unchanged. A map fix is not carried yet.
+
+Other changes:
+
+- The debug folders `debug/accepted` and `debug/rejected` are written only while Settings → Save debug images from each capture is on (or `debug_ocr` in config.toml). They hold full scoreboards with other players' names and stay on this PC. Existing folders are left alone; if one is there, the log says once at start that it is no longer written (#244).
+- Restart now starts the app the update installed. An app opened while an update is installing never closes the running app in the middle of the install (#241, #245).
+- The tracker turns off core dumps when it starts, so a crash never writes a memory image that could hold a scoreboard (#245).
+- What's new shows its text without `**` and backtick marks (#241).
+- Hero portraits learned for heroes with accents or punctuation in their names (Soldier: 76, Torbjörn, D.Va, Lúcio) are saved under plain names. Files alpha.5 saved under the old names are moved aside, never deleted (#243).
+- Two OCR calls that ran on every end-of-match nameplate and whose result was thrown away are gone (#243).
+- The release build stops instead of hanging when a package mirror does not answer (#241).
+
+The readers are unchanged: the tracker still uses classic OCR for saved stats unless `reader = "new"` is set. A switch to read without OCR is planned for a later alpha, and its default will be decided by measurement.
+
+Stable installs are not offered this alpha. The desktop app skips it until Settings → Get alpha updates is on (or config.toml has `update_channel = "prerelease"`). bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.6/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.6 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.5
 
 This alpha adds a Report a problem button that sends the tracker log to the site, and keeps your scoreboard row when the hero portrait cannot be matched.

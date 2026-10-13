@@ -144,6 +144,17 @@ fn toast_after_dismiss() -> Option<String> {
     None
 }
 
+/// R2-1 on #241: true when this Tick should act on a quit request. While an
+/// in-app update runs, the installer's stdout and stderr are pipes to this
+/// process; quitting would close them and kill the installer with SIGPIPE
+/// on its next line, mid-install. So the request is not even polled then:
+/// it stays pending and fires on the first Tick after the update ends, if
+/// the replacing launch is still waiting. A launch that gave up removed the
+/// request and asked this GUI to show instead.
+fn quit_request_due(progress: &UpdateProgress, poll: impl FnOnce() -> bool) -> bool {
+    !matches!(progress, UpdateProgress::Running) && poll()
+}
+
 /// A toast that is not the training prompt. Replacing the text drops the
 /// action, so "Send this fix" cannot sit on a later message.
 fn show_plain_toast(toast: &mut Option<String>, action: &mut Option<Message>, text: String) {
@@ -793,6 +804,9 @@ impl TrackerApp {
                     self.expanded = Some(sid);
                     self.editing = false;
                     self.confirm_delete = None;
+                    // The card's Report button reads this set. Refresh it
+                    // here so a kit written after the last snapshot is visible.
+                    self.refresh_kit_sessions();
                 }
                 Task::none()
             }
@@ -1449,15 +1463,20 @@ impl TrackerApp {
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
                 Task::none()
             }
-            Message::RestartGui => match crate::instance::spawn_replacement() {
-                Ok(()) => self.apply_tray(TrayAction::Quit),
-                Err(e) => {
-                    self.replace_toast(format!(
+            Message::RestartGui => {
+                match crate::instance::spawn_replacement(Some(&match &self.update_plan {
+                    UpdatePlan::Ready { prefix, .. } => prefix.clone(),
+                    UpdatePlan::Blocked { .. } => update::default_install_prefix(),
+                })) {
+                    Ok(()) => self.apply_tray(TrayAction::Quit),
+                    Err(e) => {
+                        self.replace_toast(format!(
                         "Could not start the new version ({e}). Quit Stat Tracker and start it again."
                     ));
-                    Task::none()
+                        Task::none()
+                    }
                 }
-            },
+            }
             Message::WindowOpened(id) => {
                 self.window_id = Some(id);
                 window::gain_focus(id)
@@ -1544,19 +1563,9 @@ impl TrackerApp {
     }
 
     /// Start a build for the dialog's current inputs. A result for an older
-    /// generation is dropped when it lands.
+    /// generation is dropped when it lands. A game report loads its kit
+    /// inside `build_game`; this function does not read crop bytes.
     fn rebuild_report(&mut self) -> Task<Message> {
-        if matches!(
-            &self.report,
-            Some(crate::report::ReportUi::Dialog(dialog)) if dialog.is_game()
-        ) {
-            if let Some(dialog) = self.report_dialog_mut() {
-                dialog.text_edited_at = None;
-                dialog.building = None;
-                dialog.built = None;
-            }
-            return Task::none();
-        }
         let mut config = self.saved_config.clone();
         config.data_dir = self.data_dir.clone();
         let capture_backend = self.backend.unwrap_or(CaptureBackend::None);
@@ -1564,8 +1573,22 @@ impl TrackerApp {
             return Task::none();
         };
         dialog.text_edited_at = None;
+        dialog.kit_images.clear();
         let generation = dialog.bump();
         dialog.building = Some(generation);
+        if let Some(category) = dialog.game_category {
+            let req = crate::report::GameBuildRequest {
+                config,
+                session_id: dialog.game_session.clone().unwrap_or_default(),
+                category,
+                text: dialog.text.clone(),
+                training: dialog.training,
+                capture_backend,
+            };
+            return Task::perform(crate::report::build_game(req), move |result| {
+                Message::Report(crate::report::ReportMessage::Built(generation, result))
+            });
+        }
         let req = crate::report::BuildRequest {
             config,
             category: dialog.category,
@@ -1580,7 +1603,9 @@ impl TrackerApp {
     }
 
     fn on_report(&mut self, message: crate::report::ReportMessage) -> Task<Message> {
-        use crate::report::{ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState};
+        use crate::report::{
+            GameReportCategory, ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState,
+        };
         match message {
             ReportMessage::Open(category) => {
                 if self.report_dialog_mut().is_some_and(|d| d.busy()) {
@@ -1599,28 +1624,31 @@ impl TrackerApp {
                 training,
                 choices,
             } => {
-                if self.report_dialog_mut().is_some_and(|d| {
-                    d.busy() || (!d.is_game() && !d.sent() && !d.text.trim().is_empty())
-                }) {
+                if self.report_dialog_mut().is_some_and(|d| d.busy()) {
                     return Task::none();
                 }
+                if self
+                    .report_dialog_mut()
+                    .is_some_and(|d| !d.is_game() && !d.sent() && !d.text.trim().is_empty())
+                {
+                    self.replace_toast("Finish or close the open report first.");
+                    return Task::none();
+                }
+                self.refresh_kit_sessions();
                 let linked = self.saved_config.sync.is_some();
                 let mut dialog = ReportDialog::new(LogOnlyCategory::Other, linked);
                 dialog.game_category = Some(category);
-                dialog.game_session = session_id.clone();
+                dialog.game_session = session_id;
                 dialog.training = training;
                 dialog.game_choices = if choices.is_empty() {
                     self.game_choices()
                 } else {
                     choices
                 };
-                if let Some(session_id) = &session_id {
-                    dialog.kit_images = crate::report::load_kit_images(&self.data_dir, session_id);
-                }
                 self.report = Some(ReportUi::Dialog(Box::new(dialog)));
                 self.toast = None;
                 self.toast_action = None;
-                Task::none()
+                self.rebuild_report()
             }
             ReportMessage::CrashYes => {
                 let linked = self.saved_config.sync.is_some();
@@ -1658,19 +1686,6 @@ impl TrackerApp {
             }
             ReportMessage::GameCategory(category) => {
                 let choices = self.game_choices();
-                let session = self
-                    .report_dialog_mut()
-                    .and_then(|dialog| dialog.game_session.clone());
-                let images = if category.allows_missing_kit() {
-                    Vec::new()
-                } else {
-                    session
-                        .as_deref()
-                        .map(|session_id| {
-                            crate::report::load_kit_images(&self.data_dir, session_id)
-                        })
-                        .unwrap_or_default()
-                };
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };
@@ -1684,11 +1699,10 @@ impl TrackerApp {
                 if category.allows_missing_kit() {
                     dialog.game_session = None;
                 }
-                dialog.kit_images = images;
+                dialog.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::PickGame(session_id) => {
-                let images = crate::report::load_kit_images(&self.data_dir, &session_id);
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
@@ -1696,7 +1710,7 @@ impl TrackerApp {
                     return Task::none();
                 }
                 d.game_session = Some(session_id);
-                d.kit_images = images;
+                d.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::ToggleImageScale => {
@@ -1735,6 +1749,10 @@ impl TrackerApp {
                 {
                     d.building = None;
                     if d.generation == generation {
+                        d.kit_images = match (&result, d.is_game()) {
+                            (Ok(zip), true) => crate::report::kit_images_from_zip(zip),
+                            _ => Vec::new(),
+                        };
                         d.built = Some(result);
                     }
                 }
@@ -2072,7 +2090,9 @@ impl TrackerApp {
             return self.apply_tray(action);
         }
 
-        if crate::instance::consume_quit(&self.data_dir) {
+        if quit_request_due(&self.update_progress, || {
+            crate::instance::consume_quit(&self.data_dir)
+        }) {
             tracing::info!("a newer tracker GUI asked this one to quit");
             return self.apply_tray(TrayAction::Quit);
         }
@@ -2859,6 +2879,31 @@ token = \"secret-token-must-stay\"
         let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
         assert_eq!(app.toast.as_deref(), Some("restarted"));
         assert!(app.toast_action.is_none());
+    }
+
+    #[test]
+    fn a_running_update_leaves_the_quit_request_unpolled() {
+        use crate::update::UpdateProgress;
+        let polled = std::cell::Cell::new(0);
+        let poll = || {
+            polled.set(polled.get() + 1);
+            true
+        };
+        assert!(!super::quit_request_due(&UpdateProgress::Running, poll));
+        assert_eq!(
+            polled.get(),
+            0,
+            "a running update must not consume the request"
+        );
+        for done in [
+            UpdateProgress::Idle,
+            UpdateProgress::Succeeded("ok".into()),
+            UpdateProgress::Failed("no".into()),
+        ] {
+            assert!(super::quit_request_due(&done, poll), "{done:?}");
+        }
+        assert_eq!(polled.get(), 3);
+        assert!(!super::quit_request_due(&UpdateProgress::Idle, || false));
     }
 
     #[test]

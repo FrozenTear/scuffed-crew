@@ -12,7 +12,14 @@
 //!   waits a few seconds for the lock.
 //!
 //! The running GUI polls both files on its Tick. `show_window` runs the tray
-//! "Show" path and `quit_window` runs the tray "Quit" path.
+//! "Show" path and `quit_window` runs the tray "Quit" path. While an in-app
+//! update runs, the GUI leaves `quit_window` unpolled: the installer writes
+//! to pipes this process holds, and quitting would kill it with SIGPIPE.
+//!
+//! A replacing launch removes `quit_window` once its wait ends, whether it
+//! got the lock or not, and a new primary removes both request files left
+//! by an earlier session. So a stale request never fires, even after the
+//! wall clock steps back past its mtime.
 //!
 //! The kernel drops a `flock` when the holder dies, including on SIGKILL or
 //! a crash, so a stale lock file never blocks a launch. Any error while
@@ -27,6 +34,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const LOCK_FILE: &str = "scuffed-stat-tracker-gui.lock";
+/// The GUI binary under `<prefix>/bin`, as `install.sh` installs it.
+pub const GUI_BIN: &str = "stat-tracker-gui";
 pub const SHOW_FILE: &str = "show_window";
 pub const QUIT_FILE: &str = "quit_window";
 
@@ -95,7 +104,45 @@ pub fn claim(lock_path: &Path, version: &str) -> io::Result<Claim> {
     }
 }
 
+/// The launch decision for `main`: take the lock, or replace an older
+/// holder (`replace` is `--replace` from "Restart now"), or report
+/// [`Claim::Secondary`] so the caller asks the holder to show. A new primary
+/// removes request files left by an earlier session.
+pub fn claim_session(
+    lock_path: &Path,
+    data_dir: &Path,
+    version: &str,
+    replace: bool,
+    proc_root: &Path,
+    wait: Duration,
+) -> io::Result<Claim> {
+    let claimed = match claim(lock_path, version)? {
+        Claim::Secondary => {
+            // Replace the running GUI on "Restart now" or when it is an
+            // older binary (left over from an update). Otherwise the caller
+            // just brings its window up.
+            let older = read_holder(lock_path)
+                .is_some_and(|holder| holder_is_older(&holder, version, proc_root));
+            if replace || older {
+                tracing::info!(lock = %lock_path.display(), older, "replacing the running tracker GUI");
+                claim_replacing(lock_path, data_dir, version, wait)?
+            } else {
+                Claim::Secondary
+            }
+        }
+        primary => primary,
+    };
+    if matches!(claimed, Claim::Primary(_)) {
+        clear_stale_requests(data_dir);
+    }
+    Ok(claimed)
+}
+
 /// Ask the holder to quit, then retry [`claim`] until `wait` runs out.
+/// The quit request is removed when the wait ends, with or without the
+/// lock: this launch is the only one that needed it. Left behind, it would
+/// make a holder that answers late quit with no GUI to follow it, or make a
+/// later GUI quit after the wall clock stepped back past its mtime.
 pub fn claim_replacing(
     lock_path: &Path,
     data_dir: &Path,
@@ -104,12 +151,30 @@ pub fn claim_replacing(
 ) -> io::Result<Claim> {
     request_quit(data_dir)?;
     let start = Instant::now();
-    loop {
-        match claim(lock_path, version)? {
-            Claim::Secondary if start.elapsed() < wait => {
+    let claimed = loop {
+        match claim(lock_path, version) {
+            Ok(Claim::Secondary) if start.elapsed() < wait => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            other => return Ok(other),
+            other => break other,
+        }
+    };
+    let _ = std::fs::remove_file(quit_path(data_dir));
+    claimed
+}
+
+/// Remove `show_window` and `quit_window`. A new primary calls this right
+/// after taking the lock, so any request file it sees later was written for
+/// it, whatever the wall clock did since. Best effort: a file that cannot be
+/// removed is still filtered by its mtime ([`RequestWatch`]).
+pub fn clear_stale_requests(data_dir: &Path) {
+    for path in [show_path(data_dir), quit_path(data_dir)] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "could not remove a stale GUI request");
+            }
         }
     }
 }
@@ -153,10 +218,27 @@ pub fn relaunch_path(current_exe: &Path) -> PathBuf {
     }
 }
 
+/// Binary for "Restart now": `<install_prefix>/bin/stat-tracker-gui`, the
+/// file the update just installed, when it exists. Otherwise (no prefix, no
+/// file there) the running binary's path, as [`relaunch_path`] gives it.
+/// The two differ when `STAT_TRACKER_PREFIX` points elsewhere or this GUI
+/// runs from outside a `bin/` directory.
+pub fn relaunch_target(install_prefix: Option<&Path>, current_exe: &Path) -> PathBuf {
+    let running = relaunch_path(current_exe);
+    if let Some(prefix) = install_prefix {
+        let installed = prefix.join("bin").join(GUI_BIN);
+        if installed != running && installed.is_file() {
+            return installed;
+        }
+    }
+    running
+}
+
 /// Start the installed GUI binary with this process's arguments plus
 /// `--replace`, so it waits for this process to exit and takes the lock.
-pub fn spawn_replacement() -> io::Result<()> {
-    let exe = relaunch_path(&std::env::current_exe()?);
+/// `install_prefix` is the prefix the in-app update installed to.
+pub fn spawn_replacement(install_prefix: Option<&Path>) -> io::Result<()> {
+    let exe = relaunch_target(install_prefix, &std::env::current_exe()?);
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if !args.iter().any(|a| a == "--replace") {
         args.push("--replace".into());
@@ -403,6 +485,10 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(status.success(), "holder exited cleanly: {status:?}");
         assert_eq!(read_holder(&path).unwrap().pid, std::process::id());
+        assert!(
+            !quit_path(dir.path()).exists(),
+            "R2-2: the request is removed once the replace succeeded"
+        );
     }
 
     #[test]
@@ -412,8 +498,98 @@ mod tests {
         let mut child = spawn_holder(&path, "sleep");
         let got = claim_replacing(&path, dir.path(), "1.0.0", Duration::from_millis(300)).unwrap();
         assert!(matches!(got, Claim::Secondary));
+        assert!(
+            !quit_path(dir.path()).exists(),
+            "R2-2: a launch that gave up takes its request back, so the holder does not quit later with no GUI to follow"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_new_primary_ignores_requests_from_before_a_clock_step() {
+        // R2-2: request files left by an earlier session, with mtimes an
+        // hour "ahead" because the wall clock stepped back since.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let ahead = SystemTime::now() + Duration::from_secs(3600);
+        for stale in [quit_path(dir.path()), show_path(dir.path())] {
+            std::fs::write(&stale, b"").unwrap();
+            File::options()
+                .write(true)
+                .open(&stale)
+                .unwrap()
+                .set_modified(ahead)
+                .unwrap();
+        }
+        let now = SystemTime::now();
+        assert!(
+            RequestWatch::new(quit_path(dir.path()), now).poll(),
+            "precondition: by mtime alone the stale request would fire"
+        );
+        let got = claim_session(
+            &path,
+            dir.path(),
+            "1.0.0",
+            false,
+            Path::new("/nonexistent-proc"),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        assert!(matches!(got, Claim::Primary(_)));
+        let mut quit = RequestWatch::new(quit_path(dir.path()), now);
+        let mut show = RequestWatch::new(show_path(dir.path()), now);
+        assert!(!quit.poll(), "a stale quit request must not fire");
+        assert!(!show.poll(), "a stale show request must not fire");
+        std::thread::sleep(Duration::from_millis(20));
+        request_quit(dir.path()).unwrap();
+        assert!(quit.poll(), "a request written after the claim still fires");
+    }
+
+    #[test]
+    fn a_same_version_launch_only_shows_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let mut child = spawn_holder(&path, "quit");
+        let got = claim_session(
+            &path,
+            dir.path(),
+            "0.5.0-alpha.5.1",
+            false,
+            Path::new("/nonexistent-proc"),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        assert!(matches!(got, Claim::Secondary));
+        assert!(!quit_path(dir.path()).exists(), "no quit request was sent");
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn restart_starts_the_binary_the_update_installed() {
+        // R2-3: the update installs to `<prefix>/bin/stat-tracker-gui`.
+        let prefix = tempfile::tempdir().unwrap();
+        let installed = prefix.path().join("bin").join(GUI_BIN);
+        let elsewhere = Path::new("/opt/dev/target/release/stat-tracker-gui (deleted)");
+        assert_eq!(
+            relaunch_target(Some(prefix.path()), elsewhere),
+            Path::new("/opt/dev/target/release/stat-tracker-gui"),
+            "no file at the prefix: fall back to the running binary"
+        );
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"#!/bin/sh\n").unwrap();
+        assert_eq!(relaunch_target(Some(prefix.path()), elsewhere), installed);
+        let running = PathBuf::from(format!("{} (deleted)", installed.display()));
+        assert_eq!(
+            relaunch_target(Some(prefix.path()), &running),
+            installed,
+            "same file: the running path, without the suffix"
+        );
+        assert_eq!(
+            relaunch_target(None, elsewhere),
+            Path::new("/opt/dev/target/release/stat-tracker-gui")
+        );
     }
 
     #[test]

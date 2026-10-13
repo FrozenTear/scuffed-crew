@@ -363,6 +363,8 @@ fn package_version() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     lock_down_umask();
+    // No core file, also when the GUI starts the daemon outside systemd.
+    let core_dumps = stat_tracker::fs_mode::disable_core_dumps();
     // Handle --version/--help before ANY init: smoke tests (CI clean-room,
     // installer) and humans probe these; unknown flags used to fall through
     // to full daemon startup, which blocks forever on headless machines.
@@ -375,6 +377,9 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")
         }))
         .init();
+    if let Err(e) = core_dumps {
+        tracing::warn!(error = %e, "could not turn off core dumps");
+    }
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
     let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
@@ -4415,11 +4420,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         let analysis = match analysis {
             Ok(a) => a,
             Err((outcome, frame, reason)) => {
-                // A settled scoreboard that failed the team-size check still has
-                // the top bar. Menus (preflight) do not.
-                if reason != "preflight" {
-                    archive_map_label_crop(data_dir, session_id, &frame);
-                }
+                archive_rejected_map_label_crop(
+                    ctx.debug_ocr,
+                    data_dir,
+                    session_id,
+                    &frame,
+                    reason,
+                );
                 save_rejected_frame(ctx.debug_ocr, data_dir, frame, reason);
                 return Ok(CaptureReport {
                     recorded: false,
@@ -4523,7 +4530,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             rows = rows.len(),
             "capture rejected — frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
         );
-        archive_map_label_crop(data_dir, session_id, &frame_img);
+        archive_rejected_map_label_crop(
+            ctx.debug_ocr,
+            data_dir,
+            session_id,
+            &frame_img,
+            "noscoreboard",
+        );
         save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, "noscoreboard");
         return Ok(CaptureReport {
             recorded: false,
@@ -4991,7 +5004,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     "unreadable"
                 }
             };
-            archive_map_label_crop(data_dir, session_id, &frame_img);
+            archive_rejected_map_label_crop(
+                ctx.debug_ocr,
+                data_dir,
+                session_id,
+                &frame_img,
+                reason,
+            );
             save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, reason);
             Ok(CaptureReport {
                 recorded: false,
@@ -5210,17 +5229,36 @@ fn stale_board_debug_dirs(debug: bool, data_dir: &std::path::Path) -> Vec<std::p
 /// no timer trim and no brightness stretch. The map-label OCR retry does not
 /// supply these pixels. A flat bar does not take a slot. Local files under
 /// `debug/mapcrops` only.
-/// Not part of the rolling debug rings, not gated on `debug_ocr`, and not
-/// included in report bundles.
+/// Not part of the rolling debug rings and not included in report bundles.
+/// From an accepted capture it is not gated on `debug_ocr`; a rejected
+/// capture goes through [`archive_rejected_map_label_crop`]. The handle is
+/// for tests.
 fn archive_map_label_crop(
     data_dir: &std::path::Path,
     session_id: &str,
     frame: &image::DynamicImage,
-) {
-    let Some(job) = mapcrops::prepare_mapcrop(data_dir, session_id, frame) else {
-        return;
-    };
-    tokio::task::spawn_blocking(move || mapcrops::commit_mapcrop(job));
+) -> Option<tokio::task::JoinHandle<()>> {
+    let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
+    Some(tokio::task::spawn_blocking(move || {
+        mapcrops::commit_mapcrop(job)
+    }))
+}
+
+/// [`archive_map_label_crop`] for a capture a trust gate rejected: only with
+/// `debug_ocr` on, and never for `preflight` (a menu has no top bar). A
+/// rejected frame may be gameplay rather than a Tab board, and there the
+/// map-label rectangle covers the kill feed, which shows player names.
+fn archive_rejected_map_label_crop(
+    debug: bool,
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+    reason: &'static str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !debug || reason == "preflight" {
+        return None;
+    }
+    archive_map_label_crop(data_dir, session_id, frame)
 }
 
 fn rand_id() -> u64 {
@@ -8078,6 +8116,73 @@ mod tests {
 
     fn tiny_board() -> image::DynamicImage {
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([8, 16, 32])))
+    }
+
+    /// A frame whose map-label box holds a small glyph, so a map crop saves.
+    fn labelled_frame() -> image::DynamicImage {
+        let (w, h) = (1920, 1080);
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
+        let rect = stat_tracker::ocr::preprocess::map_name_rect(w, h).expect("map rect");
+        for y in rect.y..rect.y + 8.min(rect.h) {
+            for x in rect.x..rect.x + 16.min(rect.w) {
+                img.put_pixel(x, y, image::Rgb([230, 230, 230]));
+            }
+        }
+        image::DynamicImage::ImageRgb8(img)
+    }
+
+    #[tokio::test]
+    async fn a_rejected_capture_saves_a_map_crop_only_with_debug_on() {
+        // R2 on #244: a rejected frame can be gameplay, where the map-label
+        // box covers the kill feed (player names).
+        let dir = tempfile::tempdir().unwrap();
+        let mapcrops = dir.path().join("debug").join("mapcrops");
+        for reason in ["teamsize", "noscoreboard", "noplayerrow", "unreadable"] {
+            assert!(
+                archive_rejected_map_label_crop(
+                    false,
+                    dir.path(),
+                    "sess-r",
+                    &labelled_frame(),
+                    reason
+                )
+                .is_none(),
+                "{reason}"
+            );
+        }
+        assert!(
+            archive_rejected_map_label_crop(
+                true,
+                dir.path(),
+                "sess-r",
+                &labelled_frame(),
+                "preflight"
+            )
+            .is_none()
+        );
+        assert!(
+            png_names(&mapcrops).is_empty(),
+            "debug off saves no map crop"
+        );
+
+        archive_rejected_map_label_crop(
+            true,
+            dir.path(),
+            "sess-r",
+            &labelled_frame(),
+            "unreadable",
+        )
+        .expect("debug on saves the crop")
+        .await
+        .unwrap();
+        assert_eq!(png_names(&mapcrops).len(), 1);
+
+        // An accepted capture still saves one with debug off.
+        archive_map_label_crop(dir.path(), "sess-a", &labelled_frame())
+            .expect("accepted capture saves the crop")
+            .await
+            .unwrap();
+        assert_eq!(png_names(&mapcrops).len(), 2);
     }
 
     #[tokio::test]

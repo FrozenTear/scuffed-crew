@@ -684,7 +684,17 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     {
         return Err(ReportError::InvalidInput("ui_scale must be in (0, 200]"));
     }
-    let reads = input.kit.reads.as_ref();
+    // R2-4 on #236: the same checks as `kit::load`, again at the sink. A kit
+    // from another blank table, or a scoreboard that is not the one its
+    // reads were written with, counts as no kit: none of its images or
+    // reads go into the zip.
+    let trusted = super::kit::is_trusted(&input.kit);
+    if input.kit.reads.is_some() && !trusted && input.category != GameCategory::MissedGame {
+        return Err(ReportError::InvalidInput(
+            "the saved scoreboard does not match its reads or this blanker",
+        ));
+    }
+    let reads = input.kit.reads.as_ref().filter(|_| trusted);
     if reads.is_none() && input.category != GameCategory::MissedGame {
         return Err(ReportError::InvalidInput("this game has no saved reads"));
     }
