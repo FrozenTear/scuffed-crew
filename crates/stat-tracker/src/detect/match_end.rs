@@ -30,7 +30,8 @@ pub enum FinalScoreSource {
     Ocr,
     /// The words-v1 `p4_final_score` template (`reader = "new"`). Only a
     /// sure read is a signal; a suspect or absent read is not, and no OCR
-    /// runs. Without that template loaded the line is read with OCR.
+    /// runs. Without that template loaded the line is read with OCR, unless
+    /// OCR is off (`ocr = "off"`): then the line is not read at all.
     Words,
 }
 
@@ -350,7 +351,8 @@ fn scoreline_looks_present(
 
 /// Under `reader = "new"`, P4 fell back to OCR because no
 /// `p4_final_score` template is loaded (an older words-v1 pack, or none
-/// yet). Logged once per process (F257-1); S1 is to forbid the fallback.
+/// yet). Logged once per process (F257-1). With OCR off the fallback never
+/// runs (see [`scoreline_looks_present_with`]).
 /// Returns whether this call logged (tests).
 fn warn_final_score_ocr_fallback() -> bool {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -366,7 +368,9 @@ fn warn_final_score_ocr_fallback() -> bool {
 
 /// [`scoreline_looks_present`] with the words-v1 read as an argument
 /// (tests). `words` is called only for [`FinalScoreSource::Words`]; `None`
-/// from it (no template loaded) falls back to the OCR read.
+/// from it (no template loaded) falls back to the OCR read while OCR is on.
+/// With OCR off ([`crate::ocr::gate`]) there is no fallback: the line is not
+/// read, P4 is not a signal, and no OCR call is made.
 fn scoreline_looks_present_with(
     img: &DynamicImage,
     rgb: &RgbImage,
@@ -411,8 +415,11 @@ fn scoreline_looks_present_with(
                 tracing::trace!(?read, "final score line (words-v1)");
                 return read.is_signal();
             }
-            // S1 (OCR off) must close this: under `reader = "new"` with no
-            // p4_final_score template loaded, P4 still runs Tesseract below.
+            // No p4_final_score template is loaded. OCR off: hold. The
+            // out-of-date words pack is what the switch reports
+            // (`ocr_switch::PackProblem::WordsOutOfDate`).
+            None if crate::ocr::gate::is_off() => return false,
+            // OCR on: under `reader = "new"` P4 still runs Tesseract below.
             None => {
                 warn_final_score_ocr_fallback();
             }
@@ -1913,6 +1920,74 @@ mod tests {
             FinalScoreSource::Words,
             |_| Some(FinalScoreRead::Sure(0.9))
         ));
+    }
+
+    /// A 1440p frame with FINAL SCORE in white on the P4 line.
+    fn final_score_frame() -> (DynamicImage, RgbImage) {
+        let (_, mut rgb) = scoreline_frame(false);
+        let label = crate::ocr::map_label_fixtures::draw_label("FINAL SCORE", 250).to_rgb8();
+        // P4's crop is x 768..1792, y 1051..1166 at 1440p.
+        for (x, y, px) in label.enumerate_pixels().filter(|(x, ..)| *x < 520) {
+            rgb.put_pixel(1270 + x, 1066 + y, *px);
+        }
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// With OCR on, `reader = "new"` without a template reads the line with
+    /// OCR and gets what ocr-v1 gets (F257-10: the fallback in its positive
+    /// direction).
+    #[test]
+    fn without_a_template_the_ocr_fallback_reads_the_line_while_ocr_is_on() {
+        let (img, rgb) = final_score_frame();
+        assert!(
+            scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Ocr, never),
+            "ocr-v1 reads FINAL SCORE on the synthetic line"
+        );
+        assert!(scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| None
+        ));
+    }
+
+    /// With OCR off there is no fallback: no template means the line is not
+    /// read, and the OCR entry point is not even called.
+    #[test]
+    fn with_ocr_off_a_missing_template_holds_and_never_calls_ocr() {
+        let (img, rgb) = final_score_frame();
+        let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| None
+        ));
+        assert_eq!(
+            off.blocked(),
+            [],
+            "the fallback is not attempted, so nothing reaches the gate"
+        );
+        // a loaded template still decides, with OCR off
+        assert!(scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| Some(FinalScoreRead::Sure(0.9))
+        ));
+        assert_eq!(off.blocked_total(), 0);
+        // ocr-v1's own read is blocked at the gate and is not a signal
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Ocr,
+            never
+        ));
+        assert_eq!(off.blocked_total(), 1);
     }
 
     /// Under `reader = "new"`, a P4 that falls back to OCR (no template) is

@@ -1,3 +1,4 @@
+pub mod gate;
 pub mod preprocess;
 
 use std::cell::RefCell;
@@ -93,6 +94,12 @@ fn ocr_pool_thread_count() -> usize {
     (total / 2).clamp(2, 4)
 }
 
+/// True once the OCR worker pool exists. It is built on the first OCR call
+/// that needs it, and never while OCR is off ([`gate`]).
+pub fn pool_started() -> bool {
+    OCR_POOL.get().is_some()
+}
+
 fn ocr_pool() -> &'static rayon::ThreadPool {
     OCR_POOL.get_or_init(|| {
         let threads = ocr_pool_thread_count();
@@ -119,18 +126,32 @@ thread_local! {
 /// Run Tesseract on `png` using a thread-local instance for `lang`, returning
 /// the recognized text and mean confidence. `whitelist` of `None` (or empty)
 /// disables character restriction.
+///
+/// The only place a `LepTess` is created. With OCR off ([`gate`]) it returns
+/// [`gate::OcrOff`] before anything else. The public functions above it ask
+/// the gate first, so this check only catches one that forgot to.
 fn ocr_with(
     lang: &'static str,
     psm: &str,
     whitelist: Option<&str>,
     png: &[u8],
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+    if gate::is_off() {
+        return Err(gate::block(gate::Site {
+            file: file!(),
+            line: line!(),
+            entry: "ocr_with",
+        })
+        .into());
+    }
+    gate::note_tesseract_call();
     TESS_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if !cache.contains_key(lang) {
             let path = tessdata_path_for_lang(lang);
             let path_str = path.as_ref().and_then(|p| p.to_str());
             let mut lt = leptess::LepTess::new(path_str, lang)?;
+            gate::note_leptess_created();
             // Tesseract prints "Warning: Invalid resolution 0 dpi" and
             // "Estimating resolution as N" to stderr on EVERY call because the
             // in-memory PNGs carry no DPI. Hundreds of cells per Tab capture ×
@@ -252,9 +273,17 @@ fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
     crate::setup::find_system_traineddata(lang)
 }
 
+static TESSDATA_LANG: OnceLock<&'static str> = OnceLock::new();
+
+/// True once this process looked for the `koverwatch` tessdata. The first
+/// OCR call that needs the language does it, and never while OCR is off
+/// ([`gate`]).
+pub fn tessdata_lang_probed() -> bool {
+    TESSDATA_LANG.get().is_some()
+}
+
 fn tessdata_lang() -> &'static str {
-    static LANG: OnceLock<&'static str> = OnceLock::new();
-    LANG.get_or_init(|| {
+    TESSDATA_LANG.get_or_init(|| {
         let has_koverwatch = dirs::data_dir()
             .map(|d| {
                 d.join("scuffed-stat-tracker")
@@ -267,9 +296,11 @@ fn tessdata_lang() -> &'static str {
     })
 }
 
+#[track_caller]
 pub fn recognize_region(
     img: &DynamicImage,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_region")?;
     let png_buf = encode_png(&preprocess::prepare(img))?;
     let (text, _conf) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
     Ok(text)
@@ -300,7 +331,13 @@ thread_local! {
 /// brightness range or bright-pixel coverage is too low to hold a label is
 /// not stretched. The first read is what comes back unless the retry matches
 /// a map.
+///
+/// With OCR off ([`gate`]) the label is not read and the text is empty.
+#[track_caller]
 pub fn recognize_map_label(frame: &DynamicImage, preflight: ScoreboardPreflight) -> String {
+    if gate::check("recognize_map_label").is_err() {
+        return String::new();
+    }
     read_map_crop(
         &preprocess::crop_map_name(frame),
         matches!(preflight, ScoreboardPreflight::Ready(_)),
@@ -340,9 +377,11 @@ pub(crate) fn read_map_crop(crop: &DynamicImage, on_tab: bool) -> String {
 /// the scoreboard-tuned `prepare()` white-mask erases stylized/red UI text
 /// (measured on the 2026-07 ban-patch screens), and PSM 7 assumes a single
 /// line. PSM 11 finds the scattered header + subtitle lines instead.
+#[track_caller]
 pub fn recognize_sparse_region(
     img: &DynamicImage,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_sparse_region")?;
     let png_buf = encode_png(&img.to_luma8())?;
     let (text, _conf) = ocr_with(tessdata_lang(), "11", None, &png_buf)?;
     Ok(text)
@@ -351,11 +390,13 @@ pub fn recognize_sparse_region(
 /// OCR an already-preprocessed grayscale image, skipping the scoreboard-tuned
 /// `prepare()` step. Used for regions (like the VICTORY/DEFEAT title) that need
 /// their own binarization. `whitelist` of `None` disables character restriction.
+#[track_caller]
 pub fn recognize_prepared(
     img: &image::GrayImage,
     psm: &str,
     whitelist: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_prepared")?;
     let png_buf = encode_png(img)?;
     let (text, _conf) = ocr_with(tessdata_lang(), psm, whitelist, &png_buf)?;
     Ok(text)
@@ -364,12 +405,14 @@ pub fn recognize_prepared(
 /// Like [`recognize_prepared`] but pins the Tesseract language. End-title
 /// words are Latin UI ("VICTORY"), not the scoreboard font `koverwatch`
 /// is trained on — forcing `eng` is the difference between "VCTORY!" and "VOY!".
+#[track_caller]
 pub fn recognize_prepared_lang(
     img: &image::GrayImage,
     psm: &str,
     whitelist: Option<&str>,
     lang: &'static str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_prepared_lang")?;
     let png_buf = encode_png(img)?;
     let (text, _conf) = ocr_with(lang, psm, whitelist, &png_buf)?;
     Ok(text)
@@ -378,9 +421,11 @@ pub fn recognize_prepared_lang(
 /// Per-cell OCR: extract and recognize a single stat cell.
 /// Uses PSM 7 (single text line) for short numeric strings.
 /// `whitelist` controls which characters Tesseract will consider.
+#[track_caller]
 pub fn recognize_cell(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_cell")?;
     recognize_cell_with_whitelist(img, "0123456789,")
 }
 
@@ -456,9 +501,11 @@ fn read_cell_binary(
 }
 
 /// Recognize a player name cell.
+#[track_caller]
 pub fn recognize_name(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize_name")?;
     let prepared = preprocess::prepare_name_cell(img);
     // Name cells feed only the fuzzy row matcher, never the numeric gate, so the
     // edge-ink suspect flag is not meaningful here.
@@ -499,11 +546,28 @@ pub fn recognize_name(
 }
 
 /// Per-row OCR: extract name + all stat cells from a single player row.
+///
+/// With OCR off ([`gate`]) nothing is read: no name, and six empty cells.
+#[track_caller]
 pub fn recognize_row(
     row_img: &DynamicImage,
     columns: &preprocess::StatColumns,
     team_size: usize,
 ) -> RowOcrResult {
+    if gate::check("recognize_row").is_err() {
+        return RowOcrResult {
+            name: None,
+            name_alternates: Vec::new(),
+            stats: (0..STATS_PER_ROW)
+                .map(|_| CellOcrResult {
+                    value: String::new(),
+                    confidence: 0,
+                    suspect: false,
+                })
+                .collect(),
+            mean_confidence: 0,
+        };
+    }
     // One read per name window. 5v5 has a window per table layout (in-match,
     // in-match with perks, centred); which one holds the name is only known
     // once the configured name is compared, so all of them are read.
@@ -572,15 +636,24 @@ pub fn recognize_row(
 
 /// Full scoreboard OCR using per-cell extraction.
 /// Returns structured results per row with higher confidence than full-image OCR.
+///
+/// With OCR off ([`gate`]) this and the two functions below read nothing
+/// and return no rows. The board is not cropped, the columns are not
+/// calibrated and the OCR pool is not started.
+#[track_caller]
 pub fn recognize_scoreboard_cells(img: &DynamicImage) -> Vec<RowOcrResult> {
     recognize_scoreboard_cells_with_team_size(img, None)
 }
 
 /// OCR with explicit team size override. Pass None to auto-detect.
+#[track_caller]
 pub fn recognize_scoreboard_cells_with_team_size(
     img: &DynamicImage,
     team_size_override: Option<usize>,
 ) -> Vec<RowOcrResult> {
+    if gate::check("recognize_scoreboard_cells_with_team_size").is_err() {
+        return Vec::new();
+    }
     let cropped = preprocess::crop_scoreboard(img);
     let team_size = team_size_override.unwrap_or_else(|| {
         let detected = detect_team_size(&cropped);
@@ -592,10 +665,14 @@ pub fn recognize_scoreboard_cells_with_team_size(
 
 /// OCR a scoreboard that the caller has already cropped (and optionally already
 /// measured for team size). Avoids a second full-frame scoreboard crop (P7).
+#[track_caller]
 pub fn recognize_scoreboard_cells_pre_cropped(
     cropped: &DynamicImage,
     team_size: usize,
 ) -> Vec<RowOcrResult> {
+    if gate::check("recognize_scoreboard_cells_pre_cropped").is_err() {
+        return Vec::new();
+    }
     let total_rows = team_size * 2;
     let columns = calibrate_columns(cropped, team_size);
 
@@ -909,9 +986,11 @@ pub(crate) fn is_clean_stat(text: &str) -> bool {
 
 /// Full-image OCR (original approach with adaptive preprocessing).
 /// Used as fallback and for compatibility with the existing parse pipeline.
+#[track_caller]
 pub fn recognize(
     img: &DynamicImage,
 ) -> Result<OcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    gate::check("recognize")?;
     let cropped = preprocess::crop_scoreboard(img);
 
     // Primary path: adaptive thresholding

@@ -224,6 +224,8 @@ pub enum Message {
     InstallModel,
     RebuildModel,
     ModelReady(Result<String, String>),
+    /// The reader packs in the data dir, looked at off the UI thread.
+    ReaderPacksChecked(stat_tracker::ocr_switch::PackReadiness),
     Vacuum,
     VacuumReady(Result<String, String>),
     ConfirmClear,
@@ -415,6 +417,9 @@ pub struct TrackerApp {
     pub confirm_clear: bool,
     pub tessdata_busy: bool,
     pub tessdata_installed: bool,
+    /// Pack state, a refused toggle's reason, and the tracker's notice for
+    /// the classic OCR switch.
+    pub ocr_switch: settings::OcrSwitchView,
     pub vacuum_busy: bool,
     snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
@@ -622,6 +627,7 @@ impl TrackerApp {
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
+            ocr_switch: settings::OcrSwitchView::default(),
             vacuum_busy: false,
             snapshot_mtime,
             seasons_url,
@@ -661,6 +667,7 @@ impl TrackerApp {
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
+            tasks.push(check_reader_packs(app.saved_config.data_dir.clone()));
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -986,8 +993,16 @@ impl TrackerApp {
                 self.settings.set_text(field, value);
                 Task::none()
             }
+            Message::SettingsToggle(SettingsToggle::ClassicOcr, want_classic) => {
+                self.toggle_classic_ocr(want_classic);
+                Task::none()
+            }
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
+                Task::none()
+            }
+            Message::ReaderPacksChecked(packs) => {
+                self.ocr_switch.packs = Some(packs);
                 Task::none()
             }
             Message::SelectOutput(name) => {
@@ -1007,6 +1022,9 @@ impl TrackerApp {
                     }
                 };
                 let sync_url = self.settings.sync_url.clone();
+                let saved_ocr = self.saved_config.ocr;
+                let form_classic_ocr = self.settings.classic_ocr;
+                let packs_dir = self.saved_config.data_dir.clone();
                 let hotkey_enabled = self.settings.overlay_hotkey_enabled;
                 let hotkey_bind = self.settings.overlay_hotkey.clone();
                 let mut stored_hotkey = None;
@@ -1023,6 +1041,16 @@ impl TrackerApp {
                         // a reload of a fixed file is not stopped by the default URL.
                         if let Some(problem) = settings::sync_url_problem(&sync_url) {
                             return Err(problem.to_string());
+                        }
+                        // Turning classic OCR off needs the reader packs. The
+                        // switch checked them at the click; they are checked
+                        // again here because the save is what the tracker reads.
+                        if let Some(reason) =
+                            settings::ocr_save_problem(saved_ocr, form_classic_ocr, || {
+                                stat_tracker::ocr_switch::PackReadiness::on_disk(&packs_dir)
+                            })
+                        {
+                            return Err(reason);
                         }
                         let hotkey = OverlayHotkey::normalized(hotkey_enabled, &hotkey_bind);
                         stored_hotkey = Some(hotkey.validate_for_save()?);
@@ -1079,6 +1107,12 @@ impl TrackerApp {
                         }
                     }
                     Err(SettingsSaveError::Blocked(message)) => {
+                        if saved_ocr.is_on() && !form_classic_ocr {
+                            // When the packs are what blocked the save, this
+                            // puts the switch back on with the reason next to
+                            // it. Blocked for another field, it stays off.
+                            self.toggle_classic_ocr(false);
+                        }
                         self.replace_toast(message);
                     }
                     Err(SettingsSaveError::Write(message)) => {
@@ -2063,7 +2097,8 @@ impl TrackerApp {
             }
             Step::PackReady(result) => {
                 self.setup.download_ready(result);
-                Task::none()
+                // The classic OCR switch shows which packs are there.
+                check_reader_packs(self.saved_config.data_dir.clone())
             }
         }
     }
@@ -2187,6 +2222,14 @@ impl TrackerApp {
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+            let notice = settings::daemon_ocr_notice(
+                stat_tracker::ocr_switch::read_status(&self.data_dir).as_ref(),
+                self.daemon.pid,
+            );
+            if notice != self.ocr_switch.notice {
+                self.ocr_switch.notice = notice;
+                self.health_status = self.health_now();
+            }
         }
 
         tray::pump_gtk();
@@ -2475,14 +2518,68 @@ impl TrackerApp {
     }
 
     fn health_now(&self) -> String {
-        health_status_for(
-            &self.data_dir,
-            &self.games,
-            self.saved_config
-                .sync
-                .as_ref()
-                .map(|s| (s.server_url.as_str(), s.token.as_str())),
+        health_with_ocr_notice(
+            health_status_for(
+                &self.data_dir,
+                &self.games,
+                self.saved_config
+                    .sync
+                    .as_ref()
+                    .map(|s| (s.server_url.as_str(), s.token.as_str())),
+            ),
+            self.ocr_switch.notice.as_deref(),
         )
+    }
+
+    /// A click on "Use classic OCR (Tesseract)". Turning it off looks at
+    /// the reader packs in the tracker's data dir first. With one missing
+    /// the switch stays on and the reason is shown next to it.
+    fn toggle_classic_ocr(&mut self, want_classic: bool) {
+        if self.fixture.is_some() {
+            // Demo mode saves nothing and has no packs to look at.
+            self.settings.classic_ocr = want_classic;
+            return;
+        }
+        let packs = if want_classic {
+            self.ocr_switch.packs.unwrap_or_default()
+        } else {
+            let packs =
+                stat_tracker::ocr_switch::PackReadiness::on_disk(&self.saved_config.data_dir);
+            self.ocr_switch.packs = Some(packs);
+            packs
+        };
+        match settings::classic_ocr_toggle(want_classic, &packs) {
+            Ok(classic) => {
+                self.settings.classic_ocr = classic;
+                self.ocr_switch.refusal = None;
+            }
+            Err(reason) => {
+                self.settings.classic_ocr = true;
+                self.ocr_switch.refusal = Some(reason);
+            }
+        }
+    }
+}
+
+/// Look at the reader packs in `data_dir` off the UI thread.
+fn check_reader_packs(data_dir: PathBuf) -> Task<Message> {
+    Task::perform(
+        async move { stat_tracker::ocr_switch::PackReadiness::on_disk(&data_dir) },
+        Message::ReaderPacksChecked,
+    )
+}
+
+const HEALTH_READY: &str = "Ready";
+const HEALTH_WAITING: &str = "Waiting for a capture";
+
+/// Tracker health with the tracker's classic OCR notice (it kept OCR on, or
+/// it holds reads for a missing reader pack). The notice takes the place of
+/// the two idle lines and follows a sync problem.
+fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
+    match notice {
+        None => base,
+        Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
+        Some(notice) => format!("{base} {notice}"),
     }
 }
 
@@ -2655,9 +2752,9 @@ fn health_status_for(
         }
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
-        "Ready".into()
+        HEALTH_READY.into()
     } else {
-        "Waiting for a capture".into()
+        HEALTH_WAITING.into()
     }
 }
 
@@ -3111,6 +3208,24 @@ token = \"secret-token-must-stay\"
         let id = window::Id::unique();
         assert_eq!(tray_show_op(None), TrayWindowOp::Open);
         assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
+    }
+
+    #[test]
+    fn the_classic_ocr_notice_replaces_an_idle_health_line_and_follows_a_sync_problem() {
+        let notice = "Reading on hold: the maps-v1 reader pack is not installed.";
+        for idle in [super::HEALTH_READY, super::HEALTH_WAITING] {
+            assert_eq!(super::health_with_ocr_notice(idle.into(), None), idle);
+            assert_eq!(
+                super::health_with_ocr_notice(idle.into(), Some(notice)),
+                notice
+            );
+        }
+        let paused = "Sync paused: Website URL must use https.";
+        assert_eq!(super::health_with_ocr_notice(paused.into(), None), paused);
+        assert_eq!(
+            super::health_with_ocr_notice(paused.into(), Some(notice)),
+            format!("{paused} {notice}")
+        );
     }
 
     #[test]

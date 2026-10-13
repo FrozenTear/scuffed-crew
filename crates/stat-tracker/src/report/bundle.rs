@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::marker::{self, LastExit};
 use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
-use crate::config::{Config, ReaderSetting};
+use crate::config::{Config, OcrSetting, ReaderSetting};
 
 /// `bundle_version` this build writes.
 pub const BUNDLE_VERSION: u64 = 2;
@@ -124,6 +124,11 @@ pub struct SystemInfo {
     /// OCR worker count in use, at least 1.
     pub ocr_threads: u32,
     pub reader: ReaderSetting,
+    /// What the daemon last ran with ([`crate::ocr_switch::Status`]), or the
+    /// config value when it never wrote a status.
+    pub ocr: OcrSetting,
+    /// OCR calls the daemon's gate blocked in its last run. 0 with OCR on.
+    pub ocr_blocked_calls: u32,
     pub shadow_recognizer: bool,
     /// True for the prerelease channel.
     pub prerelease: bool,
@@ -139,6 +144,9 @@ impl SystemInfo {
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
+        // The gate and its counter live in the daemon. It writes both to the
+        // status file; only the setting and the count are taken from it.
+        let switch = crate::ocr_switch::read_status(&config.data_dir);
         Self {
             session_type: SessionType::from_env(),
             capture_backend,
@@ -147,6 +155,9 @@ impl SystemInfo {
                 .unwrap_or(1)
                 .max(1),
             reader: config.reader,
+            ocr: switch.as_ref().map_or(config.ocr, |s| s.effective),
+            ocr_blocked_calls: switch
+                .map_or(0, |s| u32::try_from(s.blocked_total).unwrap_or(u32::MAX)),
             shadow_recognizer: config.shadow_recognizer_enabled(),
             prerelease: config.wants_prerelease_updates(),
             daemon_running,
@@ -331,6 +342,14 @@ struct SystemJson {
     cpu_threads: u32,
     ocr_threads: u32,
     reader: &'static str,
+    /// `off`, and only then. A tracker with classic OCR on writes the
+    /// `system` object it always wrote, so a server from before the switch
+    /// still takes its reports; the server reads a missing key as `on`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr: Option<&'static str>,
+    /// Written with `ocr`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr_blocked_calls: Option<u32>,
     shadow_recognizer: bool,
     update_channel: &'static str,
     daemon_running: bool,
@@ -387,6 +406,8 @@ impl From<&SystemInfo> for SystemJson {
             cpu_threads: s.cpu_threads.max(1),
             ocr_threads: s.ocr_threads.max(1),
             reader: s.reader.as_str(),
+            ocr: s.ocr.is_off().then_some(OcrSetting::OFF),
+            ocr_blocked_calls: s.ocr.is_off().then_some(s.ocr_blocked_calls),
             shadow_recognizer: s.shadow_recognizer,
             update_channel: if s.prerelease { "prerelease" } else { "stable" },
             daemon_running: s.daemon_running,

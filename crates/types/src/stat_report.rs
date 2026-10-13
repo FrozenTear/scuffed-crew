@@ -58,6 +58,7 @@ const NO_SESSION: &str = "none";
 const SESSION_TYPES: &[&str] = &["x11", "wayland", "unknown"];
 const CAPTURE_BACKENDS: &[&str] = &["x11", "wayshot", "portal", "none"];
 const READERS: &[&str] = &["ocr-v1", "new"];
+const OCR_SETTINGS: &[&str] = &["on", "off"];
 const UPDATE_CHANNELS: &[&str] = &["stable", "prerelease"];
 const LAST_EXITS: &[&str] = &["clean", "crashed", "unknown"];
 
@@ -231,6 +232,15 @@ struct RawSystem {
     cpu_threads: u32,
     ocr_threads: u32,
     reader: String,
+    /// Optional. `on` or `off`: whether the tracker ran classic OCR. A
+    /// tracker from before the OCR switch, and one with OCR on, leave it
+    /// out. Present, it is not `null`.
+    #[serde(default, deserialize_with = "present")]
+    ocr: Option<String>,
+    /// Optional. OCR calls the tracker blocked while OCR was off.
+    #[serde(default, deserialize_with = "present")]
+    #[allow(dead_code)]
+    ocr_blocked_calls: Option<u32>,
     #[allow(dead_code)]
     shadow_recognizer: bool,
     update_channel: String,
@@ -683,6 +693,9 @@ fn check_system(system: &RawSystem) -> Result<(), String> {
     pick("session_type", &system.session_type, SESSION_TYPES)?;
     pick("capture_backend", &system.capture_backend, CAPTURE_BACKENDS)?;
     pick("reader", &system.reader, READERS)?;
+    if let Some(ocr) = &system.ocr {
+        pick("ocr", ocr, OCR_SETTINGS)?;
+    }
     pick("update_channel", &system.update_channel, UPDATE_CHANNELS)?;
     pick("last_exit", &system.last_exit, LAST_EXITS)?;
     if system.cpu_threads == 0 {
@@ -1027,6 +1040,40 @@ mod tests {
         let mut v = sample_v2();
         v.as_object_mut().unwrap().remove("system");
         parse(&v).unwrap();
+    }
+
+    /// The OCR switch keys are optional: a tracker with classic OCR on
+    /// (and every tracker from before the switch) leaves them out.
+    #[test]
+    fn system_takes_the_optional_ocr_switch_keys() {
+        parse(&sample_v2()).expect("no ocr keys");
+        for ocr in OCR_SETTINGS {
+            let mut v = sample_v2();
+            v["system"]["ocr"] = serde_json::json!(ocr);
+            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} alone: {e}"));
+            v["system"]["ocr_blocked_calls"] = serde_json::json!(12);
+            parse(&v).unwrap_or_else(|e| panic!("ocr={ocr} with a count: {e}"));
+        }
+        for bad in ["OFF", "no", ""] {
+            let mut v = sample_v2();
+            v["system"]["ocr"] = serde_json::json!(bad);
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("system.ocr"), "{bad:?}: {err}");
+        }
+        for (key, bad) in [
+            ("ocr", serde_json::Value::Null),
+            ("ocr", serde_json::json!(false)),
+            ("ocr_blocked_calls", serde_json::Value::Null),
+            ("ocr_blocked_calls", serde_json::json!(-1)),
+            ("ocr_blocked_calls", serde_json::json!("3")),
+        ] {
+            let mut v = sample_v2();
+            v["system"][key] = bad.clone();
+            assert!(
+                parse(&v).unwrap_err().contains("schema"),
+                "{key}={bad} must not parse"
+            );
+        }
     }
 
     #[test]

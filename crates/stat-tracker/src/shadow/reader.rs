@@ -299,6 +299,28 @@ impl Reader {
         self.heroes.current().is_some()
     }
 
+    /// The packs `ocr = "off"` needs, as this reader has them loaded now
+    /// ([`crate::ocr_switch`]): any hero set, maps-v1 (not the hand-installed
+    /// folder) and words-v1 (not the old result folder), and whether that
+    /// words-v1 has the FINAL SCORE template. Like every read, this starts a
+    /// background re-load of a pack whose folder changed, so a later call
+    /// sees a pack that arrived or went away.
+    pub fn pack_readiness(&self) -> crate::ocr_switch::PackReadiness {
+        let words = self
+            .results
+            .current()
+            .filter(|loaded| loaded.pack == super::result::ResultPack::WordsV1);
+        crate::ocr_switch::PackReadiness {
+            heroes: self.heroes.current().is_some(),
+            maps: self
+                .maps
+                .current()
+                .is_some_and(|loaded| loaded.pack == super::banner::MapPack::V1),
+            words: words.is_some(),
+            words_final_score: words.is_some_and(|w| w.templates.final_score().is_some()),
+        }
+    }
+
     /// The top-bar map of one full frame, when the banner read is sure and
     /// storable ([`top_bar_map`]). `None` is an abstain: no map pack, no
     /// banner, a flagged read, or a name the tracker would not store.
@@ -793,6 +815,13 @@ pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_final_score(frame)
+}
+
+/// [`Reader::pack_readiness`] with the process-wide reader.
+pub fn pack_readiness() -> crate::ocr_switch::PackReadiness {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .pack_readiness()
 }
 
 #[cfg(test)]

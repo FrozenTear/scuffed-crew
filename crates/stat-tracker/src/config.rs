@@ -82,6 +82,97 @@ pub struct Config {
     /// detection, and plausibility holds stay on ocr-v1 either way.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
     pub reader: ReaderSetting,
+    /// Whether classic OCR (Tesseract) may run at all.
+    ///
+    /// Missing, or `"on"`, is today's behaviour for both values of
+    /// [`Self::reader`]. `"off"` makes the tracker read everything with the
+    /// new reader and never start Tesseract:
+    ///
+    /// | `ocr` | `reader` | what reads |
+    /// | --- | --- | --- |
+    /// | `on` | `ocr-v1` | Tesseract, everywhere |
+    /// | `on` | `new` | the new reader for saved stats, Tesseract for the rest and as its fallback |
+    /// | `off` | either | the new reader, everywhere; a field it cannot read is held, never read with OCR |
+    ///
+    /// `off` implies the new reader, so `reader` is not consulted (its value
+    /// stays in the file). `off` needs the hero, maps-v1 and words-v1 reader
+    /// packs: when one is missing the tracker keeps OCR on and logs why
+    /// ([`crate::ocr_switch`]). The tracker reads this when it starts.
+    /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
+    #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
+    pub ocr: OcrSetting,
+}
+
+/// Env override for [`Config::ocr`]: `on` or `off`. Read by
+/// [`Config::ocr_control`] only, never folded into the struct, so a Settings
+/// save cannot write it to config.toml.
+pub const OCR_ENV: &str = "STAT_TRACKER_OCR";
+
+/// `ocr` in config.toml. Missing means [`Self::On`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OcrSetting {
+    #[default]
+    On,
+    Off,
+}
+
+impl OcrSetting {
+    pub const ON: &'static str = "on";
+    pub const OFF: &'static str = "off";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::On => Self::ON,
+            Self::Off => Self::OFF,
+        }
+    }
+
+    pub const fn is_on(&self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    pub const fn is_off(self) -> bool {
+        matches!(self, Self::Off)
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            Self::ON => Some(Self::On),
+            Self::OFF => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for OcrSetting {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OcrSetting {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| D::Error::custom("ocr must be \"on\" or \"off\""))
+    }
+}
+
+/// Settings and daemon view of `ocr`.
+///
+/// `file` is the config.toml value, the only one Settings may write. `env`
+/// is [`OCR_ENV`] for this process, when it is set to `on` or `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcrControl {
+    pub file: OcrSetting,
+    pub env: Option<OcrSetting>,
+}
+
+impl OcrControl {
+    /// What this process asks for: the env value when set, else the file.
+    /// The daemon may still keep OCR on ([`crate::ocr_switch::decide`]).
+    pub fn requested(self) -> OcrSetting {
+        self.env.unwrap_or(self.file)
+    }
 }
 
 /// `reader` in config.toml. Missing means [`Self::OcrV1`].
@@ -436,8 +527,8 @@ impl Config {
     ///
     /// An `existing` document that parses as `next` is returned unchanged
     /// (byte for byte), comments included. When the only change is
-    /// `shadow_recognizer`, `reader`, or `update_channel`, that key is edited
-    /// in place so comments, order, and every other key stay as they were. A
+    /// `shadow_recognizer`, `reader`, `ocr`, or `update_channel`, that key is
+    /// edited in place so comments, order, and every other key stay as they were. A
     /// document that does not parse is an error, not a pretty-printed
     /// replacement. A missing file (no `existing` text) is a fresh
     /// pretty-printed document.
@@ -468,6 +559,9 @@ impl Config {
         if only_reader_and_shadow_differ(&loaded, next) {
             let with_shadow = patch_shadow_recognizer(existing, next.shadow_recognizer)?;
             return patch_reader(&with_shadow, next.reader);
+        }
+        if only_ocr_differs(&loaded, next) {
+            return patch_ocr(existing, next.ocr);
         }
         Ok(toml::to_string_pretty(next)?)
     }
@@ -508,6 +602,24 @@ impl Config {
     /// `reader = "new"`. Saved and uploaded stats may come from the new reader.
     pub fn uses_new_reader(&self) -> bool {
         self.reader.is_new()
+    }
+
+    /// File value of `ocr` plus this process's [`OCR_ENV`] override.
+    ///
+    /// The tracker service has its own environment, so Settings cannot treat
+    /// `env` as the service's. `file` is what Settings may write.
+    pub fn ocr_control(&self) -> OcrControl {
+        Self::ocr_control_from(self.ocr, std::env::var(OCR_ENV).ok().as_deref())
+    }
+
+    /// Pure form of [`Self::ocr_control`]. `env` is the raw variable value.
+    /// Only `on` and `off` (any case, trimmed) count; anything else is no
+    /// override.
+    pub fn ocr_control_from(file: OcrSetting, env: Option<&str>) -> OcrControl {
+        OcrControl {
+            file,
+            env: env.and_then(|raw| OcrSetting::parse(raw.trim().to_ascii_lowercase().as_str())),
+        }
     }
 
     /// The shadow log runs when its own flag is on, or when saved stats use
@@ -678,6 +790,34 @@ fn only_reader_differs(loaded: &Config, next: &Config) -> bool {
     let mut same = loaded.clone();
     same.reader = next.reader;
     same == *next
+}
+
+fn only_ocr_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.ocr == next.ocr {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.ocr = next.ocr;
+    same == *next
+}
+
+/// Change `ocr` and nothing else.
+///
+/// A root string is spliced in place. A missing root key is inserted on the
+/// root table, before the first `[table]` header.
+fn patch_ocr(
+    existing: &str,
+    ocr: OcrSetting,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("ocr").is_some() {
+        return splice_root_string(existing, &doc, "ocr", ocr.as_str());
+    }
+    insert_root_string(existing, "ocr", ocr.as_str())
 }
 
 fn only_reader_and_shadow_differ(loaded: &Config, next: &Config) -> bool {
@@ -910,6 +1050,7 @@ impl Default for Config {
             setup_completed: false,
             reader_pack_url: None,
             reader: ReaderSetting::OcrV1,
+            ocr: OcrSetting::On,
         }
     }
 }
@@ -1447,6 +1588,11 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
             } else {
                 ReaderSetting::OcrV1
             },
+            ocr: if full {
+                OcrSetting::Off
+            } else {
+                OcrSetting::On
+            },
         }
     }
 
@@ -1968,6 +2114,100 @@ custom_note = \"leave this line alone\"
         assert!(
             !saved.contains("game_process_names"),
             "a reader toggle must not add default keys: {saved}"
+        );
+    }
+
+    #[test]
+    fn ocr_defaults_to_on_and_takes_only_on_or_off() {
+        assert_eq!(Config::default().ocr, OcrSetting::On);
+        let has_ocr_key = |text: &str| text.lines().any(|line| line.starts_with("ocr "));
+        let raw = settings_shaped_without_shadow();
+        assert!(!has_ocr_key(&raw), "seed has no ocr key");
+        let loaded = Config::parse_file_contents(&raw).expect("missing ocr");
+        assert_eq!(loaded.ocr, OcrSetting::On);
+        // a config with OCR on does not grow the key; off writes it
+        assert!(!has_ocr_key(&toml::to_string_pretty(&loaded).unwrap()));
+        let mut written_off = loaded.clone();
+        written_off.ocr = OcrSetting::Off;
+        assert!(has_ocr_key(&toml::to_string_pretty(&written_off).unwrap()));
+        let off = Config::parse_file_contents(&format!("ocr = \"off\"\n{raw}")).expect("off");
+        assert_eq!(off.ocr, OcrSetting::Off);
+        assert!(off.ocr.is_off());
+        let on = Config::parse_file_contents(&format!("ocr = \"on\"\n{raw}")).expect("on");
+        assert_eq!(on.ocr, OcrSetting::On);
+        for bad in ["\"OFF\"", "\"no\"", "\"\"", "false", "0"] {
+            assert!(
+                Config::parse_file_contents(&format!("ocr = {bad}\n{raw}")).is_err(),
+                "ocr = {bad} must not parse"
+            );
+        }
+        // `reader` is its own key: turning OCR off does not rewrite it.
+        assert!(off.reader.is_ocr_v1());
+        assert!(!off.uses_new_reader());
+    }
+
+    #[test]
+    fn ocr_env_overrides_the_file_and_ignores_other_values() {
+        let file_on = |env| Config::ocr_control_from(OcrSetting::On, env);
+        assert_eq!(file_on(None).requested(), OcrSetting::On);
+        assert_eq!(file_on(Some("off")).requested(), OcrSetting::Off);
+        assert_eq!(file_on(Some(" OFF\n")).requested(), OcrSetting::Off);
+        for ignored in ["", "0", "false", "no", "offf"] {
+            let control = file_on(Some(ignored));
+            assert_eq!(control.env, None, "{ignored:?} is not an override");
+            assert_eq!(control.requested(), OcrSetting::On);
+        }
+        let file_off = Config::ocr_control_from(OcrSetting::Off, Some("on"));
+        assert_eq!(
+            file_off.file,
+            OcrSetting::Off,
+            "Settings still sees the file"
+        );
+        assert_eq!(file_off.requested(), OcrSetting::On);
+        assert_eq!(
+            Config::ocr_control_from(OcrSetting::Off, None).requested(),
+            OcrSetting::Off
+        );
+    }
+
+    #[test]
+    fn an_ocr_toggle_edits_one_key_and_keeps_the_rest_of_the_file() {
+        let raw = "\
+# hand-edited tracker config. keep this comment.
+data_dir = \"/tmp/sst-hand-edited\"
+player_name = \"the streamer\"
+reader = \"ocr-v1\"
+
+[auto_detect]
+enabled = true # watch for games
+poll_interval_secs = 4
+cooldown_secs = 120
+";
+        let mut next: Config = toml::from_str(raw).expect("hand-edited file must parse");
+        next.ocr = OcrSetting::Off;
+        let off = Config::text_for_save(Some(raw), &next).expect("turn OCR off");
+        assert!(off.contains("ocr = \"off\""), "{off}");
+        assert!(
+            off.find("ocr = ").unwrap() < off.find("[auto_detect]").unwrap(),
+            "ocr stays on the root:\n{off}"
+        );
+        assert_eq!(
+            off.replace("ocr = \"off\"\n", ""),
+            raw,
+            "nothing else changed"
+        );
+        assert_eq!(Config::parse_file_contents(&off).unwrap(), next);
+
+        next.ocr = OcrSetting::On;
+        let on = Config::text_for_save(Some(&off), &next).expect("turn OCR on");
+        assert_eq!(
+            on,
+            off.replace("ocr = \"off\"", "ocr = \"on\""),
+            "the key is spliced in place"
+        );
+        assert_eq!(
+            Config::parse_file_contents(&on).unwrap().ocr,
+            OcrSetting::On
         );
     }
 }

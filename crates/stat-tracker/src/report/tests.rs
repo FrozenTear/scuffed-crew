@@ -11,7 +11,7 @@ use super::bundle::{self, LogOnlyCategory, LogReportInput, Resolution, SessionTy
 use super::marker::LastExit;
 use super::scrub::{LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
-use crate::config::ReaderSetting;
+use crate::config::{OcrSetting, ReaderSetting};
 
 const TOKEN: &str = "sct_FAKEsyncTOKEN0123456789abcdef";
 const BEARER_SECRET: &str = "qxBearerSecret42";
@@ -55,6 +55,8 @@ fn system() -> SystemInfo {
         cpu_threads: 16,
         ocr_threads: 4,
         reader: ReaderSetting::New,
+        ocr: OcrSetting::On,
+        ocr_blocked_calls: 0,
         shadow_recognizer: false,
         prerelease: true,
         daemon_running: true,
@@ -424,6 +426,86 @@ fn check_log_only_manifest(m: &Value) {
     assert!(f["bytes"].as_u64().unwrap() > 0);
     assert_eq!(f["role"], "log");
     assert!(f["screen_class"].is_null());
+}
+
+/// The OCR switch in `system`: nothing with classic OCR on (the object a
+/// server from before the switch accepts), `ocr` and the blocked-call count
+/// with it off. Both forms pass the server's validator.
+#[test]
+fn system_reports_the_ocr_switch_only_when_classic_ocr_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    let window = || LogWindow::log_only(t("2026-10-09T12:06:00Z"));
+    let manifest = |system: SystemInfo| -> Value {
+        let mut inp = input(dir.path(), window());
+        inp.system = system;
+        let json = bundle::build_log_report(&inp).unwrap().manifest_json;
+        scuffed_types::stat_report::parse_bundle_manifest(json.as_bytes())
+            .expect("the server validator takes the manifest");
+        serde_json::from_str(&json).unwrap()
+    };
+
+    let on = manifest(SystemInfo {
+        // a count left over from an earlier run with OCR off is not sent
+        ocr_blocked_calls: 9,
+        ..system()
+    });
+    assert_eq!(keys(&on["system"]), sorted(SYSTEM_KEYS));
+
+    let off = manifest(SystemInfo {
+        ocr: OcrSetting::Off,
+        ocr_blocked_calls: 3,
+        ..system()
+    });
+    let mut with_switch: Vec<&str> = SYSTEM_KEYS.to_vec();
+    with_switch.extend(["ocr", "ocr_blocked_calls"]);
+    assert_eq!(keys(&off["system"]), sorted(&with_switch));
+    assert_eq!(off["system"]["ocr"], "off");
+    assert_eq!(off["system"]["ocr_blocked_calls"], 3);
+    assert_eq!(off["system"]["reader"], on["system"]["reader"]);
+}
+
+/// The report takes the switch from the status file the daemon wrote, and
+/// from config when there is none.
+#[test]
+fn system_collects_the_ocr_switch_from_the_daemon_status() {
+    use crate::ocr_switch::{self, Status, StatusSite};
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config {
+        data_dir: dir.path().to_path_buf(),
+        ..crate::config::Config::default()
+    };
+    let collect =
+        |config: &crate::config::Config| SystemInfo::collect(config, CaptureBackend::None, false);
+    let none = collect(&config);
+    assert_eq!((none.ocr, none.ocr_blocked_calls), (OcrSetting::On, 0));
+    config.ocr = OcrSetting::Off;
+    let from_config = collect(&config);
+    assert_eq!(
+        (from_config.ocr, from_config.ocr_blocked_calls),
+        (OcrSetting::Off, 0),
+        "no status file: the config value"
+    );
+
+    // The daemon refused off (a pack was missing): what ran was on.
+    let status = |effective, blocked_total| Status {
+        pid: 1,
+        requested: OcrSetting::Off,
+        effective,
+        refusal: None,
+        packs: None,
+        blocked_total,
+        blocked: vec![StatusSite {
+            site: "crates/stat-tracker/src/main.rs:1 recognize".into(),
+            count: blocked_total,
+        }],
+        leptess_created: 0,
+    };
+    ocr_switch::write_status(dir.path(), &status(OcrSetting::On, 0)).unwrap();
+    assert_eq!(collect(&config).ocr, OcrSetting::On);
+    ocr_switch::write_status(dir.path(), &status(OcrSetting::Off, 17)).unwrap();
+    let off = collect(&config);
+    assert_eq!((off.ocr, off.ocr_blocked_calls), (OcrSetting::Off, 17));
 }
 
 #[test]

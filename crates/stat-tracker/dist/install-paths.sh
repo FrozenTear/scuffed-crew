@@ -35,6 +35,34 @@ config purge {home}/.config/scuffed-stat-tracker
 EOF
 }
 
+# Exit 0 when classic OCR is turned off for this install: `ocr = "off"` on
+# the root table of config.toml (before the first [table]), or
+# STAT_TRACKER_OCR=off in the environment. The tracker then never starts
+# Tesseract, so the installers skip their tessdata checks. A missing or
+# unreadable config, any other value, and STAT_TRACKER_OCR=on mean OCR is on.
+#   $1 = home directory
+config_ocr_is_off() {
+    local home="$1" env_value="${STAT_TRACKER_OCR:-}"
+    env_value="${env_value,,}"
+    case "$env_value" in
+        off) return 0 ;;
+        on) return 1 ;;
+    esac
+    local cfg="${XDG_CONFIG_HOME:-$home/.config}/scuffed-stat-tracker/config.toml"
+    [[ -f "$cfg" && -r "$cfg" ]] || return 1
+    local line
+    local off_re='^[[:space:]]*ocr[[:space:]]*=[[:space:]]*("off"|'"'off'"')[[:space:]]*(#.*)?$'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*\[ ]]; then
+            return 1
+        fi
+        if [[ "$line" =~ $off_re ]]; then
+            return 0
+        fi
+    done < "$cfg"
+    return 1
+}
+
 expand_install_template() {
     local template="$1" home="$2" prefix="$3"
     template="${template//\{home\}/$home}"

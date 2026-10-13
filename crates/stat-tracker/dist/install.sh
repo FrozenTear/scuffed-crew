@@ -232,7 +232,12 @@ find_eng_traineddata() {
     return 1
 }
 
-if ! find_eng_traineddata; then
+# Only classic OCR needs eng.traineddata. With `ocr = "off"` in config.toml
+# the tracker never starts Tesseract, so a missing model is not worth a
+# warning.
+if config_ocr_is_off "$HOME"; then
+    info "Classic OCR is off (ocr = \"off\" in config.toml) — not checking for eng.traineddata."
+elif ! find_eng_traineddata; then
     warn "eng.traineddata not found — install your distro's eng tessdata package."
     warn "  Arch:    sudo pacman -S tesseract-data-eng"
     warn "  Debian:  sudo apt install tesseract-ocr-eng"

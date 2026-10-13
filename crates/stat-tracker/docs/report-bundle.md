@@ -90,7 +90,7 @@ For `e`, `a`, `d`, `dmg`, `h`, and `mit`, `value` is the stat the tracker stored
 
 For `mode`, `result`, and `hero`, the matcher does not read the field. `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
 
-`system` is optional and only allowed in `bundle_version` 2. The app includes it on every report it writes. It describes the tracker setup, not the person. Every key is required when the object is present, and unknown keys are invalid:
+`system` is optional and only allowed in `bundle_version` 2. The app includes it on every report it writes. It describes the tracker setup, not the person. Every key except `ocr` and `ocr_blocked_calls` is required when the object is present, and unknown keys are invalid:
 
 | Key | Type | Example |
 | --- | --- | --- |
@@ -99,10 +99,14 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 | `cpu_threads` | positive integer, the machine's available parallelism | `16` |
 | `ocr_threads` | positive integer, the OCR worker count in use | `4` |
 | `reader` | `ocr-v1` or `new` | `new` |
+| `ocr` | optional: `on` or `off`, whether classic OCR (Tesseract) may run | `off` |
+| `ocr_blocked_calls` | optional: non-negative integer, OCR calls the tracker blocked while OCR was off | `0` |
 | `shadow_recognizer` | boolean, the Extra number reader setting | `false` |
 | `update_channel` | `stable` or `prerelease` | `prerelease` |
 | `daemon_running` | boolean, whether the daemon answered when the report was built | `true` |
 | `last_exit` | `clean`, `crashed`, or `unknown` | `crashed` |
+
+`ocr` and `ocr_blocked_calls` are the two keys that may be left out, and neither may be `null`. They came with the OCR on/off switch (tracker 0.5.0-alpha.7). A manifest without `ocr` means `on`. The app writes both keys only when the tracker ran with classic OCR off, so a tracker with OCR on sends the same `system` object as before the switch, and a server from before the switch still accepts it. `ocr` is what the tracker last ran with, which is `on` when it refused `ocr = "off"` for a missing reader pack. `ocr_blocked_calls` counts OCR calls stopped at the gate in that run; it is 0 once every read has a replacement.
 
 `last_exit` comes from the crash marker in section 7. There is no hostname, user name, GPU serial, path, or display name in `system`, and the app does not add one.
 
@@ -517,6 +521,7 @@ Revision 2 fixtures, required:
 
 - Version: a `bundle_version` 1 manifest without `system` passes. A `bundle_version` 1 manifest with `system`, or with category `crash` or `performance`, is a 400. Version 3 is a 400.
 - `system`: every key present passes. A missing key, an unknown key, `cpu_threads` 0, or a `session_type` outside the list is a 400.
+- `system.ocr`: absent passes, and so do `on` and `off`, with or without `ocr_blocked_calls`. `null`, a boolean, or any other word is a 400. A `null`, negative, or string `ocr_blocked_calls` is a 400.
 - Log-only `other`: a version 2 `other` report with `game: null` follows the log-only rules below. A version 1 `other` report still needs a game.
 - Log-only: a `crash` report with `game: null`, nine read objects whose `value`, `confidence`, and `ocr_v1` are null and `suspect` is true, `session_id: "none"`, only `log.txt`, and both name consents false passes. The same report with a `crops/scoreboard.png` file, or with `own_name_included: true`, is a 400.
 - `team_size: null` passes on a game report.

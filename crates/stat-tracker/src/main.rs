@@ -293,8 +293,9 @@ struct DaemonCtx {
     /// is on. Never joined: dropping it on exit drops the sender, so a slow
     /// shadow frame can not delay the final session save.
     shadow: Option<shadow::worker::ShadowWorker>,
-    /// `reader = "new"`. Saved rows may use the new reader. Game boundaries
-    /// stay on ocr-v1.
+    /// `reader = "new"`, or `ocr = "off"`, which implies it
+    /// ([`stat_tracker::ocr_switch`]). Saved rows may use the new reader.
+    /// With `ocr = "on"`, game boundaries stay on ocr-v1.
     use_new_reader: bool,
 }
 
@@ -436,6 +437,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The OCR on/off switch (`ocr` in config.toml), decided once for this
+    // run, after heroes-v1 had its chance to sync. Off is refused, with the
+    // reason in the log, while a reader pack is missing. It sets the gate in
+    // `ocr::gate`: with OCR off no Tesseract instance, OCR worker pool or
+    // tessdata lookup is ever started.
+    let ocr_switch = stat_tracker::ocr_switch::Switch::start(&config);
+
     // Single wiring point for OCR debug dumps — the lib reads this switch
     // instead of re-loading config on first use; dumps land under data_dir.
     ocr::set_debug_ocr(config.debug_ocr_enabled());
@@ -443,11 +451,13 @@ async fn main() -> anyhow::Result<()> {
     // OCR pool size (Tesseract instances ≈ workers). Must run before first OCR.
     let ocr_threads = config.ocr_threads_resolved();
     ocr::set_ocr_threads(ocr_threads);
-    tracing::info!(
-        ocr_threads,
-        configured = ?config.ocr_threads,
-        "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
-    );
+    if !ocr_switch.is_off() {
+        tracing::info!(
+            ocr_threads,
+            configured = ?config.ocr_threads,
+            "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
+        );
+    }
 
     // Refuse to start alongside a live daemon. On drop the guard removes
     // daemon.pid only if the file still names this process. Held across
@@ -498,7 +508,9 @@ async fn main() -> anyhow::Result<()> {
 
     let store = open_store(&config.data_dir).await?;
 
-    if config.uses_new_reader() {
+    // `ocr = "off"` implies the new reader, whatever `reader` says.
+    let use_new_reader = config.uses_new_reader() || ocr_switch.is_off();
+    if use_new_reader {
         shadow::init(&shadow::ReaderConfig::from_data_dir(&config.data_dir));
         tracing::info!("new scoreboard reader on for saved stats");
     }
@@ -528,8 +540,11 @@ async fn main() -> anyhow::Result<()> {
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
-        use_new_reader: config.uses_new_reader(),
+        use_new_reader,
     });
+    // Watches the reader packs while OCR is asked off: a pack that goes away
+    // holds its reads and is named in the status file. It never turns OCR on.
+    tokio::spawn(ocr_switch.watch());
     // Capture never waits on the extra packs: a stalled download only
     // delays this task.
     if let Some(extras) = extra_packs {
@@ -4004,7 +4019,15 @@ fn analyze_frame(
     let need_full_ocr =
         !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
     let ocr = if need_full_ocr {
-        ocr::recognize(&img)
+        match ocr::recognize(&img) {
+            // OCR is off: there is no raw board text, which is not a failed
+            // capture. Whatever leaned on that text is held.
+            Err(e) if ocr::gate::is_off_error(e.as_ref()) => Ok(ocr::OcrResult {
+                raw_text: String::new(),
+                confidence: 0,
+            }),
+            read => read,
+        }
     } else {
         tracing::debug!("skipping full-board OCR — cell path supplied everything");
         Ok(ocr::OcrResult {
@@ -9517,6 +9540,162 @@ mod tests {
         assert_eq!(stored[0].1, scuffed_types::RECOGNIZER_OCR_V1);
         assert_eq!(stored[1].0, "defeat", "{stored:?}");
         assert_eq!(stored[1].1, shadow::digits::RECOGNIZER_ID);
+    }
+
+    // ---- S1: the OCR on/off switch (`ocr` in config.toml).
+
+    /// A 1080p stand-in for a Tab frame: a bright header band with six dark
+    /// stat labels inside the scoreboard window. That is all the preflight
+    /// needs to call it a board. Nothing on it can be read.
+    fn s1_tab_frame() -> image::DynamicImage {
+        let (w, h) = (1920u32, 1080u32);
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([12, 14, 22]));
+        let (gx, gy, gw, gh) = ocr::preprocess::game_rect_16_9(w, h);
+        let bx = gx + (gw as f64 * 0.175) as u32;
+        let by = gy + (gh as f64 * 0.15) as u32;
+        let bw = (gw as f64 * 0.65) as u32;
+        let bh = (gh as f64 * 0.70) as u32;
+        let y1 = by + (bh as f64 * 0.030) as u32;
+        for py in by..y1 {
+            for px in bx..bx + bw {
+                img.put_pixel(px, py, image::Rgb([230, 230, 230]));
+            }
+        }
+        let origin = bx + (bw as f64 * 0.40) as u32;
+        for i in 0..6u32 {
+            let x0 = origin + i * 36;
+            for py in by..y1 {
+                for px in x0..x0 + 4 {
+                    img.put_pixel(px, py, image::Rgb([20, 20, 20]));
+                }
+            }
+        }
+        image::DynamicImage::ImageRgb8(img)
+    }
+
+    /// With OCR off the vision pass still runs to its end on a Tab frame.
+    /// Every OCR read is stopped at the gate and comes back empty, and the
+    /// missing board text is not an error (an error would fail the capture).
+    #[test]
+    fn with_ocr_off_a_tab_frame_is_analysed_without_ocr_and_is_not_a_failed_capture() {
+        let frame = s1_tab_frame();
+        assert!(
+            matches!(
+                detect::hero_portrait::preflight_scoreboard(&ocr::preprocess::crop_scoreboard(
+                    &frame
+                ))
+                .0,
+                detect::hero_portrait::ScoreboardPreflight::Ready(_)
+            ),
+            "the synthetic frame has to pass the preflight"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(dir.path()));
+        let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
+        let analysed = analyze_frame(
+            frame,
+            matcher,
+            Some("PLAYER".into()),
+            detect::MatchOutcome::Unknown,
+            FrameFlags {
+                allow_banner_recovery: true,
+                session_map_known: false,
+                shadow_on: false,
+                // `ocr = "off"` implies the new reader
+                use_new_reader: true,
+            },
+        );
+        let FrameAnalysisOutcome::Analyzed(a) = analysed else {
+            panic!("the frame was rejected before the reads");
+        };
+        assert!(a.rows.is_empty(), "no cell was read");
+        assert_eq!(a.map_panel_raw, None, "no top-bar label was read");
+        assert_eq!(a.career_hero, None);
+        assert!(a.name_match.is_none());
+        assert_eq!(a.frame_outcome, detect::MatchOutcome::Unknown);
+        let text = a
+            .ocr
+            .as_ref()
+            .expect("with OCR off, no board text is not a failed capture");
+        assert_eq!((text.raw_text.as_str(), text.confidence), ("", 0));
+        // and the trust gate downstream holds such a board
+        assert!(!parse::looks_like_scoreboard(&a.rows));
+        let blocked = off.blocked();
+        assert!(
+            blocked.iter().all(|b| b.site.entry != "ocr_with"),
+            "every OCR call stops at its entry point: {blocked:?}"
+        );
+    }
+
+    /// The analysis of a Tab nothing was read from: what the vision pass
+    /// returns with OCR off for a board no reader could read.
+    fn s1_unread_analysis() -> FrameAnalysis {
+        FrameAnalysis {
+            ocr: Ok(ocr::OcrResult {
+                raw_text: String::new(),
+                confidence: 0,
+            }),
+            rows: Vec::new(),
+            map_from_panel: None,
+            map_panel_raw: None,
+            player_row_idx: None,
+            ..o8_analysis(None, None)
+        }
+    }
+
+    /// A Tab nothing was read from is held. It stores no row, and it does
+    /// not touch the game that is open: the row already stored, the result
+    /// and the map all stay as they were. Nothing is written as Unknown.
+    #[tokio::test]
+    async fn an_unread_board_is_held_and_leaves_the_open_game_as_it_was() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let mut now = test_now();
+        let mut active = game(detect::MatchOutcome::Victory, Some(5), now);
+        active.session_id = "s1".into();
+        active.map = Some("Busan".into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        let mut st = session(Some(active), now);
+
+        let tabs = [
+            (
+                o8_analysis(None, Some("zenyatta")),
+                Some(o8_board(Some("zenyatta"))),
+                true,
+            ),
+            (s1_unread_analysis(), None, false),
+            (s1_unread_analysis(), None, false),
+        ];
+        let mut stored_after_first = None;
+        for (i, (analysis, board, stored)) in tabs.into_iter().enumerate() {
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(&ctx, req)
+                .await
+                .expect("an unread board is not a failed capture");
+            assert_eq!(report.recorded, stored, "tab {i}");
+            assert!(!report.split, "tab {i} stays on this game");
+            assert_eq!(report.outcome, detect::MatchOutcome::Victory, "tab {i}");
+            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "s1", Ok(report), now).await;
+            let rows = ctx.store.get_session_snapshots("s1").await.unwrap();
+            assert_eq!(rows.len(), 1, "tab {i}: only the read board is stored");
+            match &stored_after_first {
+                None => stored_after_first = Some(rows),
+                Some(first) => assert_eq!(&rows, first, "tab {i} changed the stored row"),
+            }
+            let game = st.active_game.as_ref().expect("the game stays open");
+            assert_eq!(game.session_id, "s1");
+            assert_eq!(game.outcome, detect::MatchOutcome::Victory);
+            assert_eq!(game.map.as_deref(), Some("Busan"));
+            now += Duration::from_secs(20);
+        }
+        let row = &stored_after_first.unwrap()[0];
+        assert_eq!(row.hero, "Zenyatta");
+        assert_eq!(row.map_name, "Busan");
+        assert_eq!((row.elims, row.deaths, row.damage), (10, 2, 3000));
+        assert_ne!(row.outcome, "unknown");
     }
 
     // ---- O8: hero authority (OCR site T5) under each reader.

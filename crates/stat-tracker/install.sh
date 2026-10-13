@@ -147,7 +147,14 @@ fi
 
 # ── OCR dependencies ──────────────────────────────────────────────────────────
 
-if ! command -v tesseract &>/dev/null; then
+# Only classic OCR needs the tessdata. With `ocr = "off"` in config.toml the
+# tracker never starts Tesseract, so a missing model is not worth a warning.
+# (The build below still links the Tesseract library.)
+OCR_OFF=0
+if config_ocr_is_off "$HOME"; then
+    OCR_OFF=1
+    info "Classic OCR is off (ocr = \"off\" in config.toml) — not checking for tessdata."
+elif ! command -v tesseract &>/dev/null; then
     warn "tesseract not found — OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
     echo >&2
@@ -186,7 +193,9 @@ info "Installed binaries → $BIN_DIR"
 # Run after install so we use the freshly built binary (which has --generate-tessdata).
 # Also avoids the PID-conflict problem if a daemon is already running.
 
-info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated later from the GUI → Settings → Install Koverwatch Tessdata"
+if [[ "$OCR_OFF" -eq 0 ]]; then
+    info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated later from the GUI → Settings → Install Koverwatch Tessdata"
+fi
 
 # Ensure ~/.local/bin is on PATH (terminals). Launchers often omit it.
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
