@@ -3,9 +3,10 @@
 #
 # Takes the folder packgen wrote (one <name>.tar per pack plus manifest.json)
 # and makes those packs downloadable: on the VPS through ssh, or in a volume
-# or folder on this machine. Packs are game art. This script never writes
-# them anywhere except the destination, and refuses a folder inside a git
-# work tree. Full guide: docs/tracker-packs.md.
+# or folder on this machine. Packs are game art. This script writes them to
+# the destination and, as old copies, to its backups folder, nowhere else,
+# and refuses a folder inside a git work tree. Full guide:
+# docs/tracker-packs.md.
 #
 # Usage:
 #   publish-packs.sh [--dry-run] [--update] [--first-publish]
@@ -62,6 +63,26 @@
 # The destination needs bash 4.4+, GNU coreutils 8.24+ and flock (util-linux).
 
 set -euo pipefail
+
+# ------------------------------------------------------------ the token
+#
+# Taken out of the environment here, before this script starts its first
+# child process, and with tracing off. From this line on no child (dirname,
+# mktemp, ssh, tar, curl) inherits it, and `bash -x` has nothing to print.
+# It is written to a mode-600 curl config further down and then dropped.
+TOKEN_VALUE=""
+{
+    was_tracing=0
+    case "$-" in
+        *x*)
+            was_tracing=1
+            set +x
+            ;;
+    esac
+    TOKEN_VALUE="${PACKS_TRACKER_TOKEN:-}"
+    unset PACKS_TRACKER_TOKEN
+    [[ "${was_tracing}" == "0" ]] || set -x
+} 2>/dev/null
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT="${SCRIPT_DIR}/lib/packs-dest.sh"
@@ -160,11 +181,8 @@ WORK="$(mktemp -d)"
 chmod 700 "${WORK}"
 trap 'rm -rf "${WORK}"' EXIT
 
-# ------------------------------------------------------------ the token
-#
-# Read once, with tracing off, into a mode-600 curl config. After this block
-# no line of the script holds the token, so `bash -x` has nothing to print,
-# and no child process (ssh, tar, curl) inherits it in its environment.
+# The token goes into a mode-600 curl config, again with tracing off. After
+# this block no line of the script holds it.
 HAVE_TOKEN=0
 SITE_AUTH="${WORK}/site-auth"
 {
@@ -175,19 +193,20 @@ SITE_AUTH="${WORK}/site-auth"
             set +x
             ;;
     esac
-    if [[ -n "${PACKS_TRACKER_TOKEN:-}" ]]; then
-        if [[ ! "${PACKS_TRACKER_TOKEN}" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+    if [[ -n "${TOKEN_VALUE}" ]]; then
+        if [[ ! "${TOKEN_VALUE}" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
             HAVE_TOKEN=bad
         elif (
             umask 077
-            printf 'header = "Authorization: Bearer %s"\n' "${PACKS_TRACKER_TOKEN}" > "${SITE_AUTH}"
+            printf 'header = "Authorization: Bearer %s"\n' "${TOKEN_VALUE}" > "${SITE_AUTH}"
         ); then
             HAVE_TOKEN=1
         else
             HAVE_TOKEN=unwritten
         fi
     fi
-    unset PACKS_TRACKER_TOKEN
+    TOKEN_VALUE=""
+    unset TOKEN_VALUE
     [[ "${was_tracing}" == "0" ]] || set -x
 } 2>/dev/null
 
@@ -215,7 +234,12 @@ fi
 PHASE=check
 GOT_SIGNAL=""
 GOT_STATUS=0
+REPAIRED=0
 on_signal() {
+    if [[ "${PHASE}" == "check" && "${REPAIRED}" == "1" ]]; then
+        echo "error: stopped by SIG$1. Nothing was published. The interrupted publish from before was repaired." >&2
+        exit "$2"
+    fi
     if [[ "${PHASE}" == "check" ]]; then
         echo "error: stopped by SIG$1. The destination was not changed." >&2
         exit "$2"
@@ -377,15 +401,19 @@ shown() {
 
 # A printed command for the destination machine. It is handed to `sh -c`, so
 # it does not matter which login shell the far side has, or which shell the
-# line is pasted into here (the `&&` in it is not every shell's syntax).
+# line is pasted into here (the `&&` in it is not every shell's syntax). It
+# runs under the publish lock, waiting up to a minute for a publish that is
+# running, so it never works on the folder at the same time as one.
 for_dest() {
-    if [[ "$1" == *"'"* ]]; then
+    local lock
+    lock="flock -w 60 $(shown "${DEST_PATH}")"
+    if [[ "$1" == *"'"* || "${lock}" == *"'"* ]]; then
         # A path that needed quoting of its own. Printed as it is, for bash.
         printf '%s' "$1"
     elif [[ -n "${HOST}" ]]; then
-        printf "ssh %s \"sh -c '%s'\"" "${HOST}" "$1"
+        printf "ssh %s \"%s sh -c '%s'\"" "${HOST}" "${lock}" "$1"
     else
-        printf "sh -c '%s'" "$1"
+        printf "%s sh -c '%s'" "${lock}" "$1"
     fi
 }
 
@@ -495,7 +523,7 @@ JOURNAL_STATE=""
 JOURNAL_RUN=""
 SAVED_MANIFEST=""
 declare -A FILE_SIZE=() FILE_SHA=() HALF_SIZE=() HALF_SHA=() HALF_SAVED=() HALF_PATH=() SAVED_TAR=()
-declare -a HALF_NAMES=() EXTRAS=() LEFTOVERS=() SAVED_MANIFESTS=()
+declare -a HALF_NAMES=() STUCK_NAMES=() EXTRAS=() LEFTOVERS=() SAVED_MANIFESTS=() ASIDES=()
 parse_state() {
     local kind rest a b c d e complete=0
     DEST_PATH=""
@@ -508,6 +536,8 @@ parse_state() {
     FILE_SIZE=()
     FILE_SHA=()
     HALF_NAMES=()
+    STUCK_NAMES=()
+    ASIDES=()
     HALF_SIZE=()
     HALF_SHA=()
     HALF_SAVED=()
@@ -528,6 +558,7 @@ parse_state() {
                     absent) ;;
                     toolarge) die "the published manifest.json is larger than 64 KiB; the site refuses it. Fix it by hand." ;;
                     *)
+                        [[ "${a}" =~ ^[0-9a-f]{64}$ ]] || return 1
                         STATE_REPORTED_SHA="${a}"
                         printf '%s' "${b}" | base64 -d > "$2" 2>/dev/null || return 1
                         # Hashed here. What the other side says its sha256 is does not count.
@@ -537,6 +568,9 @@ parse_state() {
                 ;;
             FILE)
                 read -r a b c <<< "${rest}"
+                # A line without a size and a full sha256 is a broken answer,
+                # not a file that differs.
+                [[ -n "${a}" && "${b}" =~ ^[0-9]+$ && "${c}" =~ ^[0-9a-f]{64}$ ]] || return 1
                 FILE_SIZE["${a}"]="${b}"
                 FILE_SHA["${a}"]="${c}"
                 ;;
@@ -555,6 +589,8 @@ parse_state() {
                 HALF_SAVED["${a}"]="${d}"
                 HALF_PATH["${a}"]="${e}"
                 ;;
+            STUCK) STUCK_NAMES+=("${rest}") ;;
+            ASIDE) ASIDES+=("${rest}") ;;
             SAVEDMANIFEST) SAVED_MANIFESTS+=("${rest}") ;;
             SAVEDTAR)
                 read -r a b c <<< "${rest}"
@@ -587,6 +623,12 @@ fi
 if [[ "${JOURNAL_STATE}" == "unreadable" ]]; then
     die "${DEST_PATH}/.publish-journal is left from an interrupted publish and cannot be read. Compare the packs with manifest.json by hand, then remove that file."
 fi
+if [[ "${JOURNAL_STATE}" == "stuck" ]]; then
+    echo "error: an earlier publish (${JOURNAL_RUN}) was interrupted, and for these packs it cannot be told what they should be: ${STUCK_NAMES[*]}" >&2
+    echo "  The file is neither the pack manifest.json lists nor the one from before that publish, or it could not be read." >&2
+    echo "  Nothing was changed. Compare those files with ${DEST_PATH}/manifest.json by hand, then remove ${DEST_PATH}/.publish-journal" >&2
+    exit 1
+fi
 
 # An interrupted update left a tar with its new bytes under the old list.
 # A real run puts the old file back first, and only then plans.
@@ -603,7 +645,7 @@ if [[ "${JOURNAL_STATE}" == "open" ]]; then
         echo "  A real run first puts the old file(s) back, by rename. The plan below assumes that is done."
         for name in "${HALF_NAMES[@]}"; do
             [[ "${HALF_SAVED[${name}]}" == "ok" ]] \
-                || die "the old ${name} cannot be put back: there is no good saved copy. Publish ${name} again from an outdir."
+                || die "the old ${name} cannot be put back: there is no good saved copy. If it is gone for good, remove ${DEST_PATH}/.publish-journal on the destination by hand, then publish ${name} again from an outdir."
             FILE_SIZE["${name}"]="${HALF_SIZE[${name}]}"
             FILE_SHA["${name}"]="${HALF_SHA[${name}]}"
         done
@@ -618,6 +660,7 @@ if [[ "${JOURNAL_STATE}" == "open" ]]; then
         parse_state "${WORK}/state" "${WORK}/old-manifest.json" \
             || die "the destination answer was cut short after the repair. Run again."
         [[ -z "${JOURNAL_STATE}" ]] || die "the repair did not finish. Run again."
+        REPAIRED=1
         echo "Repaired. The published list and its files match again."
         if [[ -n "${GOT_SIGNAL}" ]]; then
             echo "error: stopped by SIG${GOT_SIGNAL} after the repair. Nothing was published." >&2
@@ -647,8 +690,8 @@ else
     : > "${WORK}/old.tsv"
 fi
 echo "Destination: ${DEST_PATH} (${#OLD_NAMES[@]} pack(s) published)"
-if [[ "${JOURNAL_STATE}" == "committed" ]]; then
-    echo "note: a publish that did switch (${JOURNAL_RUN}) left its journal behind. The next real publish removes it."
+if [[ "${JOURNAL_STATE}" == "stale" ]]; then
+    echo "note: an earlier publish (${JOURNAL_RUN}) left its journal behind. Every pack matches the list; the next real publish removes it."
 fi
 if [[ "${#LEFTOVERS[@]}" -gt 0 ]]; then
     echo "note: ${#LEFTOVERS[@]} temp file(s) of a killed publish are in the folder. The next real publish removes them."
@@ -672,7 +715,7 @@ if [[ "${OLD_MANIFEST_SHA}" == "absent" ]]; then
         for name in "${strangers[@]:0:10}"; do
             echo "  ${name}" >&2
         done
-        echo "  This script does not remove or overwrite files it did not bring." >&2
+        echo "  This script does not remove files it did not bring." >&2
         exit 1
     fi
 elif [[ "${FIRST_PUBLISH}" == "1" ]]; then
@@ -687,7 +730,7 @@ dest_file_ok() {
 }
 
 declare -A STATUS=() MODE=()
-declare -a NEW_ORDER=() UPLOADS=() UPDATES=() NO_OLD_COPY=() SAME_VERSION=() NEEDS_UPDATE=()
+declare -a NEW_ORDER=() UPLOADS=() UPDATES=() REPAIRS=() NO_OLD_COPY=() SAME_VERSION=() NEEDS_UPDATE=()
 
 for name in "${OLD_NAMES[@]}"; do
     NEW_ORDER+=("${name}")
@@ -702,6 +745,7 @@ for name in "${OLD_NAMES[@]}"; do
             STATUS["${name}"]="repaired"
             MODE["${name}"]="repair"
             UPLOADS+=("${name}")
+            REPAIRS+=("${name}")
         fi
     elif [[ "${OUT_VER[${name}]}" == "${OLD_VER[${name}]}" ]]; then
         SAME_VERSION+=("${name}")
@@ -942,6 +986,10 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     for name in "${NO_OLD_COPY[@]}"; do
         echo "note: ${name} at the destination is not the published file, so there is no old copy to save or roll back to."
     done
+    for name in "${UPLOADS[@]}"; do
+        [[ "${MODE[${name}]}" != "update" && -n "${FILE_SHA[${name}]:-}" && "${FILE_SHA[${name}]}" != "${OUT_SHA[${name}]}" ]] || continue
+        echo "note: a file named ${name} is already in the folder with other bytes (unlisted, or damaged). A copy goes to ${BACKUPS_PATH}/packs-set-aside-${STAMP}/ before it is replaced."
+    done
     exit 0
 fi
 
@@ -950,9 +998,10 @@ fi
 upload_stream() {
     local name
     for name in "${UPLOADS[@]}"; do
-        if [[ "${MODE[${name}]}" == "update" ]]; then
-            printf 'PACK %s %s %s update %s %s\n' "${name}" "${OUT_SIZE[${name}]}" "${OUT_SHA[${name}]}" \
-                "${OLD_SIZE[${name}]}" "${OLD_SHA[${name}]}"
+        if [[ -n "${OLD_SHA[${name}]:-}" ]]; then
+            # update, or repair of a listed pack: with what the list said it was.
+            printf 'PACK %s %s %s %s %s %s\n' "${name}" "${OUT_SIZE[${name}]}" "${OUT_SHA[${name}]}" \
+                "${MODE[${name}]}" "${OLD_SIZE[${name}]}" "${OLD_SHA[${name}]}"
         else
             printf 'PACK %s %s %s %s\n' "${name}" "${OUT_SIZE[${name}]}" "${OUT_SHA[${name}]}" "${MODE[${name}]}"
         fi
@@ -1039,6 +1088,11 @@ if [[ "${LIVE}" == "old" ]]; then
     fi
     echo "error: the publish stopped half way. The OLD list is live, but these packs do not match it: ${BROKEN[*]}" >&2
     echo "  A tracker that asks for one of them gets a refusal until this is repaired." >&2
+    if [[ "${JOURNAL_STATE}" != "open" ]]; then
+        # Nothing of this run is half done, so the damage is older than this run.
+        echo "  This run left no update half done. Publish those packs again from an outdir, or roll back." >&2
+        exit 1
+    fi
     echo "  Repair: run the same command again. It puts the old file(s) back first, then publishes." >&2
     for name in "${HALF_NAMES[@]}"; do
         if [[ "${HALF_SAVED[${name}]}" == "ok" ]]; then
@@ -1057,52 +1111,75 @@ fi
 echo
 print_table
 echo
-
-rollback=""
-for name in "${UPDATES[@]}"; do
-    key="${name} ${OLD_SHA[${name}]}"
-    saved="${SAVED_TAR[${key}]:-}"
-    if [[ -n "${saved}" ]]; then
-        echo "Old tar: ${saved}"
-        rollback+="$(put_back "${saved}" "${name}") && "
-    else
-        echo "Old tar: none for ${name}. It was not the published file before this run, so there was nothing to save."
-    fi
+for entry in "${ASIDES[@]}"; do
+    echo "Set aside: ${entry#* } (a file named ${entry%% *} was in the folder with other bytes; this is a copy of it)"
 done
-if [[ "${OLD_MANIFEST_SHA}" == "absent" ]]; then
-    echo "Backup: none. There was no manifest.json before this publish."
-    rollback+="rm -f ${d}/manifest.json"
-else
-    for entry in "${SAVED_MANIFESTS[@]}"; do
-        [[ "${entry%% *}" == "${OLD_MANIFEST_SHA}" ]] && SAVED_MANIFEST="${entry#* }"
-    done
-    if [[ -n "${SAVED_MANIFEST}" ]]; then
-        echo "Backup: ${SAVED_MANIFEST}"
-        rollback+="$(put_back "${SAVED_MANIFEST}" manifest.json)"
-    else
-        echo "Backup: NOT FOUND. No packs-manifest-pre-${STAMP}*.json in ${BACKUPS_PATH} is the old manifest."
-        rollback=""
-    fi
-fi
-if [[ -n "${rollback}" ]]; then
-    echo "Rollback: $(for_dest "${rollback}")"
-else
-    echo "Rollback: no line can be given without the old manifest. Publish the old build again instead."
-fi
-if [[ "${OLD_MANIFEST_SHA}" == "absent" ]]; then
-    echo "  (that turns the pack routes off again: 503 packs_disabled)"
-fi
-warn_missing
 
-if [[ "${#BROKEN[@]}" -gt 0 ]]; then
-    echo "error: the NEW list is live, but these packs do not match it: ${BROKEN[*]}" >&2
-    echo "  Run the rollback line above." >&2
-    exit 1
-fi
-if [[ "${clean}" != "1" ]]; then
-    echo "error: the run did not end cleanly, but the NEW list is live and every pack it lists is in place" >&2
-    echo "  (read back just now, checked by sha256 and size). Keep the rollback line above." >&2
-    exit 1
+if [[ "${NEW_MANIFEST_SHA}" == "${OLD_MANIFEST_SHA}" ]]; then
+    # This run only put files back that were missing or damaged. The list it
+    # wrote is the list it found, so nothing was switched and there is
+    # nothing to roll back to.
+    if [[ "${#BROKEN[@]}" -gt 0 ]]; then
+        echo "error: the list did not change in this run; it only uploads packs whose files were missing or damaged." >&2
+        echo "  These still do not match the list: ${BROKEN[*]}" >&2
+        echo "  Nothing was switched, so there is nothing to roll back. Run the same command again." >&2
+        exit 1
+    fi
+    if [[ "${clean}" != "1" ]]; then
+        echo "error: the run did not end cleanly. The list did not change in this run, and every pack it lists" >&2
+        echo "  is in place now (read back just now, checked by sha256 and size)." >&2
+        exit 1
+    fi
+    echo "Backup: not needed. The list did not change; only files were put back."
+else
+    rollback=""
+    for name in "${UPDATES[@]}"; do
+        key="${name} ${OLD_SHA[${name}]}"
+        saved="${SAVED_TAR[${key}]:-}"
+        if [[ -n "${saved}" ]]; then
+            echo "Old tar: ${saved}"
+            rollback+="$(put_back "${saved}" "${name}") && "
+        else
+            echo "Old tar: none for ${name}. It was not the published file before this run, so there was nothing to save."
+        fi
+    done
+    if [[ "${OLD_MANIFEST_SHA}" == "absent" ]]; then
+        echo "Backup: none. There was no manifest.json before this publish."
+        rollback+="rm -f ${d}/manifest.json"
+    else
+        for entry in "${SAVED_MANIFESTS[@]}"; do
+            [[ "${entry%% *}" == "${OLD_MANIFEST_SHA}" ]] && SAVED_MANIFEST="${entry#* }"
+        done
+        if [[ -n "${SAVED_MANIFEST}" ]]; then
+            echo "Backup: ${SAVED_MANIFEST}"
+            rollback+="$(put_back "${SAVED_MANIFEST}" manifest.json)"
+        else
+            echo "Backup: NOT FOUND. No packs-manifest-pre-${STAMP}*.json in ${BACKUPS_PATH} is the old manifest."
+            rollback=""
+        fi
+    fi
+    if [[ -n "${rollback}" ]]; then
+        echo "Rollback: $(for_dest "${rollback}")"
+    else
+        echo "Rollback: no line can be given without the old manifest. Publish the old build again instead."
+    fi
+    if [[ "${OLD_MANIFEST_SHA}" == "absent" ]]; then
+        echo "  (that turns the pack routes off again: 503 packs_disabled)"
+    fi
+    warn_missing
+
+    if [[ "${#BROKEN[@]}" -gt 0 ]]; then
+        echo "error: the NEW list is live, but these packs do not match it: ${BROKEN[*]}" >&2
+        if [[ -n "${rollback}" ]]; then
+            echo "  Run the rollback line above." >&2
+        fi
+        exit 1
+    fi
+    if [[ "${clean}" != "1" ]]; then
+        echo "error: the run did not end cleanly, but the NEW list is live and every pack it lists is in place" >&2
+        echo "  (read back just now, checked by sha256 and size). Keep the rollback line above." >&2
+        exit 1
+    fi
 fi
 echo "Verified: manifest.json read back, ${#NEW_ORDER[@]} pack(s) match by sha256 and size at ${DEST_PATH}."
 if [[ -n "${GOT_SIGNAL}" ]]; then

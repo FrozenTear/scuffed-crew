@@ -153,7 +153,8 @@ After it has read the destination, it also refuses:
   looking at the wrong folder;
 - a published list whose own files are missing or damaged. Publish that pack
   again, or roll back, first;
-- a backups folder inside the destination, also through a symlink;
+- a backups folder inside the destination, also through a symlink, or
+  inside a git work tree;
 - a second publish while one is running.
 
 ### What it does
@@ -175,9 +176,15 @@ After it has read the destination, it also refuses:
 
 A failure or a lost connection before the last rename of step 5 leaves the
 old manifest and every tar it lists as they were. A new tar may already be in
-the folder. Nothing lists it, so the server does not serve it, and the next
-publish overwrites it. Temp files from a killed run are removed by the next
-run; only the script's own temp names are, never another file.
+the folder. Nothing lists it, so the server does not serve it. Temp files
+from a killed run are removed by the next run; only the script's own temp
+names are, never another file.
+
+A file that is already in the folder under the name of a pack being
+published as `new` or `repaired` (an unlisted tar of an earlier run, or a
+damaged one) is not simply overwritten: a copy goes to
+`packs-set-aside-<stamp>/` in the backups folder first, and the run prints
+`Set aside: ...`. A failed run can leave its copies in the backups folder.
 
 It prints one line per pack:
 
@@ -193,7 +200,11 @@ words-v2.tar           1               93184  0123456789ab  new
 `new` was uploaded under a name that was not listed. `updated (1 -> 2)` got
 new bytes and a new version under its old name. `repaired` means the pack was
 listed but its file at the destination was missing or damaged, and was
-uploaded again.
+uploaded again. A run that only repairs does not change the list: it prints
+`Backup: not needed` and no rollback line.
+
+The script cannot tell a newer `version` from an older one; it only sees
+that they differ. Read every `updated` row before a real run.
 
 ### When a run does not end cleanly
 
@@ -211,10 +222,19 @@ is still running, reads the destination again, and prints one of:
 - **what is live is NOT known.** The destination could not be read again.
   Run the same command with `--dry-run` to look.
 
-It exits non-zero in all four. A SIGTERM, SIGINT or SIGHUP to the script
-while the publish half runs does not stop that half: the script waits for
-it, prints the `Backup:` and `Rollback:` lines, and exits with the signal's
-status.
+It exits non-zero in all four. A SIGTERM, SIGINT or SIGHUP sent to the
+script alone while the publish half runs does not stop that half: the script
+waits for it, prints the `Backup:` and `Rollback:` lines, and exits with the
+signal's status. Ctrl-C in a terminal is different: it also reaches the
+publish half (a local destination) or ends the ssh connection (`--host`).
+The publish half then stops before the switch or finishes it, and the
+script reads back and reports which, as above.
+
+If a half-switched pack cannot be repaired, the script says why and changes
+nothing: the saved copy of the old tar is gone (remove
+`<destination>/.publish-journal` by hand, then publish that pack again), or
+the list names bytes that are neither the old file nor the one in the
+folder (compare by hand, then remove that file).
 
 ### Update a pack in place
 
@@ -236,10 +256,14 @@ changed, a tracker refuses bytes whose sha256 is not the listed one and keeps
 its folder, and a tracker that already has the old version asks for nothing:
 no tracker installs a wrong pack, and its next sync gets the new one.
 
-SIGTERM, SIGINT and SIGHUP are held off for those two renames. `kill -9` or a
-power cut between them leaves the old list over the new tar; the destination
-half wrote down what it was doing before the first rename, and the next run
-puts the old tar back from the saved copy before it does anything else.
+SIGTERM, SIGINT and SIGHUP are ignored for those two renames: one that
+arrives then is dropped and the update goes through. `kill -9` or a power
+cut between them leaves the old list over the new tar. The destination half
+wrote down what it was doing before the first rename
+(`.publish-journal`), and the next run reads that note against the live
+`manifest.json`: a pack whose old bytes the live list still names gets them
+back from the saved copy before anything else is done, and a pack whose file
+already matches the live list is never touched.
 
 A member's tracker notices the update on its next sync: a restart, or the
 setup guide's "Download reader pack".
@@ -251,8 +275,8 @@ The script never removes a pack from the list. There is no `--keep` and no
 32, and a missing name breaks every tracker release that asks for it (see the
 table in [Names, versions, and which tracker asks for what](#names-versions-and-which-tracker-asks-for-what)).
 If a name really has to go, that is a deliberate edit of `manifest.json` on
-the server, by hand, after checking that table: write the new file beside
-the old one and rename it over.
+the server, by hand, after checking that table and with no publish running:
+write the new file beside the old one and rename it over.
 
 ## Verify
 
@@ -280,7 +304,8 @@ manifest at the destination, downloads every pack, and compares status,
 `ETag`, `Content-Length` and the sha256 of the body. The token is read from
 `PACKS_TRACKER_TOKEN` only. There is no command-line option for it. It is
 never printed, it is in no command line (curl reads it from a mode-600 file
-in the script's temp folder), no child process gets it in its environment,
+in the script's temp folder, removed when the script ends), no child process
+gets it in its environment (it is taken out on the script's first line),
 and a `bash -x` trace does not show it. The site URL and the token's shape
 are checked before anything is published.
 
@@ -300,13 +325,15 @@ folder on the destination machine first, and prints the path and one command:
 
 ```text
 Backup: /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json
-Rollback: ssh root@your-vps "sh -c 'cp -p /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json <volume>/.manifest.json.rollback-20261013T120000Z.tmp && mv -f <volume>/.manifest.json.rollback-20261013T120000Z.tmp <volume>/manifest.json'"
+Rollback: ssh root@your-vps "flock -w 60 <volume> sh -c 'cp -p /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json <volume>/.manifest.json.rollback-20261013T120000Z.tmp && mv -f <volume>/.manifest.json.rollback-20261013T120000Z.tmp <volume>/manifest.json'"
 ```
 
 Run that line as printed. It puts the old list back with one rename. The
 tars of the rolled-back publish stay in the folder unlisted, so the server
 does not serve them. The line is one `sh -c` command: it can be pasted into
 bash or nushell, and it does not depend on root's login shell on the server.
+It runs under the publish lock (`flock`), waiting up to a minute for a
+publish that is running, so the two never work on the folder at once.
 
 After an update the line is longer. It first puts each saved tar back, then
 the manifest:
@@ -314,7 +341,7 @@ the manifest:
 ```text
 Old tar: /root/scuffed-crew-backups/packs-tars-pre-20261013T120000Z/words-v1.tar
 Backup: /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json
-Rollback: ssh root@your-vps "sh -c 'cp -p <old tar> <volume>/.words-v1.tar.rollback-<stamp>.tmp && mv -f <volume>/.words-v1.tar.rollback-<stamp>.tmp <volume>/words-v1.tar && cp -p <backup> <volume>/.manifest.json.rollback-<stamp>.tmp && mv -f <volume>/.manifest.json.rollback-<stamp>.tmp <volume>/manifest.json'"
+Rollback: ssh root@your-vps "flock -w 60 <volume> sh -c 'cp -p <old tar> <volume>/.words-v1.tar.rollback-<stamp>.tmp && mv -f <volume>/.words-v1.tar.rollback-<stamp>.tmp <volume>/words-v1.tar && cp -p <backup> <volume>/.manifest.json.rollback-<stamp>.tmp && mv -f <volume>/.manifest.json.rollback-<stamp>.tmp <volume>/manifest.json'"
 ```
 
 Every file is copied to a temp name in the volume and renamed into place. It
@@ -327,8 +354,9 @@ the update itself. Trackers that already fetched the new version see the old
 
 The backups folder is `~/scuffed-crew-backups` of the login that ran the
 destination half (`/root/scuffed-crew-backups` on the VPS).
-`PACKS_BACKUP_DIR` changes it. It must be outside the destination. A folder
-the script creates is mode 0700; an existing one is left as it is. The first
+`PACKS_BACKUP_DIR` changes it. It must be outside the destination and
+outside any git work tree (old packs are saved there). A folder the script
+creates is mode 0700; an existing one is left as it is. The first
 publish into an empty folder has nothing to back up. Its rollback line
 removes `manifest.json`, which turns the pack routes off again.
 
