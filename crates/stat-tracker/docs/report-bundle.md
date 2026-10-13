@@ -4,6 +4,8 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4).
+
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
 ## 1. Purpose
@@ -57,7 +59,7 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 `game` holds the match context:
 
 - `map`, `mode`, and `result` are strings or `null`.
-- `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6 and kept the frame by filling both name layouts (section 4). A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
+- `team_size` is `5`, `6`, or `null`. `null` means the app could not tell 5v5 from 6v6; such a board writes no scoreboard (section 4), so `null` shows up on a `missed_game` report without a kit. A frame with any other team size is dropped. Revision 1's validator took only 5 or 6, so a `null` was a 400. The validator accepts `null` from revision 2 on, for both bundle versions.
 - In a `crash` or `performance` report, `game` is `null`. An `other` report (bundle version 2) may also have `game: null`; it is then a log-only report and follows the same rules as `crash` and `performance` (this section and section 7). An `other` report with a game follows the game report rules. `reads` keeps its usual shape: all nine keys, each an object with `value`, `confidence`, and `ocr_v1` set to `null` and `suspect` set to `true` (a null value is always suspect, as below). A read is never JSON `null` as a whole.
 - `captured_at` is the frame time in UTC, RFC 3339, such as `2026-10-09T12:00:00Z`. For a game report, the log window in section 6 is measured from the session around this time. Crash and performance reports have no `game` object; their window follows section 6.
 
@@ -227,9 +229,9 @@ Every image in the zip is a lossless PNG at native resolution. Native means one 
 
 Colour type is 8-bit truecolour RGB, or 8-bit RGBA when a glyph crop needs a mask. Interlace is off. All metadata is stripped. The only chunks allowed are `IHDR`, `IDAT`, `IEND`, and `PLTE` when a palette image cannot be avoided. The app should write RGB or RGBA and not a palette. Text chunks, EXIF, time chunks, colour profiles, and physical-pixel chunks are removed. The PNG magic bytes are `89 50 4E 47 0D 0A 1A 0A`.
 
-The main scoreboard image is `crops/scoreboard.png`: the scoreboard rectangle cut from the blanked frame. The app may also include `crops/frame.png`, the full blanked frame, when the zip still fits the size cap in section 8. If the full frame would make the zip too big, the app leaves it out and says so in the preview. It does not shrink the frame to fit. On a scoreboard frame, `crops/frame.png` fills every pixel outside the scoreboard rectangle with the solid colour. That covers side panels and the part of the chat band (x 0 to 340, y 620 to 855 of the playfield) that falls outside the rectangle. Inside the rectangle, name cells are filled and hero portraits and digit columns stay as they are. Revision 1 also allowed extra 1:1 crops of suspect digit cells. The validator only accepts `crops/scoreboard.png` and `crops/frame.png` for role `crop`, so those extra crops were a 400. Revision 2 drops them. A later change adds `crops/outcome.png`, so a `crop` path is exactly one of those three. The outcome crop is the competitive rank screen's result word box, x 10/1000, y 145/1000, width 240/1000, height 80/1000 of the playfield (the box `read_rank_screen_result` reads). It holds only the result word (Victory, Defeat, or Draw). Like every crop, it is cut from the blanked frame. On a rank screen frame, the `outcome` class fills only `overlay_top`, `overlay_bottom`, and the bands outside the playfield, and none of them reaches this box, so blanking does not paint it. It is cut only from a frame on which the rank screen detector (`OutcomeSource::RankScreen`) fired, from those same pixels, after that box held still across ticks (the detector's stability check), and only when the scoreboard detector (the capture preflight) did not accept that same frame: the preflight answers "not a scoreboard" and the row scan does not look like a scoreboard. The rank word match is loose (a title such as QUICKDRAW contains DRAW), so a Tab-held scoreboard can fire the rank screen detector. It is never cut from a frame on which only the banner, the accolade result word, or the end title fired, and never from a different frame than the one that read the word. On other screens the same box is not name-free: on a scoreboard frame it holds the member's hero portrait, rank badge, and title, with their name a few pixels to the right. The accolade screen is excluded because the member's own name sits just below its word box. Banner, end title, and scoreboard-header outcomes write no outcome crop. A later revision can add a cell-crop path with its own validator change.
+The main scoreboard image is `crops/scoreboard.png`: the scoreboard rectangle of the frame, blanked by the allowlist in section 4. The rectangle is cut in memory and blanked before anything is written. The app may also include `crops/frame.png`, the full blanked frame, when the zip still fits the size cap in section 8. If the full frame would make the zip too big, the app leaves it out and says so in the preview. It does not shrink the frame to fit. On a scoreboard frame, `crops/frame.png` fills every pixel outside the scoreboard rectangle with the solid colour. That covers side panels and the part of the chat band (x 0 to 340, y 620 to 855 of the playfield) that falls outside the rectangle. Inside the rectangle, `crops/frame.png` uses the same allowlist as `crops/scoreboard.png` (section 4): only the kept portrait and digit cells show, and everything else inside the rectangle is filled. The app in this revision does not write `crops/frame.png`; the report kit holds only `crops/scoreboard.png` and `crops/outcome.png`. Revision 1 also allowed extra 1:1 crops of suspect digit cells. The validator only accepts `crops/scoreboard.png` and `crops/frame.png` for role `crop`, so those extra crops were a 400. Revision 2 drops them. A later change adds `crops/outcome.png`, so a `crop` path is exactly one of those three. The outcome crop is the competitive rank screen's result word box, x 10/1000, y 145/1000, width 240/1000, height 80/1000 of the playfield (the box `read_rank_screen_result` reads). It holds only the result word (Victory, Defeat, or Draw). Like every crop, it is cut from the blanked frame. On a rank screen frame, the `outcome` class fills only `overlay_top`, `overlay_bottom`, and the bands outside the playfield, and none of them reaches this box, so blanking does not paint it. It is cut only from a frame on which the rank screen detector (`OutcomeSource::RankScreen`) fired, from those same pixels, after that box held still across ticks (the detector's stability check), and only when the scoreboard detector (the capture preflight) did not accept that same frame: the preflight answers "not a scoreboard" and the row scan does not look like a scoreboard. The rank word match is loose (a title such as QUICKDRAW contains DRAW), so a Tab-held scoreboard can fire the rank screen detector. It is never cut from a frame on which only the banner, the accolade result word, or the end title fired, and never from a different frame than the one that read the word. On other screens the same box is not name-free: on a scoreboard frame it holds the member's hero portrait, rank badge, and title, with their name a few pixels to the right. The accolade screen is excluded because the member's own name sits just below its word box. Banner, end title, and scoreboard-header outcomes write no outcome crop. A later revision can add a cell-crop path with its own validator change.
 
-Blanking runs on the full frame first. Crops are cut from that blanked frame. The only images cut from the unblanked frame are the own-name crop and the glyph crops, and only when their boxes are ticked.
+The scoreboard rectangle and the outcome box are blanked in memory before they are written, and the scoreboard blanker reads chat from the rest of the frame. The only images cut from the unblanked frame are the own-name crop and the glyph crops, and only when their boxes are ticked.
 
 Unblanked frames stay in memory while those crops are cut. If an unblanked frame has to be a file, that file is readable and writable by the owner only. The app deletes it when the zip is sealed, when the preview closes, and again at the next start if a crash left it behind. It is not written to the download directory or left in the data directory.
 
@@ -245,7 +247,7 @@ Pixel edges use the same truncation as the current scoreboard crop: scale by the
 
 The bands outside the playfield (the letterbox or pillarbox) are filled with the same solid colour on every frame we keep. Those bands are the complement of the playfield, not a row in the table. Overlays and notifications sit there on ultrawide and 16:10 captures.
 
-### Scoreboard rows
+### Scoreboard (revision 6, measured)
 
 The scoreboard crop, as fractions of the playfield, matches the crop the tracker already uses:
 
@@ -256,33 +258,63 @@ The scoreboard crop, as fractions of the playfield, matches the crop the tracker
 | width | 650/1000 |
 | height | 700/1000 |
 
-Inside that crop, the row grid matches the player row crop. Header height is 25/1000 of the crop height. Team 2 starts at 565/1000 of the crop height. Row height in pixels is `(team2_start - header) / (team_size + 1)` using integer division. Team 1 row `i` starts at `header + i * row_height`. Team 2 row `i` starts at `team2_start + i * row_height`. There are `team_size` rows on each side: 10 rows in 5v5, 12 rows in 6v6. The blank covers the full row height, not the tighter window the OCR pads inward.
+`crops/scoreboard.png` is an allowlist. It starts as the solid colour, and only two kinds of pixel are copied from the frame: a row's portrait cell and a row's digit glyphs. Each comes from a structure measured on that board and checked by a second cue. Nothing is placed by a fixed fraction of the crop. The in-match table sits at four widths and offsets (perk icons move it by up to 57 px at 1440p) and the post-match table is centred, so revision 3's fixed columns cut through portraits and left names visible. Everything that is not copied stays filled: the header, the name column with its badge, rank icon, name, and title, the ult and perk icons, the voice icons, the gap between the teams, the hero card, and the game world behind and beside the table, where in-world nameplates show.
 
-Name, portrait, and digit columns are fractions of the scoreboard crop width. Ranges are half-open: the start is included and the end is not. They share edges and do not overlap. Together, portrait, name, and digits cover the full crop width of each player row.
+Geometry, measured per board. Lengths are in the 1664 px crop of a 2560x1440 frame, times `s` = crop width / 1664.
 
-5v5:
+- Board: the crop aspect is within 1% of 1664:1007 and `s` is between 0.70 and 1.60. Only the 1440p and 1080p crops (`s` within 5% of 1 or of 0.75) keep anything: digits and portraits have no measured floors at other scales, so a board measured at any other scale keeps nothing. The light header strip gives the table edges `L` and `R` and the header bottom. Only the measured layouts pass: the in-match table centred at 522 `s`, or the post-match table centred in the crop, with `R - L` of 930, 978, 994, or 1044 `s`. The stat header labels sit at their offsets from `R` (5 of the 6 must be found; the one-letter H can drop out of the label scan), with no other label between E and MIT.
+- Rows: each team's grid is fitted to the 2 px separators between rows: team 1 from the header bottom, team 2 from 556 to 576 `s`, pitch 74.5 to 75.75 `s`. A team's grid is trusted when 3 of its internal separators show, and a row is used only when the separators on both of its sides show.
+- Only 6v6 has measured geometry. Any other team size, or an unknown one, keeps nothing. A board whose geometry fails keeps nothing at all.
 
-| Column | Start | End |
-| --- | --- | --- |
-| Portrait (protected) | 0 | 200/1000 |
-| Name (blank) | 200/1000 | 450/1000 |
-| Digits (protected) | 450/1000 | right edge |
+**Portraits are not kept in this revision.** Every portrait cell (role bar and hero portrait) is filled on every board, and the digits are kept exactly as before. `COPY_PORTRAITS` in `src/report/blank/mod.rs` is off, and the daemon holds no portrait cell in memory. Attack round 3 (2026-10-13) showed two overlays that the earlier-capture check below cannot see: a faint overlay drawn on the current capture only (about 9% opacity or less, about 20 levels a channel or less), which can be read after subtracting the hero's clean art; and an overlay that stays within about 20 levels of the earlier capture, except about 20 px, for a minute or more (a pinned stream overlay, a menu held open). Both are listed under known limits. Alpha.7 plans to turn portraits back on with a native-template paste: hero templates at the board's own size (74 px at 1440p, 56 px at 1080p, from the game's 256 px portraits), where the output shows the template, not frame pixels.
 
-6v6:
+The rule below stays in the code behind `COPY_PORTRAITS` and is tested with the switch on. With the switch on, a row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. A portrait is kept only when an earlier capture of the same game, at least 60 seconds older, matches it; with no such capture it is filled. It is copied whole only when all of these hold:
 
-| Column | Start | End |
-| --- | --- | --- |
-| Portrait (protected) | 0 | 140/1000 |
-| Name (blank) | 140/1000 | 255/1000 |
-| Digits (protected) | 255/1000 | right edge |
+- the cell matches the same row's cell on an earlier capture of the same game, taken at least a minute earlier and at most 30 minutes earlier: of the difference between the two cells, minus its 15 `s` box mean (a team colour or world shift moves the whole bar or background and cancels), no channel may be off by more than 20 at more than 20 px (x `s` squared). Text, boxes and fades drawn on one capture and not the other, at more than about 10% opacity, differ at hundreds of px; a fainter overlay does not (known limits below). The daemon keeps the portrait cells of a game's last 8 captures in memory for this (never on disk), drops them when the game ends or is deleted, and when 8 are held always keeps the newest capture old enough to be a reference. The age is checked on the wall clock and on the monotonic clock, so a clock step never makes a seconds-old capture a reference, and a capture whose crop is byte-identical to the one checked (a frozen render) is never a reference. The first capture of a game, a hero swap, a death and a respawn keep no portrait until a matching earlier capture exists;
+- the role bar is one opaque colour: 55% of its non-icon pixels sit within 40 of their median;
+- the bar shows at most 2 sharp-stroke pixels (a channel more than 30 from its 5x5 median) outside the role icon, a role icon of at least 120 white px (x `s` squared), and white only inside the icon zone, with the icon centred and mirror-symmetric;
+- the 6 px strip right of the portrait holds at most 2 white or grey or bright bar-coloured pixels and at most 30 sharp-stroke pixels of any colour, and the 8 px strip left of the bar at most 2 white or grey pixels (when the bar sits closer than 8 px to the crop's left edge, as in the wide perk layout, the strip is what the crop holds left of the bar plus the bar's own first 4 `s`, left of the icon zone);
+- the portrait's right edge shows on at least 40% of the row's pixel rows (a menu box laid across it hides it);
+- the row separators above and below the portrait square show: on at most 35% of its columns may a separator sit within 12 of the pixels 3 `s` above and below it on every channel (real rows: at most 26%); a separator the crop cuts off (the bottom row of a 1440p crop) cannot show, so that row keeps no portrait;
+- no chat can be over the row (below).
 
-The name blank is wider than the OCR name window on purpose. The OCR window stays where it is today (5v5 from 260/1000 with width 120/1000, 6v6 from 150/1000 with width 100/1000). Blanking does not use that tighter window. A name that spills past it would otherwise survive. The 6v6 digit edge sits just to the right of the measured 6v6 name window. At 260/1000 the old name window already landed on digits, so digits are protected from 255/1000.
+With the switch on, on the member's 34 boards of 2026-10-11 and 10-12, blanked in time order as one member's captures (the daemon's case), the edge gates drop 67 of 408 portraits (39 rows with no hero picked, which show no role icon, and 28 bottom rows whose lower separator the crop cuts off) and the content check drops 244 more (195 differ from every earlier capture at least a minute older, 49 have none): 97 of 408 portraits are kept at 1664 px and 73 of 408 at 1248 px. Those captures are a few minutes apart, with deaths and hero swaps between them; the daemon sees every accepted Tab, so it finds a matching earlier capture more often.
 
-Hero portrait pixels and digit-column pixels are not modified. After blanking they are byte-identical to the same rectangles before blanking, compared as raw pixels, not as a re-encoded PNG. The header row and the gap between the teams are not name rows. They are left unchanged unless another region in the active class covers them.
+Chat is read on the full frame. The chat box stacks lines upward from a bottom line below the crop, and each line starts left of the crop. When the strip at x 60 to 448, y 1250 to 1340 of the 2560x1440 playfield holds chat text (more than 12 pixels with a channel more than 40 from its 5x5 median; the member's chat-free Tab frames hold 0 to 2, frames with chat 282 to 2,071; at 30 instead of 40 two chat-free Tab frames would read as chat, with 91 and 93), the stack is followed upward line by line. Every row it can reach keeps no portrait, and at least the rows reaching below 85% of the crop height. Blanking a crop with no frame drops those bottom portraits too. Chat drawn in a role bar's own colour cannot be seen on the bar, so this is the gate that stops it.
+
+A row keeps its numbers only when all six of its cells pass every gate; otherwise all six cells of that row stay filled. The cells are read by a copy of the tracker's digit reader (cv-v5, `shadow/digits.rs` at a9c01c0, in `src/report/blank/reader.rs`): segmentation, row text band, template beam, and field grammar. The gates:
+
+- Board: the board's digit height is 11 to 15.5 `s`, its white level at least 150, each column's numbers centred within 3 `s` of `R` minus the column offset, the scale within 5% of the 1440p or 1080p crop, and the bundled letter templates loaded.
+- Row: the team tint has a saturation of at least 0.30, from its own role bar or the team's other bars (a grey tint lets text behind the row look like white digits); the row has a text band.
+- Cell: one ink group; a cell colour saturation of at least 0.30; no second ink layer; a grammatical reading with none of the reader's sanity flags; at most 2 digits in E, A, and D; no slanted cut; centred within 2.5 `s` + 0.5 px of the column's board consensus; the board's digit height on the row's baseline; all ink on the text line.
+- Glyph: per-class floors for the template score, the calibrated margin, and the ink mass, set just under the member's real digits; not more letter-like than digit-like, by more than 0.04 of the template score at 1440p and 0.06 at 1080p, against 1,512 letter templates drawn from 18 openly licensed fonts (`assets/blank-letters`, built by `scripts/gen_blank_letters.py`; a missing set keeps no glyph); the digit height; commas below the line; consecutive glyphs 9 to 12.5 `s` apart, 6 to 9 `s` around a comma; touching glyphs cut apart only at a thin joint, at most 0.45 of the text height in ink; a lone 0 dim (0.55 to 1.05 of the white level), anything else at least 0.80 of it.
+
+Copied from a kept cell are its glyphs' binarised pixels, plus the rim pixels around them that lie at least 12% of the way from their local background to the glyph colour and within 40 of the blend ray from the cell's smooth background. The cell is painted one flat colour first: the colour nearest its median that sits more than 2 levels from every source pixel of the cell, so no painted pixel equals a source pixel. Every kept row is read back from the output, and a row that does not read the same keeps nothing. Kept portrait and glyph pixels are byte-identical to the frame's pixels.
+
+Measured on 2026-10-12 with the Rust blanker:
+
+- The member's 34 real boards at 1664 px: 0 secret pixels kept, 97.5% of digit pixels, 407 of 408 rows of numbers (one row needed a slanted cut), and no portrait (blank table 11; 97 of 408 with `COPY_PORTRAITS` on, in time order). At 1248 px: 408 of 408 rows of numbers and no portrait.
+- Both post-match fixtures keep all 12 rows of numbers.
+- 118 forged attacks: 3 leak, 278 px in all, none readable.
+- 219 further forgeries (menus, notifications, killcam banners, coloured text beside digits, chat in every channel colour): all closed, except a box drawn wholly inside one portrait.
+- Blank table 11 copies no portrait pixel, so no portrait or overlay forgery leaks; what is left is the digit rim residue below. With `COPY_PORTRAITS` on:
+- Attack round 2, re-run on blank table 10 (582 forgeries with the clean board as the earlier capture): every portrait and overlay forgery copies 0 drawn px (context menus opened inside a portrait, menus mid fade-in, coloured or faded text across the portrait edge, translucent boxes, tooltips over the portrait column, panels over the role bar, text in the icon zone, chat in the bar colour, a translucent board over in-world nameplates). What is left is the digit rim residue below (53 forgeries, 4,959 px) and one 2 px sample.
+- The same forgeries with the overlay also on the earlier capture (it stayed within about 20 levels, except about 20 px, for a minute or more): the edge gates alone leave 124 forgeries leaking 96,398 px, besides the same digit rim residue. This is the pinned-overlay limit below.
+
+Known limits:
+
+- An overlay that stays within about 20 levels of the earlier capture, except about 20 px, over a portrait for a minute or more (a pinned stream overlay, a menu held open through two captures a minute apart, a fade of up to about 9%, or about 16 to 24 px of animated change) passes the content check, and only the edge gates judge it. A box or text drawn wholly inside one portrait, or one whose edges miss every gate, is then copied with the portrait. Fades and translucent boxes over the moving world change by more than that within a minute; opaque ones do not.
+- A faint overlay on the current capture only, at about 9% opacity or less (about 20 levels a channel or less), passes the content check and every gate, and can be read after subtracting the hero's clean art: attack round 3 read a chat fragment drawn at 4% over the bottom-row portraits through the frame path. The chat gate misses chat fainter than about 17%. A lower content threshold (20 to 12 levels) only narrows this to about 5% and drops 29% of the matched rows, so it is not used.
+- The two portrait limits above apply only with `COPY_PORTRAITS` on. It is off in this revision, so no portrait is kept.
+- Pale text behind a translucent row can leave rim samples on digit rims: chains of up to about 60 px per component, unreadable.
+- Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
+- 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
+
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 11 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
-These rows are also in the same table. Fractions are of the playfield (`x`, `y`, `width`, `height`), in thousandths.
+Fractions are of the playfield (`x`, `y`, `width`, `height`), in thousandths. The app uses only `overlay_top` and `overlay_bottom` today, to blank the rank screen before the outcome box is cut. The other rows are the plan for screen classes it does not send yet; the scoreboard crop needs none of them, because its allowlist keeps nothing outside the measured cells.
 
 | Id | Class | x | y | w | h | Confirmed |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -317,11 +349,11 @@ A row is confirmed only when this document records that the rectangle covered th
 
 Until a row is confirmed, the app does not send that screen class, with two first-cut exceptions. Scoreboard frames may be sent: their name rows follow the crop the tracker already measures, and `kill_feed`, `chat_below`, and the overlay bars are filled as well. On those frames `crops/frame.png` also fills everything outside the scoreboard rectangle (section 3). POTG frames may be sent from the existing nameplate crop. Gameplay, killcam, accolade, party, and lobby frames are dropped until their rows are confirmed.
 
-A kept frame is blanked with the rows for its class, plus `overlay_top` and `overlay_bottom`. A test checks that, at 1920x1080 and 2560x1440, for both team sizes, no scoreboard name rectangle shares a pixel with a portrait rectangle or a digit rectangle.
+A kept frame of another class is blanked with the rows for its class, plus `overlay_top` and `overlay_bottom`.
 
 ### What is dropped
 
-The app classifies the frame with the detectors it already trusts (scoreboard, POTG nameplate, and the other screen classes above). The `outcome` class is used only for `crops/outcome.png` and has no name region. If no detector accepts the frame, the frame is dropped. If a system notification could cover the game, or the app cannot see that every name on that screen falls inside a blank region for that class, the frame is dropped. If the app is not sure whether the board is 5v5 or 6v6, it drops the frame. It may keep that frame only by filling the name cells of both layouts, so a name in either band is covered. A frame kept that way does not claim that portraits and digits stayed byte-identical where the two name bands overlap them, and `team_size` is `null`. A dropped frame is not blanked "as best we can" and then sent. It is absent from the zip and from the preview. If every frame is dropped, there is nothing to send, and Save report stays disabled.
+The app classifies the frame with the detectors it already trusts (scoreboard, POTG nameplate, and the other screen classes above). The `outcome` class is used only for `crops/outcome.png` and has no name region. If no detector accepts the frame, the frame is dropped. If a system notification could cover the game, or the app cannot see that every name on that screen falls inside a blank region for that class, the frame is dropped. If the app is not sure whether the board is 5v5 or 6v6, the blanker keeps nothing of it, so it writes no scoreboard. A dropped frame is not blanked "as best we can" and then sent. It is absent from the zip and from the preview. If every frame is dropped, there is nothing to send, and Save report stays disabled.
 
 ## 5. Name read failures
 
@@ -375,6 +407,8 @@ The GUI has two ways in:
 - **Report a problem** in the app menu and in Settings. It builds a `crash` or `performance` report (the member picks one), or `other`. It has no game and no crops.
 
 Crash marker: when the daemon starts, it writes `{data_dir}/run.marker` with its pid, its start time, and `last_seen`, the last time it was known to be alive. While running it rewrites `last_seen` once a minute (an atomic replace of the file, so a crash mid-write leaves the previous copy). A clean shutdown (SIGTERM, a normal exit, or an update restart) removes it. When the daemon starts and finds an old marker whose pid is not running, or is running but is not a `scuffed-stat-tracker` process (pids are reused), the last run did not exit cleanly. It moves the marker to `{data_dir}/last_crash.marker` (one file, overwritten) and logs one WARN line. The next time the app opens, if `last_crash.marker` exists and is newer than the last report or dismissal, the app asks once: "The tracker stopped unexpectedly. Send a report?" Yes opens Report a problem with `crash` picked. No or Send removes the marker. The marker holds only the pid, the start time, and `last_seen`. It is never uploaded as a file. `last_seen` sets the crash log window (section 6). The app shows the stop as "around `last_seen`", which is at most a minute before the real stop.
+
+Report kit: while a game is captured, the daemon keeps what a game report needs in `{data_dir}/report-kit/<session_id>/` (directory 0700, files 0600, each replaced atomically, the newest 20 sessions kept). `scoreboard.png` is the newest accepted scoreboard of the session, blanked at capture time under section 4, so no unblanked frame is ever written for a report. A board the blanker keeps nothing of writes no kit. `outcome.png` is the rank screen word box under section 3. `reads.json` holds the reads of the capture `scoreboard.png` came from, in the manifest read shape. Those reads are the original reads; a later edit by the member does not change them, and the edit goes into `corrections`. The tracker does not keep a per-field confidence yet, so `confidence` is `null`. A session id that is not 1 to 64 ASCII letters, digits, `-`, or `_` gets no kit. A game with no kit cannot be reported, except as `missed_game`, which then has a `game` object with null fields, the build time as `captured_at`, empty reads, and session `none`.
 
 Both ways open a preview built by reading the zip that would be sent.
 
@@ -443,15 +477,15 @@ Contabo has no backups. A report stored on that disk is for testing this flow on
 
 ## 9. Tests required
 
-Tests use synthetic images drawn for the test. They do not read or commit anything under `crates/stat-tracker/test-data/`. The fake name is a fixed string that is not a real player name, painted in a colour that is not the blank colour and not the portrait or digit paint. This spec uses the letters `QXNAME` plus the region id, in pure red RGB 255, 0, 0.
+Tests use synthetic images drawn for the test, and the two post-match fixtures in `test-data/vision-baseline/`, which are real boards whose names were filled before they were committed. They do not read or commit member frames.
 
-Scoreboard fixtures: 1920x1080 and 2560x1440, each in 5v5 and in 6v6. That is four boards. Each board draws a hero portrait filling every portrait rectangle, digits filling every digit column, and the fake name filling every name rectangle for the scoreboard class, including the overlay bars, the scoreboard kill feed, and the below-board chat strip. All 10 names are painted in 5v5, and all 12 in 6v6.
+Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates; plus the two post-match fixtures. After blanking:
 
-After blanking:
-
-- No red pixel remains in any name rectangle, and OCR of the image does not contain `QXNAME`. The test fails if any of that text survives.
-- The raw pixels of every hero portrait rectangle and every digit column are byte-identical to the snapshot taken before blanking.
-- No name rectangle shares a pixel with a portrait or a digit column.
+- Every name stroke is the solid colour, and the header and the world are filled.
+- This revision copies no portrait pixel: on every synthetic layout, after a matching earlier capture, every portrait cell is fill and no portrait cell is held in memory. With `COPY_PORTRAITS` on (the tests switch it on for the rest of this list), every portrait passes on a clean synthetic board blanked after an earlier live capture, except the bottom row whose separator the crop cuts off, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
+- Each gate has a test that drops what it guards and copies none of the drawn pixels: a name in a stat cell, a notice across the columns, a grey row tint, a stroke over the role bar, a menu box laid across a portrait, touching glyphs joined by a thick stroke, chat on the frame (one line, and a stack), a crop with no frame, a board that is not 6v6, and a board whose header is gone.
+- The portrait content check, each against a clean earlier capture: a dark menu opened inside a portrait, a menu caught mid fade-in, and orange, grey and blue text across the portrait edge copy nothing of the overlay; a changed portrait and an earlier capture under a minute old keep no portrait. With the overlay on both captures: a box over the portrait column hides the separators, and a panel in the bar colour hides the role icon. A board at another scale keeps no portrait.
+- An ignored harness runs the blanker on a directory of member frames for retention, leaks, and read-back on the member's machine (`report::blank::port_check`).
 
 One synthetic frame per other screen class, at both resolutions, paints the fake name into every name region of that class and checks that blanking removes it.
 
@@ -459,7 +493,7 @@ Classifier: a frame that no detector accepts produces no image in the zip. Gamep
 
 Full-frame fixture: on a 1920x1080 scoreboard and a 2560x1440 scoreboard, paint a fake name outside the scoreboard rectangle, including in the band from x 0 to 340 and y 620 to 855 of the playfield and on a side panel. Build `crops/frame.png`. That name is gone. Portraits and digit columns inside the rectangle stay byte-identical.
 
-Ambiguous team size: a board that is not clearly 5v5 or 6v6 is either absent from the zip, or both the 5v5 name band and the 6v6 name band are filled. A fake name painted in each band does not survive on a kept frame.
+Ambiguous team size: a board that is not clearly 6v6 keeps nothing and writes no kit.
 
 Wrong-row fixture: the configured name is one fake name. The tracker is pointed at a row whose name read is a different fake name. With the own-name box on, the bundle has no `crops/own-name.png` and no `crops/own-name-hud.png`.
 
@@ -506,6 +540,10 @@ Out of scope for this change, and out of scope for the first build unless a late
 - Keeping reports on Contabo as a long-term archive.
 - Windows or macOS capture.
 - Committing real game captures as fixtures.
+
+Follow-ups:
+
+- Portraits in alpha.7: a native-template paste. A hero pack built from the game's own 256 px portraits (heroes-v2), downscaled to the board's size (74 px at 1440p, 56 px at 1080p) and distributed by the server like the current pack. A row whose portrait matches a template gets the template pasted, so no frame pixel of the portrait is copied and neither a faint nor a pinned overlay can reach the output. The earlier-capture rule in section 4 stays behind `COPY_PORTRAITS` until then. The current 95 px pack differs from board portraits by 8 to 17 levels on average, too much to see a short name over the art.
 
 Open questions:
 

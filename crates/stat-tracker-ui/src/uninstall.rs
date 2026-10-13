@@ -861,6 +861,9 @@ fn is_tracker_data_name(name: &str) -> bool {
             | "sync_auth.json"
             | "portraits"
             | "ui_state.json"
+            | "report-kit"
+            | "run.marker"
+            | "last_crash.marker"
     ) || name.starts_with("stats.surrealkv.pre-vacuum-")
 }
 

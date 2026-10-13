@@ -36,13 +36,17 @@ jobs:
   build-daemon:
     name: Daemon (ubuntu-22.04, glibc 2.35 floor)
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          # A dead mirror must fail the job in minutes, not hang it (alpha.5).
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update
+          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
             tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev \
@@ -143,13 +147,17 @@ jobs:
   build-gui:
     name: GUI (ubuntu-22.04, Iced + GTK tray)
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          # A dead mirror must fail the job in minutes, not hang it (alpha.5).
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update
+          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
@@ -248,6 +256,7 @@ jobs:
     name: Package & Release
     needs: [build-daemon, build-gui]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -266,13 +275,23 @@ jobs:
           path: gui
 
       - name: Packaging unit checks (OpenSSL deny + isolated lib dirs)
+        # alpha.5 hung here for 50 min. Each script is named and capped so the
+        # next hang fails fast and says which one.
+        timeout-minutes: 10
         run: |
-          bash crates/stat-tracker/dist/test-packaging.sh
-          bash crates/stat-tracker/dist/test-uninstall-paths.sh
-          bash crates/stat-tracker/dist/test-desktop-entry.sh
-          bash crates/stat-tracker/dist/test-systemd-unit.sh
-          bash crates/stat-tracker/dist/test-release-notes.sh
-          bash crates/stat-tracker/dist/test-stage-assets.sh
+          set -euo pipefail
+          for t in test-packaging test-uninstall-paths test-desktop-entry \
+                   test-systemd-unit test-release-notes test-stage-assets; do
+            echo "::group::${t}.sh"
+            echo "running ${t}.sh"
+            rc=0
+            timeout 300 bash "crates/stat-tracker/dist/${t}.sh" || rc=$?
+            echo "::endgroup::"
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::${t}.sh failed (exit ${rc}; 124 means it timed out)"
+              exit "${rc}"
+            fi
+          done
 
       - name: Assemble tarball
         run: |
@@ -310,7 +329,7 @@ jobs:
           # checks ~/.local/share/scuffed-stat-tracker/tessdata FIRST, so
           # install.sh drops this file there (without clobbering a user model).
           mkdir -p "${STAGE}/tessdata"
-          curl -fsSL \
+          curl -fsSL --retry 3 --connect-timeout 30 --max-time 300 \
             https://github.com/tesseract-ocr/tessdata_fast/raw/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata \
             -o "${STAGE}/tessdata/eng.traineddata"
           # Game-font model trained in the daemon job (see "Train koverwatch

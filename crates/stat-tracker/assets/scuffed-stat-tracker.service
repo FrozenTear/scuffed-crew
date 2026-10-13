@@ -56,6 +56,9 @@ IOSchedulingPriority=7
 # --generate-tessdata (CLI or GUI, not this unit) also writes
 # ~/.local/share/fonts. The GUI updater stages under /tmp and is not
 # this unit. %h does not follow XDG_DATA_HOME or XDG_CONFIG_HOME.
+# No core dumps: a crash must never write captured frames or the report
+# kit's in-memory portrait cells (unblanked) to disk.
+LimitCORE=0
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=-%h/.local/share/scuffed-stat-tracker -%h/.config/scuffed-stat-tracker %t

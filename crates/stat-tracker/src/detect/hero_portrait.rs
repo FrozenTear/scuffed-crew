@@ -745,12 +745,71 @@ fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
     total_diff as f64 / (pixel_count * 3) as f64
 }
 
-/// Where the reference image for `hero_name` lives: the hero name lowercased,
-/// spaces to underscores, dots dropped ("D.Mon" -> dmon.png, "Wrecking Ball"
-/// -> wrecking_ball.png) — the same stem `PortraitMatcher::load` keys on.
+/// Where the reference image for `hero_name` lives: `<portrait_stem>.png`,
+/// the same stem `PortraitMatcher::load` keys on and `build.rs` bundles
+/// `portraits/*.png` under.
 pub fn portrait_reference_path(portraits_dir: &Path, hero_name: &str) -> PathBuf {
-    let filename = hero_name.to_lowercase().replace(' ', "_").replace('.', "");
-    portraits_dir.join(format!("{filename}.png"))
+    portraits_dir.join(format!("{}.png", portrait_stem(hero_name)))
+}
+
+/// File stem for `hero_name`: lowercase ASCII, accents folded, punctuation
+/// dropped, a run of spaces or underscores between two words becomes one `_`.
+/// A space next to punctuation goes with it.
+///
+/// "D.Va" -> `dva`, "Soldier: 76" -> `soldier76`, "Torbjörn" -> `torbjorn`,
+/// "Lúcio" -> `lucio`, "Wrecking Ball" -> `wrecking_ball`. A stem maps to
+/// itself, so `portrait_stem(stem) != stem` marks a file no hero name can
+/// produce. A letter with no ASCII fold is kept lowercased, so a name never
+/// maps to an empty stem.
+pub fn portrait_stem(hero_name: &str) -> String {
+    let mut stem = String::with_capacity(hero_name.len());
+    let mut space = false;
+    let mut punct = false;
+    for c in hero_name.chars().flat_map(char::to_lowercase) {
+        if c.is_whitespace() || c == '_' {
+            space = true;
+            continue;
+        }
+        let folded = ascii_fold(c);
+        if folded.is_empty() {
+            punct = true;
+            continue;
+        }
+        if space && !punct && !stem.is_empty() {
+            stem.push('_');
+        }
+        space = false;
+        punct = false;
+        stem.push_str(&folded);
+    }
+    stem
+}
+
+/// `c` (already lowercase) as ASCII: itself when ASCII alphanumeric, its base
+/// letter(s) when a folded Latin letter, itself when any other letter or
+/// digit, and empty for punctuation and symbols.
+fn ascii_fold(c: char) -> String {
+    let base = match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'č' => "c",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' => "e",
+        'ì' | 'í' | 'î' | 'ï' | 'ī' => "i",
+        'ł' => "l",
+        'ñ' | 'ń' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => "o",
+        'œ' => "oe",
+        'ś' | 'š' => "s",
+        'ß' => "ss",
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' => "u",
+        'ý' | 'ÿ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        'þ' => "th",
+        'ð' => "d",
+        _ if c.is_alphanumeric() => return c.to_string(),
+        _ => "",
+    };
+    base.to_string()
 }
 
 /// Save a portrait crop as a reference image.
@@ -831,6 +890,12 @@ pub fn should_save_portrait_crop(
 /// table puts the portrait near x 323. A saved crop is never overwritten, so a
 /// misplaced one would stick. A row found only by the highlight says nothing
 /// about the layout and never seeds on 5v5.
+///
+/// Name windows 0 (no perks, x 0.10-0.25) and 1 (perks, x 0.095-0.20)
+/// overlap, so a short name on a no-perk board matches both, `sole_window` is
+/// false, and that board never seeds. This fails safe: no seed is written and
+/// the career panel stays the hero authority. The one wrong-seed path left is
+/// a perk board where window 1's read fails and window 0's succeeds.
 pub fn portrait_seed_layout_known(
     team_size: usize,
     name_match: Option<&crate::parse::NameMatch>,
@@ -933,16 +998,23 @@ pub const SEED_GEOMETRY_VERSION: u32 = 2;
 /// its captured seeds were cut with. Absent means version 1.
 const SEED_GEOMETRY_MARKER: &str = ".seed-geometry";
 
-/// Move captured seeds cut with an older portrait grid out of the reference
-/// set, once per [`SEED_GEOMETRY_VERSION`].
+/// Move portrait files the matcher must no longer load out of the reference
+/// set. Nothing is deleted. Returns how many files moved.
 ///
-/// A file stays when its bytes are a bundled reference or a provisional
-/// stand-in for its stem. Every other `*.png` is a captured seed (or a file
-/// the user placed there) and moves to `invalidated-<old version>/` in the
-/// same directory; nothing is deleted. A moved slot is then missing, so the
-/// bundled reference is unpacked again where one exists and the next
-/// qualifying capture seeds it afresh. Returns how many files moved. The
-/// marker is written only after every move succeeded.
+/// - Once per [`SEED_GEOMETRY_VERSION`], while the marker is older: every
+///   `*.png` whose bytes are not a bundled reference or a provisional
+///   stand-in for its stem is a seed cut with the old grid (or a file the
+///   user placed there) and moves to `invalidated-<old version>/`. A moved
+///   slot is then missing, so the bundled reference is unpacked again where
+///   one exists and the next qualifying capture seeds it afresh.
+/// - On every call: a `*.png` whose stem is not a [`portrait_stem`] (alpha.5
+///   wrote `soldier:_76.png` and `torbjörn.png`) moves to
+///   `invalidated-<marker version>/`. No hero name maps to it any more, so it
+///   would only stay loaded as a second template beside the bundled one.
+///
+/// A png that cannot be read is skipped with one WARN and stays where it is.
+/// It does not stop the other moves or the marker. The marker is written
+/// once every move succeeded.
 pub fn invalidate_stale_seeds(portraits_dir: &Path) -> std::io::Result<usize> {
     invalidate_stale_seeds_with(portraits_dir, bundled_portraits())
 }
@@ -951,15 +1023,21 @@ fn invalidate_stale_seeds_with(
     portraits_dir: &Path,
     bundled: &[(&str, &[u8])],
 ) -> std::io::Result<usize> {
+    invalidate_stale_seeds_reading(portraits_dir, bundled, |p| std::fs::read(p))
+}
+
+fn invalidate_stale_seeds_reading(
+    portraits_dir: &Path,
+    bundled: &[(&str, &[u8])],
+    read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> std::io::Result<usize> {
     std::fs::create_dir_all(portraits_dir)?;
     let marker = portraits_dir.join(SEED_GEOMETRY_MARKER);
     let on_disk: u32 = std::fs::read_to_string(&marker)
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(1);
-    if on_disk >= SEED_GEOMETRY_VERSION {
-        return Ok(0);
-    }
+    let stale_grid = on_disk < SEED_GEOMETRY_VERSION;
 
     let dest = portraits_dir.join(format!("invalidated-{on_disk}"));
     let mut moved = 0usize;
@@ -974,12 +1052,28 @@ fn invalidate_stale_seeds_with(
         if stem.starts_with('.') {
             continue;
         }
-        let bytes = std::fs::read(&path)?;
-        let is_bundled = bundled
-            .iter()
-            .any(|(name, data)| *name == stem && *data == bytes.as_slice());
-        if is_bundled || bytes_match_provisional(stem, &bytes) {
-            continue;
+        let bad_stem = portrait_stem(stem) != stem;
+        if !bad_stem {
+            if !stale_grid {
+                continue;
+            }
+            let bytes = match read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "could not read portrait file during the seed migration; left in place"
+                    );
+                    continue;
+                }
+            };
+            let is_bundled = bundled
+                .iter()
+                .any(|(name, data)| *name == stem && *data == bytes.as_slice());
+            if is_bundled || bytes_match_provisional(stem, &bytes) {
+                continue;
+            }
         }
         std::fs::create_dir_all(&dest)?;
         let Some(file_name) = path.file_name() else {
@@ -995,14 +1089,16 @@ fn invalidate_stale_seeds_with(
         moved += 1;
     }
 
-    write_bytes_atomic(&marker, format!("{SEED_GEOMETRY_VERSION}\n").as_bytes())?;
+    if stale_grid {
+        write_bytes_atomic(&marker, format!("{SEED_GEOMETRY_VERSION}\n").as_bytes())?;
+    }
     if moved > 0 {
         tracing::info!(
             moved,
             from_version = on_disk,
             to_version = SEED_GEOMETRY_VERSION,
             dir = %dest.display(),
-            "moved portrait seeds cut with an older portrait grid aside; they re-seed from new captures"
+            "moved portrait seeds cut with an older portrait grid or under a hero-name stem no build writes aside; they re-seed from new captures"
         );
     }
     Ok(moved)
@@ -1217,6 +1313,39 @@ mod reference_path_tests {
             dir.join("doctrine.png")
         );
     }
+
+    /// alpha.5 kept ':' and 'ö', so Soldier: 76 and Torbjörn seeded a second
+    /// reference beside the bundled `soldier76` and `torbjorn` (#240).
+    #[test]
+    fn stem_folds_accents_and_drops_punctuation() {
+        let dir = Path::new("/tmp/portraits");
+        for (hero, stem) in [
+            ("Soldier: 76", "soldier76"),
+            ("Torbjörn", "torbjorn"),
+            ("D.Va", "dva"),
+            ("Lúcio", "lucio"),
+            ("Jetpack Cat", "jetpack_cat"),
+            ("Junker  Queen", "junker_queen"),
+        ] {
+            assert_eq!(super::portrait_stem(hero), stem, "{hero}");
+            assert_eq!(
+                portrait_reference_path(dir, hero),
+                dir.join(format!("{stem}.png")),
+                "{hero}"
+            );
+        }
+    }
+
+    /// Every bundled stem is already a stem, so the migration never moves a
+    /// bundled file and a hero named by its stem keys the bundled reference.
+    #[test]
+    fn every_bundled_portrait_stem_round_trips() {
+        let bundled = super::bundled_portraits();
+        assert!(bundled.len() >= 50, "bundled set: {}", bundled.len());
+        for (stem, _) in bundled {
+            assert_eq!(super::portrait_stem(stem), *stem);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1425,7 +1554,7 @@ mod seed_layout_tests {
 mod stale_seed_tests {
     use super::{
         PortraitMatcher, SEED_GEOMETRY_MARKER, SEED_GEOMETRY_VERSION, bundled_portraits,
-        invalidate_stale_seeds, invalidate_stale_seeds_with,
+        invalidate_stale_seeds, invalidate_stale_seeds_reading, invalidate_stale_seeds_with,
     };
 
     fn bundled(stem: &str) -> &'static [u8] {
@@ -1523,6 +1652,103 @@ mod stale_seed_tests {
             bundled("mercy")
         );
         assert!(p.join("invalidated-1/mercy.png").exists());
+    }
+
+    /// The real alpha.5 bad stems (#240): moved with the v1 seeds.
+    #[test]
+    fn bad_stem_seeds_move_with_the_grid_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("soldier76.png"), bundled("soldier76")).unwrap();
+        std::fs::write(p.join("soldier:_76.png"), b"seed").unwrap();
+        std::fs::write(p.join("torbjörn.png"), b"seed").unwrap();
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 2);
+        assert!(p.join("invalidated-1/soldier:_76.png").exists());
+        assert!(p.join("invalidated-1/torbjörn.png").exists());
+        assert_eq!(
+            std::fs::read(p.join("soldier76.png")).unwrap(),
+            bundled("soldier76")
+        );
+        assert_eq!(marker(p).trim(), SEED_GEOMETRY_VERSION.to_string());
+    }
+
+    /// A bad stem written after the marker is current (an older daemon still
+    /// running) still moves aside on the next start; normal seeds stay.
+    #[test]
+    fn bad_stem_seeds_move_even_when_the_marker_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(
+            p.join(SEED_GEOMETRY_MARKER),
+            format!("{SEED_GEOMETRY_VERSION}\n"),
+        )
+        .unwrap();
+        std::fs::write(p.join("dmon.png"), b"v2 seed").unwrap();
+        std::fs::write(p.join("torbjörn.png"), b"v2 bad stem").unwrap();
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 1);
+        assert_eq!(std::fs::read(p.join("dmon.png")).unwrap(), b"v2 seed");
+        assert!(!p.join("torbjörn.png").exists());
+        let dest = format!("invalidated-{SEED_GEOMETRY_VERSION}/torbjörn.png");
+        assert_eq!(std::fs::read(p.join(dest)).unwrap(), b"v2 bad stem");
+        // Nothing left to move.
+        assert_eq!(invalidate_stale_seeds(p).unwrap(), 0);
+    }
+
+    /// One unreadable png (#240 N1): one WARN, the file stays, the other
+    /// seeds still move, and the marker is written so it does not repeat.
+    #[test]
+    fn an_unreadable_png_warns_once_and_the_marker_is_still_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("ana.png"), b"unreadable").unwrap();
+        std::fs::write(p.join("mercy.png"), b"seed").unwrap();
+        let (moved, log) = with_warn_log(|| {
+            invalidate_stale_seeds_reading(p, bundled_portraits(), |path| {
+                if path.file_name().is_some_and(|n| n == "ana.png") {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    std::fs::read(path)
+                }
+            })
+        });
+        assert_eq!(moved.unwrap(), 1);
+        assert_eq!(log.matches("WARN").count(), 1, "{log}");
+        assert!(log.contains("ana.png"), "{log}");
+        assert!(p.join("ana.png").exists());
+        assert!(p.join("invalidated-1/mercy.png").exists());
+        assert_eq!(marker(p).trim(), SEED_GEOMETRY_VERSION.to_string());
+    }
+
+    #[derive(Clone, Default)]
+    struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    fn with_warn_log<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buf = Buf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let out = tracing::subscriber::with_default(sub, f);
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, text)
     }
 }
 

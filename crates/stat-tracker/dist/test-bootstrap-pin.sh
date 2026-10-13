@@ -122,8 +122,10 @@ set -e
 pass "key plus .minisig refuses when minisign is not installed"
 
 if ! command -v minisign >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends minisign
+    # CI only. A dead mirror must fail in minutes, not hang the release job.
+    apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+    sudo timeout 180 apt-get "${apt_opts[@]}" update -qq
+    sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
 command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
 
@@ -302,6 +304,27 @@ mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
 [[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable beside alphas was ${picked[0]}"
 [[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.10" ]] || fail "newer alpha was ${picked[1]}"
 pass "alpha.10 sorts after alpha.2"
+
+# A 4-part point release sorts between its alpha and the next one.
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-alpha.5","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.5.1","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.5.1" ]] || fail "alpha.5.1 was not newer than alpha.5: ${picked[1]}"
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-alpha.6","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.5.1","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.6" ]] || fail "alpha.6 was not newer than alpha.5.1: ${picked[1]}"
+pass "alpha.5 < alpha.5.1 < alpha.6"
 
 stable_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 "")"
 [[ "$stable_pick" == "stat-tracker-v0.4.24" ]] || fail "default channel picked $stable_pick"

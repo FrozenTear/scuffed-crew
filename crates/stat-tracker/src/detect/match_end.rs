@@ -495,8 +495,8 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
 ///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
 /// 3. Nameplate POTG title card (lower-left gold battletag + white title
-///    glyphs). Same class as letterbox: the cheap gate is the wake.
-///    Phrase OCR is logged when it hits but is not required.
+///    glyphs). Same class as letterbox: the cheap gate is the wake, and
+///    no OCR runs on it.
 ///
 /// Ban Heroes UI is a **distinct** signal ([`super::match_start::detect_ban_screen`])
 /// and must not set `end_reel_wake_until`. Future: register voted bans;
@@ -514,7 +514,7 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
         tracing::info!("end-reel title — POTG / highlight wake");
         return true;
     }
-    if read_end_reel_nameplate(img, rgb) {
+    if read_end_reel_nameplate(rgb) {
         tracing::info!("end-reel nameplate — POTG / highlight wake");
         return true;
     }
@@ -666,29 +666,13 @@ fn end_reel_cinematic_crop(img: &DynamicImage) -> Option<DynamicImage> {
 }
 
 /// Nameplate POTG title card: gold battletag + white title glyphs.
-/// Cadence wake only — same class as [`end_reel_letterbox`]. Phrase OCR
-/// is attempted for the log; it must not gate the wake (Soot 2026-09-06:
-/// known-potg-003708 passed the cheap gate, then Tesseract returned
-/// `PIAN AF TIIF AR` because the endorsement toast sits on the title).
-fn read_end_reel_nameplate(img: &DynamicImage, rgb: &RgbImage) -> bool {
-    if !nameplate_potg_signal(rgb) {
-        return false;
-    }
-    if let Some(crop) = end_reel_nameplate_crop(img) {
-        let _ = ocr_end_reel_phrase(prepare_nameplate_title(&crop), "end-reel nameplate")
-            || ocr_end_reel_phrase(
-                crate::ocr::preprocess::prepare_title(&crop),
-                "end-reel nameplate title-prep",
-            );
-    }
-    true
-}
-
-/// Left-half stack: PLAY OF THE GAME above the large gold battletag.
-/// Measured on known-potg-003708 (2560×1440): title ~y 64–67%, name
-/// ~y 69–75%. Left-biased so the hero (right two-thirds) stays out.
-fn end_reel_nameplate_crop(img: &DynamicImage) -> Option<DynamicImage> {
-    playfield_crop(img, 20, 550, 500, 300)
+/// Cadence wake only — same class as [`end_reel_letterbox`], no OCR. Phrase
+/// OCR must not gate this wake (Soot 2026-09-06: known-potg-003708 passed
+/// the cheap gate, then Tesseract returned `PIAN AF TIIF AR` because the
+/// endorsement toast sits on the title), and a read whose result was
+/// discarded only cost two Tesseract calls per wake (#240).
+fn read_end_reel_nameplate(rgb: &RgbImage) -> bool {
+    nameplate_potg_signal(rgb)
 }
 
 fn playfield_crop(
@@ -726,38 +710,6 @@ fn ocr_end_reel_phrase(prepared: GrayImage, context: &'static str) -> bool {
             false
         }
     }
-}
-
-/// Isolate bright desaturated glyphs (PLAY OF THE GAME) on a lit nameplate
-/// card. Yellow endorsement toasts and the orange battletag fail the sat
-/// cap; mid-tone world fails the value floor. Black-on-white for Tesseract.
-fn prepare_nameplate_title(crop: &DynamicImage) -> GrayImage {
-    let rgb = crop.to_rgb8();
-    let (w, h) = rgb.dimensions();
-    let mut ink = GrayImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let [r, g, b] = rgb.get_pixel(x, y).0;
-            let (_, sat, val) = rgb_to_hsv(r, g, b);
-            let v = if val > 200 && sat < 55 { 0 } else { 255 };
-            ink.put_pixel(x, y, Luma([v]));
-        }
-    }
-    let scale = (120 / h.max(1)).clamp(1, 4);
-    let work = if scale > 1 {
-        image::imageops::resize(
-            &ink,
-            w * scale,
-            h * scale,
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        ink
-    };
-    let (ww, hh) = work.dimensions();
-    let mut bordered = GrayImage::from_pixel(ww + 24, hh + 24, Luma([255]));
-    image::imageops::replace(&mut bordered, &work, 12, 12);
-    bordered
 }
 
 /// Cheap nameplate gate: large gold battletag in the lower-left plus
@@ -1788,5 +1740,21 @@ mod tests {
 
         let red = RgbImage::from_pixel(640, 360, Rgb([200, 30, 30]));
         assert!(!nameplate_potg_signal(&red), "defeat red flood");
+    }
+
+    /// The nameplate step's answer is the pixel gate alone: true on the
+    /// nameplate card, false off it. Deleting its discarded phrase OCR (#240)
+    /// must not change either.
+    #[test]
+    fn nameplate_step_returns_the_pixel_gate() {
+        assert!(read_end_reel_nameplate(&nameplate_potg_frame()));
+        for (frame, what) in [
+            (RgbImage::from_pixel(640, 360, Rgb([180, 200, 220])), "sky"),
+            (RgbImage::from_pixel(640, 360, Rgb([230, 180, 20])), "gold"),
+            (RgbImage::from_pixel(640, 360, Rgb([200, 30, 30])), "red"),
+            (RgbImage::from_pixel(640, 360, Rgb([0, 0, 0])), "black"),
+        ] {
+            assert!(!read_end_reel_nameplate(&frame), "{what}");
+        }
     }
 }

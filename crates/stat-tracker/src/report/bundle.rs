@@ -242,6 +242,17 @@ pub struct ReportZip {
     pub files: Vec<ReportFile>,
     /// `log.txt` exactly as stored in the zip, for the preview.
     pub log_text: String,
+    /// Every image in the zip, the same bytes, for the preview.
+    pub images: Vec<ReportImage>,
+}
+
+/// One image of a [`ReportZip`], as stored in the zip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportImage {
+    pub path: String,
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug)]
@@ -285,11 +296,20 @@ struct Manifest<'a> {
     reason: Reason<'a>,
     system: SystemJson,
     session_id: &'a str,
-    game: Option<()>,
-    reads: NullReads,
+    game: Option<GameJson<'a>>,
+    reads: serde_json::Value,
     corrections: std::collections::BTreeMap<String, String>,
     consent: Consent,
     files: &'a [ReportFile],
+}
+
+#[derive(Serialize)]
+struct GameJson<'a> {
+    map: Option<&'a str>,
+    mode: Option<&'a str>,
+    result: Option<&'a str>,
+    team_size: Option<u32>,
+    captured_at: String,
 }
 
 #[derive(Serialize)]
@@ -432,7 +452,8 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         system: SystemJson::from(&input.system),
         session_id: NO_SESSION,
         game: None,
-        reads: NullReads::default(),
+        reads: serde_json::to_value(NullReads::default())
+            .map_err(|_| ReportError::InvalidInput("reads did not serialize"))?,
         corrections: Default::default(),
         consent: Consent {
             training: input.training,
@@ -454,6 +475,7 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         manifest_json,
         files,
         log_text,
+        images: Vec::new(),
     })
 }
 
@@ -469,4 +491,340 @@ fn write_zip(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, ReportError> {
         zw.write_all(data)?;
     }
     Ok(zw.finish()?.into_inner())
+}
+
+// --- Game reports (sections 2, 3, 7) ---
+
+/// `reason.category` of a report about one game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameCategory {
+    WrongStats,
+    WrongHero,
+    WrongMap,
+    WrongMode,
+    WrongResult,
+    MissedGame,
+    Other,
+}
+
+impl GameCategory {
+    pub const ALL: [Self; 7] = [
+        Self::WrongStats,
+        Self::WrongHero,
+        Self::WrongMap,
+        Self::WrongMode,
+        Self::WrongResult,
+        Self::MissedGame,
+        Self::Other,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WrongStats => "wrong_stats",
+            Self::WrongHero => "wrong_hero",
+            Self::WrongMap => "wrong_map",
+            Self::WrongMode => "wrong_mode",
+            Self::WrongResult => "wrong_result",
+            Self::MissedGame => "missed_game",
+            Self::Other => "other",
+        }
+    }
+
+    /// Text for the category chips.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WrongStats => "Wrong stats",
+            Self::WrongHero => "Wrong hero",
+            Self::WrongMap => "Wrong map",
+            Self::WrongMode => "Wrong mode",
+            Self::WrongResult => "Wrong result",
+            Self::MissedGame => "Missed game",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// Everything [`build_game_report`] needs. Build it with
+/// [`GameReportInput::from_config`] in the app; tests fill it by hand.
+#[derive(Debug, Clone)]
+pub struct GameReportInput {
+    pub session_id: String,
+    pub category: GameCategory,
+    /// Member's free text. Scrubbed, then cut to 500 characters.
+    pub text: String,
+    pub resolution: Resolution,
+    pub ui_scale: Option<f64>,
+    pub system: SystemInfo,
+    /// Training box. Off unless the member ticked it.
+    pub training: bool,
+    pub scrub: ScrubContext,
+    pub window: LogWindow,
+    pub log_dir: PathBuf,
+    /// The session's report kit (blanked crops and reads).
+    pub kit: super::kit::Kit,
+    /// The member's edits, by read key (`hero`, `result`, `e`, ...).
+    pub corrections: std::collections::BTreeMap<String, String>,
+    /// When the report was built. A missed game with no kit uses it as
+    /// `game.captured_at`.
+    pub built_at: DateTime<Utc>,
+}
+
+/// The member's edits on the newest snapshot of `session_id`, by read key.
+/// The original read stays in `reads` (section 2).
+pub fn session_corrections(
+    snapshot: &crate::storage::Snapshot,
+    session_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(m) = snapshot.matches.iter().find(|m| m.session_id == session_id) else {
+        return out;
+    };
+    let mut put = |key: &str, v: Option<String>| {
+        if let Some(v) = v.map(|v| v.trim().chars().take(64).collect::<String>())
+            && !v.is_empty()
+        {
+            out.insert(key.to_string(), v);
+        }
+    };
+    put("hero", m.corrected_hero.clone());
+    put("result", m.corrected_outcome.clone());
+    put("e", m.corrected_elims.map(|v| v.to_string()));
+    put("a", m.corrected_assists.map(|v| v.to_string()));
+    put("d", m.corrected_deaths.map(|v| v.to_string()));
+    put("dmg", m.corrected_damage.map(|v| v.to_string()));
+    put("h", m.corrected_healing.map(|v| v.to_string()));
+    put("mit", m.corrected_mitigation.map(|v| v.to_string()));
+    out
+}
+
+impl GameReportInput {
+    /// Input for this machine: the session's kit, the member's edits from
+    /// the live snapshot, the session log window (section 6), scrub values
+    /// and the system object from `config`. `names` is the caller's scrub
+    /// list of player names read in the window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_config(
+        config: &Config,
+        session_id: &str,
+        category: GameCategory,
+        text: String,
+        capture_backend: CaptureBackend,
+        daemon_running: bool,
+        names: Vec<String>,
+        built_at: DateTime<Utc>,
+    ) -> Result<Self, ReportError> {
+        let kit = super::kit::load(&config.data_dir, session_id);
+        if kit.scoreboard_png.is_none() && category != GameCategory::MissedGame {
+            return Err(ReportError::InvalidInput(
+                "this game has no saved scoreboard to report",
+            ));
+        }
+        let snapshot = crate::storage::read_snapshot(&config.data_dir);
+        let corrections = snapshot
+            .as_ref()
+            .map(|s| session_corrections(s, session_id))
+            .unwrap_or_default();
+        let session = snapshot
+            .as_ref()
+            .and_then(|s| s.sessions.iter().find(|x| x.session_id == session_id));
+        let window = match (session, kit.reads.as_ref()) {
+            (Some(s), _) => LogWindow::session(s.started_at.into(), s.last_capture_at.into()),
+            (None, Some(r)) => LogWindow::session(r.captured_at, r.captured_at),
+            (None, None) => LogWindow::log_only(built_at),
+        };
+        let resolution = kit
+            .reads
+            .as_ref()
+            .map(|r| Resolution {
+                width: r.width,
+                height: r.height,
+            })
+            .unwrap_or(Resolution {
+                width: 1920,
+                height: 1080,
+            });
+        let mut scrub = ScrubContext::from_config(config);
+        scrub.names = names;
+        Ok(Self {
+            session_id: session_id.to_string(),
+            category,
+            text,
+            resolution,
+            ui_scale: None,
+            system: SystemInfo::collect(config, capture_backend, daemon_running),
+            training: false,
+            scrub,
+            window,
+            log_dir: config.data_dir.clone(),
+            kit,
+            corrections,
+            built_at,
+        })
+    }
+}
+
+/// The zip may not be bigger than this (section 8).
+pub const MAX_ZIP_BYTES: usize = 10 * 1024 * 1024;
+
+fn png_size(png: &[u8]) -> Result<(u32, u32), ReportError> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|_| ReportError::InvalidInput("a saved crop is not a PNG"))?;
+    Ok((img.width(), img.height()))
+}
+
+/// Build a report about one game: the blanked scoreboard, the rank screen
+/// result word when the tracker saw it, the scrubbed session log, the reads,
+/// and the member's edits.
+pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportError> {
+    if input.resolution.width == 0 || input.resolution.height == 0 {
+        return Err(ReportError::InvalidInput("resolution must be positive"));
+    }
+    if let Some(scale) = input.ui_scale
+        && (!scale.is_finite() || scale <= 0.0 || scale > 200.0)
+    {
+        return Err(ReportError::InvalidInput("ui_scale must be in (0, 200]"));
+    }
+    let reads = input.kit.reads.as_ref();
+    if reads.is_none() && input.category != GameCategory::MissedGame {
+        return Err(ReportError::InvalidInput("this game has no saved reads"));
+    }
+
+    let raw_log = scrub::read_daemon_logs(&input.log_dir);
+    let log_text = scrub::scrub_log(&input.scrub, &input.window, &raw_log);
+    let reason_text = scrub_reason_text(&input.scrub, &input.text);
+
+    let mut images = Vec::new();
+    for (path, png) in [
+        ("crops/scoreboard.png", input.kit.scoreboard_png.as_ref()),
+        ("crops/outcome.png", input.kit.outcome_png.as_ref()),
+    ] {
+        if let (Some(png), Some(_)) = (png, reads) {
+            let (width, height) = png_size(png)?;
+            images.push(ReportImage {
+                path: path.to_string(),
+                png: png.clone(),
+                width,
+                height,
+            });
+        }
+    }
+
+    let mut files = vec![ReportFile {
+        path: LOG_PATH.to_string(),
+        sha256: sha256_hex(log_text.as_bytes()),
+        bytes: log_text.len() as u64,
+        role: "log",
+        screen_class: None,
+    }];
+    for img in &images {
+        files.push(ReportFile {
+            path: img.path.clone(),
+            sha256: sha256_hex(&img.png),
+            bytes: img.png.len() as u64,
+            role: "crop",
+            screen_class: Some(if img.path == "crops/outcome.png" {
+                "outcome"
+            } else {
+                "scoreboard"
+            }),
+        });
+    }
+
+    // Every game category carries a game object. A missed game with no kit
+    // has nothing read: empty fields, the build time, and empty reads.
+    let secs = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let game = Some(match reads {
+        Some(r) => GameJson {
+            map: r.map.as_deref(),
+            mode: r.mode.as_deref(),
+            result: r.result.as_deref(),
+            team_size: r.team_size,
+            captured_at: secs(r.captured_at),
+        },
+        None => GameJson {
+            map: None,
+            mode: None,
+            result: None,
+            team_size: None,
+            captured_at: secs(input.built_at),
+        },
+    });
+    let reads_json = match reads {
+        Some(r) => {
+            let mut map = serde_json::Map::new();
+            for key in ["mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit"] {
+                let read = r.reads.get(key).cloned().unwrap_or(super::kit::KitRead {
+                    value: None,
+                    confidence: None,
+                    ocr_v1: None,
+                    suspect: true,
+                });
+                map.insert(
+                    key.to_string(),
+                    serde_json::to_value(read)
+                        .map_err(|_| ReportError::InvalidInput("reads did not serialize"))?,
+                );
+            }
+            serde_json::Value::Object(map)
+        }
+        None => serde_json::to_value(NullReads::default())
+            .map_err(|_| ReportError::InvalidInput("reads did not serialize"))?,
+    };
+    let session_id = if reads.is_some() {
+        input.session_id.as_str()
+    } else {
+        NO_SESSION
+    };
+    let corrections = if reads.is_some() {
+        input.corrections.clone()
+    } else {
+        Default::default()
+    };
+    let manifest = Manifest {
+        bundle_version: BUNDLE_VERSION,
+        app_version: APP_VERSION,
+        recognizers: Recognizers {
+            matcher: crate::shadow::digits::RECOGNIZER_ID,
+            ocr: OCR_ID,
+        },
+        resolution: input.resolution,
+        ui_scale: input.ui_scale,
+        reason: Reason {
+            category: input.category.as_str(),
+            text: &reason_text,
+        },
+        system: SystemJson::from(&input.system),
+        session_id,
+        game,
+        reads: reads_json,
+        corrections,
+        consent: Consent {
+            training: input.training,
+            own_name_included: false,
+            glyphs_included: false,
+        },
+        files: &files,
+    };
+    let mut manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|_| ReportError::InvalidInput("manifest did not serialize"))?;
+    manifest_json.push('\n');
+
+    let mut entries: Vec<(&str, &[u8])> = vec![
+        (MANIFEST_PATH, manifest_json.as_bytes()),
+        (LOG_PATH, log_text.as_bytes()),
+    ];
+    for img in &images {
+        entries.push((img.path.as_str(), img.png.as_slice()));
+    }
+    let bytes = write_zip(&entries)?;
+    if bytes.len() > MAX_ZIP_BYTES {
+        return Err(ReportError::InvalidInput("the report is bigger than 10 MB"));
+    }
+    Ok(ReportZip {
+        bytes,
+        manifest_json,
+        files,
+        log_text,
+        images,
+    })
 }

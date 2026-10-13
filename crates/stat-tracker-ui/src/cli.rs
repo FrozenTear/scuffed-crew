@@ -16,6 +16,9 @@ pub struct Cli {
     pub companion: bool,
     pub help: bool,
     pub version: bool,
+    /// Replace a running GUI ("Restart now" after an update): ask it to
+    /// quit and wait for the single-instance lock.
+    pub replace: bool,
 }
 
 impl Cli {
@@ -30,6 +33,7 @@ impl Cli {
         let mut companion = false;
         let mut help = false;
         let mut version = false;
+        let mut replace = false;
         let args: Vec<String> = args
             .into_iter()
             .map(|arg| arg.as_ref().to_string())
@@ -59,6 +63,7 @@ impl Cli {
                     }
                 }
                 "--companion" => companion = true,
+                "--replace" => replace = true,
                 "--seasons-url" => {
                     if let Some(v) = args.get(i + 1) {
                         seasons_url = Some(v.clone());
@@ -102,6 +107,7 @@ impl Cli {
             companion,
             help,
             version,
+            replace,
         }
     }
 
@@ -123,6 +129,8 @@ OPTIONS:
   --seasons-url URL     GET /api/public/seasons on launch and every 30 min
                         (default: $SCUFFED_SERVER or config sync URL).
                         Cached to <data-dir>/seasons.json. Ignored when --fixture is set.
+  --replace             Ask a running GUI to quit and take its place
+                        (used by Restart now after an update)
   -h, --help            Show this help
   -V, --version         Print the tracker version and exit
 "
