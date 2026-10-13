@@ -58,6 +58,23 @@ grep -q '^PrivateTmp=yes$' "$SESSION_UNIT" \
     || fail "session unit missing PrivateTmp=yes"
 pass "unit templates carry the sandbox"
 
+# OCR runs with one OpenMP thread (alpha.7 C1). libgomp reads the variable
+# when the binary loads, so for a systemd start the unit is the only place
+# that can set it. It must be one live [Service] directive, with no second
+# assignment that would win over it.
+assert_omp_limit() {
+    local unit="$1" section
+    [[ "$(grep -c '^Environment=OMP_THREAD_LIMIT=1$' "$unit")" == 1 ]] \
+        || fail "$unit does not set Environment=OMP_THREAD_LIMIT=1 exactly once"
+    section="$(awk '/^\[/ { s = $0 } /^Environment=OMP_THREAD_LIMIT=1$/ { print s }' "$unit")"
+    [[ "$section" == "[Service]" ]] \
+        || fail "$unit sets OMP_THREAD_LIMIT outside [Service] (in ${section:-no section})"
+    [[ "$(grep -v '^[[:space:]]*#' "$unit" | grep -c 'OMP_THREAD_LIMIT')" == 1 ]] \
+        || fail "$unit assigns OMP_THREAD_LIMIT more than once"
+}
+assert_omp_limit "$UNIT"
+pass "daemon unit template sets OMP_THREAD_LIMIT=1"
+
 # ── pure ExecStart quoting ────────────────────────────────────────────────────
 
 # shellcheck source=systemd-unit.sh
@@ -287,11 +304,18 @@ fi
 [[ ! -e "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
     || fail "install with no config.toml wrote a data_dir drop-in"
 pass "custom PREFIX ExecStart=$DAEMON_BIN"
+assert_omp_limit "$DAEMON_UNIT"
+pass "installed daemon unit sets OMP_THREAD_LIMIT=1"
 
 # An upgrade over a running daemon restarts it (systemd otherwise keeps the
 # old, deleted binary running), after the reload and the session import.
+# The unit on disk is the one an alpha.6 install left: no OMP_THREAD_LIMIT.
+# The upgrade must write the line before the reload and the restart.
 grep -q 'try-restart' "$LOG" && fail "stopped daemon was restarted: $(cat "$LOG")"
+sed -i '/OMP_THREAD_LIMIT/d' "$DAEMON_UNIT"
+grep -q 'OMP_THREAD_LIMIT' "$DAEMON_UNIT" && fail "could not stage a unit without the limit"
 FAKE_ACTIVE=1 run_install "$HOME_DIR" "$PREFIX"
+assert_omp_limit "$DAEMON_UNIT"
 grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \
     || fail "running daemon was not restarted: $(cat "$LOG")"
 reload_at="$(grep -n -- '--user daemon-reload' "$LOG" | head -1 | cut -d: -f1)"
@@ -300,6 +324,7 @@ restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
 [[ -n "$reload_at" && -n "$import_at" && "$reload_at" -lt "$restart_at" && "$import_at" -lt "$restart_at" ]] \
     || fail "restart ran before the reload or the session import: $(cat "$LOG")"
 pass "upgrade restarts a running daemon, and only a running one"
+pass "upgrade adds OMP_THREAD_LIMIT=1 to a unit that lacked it"
 
 # The source-build installer (crates/stat-tracker/install.sh) has the same
 # restart call. Stage it in a fake repo whose `cargo` writes stub binaries.
@@ -331,6 +356,8 @@ run_source_install() {
 SRC_HOME="$TMP/home-src"
 mkdir -p "$SRC_HOME"
 run_source_install "$SRC_HOME" "$TMP/opt/src"
+assert_omp_limit "$SRC_HOME/.config/systemd/user/scuffed-stat-tracker.service"
+pass "source-build install sets OMP_THREAD_LIMIT=1 in the unit"
 grep -q 'try-restart' "$LOG" && fail "source install restarted a stopped daemon: $(cat "$LOG")"
 FAKE_ACTIVE=1 run_source_install "$SRC_HOME" "$TMP/opt/src"
 grep -qx -- '--user try-restart scuffed-stat-tracker.service' "$LOG" \

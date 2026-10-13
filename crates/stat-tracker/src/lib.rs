@@ -7,6 +7,7 @@ pub mod fs_mode;
 pub mod hero_auth;
 pub mod mapcrops;
 pub mod ocr;
+pub mod omp;
 pub mod packs;
 pub mod parse;
 pub mod perf;
