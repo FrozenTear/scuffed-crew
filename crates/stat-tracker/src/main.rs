@@ -367,8 +367,21 @@ fn package_version() -> &'static str {
     option_env!("SST_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // First, before any thread, log line or Tesseract use: libgomp reads
+    // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
+    // app with no unit installed) is replaced here by the same binary with
+    // it set.
+    // Under the systemd unit the variable is already there and this returns.
+    let omp = stat_tracker::omp::ensure_thread_limit();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?
+        .block_on(run(omp))
+}
+
+async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     lock_down_umask();
     // No core file, also when the GUI starts the daemon outside systemd.
     let core_dumps = stat_tracker::fs_mode::disable_core_dumps();
@@ -387,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = core_dumps {
         tracing::warn!(error = %e, "could not turn off core dumps");
     }
+    stat_tracker::omp::log_startup(&omp);
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
     let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
@@ -548,6 +562,10 @@ async fn main() -> anyhow::Result<()> {
 /// used by smoke tests and humans). Returns true if a flag was handled and
 /// `main` should exit successfully.
 fn handle_preinit_flags() -> bool {
+    if std::env::args().any(|a| a == stat_tracker::omp::PRINT_FLAG) {
+        print!("{}", stat_tracker::omp::print_report());
+        return true;
+    }
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("scuffed-stat-tracker {}", package_version());
         return true;
@@ -565,7 +583,8 @@ fn handle_preinit_flags() -> bool {
              \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
              \x20 --collect-portraits   only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
-             \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
+             \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\
+             \x20 --print-omp-limit     print the OpenMP thread limit OCR runs with and exit\n\n\
              With no flags, runs the capture daemon (see README).",
             package_version()
         );
@@ -4763,6 +4782,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             let started = Instant::now();
             let analysis = analyze_frame(img, matcher, player_name_owned, game_outcome, flags);
             stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
+            stat_tracker::omp::log_threads_after_first_ocr();
             analysis
         })
         .await?;

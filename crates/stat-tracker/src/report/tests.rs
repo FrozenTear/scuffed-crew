@@ -120,7 +120,7 @@ fn seed_logs(dir: &std::path::Path) {
     cur.push_str(&line(
         "2026-10-09T12:06:00.000001Z",
         "scuffed_stat_tracker",
-        "capture timing grabs=60 grab_ms_p50=3",
+        "capture timing grabs=60 grab_ms_p50=3 omp_thread_limit=1 os_threads=5",
     ));
     cur.push_str(&line(
         "2026-10-09T12:20:00.000001Z",
@@ -218,7 +218,7 @@ fn section_9_log_fixture_scrubs_everything() {
         "tag [battletag] joined",
         "scoreboard names [player] [player] self [player]",
         "misread [player] and short [player]",
-        "capture timing grabs=60 grab_ms_p50=3",
+        "capture timing grabs=60 grab_ms_p50=3 omp_thread_limit=1 os_threads=5",
     ] {
         assert!(log.contains(want), "missing {want:?} in:\n{log}");
     }
