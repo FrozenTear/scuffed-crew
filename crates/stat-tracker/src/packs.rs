@@ -958,7 +958,7 @@ struct InnerFile {
     size: u64,
 }
 
-fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
+pub(crate) fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
     let _ = sync_dir(staging);
     if live.exists() {
         match exchange_paths(staging, live) {

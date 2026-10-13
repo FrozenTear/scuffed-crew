@@ -1141,9 +1141,47 @@ struct LiveInner {
     dirs: HeroDirs,
     current: std::sync::RwLock<Current>,
     loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    hooks: TestHooks,
+}
+
+/// Test probes on the reload thread: a spawn count, a delay before the
+/// load, and a step run between the first stamp and the load.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    spawns: std::sync::atomic::AtomicUsize,
+    delay_ms: std::sync::atomic::AtomicU64,
+    during: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestHooks")
+    }
 }
 
 impl LiveInner {
+    /// What runs between the reload's first stamp and its load: nothing,
+    /// except in tests.
+    fn before_load(&self) -> impl FnOnce() + use<> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let ms = self.hooks.delay_ms.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let during = self.hooks.during.lock().unwrap().take();
+            move || {
+                if let Some(f) = during {
+                    f();
+                }
+            }
+        }
+        #[cfg(not(test))]
+        || {}
+    }
+
     fn install(&self, (set, stamp): (Option<HeroSet>, Stamp)) {
         tracing::info!(
             heroes = set.is_some(),
@@ -1202,14 +1240,49 @@ impl LiveHeroSet {
         let inner = std::sync::Arc::clone(&self.inner);
         let spawned = std::thread::Builder::new()
             .name("hero-pack-reload".into())
-            .spawn(move || match inner.dirs.load_stable(|| {}) {
-                Some(loaded) => inner.install(loaded),
-                None => tracing::debug!("hero pack changed while loading, retry later"),
+            .spawn(move || {
+                let during = inner.before_load();
+                match inner.dirs.load_stable(during) {
+                    Some(loaded) => inner.install(loaded),
+                    None => tracing::debug!("hero pack changed while loading, retry later"),
+                }
             });
         match spawned {
-            Ok(handle) => *loader = Some(handle),
+            Ok(handle) => {
+                #[cfg(test)]
+                self.inner
+                    .hooks
+                    .spawns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *loader = Some(handle);
+            }
             Err(e) => tracing::warn!(error = %e, "hero pack reload not started"),
         }
+    }
+
+    /// Reload threads started so far (tests).
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.inner
+            .hooks
+            .spawns
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make each reload wait `ms` before it loads (tests).
+    #[cfg(test)]
+    pub(crate) fn set_load_delay_ms(&self, ms: u64) {
+        self.inner
+            .hooks
+            .delay_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Run `f` inside the next reload, between its first stamp and its load
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn during_next_load(&self, f: impl FnOnce() + Send + 'static) {
+        *self.inner.hooks.during.lock().unwrap() = Some(Box::new(f));
     }
 
     /// Wait for a reload in flight (tests).
@@ -1968,6 +2041,71 @@ mod tests {
         let (got, heroes) = reads(&live.current().unwrap(), ART_V2, 76);
         assert_eq!(got, HeroPack::V2);
         assert!(all_right(&heroes), "{heroes:?}");
+    }
+
+    /// F249-6: one reload thread at a time. Boards that arrive while a load
+    /// is in flight start no second one.
+    #[test]
+    fn only_one_reload_runs_at_a_time() {
+        let data = data_dir(true, None, None);
+        let live = LiveHeroSet::load(HeroDirs::in_data_dir(data.path()));
+        live.set_load_delay_ms(400);
+        swap_in_v2(data.path());
+        for _ in 0..50 {
+            let set = live.current().unwrap();
+            assert_eq!(set.main_pack(), Some(HeroPack::V1), "load still in flight");
+        }
+        assert_eq!(live.reload_spawns(), 1);
+        live.wait_reload();
+        assert_eq!(live.current().unwrap().main_pack(), Some(HeroPack::V2));
+        assert_eq!(live.reload_spawns(), 1, "stamp matches again: no reload");
+    }
+
+    /// Replace `templates/heroes-v2` through pack sync's own swap
+    /// (`renameat2` exchange, or its rename fallback).
+    fn swap_v2_with_art(data: &Path, art: u32) {
+        let staging = data.join(format!("templates/.heroes-v2-staging-{art}"));
+        write_templates(&staging, &IDS, 74, art);
+        write_skull(&staging);
+        crate::packs::swap_dir(&staging, &data.join(TEMPLATE_SUBDIR_V2)).unwrap();
+    }
+
+    /// F249-7: a newer heroes-v2 over an installed one (the folder exists
+    /// before and after; only its identity changes) is picked up.
+    #[test]
+    fn an_updated_v2_pack_is_picked_up() {
+        let data = data_dir(true, Some(&IDS), None);
+        let live = LiveHeroSet::load(HeroDirs::in_data_dir(data.path()));
+        let old = live.current().unwrap();
+        assert!(all_right(&reads(&old, ART_V2, 76).1));
+        swap_v2_with_art(data.path(), 300);
+        live.current();
+        live.wait_reload();
+        let new = live.current().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old, &new), "re-loaded");
+        let (pack, heroes) = reads(&new, 300, 76);
+        assert_eq!(pack, HeroPack::V2);
+        assert!(all_right(&heroes), "new art: {heroes:?}");
+    }
+
+    /// F249-8: the reload thread itself throws away a load that saw a swap,
+    /// and a later board loads again.
+    #[test]
+    fn the_reload_thread_discards_a_load_that_saw_a_swap() {
+        let data = data_dir(true, None, None);
+        let live = LiveHeroSet::load(HeroDirs::in_data_dir(data.path()));
+        swap_in_v2(data.path());
+        let path = data.path().to_path_buf();
+        live.during_next_load(move || swap_v2_with_art(&path, 300));
+        assert_eq!(live.current().unwrap().main_pack(), Some(HeroPack::V1));
+        live.wait_reload();
+        // nothing was installed; this board keeps v1 and starts a retry
+        assert_eq!(live.current().unwrap().main_pack(), Some(HeroPack::V1));
+        live.wait_reload();
+        let set = live.current().unwrap();
+        assert_eq!(set.main_pack(), Some(HeroPack::V2));
+        assert!(all_right(&reads(&set, 300, 76).1), "the art after the swap");
+        assert_eq!(live.reload_spawns(), 2);
     }
 
     #[test]
