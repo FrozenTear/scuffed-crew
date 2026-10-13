@@ -1643,6 +1643,36 @@ fn mark_edited(fields: &mut Vec<String>, name: &str) {
     }
 }
 
+/// The member's own hero pick on a session's rows: the newest row that
+/// carries a `corrected_hero`. [`LocalStore::edit_match`] writes the same
+/// pick onto every row the session had at that time.
+pub fn member_hero_edit(rows: &[PersonalMatch]) -> Option<&PersonalMatch> {
+    rows.iter().rev().find(|m| m.corrected_hero.is_some())
+}
+
+/// Copy a member's hero pick from `edited` (a row of the same session) onto
+/// a capture row written after the edit, so the pick is never overridden by
+/// that row's read: `corrected_hero`, `corrected_role` when the edit set one,
+/// the `hero` / `role` edit marks, `edited_at`, and the cleared `hero`
+/// suspect. The row's own read (`hero`, `role`) stays as read. Returns
+/// whether `edited` carried a pick.
+pub fn carry_member_hero_edit(edited: &PersonalMatch, row: &mut PersonalMatch) -> bool {
+    let Some(hero) = edited.corrected_hero.clone() else {
+        return false;
+    };
+    row.corrected_hero = Some(hero);
+    mark_edited(&mut row.edited_fields, "hero");
+    crate::reader_apply::clear_edited_suspects(&mut row.suspect_fields, "hero");
+    if let Some(role) = edited.corrected_role.clone() {
+        row.corrected_role = Some(role);
+        mark_edited(&mut row.edited_fields, "role");
+    }
+    if row.edited_at.is_none() {
+        row.edited_at = edited.edited_at;
+    }
+    true
+}
+
 /// Overlay a [`MatchEdit`] onto a row: for every `Some(_)` field, set the
 /// matching `corrected_*` value (OCR fields untouched) and record the field
 /// name. Re-editing accumulates the union of edited fields and overwrites

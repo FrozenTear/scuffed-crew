@@ -2405,6 +2405,30 @@ async fn session_has_member_map_edit(store: &storage::LocalStore, req: &CaptureR
     }
 }
 
+/// `reader = "new"`: copy the member's own hero pick on `session_id`
+/// ([`storage::member_hero_edit`]) onto `parsed`, a row of that session about
+/// to be written. The stored read stays as read; the pick is the overlay the
+/// display and upload use, so the read never overrides it. A store error
+/// carries nothing and is logged: the pick cannot be known then.
+async fn carry_session_hero_edit(
+    store: &storage::LocalStore,
+    session_id: &str,
+    parsed: &mut storage::PersonalMatch,
+) {
+    match store.get_session_snapshots(session_id).await {
+        Ok(rows) => {
+            if let Some(edited) = storage::member_hero_edit(&rows)
+                && storage::carry_member_hero_edit(edited, parsed)
+            {
+                tracing::info!(read = %parsed.hero, "member hero pick kept on this capture");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "session rows unreadable; member hero pick not checked")
+        }
+    }
+}
+
 /// Everything the blocking vision/OCR pass extracts from one Tab frame.
 /// Replaces a 9-tuple whose adjacent same-typed fields were swap-prone.
 struct FrameAnalysis {
@@ -2417,8 +2441,20 @@ struct FrameAnalysis {
     rows: Vec<ocr::RowOcrResult>,
     /// Portrait template match: (hero file stem, confidence).
     portrait_hero: Option<(String, f64)>,
-    /// Career-panel hero title (most reliable source when present).
+    /// Career-panel hero title (most reliable source when present). OCR site
+    /// T5, read under `reader = "ocr-v1"` only: always `None` under the new
+    /// reader, which uses `pack_hero` instead.
     career_hero: Option<String>,
+    /// `reader = "new"`: the hero the heroes-v2 icon reads authenticate: the
+    /// own row's and the career panel's portrait, each only when accepted,
+    /// and never two different heroes ([`shadow::TabHeroes::authority`]). It
+    /// has the career-panel title's authority
+    /// ([`hero_auth::resolve_hero_new_reader`]). Always `None` under ocr-v1.
+    pack_hero: Option<String>,
+    /// `reader = "new"`: this Tab's hero icon read, reused by the board read
+    /// in `apply_new_reader` so the icons are matched once per Tab. `None`
+    /// under ocr-v1, or after a caught panic.
+    tab_heroes: Option<shadow::TabHeroes>,
     /// Top-bar map label OCR, already canonicalized.
     map_from_panel: Option<String>,
     /// Top-bar OCR before canonicalization. The Adlersbrunn alias check
@@ -3916,12 +3952,26 @@ fn analyze_frame(
         .and_then(|name| parse::match_player_row_by_name(&rows, name));
     let row_idx = name_match.map(|m| m.row).or(brightness_row_idx);
 
-    // Career-panel hero title. Guard against garbage OCR (happens when there
-    // is no career panel — replay, post-match — by requiring the result to
-    // actually match a known hero name, which match_hero_in_text already does).
-    let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
-        .ok()
-        .and_then(|t| parse::match_hero_in_text(&t));
+    // Hero authority (OCR site T5). ocr-v1 reads the career-panel hero
+    // title. Guard against garbage OCR (happens when there is no career
+    // panel — replay, post-match — by requiring the result to actually
+    // match a known hero name, which match_hero_in_text already does). The
+    // new reader never reads it: the heroes-v2 reads of the career panel's
+    // portrait and of the own row take its place (alpha.7 O8).
+    let OwnHeroRead {
+        career_hero,
+        pack_hero,
+        tab_heroes,
+    } = read_own_hero(
+        use_new_reader,
+        || {
+            ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
+                .ok()
+                .and_then(|t| parse::match_hero_in_text(&t))
+        },
+        || shadow::read_heroes(&img, &scoreboard, team_size),
+        row_idx,
+    );
     let map_text = ocr::recognize_map_label(&img, preflight);
     let map_panel_raw = if map_text.trim().is_empty() {
         None
@@ -3937,14 +3987,14 @@ fn analyze_frame(
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path —
-    // player row found and parseable, hero identified (career panel or
-    // portrait match), map already known — it is pure redundancy
-    // (adaptive preprocessing plus up to three threshold sweeps), so run
+    // player row found and parseable, hero identified (career panel,
+    // heroes-v2 icons or portrait match), map already known — it is pure
+    // redundancy (adaptive preprocessing plus up to three threshold sweeps), so run
     // it lazily. A portrait match alone satisfies the hero requirement:
     // replay/post-match layouts have no career panel, and the raw-text
     // hero guess loses to the portrait in the priority order anyway (H6).
     let cells_parse = parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
-    let hero_identified = career_hero.is_some() || portrait_match.is_some();
+    let hero_identified = career_hero.is_some() || pack_hero.is_some() || portrait_match.is_some();
     let need_full_ocr =
         !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
     let ocr = if need_full_ocr {
@@ -3963,6 +4013,8 @@ fn analyze_frame(
         rows,
         portrait_hero: portrait_match,
         career_hero,
+        pack_hero,
+        tab_heroes,
         map_from_panel,
         map_panel_raw,
         map_from_banner: top_bar.from_banner,
@@ -3979,6 +4031,62 @@ fn analyze_frame(
         team_size,
         frame: img,
     }))
+}
+
+/// The hero authority inputs of one Tab (OCR site T5).
+#[derive(Debug, Clone, PartialEq)]
+struct OwnHeroRead {
+    /// ocr-v1: the career-panel title. `None` under the new reader.
+    career_hero: Option<String>,
+    /// New reader: the hero the heroes-v2 icon reads authenticate
+    /// ([`shadow::TabHeroes::authority`]). `None` under ocr-v1, and on any
+    /// abstain.
+    pack_hero: Option<String>,
+    /// New reader: the whole icon read, for the board read. `None` under
+    /// ocr-v1, and after a caught panic.
+    tab_heroes: Option<shadow::TabHeroes>,
+}
+
+/// Read the hero authority of one Tab with the daemon's reader switch.
+///
+/// * `reader = "ocr-v1"`: `career` (the career-panel OCR) runs, exactly as
+///   before. The icons are not read.
+/// * `reader = "new"`: the career-panel title is never read. `heroes` (the
+///   heroes-v2 icon read of the whole board and of the career panel's
+///   portrait) runs, and `pack_hero` is the hero those reads authenticate
+///   ([`shadow::TabHeroes::authority`]). Suspect or special reads, two reads
+///   naming different heroes, or a panic in the icon reader are an abstain:
+///   no hero, and never an OCR read in its place. A panic does not fail the
+///   Tab, the same isolation [`choose_top_bar_map`] gives the banner.
+fn read_own_hero(
+    use_new_reader: bool,
+    career: impl FnOnce() -> Option<String>,
+    heroes: impl FnOnce() -> shadow::TabHeroes,
+    own_row: Option<usize>,
+) -> OwnHeroRead {
+    if !use_new_reader {
+        return OwnHeroRead {
+            career_hero: career(),
+            pack_hero: None,
+            tab_heroes: None,
+        };
+    }
+    let tab_heroes = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(heroes)) {
+        Ok(read) => Some(read),
+        Err(_) => {
+            tracing::warn!("hero icon reader panicked; no hero authority for this Tab");
+            None
+        }
+    };
+    let pack_hero = tab_heroes
+        .as_ref()
+        .and_then(|read| read.authority(own_row))
+        .map(str::to_string);
+    OwnHeroRead {
+        career_hero: None,
+        pack_hero,
+        tab_heroes,
+    }
 }
 
 /// Row id passed into [`boundary::plan_capture`]. `None` when the player
@@ -4452,6 +4560,7 @@ async fn apply_new_reader(
     team_size: usize,
     board_override: Option<shadow::BoardRead>,
     banner: Option<Option<shadow::banner::MapRead>>,
+    tab_heroes: Option<shadow::TabHeroes>,
 ) {
     let board = if let Some(mut board) = board_override {
         board.set_result(shadow::result_field(evidence));
@@ -4461,12 +4570,10 @@ async fn apply_new_reader(
         let evidence = evidence.clone();
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // The banner the top bar already read, so the frame is read
-                // once per Tab (F251-3).
-                let mut board = match banner {
-                    Some(read) => shadow::read_board_with_banner(&frame, read),
-                    None => shadow::read_board(&frame),
-                };
+                // The banner the top bar already read and the hero icons the
+                // hero authority already read, so the frame is read once per
+                // Tab (F251-3, O8). `None` reads that part here.
+                let mut board = shadow::read_board_with(&frame, banner, tab_heroes);
                 board.set_result(shadow::result_field(&evidence));
                 board
             }))
@@ -4720,6 +4827,8 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         rows,
         portrait_hero,
         career_hero,
+        pack_hero,
+        tab_heroes,
         map_from_panel,
         map_panel_raw,
         map_from_banner,
@@ -4855,25 +4964,32 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // Hero authority (CG-4 C): career-panel always wins; portrait may
             // confirm current hero but may only switch if career never succeeded
             // this game and ≥2 consecutive matches ≥0.85. See hero_auth::resolve_hero.
+            // reader = "new" (O8): the heroes-v2 icon reads (career panel
+            // portrait, own row) take the career-panel title's place, and no
+            // OCR text names the hero.
             let portrait = portrait_hero
                 .as_ref()
                 .map(|(name, conf)| (name.as_str(), *conf));
-            let (hero, source, next_auth) = hero_auth::resolve_hero(
-                career_hero.as_deref(),
-                portrait,
-                &parsed.hero,
-                &hero_auth,
-                parse::canonical_hero,
-            );
+            let (hero, source, next_auth) = if ctx.use_new_reader {
+                hero_auth::resolve_hero_new_reader(
+                    pack_hero.as_deref(),
+                    portrait,
+                    &hero_auth,
+                    parse::canonical_hero,
+                )
+            } else {
+                hero_auth::resolve_hero(
+                    career_hero.as_deref(),
+                    portrait,
+                    &parsed.hero,
+                    &hero_auth,
+                    parse::canonical_hero,
+                )
+            };
             hero_auth = next_auth;
             parsed.hero = hero;
             parsed.role = parse::guess_role_public(&parsed.hero);
-            let source_label = match source {
-                HeroSource::CareerPanel => "career_panel",
-                HeroSource::Portrait => "portrait",
-                HeroSource::Held => "held",
-                HeroSource::OcrText => "ocr_text",
-            };
+            let source_label = source.label();
             tracing::info!(
                 hero = %parsed.hero,
                 source = source_label,
@@ -4895,7 +5011,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // (D.Mon, WL-5): the first game on one seeds its reference here, and
             // the matcher picks it up on the next daemon start. Only the
             // career-panel source may seed (a portrait/held/text guess must not
-            // template itself).
+            // template itself). The heroes-v2 icon reads (`reader = "new"`)
+            // do not force a seed either: the reference library is the
+            // ocr-v1 portrait matcher's, and a wrong seed sticks. Only the
+            // `collect_portraits` opt-in seeds under the new reader.
             let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
             let reference_path =
                 detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
@@ -4981,7 +5100,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 return Ok(skipped_capture_report(
                     &plan,
                     session_id,
-                    matches!(source, HeroSource::CareerPanel),
+                    source.is_authority(),
                     hero_auth,
                     plan.defer.then(|| parsed.hero.clone()),
                     plan.defer.then_some(captured_at),
@@ -5142,11 +5261,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     team_size,
                     board_override,
                     banner,
+                    tab_heroes,
                 )
                 .await;
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
                 staged.gate =
                     hold_new_reader_stats(&mut parsed, prior, suspect, split, trusted_cells);
+                // A member's own hero pick on this game is never overridden
+                // by a later Tab's read (O8): this row carries the pick too.
+                if !split && target_session == session_id {
+                    carry_session_hero_edit(store, session_id, &mut parsed).await;
+                }
             } else {
                 note_gate_suspects(&mut parsed, held_stats, &held_cells);
             }
@@ -5228,7 +5353,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 refresh_baseline: plan.refresh_baseline,
                 clear_hint: plan.clear_hint,
                 count_progress: plan.count_progress,
-                career_panel: matches!(source, HeroSource::CareerPanel),
+                career_panel: source.is_authority(),
                 held_counters: None,
                 held_hero: None,
                 gate_state: Some(staged.gate.state),
@@ -8197,7 +8322,18 @@ mod tests {
             body.contains("choose_top_bar_map( use_new_reader, || shadow::read_banner(&img),"),
             "the top-bar map goes through choose_top_bar_map with the switch"
         );
-        assert_eq!(body.matches("shadow::read_").count(), 1, "one banner read");
+        assert_eq!(
+            body.matches("shadow::read_banner").count(),
+            1,
+            "one banner read"
+        );
+        // ...and one hero icon read (O8), the only other shadow read
+        assert_eq!(
+            body.matches("shadow::read_heroes").count(),
+            1,
+            "one hero read"
+        );
+        assert_eq!(body.matches("shadow::read_").count(), 2);
         assert!(body.contains("map_from_banner: top_bar.from_banner, banner: top_bar.banner,"));
         let hc = src
             .find("\nasync fn handle_capture(")
@@ -8208,15 +8344,46 @@ mod tests {
             "if ctx.use_new_reader { req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await; }"
         ));
         assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
-        assert!(hc_body.contains("board_override, banner, ) .await;"));
+        assert!(hc_body.contains("board_override, banner, tab_heroes, ) .await;"));
         // the stored report carries the text-fallback replacement
         assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
-        // apply_new_reader reuses the banner read instead of reading again
+        // apply_new_reader reuses the banner and hero reads instead of
+        // reading again
         let an = src
             .find("\nasync fn apply_new_reader(")
             .expect("apply_new_reader");
         let an_body = norm(src[an..].split("\n}\n").next().unwrap());
-        assert!(an_body.contains("Some(read) => shadow::read_board_with_banner(&frame, read),"));
+        assert!(
+            an_body
+                .contains("let mut board = shadow::read_board_with(&frame, banner, tab_heroes);")
+        );
+    }
+
+    /// T5 (O8): the vision pass reads the hero authority only through
+    /// `read_own_hero` with the daemon's reader switch, and `handle_capture`
+    /// resolves it with the switch. Hard-wiring either, or reading the career
+    /// panel outside `read_own_hero`, breaks this.
+    #[test]
+    fn the_hero_authority_goes_through_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = include_str!("main.rs");
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        assert!(body.contains("} = read_own_hero( use_new_reader, || {"));
+        assert_eq!(
+            body.matches("crop_career_hero").count(),
+            1,
+            "one career read"
+        );
+        assert!(body.contains("|| shadow::read_heroes(&img, &scoreboard, team_size), row_idx, );"));
+        assert!(body.contains("career_hero, pack_hero, tab_heroes,"));
+        let hc = src
+            .find("\nasync fn handle_capture(")
+            .expect("handle_capture");
+        let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+        assert!(hc_body.contains(
+            "if ctx.use_new_reader { hero_auth::resolve_hero_new_reader( pack_hero.as_deref(), portrait, &hero_auth, parse::canonical_hero, ) } else { hero_auth::resolve_hero( career_hero.as_deref(), portrait, &parsed.hero, &hero_auth, parse::canonical_hero, ) };"
+        ));
     }
 
     fn request_with_text_fallback() -> (ActiveGame, Instant) {
@@ -9051,6 +9218,8 @@ mod tests {
                 rows: stat_rows(elims),
                 portrait_hero: None,
                 career_hero: None,
+                pack_hero: None,
+                tab_heroes: None,
                 map_from_panel: Some("Busan".into()),
                 map_panel_raw: Some("BUSAN".into()),
                 map_from_banner: false,
@@ -9203,6 +9372,8 @@ mod tests {
                 rows: rows(),
                 portrait_hero: None,
                 career_hero: None,
+                pack_hero: None,
+                tab_heroes: None,
                 map_from_panel: Some("Busan".into()),
                 map_panel_raw: Some("BUSAN".into()),
                 scoreboard: std::sync::Arc::new(frame.clone()),
@@ -9302,6 +9473,403 @@ mod tests {
         assert_eq!(stored[0].1, scuffed_types::RECOGNIZER_OCR_V1);
         assert_eq!(stored[1].0, "defeat", "{stored:?}");
         assert_eq!(stored[1].1, shadow::digits::RECOGNIZER_ID);
+    }
+
+    // ---- O8: hero authority (OCR site T5) under each reader.
+
+    fn o8_rows() -> Vec<ocr::RowOcrResult> {
+        let values = ["10", "4", "2", "3000", "800", "400"];
+        (0..10)
+            .map(|_| ocr::RowOcrResult {
+                name: Some(ocr::CellOcrResult {
+                    value: "PLAYER".into(),
+                    confidence: 80,
+                    suspect: false,
+                }),
+                name_alternates: Vec::new(),
+                stats: values
+                    .iter()
+                    .map(|value| ocr::CellOcrResult {
+                        value: value.to_string(),
+                        confidence: 90,
+                        suspect: false,
+                    })
+                    .collect(),
+                mean_confidence: 90,
+            })
+            .collect()
+    }
+
+    /// One Tab: the full-board OCR text names Ana (an OCR-text hero), the
+    /// career panel (if any) and the heroes-v2 own-row read as given.
+    fn o8_analysis(career: Option<&str>, pack: Option<&str>) -> FrameAnalysis {
+        let frame = image::DynamicImage::new_rgb8(64, 64);
+        FrameAnalysis {
+            frame_outcome: detect::MatchOutcome::Unknown,
+            ocr: Ok(ocr::OcrResult {
+                raw_text: "Ana\nBusan".into(),
+                confidence: 80,
+            }),
+            rows: o8_rows(),
+            portrait_hero: None,
+            career_hero: career.map(str::to_string),
+            pack_hero: pack.map(str::to_string),
+            tab_heroes: None,
+            map_from_panel: Some("Busan".into()),
+            map_panel_raw: Some("BUSAN".into()),
+            map_from_banner: false,
+            banner: None,
+            scoreboard: std::sync::Arc::new(frame.clone()),
+            player_row_idx: Some(0),
+            name_match: None,
+            team_size: 5,
+            frame,
+            shadow_input: None,
+        }
+    }
+
+    /// The new reader's board for that Tab: digits read, own-row hero as
+    /// given (`None`: a suspect read that names no hero).
+    fn o8_board(hero: Option<&str>) -> shadow::BoardRead {
+        let mut fields = vec![
+            shadow::FieldRead {
+                name: "map".into(),
+                value: Some(shadow::Value::Text("Busan".into())),
+                confidence: 0.9,
+                suspect: false,
+            },
+            shadow::FieldRead {
+                name: "r0.hero".into(),
+                value: hero.map(|h| shadow::Value::Text(h.into())),
+                confidence: if hero.is_some() { 0.9 } else { 0.4 },
+                suspect: hero.is_none(),
+            },
+        ];
+        for (suffix, value) in [
+            ("e", 10),
+            ("a", 4),
+            ("d", 2),
+            ("dmg", 3000),
+            ("h", 800),
+            ("mit", 400),
+        ] {
+            fields.push(shadow::FieldRead {
+                name: format!("r0.{suffix}"),
+                value: Some(shadow::Value::Int(value)),
+                confidence: 0.9,
+                suspect: false,
+            });
+        }
+        shadow::BoardRead {
+            status: shadow::BoardStatus::Read,
+            team_size: Some(5),
+            fields,
+            elapsed_ms: 1,
+        }
+    }
+
+    async fn o8_ctx(dir: &std::path::Path, use_new_reader: bool) -> DaemonCtx {
+        DaemonCtx {
+            backend: capture::CaptureBackend::None,
+            store: storage::LocalStore::open(dir).await.unwrap(),
+            sync_client: None,
+            player_name: None,
+            capture_output: None,
+            auto_detect: config::AutoDetectConfig::default(),
+            finished_game_close: Duration::from_secs(90),
+            game_process_names: Vec::new(),
+            portrait_matcher: std::sync::Arc::new(detect::hero_portrait::PortraitMatcher::load(
+                dir,
+            )),
+            collect_portraits: false,
+            dump_poll_frames: false,
+            debug_ocr: false,
+            data_dir: dir.to_path_buf(),
+            empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
+            shadow: None,
+            use_new_reader,
+        }
+    }
+
+    /// The hero parts of the last Tab's report.
+    struct O8Report {
+        career_panel: bool,
+        hero_auth: HeroAuthState,
+    }
+
+    /// Run Tabs through `handle_capture` on one open game and return the
+    /// session's stored rows and the last report.
+    async fn o8_tabs(
+        ctx: &DaemonCtx,
+        tabs: Vec<(FrameAnalysis, Option<shadow::BoardRead>)>,
+        between: impl AsyncFn(&DaemonCtx, usize),
+    ) -> (Vec<storage::PersonalMatch>, O8Report) {
+        let mut now = test_now();
+        let mut active = game(detect::MatchOutcome::Unknown, None, now);
+        active.session_id = "o8".into();
+        active.map = Some("Busan".into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        let mut st = session(Some(active), now);
+        let mut last = None;
+        for (i, (analysis, board)) in tabs.into_iter().enumerate() {
+            between(ctx, i).await;
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(ctx, req).await.unwrap();
+            assert!(report.recorded, "tab {i} was not stored");
+            assert!(!report.split, "tab {i} must stay on this game");
+            last = Some(O8Report {
+                career_panel: report.career_panel,
+                hero_auth: report.hero_auth.clone(),
+            });
+            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "o8", Ok(report), now).await;
+            now += Duration::from_secs(20);
+        }
+        let rows = ctx.store.get_session_snapshots("o8").await.unwrap();
+        (rows, last.expect("a tab"))
+    }
+
+    async fn no_edit(_: &DaemonCtx, _: usize) {}
+
+    #[tokio::test]
+    async fn new_reader_hero_comes_from_the_pack_read_never_the_career_panel() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        // The career panel says Reinhardt and the OCR text Ana; the heroes-v2
+        // own-row read says Zenyatta and is the hero authority.
+        let (rows, report) = o8_tabs(
+            &ctx,
+            vec![(
+                o8_analysis(Some("Reinhardt"), Some("zenyatta")),
+                Some(o8_board(Some("zenyatta"))),
+            )],
+            no_edit,
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Zenyatta");
+        assert!(report.career_panel, "a pack read is the authority");
+        assert!(report.hero_auth.career_ever_ok);
+        assert_eq!(report.hero_auth.accepted_hero.as_deref(), Some("Zenyatta"));
+    }
+
+    #[tokio::test]
+    async fn new_reader_abstain_stores_unknown_not_the_career_or_ocr_hero() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        // The own-row read abstained (suspect), so the board names no hero
+        // either. The career panel and the OCR text must not stand in.
+        let (rows, report) = o8_tabs(
+            &ctx,
+            vec![(o8_analysis(Some("Reinhardt"), None), Some(o8_board(None)))],
+            no_edit,
+        )
+        .await;
+        assert_eq!(rows[0].hero, "Unknown");
+        assert!(rows[0].suspect_fields.iter().any(|f| f == "hero"));
+        assert!(!report.career_panel);
+        assert!(!report.hero_auth.career_ever_ok);
+        assert!(report.hero_auth.accepted_hero.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_reader_abstain_holds_the_hero_already_accepted() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, report) = o8_tabs(
+            &ctx,
+            vec![
+                (
+                    o8_analysis(None, Some("zenyatta")),
+                    Some(o8_board(Some("zenyatta"))),
+                ),
+                (o8_analysis(Some("Reinhardt"), None), Some(o8_board(None))),
+            ],
+            no_edit,
+        )
+        .await;
+        let heroes: Vec<&str> = rows.iter().map(|r| r.hero.as_str()).collect();
+        assert_eq!(heroes, ["Zenyatta", "Zenyatta"], "abstain holds Zenyatta");
+        assert_eq!(report.hero_auth.accepted_hero.as_deref(), Some("Zenyatta"));
+    }
+
+    #[tokio::test]
+    async fn ocr_v1_hero_still_comes_from_the_career_panel() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), false).await;
+        // ocr-v1 ignores a pack read and never reads the board.
+        let (rows, report) = o8_tabs(
+            &ctx,
+            vec![
+                (o8_analysis(Some("Reinhardt"), Some("zenyatta")), None),
+                // no career read: the held career hero, as before
+                (o8_analysis(None, Some("zenyatta")), None),
+            ],
+            no_edit,
+        )
+        .await;
+        let heroes: Vec<&str> = rows.iter().map(|r| r.hero.as_str()).collect();
+        assert_eq!(heroes, ["Reinhardt", "Reinhardt"]);
+        assert!(report.hero_auth.career_ever_ok);
+        // and with no career read and nothing held, the OCR text, as before
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), false).await;
+        let (rows, _) = o8_tabs(
+            &ctx,
+            vec![(o8_analysis(None, Some("zenyatta")), None)],
+            no_edit,
+        )
+        .await;
+        assert_eq!(rows[0].hero, "Ana", "ocr-v1 keeps its OCR-text fallback");
+    }
+
+    /// A member's own hero pick on the game, made between two Tabs.
+    async fn pick_reinhardt(ctx: &DaemonCtx, tab: usize) {
+        if tab == 1 {
+            ctx.store
+                .edit_match(
+                    "o8",
+                    &storage::MatchEdit {
+                        hero: Some("Reinhardt".into()),
+                        ..storage::MatchEdit::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn new_reader_never_overrides_a_member_hero_pick() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let tab = || {
+            (
+                o8_analysis(None, Some("zenyatta")),
+                Some(o8_board(Some("zenyatta"))),
+            )
+        };
+        let (rows, _) = o8_tabs(&ctx, vec![tab(), tab()], pick_reinhardt).await;
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.hero, "Zenyatta", "the read stays as read");
+            assert_eq!(row.display_hero(), "Reinhardt", "the member's pick wins");
+            assert_eq!(row.display_role(), "Tank");
+            assert!(row.field_edited("hero"));
+            assert!(!row.suspect_fields.iter().any(|f| f == "hero"));
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_v1_rows_after_a_hero_pick_are_written_as_before() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), false).await;
+        let tab = || (o8_analysis(Some("Zenyatta"), None), None);
+        let (rows, _) = o8_tabs(&ctx, vec![tab(), tab()], pick_reinhardt).await;
+        assert_eq!(rows[0].display_hero(), "Reinhardt");
+        // ocr-v1 is unchanged: a later row carries no overlay of its own
+        assert_eq!(rows[1].corrected_hero, None);
+    }
+
+    #[test]
+    fn read_own_hero_reads_only_the_switched_source() {
+        let tab = |hero: Option<&str>| shadow::TabHeroes {
+            team_size: 5,
+            read: Some(shadow::heroes::HeroFrameRead {
+                board: shadow::heroes::HeroBoard {
+                    rows: (0..10)
+                        .map(|row| shadow::heroes::HeroRead {
+                            row,
+                            class: if hero.is_some() {
+                                shadow::heroes::RowClass::Hero
+                            } else {
+                                shadow::heroes::RowClass::Unknown
+                            },
+                            hero: hero.map(str::to_string),
+                            best: hero.unwrap_or("ana").to_string(),
+                            score: if hero.is_some() { 0.9 } else { 0.5 },
+                            lead: 0.2,
+                            second: "mercy".into(),
+                            suspect: hero.is_none(),
+                        })
+                        .collect(),
+                    elapsed_us: 1,
+                },
+                pack: shadow::heroes::HeroPack::V2,
+                pad_px: None,
+            }),
+            panel: None,
+        };
+        // ocr-v1: the career panel, and the icons are never read
+        let v1 = read_own_hero(
+            false,
+            || Some("Reinhardt".into()),
+            || panic!("ocr-v1 must not read the hero icons"),
+            Some(0),
+        );
+        assert_eq!(v1.career_hero.as_deref(), Some("Reinhardt"));
+        assert_eq!((v1.pack_hero, v1.tab_heroes), (None, None));
+        // new: the icons, and the career panel is never read
+        let career =
+            || -> Option<String> { panic!("the new reader must not read the career panel") };
+        let new = read_own_hero(true, career, || tab(Some("zenyatta")), Some(3));
+        assert_eq!(new.career_hero, None);
+        assert_eq!(new.pack_hero.as_deref(), Some("zenyatta"));
+        assert!(new.tab_heroes.is_some(), "kept for the board read");
+        // an abstaining own row, an unknown own row, a row off the board
+        let career = || -> Option<String> { panic!("no career read") };
+        assert_eq!(
+            read_own_hero(true, career, || tab(None), Some(3)).pack_hero,
+            None
+        );
+        let career = || -> Option<String> { panic!("no career read") };
+        assert_eq!(
+            read_own_hero(true, career, || tab(Some("zenyatta")), None).pack_hero,
+            None
+        );
+        let career = || -> Option<String> { panic!("no career read") };
+        assert_eq!(
+            read_own_hero(true, career, || tab(Some("zenyatta")), Some(10)).pack_hero,
+            None
+        );
+        // the career panel's portrait authenticates when the row abstains
+        let panel = || {
+            let mut t = tab(None);
+            t.panel = Some(shadow::heroes::PanelRead {
+                read: shadow::heroes::HeroRead {
+                    row: 0,
+                    class: shadow::heroes::RowClass::Hero,
+                    hero: Some("ana".into()),
+                    best: "ana".into(),
+                    score: 0.97,
+                    lead: 0.4,
+                    second: "mercy".into(),
+                    suspect: false,
+                },
+                pack: shadow::heroes::HeroPack::V2,
+                box_px: (0, 0, 1, 1),
+                rel: (0.03, -0.03, 0.16),
+            });
+            t
+        };
+        let career = || -> Option<String> { panic!("no career read") };
+        assert_eq!(
+            read_own_hero(true, career, panel, Some(3))
+                .pack_hero
+                .as_deref(),
+            Some("ana")
+        );
+        // a panic in the icon reader is an abstain, not a failed Tab
+        let career = || -> Option<String> { panic!("no career read") };
+        let panicked = read_own_hero(true, career, || panic!("icon reader"), Some(0));
+        assert_eq!((panicked.pack_hero, panicked.tab_heroes), (None, None));
     }
 
     #[tokio::test]
