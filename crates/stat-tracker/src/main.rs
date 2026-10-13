@@ -8366,8 +8366,8 @@ mod tests {
     /// The end title (P3) and the end-of-match wake (P5) go through the
     /// reader switch (alpha.7 O2): on the poll tick and in the Tab frame's
     /// vision pass. Each reads the frame's titles once, and no daemon call
-    /// site uses the wake entry point that is hard-wired to OCR. Whitespace
-    /// is ignored.
+    /// site uses the wake entry point that is hard-wired to OCR. Every
+    /// broken wire is named. Whitespace is ignored.
     #[test]
     fn the_end_titles_go_through_the_reader_switch() {
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -8375,21 +8375,46 @@ mod tests {
         let src = full.split("\nmod tests {").next().unwrap();
         let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
         let body = norm(src[at..].split("\n}\n").next().unwrap());
-        let tab = "let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);";
-        assert!(body.contains(tab));
-        assert!(body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles)"));
-        assert!(body.contains("detect::match_end::detect_outcome_text_with(&img, p4, &titles)"));
         let all = norm(src);
-        let poll = "let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);";
-        assert!(all.contains(poll));
-        assert!(all.contains(
-            "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
-             detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );"
-        ));
-        assert!(all.contains("detect::match_end::detect_end_reel_with(&img, &rgb, &titles);"));
-        assert_eq!(all.matches("detect::match_end::Titles::").count(), 2);
-        assert_eq!(all.matches("shadow::read_end_title").count(), 0);
-        assert!(!all.contains("detect::match_end::detect_end_reel("));
+        let checks = [
+            (
+                "the Tab pass makes its titles from the switch",
+                body.contains(
+                    "let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);",
+                ),
+            ),
+            (
+                "the Tab pass hands them to both outcome reads",
+                body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles)")
+                    && body
+                        .contains("detect::match_end::detect_outcome_text_with(&img, p4, &titles)"),
+            ),
+            (
+                "the poll tick makes its titles from the switch",
+                all.contains(
+                    "let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);",
+                ),
+            ),
+            (
+                "the poll tick hands them to the outcome signal",
+                all.contains(
+                    "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
+                     detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );",
+                ),
+            ),
+            (
+                "the poll tick hands them to the wake",
+                all.contains("detect::match_end::detect_end_reel_with(&img, &rgb, &titles);")
+                    && !all.contains("detect::match_end::detect_end_reel("),
+            ),
+            (
+                "titles are made in those two places only",
+                all.matches("detect::match_end::Titles::").count() == 2
+                    && !all.contains("shadow::read_end_title"),
+            ),
+        ];
+        let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
+        assert!(broken.is_empty(), "{broken:?}");
     }
 
     /// The vision pass reads the banner only through `choose_top_bar_map`,
