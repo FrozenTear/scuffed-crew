@@ -10570,10 +10570,7 @@ mod tests {
         // The keeper is made after the paused / not paused branches have
         // both closed, so it does not depend on what the startup sync
         // returned or on whether one ran.
-        let (sync, keeper) = (
-            at("packs::sync_on_startup("),
-            at("packs::PackKeeper::new("),
-        );
+        let (sync, keeper) = (at("packs::sync_on_startup("), at("packs::PackKeeper::new("));
         assert!(sync < keeper);
         assert!(
             body[sync..keeper].contains("\n        }\n"),
