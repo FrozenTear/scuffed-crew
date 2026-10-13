@@ -487,13 +487,30 @@ the same way it includes uploads.
 
 Hero icons and other recognizer packs are game art. Do not commit them, do not
 attach them to a release, and do not put them in fixtures. Compose mounts the
-named volume `packs-data` read-only at `/app/data/packs` and sets `PACKS_DIR`
-to that path. The directory is outside SurrealDB and outside the web root.
-How to fill the volume: [tracker-packs.md](tracker-packs.md).
+named volume `packs-data` (on the VPS: `scuffed-crew_packs-data`) read-only at
+`/app/data/packs` and sets `PACKS_DIR` to that path. The directory is outside
+SurrealDB and outside the web root.
 
-If `PACKS_DIR` is unset or the directory cannot be read, the site still starts.
-`GET /api/tracker/packs` and `GET /api/tracker/packs/{name}` return 503
-`{"error":"packs_disabled"}`. `packs-data` is not in `scripts/backup.sh`.
+Fill the volume with `scripts/publish-packs.sh`, from the machine that built
+the packs. Do not copy files into the volume by hand:
+
+```bash
+scripts/publish-packs.sh --dry-run --host root@your-vps /path/to/packbuild/packs
+scripts/publish-packs.sh --host root@your-vps /path/to/packbuild/packs
+```
+
+It keeps the packs that are already published, uploads the new ones, and
+switches `manifest.json` last, so a failed run leaves the old list in place.
+The site does not need a restart. Each run copies the old manifest to
+`/root/scuffed-crew-backups/packs-manifest-pre-<UTC stamp>.json` on the VPS
+and prints the one-line rollback command. Naming rules, verifying through
+the site, and rollback: [tracker-packs.md](tracker-packs.md).
+
+If `PACKS_DIR` is unset, the directory cannot be read, or it has no valid
+`manifest.json`, the site still starts. `GET /api/tracker/packs` and
+`GET /api/tracker/packs/{name}` return 503 `{"error":"packs_disabled"}`.
+`packs-data` is not in `scripts/backup.sh`. The copy of record is the build
+folder on the operator's machine.
 
 ## Backups
 

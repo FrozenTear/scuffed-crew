@@ -1,52 +1,314 @@
 # Recognizer asset packs
 
-The stat tracker downloads private asset packs from the site. It installs six
-packs (see [The packs the tracker installs](#the-packs-the-tracker-installs)).
-Only one of them is read today: the hero template pack, `heroes-v1.tar`. The
-others are downloaded so later readers can use them. Those files are game art.
+A pack is one tar file of small images and JSON that the stat tracker needs
+to read the game screen: hero portraits, ban icons, map-name glyphs, result
+words. The tracker does not ship them. It downloads them from the site with
+its sync token and unpacks them under its data folder.
 
-Do not commit them. Do not attach them to a GitHub release. Do not put them in
-fixtures or under `crates/stat-tracker/test-data/`. The server only reads files
-an operator places in a private directory.
+Packs are game art. Do not commit them. Do not attach them to a GitHub
+release, a PR, or a comment. Do not put them in fixtures or under
+`crates/stat-tracker/test-data/`. They live in two places only: the build
+folder on the machine that made them, and `PACKS_DIR` on the server.
 
-## Where the files live
+## The six packs
 
-Set `PACKS_DIR` to that directory. It sits outside SurrealDB and outside the
-web root, the same idea as `REPORTS_DIR`.
+| Pack | What it is for | Size on 2026-10-13 |
+| --- | --- | --- |
+| `heroes-v1.tar` | hero portraits, the first pack | on the server; not built by packgen |
+| `heroes-v2.tar` | hero portraits for 1440p-scale boards | 860 KiB |
+| `heroes-v2-1080.tar` | hero portraits for boards with a crop at most 881 px high | 590 KiB |
+| `bans-v1.tar` | ban icons | 600 KiB |
+| `maps-v1.tar` | map-name glyphs | 40 KiB |
+| `words-v1.tar` | result words | 90 KiB |
 
-Compose sets `PACKS_DIR=/app/data/packs` and mounts the named volume
-`packs-data` there **read-only**:
+Which folder each one lands in, what may be inside, and which reader uses it
+are in [Reference: inside a pack](#reference-inside-a-pack).
 
-```yaml
-- packs-data:/app/data/packs:ro
+The server serves any valid name in its list. The tracker installs these six
+names and ignores every other entry. `heroes-v1.tar` must stay in the list,
+and stays first: every released tracker asks for it before anything else.
+
+## Names and the no-change rule
+
+A pack name is lowercase letters, digits and `-`, then `.tar`:
+`<family>-v<generation>[-<variant>].tar`. `words-v1.tar` is family `words`,
+generation 1. `heroes-v2-1080.tar` is family `heroes-1080`, generation 2.
+
+**A published pack never changes.** If the art changes, build it under the
+next name (`words-v2.tar`) and publish that beside the old one. The reasons:
+
+- A tracker downloads a pack again only when the listed `version` differs
+  from the one it recorded. New bytes under an old name and version never
+  reach a tracker that already has that pack.
+- A reader is written against one pack's contents. A tracker keeps reading
+  `words-v1.tar` until a tracker release names `words-v2.tar` in `PACKS`
+  (`crates/stat-tracker/src/packs.rs`). Until then `words-v2.tar` is listed
+  and ignored, which is harmless.
+- Old trackers stay in use. They must keep finding the pack they were
+  built for.
+
+`scripts/publish-packs.sh` enforces this: the same name with other bytes is
+refused. `--replace` overrides it for a pack that no member has fetched yet,
+for example one that was published broken an hour ago.
+
+## Build
+
+Packs are built on the operator's machine with packgen
+(`crates/stat-tracker/scripts/packgen.py`; on the `claude/packgen` branch
+until it is merged). It reads game-art extracts and labelled captures from
+paths given on the command line, refuses to write into a git work tree, and
+writes one folder: `<out>/packs/` with one `<name>.tar` per pack and a
+`manifest.json` that lists each tar's `name`, `version`, `sha256` and `size`.
+That `packs/` folder is the `<outdir>` for the publish script. The inputs and
+the output stay on the build machine. The subcommands and their inputs are in
+the docstring at the top of the script.
+
+`heroes-v1.tar` is older than packgen. It was copied to the server by hand
+and is not in the packgen output. Publishing leaves it alone.
+
+## Publish
+
+```bash
+# 1. See what would happen. Reads the server, changes nothing.
+scripts/publish-packs.sh --dry-run --host root@your-vps ~/.local/share/scuffed-stat-tracker-packbuild/packs
+
+# 2. Do it.
+scripts/publish-packs.sh --host root@your-vps ~/.local/share/scuffed-stat-tracker-packbuild/packs
 ```
 
-The image entrypoint does not create or chown this path. A read-only mount
-cannot be changed from inside the container. Put the files in the volume
-before the server starts, or copy them in while the volume is writable and
-then start the stack so the mount is read-only.
+The server does not need a restart. It reads `manifest.json` on every
+request, and the container sees the volume's files as soon as they land.
 
-The directory and `manifest.json` must be readable by the container user
-`scuffed`. Mode `0755` on the directory and `0644` on the files is enough. A
-named volume is often `root:root` mode `0755`, which `scuffed` can read.
+`--host` is the ssh login that owns the podman volumes (root on the VPS).
+The script finds the one volume named `packs-data` or `<project>_packs-data`
+(on the VPS: `scuffed-crew_packs-data`) and writes into its mountpoint, the
+same way `scripts/backup.sh` reads the other volumes. Nothing is installed on
+the server: the destination half of the script (`scripts/lib/packs-dest.sh`)
+is sent over the ssh connection, one connection to read and one to publish.
+The server needs bash, coreutils and podman.
 
-`scripts/backup.sh` does not snapshot `packs-data`. Keep your own copy. Do not
-publish the volume.
+Other destinations:
 
-## If packs are off
+| Want | Run |
+| --- | --- |
+| the podman volume on this machine | `scripts/publish-packs.sh --local-volume <outdir>` |
+| a plain folder on this machine | `PACKS_DEST=/some/dir scripts/publish-packs.sh <outdir>` |
+| a plain folder on the server | `PACKS_DEST=/some/dir scripts/publish-packs.sh --host root@your-vps <outdir>` |
+| a volume with another name | `PACKS_VOLUME=<exact name>` with `--host` or `--local-volume` |
 
-When `PACKS_DIR` is unset, blank, or the directory cannot be read, the server
-still starts. Both routes return:
+### What it refuses
+
+Before it touches the destination, the script refuses:
+
+- an `<outdir>` inside a git work tree;
+- a manifest entry whose tar is missing, and a tar the manifest does not list;
+- a tar whose sha256 or size differs from its manifest entry;
+- a pack name that is not `[a-z0-9-]+.tar`, so no path separators;
+- a tar that holds an absolute path, `..`, a symlink, a hard link, or a
+  device node. Tars are listed with `tar -t`. They are never unpacked;
+- a pack whose inner `manifest.json` has another `name` or `version` than its
+  list entry (the tracker would refuse that pack);
+- a pack over 32 MiB, and a merged list over 32 entries or 64 KiB (the
+  tracker's and the server's limits).
+
+After it has read the destination, it also refuses:
+
+- the same name with other bytes or another version, without `--replace`;
+- a published list whose own files are missing or damaged. Publish that pack
+  again, or roll back, first.
+
+### What it does
+
+1. **Merge.** Packs that are published and not in `<outdir>` stay listed, in
+   their old order. New packs go last. A pack with the same name, version and
+   sha256 is skipped.
+2. **Upload.** Each new tar goes to a temp name in the destination folder
+   (`.<name>.publish-<stamp>.tmp`). Its sha256 and size are checked there.
+3. **Check.** `manifest.json.new` is written and synced. Every pack it lists
+   must be at the destination with that sha256 and size. If not, the run
+   stops here.
+4. **Switch.** New tars are renamed into place. The old manifest is copied to
+   the backups folder. `manifest.json.new` is renamed over `manifest.json`
+   last.
+5. **Verify.** The manifest is read back, and every listed pack is hashed
+   again at the destination.
+
+A failure or a lost connection before step 4's last rename leaves the old
+manifest and every tar it lists as they were. A new tar may already be in
+the folder. Nothing lists it, so the server does not serve it, and the next
+publish overwrites it. Temp files from a killed run are removed by the next
+run.
+
+It prints one line per pack:
+
+```text
+PACK                             SIZE  SHA256        STATUS
+heroes-v1.tar                  123456  0123456789ab  kept
+words-v1.tar                    92160  0123456789ab  skipped
+words-v2.tar                    93184  0123456789ab  new
+```
+
+`kept` is published and not in `<outdir>`. `skipped` is in both, identical.
+`new` was uploaded. `replaced` and `dropped` come from the two options below.
+`repaired` means the pack was listed but its file at the destination was
+missing or damaged, and was uploaded again.
+
+### --replace
+
+`--replace` allows the same name with other bytes. That pack cannot switch
+in one step, because its file and the manifest are two renames. Between them,
+for a moment, the server answers 404 for that pack or a tracker rejects it by
+sha256 and keeps its old folder. The old tar is saved in the backups folder
+first, and a failed run puts it back. If the `version` is unchanged the
+script warns: trackers that already have the pack will not fetch it again.
+
+### --keep N
+
+By default every pack ever published stays listed. `--keep N` keeps the `N`
+newest generations of each family and drops the rest from the list. A dropped
+tar is moved to the backups folder after the switch, never before. A pack in
+`<outdir>` is never dropped. Neither is `heroes-v1.tar`, or any name in
+`PACKS_PIN` (space-separated; setting it replaces the default).
+
+## Verify
+
+The script verifies the destination itself (step 5) and prints
+`Verified: ...`. That proves the files. It does not prove that the site
+serves them.
+
+To check through the site, give the script a tracker token in the
+environment:
+
+```bash
+read -rs PACKS_TRACKER_TOKEN && export PACKS_TRACKER_TOKEN
+PACKS_SITE_URL=https://your-site scripts/publish-packs.sh --host root@your-vps <outdir>
+```
+
+It then calls `GET /api/tracker/packs`, compares the list with the manifest
+it wrote, downloads every pack, and compares status, `ETag`,
+`Content-Length` and the sha256 of the body. The token is read from
+`PACKS_TRACKER_TOKEN` only. It is never printed, and there is no command-line
+option for it. Use a tracker token made for this check and revoke it
+afterwards. Running the same command again later is safe: with nothing to
+publish it only runs the check.
+
+Without a token the script says `Authenticated check: SKIPPED`.
+
+The pack routes allow 8 requests in a burst per client IP, then one every
+10 seconds. With more than seven packs the check waits between requests.
+
+## Roll back
+
+Every publish that replaces a manifest copies the old one to the backups
+folder on the destination machine first, and prints the path and one command:
+
+```text
+Backup: /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json
+Rollback: ssh root@your-vps 'cp -p /root/scuffed-crew-backups/packs-manifest-pre-20261013T120000Z.json <volume>/manifest.json.new && mv -f <volume>/manifest.json.new <volume>/manifest.json'
+```
+
+Run that line as printed. It puts the old list back with one rename. The
+tars of the rolled-back publish stay in the folder unlisted, so the server
+does not serve them. After `--replace` or `--keep` the line also copies the
+saved tars back from `packs-tars-pre-<stamp>/`.
+
+The backups folder is `~/scuffed-crew-backups` of the login that ran the
+destination half (`/root/scuffed-crew-backups` on the VPS).
+`PACKS_BACKUP_DIR` changes it. The first publish into an empty folder has
+nothing to back up. Its rollback line removes `manifest.json`, which turns
+the pack routes off again.
+
+`scripts/backup.sh` does not snapshot the packs volume. The copy of record
+is the build folder on the operator's machine.
+
+## What a member's tracker does on its next start
+
+Nothing is pushed. A tracker reads the list when its daemon starts and when
+the setup guide runs its reader pack step.
+
+- **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
+  then starts capture. The other five packs are synced in the background
+  with the same list, so capture never waits on them.
+- **Setup guide** ("Download reader pack") syncs all six.
+- A pack is downloaded when its folder is missing, or when the listed
+  `version` differs from the one recorded in
+  `<data_dir>/templates/pack-versions.json`. Otherwise it is left alone.
+- Each download is checked against the list's size and sha256 before
+  anything is unpacked, then unpacked into a staging folder and swapped in.
+  A failed download or a refused pack leaves the old folder in place.
+- A name the tracker does not know is ignored. A name it knows that the
+  list does not have is reported as not listed, and its folder is kept.
+- The new reader notices a new hero or map folder on a later board, without
+  another restart.
+
+So after a publish: a member who restarts the tracker gets the new packs in
+the background while capture runs. A member who does not restart keeps
+running on what they have.
+
+More detail on a sync:
+
+- **One sync at a time.** A sync holds an exclusive lock on
+  `<data_dir>/templates/.pack-sync.lock` before its first request. A second
+  sync (the daemon and the app at once) sends nothing and reports "A reader
+  pack sync is already running. Try again in a moment." That is not a failure.
+- A 401, 403, 429, or `packs_disabled` answer on one download stops the packs
+  after it for that run. Their folders are kept, a pack that is already
+  current is still reported as current, and the next run tries again.
+- A first install of all six is seven requests (the list and six files),
+  inside the burst of 8.
+- Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
+  `templates/` by a killed sync are removed by the next sync once they are
+  an hour old.
+
+The setup guide shows the hero pack's line, plus "Extra reader packs ready:
+N of M." when the server lists any of the other packs, plus the rate-limit
+sentence when one of them was rate limited.
+
+## What "packs_disabled" means
+
+The server could not load a pack list, so pack downloads are off. Both
+routes answer HTTP 503 with:
 
 ```json
 {"error":"packs_disabled"}
 ```
 
-HTTP status is 503. Fix the directory and the next request tries again. If
-startup refused the path because it overlaps uploads, reports, or `dist`,
-change `PACKS_DIR` and restart.
+The rest of the site is not affected, and the server did start. The causes:
 
-## manifest.json
+- `PACKS_DIR` is unset or blank;
+- the folder is missing or the container user cannot read it;
+- there is no `manifest.json` in it (nothing was published yet, or a first
+  publish was rolled back);
+- `manifest.json` breaks a rule in the next section;
+- the path overlaps uploads, reports, or `dist`. That one is decided at
+  startup: change `PACKS_DIR` and restart.
+
+For every cause but the last, fix the folder and the next request works. No
+restart. The server logs `recognizer packs unavailable` with the reason.
+
+A tracker that gets this answer keeps the packs it has and tries again on
+its next start. Its setup guide shows "Reader packs aren't set up on the
+server yet. The tracker still works. Try again later or ask an admin."
+
+## Where the files live
+
+`PACKS_DIR` is a folder outside SurrealDB and outside the web root, the same
+idea as `REPORTS_DIR`. Compose sets `PACKS_DIR=/app/data/packs` and mounts
+the named volume `packs-data` there **read-only**:
+
+```yaml
+- packs-data:/app/data/packs:ro
+```
+
+Podman Compose prefixes the project name, so on the VPS the volume is
+`scuffed-crew_packs-data`. The server cannot write to it. The publish script
+writes through the volume's mountpoint on the host.
+
+The folder and its files must be readable by the container user `scuffed`.
+The script writes files as mode `0644`. A named volume's folder is
+`root:root` mode `0755`, which `scuffed` can read.
+
+## Reference: manifest.json
 
 `PACKS_DIR/manifest.json` is a JSON array. Each object has `name`, `version`,
 `sha256`, and `size`:
@@ -73,11 +335,9 @@ A name that is not in this file is not served, including a path that tries to
 leave the directory. The server canonicalizes the file and requires it to stay
 inside `PACKS_DIR`.
 
-## The packs the tracker installs
+`scripts/publish-packs.sh` writes this file with one entry per line.
 
-The server serves any valid name. The tracker installs these names, each
-into its own folder under `<data_dir>/templates/`, and ignores every other
-entry:
+## Reference: inside a pack
 
 | Pack | Folder | What may be inside (besides `manifest.json`) | Read by |
 | --- | --- | --- | --- |
@@ -178,60 +438,11 @@ The tracker checks each downloaded file's size and sha256 against
 `PACKS_DIR/manifest.json` before it unpacks anything. Each is capped at
 32 MiB.
 
-### Where they land and when they are fetched again
+The publish script checks the member paths and types, and that the inner
+`name` and `version` match the list. The rest of this section is checked by
+the tracker when it installs the pack.
 
-Each pack is unpacked into a staging folder next to its live folder and then
-swapped into place, so a failed download or a rejected pack leaves the old
-folder in place. Installed versions are recorded in
-`<data_dir>/templates/pack-versions.json`, one `"<name>": "<version>"` key per
-pack. A file written by an older tracker that names only `heroes-v1.tar` is
-read as is, and its entry is kept.
-
-It checks the list when the daemon starts and when the setup guide runs its
-reader pack step. It downloads a pack again only when the listed `version`
-differs from the recorded one, or that pack's folder is gone. To ship new
-art, change `version` in both manifests. Replacing the file under the same
-version does not reach trackers that already have it.
-
-Packs are fetched one after another, `heroes-v1.tar` first. A first install
-of all six is seven requests (the list and six files), inside the burst of 8
-below.
-
-- **Daemon start** syncs `heroes-v1.tar` only (the list and one file, as
-  before) and then starts capture. The other five packs are synced in the
-  background with the same list, so capture never waits on them.
-- **Setup guide** ("Download reader pack") syncs all six.
-- **One sync at a time.** A sync holds an exclusive lock on
-  `<data_dir>/templates/.pack-sync.lock` before its first request. A second
-  sync (the daemon and the app at once) sends nothing and reports "A reader
-  pack sync is already running. Try again in a moment." That is not a failure.
-- A 401, 403, 429, or `packs_disabled` answer on one download stops the packs
-  after it for that run. Their folders are kept, a pack that is already
-  current is still reported as current, and the next run tries again.
-- Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
-  `templates/` by a killed sync are removed by the next sync once they are
-  an hour old.
-
-The setup guide shows the hero pack's line, plus "Extra reader packs ready:
-N of M." when the server lists any of the other packs, plus the rate-limit
-sentence when one of them was rate limited.
-
-## Copy into the volume
-
-From a private directory that is not this git repo (Podman):
-
-```bash
-podman volume create packs-data
-podman run --rm \
-  -v packs-data:/packs:Z \
-  -v /path/to/private-packs:/src:ro,Z \
-  docker.io/library/alpine:3 \
-  sh -c 'cp -a /src/. /packs/ && chmod 0755 /packs && chmod 0644 /packs/*'
-```
-
-Then start the stack. The compose file mounts that volume read-only.
-
-## How the tracker calls it
+## Reference: how the tracker calls it
 
 Both routes use the same daemon token as `POST /api/stats/upload`. The tracker
 has a token, not a browser session.
