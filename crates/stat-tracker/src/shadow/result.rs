@@ -76,10 +76,12 @@
 //!
 //! The words-v1 pack also ships `p4_final_score.png`, the FINAL SCORE line
 //! under the end title ([`FinalScoreTemplate`], region x 36-64%, y 70-84%,
-//! plane `min`). It is not a result word: under `reader = "new"` the
-//! end-title gate in `detect::match_end` reads it in place of ocr-v1's P4
-//! OCR, with the same search and certification against
-//! [`FINAL_SCORE_FLOOR`].
+//! plane `min`). It is not a result word: it opens the gate of the
+//! end-title OCR in `detect::match_end` in place of ocr-v1's P4 OCR, with
+//! the same search and certification against [`FINAL_SCORE_FLOOR`]. Since
+//! alpha.7 O2 `reader = "new"` runs that OCR, and so this read, only while
+//! no end-title templates are loaded; with them loaded the end title is
+//! the template read above and nothing reads this line.
 //!
 //! The words-v1 folder also holds the phase-screen titles ([`phrase`]),
 //! loaded with the result words and read with the same search.
@@ -1621,10 +1623,19 @@ impl ResultTemplates {
     /// `None` unless a VICTORY and a DEFEAT end-title template are loaded,
     /// because a sure read is a lead over the best other word.
     pub fn end_titles(&self) -> Option<ResultTemplates> {
-        let mut only = self.clone();
-        only.tpls.retain(|t| is_end_title(&t.layout.id));
-        let has = |o| only.tpls.iter().any(|t| t.outcome == o);
-        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(only)
+        // only the end-title templates are copied (F263-10); the FINAL
+        // SCORE template stays with the whole set, which is what reads it
+        let tpls: Vec<Template> = self
+            .tpls
+            .iter()
+            .filter(|t| is_end_title(&t.layout.id))
+            .cloned()
+            .collect();
+        let has = |o| tpls.iter().any(|t| t.outcome == o);
+        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(ResultTemplates {
+            tpls,
+            final_score: None,
+        })
     }
 }
 

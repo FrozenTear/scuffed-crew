@@ -3,7 +3,8 @@
 //! end-title templates from the data dir in `SCUFFED_TEMPLATE_DIR`, and the
 //! poll tick's signal, the wake and the Tab frame's outcome come from that
 //! read. Synthetic templates, not game art. One test per process, so the
-//! reader is set up exactly once, here.
+//! reader is set up exactly once, here. (The other setup, no end-title
+//! templates and the OCR fallback, is a unit test in `detect::match_end`.)
 
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::detect::MatchOutcome;
@@ -67,18 +68,26 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
         let img = DynamicImage::ImageRgb8(rgb.clone());
         // reader = "new": one read, a sure word
         let titles = Titles::for_rgb(true, &rgb);
-        let Titles::Words(Some(read)) = &titles else {
+        let Titles::Words(read) = &titles else {
             panic!("no end-title read: {titles:?}");
         };
         assert_eq!(read.sure(), Some(outcome), "{read:?}");
         assert_eq!(Titles::for_frame(true, &img), titles);
-        // the poll tick: a signal on the first sighting, and the wake
+        // capture hands RGBA frames: the same read (F263-7)
+        let rgba = DynamicImage::ImageRgba8(img.to_rgba8());
+        assert_eq!(Titles::for_frame(true, &rgba), titles);
+        // the poll tick: the first sighting wakes and is no signal yet, the
+        // same word on the next tick is the signal (F263-2)
         let mut stability = FrameStability::default();
+        assert_eq!(
+            detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
+            None
+        );
+        assert!(detect_end_reel_with(&img, &rgb, &titles));
         assert_eq!(
             detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
             Some((want, OutcomeSource::EndTitle))
         );
-        assert!(detect_end_reel_with(&img, &rgb, &titles));
         // the Tab frame's vision pass, with and without banner recovery
         assert_eq!(detect_outcome_with(&img, new, &titles), want);
         assert_eq!(detect_outcome_text_with(&img, new, &titles), want);
@@ -98,15 +107,17 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
     let rgb = frame(None);
     let img = DynamicImage::ImageRgb8(rgb.clone());
     let titles = Titles::for_rgb(true, &rgb);
-    let Titles::Words(Some(read)) = &titles else {
+    let Titles::Words(read) = &titles else {
         panic!("no end-title read: {titles:?}");
     };
     assert_eq!((read.outcome, read.sure()), (None, None), "{read:?}");
     let mut stability = FrameStability::default();
-    assert_eq!(
-        detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
-        None
-    );
+    for _ in 0..2 {
+        assert_eq!(
+            detect_outcome_signal_polled(&img, &rgb, &mut stability, new, &titles),
+            None
+        );
+    }
     assert!(!detect_end_reel_with(&img, &rgb, &titles));
     assert_eq!(
         detect_outcome_text_with(&img, new, &titles),

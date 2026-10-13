@@ -86,7 +86,7 @@ entry:
 | `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
-| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, and the end title on poll ticks and Tab frames (hand-installed `templates/result/` is the fallback) |
+| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -123,6 +123,18 @@ sure banner read also replaces a session map that came only from the
 full-board text, while that game has shown no result or boundary signal; a
 session map from the top bar or an accolade is never replaced. With
 `reader = "ocr-v1"` the banner is not read.
+
+The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
+at the end of a match) from the end-title templates of `words-v1.tar`:
+`end_title_<word>.png`, and variants named `end_title_<name>_<word>.png`. It
+needs a VICTORY and a DEFEAT one (a variant counts). Without that pair, or
+with no words pack at all, the new reader reads the end title and the
+end-of-match title card with OCR, as `reader = "ocr-v1"` does, and logs one
+warning. With the pair loaded no OCR reads them. On a poll tick the first
+sure read only wakes the poller; the same sure word on the next poll tick
+counts as one result-word read, and a result still needs a second agreeing
+word read. A Tab frame's sure read is that frame's result. With
+`reader = "ocr-v1"` the templates are not read.
 
 Every glyph file that `atlas.json` names must be a `g<4 lowercase hex>.png`
 file in the pack folder, the same names pack sync allows. Any other path
