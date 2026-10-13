@@ -146,7 +146,8 @@ const REFINE: usize = 2;
 /// Layout id and file stem of the FINAL SCORE line template (P4).
 pub const FINAL_SCORE: &str = "p4_final_score";
 /// Minimum score for a sure FINAL SCORE read. The words-v1 template scores
-/// 0.86 to 0.96 on 15 real FINAL SCORE frames (15 games, 1080p and 1440p)
+/// 0.86 to 0.96 on 12 held-out real FINAL SCORE frames (12 games, 3
+/// creators, 1080p and 1440p), 0.90 to 0.93 on the 3 frames it was fit on,
 /// and at most 0.39 on 637 frames without the line (2026-10-13).
 pub const FINAL_SCORE_FLOOR: f32 = 0.70;
 
@@ -668,7 +669,9 @@ fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -
 /// Fewest blocks on a template side for a projection bound.
 const MIN_PROJ_BLOCKS: usize = 3;
 /// Slack on the bound for float rounding (the f32 region pixels; the
-/// projection itself is in f64).
+/// projection itself is in f64). It covers the bound's own error, not
+/// [`ncc_at`]'s: that score is an uncentred f32 dot and overshoots the exact
+/// score by up to about 1.7e-4 on bright, nearly flat windows (F257-5).
 const BOUND_SLACK: f64 = 1e-4;
 /// Multiply-adds one read may spend on exact scores while certifying.
 const CERT_MACS: usize = 300_000_000;
@@ -688,8 +691,13 @@ enum Cert {
 /// window is ruled out when any bound of the chain ([`bound_at`], one per
 /// projection, coarsest and cheapest first) is below `tau`; every other
 /// window is scored with [`ncc_at`]. The same answer as [`search_full`]
-/// against `tau`, at a small part of its cost when the bounds are tight.
-/// Without projections the stack is searched in full.
+/// against `tau`, at a small part of its cost when the bounds are tight,
+/// up to [`ncc_at`]'s own f32 error (about 1.7e-4 at most, on bright,
+/// nearly flat windows; F257-5). Both ways: a window that error lifts over
+/// `tau` may be ruled out by its bound, so `certify` says `Below` where
+/// [`search_full`] reports a score at `tau`; and a window that is scored
+/// exactly can return `Above` on that error. For a result read `Above`
+/// only flags it. Without projections the stack is searched in full.
 fn certify(
     region: &[Level],
     chain: &[(&Proj, &Phased)],
@@ -1219,7 +1227,14 @@ impl FinalScoreTemplate {
     /// decides exactly whether any window reaches the floor: a window that
     /// does makes the read sure, and a check that runs out of budget leaves
     /// it suspect. So a sure read here is a sure exhaustive read, and the
-    /// reverse holds whenever the fast score is at [`PRESENT`].
+    /// reverse holds whenever the fast score is at [`PRESENT`] (both up to
+    /// [`ncc_at`]'s f32 error at the floor, see [`certify`]).
+    ///
+    /// Cost note (F257-6): a suspect fast score certifies with the full
+    /// [`CERT_MACS`] budget, and the bound pass is not budgeted (F253-13).
+    /// On the poll tick that can repeat on every stable tick. No frame of
+    /// the 652 measured lands in the suspect band (others at most 0.39,
+    /// the line at least 0.86), so it has never run on a real frame.
     pub fn read(&self, rgb: &RgbImage) -> FinalScoreRead {
         self.read_with_budget(rgb, CERT_MACS)
     }

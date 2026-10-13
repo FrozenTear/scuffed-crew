@@ -126,9 +126,19 @@ fn detect_outcome_signal_inner(
 /// `detect_outcome` returns `Unknown` and no outcome was carried over from
 /// the poller.
 ///
-/// It used to OCR a VICTORY / DEFEAT header at the top centre of the
-/// post-match scoreboard first (T1). The current scoreboard prints no
-/// result word there, so that read is gone (alpha.7 O4).
+/// It used to OCR a VICTORY / DEFEAT header at the top centre first (T1:
+/// x 30-70%, y 2-24% of the 16:9 rect). Removed in alpha.7 O4. T1's own
+/// crop and check found no result word on 652 frames (2026-10-13):
+/// * 257 Tab candidates from 67 games (member frames 2026-05-17 to
+///   2026-10-13, 2026 VOD boards), 8 of them end-of-match Tab frames from 7
+///   games (Escort, Hybrid, Control; 6 known competitive);
+/// * end titles, accolade and rank screens of Escort, Hybrid, Control, Push
+///   and Flashpoint, and two 2022-23 UI references.
+///
+/// Not covered: Push, Flashpoint and Clash end-of-match Tab frames, quick
+/// play, arcade, custom games, Stadium, and a DRAW. The full-board OCR's
+/// header line (`parse::outcome_from_board_header`, ET-2) is untouched and
+/// remains the only reader of a result word on the board itself.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
     detect_outcome_text_with(img, FinalScoreSource::Ocr)
 }
@@ -338,6 +348,22 @@ fn scoreline_looks_present(
     scoreline_looks_present_with(img, rgb, stability, p4, crate::shadow::read_final_score)
 }
 
+/// Under `reader = "new"`, P4 fell back to OCR because no
+/// `p4_final_score` template is loaded (an older words-v1 pack, or none
+/// yet). Logged once per process (F257-1); S1 is to forbid the fallback.
+/// Returns whether this call logged (tests).
+fn warn_final_score_ocr_fallback() -> bool {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    if first {
+        tracing::warn!(
+            "reader = \"new\" but no p4_final_score template is loaded; \
+             the FINAL SCORE line is read with OCR"
+        );
+    }
+    first
+}
+
 /// [`scoreline_looks_present`] with the words-v1 read as an argument
 /// (tests). `words` is called only for [`FinalScoreSource::Words`]; `None`
 /// from it (no template loaded) falls back to the OCR read.
@@ -379,11 +405,18 @@ fn scoreline_looks_present_with(
         tracing::trace!("scoreline crop not stable — deferring OCR");
         return false;
     }
-    if p4 == FinalScoreSource::Words
-        && let Some(read) = words(rgb)
-    {
-        tracing::trace!(?read, "final score line (words-v1)");
-        return read.is_signal();
+    if p4 == FinalScoreSource::Words {
+        match words(rgb) {
+            Some(read) => {
+                tracing::trace!(?read, "final score line (words-v1)");
+                return read.is_signal();
+            }
+            // S1 (OCR off) must close this: under `reader = "new"` with no
+            // p4_final_score template loaded, P4 still runs Tesseract below.
+            None => {
+                warn_final_score_ocr_fallback();
+            }
+        }
     }
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
@@ -1880,5 +1913,18 @@ mod tests {
             FinalScoreSource::Words,
             |_| Some(FinalScoreRead::Sure(0.9))
         ));
+    }
+
+    /// Under `reader = "new"`, a P4 that falls back to OCR (no template) is
+    /// logged once per process (F257-1). Once this test's fallback has run,
+    /// the one log line is spent.
+    #[test]
+    fn a_final_score_ocr_fallback_is_logged() {
+        let (img, rgb) = scoreline_frame(true);
+        let _ = scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Words, |_| None);
+        assert!(
+            !warn_final_score_ocr_fallback(),
+            "the fallback logged already"
+        );
     }
 }

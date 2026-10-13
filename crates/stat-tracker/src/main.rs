@@ -3883,24 +3883,23 @@ fn analyze_frame(
         use_new_reader,
     } = flags;
     // Outcome: prefer the open game's result (read off the accolade
-    // screen by the poller); else color-flood detection (only when the
-    // caller deems a banner plausible — see MIN_BANNER_SESSION_AGE); else
-    // the end title behind the board. The scoreboard's own header prints no
-    // result word any more, so it is not read (alpha.7 O4). `reader =
-    // "new"` reads the FINAL SCORE line with the words-v1 template (O3).
+    // screen by the poller); else color-flood detection plus the word reads
+    // (only when the caller deems a banner plausible — see
+    // MIN_BANNER_SESSION_AGE), which end in the end-title read; else the
+    // end-title read alone. T1, an OCR of the top-centre band for a result
+    // header, is gone (alpha.7 O4; what that was measured on is in
+    // `detect_outcome_text`). The full-board OCR's header line (ET-2, in
+    // `handle_capture`) still runs. `reader = "new"` reads the FINAL SCORE
+    // line with the words-v1 template (O3). The end title is read once
+    // (F257-3).
     let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);
-    let detected = if allow_banner_recovery {
+    let frame_outcome = if allow_banner_recovery {
         detect::match_end::detect_outcome_with(&img, p4)
     } else {
-        detect::MatchOutcome::Unknown
-    };
-    let frame_outcome = if matches!(detected, detect::MatchOutcome::Unknown) {
         detect::match_end::detect_outcome_text_with(&img, p4)
-    } else {
-        detected
     };
     // The open session's outcome wins on a capture that stays in that session.
-    // A gap split keeps this frame's own header. A reset split stores Unknown.
+    // A gap split keeps this frame's own outcome. A reset split stores Unknown.
     let outcome = if game_outcome.is_decided() {
         game_outcome
     } else {
@@ -4103,7 +4102,7 @@ fn identified_row_id(player_row_idx: Option<usize>) -> Option<u32> {
 }
 
 /// Session a stat split just opened. A decided `outcome` is the current
-/// frame's header (gap split) and stamps grace. Unknown is a reset split.
+/// frame's own outcome (gap split) and stamps grace. Unknown is a reset split.
 ///
 /// `career_ever_ok` is per game. It is set when this capture read the career
 /// panel. A flag carried from the previous game does not. Portrait switch
@@ -8331,8 +8330,13 @@ mod tests {
                 "let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);"
             )
         );
-        assert!(body.contains("detect::match_end::detect_outcome_with(&img, p4)"));
-        assert!(body.contains("detect::match_end::detect_outcome_text_with(&img, p4)"));
+        // one end-title read per Tab frame (F257-3)
+        assert!(body.contains(
+            "let frame_outcome = if allow_banner_recovery { \
+             detect::match_end::detect_outcome_with(&img, p4) } else { \
+             detect::match_end::detect_outcome_text_with(&img, p4) };"
+        ));
+        assert_eq!(body.matches("detect::match_end::detect_outcome").count(), 2);
         let all = norm(src);
         assert!(all.contains(
             "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \

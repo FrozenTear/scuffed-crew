@@ -2213,4 +2213,36 @@ mod tests {
         let b = reader.read_board_with(&frame, None, None);
         assert_eq!(b.fields, own.fields);
     }
+
+    /// The production wiring of P4's template (F257-2): a data dir with
+    /// words-v1's `p4_final_score.png` -> `Reader::load` -> `read_final_score`
+    /// reads the line; without the file it is `None` (P4 then uses OCR).
+    #[test]
+    fn the_reader_reads_the_final_score_line_from_the_words_pack() {
+        use crate::shadow::result::test_fixtures::{paint_at, word, write_pack};
+        use crate::shadow::result::{FinalScoreRead, WORDS_SUBDIR};
+        let line = word(4, 123, 28);
+        let mut frame = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        paint_at(&mut frame, 1102, 1060, &line, [235, 235, 235]);
+        let pack = |with_line: bool| {
+            let data = tempfile::tempdir().unwrap();
+            let words = data.path().join(WORDS_SUBDIR);
+            let (v, d) = (word(1, 70, 30), word(3, 60, 30));
+            let mut files = vec![("accolade_victory.png", &v), ("accolade_defeat.png", &d)];
+            if with_line {
+                files.push(("p4_final_score.png", &line));
+            }
+            write_pack(&words, &files);
+            data
+        };
+        let data = pack(true);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let r = reader.read_final_score(&frame);
+        assert!(matches!(r, Some(FinalScoreRead::Sure(_))), "{r:?}");
+        let blank = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        assert!(!reader.read_final_score(&blank).unwrap().is_signal());
+        let data = pack(false);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        assert_eq!(reader.read_final_score(&frame), None);
+    }
 }
