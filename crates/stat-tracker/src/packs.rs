@@ -1174,7 +1174,7 @@ fn is_word_byte(byte: u8) -> bool {
 }
 
 /// `g` plus four lowercase hex digits, then `.png`.
-fn is_glyph_name(raw: &str) -> bool {
+pub(crate) fn is_glyph_name(raw: &str) -> bool {
     raw.strip_prefix('g')
         .and_then(|rest| rest.strip_suffix(".png"))
         .is_some_and(|hex| {

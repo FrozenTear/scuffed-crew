@@ -117,9 +117,16 @@ packs, maps-v1 is picked up on a later Tab once it is swapped in, without a
 restart; a folder that changes while it loads is not used. A sure banner read
 is the top-bar map: the session map, a vote-candidate veto, and the rule that
 keeps Deathmatch and other untracked maps local apply to it as they do to the
-top-bar OCR. A flagged read, no banner, or a name the tracker's map table
-does not hold falls back to the top-bar OCR. With `reader = "ocr-v1"` the
-banner is not read.
+top-bar OCR. A flagged read, no banner, a name the tracker's map table does
+not hold, or a panic in the banner reader falls back to the top-bar OCR. A
+sure banner read also replaces a session map that came only from the
+full-board text, while that game has shown no result or boundary signal; a
+session map from the top bar or an accolade is never replaced. With
+`reader = "ocr-v1"` the banner is not read.
+
+Every glyph file that `atlas.json` names must be a `g<4 lowercase hex>.png`
+file in the pack folder, the same names pack sync allows. Any other path
+refuses the whole pack, and the reader falls back to the next folder.
 
 Each file is a plain ustar archive. At the top level it holds:
 
