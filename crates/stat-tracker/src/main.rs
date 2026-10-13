@@ -9211,6 +9211,8 @@ mod tests {
                 team_size: 5,
                 frame,
                 shadow_input: None,
+                map_from_banner: false,
+                banner: None,
             }
         };
         let mut fields = vec![shadow::FieldRead {
