@@ -3687,10 +3687,18 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     _ => None,
                                 }
                             };
+                            // `reader = "new"` confirms the vote, ban and
+                            // select screens with the words-v1 phrase masks,
+                            // not OCR (alpha.7 O7).
                             let phase = if outcome_only {
                                 detect::GamePhase::Unknown
                             } else {
-                                detect::match_start::detect_phase_polled(&img, &rgb, &mut stability)
+                                detect::match_start::detect_phase_polled(
+                                    &img,
+                                    &rgb,
+                                    &mut stability,
+                                    detect::match_start::PhaseSource::for_reader(use_new_reader),
+                                )
                             };
                             // Wake hint only — does not confirm an outcome.
                             // Ban Heroes is a distinct hook (`detect_ban_screen`)
@@ -8560,6 +8568,27 @@ mod tests {
             "detect::match_end::detect_outcome_signal_with_rgb(",
         ] {
             assert!(!all.contains(ocr_only), "{ocr_only}");
+        }
+    }
+
+    /// The poll tick confirms the vote, ban and select screens with the
+    /// source the reader switch picks (alpha.7 O7), and calls no ocr-v1
+    /// only phase read. Whitespace is ignored.
+    #[test]
+    fn the_poll_tick_takes_the_phase_source_from_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let src = norm(full.split("\nmod tests {").next().unwrap());
+        assert!(src.contains(
+            "detect::match_start::detect_phase_polled( &img, &rgb, &mut stability, \
+             detect::match_start::PhaseSource::for_reader(use_new_reader), )"
+        ));
+        for ocr_only in [
+            "detect::match_start::detect_phase(",
+            "detect::match_start::detect_phase_with_rgb(",
+            "PhaseSource::Ocr",
+        ] {
+            assert!(!src.contains(ocr_only), "{ocr_only}");
         }
     }
 
