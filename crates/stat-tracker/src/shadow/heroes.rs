@@ -110,6 +110,23 @@ pub struct HeroRead {
     pub suspect: bool,
 }
 
+impl HeroRead {
+    /// The hero key this row names: an accepted hero read that passed the
+    /// gate. `None` for a suspect read, an unknown icon, a placeholder, a
+    /// skull or an empty slot. The board's `rN.hero` field and the new
+    /// reader's hero authority both use this.
+    pub fn accepted(&self) -> Option<&str> {
+        match (self.class, self.hero.as_deref()) {
+            (RowClass::Hero, Some(hero))
+                if !self.suspect && !scuffed_types::is_placeholder_hero(hero) =>
+            {
+                Some(hero)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// One board's reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeroBoard {
@@ -1033,6 +1050,148 @@ impl HeroSet {
     }
 }
 
+/// The career panel's hero portrait on one full Tab frame: the large icon
+/// above the hero name, right of the table (OCR site T5 read the name under
+/// it as text).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelRead {
+    /// The read of the best box (`row` is 0), through the board's gate.
+    pub read: HeroRead,
+    pub pack: HeroPack,
+    /// Box in frame px `(x0, y0, x1, y1)`.
+    pub box_px: (usize, usize, usize, usize),
+    /// Box left relative to the header bar's right end, top relative to the
+    /// game rect's top, and side, in 16:9 game-rect heights.
+    pub rel: (f32, f32, f32),
+}
+
+/// Panel gate: the best of many searched boxes is kept, so the panel read
+/// needs more than the board's [`MIN_SCORE`] / [`MIN_LEAD`]. On the alpha.7
+/// gold frames all 99 right panel reads scored at least 0.959 with a lead
+/// of at least 0.318, and every wrong best box at most 0.614 (lead at most
+/// 0.19).
+pub const PANEL_MIN_SCORE: f32 = 0.85;
+/// See [`PANEL_MIN_SCORE`].
+pub const PANEL_MIN_LEAD: f32 = 0.20;
+/// Searched box left for [`HeroSet::read_panel`], in game-rect heights from
+/// the header bar's right end: the panel moves sideways with the table
+/// (perks, 5v5 and 6v6). Right reads on the gold frames landed at 0 to 0.03.
+pub const PANEL_DX: (f64, f64) = (0.0, 0.06);
+/// Searched box top, in game-rect heights from the game rect's top. The
+/// panel does not move up or down with the table: a table pushed down by a
+/// mode banner keeps the panel where it was.
+pub const PANEL_TOP: (f64, f64) = (0.108, 0.168);
+pub const PANEL_SIDES: [f64; 3] = [0.145, 0.16, 0.175];
+const PANEL_STEP: f64 = 0.012;
+
+impl PanelRead {
+    /// The hero key when the read passed the panel gate: an accepted hero
+    /// read ([`HeroRead::accepted`]) at [`PANEL_MIN_SCORE`] and
+    /// [`PANEL_MIN_LEAD`] or more. `None` is an abstain.
+    pub fn accepted(&self) -> Option<&str> {
+        let r = &self.read;
+        (r.score >= PANEL_MIN_SCORE && r.lead >= PANEL_MIN_LEAD)
+            .then(|| r.accepted())
+            .flatten()
+    }
+}
+
+impl HeroSet {
+    /// Read the hero portrait on the career panel right of the Tab table.
+    /// The panel moves with the table (perks, 5v5 and 6v6), so the box is
+    /// searched next to the header bar's right end: a coarse grid, then a
+    /// finer one round the best box. `scoreboard` is the `crop_scoreboard`
+    /// cut of `frame`.
+    pub fn read_panel(
+        &self,
+        frame: &DynamicImage,
+        scoreboard: &DynamicImage,
+        budget: Duration,
+    ) -> Result<PanelRead, HeroError> {
+        let t0 = Instant::now();
+        let (pack, t) = self.set_for(scoreboard.height())?;
+        let (fw, fh) = (frame.width(), frame.height());
+        let (cx, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(fw, fh);
+        if (scoreboard.width(), scoreboard.height()) != (cw, ch) {
+            return Err(HeroError::Unsupported(
+                "scoreboard is not this frame's crop",
+            ));
+        }
+        let mut owned = None;
+        let sview = view_of(scoreboard, &mut owned);
+        let hdr = find_header(sview).ok_or(HeroError::NoHeader)?;
+        let (_, gy, _, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+        let u = gh as f64;
+        let (ax, ay) = (cx as f64 + hdr.1 as f64, gy as f64);
+        let mut fowned = None;
+        let fview = view_of(frame, &mut fowned);
+        let eval = |dx: f64, dy: f64, s: f64| -> Option<PanelRead> {
+            let (x0, y0, side) = (
+                (ax + dx * u).round(),
+                (ay + dy * u).round(),
+                (s * u).round(),
+            );
+            if x0 < 0.0 || y0 < 0.0 {
+                return None;
+            }
+            let bx = (
+                x0 as usize,
+                y0 as usize,
+                (x0 + side) as usize,
+                (y0 + side) as usize,
+            );
+            let q = prep_view(fview, bx)?;
+            Some(PanelRead {
+                read: t.read_patch(0, &q),
+                pack,
+                box_px: bx,
+                rel: (dx as f32, dy as f32, s as f32),
+            })
+        };
+        let better = |a: &Option<PanelRead>, b: &PanelRead| {
+            a.as_ref().is_none_or(|a| b.read.score > a.read.score)
+        };
+        let mut best: Option<PanelRead> = None;
+        let steps = |lo: f64, hi: f64, step: f64| {
+            let n = ((hi - lo) / step).round() as usize;
+            (0..=n).map(move |k| lo + k as f64 * step)
+        };
+        for s in PANEL_SIDES {
+            for dy in steps(PANEL_TOP.0, PANEL_TOP.1, PANEL_STEP) {
+                for dx in steps(PANEL_DX.0, PANEL_DX.1, PANEL_STEP) {
+                    if t0.elapsed() > budget {
+                        return Err(HeroError::OverBudget);
+                    }
+                    if let Some(r) = eval(dx, dy, s)
+                        && better(&best, &r)
+                    {
+                        best = Some(r);
+                    }
+                }
+            }
+        }
+        let coarse = best.clone().ok_or(HeroError::NoRows)?;
+        let (bdx, bdy, bs) = (
+            coarse.rel.0 as f64,
+            coarse.rel.1 as f64,
+            coarse.rel.2 as f64,
+        );
+        let h = PANEL_STEP / 2.0;
+        for s in [bs - 0.0075, bs, bs + 0.0075] {
+            for dy in [bdy - h, bdy, bdy + h] {
+                for dx in [bdx - h, bdx, bdx + h] {
+                    if let Some(r) = eval(dx, dy, s)
+                        && better(&best, &r)
+                    {
+                        best = Some(r);
+                    }
+                }
+            }
+        }
+        best.ok_or(HeroError::NoRows)
+    }
+}
+
 /// Frame px to widen the hero crop to the left by, or `None` to keep the
 /// scoreboard crop. Only when the header bar starts at the crop's left edge
 /// (`header_x0 == 0`), `scoreboard` is the `crop_scoreboard` cut of a
@@ -1934,6 +2093,166 @@ mod tests {
                 "{left}: same as the fixed crop"
             );
         }
+    }
+
+    /// O8: the hero authority's own-row read goes through the new reader's
+    /// pack choice (heroes-v2) and the clipped-header re-crop, and an icon
+    /// outside the pack on the own row is an abstain, not a guess.
+    #[test]
+    fn the_own_row_read_uses_v2_and_the_re_crop_and_abstains_on_an_unknown_icon() {
+        let data = data_dir(true, Some(&IDS), None);
+        let reader =
+            crate::shadow::Reader::load(&crate::shadow::ReaderConfig::from_data_dir(data.path()));
+        let mut ids: Vec<u32> = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+            .iter()
+            .map(|i| i + ART_V2)
+            .collect();
+        let read = |ids: &[u32]| {
+            let frame = frame_with_board(ids, 60);
+            let sb = crate::ocr::preprocess::crop_scoreboard(&frame);
+            reader.read_heroes(&frame, &sb, 5)
+        };
+        let t = read(&ids);
+        let r = t.read.as_ref().expect("a read");
+        assert_eq!(r.pack, HeroPack::V2);
+        assert_eq!(r.pad_px, Some(CLIPPED_HEADER_PAD_1440), "clipped header");
+        for row in 0..10 {
+            let want = format!("hero-{}", row % 5 + 1);
+            assert_eq!(t.own_hero(row), Some(want.as_str()), "row {row}");
+        }
+        // v1 art on row 2 is not in the set used, and no other class fits
+        ids[2] = 3;
+        let t = read(&ids);
+        let row2 = &t.read.as_ref().unwrap().board.rows[2];
+        assert!(row2.suspect, "{row2:?}");
+        assert_eq!(t.own_hero(2), None);
+        assert_eq!(t.own_hero(1), Some("hero-2"));
+    }
+
+    /// Paint synthetic portrait `id` (side `s` game-rect heights) `dx` right
+    /// of the header bar's right end and `top` below the frame's top, where
+    /// the career panel's portrait sits.
+    fn paint_panel(frame: &mut DynamicImage, id: u32, (dx, top, s): (f64, f64, f64)) {
+        let sb = crate::ocr::preprocess::crop_scoreboard(frame);
+        let mut owned = None;
+        let hdr = find_header(view_of(&sb, &mut owned)).unwrap();
+        let (cx, _, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+        let (x, y) = (cx as f64 + hdr.1 as f64 + dx * 1440.0, top * 1440.0);
+        let p = portrait(id, (s * 1440.0) as u32, None);
+        let f = frame.as_mut_rgb8().unwrap();
+        for (px, py, c) in p.enumerate_pixels() {
+            if c.0[3] > 0 {
+                f.put_pixel(
+                    x as u32 + px,
+                    y as u32 + py,
+                    image::Rgb([c.0[0], c.0[1], c.0[2]]),
+                );
+            }
+        }
+    }
+
+    /// [`frame_with_board`] (header not clipped) with the board `down` px
+    /// lower, as when a mode banner pushes the table down.
+    fn frame_with_board_down(ids: &[u32], down: i64) -> DynamicImage {
+        let pitch = 80;
+        let b = board(ids, 5, pitch, [PURPLE, YELLOW]);
+        let (cx, cy, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+        let mut f = RgbImage::from_pixel(2560, 1440, image::Rgb([12, 14, 24]));
+        image::imageops::overlay(&mut f, &b, cx as i64, cy as i64 + down);
+        DynamicImage::ImageRgb8(f)
+    }
+
+    /// O8: the career panel's portrait is found right of the header bar, at
+    /// the panel's fixed height, and read with the board's pack. Art outside
+    /// that pack, or no portrait, is not a hero.
+    #[test]
+    fn the_panel_portrait_is_found_by_the_header_and_read_with_v2() {
+        let data = data_dir(true, Some(&IDS), None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        let ids: Vec<u32> = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+            .iter()
+            .map(|i| i + ART_V2)
+            .collect();
+        let read = |down: i64, panel: Option<(u32, (f64, f64, f64))>| {
+            let mut frame = frame_with_board_down(&ids, down);
+            if let Some((id, at)) = panel {
+                paint_panel(&mut frame, id, at);
+            }
+            let sb = crate::ocr::preprocess::crop_scoreboard(&frame);
+            set.read_panel(&frame, &sb, Duration::from_secs(5))
+        };
+        // inside the searched window, on and off the grid
+        for at in [
+            (0.03, 0.142, 0.16),
+            (0.012, 0.12, 0.175),
+            (0.021, 0.155, 0.15),
+        ] {
+            let r = read(0, Some((4 + ART_V2, at))).unwrap();
+            assert_eq!(r.pack, HeroPack::V2);
+            assert_eq!(r.accepted(), Some("hero-4"), "{at:?}: {r:?}");
+        }
+        // a table pushed down by a banner leaves the panel where it was
+        let r = read(150, Some((2 + ART_V2, (0.03, 0.142, 0.16)))).unwrap();
+        assert_eq!(r.accepted(), Some("hero-2"), "{r:?}");
+        // v1 art is not in the set used, and no portrait names no hero
+        let v1 = read(0, Some((4, (0.03, 0.142, 0.16)))).unwrap();
+        assert_eq!(v1.accepted(), None, "{v1:?}");
+        let none = read(0, None).unwrap();
+        assert_eq!(none.accepted(), None, "{none:?}");
+        // a frame that is not this crop's frame is refused
+        let frame = frame_with_board(&ids, -40);
+        let small = DynamicImage::new_rgb8(100, 100);
+        assert!(
+            set.read_panel(&frame, &small, Duration::from_secs(5))
+                .is_err()
+        );
+    }
+
+    /// The panel gate is stricter than the board's: the panel read is the
+    /// best of many boxes.
+    #[test]
+    fn the_panel_gate_needs_a_high_score_and_lead() {
+        let panel = |class: RowClass, hero: Option<&str>, score: f32, lead: f32| PanelRead {
+            read: HeroRead {
+                row: 0,
+                class,
+                hero: hero.map(str::to_string),
+                best: hero.unwrap_or("?").to_string(),
+                score,
+                lead,
+                second: "x".into(),
+                suspect: !passes_gate(score, lead),
+            },
+            pack: HeroPack::V2,
+            box_px: (0, 0, 1, 1),
+            rel: (0.0, 0.0, 0.16),
+        };
+        assert_eq!(
+            panel(RowClass::Hero, Some("ana"), 0.96, 0.4).accepted(),
+            Some("ana")
+        );
+        assert_eq!(
+            panel(RowClass::Hero, Some("ana"), PANEL_MIN_SCORE, PANEL_MIN_LEAD).accepted(),
+            Some("ana")
+        );
+        // passes the board's gate, not the panel's
+        assert_eq!(
+            panel(RowClass::Hero, Some("ana"), 0.80, 0.4).accepted(),
+            None
+        );
+        assert_eq!(
+            panel(RowClass::Hero, Some("ana"), 0.96, 0.15).accepted(),
+            None
+        );
+        // a special class or a suspect read is never a hero
+        assert_eq!(panel(RowClass::Skull, None, 0.96, 0.4).accepted(), None);
+        assert_eq!(
+            panel(RowClass::Hero, Some("skull_06"), 0.96, 0.4).accepted(),
+            None
+        );
+        let mut sus = panel(RowClass::Hero, Some("ana"), 0.96, 0.4);
+        sus.read.suspect = true;
+        assert_eq!(sus.accepted(), None);
     }
 
     #[test]

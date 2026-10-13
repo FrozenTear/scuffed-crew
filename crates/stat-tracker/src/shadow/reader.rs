@@ -47,7 +47,8 @@ use serde::Serialize;
 use super::banner::{LiveMaps, MapDirs, MapInfo, MapRead, MapTemplates};
 use super::digits;
 use super::heroes::{
-    HeroDirs, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
+    HeroDirs, HeroFrameRead, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2,
+    TEMPLATE_SUBDIR_V2_1080,
 };
 use super::result::{
     FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates,
@@ -205,6 +206,59 @@ impl ReaderConfig {
     }
 }
 
+/// The hero icons of one Tab frame, read once ([`Reader::read_heroes`]) and
+/// shared by the capture path's hero authority and the board read
+/// ([`Reader::read_board_with`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabHeroes {
+    /// Team size the rows were split with.
+    pub team_size: usize,
+    /// `None` when no hero pack is loaded or the read failed (no header, no
+    /// rows, over budget, unsupported size).
+    pub read: Option<HeroFrameRead>,
+    /// The career panel's portrait read, `None` when no pack is loaded or
+    /// no box could be read.
+    pub panel: Option<super::heroes::PanelRead>,
+}
+
+impl TabHeroes {
+    /// The hero key on `row` when that row's read was accepted
+    /// ([`super::heroes::HeroRead::accepted`]). `None` is an abstain: no
+    /// read, a row outside the board, a suspect read, an unknown icon, a
+    /// placeholder, a skull or an empty slot.
+    pub fn own_hero(&self, row: usize) -> Option<&str> {
+        if row >= 2 * self.team_size {
+            return None;
+        }
+        self.read
+            .as_ref()?
+            .board
+            .rows
+            .iter()
+            .find(|h| h.row == row)?
+            .accepted()
+    }
+
+    /// The career panel's hero key when that read passed the panel gate
+    /// ([`super::heroes::PanelRead::accepted`]).
+    pub fn panel_hero(&self) -> Option<&str> {
+        self.panel.as_ref()?.accepted()
+    }
+
+    /// The hero the new reader authenticates for the member (alpha.7 O8):
+    /// the own row's read and the career panel's read, each only when
+    /// accepted. Both naming one hero, or one naming a hero while the other
+    /// abstains, authenticates it. Two different heroes are an abstain, and
+    /// so is neither.
+    pub fn authority(&self, own_row: Option<usize>) -> Option<&str> {
+        let row = own_row.and_then(|r| self.own_hero(r));
+        match (row, self.panel_hero()) {
+            (Some(r), Some(p)) if r != p => None,
+            (row, panel) => row.or(panel),
+        }
+    }
+}
+
 /// The loaded packs. Digits need none (their templates are embedded).
 #[derive(Default)]
 pub struct Reader {
@@ -264,7 +318,7 @@ impl Reader {
     /// Without a board (or without a clear 5v5 / 6v6 layout) the read is
     /// [`not_found`] with that status: no team size, no row fields, no map.
     pub fn read_board(&self, frame: &DynamicImage) -> BoardRead {
-        self.read_board_timed(frame, READ_BUDGET, None)
+        self.read_board_timed(frame, READ_BUDGET, None, None)
     }
 
     /// [`Self::read_board`] with the banner already read for this frame
@@ -275,17 +329,57 @@ impl Reader {
         frame: &DynamicImage,
         banner: Option<MapRead>,
     ) -> BoardRead {
-        self.read_board_timed(frame, READ_BUDGET, Some(banner))
+        self.read_board_timed(frame, READ_BUDGET, Some(banner), None)
+    }
+
+    /// The hero icons of one full Tab frame: `scoreboard` is its
+    /// `crop_scoreboard` cut, split into `team_size` rows per team, with the
+    /// clipped-header re-crop of [`super::heroes::HeroSet::read_frame`], and
+    /// the career panel's portrait ([`super::heroes::HeroSet::read_panel`]).
+    pub fn read_heroes(
+        &self,
+        frame: &DynamicImage,
+        scoreboard: &DynamicImage,
+        team_size: usize,
+    ) -> TabHeroes {
+        let set = self.heroes.current();
+        let read = set
+            .as_ref()
+            .and_then(|h| h.read_frame(frame, scoreboard, team_size, READ_BUDGET).ok());
+        let panel = set
+            .as_ref()
+            .and_then(|h| h.read_panel(frame, scoreboard, READ_BUDGET).ok());
+        TabHeroes {
+            team_size,
+            read,
+            panel,
+        }
+    }
+
+    /// [`Self::read_board`] with reads the caller already made for this
+    /// frame: `banner` as in [`Self::read_board_with_banner`] (`None` reads
+    /// it here), `heroes` from [`Self::read_heroes`]. The hero read is used
+    /// only when its team size is the board's; otherwise the icons are read
+    /// again with the board's size.
+    pub fn read_board_with(
+        &self,
+        frame: &DynamicImage,
+        banner: Option<Option<MapRead>>,
+        heroes: Option<TabHeroes>,
+    ) -> BoardRead {
+        self.read_board_timed(frame, READ_BUDGET, banner, heroes)
     }
 
     /// [`Self::read_board`] with an explicit digit/hero budget (tests use a
     /// zero budget to force an empty digit read after columns are found).
     /// `banner` is a read the caller already made; `None` reads it here.
+    /// `heroes` likewise, when its team size matches the board's.
     fn read_board_timed(
         &self,
         frame: &DynamicImage,
         budget: Duration,
         banner: Option<Option<MapRead>>,
+        heroes: Option<TabHeroes>,
     ) -> BoardRead {
         let t0 = Instant::now();
         let scoreboard = crate::ocr::preprocess::crop_scoreboard(frame);
@@ -306,11 +400,15 @@ impl Reader {
             return b;
         }
         // Heroes from the scoreboard crop, or a wider re-crop of the frame
-        // when the board's header is clipped at the crop's left edge.
-        let hero_read = self
-            .heroes
-            .current()
-            .and_then(|h| h.read_frame(frame, &scoreboard, team_size, budget).ok());
+        // when the board's header is clipped at the crop's left edge. A read
+        // the capture path already made with this team size is reused.
+        let hero_read = match heroes {
+            Some(given) if given.team_size == team_size => given.read,
+            _ => self
+                .heroes
+                .current()
+                .and_then(|h| h.read_frame(frame, &scoreboard, team_size, budget).ok()),
+        };
         if let Some(h) = &hero_read {
             tracing::debug!(
                 hero_pack = h.pack.as_str(),
@@ -607,10 +705,8 @@ pub fn assemble(
         }
         let name = format!("r{}.hero", h.row);
         if let Some(f) = board.fields.iter_mut().find(|f| f.name == name) {
-            match (h.class, h.hero.as_deref()) {
-                (RowClass::Hero, Some(hero))
-                    if !h.suspect && !scuffed_types::is_placeholder_hero(hero) =>
-                {
+            match (h.class, h.accepted()) {
+                (_, Some(hero)) => {
                     f.value = Some(Value::Text(hero.to_string()));
                     f.confidence = h.score;
                     f.suspect = false;
@@ -665,6 +761,24 @@ pub fn read_board_with_banner(frame: &DynamicImage, banner: Option<MapRead>) -> 
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_board_with_banner(frame, banner)
+}
+
+/// [`Reader::read_heroes`] with the process-wide reader.
+pub fn read_heroes(frame: &DynamicImage, scoreboard: &DynamicImage, team_size: usize) -> TabHeroes {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_heroes(frame, scoreboard, team_size)
+}
+
+/// [`Reader::read_board_with`] with the process-wide reader.
+pub fn read_board_with(
+    frame: &DynamicImage,
+    banner: Option<Option<MapRead>>,
+    heroes: Option<TabHeroes>,
+) -> BoardRead {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_board_with(frame, banner, heroes)
 }
 
 /// Read one result frame with the process-wide reader.
@@ -1442,7 +1556,7 @@ mod tests {
         let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
         assert!(digits::stat_columns_found(&crop));
         assert_eq!(board_layout(&crop), Ok(6));
-        let b = reader.read_board_timed(&frame, Duration::ZERO, None);
+        let b = reader.read_board_timed(&frame, Duration::ZERO, None, None);
         assert_eq!(b.status, BoardStatus::NotFound);
         assert_eq!(b.team_size, None);
         assert!(b.fields.iter().all(|f| f.suspect && f.value.is_none()));
@@ -1940,5 +2054,163 @@ mod tests {
         }
         let keys: Vec<_> = differ.iter().map(|d| d.0).collect();
         assert_eq!(keys, EXPECTED_MODE_DIFFS, "{differ:?}");
+    }
+
+    // ---- O8: the hero authority's own-row read.
+
+    fn tab_heroes(team_size: usize, rows: Vec<HeroRead>) -> TabHeroes {
+        TabHeroes {
+            team_size,
+            read: Some(HeroFrameRead {
+                board: super::super::heroes::HeroBoard {
+                    rows,
+                    elapsed_us: 1,
+                },
+                pack: super::super::heroes::HeroPack::V2,
+                pad_px: None,
+            }),
+            panel: None,
+        }
+    }
+
+    /// Only an accepted hero read names the own row's hero. Everything the
+    /// gate flagged, and every special class, is an abstain.
+    #[test]
+    fn own_hero_names_only_an_accepted_hero_read() {
+        let mut gated_out = hero(1, RowClass::Hero, Some("tracer"), true);
+        gated_out.score = 0.62;
+        let t = tab_heroes(
+            5,
+            vec![
+                hero(0, RowClass::Hero, Some("ana"), false),
+                gated_out,
+                hero(2, RowClass::Unknown, None, true),
+                hero(3, RowClass::Placeholder, Some("placeholder"), false),
+                hero(4, RowClass::Skull, None, false),
+                hero(5, RowClass::Empty, None, false),
+                // an accepted read whose key is a special class
+                hero(6, RowClass::Hero, Some("skull_06"), false),
+                hero(7, RowClass::Hero, Some("mercy"), false),
+            ],
+        );
+        assert_eq!(t.own_hero(0), Some("ana"));
+        assert_eq!(t.own_hero(7), Some("mercy"));
+        for row in 1..=6 {
+            assert_eq!(t.own_hero(row), None, "row {row}");
+        }
+        // a row with no read, a row off the board, and no read at all
+        assert_eq!(t.own_hero(8), None);
+        assert_eq!(t.own_hero(10), None);
+        let wide = tab_heroes(5, vec![hero(10, RowClass::Hero, Some("ana"), false)]);
+        assert_eq!(wide.own_hero(10), None, "row 10 is off a 5v5 board");
+        let none = TabHeroes {
+            team_size: 5,
+            read: None,
+            panel: None,
+        };
+        assert_eq!(none.own_hero(0), None);
+        // the board's hero field agrees with the authority on every row
+        let rows = &t.read.as_ref().unwrap().board.rows;
+        let b = assemble(5, Some(&digits_board(10)), Some(rows));
+        for row in 0..10 {
+            let field = b.get(&format!("r{row}.hero")).unwrap().value.clone();
+            let own = t.own_hero(row).map(|h| Value::Text(h.to_string()));
+            assert_eq!(field, own, "r{row}.hero and own_hero disagree");
+        }
+    }
+
+    fn panel_of(name: Option<&str>, score: f32) -> super::super::heroes::PanelRead {
+        super::super::heroes::PanelRead {
+            read: HeroRead {
+                score,
+                lead: 0.4,
+                ..match name {
+                    Some(h) => hero(0, RowClass::Hero, Some(h), false),
+                    None => hero(0, RowClass::Unknown, None, true),
+                }
+            },
+            pack: super::super::heroes::HeroPack::V2,
+            box_px: (0, 0, 1, 1),
+            rel: (0.03, -0.03, 0.16),
+        }
+    }
+
+    /// O8: the own row and the career panel portrait together. One accepted
+    /// read authenticates; two that disagree, or none, are an abstain.
+    #[test]
+    fn the_authority_takes_an_accepted_read_and_never_a_disagreement() {
+        let with = |row: Option<&str>, panel: Option<super::super::heroes::PanelRead>| {
+            let mut t = tab_heroes(
+                5,
+                vec![match row {
+                    Some(h) => hero(0, RowClass::Hero, Some(h), false),
+                    None => hero(0, RowClass::Skull, None, false),
+                }],
+            );
+            t.panel = panel;
+            t
+        };
+        let ana = || Some(panel_of(Some("ana"), 0.97));
+        assert_eq!(with(Some("ana"), ana()).authority(Some(0)), Some("ana"));
+        assert_eq!(with(Some("ana"), None).authority(Some(0)), Some("ana"));
+        assert_eq!(
+            with(None, ana()).authority(Some(0)),
+            Some("ana"),
+            "dead: panel"
+        );
+        assert_eq!(
+            with(Some("mercy"), ana()).authority(Some(0)),
+            None,
+            "disagree"
+        );
+        assert_eq!(with(None, None).authority(Some(0)), None);
+        // the panel needs no own row; the row read needs one
+        assert_eq!(with(None, ana()).authority(None), Some("ana"));
+        assert_eq!(with(Some("ana"), None).authority(None), None);
+        // a panel read under the panel gate, or a suspect one, is no read
+        let low = Some(panel_of(Some("ana"), 0.80));
+        assert_eq!(with(None, low.clone()).panel_hero(), None);
+        assert_eq!(with(None, low).authority(Some(0)), None);
+        // ...and it cannot veto an accepted row read either
+        let low_mercy = Some(panel_of(Some("mercy"), 0.80));
+        assert_eq!(with(Some("ana"), low_mercy).authority(Some(0)), Some("ana"));
+        let sus = Some(panel_of(None, 0.97));
+        assert_eq!(with(None, sus).authority(Some(0)), None);
+    }
+
+    /// The board takes the hero read the capture path already made when its
+    /// team size is the board's, and reads the icons itself otherwise.
+    #[test]
+    fn the_board_uses_the_hero_read_it_is_given_at_its_team_size() {
+        // no hero pack: a board read alone names no hero
+        let reader = Reader::load(&ReaderConfig::default());
+        let frame = tab_stand_in(2560, 1440, 6, PITCH_6V6, BLUE_RED, true);
+        let own = reader.read_board(&frame);
+        assert_eq!(own.status, BoardStatus::Read);
+        assert_eq!(own.get("r0.hero").unwrap().value, None);
+
+        let given = tab_heroes(6, vec![hero(0, RowClass::Hero, Some("ana"), false)]);
+        let b = reader.read_board_with(&frame, None, Some(given));
+        assert_eq!(
+            b.get("r0.hero").unwrap().value,
+            Some(Value::Text("ana".into()))
+        );
+        // the rest of the board is the same read
+        let strip = |b: &BoardRead| {
+            b.fields
+                .iter()
+                .filter(|f| f.name != "r0.hero")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip(&b), strip(&own));
+
+        // a read made with another team size is not used
+        let other = tab_heroes(5, vec![hero(0, RowClass::Hero, Some("ana"), false)]);
+        let b = reader.read_board_with(&frame, None, Some(other));
+        assert_eq!(b.get("r0.hero").unwrap().value, None);
+        // and `None` is the board's own read
+        let b = reader.read_board_with(&frame, None, None);
+        assert_eq!(b.fields, own.fields);
     }
 }
