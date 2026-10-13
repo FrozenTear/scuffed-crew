@@ -80,6 +80,9 @@
 //! end-title gate in `detect::match_end` reads it in place of ocr-v1's P4
 //! OCR, with the same search and certification against
 //! [`FINAL_SCORE_FLOOR`].
+//!
+//! The words-v1 folder also holds the phase-screen titles ([`phrase`]),
+//! loaded with the result words and read with the same search.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,6 +93,8 @@ use serde::{Deserialize, Serialize};
 use super::banner::Gray;
 use super::heroes::{DirStamp, dir_stamp};
 use crate::ocr::preprocess::game_rect_16_9;
+
+pub mod phrase;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
 /// Nothing reads it yet: no snapshot, manifest or log carries it, so a field
@@ -1357,15 +1362,25 @@ pub struct LoadedResults {
     /// The end-title templates of `templates` on their own
     /// ([`ResultTemplates::end_titles`]), cut once per load.
     pub end_titles: Option<ResultTemplates>,
+    /// The phase-screen titles, from the words-v1 folder only (the old
+    /// folder has none), whichever folder the result words came from.
+    pub phrases: Option<phrase::PhraseTemplates>,
 }
 
 impl LoadedResults {
-    pub fn new(templates: ResultTemplates, pack: ResultPack) -> Self {
+    /// One load: the word templates of `pack` with their end titles cut
+    /// out, and the phase-screen titles of the words-v1 folder.
+    pub fn new(
+        templates: ResultTemplates,
+        pack: ResultPack,
+        phrases: Option<phrase::PhraseTemplates>,
+    ) -> Self {
         let end_titles = templates.end_titles();
         Self {
             templates,
             pack,
             end_titles,
+            phrases,
         }
     }
 }
@@ -1390,12 +1405,16 @@ impl ResultDirs {
     /// Templates from the first folder that loads: words-v1, then the old
     /// manual folder.
     pub fn load(&self) -> Option<LoadedResults> {
+        let phrases = self
+            .words
+            .as_deref()
+            .and_then(phrase::PhraseTemplates::load_dir);
         let words = self.words.as_deref().and_then(ResultTemplates::load_dir);
         if let Some(templates) = words {
-            return Some(LoadedResults::new(templates, ResultPack::WordsV1));
+            return Some(LoadedResults::new(templates, ResultPack::WordsV1, phrases));
         }
         let legacy = self.legacy.as_deref().and_then(ResultTemplates::load_dir);
-        legacy.map(|templates| LoadedResults::new(templates, ResultPack::Legacy))
+        legacy.map(|templates| LoadedResults::new(templates, ResultPack::Legacy, phrases))
     }
 
     /// Load, or `None` when a folder changed while it loaded (a swap ran
@@ -1476,6 +1495,11 @@ impl LiveInner {
             results = loaded.is_some(),
             result_pack = loaded.as_ref().map(|l| l.pack.as_str()),
             result_sources = ?loaded.as_ref().map(|l| l.templates.sources()),
+            end_titles = ?loaded
+                .as_ref()
+                .and_then(|l| l.end_titles.as_ref())
+                .map(|t| t.sources()),
+            phrases = ?loaded.as_ref().and_then(|l| l.phrases.as_ref()).map(|p| p.ids()),
             "new reader result words loaded"
         );
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = (loaded.map(Arc::new), stamp);
