@@ -298,8 +298,17 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         (OcrSetting::Off, OcrSetting::Off, None)
     );
     assert_eq!(status.packs, Some(READY));
-    assert_eq!(status.notice(), None);
     assert_eq!(status.blocked_total, blocked);
+    // The counters are the process's: the calls stopped further up are in
+    // the file, and the notice counts them.
+    assert!(blocked >= 12, "{blocked}");
+    assert!(
+        status
+            .notice()
+            .is_some_and(|n| n.contains(&format!("{blocked} reads still asked for it"))),
+        "{:?}",
+        status.notice()
+    );
     assert_eq!(status.leptess_created, gate::leptess_created());
     assert!(status.leptess_created >= 1);
     let region_key = direct
@@ -706,9 +715,13 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
     );
     assert_eq!(refusal.reads, Read::needing_ocr());
     let reason = refusal.text(Audience::Daemon);
+    // After the reads this build still needs OCR for, the packs are a
+    // sentence of their own ("The map pack is not installed and ...").
+    let lower = reason.to_lowercase();
     assert!(
-        reason.contains("the map pack is not installed")
-            && reason.contains("the word pack is not installed"),
+        lower.contains("the map pack is not installed")
+            && lower.contains("the word pack is not installed")
+            && !lower.contains("hero pack"),
         "{reason}"
     );
     assert_eq!(run.status.notice(), Some(reason));
@@ -721,7 +734,10 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         .collect();
     assert_eq!(refused.len(), 1, "one WARN line; output:\n{}", run.out);
     assert!(
-        refused[0].contains("maps-v1") && refused[0].contains("the map pack is not installed"),
+        refused[0].contains("maps-v1")
+            && refused[0]
+                .to_lowercase()
+                .contains("the map pack is not installed"),
         "the log says why, with the pack id: {}",
         refused[0]
     );
