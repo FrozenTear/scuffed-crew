@@ -3,12 +3,16 @@
 //! The regions are ocr-v1's (`detect::match_end`), as fractions of the
 //! centred 16:9 game rect, one [`Layout`] each, tagged with a source id:
 //!
-//! * `accolade`: post-match accolade screen, player cards; region x 0.5-25.5%, y 3.5-9.5%;
-//!   plane `max`; real frames: 52 (1440p).
+//! * `accolade`: post-match accolade screen, player cards; region x 0.5-25.5%, y 3.5-8.62%;
+//!   plane `max`; real frames: 52 (1440p). ocr-v1's crop runs to y 9.5%, but
+//!   the member's nameplate under the result word starts at y 8.7%, so this
+//!   region stops above it ([`NAME_LINE_TOP`]). The map and match time right
+//!   of the word are in the region; no name is.
 //! * `rank_screen`: competitive rank screen (incl. defeat); region x 1-25%, y 14.5-22.5%;
 //!   plane `min`; real frames: 98 (1440p).
 //! * `end_title`: centred italic end title; region x 32-68%, y 34-52%;
-//!   plane `max`; real frames: none.
+//!   plane `max`; real frames: none. The words-v1 pack widens it with its
+//!   `layouts.json` (the current title sits lower, y 43-56.5%).
 //! * `tab_header`: post-match Tab board header; region x 30-70%, y 2-24%;
 //!   plane `min`; real frames: none.
 //!
@@ -19,6 +23,31 @@
 //! correlation for each word template at three scales. A read names a word
 //! when the best template scores at least [`PRESENT`], and is sure when it
 //! scores at least [`FLOOR`] and leads the best other word by [`MARGIN`].
+//! DRAW has no real frame yet (its words-v1 template is rendered), so a DRAW
+//! read that is not sure names no word at all: it abstains instead of
+//! flagging the match. This is by design, and it has a cost: with no read,
+//! the `result` field is not attempted, so on a real draw that only the
+//! rendered template half-matches, ocr-v1's value is stored without a
+//! `result` suspect mark (it was marked before).
+//!
+//! The search is coarse to fine ([`ResultTemplates::read`]): each template
+//! is matched at every position of a 2x or 4x box-downscaled region, the
+//! best few peaks are refined one pyramid level at a time in a small window,
+//! and the score is the full-resolution correlation at the refined position.
+//! A score is never higher than the exhaustive search's
+//! ([`ResultTemplates::read_exhaustive`]) and equals it whenever the
+//! exhaustive best position is found, which tests check on synthetic frames.
+//! The exhaustive search over the words-v1 end-title region took 8.6 s per
+//! frame.
+//!
+//! That alone does not make a fast read conservative: the margin is taken
+//! against the runner-up, and an under-read runner-up widens it. So a read
+//! the fast scores call sure is certified: for every template of another
+//! word, an exact bound (the block projection plus Cauchy-Schwarz on the
+//! rest, [`bound_at`]) rules out every window, and the windows it cannot
+//! rule out are scored exactly. Any window at `s1 - MARGIN` or above flags
+//! the read. A sure fast read is therefore a sure exhaustive read of the
+//! same word; a word the fast search under-reads can only lower confidence.
 //!
 //! Like ocr-v1, one sure read is not enough: [`ResultEvidence`] collects every
 //! read of one match (poll frames, the accolade screen, the rank screen) and
@@ -27,28 +56,38 @@
 //! never a new event: the reader creates no events, the caller adds each
 //! frame of a match to that match's evidence.
 //!
-//! Templates are game art and are not embedded. They load from
-//! `<data_dir>/templates/result/<source>_<word>.png` (8-bit grey at the work
-//! scale, `word` one of `victory`, `defeat`, `draw`). A layout without
-//! templates reads nothing. Further screens plug in through an optional
-//! `layouts.json` in the same directory (see [`ResultTemplates::load_dir`]).
+//! Templates are game art and are not embedded. They load from the words-v1
+//! pack folder `<data_dir>/templates/words-v1/` ([`WORDS_SUBDIR`], installed
+//! by pack sync), else from the old manual folder
+//! `<data_dir>/templates/result/` ([`TEMPLATE_SUBDIR`]). Files are
+//! `<source>_<word>.png` (8-bit grey at the work scale, `word` one of
+//! `victory`, `defeat`, `draw`). A layout without templates reads nothing.
+//! Further screens plug in through an optional `layouts.json` in the same
+//! directory (see [`ResultTemplates::load_dir`]). [`LiveResults`] re-loads
+//! the templates when either folder changes, the way the hero packs do.
 //! Only `accolade` and `rank_screen` have real templates so far; DRAW,
 //! `end_title`, `tab_header` and 1080p-native accolade frames are untested.
 //! The tracker's colour-flood banner (gold or red over y 30-70%) is not read
 //! here: it depends on colour, and a word read covers the same screens.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
 use super::banner::Gray;
+use super::heroes::{DirStamp, dir_stamp};
 use crate::ocr::preprocess::game_rect_16_9;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
-pub const RESULT_RECOGNIZER_ID: &str = "result-v1";
-/// Template directory under the data dir.
+/// Nothing reads it yet: no snapshot, manifest or log carries it, so a field
+/// report cannot tell a result-v1 read from a result-v2 one.
+pub const RESULT_RECOGNIZER_ID: &str = "result-v2";
+/// The old manual template folder under the data dir (the fallback).
 pub const TEMPLATE_SUBDIR: &str = "templates/result";
+/// The words-v1 pack folder under the data dir (preferred).
+pub const WORDS_SUBDIR: &str = "templates/words-v1";
 /// Below this, no result word is on the frame.
 pub const PRESENT: f32 = 0.50;
 /// Minimum score for a sure read.
@@ -57,9 +96,45 @@ pub const FLOOR: f32 = 0.70;
 pub const MARGIN: f32 = 0.12;
 /// Agreeing sure reads a match needs before its result is sure (ocr-v1 rule).
 pub const MIN_AGREE: usize = 2;
+/// Top of the accolade screen's nameplate under the result word, as a
+/// fraction of the game rect height. Measured on the 13 real 1440p accolade
+/// frames the new reader reads: the word's glyphs end by 8.1% (its template
+/// by 8.4%), the nameplate's icon starts at 8.7% to 8.9% and its text at
+/// about 9.2%.
+pub const NAME_LINE_TOP: f64 = 0.0865;
+/// Bottom of the accolade region, above [`NAME_LINE_TOP`]. 74 rows at
+/// 1440p, so the 2:1 resample to the work scale is exact. At 1080p and
+/// below the gap to the nameplate is under one pixel (row 93 against about
+/// 93.96 at 1080p), from u32 truncation; native 1080p accolade frames are
+/// unmeasured.
+pub const ACCOLADE_Y1: f64 = 0.0862;
+/// The accolade nameplate box (x0, y0, x1, y1): its icon and text under the
+/// result word, across the width of the accolade region. No layout's region
+/// may reach into it ([`ResultTemplates::load_dir`]).
+pub const NAMEPLATE: [f64; 4] = [0.0, NAME_LINE_TOP, 0.255, 0.115];
+// The accolade region ends above the nameplate (checked at compile time).
+const _: () = assert!(ACCOLADE_Y1 < NAME_LINE_TOP && NAMEPLATE[1] == NAME_LINE_TOP);
 /// Work scale relative to a 1440p game rect.
 const WORK: f64 = 0.5;
 const SCALES: [f64; 3] = [0.96, 1.0, 1.04];
+/// The coarse search level keeps at least this many template pixels on the
+/// template's short side.
+const MIN_COARSE_PX: usize = 12;
+/// Deepest pyramid level: 4x downscaled.
+const MAX_LEVEL: usize = 2;
+/// A coarser level is used only when the template keeps at least this
+/// share of its per-pixel variance there. Text strokes survive a 4x box
+/// filter (the words-v1 templates keep 0.84 to 0.97); fine stripes average
+/// out, and a coarse search over them would rank the wrong peaks.
+const MIN_KEPT: f64 = 0.8;
+/// Coarse peaks refined per template and scale.
+const PEAKS: usize = 12;
+/// Coarse peaks closer than this (coarse pixels, either axis) are one peak.
+const PEAK_SEP: usize = 1;
+/// Refine window half-width on the first level below the coarse one, then
+/// on every later level (pixels of that level).
+const REFINE_FIRST: usize = 3;
+const REFINE: usize = 2;
 
 /// Source ids of the built-in layouts.
 pub const ACCOLADE: &str = "accolade";
@@ -121,10 +196,10 @@ impl Layout {
         }
     }
 
-    /// The four ocr-v1 regions.
+    /// The four ocr-v1 regions, the accolade one stopped above the nameplate.
     pub fn builtin() -> Vec<Layout> {
         vec![
-            Self::new(ACCOLADE, [0.005, 0.035, 0.255, 0.095], Plane::Max),
+            Self::new(ACCOLADE, [0.005, 0.035, 0.255, ACCOLADE_Y1], Plane::Max),
             Self::new(RANK_SCREEN, [0.010, 0.145, 0.250, 0.225], Plane::Min),
             Self::new(END_TITLE, [0.320, 0.340, 0.680, 0.520], Plane::Max),
             Self::new(TAB_HEADER, [0.300, 0.020, 0.700, 0.240], Plane::Min),
@@ -160,16 +235,484 @@ impl ResultRead {
     }
 }
 
-/// Word templates, per layout and outcome.
-#[derive(Debug, Clone)]
-pub struct ResultTemplates {
-    tpls: Vec<(Layout, Outcome, Gray)>,
+// ------------------------------------------------------------------ search
+
+/// One pyramid level of a region: pixels plus integral images (sum and sum
+/// of squares) for window statistics.
+struct Level {
+    w: usize,
+    h: usize,
+    px: Vec<f32>,
+    s1: Vec<f64>,
+    s2: Vec<f64>,
 }
 
-fn region(rgb: &RgbImage, layout: &Layout) -> Option<Gray> {
+impl Level {
+    fn new(w: usize, h: usize, px: Vec<f32>) -> Self {
+        let mut s1 = vec![0.0f64; (w + 1) * (h + 1)];
+        let mut s2 = vec![0.0f64; (w + 1) * (h + 1)];
+        for y in 0..h {
+            for x in 0..w {
+                let v = px[y * w + x] as f64;
+                let i = (y + 1) * (w + 1) + x + 1;
+                s1[i] = v + s1[i - 1] + s1[i - w - 1] - s1[i - w - 2];
+                s2[i] = v * v + s2[i - 1] + s2[i - w - 1] - s2[i - w - 2];
+            }
+        }
+        Self { w, h, px, s1, s2 }
+    }
+
+    /// Sum of `s` over the `tw` x `th` window at (x, y).
+    #[inline]
+    fn rect(&self, s: &[f64], x: usize, y: usize, tw: usize, th: usize) -> f64 {
+        let a = y * (self.w + 1) + x;
+        let b = (y + th) * (self.w + 1) + x;
+        s[b + tw] - s[b] - s[a + tw] + s[a]
+    }
+}
+
+/// 2x2 box average, dropping an odd last row or column. Pixel (x, y) of the
+/// result covers pixels (2x..2x+2, 2y..2y+2), so a position at one level is
+/// twice that position one level down.
+fn half(w: usize, h: usize, px: &[f32]) -> (usize, usize, Vec<f32>) {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = Vec::with_capacity(hw * hh);
+    for y in 0..hh {
+        for x in 0..hw {
+            let i = 2 * y * w + 2 * x;
+            out.push((px[i] + px[i + 1] + px[i + w] + px[i + w + 1]) * 0.25);
+        }
+    }
+    (hw, hh, out)
+}
+
+/// One template at one scale and pyramid level: zero-mean pixels and norm.
+#[derive(Debug, Clone)]
+struct Kernel {
+    w: usize,
+    h: usize,
+    z: Vec<f32>,
+    norm: f64,
+}
+
+impl Kernel {
+    fn new(w: usize, h: usize, px: &[f32]) -> Option<Self> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mean = px.iter().map(|&v| v as f64).sum::<f64>() / (w * h) as f64;
+        let z: Vec<f32> = px.iter().map(|&v| (v as f64 - mean) as f32).collect();
+        let norm = z.iter().map(|&v| v as f64 * v as f64).sum::<f64>().sqrt();
+        (norm > 0.0).then_some(Self { w, h, z, norm })
+    }
+
+    /// Per-pixel variance.
+    fn var(&self) -> f64 {
+        self.norm * self.norm / (self.w * self.h) as f64
+    }
+}
+
+/// One template at one scale: level 0 is the work scale, level `l` is
+/// 2^l times smaller. Only levels whose short side keeps
+/// [`MIN_COARSE_PX`] pixels are built.
+#[derive(Debug, Clone)]
+struct Stack {
+    levels: Vec<Kernel>,
+    /// The template's block projections for the certification bound
+    /// ([`certify`]), coarsest first: `f` = 16, 8, 4, 2 while the template
+    /// keeps [`MIN_PROJ_BLOCKS`] blocks on each side.
+    projs: Vec<Proj>,
+}
+
+/// A template projected onto `f` x `f` blocks: `ct` is each block's mean
+/// minus the whole template's mean (`cw` x `ch` blocks, the ones the
+/// coarse kernel covers), `res` the norm of what the projection leaves
+/// out. With `P` the block projection and `t` the zero-mean template,
+/// `|t|^2 = f^2 |ct|^2 + res^2`.
+#[derive(Debug, Clone)]
+struct Proj {
+    f: usize,
+    cw: usize,
+    ch: usize,
+    ct: Vec<f32>,
+    s_ct: f64,
+    res: f64,
+}
+
+impl Proj {
+    fn new(t: &Gray, top: usize, norm: f64) -> Self {
+        let (mut cw, mut ch, mut px) = (t.w, t.h, t.px.clone());
+        for _ in 0..top {
+            (cw, ch, px) = half(cw, ch, &px);
+        }
+        let f = 1usize << top;
+        let mean = t.px.iter().map(|&v| v as f64).sum::<f64>() / (t.w * t.h) as f64;
+        let ct: Vec<f32> = px.iter().map(|&v| (v as f64 - mean) as f32).collect();
+        let s_ct = ct.iter().map(|&v| v as f64).sum();
+        let proj2 = (f * f) as f64 * ct.iter().map(|&v| v as f64 * v as f64).sum::<f64>();
+        let res = (norm * norm - proj2).max(0.0).sqrt();
+        Self {
+            f,
+            cw,
+            ch,
+            ct,
+            s_ct,
+            res,
+        }
+    }
+}
+
+impl Stack {
+    fn new(t: &Gray) -> Option<Self> {
+        Self::with_kept(t, MIN_KEPT)
+    }
+
+    /// [`Stack::new`] with the kept-variance rule as an argument (tests).
+    fn with_kept(t: &Gray, min_kept: f64) -> Option<Self> {
+        let base = Kernel::new(t.w, t.h, &t.px)?;
+        let var0 = base.var();
+        let mut levels = vec![base];
+        let (mut w, mut h, mut px) = (t.w, t.h, t.px.clone());
+        while levels.len() <= MAX_LEVEL && (w / 2).min(h / 2) >= MIN_COARSE_PX {
+            (w, h, px) = half(w, h, &px);
+            match Kernel::new(w, h, &px) {
+                Some(k) if k.var() >= min_kept * var0 => levels.push(k),
+                _ => break,
+            }
+        }
+        let projs = (1..=4)
+            .rev()
+            .filter(|&l| (t.w >> l).min(t.h >> l) >= MIN_PROJ_BLOCKS)
+            .map(|l| Proj::new(t, l, levels[0].norm))
+            .collect();
+        Some(Self { levels, projs })
+    }
+}
+
+#[inline]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    let mut s = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        s += x * y;
+    }
+    s
+}
+
+/// Zero-mean NCC of `k` at (x, y) of `p`; `None` on a flat window.
+#[inline]
+fn ncc_at(p: &Level, k: &Kernel, x: usize, y: usize) -> Option<f64> {
+    let n = (k.w * k.h) as f64;
+    let sum = p.rect(&p.s1, x, y, k.w, k.h);
+    let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
+    if var <= 1e-9 {
+        return None;
+    }
+    let mut num = 0.0f64;
+    for ty in 0..k.h {
+        let row = &p.px[(y + ty) * p.w + x..][..k.w];
+        num += dot(row, &k.z[ty * k.w..][..k.w]) as f64;
+    }
+    Some(num / (var.sqrt() * k.norm))
+}
+
+/// Best score of one search and its multiply-adds (window pixels scored).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Found {
+    score: f64,
+    macs: usize,
+}
+
+const NONE_FOUND: Found = Found {
+    score: -1.0,
+    macs: 0,
+};
+
+/// Every position at level 0.
+fn search_full(region: &[Level], st: &Stack) -> Found {
+    let (p, k) = (&region[0], &st.levels[0]);
+    if k.w > p.w || k.h > p.h {
+        return NONE_FOUND;
+    }
+    let mut out = NONE_FOUND;
+    for y in 0..=p.h - k.h {
+        for x in 0..=p.w - k.w {
+            out.macs += k.w * k.h;
+            if let Some(v) = ncc_at(p, k, x, y)
+                && v > out.score
+            {
+                out.score = v;
+            }
+        }
+    }
+    out
+}
+
+/// Coarse to fine: every position at the coarsest level where the template
+/// fits, then the best [`PEAKS`] peaks, each refined level by level in a
+/// small window around twice its position. The score is level 0's.
+fn search_fast(region: &[Level], st: &Stack) -> Found {
+    search_fast_with(region, st, PEAKS, REFINE_FIRST, REFINE)
+}
+
+/// [`search_fast`] with its peak count and refine windows as arguments
+/// (tests pin each one).
+fn search_fast_with(
+    region: &[Level],
+    st: &Stack,
+    n_peaks: usize,
+    refine_first: usize,
+    refine: usize,
+) -> Found {
+    let fits = |l: usize| {
+        l < region.len()
+            && l < st.levels.len()
+            && st.levels[l].w <= region[l].w
+            && st.levels[l].h <= region[l].h
+    };
+    let Some(top) = (0..st.levels.len()).rev().find(|&l| fits(l)) else {
+        return NONE_FOUND;
+    };
+    if top == 0 || !fits(0) {
+        return search_full(region, st);
+    }
+    let (p, k) = (&region[top], &st.levels[top]);
+    let mut macs = 0;
+    let mut coarse: Vec<(f64, usize, usize)> = Vec::new();
+    for y in 0..=p.h - k.h {
+        for x in 0..=p.w - k.w {
+            macs += k.w * k.h;
+            if let Some(v) = ncc_at(p, k, x, y) {
+                coarse.push((v, x, y));
+            }
+        }
+    }
+    coarse.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut peaks: Vec<(usize, usize)> = Vec::with_capacity(n_peaks);
+    for &(_, x, y) in &coarse {
+        if peaks.len() == n_peaks {
+            break;
+        }
+        if peaks
+            .iter()
+            .all(|&(px, py)| px.abs_diff(x) > PEAK_SEP || py.abs_diff(y) > PEAK_SEP)
+        {
+            peaks.push((x, y));
+        }
+    }
+    let mut best = -1.0f64;
+    for (mut x, mut y) in peaks {
+        let mut score = None;
+        for l in (0..top).rev() {
+            let (p, k) = (&region[l], &st.levels[l]);
+            let r = if l + 1 == top { refine_first } else { refine };
+            let (cx, cy) = ((2 * x).min(p.w - k.w), (2 * y).min(p.h - k.h));
+            let mut lvl_best: Option<(f64, usize, usize)> = None;
+            for yy in cy.saturating_sub(r)..=(cy + r).min(p.h - k.h) {
+                for xx in cx.saturating_sub(r)..=(cx + r).min(p.w - k.w) {
+                    macs += k.w * k.h;
+                    if let Some(v) = ncc_at(p, k, xx, yy)
+                        && lvl_best.is_none_or(|b| v > b.0)
+                    {
+                        lvl_best = Some((v, xx, yy));
+                    }
+                }
+            }
+            (x, y) = lvl_best.map_or((cx, cy), |b| (b.1, b.2));
+            score = lvl_best.map(|b| b.0);
+        }
+        if let Some(s) = score
+            && s > best
+        {
+            best = s;
+        }
+    }
+    Found { score: best, macs }
+}
+
+// ---------------------------------------------------------- certification
+
+/// Box means of a level-0 region over `f` x `f` squares at every position,
+/// split by phase: `phases[ay * f + ax]` holds the means at
+/// `(ax + f i, ay + f j)`, so a window's blocks are a contiguous
+/// `cw` x `ch` patch of one phase image.
+struct Phased {
+    f: usize,
+    phases: Vec<Level>,
+}
+
+impl Phased {
+    fn new(p: &Level, f: usize) -> Self {
+        let ff = (f * f) as f64;
+        let count = |n: usize, a: usize| if n >= f + a { (n - f - a) / f + 1 } else { 0 };
+        let mut phases = Vec::with_capacity(f * f);
+        for ay in 0..f {
+            for ax in 0..f {
+                let (pw, ph) = (count(p.w, ax), count(p.h, ay));
+                let mut px = Vec::with_capacity(pw * ph);
+                for j in 0..ph {
+                    for i in 0..pw {
+                        px.push((p.rect(&p.s1, ax + f * i, ay + f * j, f, f) / ff) as f32);
+                    }
+                }
+                phases.push(Level::new(pw, ph, px));
+            }
+        }
+        Self { f, phases }
+    }
+}
+
+/// An upper bound on the NCC of `k` at (x, y) of `p`, from the block
+/// projection. With `P` the projection onto the window's `f` x `f` block
+/// means, `<p, t> = <Pp, Pt> + <(I-P)p, (I-P)t> <= <Pp, Pt> + |(I-P)p| |(I-P)t|`
+/// (the two parts are orthogonal; Cauchy-Schwarz on the second).
+/// `<Pp, Pt>` is a dot product of `cw * ch` block means instead of the
+/// whole window. `None` on a flat window, where [`ncc_at`] has no score
+/// either.
+#[inline]
+fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -> Option<f64> {
+    let n = (k.w * k.h) as f64;
+    let sum = p.rect(&p.s1, x, y, k.w, k.h);
+    let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
+    if var <= 1e-9 {
+        return None;
+    }
+    let m = sum / n;
+    let f = ph.f;
+    let q = &ph.phases[(y % f) * f + x % f];
+    let (ox, oy) = (x / f, y / f);
+    let sb = q.rect(&q.s1, ox, oy, pr.cw, pr.ch);
+    let sb2 = q.rect(&q.s2, ox, oy, pr.cw, pr.ch);
+    let mut db = 0.0f64;
+    for j in 0..pr.ch {
+        db += dot(
+            &q.px[(oy + j) * q.w + ox..][..pr.cw],
+            &pr.ct[j * pr.cw..][..pr.cw],
+        ) as f64;
+    }
+    let ff = (f * f) as f64;
+    let pp = ff * (db - m * pr.s_ct);
+    let proj2 = ff * (sb2 - 2.0 * m * sb + (pr.cw * pr.ch) as f64 * m * m);
+    let res_p = (var - proj2).max(0.0).sqrt();
+    Some((pp + res_p * pr.res) / (var.sqrt() * k.norm))
+}
+
+/// Fewest blocks on a template side for a projection bound.
+const MIN_PROJ_BLOCKS: usize = 3;
+/// Slack on the bound for float rounding (f32 block means and dot).
+const BOUND_SLACK: f64 = 1e-4;
+/// Multiply-adds one read may spend on exact scores while certifying.
+const CERT_MACS: usize = 300_000_000;
+
+/// Whether a template's exhaustive best reaches `tau`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cert {
+    /// No window scores `tau` or more.
+    Below,
+    /// A window scores this (`>= tau`).
+    Above(f64),
+    /// The exact-score budget ran out first.
+    Unknown,
+}
+
+/// Decide exactly whether any window of `st` scores at least `tau`: a
+/// window is ruled out when any bound of the chain ([`bound_at`], one per
+/// projection, coarsest and cheapest first) is below `tau`; every other
+/// window is scored with [`ncc_at`]. The same answer as [`search_full`]
+/// against `tau`, at a small part of its cost when the bounds are tight.
+/// Without projections the stack is searched in full.
+fn certify(
+    region: &[Level],
+    chain: &[(&Proj, &Phased)],
+    st: &Stack,
+    tau: f64,
+    budget: &mut usize,
+) -> Cert {
+    let (p, k) = (&region[0], &st.levels[0]);
+    if k.w > p.w || k.h > p.h {
+        return Cert::Below;
+    }
+    if chain.is_empty() {
+        let full = search_full(region, st);
+        *budget = budget.saturating_sub(full.macs);
+        return if full.score >= tau {
+            Cert::Above(full.score)
+        } else {
+            Cert::Below
+        };
+    }
+    for y in 0..=p.h - k.h {
+        'window_x: for x in 0..=p.w - k.w {
+            for (pr, ph) in chain {
+                match bound_at(p, ph, k, pr, x, y) {
+                    None => continue 'window_x,
+                    Some(ub) if ub + BOUND_SLACK < tau => continue 'window_x,
+                    Some(_) => {}
+                }
+            }
+            let cost = k.w * k.h;
+            if *budget < cost {
+                return Cert::Unknown;
+            }
+            *budget -= cost;
+            if let Some(v) = ncc_at(p, k, x, y)
+                && v >= tau
+            {
+                return Cert::Above(v);
+            }
+        }
+    }
+    Cert::Below
+}
+
+/// A region inside the game rect: finite, `0 <= x0 < x1 <= 1`, same for y.
+fn roi_is_valid([x0, y0, x1, y1]: [f64; 4]) -> bool {
+    [x0, y0, x1, y1].iter().all(|v| v.is_finite())
+        && 0.0 <= x0
+        && x0 < x1
+        && x1 <= 1.0
+        && 0.0 <= y0
+        && y0 < y1
+        && y1 <= 1.0
+}
+
+/// A layout whose region reaches into [`NAMEPLATE`]: cut to end at
+/// [`ACCOLADE_Y1`] when it starts above the nameplate, else dropped.
+fn keep_off_nameplate(mut l: Layout) -> Option<Layout> {
+    let [x0, y0, x1, y1] = l.roi;
+    let [nx0, ny0, nx1, ny1] = NAMEPLATE;
+    let overlaps = x0 < nx1 && nx0 < x1 && y0 < ny1 && ny0 < y1;
+    if !overlaps {
+        return Some(l);
+    }
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    if y0 < ACCOLADE_Y1 {
+        if first {
+            tracing::warn!(id = %l.id, "result layout reached the accolade nameplate; cut above it");
+        }
+        l.roi[3] = ACCOLADE_Y1;
+        Some(l)
+    } else {
+        if first {
+            tracing::warn!(id = %l.id, "result layout inside the accolade nameplate; dropped");
+        }
+        None
+    }
+}
+
+/// The region of a layout at the work scale, with its pyramid.
+fn region(rgb: &RgbImage, roi: [f64; 4], plane: Plane) -> Option<Vec<Level>> {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = game_rect_16_9(w, h);
-    let [fx0, fy0, fx1, fy1] = layout.roi;
+    let [fx0, fy0, fx1, fy1] = roi;
     let x0 = gx + (fx0 * gw as f64) as u32;
     let x1 = (gx + (fx1 * gw as f64) as u32).min(w);
     let y0 = gy + (fy0 * gh as f64) as u32;
@@ -182,7 +725,7 @@ fn region(rgb: &RgbImage, layout: &Layout) -> Option<Gray> {
     for y in 0..rh {
         for x in 0..rw {
             let p = rgb.get_pixel(x0 + x as u32, y0 + y as u32).0;
-            g.px[y * rw + x] = match layout.plane {
+            g.px[y * rw + x] = match plane {
                 Plane::Max => p[0].max(p[1]).max(p[2]),
                 Plane::Min => p[0].min(p[1]).min(p[2]),
             } as f32
@@ -192,71 +735,48 @@ fn region(rgb: &RgbImage, layout: &Layout) -> Option<Gray> {
     let s = WORK * 1440.0 / gh as f64;
     let nw = ((rw as f64 * s).round_ties_even() as usize).max(1);
     let nh = ((rh as f64 * s).round_ties_even() as usize).max(1);
-    Some(g.resize(nw, nh))
+    Some(pyramid(g.resize(nw, nh)))
 }
 
-/// Best zero-mean NCC of `t` slid over `p`.
-fn best_ncc(p: &Gray, t: &Gray) -> f64 {
-    let mut out = -1.0f64;
-    for sc in SCALES {
-        let tw = ((t.w as f64 * sc).round_ties_even() as usize).max(1);
-        let th = ((t.h as f64 * sc).round_ties_even() as usize).max(1);
-        if tw > p.w || th > p.h {
-            continue;
+/// A work-scale region and its box-downscaled levels.
+fn pyramid(g: Gray) -> Vec<Level> {
+    let mut levels = vec![Level::new(g.w, g.h, g.px)];
+    while levels.len() <= MAX_LEVEL {
+        let last = &levels[levels.len() - 1];
+        let (hw, hh, px) = half(last.w, last.h, &last.px);
+        if hw == 0 || hh == 0 {
+            break;
         }
-        let tt = t.resize(tw, th);
-        let n = (tw * th) as f64;
-        let tm = tt.px.iter().map(|&v| v as f64).sum::<f64>() / n;
-        let tz: Vec<f64> = tt.px.iter().map(|&v| v as f64 - tm).collect();
-        let tn = tz.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if tn <= 0.0 {
-            continue;
-        }
-        // integral images for window sums
-        let (pw, ph) = (p.w, p.h);
-        let mut s1 = vec![0.0f64; (pw + 1) * (ph + 1)];
-        let mut s2 = vec![0.0f64; (pw + 1) * (ph + 1)];
-        for y in 0..ph {
-            for x in 0..pw {
-                let v = p.at(x, y) as f64;
-                let i = (y + 1) * (pw + 1) + x + 1;
-                s1[i] = v + s1[i - 1] + s1[i - pw - 1] - s1[i - pw - 2];
-                s2[i] = v * v + s2[i - 1] + s2[i - pw - 1] - s2[i - pw - 2];
-            }
-        }
-        let rect = |s: &[f64], x: usize, y: usize| {
-            let a = y * (pw + 1) + x;
-            let b = (y + th) * (pw + 1) + x;
-            s[b + tw] - s[b] - s[a + tw] + s[a]
-        };
-        for y in 0..=ph - th {
-            for x in 0..=pw - tw {
-                let sum = rect(&s1, x, y);
-                let var = rect(&s2, x, y) - sum * sum / n;
-                if var <= 1e-9 {
-                    continue;
-                }
-                let mut num = 0.0;
-                for ty in 0..th {
-                    let row = &p.px[(y + ty) * pw + x..(y + ty) * pw + x + tw];
-                    let trow = &tz[ty * tw..(ty + 1) * tw];
-                    for (a, b) in row.iter().zip(trow) {
-                        num += *a as f64 * b;
-                    }
-                }
-                let v = num / (var.sqrt() * tn);
-                if v > out {
-                    out = v;
-                }
-            }
-        }
+        levels.push(Level::new(hw, hh, px));
     }
-    out
+    levels
+}
+
+// --------------------------------------------------------------- templates
+
+/// One word template, prepared at every search scale.
+#[derive(Debug, Clone)]
+struct Template {
+    layout: Layout,
+    outcome: Outcome,
+    stacks: Vec<Stack>,
+}
+
+/// Word templates, per layout and outcome.
+#[derive(Debug, Clone)]
+pub struct ResultTemplates {
+    tpls: Vec<Template>,
 }
 
 impl ResultTemplates {
+    /// The old manual folder, `<data_dir>/templates/result`.
     pub fn dir_in(data_dir: &Path) -> PathBuf {
         data_dir.join(TEMPLATE_SUBDIR)
+    }
+
+    /// The words-v1 pack folder, `<data_dir>/templates/words-v1`.
+    pub fn words_dir_in(data_dir: &Path) -> PathBuf {
+        data_dir.join(WORDS_SUBDIR)
     }
 
     /// Load `<source>_{victory,defeat,draw}.png` for the built-in layouts
@@ -265,18 +785,39 @@ impl ResultTemplates {
     /// built-in id replaces it). A new result screen plugs in with a layout
     /// entry and its templates, no code change. `None` unless at least one
     /// victory and one defeat template load.
+    ///
+    /// The file comes from a downloaded pack, so a file that does not parse
+    /// refuses the folder, and each entry is checked:
+    /// * an id that is not a plain word id ([`crate::packs::is_word_id`]:
+    ///   no `/`, no `..`, not absolute) or a region that is not inside the
+    ///   game rect refuses the whole folder (`None`, so the caller falls
+    ///   back);
+    /// * a region that reaches into the accolade nameplate ([`NAMEPLATE`]) is
+    ///   cut to end at [`ACCOLADE_Y1`] when it starts above the nameplate,
+    ///   and dropped when it starts inside it. Logged once per process.
     pub fn load_dir(dir: &Path) -> Option<Self> {
         let mut layouts = Layout::builtin();
         if let Ok(text) = std::fs::read_to_string(dir.join("layouts.json")) {
             match serde_json::from_str::<Vec<Layout>>(&text) {
                 Ok(extra) => {
                     for l in extra {
+                        if !crate::packs::is_word_id(&l.id) || !roi_is_valid(l.roi) {
+                            tracing::warn!(
+                                dir = %dir.display(),
+                                "result layouts.json has an unsafe id or region; folder refused"
+                            );
+                            return None;
+                        }
+                        let Some(l) = keep_off_nameplate(l) else {
+                            continue;
+                        };
                         layouts.retain(|k| k.id != l.id);
                         layouts.push(l);
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "result layouts.json unreadable, built-ins only")
+                    tracing::warn!(error = %e, "result layouts.json unreadable; folder refused");
+                    return None;
                 }
             }
         }
@@ -306,33 +847,173 @@ impl ResultTemplates {
     /// Build from in-memory templates (tests). Same `None` rule as `load_dir`.
     pub fn from_templates(tpls: Vec<(Layout, Outcome, Gray)>) -> Option<Self> {
         let has = |o| tpls.iter().any(|t| t.1 == o);
-        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(Self { tpls })
+        if !(has(Outcome::Victory) && has(Outcome::Defeat)) {
+            return None;
+        }
+        let tpls = tpls
+            .into_iter()
+            .map(|(layout, outcome, t)| Template {
+                layout,
+                outcome,
+                stacks: SCALES
+                    .iter()
+                    .filter_map(|sc| {
+                        let tw = ((t.w as f64 * sc).round_ties_even() as usize).max(1);
+                        let th = ((t.h as f64 * sc).round_ties_even() as usize).max(1);
+                        Stack::new(&t.resize(tw, th))
+                    })
+                    .collect(),
+            })
+            .collect();
+        Some(Self { tpls })
+    }
+
+    /// The loaded layout with this id (tests).
+    #[cfg(test)]
+    fn layout(&self, id: &str) -> Option<&Layout> {
+        self.tpls.iter().map(|t| &t.layout).find(|l| l.id == id)
     }
 
     /// Source ids that have at least one template.
     pub fn sources(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.tpls.iter().map(|t| t.0.id.as_str()).collect();
+        let mut v: Vec<&str> = self.tpls.iter().map(|t| t.layout.id.as_str()).collect();
         v.dedup();
         v
     }
 
-    /// Read the result word from one result frame (any layout).
-    pub fn read(&self, rgb: &RgbImage) -> ResultRead {
-        let mut best: [(f64, Option<&str>); 3] = [(-1.0, None); 3];
-        let mut regions: Vec<(&str, Option<Gray>)> = Vec::new();
-        for (layout, o, t) in &self.tpls {
-            let idx = match regions.iter().position(|r| r.0 == layout.id) {
+    /// Each template's region, cut once per rect and plane.
+    fn regions(&self, rgb: &RgbImage) -> Regions {
+        let mut cut: Vec<([f64; 4], Plane, Option<Vec<Level>>)> = Vec::new();
+        let mut of = Vec::with_capacity(self.tpls.len());
+        for t in &self.tpls {
+            let key = (t.layout.roi, t.layout.plane);
+            let idx = match cut.iter().position(|r| (r.0, r.1) == key) {
                 Some(i) => i,
                 None => {
-                    regions.push((&layout.id, region(rgb, layout)));
-                    regions.len() - 1
+                    cut.push((key.0, key.1, region(rgb, key.0, key.1)));
+                    cut.len() - 1
                 }
             };
-            let Some(p) = &regions[idx].1 else { continue };
-            let s = best_ncc(p, t);
-            let slot = &mut best[o.index()];
-            if s > slot.0 {
-                *slot = (s, Some(&layout.id));
+            of.push(idx);
+        }
+        Regions {
+            levels: cut.into_iter().map(|c| c.2).collect(),
+            of,
+            phased: Vec::new(),
+        }
+    }
+
+    /// Best score of each template (in load order) and the windows scored.
+    #[cfg(test)]
+    fn scores(&self, rgb: &RgbImage, exhaustive: bool) -> Vec<Found> {
+        self.scores_in(&self.regions(rgb), exhaustive)
+    }
+
+    fn scores_in(&self, regions: &Regions, exhaustive: bool) -> Vec<Found> {
+        let mut out = Vec::with_capacity(self.tpls.len());
+        for (i, t) in self.tpls.iter().enumerate() {
+            let Some(p) = &regions.levels[regions.of[i]] else {
+                out.push(NONE_FOUND);
+                continue;
+            };
+            let mut best = NONE_FOUND;
+            for st in &t.stacks {
+                let f = if exhaustive {
+                    search_full(p, st)
+                } else {
+                    search_fast(p, st)
+                };
+                best.macs += f.macs;
+                if f.score > best.score {
+                    best.score = f.score;
+                }
+            }
+            out.push(best);
+        }
+        out
+    }
+
+    /// Read the result word from one result frame (any layout), with the
+    /// coarse-to-fine search.
+    ///
+    /// A read the fast scores call sure is then certified: no template of
+    /// another word may score `s1 - MARGIN` or more anywhere in its region,
+    /// checked exactly with [`certify`]. Since the word's own fast score is
+    /// at most its exhaustive score, a sure read here is a sure exhaustive
+    /// read of the same word. A read that fails the check, or whose check
+    /// runs out of budget, is flagged (an unsure DRAW abstains).
+    pub fn read(&self, rgb: &RgbImage) -> ResultRead {
+        let mut regions = self.regions(rgb);
+        let scores = self.scores_in(&regions, false);
+        self.settle(&mut regions, scores, CERT_MACS)
+    }
+
+    /// [`Self::read`] with every window of every region scored: the
+    /// reference the fast search is checked against (tests, benches). Slow.
+    pub fn read_exhaustive(&self, rgb: &RgbImage) -> ResultRead {
+        self.decide(&self.scores_in(&self.regions(rgb), true))
+    }
+
+    /// The read for these fast scores, certified when it is sure.
+    fn settle(
+        &self,
+        regions: &mut Regions,
+        mut scores: Vec<Found>,
+        mut budget: usize,
+    ) -> ResultRead {
+        let read = self.decide(&scores);
+        let Some(top) = read.outcome.filter(|_| !read.suspect) else {
+            return read;
+        };
+        let s1 = self
+            .tpls
+            .iter()
+            .zip(&scores)
+            .filter(|(t, _)| t.outcome == top)
+            .map(|(_, f)| f.score)
+            .fold(-1.0f64, f64::max);
+        let tau = s1 - MARGIN as f64;
+        for (i, t) in self.tpls.iter().enumerate() {
+            if t.outcome == top {
+                continue;
+            }
+            let ri = regions.of[i];
+            for st in &t.stacks {
+                let cert = {
+                    let Regions { levels, phased, .. } = &mut *regions;
+                    let Some(lv) = &levels[ri] else { break };
+                    for pr in &st.projs {
+                        make_phased(phased, ri, lv, pr.f);
+                    }
+                    let chain: Vec<(&Proj, &Phased)> = st
+                        .projs
+                        .iter()
+                        .filter_map(|pr| {
+                            let ph = phased.iter().find(|(k, _)| *k == (ri, pr.f))?;
+                            Some((pr, &ph.1))
+                        })
+                        .collect();
+                    certify(lv, &chain, st, tau, &mut budget)
+                };
+                match cert {
+                    Cert::Below => {}
+                    Cert::Above(v) => {
+                        scores[i].score = scores[i].score.max(v);
+                        return flag(self.decide(&scores));
+                    }
+                    Cert::Unknown => return flag(read),
+                }
+            }
+        }
+        read
+    }
+
+    fn decide(&self, scores: &[Found]) -> ResultRead {
+        let mut best: [(f64, Option<&str>); 3] = [(-1.0, None); 3];
+        for (t, f) in self.tpls.iter().zip(scores) {
+            let slot = &mut best[t.outcome.index()];
+            if f.score > slot.0 {
+                *slot = (f.score, Some(&t.layout.id));
             }
         }
         let mut order = Outcome::ALL;
@@ -342,15 +1023,296 @@ impl ResultTemplates {
         if s1 < PRESENT as f64 {
             return ResultRead::nothing(s1, s1 - s2);
         }
+        let suspect = !(s1 >= FLOOR as f64 && s1 - s2 >= MARGIN as f64);
+        // DRAW has no real frame: only a sure DRAW read names it.
+        if order[0] == Outcome::Draw && suspect {
+            return ResultRead::nothing(s1, s1 - s2);
+        }
         ResultRead {
             outcome: Some(order[0]),
             source: src.map(str::to_string),
             score: s1 as f32,
             margin: (s1 - s2) as f32,
-            suspect: !(s1 >= FLOOR as f64 && s1 - s2 >= MARGIN as f64),
+            suspect,
         }
     }
 }
+
+/// A read that must not be sure: flagged, or nothing for a DRAW (only a
+/// sure DRAW is named).
+fn flag(mut r: ResultRead) -> ResultRead {
+    if r.outcome == Some(Outcome::Draw) {
+        return ResultRead::nothing(r.score as f64, r.margin as f64);
+    }
+    r.suspect = true;
+    r
+}
+
+/// The regions of one frame: one per distinct rect and plane, the region
+/// index of each template, and box-mean phase images made on demand.
+struct Regions {
+    levels: Vec<Option<Vec<Level>>>,
+    of: Vec<usize>,
+    phased: Vec<((usize, usize), Phased)>,
+}
+
+/// Make the phase images of region `ri` at block size `f`, once.
+fn make_phased(cache: &mut Vec<((usize, usize), Phased)>, ri: usize, levels: &[Level], f: usize) {
+    if !cache.iter().any(|(k, _)| *k == (ri, f)) {
+        cache.push(((ri, f), Phased::new(&levels[0], f)));
+    }
+}
+
+// ------------------------------------------------------------ live reload
+
+/// Where the result templates live: the words-v1 pack folder first, then
+/// the old manual folder. `None` skips that folder.
+#[derive(Debug, Clone, Default)]
+pub struct ResultDirs {
+    pub words: Option<PathBuf>,
+    pub legacy: Option<PathBuf>,
+}
+
+/// Which folder the loaded templates came from (fixed names, logged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ResultPack {
+    #[serde(rename = "words-v1")]
+    WordsV1,
+    #[serde(rename = "result")]
+    Legacy,
+}
+
+impl ResultPack {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResultPack::WordsV1 => "words-v1",
+            ResultPack::Legacy => "result",
+        }
+    }
+}
+
+/// Loaded templates and the folder they came from.
+#[derive(Debug)]
+pub struct LoadedResults {
+    pub templates: ResultTemplates,
+    pub pack: ResultPack,
+}
+
+type Stamp = [DirStamp; 2];
+
+impl ResultDirs {
+    pub fn in_data_dir(data_dir: &Path) -> Self {
+        Self {
+            words: Some(ResultTemplates::words_dir_in(data_dir)),
+            legacy: Some(ResultTemplates::dir_in(data_dir)),
+        }
+    }
+
+    fn stamp(&self) -> Stamp {
+        [
+            dir_stamp(self.words.as_deref()),
+            dir_stamp(self.legacy.as_deref()),
+        ]
+    }
+
+    /// Templates from the first folder that loads: words-v1, then the old
+    /// manual folder.
+    pub fn load(&self) -> Option<LoadedResults> {
+        let words = self.words.as_deref().and_then(ResultTemplates::load_dir);
+        if let Some(templates) = words {
+            return Some(LoadedResults {
+                templates,
+                pack: ResultPack::WordsV1,
+            });
+        }
+        let legacy = self.legacy.as_deref().and_then(ResultTemplates::load_dir);
+        legacy.map(|templates| LoadedResults {
+            templates,
+            pack: ResultPack::Legacy,
+        })
+    }
+
+    /// Load, or `None` when a folder changed while it loaded (a swap ran
+    /// meanwhile; the caller retries later). `during` runs between the first
+    /// stamp and the load (tests use it to swap a folder in).
+    fn load_stable(&self, during: impl FnOnce()) -> Option<(Option<LoadedResults>, Stamp)> {
+        let before = self.stamp();
+        during();
+        let loaded = self.load();
+        (self.stamp() == before).then_some((loaded, before))
+    }
+}
+
+/// The new reader's [`ResultTemplates`], re-loaded when a template folder
+/// changes ([`super::heroes::LiveHeroSet`]'s rules).
+///
+/// Pack sync installs words-v1 in the background after the reader is set
+/// up. Each result read checks the two folders' stamps (two `stat` calls).
+/// On a change it starts one background load and keeps reading with the
+/// templates it has, so a poll tick never waits on a load. A load that saw
+/// a folder change while it ran is thrown away and retried on a later read,
+/// so the templates never mix files from before and after a swap.
+#[derive(Debug, Default)]
+pub struct LiveResults {
+    inner: Arc<LiveInner>,
+}
+
+type Current = (Option<Arc<LoadedResults>>, Stamp);
+
+#[derive(Debug, Default)]
+struct LiveInner {
+    dirs: ResultDirs,
+    current: std::sync::RwLock<Current>,
+    loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    hooks: TestHooks,
+}
+
+/// Test probes on the reload thread: a spawn count, a delay before the
+/// load, and a step run between the first stamp and the load.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    spawns: std::sync::atomic::AtomicUsize,
+    delay_ms: std::sync::atomic::AtomicU64,
+    during: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestHooks")
+    }
+}
+
+impl LiveInner {
+    /// What runs between the reload's first stamp and its load: nothing,
+    /// except in tests.
+    fn before_load(&self) -> impl FnOnce() + use<> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let ms = self.hooks.delay_ms.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let during = self.hooks.during.lock().unwrap().take();
+            move || {
+                if let Some(f) = during {
+                    f();
+                }
+            }
+        }
+        #[cfg(not(test))]
+        || {}
+    }
+
+    fn install(&self, (loaded, stamp): (Option<LoadedResults>, Stamp)) {
+        tracing::info!(
+            results = loaded.is_some(),
+            result_pack = loaded.as_ref().map(|l| l.pack.as_str()),
+            result_sources = ?loaded.as_ref().map(|l| l.templates.sources()),
+            "new reader result words loaded"
+        );
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = (loaded.map(Arc::new), stamp);
+    }
+}
+
+impl LiveResults {
+    /// Load now (reader setup). A folder that keeps changing during the
+    /// first tries leaves the templates empty; the next read loads again.
+    pub fn load(dirs: ResultDirs) -> Self {
+        let inner = LiveInner {
+            dirs,
+            ..Default::default()
+        };
+        let first = (0..3).find_map(|_| inner.dirs.load_stable(|| {}));
+        // An all-zero stamp never matches a real one: the next read reloads.
+        inner.install(first.unwrap_or((None, [Some((0, 0, 0, 0)); 2])));
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    /// The templates for this read. Starts a background reload when a
+    /// folder changed since they were loaded.
+    pub fn current(&self) -> Option<Arc<LoadedResults>> {
+        let (loaded, stamp) = self
+            .inner
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if self.inner.dirs.stamp() != stamp {
+            self.start_reload();
+        }
+        loaded
+    }
+
+    fn start_reload(&self) {
+        let Ok(mut loader) = self.inner.loader.try_lock() else {
+            return;
+        };
+        if loader.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("result-words-reload".into())
+            .spawn(move || {
+                let during = inner.before_load();
+                match inner.dirs.load_stable(during) {
+                    Some(loaded) => inner.install(loaded),
+                    None => tracing::debug!("result words changed while loading, retry later"),
+                }
+            });
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                self.inner
+                    .hooks
+                    .spawns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *loader = Some(handle);
+            }
+            Err(e) => tracing::warn!(error = %e, "result words reload not started"),
+        }
+    }
+
+    /// Reload threads started so far (tests).
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.inner
+            .hooks
+            .spawns
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make each reload wait `ms` before it loads (tests).
+    #[cfg(test)]
+    pub(crate) fn set_load_delay_ms(&self, ms: u64) {
+        self.inner
+            .hooks
+            .delay_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Run `f` inside the next reload, between its first stamp and its load
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn during_next_load(&self, f: impl FnOnce() + Send + 'static) {
+        *self.inner.hooks.during.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// Wait for a reload in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_reload(&self) {
+        let handle = self.inner.loader.lock().unwrap().take();
+        if let Some(h) = handle {
+            h.join().unwrap();
+        }
+    }
+}
+
+// ---------------------------------------------------------------- evidence
 
 /// Every result read of one match, from any source.
 #[derive(Debug, Clone, Default)]
@@ -435,12 +1397,13 @@ impl ResultEvidence {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_fixtures {
+    //! Synthetic word templates and frames. Not game art.
     use super::*;
     use image::Rgb;
 
-    /// Synthetic word: vertical bars in a word-specific rhythm. Not game art.
-    fn word(seed: u32, w: usize, h: usize) -> Gray {
+    /// Synthetic word: vertical bars in a word-specific rhythm.
+    pub(crate) fn word(seed: u32, w: usize, h: usize) -> Gray {
         let mut g = Gray::new(w, h);
         for y in 2..h - 2 {
             for x in 0..w {
@@ -454,9 +1417,45 @@ mod tests {
         g
     }
 
-    fn lay(id: &str) -> Layout {
+    pub(crate) fn lay(id: &str) -> Layout {
         Layout::by_id(id).unwrap()
     }
+
+    /// Paint a work-scale word into a 2560x1440 frame at (x0, y0), doubled.
+    pub(crate) fn paint_at(img: &mut RgbImage, x0: u32, y0: u32, t: &Gray, colour: [u8; 3]) {
+        for y in 0..t.h * 2 {
+            for x in 0..t.w * 2 {
+                if t.at(x / 2, y / 2) > 0.4 {
+                    img.put_pixel(x0 + x as u32, y0 + y as u32, Rgb(colour));
+                }
+            }
+        }
+    }
+
+    /// Paint a work-scale word into a 2560x1440 frame inside a layout's region.
+    pub(crate) fn paint(img: &mut RgbImage, layout: &Layout, t: &Gray, colour: [u8; 3]) {
+        let [fx0, fy0, _, _] = layout.roi;
+        let (x0, y0) = ((fx0 * 2560.0) as u32 + 20, (fy0 * 1440.0) as u32 + 10);
+        paint_at(img, x0, y0, t, colour);
+    }
+
+    /// Write `<id>_<word>.png` files the way a pack ships them.
+    pub(crate) fn write_pack(dir: &Path, files: &[(&str, &Gray)]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, g) in files {
+            let img = image::GrayImage::from_fn(g.w as u32, g.h as u32, |x, y| {
+                image::Luma([(g.at(x as usize, y as usize) * 255.0) as u8])
+            });
+            img.save(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::*;
+    use super::*;
+    use image::Rgb;
 
     fn templates() -> ResultTemplates {
         ResultTemplates::from_templates(vec![
@@ -466,19 +1465,6 @@ mod tests {
             (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
         ])
         .unwrap()
-    }
-
-    /// Paint a work-scale word into a 2560x1440 frame inside a layout's region.
-    fn paint(img: &mut RgbImage, layout: &Layout, t: &Gray, colour: [u8; 3]) {
-        let [fx0, fy0, _, _] = layout.roi;
-        let (x0, y0) = ((fx0 * 2560.0) as u32 + 20, (fy0 * 1440.0) as u32 + 10);
-        for y in 0..t.h * 2 {
-            for x in 0..t.w * 2 {
-                if t.at(x / 2, y / 2) > 0.4 {
-                    img.put_pixel(x0 + x as u32, y0 + y as u32, Rgb(colour));
-                }
-            }
-        }
     }
 
     fn sure(o: Outcome, src: &str) -> ResultRead {
@@ -492,9 +1478,10 @@ mod tests {
     }
 
     #[test]
-    fn regions_are_ocr_v1s() {
+    fn regions_are_ocr_v1s_except_the_accolade_name_line() {
         let roi = |id: &str| lay(id).roi;
-        assert_eq!(roi(ACCOLADE), [0.005, 0.035, 0.255, 0.095]);
+        // ocr-v1 crops the accolade word to y 9.5%; the nameplate starts at 8.7%
+        assert_eq!(roi(ACCOLADE), [0.005, 0.035, 0.255, 0.0862]);
         assert_eq!(roi(RANK_SCREEN), [0.010, 0.145, 0.250, 0.225]);
         assert_eq!(roi(END_TITLE), [0.320, 0.340, 0.680, 0.520]);
         assert_eq!(roi(TAB_HEADER), [0.300, 0.020, 0.700, 0.240]);
@@ -546,19 +1533,55 @@ mod tests {
         assert!(!r.suspect, "{r:?}");
     }
 
-    #[test]
-    fn draw_template_reads_draw() {
-        let mut v = vec![
+    fn with_draw() -> ResultTemplates {
+        ResultTemplates::from_templates(vec![
             (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
             (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
-        ];
-        v.push((lay(ACCOLADE), Outcome::Draw, word(6, 50, 30)));
-        let t = ResultTemplates::from_templates(v).unwrap();
+            (lay(ACCOLADE), Outcome::Draw, word(6, 50, 30)),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn draw_template_reads_draw() {
+        let t = with_draw();
         let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
         paint(&mut img, &lay(ACCOLADE), &word(6, 50, 30), [230, 230, 230]);
         let r = t.read(&img);
         assert_eq!(r.outcome, Some(Outcome::Draw), "{r:?}");
+        assert!(!r.suspect, "{r:?}");
         assert_eq!(Outcome::Draw.as_str(), "draw");
+    }
+
+    /// A DRAW that is present but not sure names no word: it abstains, and
+    /// so adds nothing to (and flags nothing in) the match's evidence. The
+    /// same read for VICTORY is kept, flagged.
+    #[test]
+    fn an_unsure_draw_abstains() {
+        let t = with_draw();
+        let found = |s: [f64; 3]| -> Vec<Found> {
+            s.iter().map(|&score| Found { score, macs: 1 }).collect()
+        };
+        // templates are victory, defeat, draw in load order
+        let draw = t.decide(&found([0.40, 0.30, 0.62]));
+        assert_eq!(draw.outcome, None, "{draw:?}");
+        assert!(draw.suspect);
+        let mut e = ResultEvidence::default();
+        e.add(sure(Outcome::Victory, ACCOLADE));
+        e.add(sure(Outcome::Victory, RANK_SCREEN));
+        e.add(draw);
+        assert!(!e.decide().suspect, "an abstain flags nothing");
+        // a close DRAW also abstains
+        assert_eq!(t.decide(&found([0.75, 0.30, 0.80])).outcome, None);
+        // a sure DRAW still reads
+        let sure_draw = t.decide(&found([0.40, 0.30, 0.90]));
+        assert_eq!(
+            (sure_draw.outcome, sure_draw.suspect),
+            (Some(Outcome::Draw), false)
+        );
+        // an unsure VICTORY is kept, flagged
+        let v = t.decide(&found([0.62, 0.30, 0.40]));
+        assert_eq!((v.outcome, v.suspect), (Some(Outcome::Victory), true));
     }
 
     #[test]
@@ -622,23 +1645,20 @@ mod tests {
 
     #[test]
     fn a_new_screen_plugs_in_through_layouts_json() {
-        let dir = std::env::temp_dir().join(format!("result-pack-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let save = |name: &str, g: &Gray| {
-            let img = image::GrayImage::from_fn(g.w as u32, g.h as u32, |x, y| {
-                image::Luma([(g.at(x as usize, y as usize) * 255.0) as u8])
-            });
-            img.save(dir.join(name)).unwrap();
-        };
-        save("cards_victory.png", &word(1, 70, 30));
-        save("cards_defeat.png", &word(3, 60, 30));
+        let dir = tempfile::tempdir().unwrap();
+        write_pack(
+            dir.path(),
+            &[
+                ("cards_victory.png", &word(1, 70, 30)),
+                ("cards_defeat.png", &word(3, 60, 30)),
+            ],
+        );
         std::fs::write(
-            dir.join("layouts.json"),
+            dir.path().join("layouts.json"),
             r#"[{"id": "cards", "roi": [0.40, 0.40, 0.60, 0.50], "plane": "max"}]"#,
         )
         .unwrap();
-        let t = ResultTemplates::load_dir(&dir).expect("plugged-in layout loads");
-        std::fs::remove_dir_all(&dir).ok();
+        let t = ResultTemplates::load_dir(dir.path()).expect("plugged-in layout loads");
         assert_eq!(t.sources(), vec!["cards"]);
         let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
         let c = Layout {
@@ -650,5 +1670,993 @@ mod tests {
         let r = t.read(&img);
         assert_eq!(r.outcome, Some(Outcome::Victory));
         assert_eq!(r.source.as_deref(), Some("cards"));
+    }
+
+    // ------------------------------------------------ name line (O1 item 5)
+
+    /// A synthetic name line: dense short strokes, unlike any word template.
+    fn name_line(img: &mut RgbImage, gh: f64, colour: [u8; 3]) {
+        let y0 = (NAME_LINE_TOP * gh) as u32;
+        let y1 = (0.113 * gh) as u32;
+        let gw = gh * 16.0 / 9.0;
+        for y in y0..y1 {
+            for x in (0.027 * gw) as u32..(0.088 * gw) as u32 {
+                if (x / 3 + y / 5).is_multiple_of(2) {
+                    img.put_pixel(x, y, Rgb(colour));
+                }
+            }
+        }
+    }
+
+    /// The accolade region stops above the member's name line (measured on
+    /// real frames): a name drawn there leaves the region's pixels and every
+    /// accolade score exactly as they were, at 1440p and 1080p. ocr-v1's crop
+    /// would hold the name's top rows.
+    #[test]
+    fn the_accolade_region_excludes_the_name_line() {
+        let a = lay(ACCOLADE);
+        assert!(a.roi[3] < NAME_LINE_TOP, "{:?}", a.roi);
+        let t = templates();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        // the word where real frames have it: y 4.0-8.4%
+        paint_at(&mut img, 64, 58, &word(1, 70, 30), [255, 220, 0]);
+        let before = t.scores(&img, true);
+        let read = t.read(&img);
+        assert_eq!(read.outcome, Some(Outcome::Victory), "{read:?}");
+        for colour in [[255, 255, 255], [255, 220, 0]] {
+            let mut named = img.clone();
+            name_line(&mut named, 1440.0, colour);
+            assert_eq!(t.scores(&named, true), before, "{colour:?}");
+            assert_eq!(t.read(&named), read);
+        }
+        // the region's pixels are untouched by the name, and the old ocr-v1
+        // crop (to 9.5%) would hold it
+        let px = |img: &RgbImage, roi| region(img, roi, Plane::Max).unwrap()[0].px.clone();
+        let mut named = img.clone();
+        name_line(&mut named, 1440.0, [255, 255, 255]);
+        assert_eq!(px(&named, a.roi), px(&img, a.roi));
+        let old = [0.005, 0.035, 0.255, 0.095];
+        assert_ne!(px(&named, old), px(&img, old));
+        // the same at 1080p
+        let (small, small_named) = (
+            image::imageops::resize(&img, 1920, 1080, image::imageops::FilterType::Nearest),
+            image::imageops::resize(&named, 1920, 1080, image::imageops::FilterType::Nearest),
+        );
+        let mut small_named2 = small.clone();
+        name_line(&mut small_named2, 1080.0, [255, 255, 255]);
+        assert_eq!(px(&small_named2, a.roi), px(&small, a.roi));
+        assert_ne!(px(&small_named, old), px(&small, old));
+    }
+
+    /// F253-4: a pack's `layouts.json` cannot bring the nameplate back. An
+    /// `accolade` override that runs to ocr-v1's 9.5% is cut at
+    /// [`ACCOLADE_Y1`]; a layout that starts inside the nameplate is dropped.
+    #[test]
+    fn a_layouts_json_cannot_reach_the_nameplate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pack(
+            dir.path(),
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+                ("cards_victory.png", &word(5, 40, 12)),
+                ("cards_defeat.png", &word(7, 40, 12)),
+            ],
+        );
+        std::fs::write(
+            dir.path().join("layouts.json"),
+            r#"[{"id": "accolade", "roi": [0.005, 0.035, 0.255, 0.095], "plane": "max"},
+                {"id": "cards", "roi": [0.02, 0.09, 0.20, 0.112], "plane": "max"}]"#,
+        )
+        .unwrap();
+        let t = ResultTemplates::load_dir(dir.path()).expect("loads, clamped");
+        assert_eq!(
+            t.layout(ACCOLADE).unwrap().roi,
+            [0.005, 0.035, 0.255, ACCOLADE_Y1]
+        );
+        assert!(t.layout("cards").is_none(), "{:?}", t.sources());
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 64, 58, &word(1, 70, 30), [255, 220, 0]);
+        let mut named = img.clone();
+        name_line(&mut named, 1440.0, [255, 255, 255]);
+        assert_eq!(t.scores(&named, true), t.scores(&img, true));
+        assert_eq!(t.read(&img).outcome, Some(Outcome::Victory));
+    }
+
+    /// F253-5: layout ids are file stems. One that could leave the pack
+    /// folder (or is not a words-v1 word id), or a region outside the game
+    /// rect, refuses the folder, and the reader falls back to the old one.
+    #[test]
+    fn a_hostile_layouts_json_refuses_the_folder() {
+        let long = "x".repeat(65);
+        let bad_ids = [
+            "../evil",
+            "/tmp/evil",
+            "a/b",
+            "..",
+            ".",
+            "Evil",
+            "",
+            &long,
+            "e vil",
+            "e\\\\vil",
+        ];
+        let bad_rois = [
+            "[0.5, 0.5, 0.4, 0.6]",
+            "[-0.1, 0.4, 0.2, 0.6]",
+            "[0.0, 0.0, 1.5, 1.0]",
+            "[0.4, 0.6, 0.6, 0.6]",
+        ];
+        let cases = bad_ids
+            .iter()
+            .map(|id| format!(r#"[{{"id": "{id}", "roi": [0.4, 0.4, 0.6, 0.5], "plane": "max"}}]"#))
+            .chain([r#"[{"id": "cards", "roi": [0.4, 0.4], "plane": "max"}]"#.to_string()])
+            .chain(
+                bad_rois
+                    .iter()
+                    .map(|roi| format!(r#"[{{"id": "cards", "roi": {roi}, "plane": "max"}}]"#)),
+            );
+        for (k, json) in cases.enumerate() {
+            let data = tempfile::tempdir().unwrap();
+            let words = data.path().join(WORDS_SUBDIR);
+            pack(&words, 1);
+            // what `../evil` would open, one level above the pack folder
+            write_pack(
+                &data.path().join("templates"),
+                &[
+                    ("evil_victory.png", &word(9, 70, 30)),
+                    ("evil_defeat.png", &word(4, 60, 30)),
+                ],
+            );
+            std::fs::write(words.join("layouts.json"), &json).unwrap();
+            assert!(
+                ResultTemplates::load_dir(&words).is_none(),
+                "case {k}: {json}"
+            );
+            pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+            let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+            assert_eq!(
+                reads_victory(&live, 5),
+                (Some(ResultPack::Legacy), true),
+                "case {k}"
+            );
+        }
+        // the same folder with a plain id loads
+        let dir = tempfile::tempdir().unwrap();
+        pack(dir.path(), 1);
+        std::fs::write(
+            dir.path().join("layouts.json"),
+            r#"[{"id": "end_title_2", "roi": [0.4, 0.4, 0.6, 0.5], "plane": "max"}]"#,
+        )
+        .unwrap();
+        assert!(ResultTemplates::load_dir(dir.path()).is_some());
+    }
+
+    // ---------------------------------------------- fast search (O1 item 2)
+
+    /// The kept-variance rule the parity tests build stacks with: looser
+    /// than [`MIN_KEPT`], so the synthetic glyphs reach the 4x level.
+    const TEST_KEPT: f64 = 0.6;
+
+    /// Deterministic xorshift.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, m: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % m.max(1)
+        }
+    }
+
+    /// A work-scale region `rw` x `rh` of noise on a random background,
+    /// with `t` drawn at a random spot and size (one of the search scales)
+    /// and a second, different word beside it as a distractor.
+    fn random_region(rng: &mut Rng, t: &Gray, other: &Gray, rw: usize, rh: usize) -> Gray {
+        let bg = rng.next(40) as f32 / 255.0;
+        let mut g = Gray::new(rw, rh);
+        for v in g.px.iter_mut() {
+            *v = bg + rng.next(30) as f32 / 255.0;
+        }
+        let ink = 0.55 + rng.next(45) as f32 / 100.0;
+        let word_t = t;
+        let mut draw = |t: &Gray, rng: &mut Rng| {
+            let sc = if std::ptr::eq(t, word_t) {
+                1.0
+            } else {
+                SCALES[rng.next(3) as usize]
+            };
+            let tw = ((t.w as f64 * sc).round() as usize).min(rw);
+            let th = ((t.h as f64 * sc).round() as usize).min(rh);
+            let s = t.resize(tw, th);
+            let (x0, y0) = (
+                rng.next((rw - tw) as u64) as usize,
+                rng.next((rh - th) as u64) as usize,
+            );
+            for y in 0..th {
+                for x in 0..tw {
+                    let a = s.at(x, y) / 0.9;
+                    let p = &mut g.px[(y0 + y) * rw + x0 + x];
+                    *p = (*p * (1.0 - a) + ink * a).min(1.0);
+                }
+            }
+        };
+        draw(other, rng);
+        draw(t, rng);
+        g
+    }
+
+    /// Template sizes of the real packs at the work scale (accolade, rank
+    /// screen) and two that build the 4x level (end-title shape, smaller so
+    /// the exhaustive reference stays quick in a debug build).
+    const SIZES: [(usize, usize, usize, usize); 4] = [
+        (149, 32, 230, 37),
+        (131, 39, 230, 57),
+        (120, 50, 230, 90),
+        (100, 48, 210, 100),
+    ];
+
+    /// Synthetic italic "letters" of thick strokes, like title text (the
+    /// bar rhythm of [`word`] aliases at 4x and is harder than any real
+    /// word; [`fast_search_matches_on_thin_bars`] covers it too).
+    fn glyphs(seed: u64, w: usize, h: usize) -> Gray {
+        let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+        let mut g = Gray::new(w, h);
+        let n = (w * 10 / (h * 6)).max(3);
+        let cw = w / n;
+        let t = (h / 6).max(2);
+        for i in 0..n {
+            let x0 = i * cw + cw / 8;
+            let x1 = (i + 1) * cw - cw / 8;
+            let strokes = 2 + rng.next(3);
+            for _ in 0..strokes {
+                let kind = rng.next(5);
+                for y in 2..h - 2 {
+                    let skew = (h - y) / 5;
+                    for x in x0..x1 {
+                        let on = match kind {
+                            0 => x < x0 + t,
+                            1 => x + t >= x1,
+                            2 => y < 2 + t,
+                            3 => y + t + 2 >= h,
+                            _ => (y as isize - h as isize / 2).unsigned_abs() < t / 2 + 1,
+                        };
+                        let xs = (x + skew).min(w - 1);
+                        if on {
+                            g.px[y * w + xs] = 0.9;
+                        }
+                    }
+                }
+            }
+        }
+        g
+    }
+
+    /// One parity case: `t` and a distractor in a noisy region; both
+    /// templates searched both ways. Returns (present, deep) counts.
+    fn parity_case(
+        rng: &mut Rng,
+        case: usize,
+        t: &Gray,
+        other: &Gray,
+        rw: usize,
+        rh: usize,
+    ) -> (usize, usize) {
+        let p = pyramid(random_region(rng, t, other, rw, rh));
+        let (mut present, mut deep) = (0, 0);
+        for tpl in [t, other] {
+            // a looser kept rule than production, so these synthetic words
+            // reach the 4x level: the search must be exact on any stack
+            let st = Stack::with_kept(tpl, TEST_KEPT).unwrap();
+            deep += usize::from(st.levels.len() == 3);
+            let (fast, full) = (search_fast(&p, &st), search_full(&p, &st));
+            assert!(
+                fast.score <= full.score + 1e-9,
+                "case {case}: {fast:?} > {full:?}"
+            );
+            if full.score >= PRESENT as f64 {
+                present += 1;
+                assert!(
+                    (fast.score - full.score).abs() < 1e-9,
+                    "case {case}: fast {fast:?} full {full:?}"
+                );
+            }
+        }
+        (present, deep)
+    }
+
+    /// The fast search never scores above the exhaustive one, and finds the
+    /// exhaustive best score whenever that score is a present word. Checked
+    /// for the word's own template and for another word's template (a
+    /// cross match), at every template size the packs use.
+    #[test]
+    fn fast_search_matches_the_exhaustive_search() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut present, mut deep) = (0, 0);
+        for case in 0..16 {
+            let (tw, th, rw, rh) = SIZES[case % SIZES.len()];
+            let t = glyphs(case as u64, tw, th);
+            let other = glyphs(case as u64 + 100, tw * 9 / 10, th);
+            let (p, d) = parity_case(&mut rng, case, &t, &other, rw, rh);
+            present += p;
+            deep += d;
+        }
+        assert!(present >= 16, "each case has its word present: {present}");
+        assert!(deep >= 16, "the 4x level is exercised: {deep}");
+    }
+
+    /// The same check with thin-bar words, which average out at 4x: their
+    /// pyramid stops early ([`MIN_KEPT`]), and the search stays exact.
+    #[test]
+    fn fast_search_matches_on_thin_bars() {
+        let mut rng = Rng(0x5851_f42d_4c95_7f2d);
+        let (mut present, mut deep) = (0, 0);
+        for case in 0..12 {
+            let (tw, th, rw, rh) = SIZES[case % SIZES.len()];
+            let seed = 1 + (case as u32 % 9);
+            let t = word(seed, tw, th);
+            let other = word(seed % 9 + 2, tw * 9 / 10, th);
+            let (p, d) = parity_case(&mut rng, case, &t, &other, rw, rh);
+            present += p;
+            deep += d;
+        }
+        assert!(present >= 12, "{present}");
+        // glyph words of these sizes build 16 deep stacks in 16 cases
+        assert!(deep < 8, "thin bars keep too little at 4x: {deep}");
+        assert_eq!(
+            Stack::with_kept(&glyphs(1, 120, 50), TEST_KEPT)
+                .unwrap()
+                .levels
+                .len(),
+            3
+        );
+    }
+
+    /// A blocky copy of the word (each coarse pixel of the template blown up
+    /// to a square, like a low-resolution or heavily compressed title) is
+    /// the template itself on the coarse level and beats the sharp, noisy
+    /// word there; at full resolution the sharp word wins. The fast search
+    /// refines more than the best coarse peak, so it still finds it.
+    #[test]
+    fn fast_search_looks_past_a_coarse_decoy() {
+        let mut rng = Rng(4242);
+        for (k, &(tw, th, rw, rh)) in SIZES.iter().enumerate() {
+            let t = glyphs(k as u64 + 50, tw, th);
+            let st = Stack::new(&t).unwrap();
+            let top = st.levels.len() - 1;
+            let f = 1usize << top;
+            let (mut cw, mut ch, mut cpx) = (t.w, t.h, t.px.clone());
+            for _ in 0..top {
+                (cw, ch, cpx) = half(cw, ch, &cpx);
+            }
+            let (rw, rh) = (
+                (rw + tw + 4 * f).next_multiple_of(f),
+                (rh + 4 * f).next_multiple_of(f),
+            );
+            let mut g = Gray::new(rw, rh);
+            // the sharp word, with pixel noise, on the coarse grid
+            let (sx, sy) = (2 * f, 2 * f);
+            for y in 0..th {
+                for x in 0..tw {
+                    g.px[(sy + y) * rw + sx + x] = t.at(x, y) * 0.8 + rng.next(60) as f32 / 255.0;
+                }
+            }
+            // the blocky copy, right of it, on the coarse grid
+            let (dx, dy) = ((sx + tw + 2 * f).next_multiple_of(f), f);
+            for y in 0..ch * f {
+                for x in 0..cw * f {
+                    g.px[(dy + y) * rw + dx + x] = cpx[(y / f) * cw + x / f] * 0.8;
+                }
+            }
+            let p = pyramid(g);
+            let coarse =
+                |x: usize, y: usize| ncc_at(&p[top], &st.levels[top], x / f, y / f).unwrap();
+            assert!(
+                coarse(dx, dy) > coarse(sx, sy),
+                "{k}: the decoy leads on the coarse level"
+            );
+            let (fast, full) = (search_fast(&p, &st), search_full(&p, &st));
+            let sharp = ncc_at(&p[0], &st.levels[0], sx, sy).unwrap();
+            assert!(sharp > ncc_at(&p[0], &st.levels[0], dx, dy).unwrap(), "{k}");
+            assert!((full.score - sharp).abs() < 1e-9, "{k}: {full:?} {sharp}");
+            assert!(
+                (fast.score - full.score).abs() < 1e-9,
+                "{k}: fast {fast:?} full {full:?}"
+            );
+        }
+    }
+
+    // ------------------------------------------- certification (F253-3)
+
+    /// The projection bound is never below the exact score, at every
+    /// window, for 2x and 4x stacks, glyph and thin-bar words.
+    #[test]
+    fn the_certification_bound_is_never_below_the_score() {
+        let mut rng = Rng(31337);
+        let mut checked = 0;
+        for case in 0..8 {
+            let (tw, th) = [(60, 24), (100, 48)][case % 2];
+            let t = if case % 4 < 2 {
+                glyphs(case as u64 + 200, tw, th)
+            } else {
+                word(1 + case as u32, tw, th)
+            };
+            let other = glyphs(case as u64 + 300, tw * 9 / 10, th);
+            let p = pyramid(random_region(&mut rng, &t, &other, tw + 40, th + 24));
+            for tpl in [&t, &other] {
+                let st = Stack::new(tpl).unwrap();
+                assert!(!st.projs.is_empty());
+                for pr in &st.projs {
+                    let ph = Phased::new(&p[0], pr.f);
+                    let k = &st.levels[0];
+                    for y in 0..=p[0].h - k.h {
+                        for x in 0..=p[0].w - k.w {
+                            if let (Some(ub), Some(v)) =
+                                (bound_at(&p[0], &ph, k, pr, x, y), ncc_at(&p[0], k, x, y))
+                            {
+                                assert!(
+                                    ub + 1e-6 >= v,
+                                    "case {case} f {} ({x},{y}): bound {ub} < {v}",
+                                    pr.f
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+
+    /// `certify` gives the exhaustive search's answer against any
+    /// threshold: `Above` exactly when the exhaustive best reaches it.
+    #[test]
+    fn certify_agrees_with_the_exhaustive_search() {
+        let mut rng = Rng(271828);
+        for case in 0..8 {
+            let (tw, th, rw, rh) = SIZES[case % SIZES.len()];
+            let t = glyphs(case as u64 + 400, tw, th);
+            let other = glyphs(case as u64 + 500, tw * 9 / 10, th);
+            let p = pyramid(random_region(&mut rng, &t, &other, rw, rh));
+            for tpl in [&t, &other] {
+                let st = Stack::new(tpl).unwrap();
+                let phs: Vec<Phased> = st.projs.iter().map(|pr| Phased::new(&p[0], pr.f)).collect();
+                let chain: Vec<(&Proj, &Phased)> = st.projs.iter().zip(&phs).collect();
+                let full = search_full(&p, &st).score;
+                for tau in [0.3, 0.5, full - 0.02, full + 1e-3] {
+                    let mut budget = usize::MAX;
+                    let c = certify(&p, &chain, &st, tau, &mut budget);
+                    match c {
+                        Cert::Above(v) => assert!(full >= tau && v >= tau && v <= full + 1e-9),
+                        Cert::Below => assert!(full < tau, "case {case} tau {tau}: full {full}"),
+                        Cert::Unknown => panic!("unbounded budget"),
+                    }
+                }
+                // no budget: any window that needs an exact score stops it
+                if full >= 0.5 {
+                    assert_eq!(certify(&p, &chain, &st, full - 0.02, &mut 0), Cert::Unknown);
+                }
+            }
+        }
+    }
+
+    /// Two present words, VICTORY and DEFEAT, in one region: the exhaustive
+    /// read is suspect (no margin). If the fast search under-read DEFEAT,
+    /// its scores alone would say sure; the certification finds DEFEAT and
+    /// flags the read. With no budget for exact scores it is flagged too.
+    #[test]
+    fn an_under_read_runner_up_never_makes_a_read_sure() {
+        let title = Layout::new(END_TITLE, [0.40, 0.40, 0.62, 0.56], Plane::Max);
+        let (a, b) = (glyphs(601, 100, 48), glyphs(602, 90, 48));
+        let t = ResultTemplates::from_templates(vec![
+            (title.clone(), Outcome::Victory, a.clone()),
+            (title.clone(), Outcome::Defeat, b.clone()),
+        ])
+        .unwrap();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut img, 1050, 600, &a, [240, 240, 240]);
+        paint_at(&mut img, 1290, 650, &b, [240, 240, 240]);
+        let exhaustive = t.read_exhaustive(&img);
+        assert!(exhaustive.suspect, "{exhaustive:?}");
+        let mut regions = t.regions(&img);
+        let fast = t.scores_in(&regions, false);
+        assert!(
+            fast[1].score > 0.9,
+            "the fast search finds DEFEAT: {fast:?}"
+        );
+        // the same frame, as if the fast search had missed DEFEAT
+        let mut under = fast.clone();
+        under[1].score = 0.2;
+        let uncertified = t.decide(&under);
+        assert!(
+            !uncertified.suspect,
+            "the fast scores alone: {uncertified:?}"
+        );
+        let r = t.settle(&mut regions, under.clone(), CERT_MACS);
+        assert!(r.suspect, "{r:?}");
+        assert!(r.margin < MARGIN, "{r:?}");
+        let r = t.settle(&mut regions, under, 0);
+        assert!(r.suspect, "no budget: {r:?}");
+        // DEFEAT gone: the read is sure and stays sure
+        let mut one = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint_at(&mut one, 1050, 600, &a, [240, 240, 240]);
+        let r = t.read(&one);
+        assert!(r.outcome == Some(Outcome::Victory) && !r.suspect, "{r:?}");
+        assert_eq!(r, t.read_exhaustive(&one));
+    }
+
+    /// Random blocks of ink, a third kind of synthetic word.
+    fn blobs(seed: u64, w: usize, h: usize) -> Gray {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9) | 1);
+        let mut g = Gray::new(w, h);
+        for _ in 0..(w / 6).max(4) {
+            let (bw, bh) = (
+                2 + rng.next(10) as usize,
+                2 + rng.next((h / 2) as u64) as usize,
+            );
+            let (x0, y0) = (
+                rng.next((w - bw) as u64) as usize,
+                rng.next((h - bh) as u64) as usize,
+            );
+            for y in y0..y0 + bh {
+                for x in x0..x0 + bw {
+                    g.px[y * w + x] = 0.9;
+                }
+            }
+        }
+        g
+    }
+
+    /// Parity stress, run by hand: `O1_STRESS_CASES` (600), `O1_STRESS_SEED`,
+    /// `O1_PEAKS` and `O1_KEPT` (the shipped values) in a release test build.
+    /// Random word kind (glyphs, thin bars, blobs), template size, region
+    /// size, scale, noise, ink, 1 to 3 distractors, sometimes a blocky decoy;
+    /// three templates at the three search scales per case. Prints the
+    /// present matches the fast search missed, by kept variance.
+    #[test]
+    #[ignore]
+    fn fast_search_stress() {
+        let env = |k: &str| std::env::var(k).ok();
+        let n: usize = env("O1_STRESS_CASES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600);
+        let seed: u64 = env("O1_STRESS_SEED")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let peaks: usize = env("O1_PEAKS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PEAKS);
+        let kept: f64 = env("O1_KEPT")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MIN_KEPT);
+        let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+        let (mut present, mut miss, mut miss_hi, mut stacks) = (0usize, 0usize, 0usize, 0usize);
+        let make = |kind: u64, sd: u64, w: usize, h: usize| match kind {
+            0 => glyphs(sd, w, h),
+            1 => word(1 + (sd % 9) as u32, w, h),
+            _ => blobs(sd, w, h),
+        };
+        for case in 0..n {
+            let kind = rng.next(3);
+            let (tw, th) = (60 + rng.next(121) as usize, 24 + rng.next(37) as usize);
+            let base = seed * 100_000 + case as u64 * 10;
+            let tpls = [
+                make(kind, base, tw, th),
+                make(rng.next(3), base + 1, tw * 9 / 10, th),
+                make(rng.next(3), base + 2, tw * 11 / 10, th),
+            ];
+            let (rw, rh) = (
+                tw * 12 / 10 + 8 + rng.next(tw as u64) as usize,
+                th * 12 / 10 + 6 + rng.next(th as u64) as usize,
+            );
+            let mut g = Gray::new(rw, rh);
+            let (bg, amp) = (rng.next(60) as f32 / 255.0, 1 + rng.next(60));
+            for v in g.px.iter_mut() {
+                *v = bg + rng.next(amp) as f32 / 255.0;
+            }
+            let mut draw = |t: &Gray, rng: &mut Rng, blocky: bool| {
+                let sc = SCALES[rng.next(3) as usize];
+                let w = ((t.w as f64 * sc).round() as usize).min(rw);
+                let h = ((t.h as f64 * sc).round() as usize).min(rh);
+                let mut st = t.resize(w, h);
+                if blocky {
+                    let f = 4;
+                    for y in 0..h {
+                        for x in 0..w {
+                            st.px[y * w + x] =
+                                t.at(((x / f) * f).min(t.w - 1), ((y / f) * f).min(t.h - 1));
+                        }
+                    }
+                }
+                let ink = 0.45 + rng.next(55) as f32 / 100.0;
+                let (x0, y0) = (
+                    rng.next((rw - w + 1) as u64) as usize,
+                    rng.next((rh - h + 1) as u64) as usize,
+                );
+                for y in 0..h {
+                    for x in 0..w {
+                        let a = (st.at(x, y) / 0.9).min(1.0);
+                        let p = &mut g.px[(y0 + y) * rw + x0 + x];
+                        *p = (*p * (1.0 - a) + ink * a).min(1.0);
+                    }
+                }
+            };
+            for _ in 0..1 + rng.next(3) {
+                let k = 1 + rng.next(2) as usize;
+                draw(&tpls[k], &mut rng, false);
+            }
+            if rng.next(3) == 0 {
+                draw(&tpls[0], &mut rng, true);
+            }
+            draw(&tpls[0], &mut rng, false);
+            let p = pyramid(g);
+            for tpl in &tpls {
+                for sc in SCALES {
+                    let (w, h) = (
+                        ((tpl.w as f64 * sc).round_ties_even() as usize).max(1),
+                        ((tpl.h as f64 * sc).round_ties_even() as usize).max(1),
+                    );
+                    let Some(st) = Stack::with_kept(&tpl.resize(w, h), kept) else {
+                        continue;
+                    };
+                    stacks += 1;
+                    let fast = search_fast_with(&p, &st, peaks, REFINE_FIRST, REFINE);
+                    let full = search_full(&p, &st);
+                    assert!(fast.score <= full.score + 1e-9);
+                    if full.score >= PRESENT as f64 {
+                        present += 1;
+                        if full.score - fast.score > 1e-9 {
+                            miss += 1;
+                            let k = st.levels.last().unwrap().var() / st.levels[0].var();
+                            if k >= 0.84 {
+                                miss_hi += 1;
+                            }
+                            eprintln!(
+                                "MISS case {case} kind {kind} levels {} kept {k:.2} full {:.3} fast {:.3}",
+                                st.levels.len(),
+                                full.score,
+                                fast.score
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "STRESS seed {seed} cases {n} stacks {stacks} peaks {peaks} kept {kept}: present {present} miss {miss} (kept>=0.84: {miss_hi})"
+        );
+    }
+
+    /// F253-2: `MIN_KEPT` decides the depth. This glyph word keeps between
+    /// 0.6 and 0.8 of its variance at 4x: the shipped rule stops it at 2x,
+    /// where the stress runs found no misses, and a 0.6 rule would not.
+    #[test]
+    fn min_kept_stops_a_word_that_blurs_at_4x() {
+        let g = glyphs(1, 120, 50);
+        let (mut w, mut h, mut px) = (g.w, g.h, g.px.clone());
+        for _ in 0..2 {
+            (w, h, px) = half(w, h, &px);
+        }
+        let kept =
+            Kernel::new(w, h, &px).unwrap().var() / Kernel::new(g.w, g.h, &g.px).unwrap().var();
+        assert!((0.6..0.8).contains(&kept), "{kept}");
+        assert_eq!(Stack::new(&g).unwrap().levels.len(), 2);
+        assert_eq!(Stack::with_kept(&g, 0.6).unwrap().levels.len(), 3);
+    }
+
+    /// A sharp, noisy word and `n` blocky decoys (each the template itself
+    /// on the coarse level) in one region. Returns the region and stack.
+    fn decoy_region(seed: u64, n: usize) -> (Vec<Level>, Stack) {
+        let mut rng = Rng(seed);
+        let t = glyphs(seed + 70, 100, 48);
+        let st = Stack::new(&t).unwrap();
+        let top = st.levels.len() - 1;
+        let f = 1usize << top;
+        let (mut cw, mut ch, mut cpx) = (t.w, t.h, t.px.clone());
+        for _ in 0..top {
+            (cw, ch, cpx) = half(cw, ch, &cpx);
+        }
+        let step = (t.w + 3 * f).next_multiple_of(f);
+        let (rw, rh) = ((n + 1) * step + 4 * f, (t.h + 4 * f).next_multiple_of(f));
+        let mut g = Gray::new(rw, rh);
+        let (sx, sy) = (2 * f, 2 * f);
+        for y in 0..t.h {
+            for x in 0..t.w {
+                g.px[(sy + y) * rw + sx + x] = t.at(x, y) * 0.8 + rng.next(60) as f32 / 255.0;
+            }
+        }
+        for d in 0..n {
+            let (dx, dy) = (sx + (d + 1) * step, f + f * (d % 2));
+            for y in 0..ch * f {
+                for x in 0..cw * f {
+                    g.px[(dy + y) * rw + dx + x] = cpx[(y / f) * cw + x / f] * 0.8;
+                }
+            }
+        }
+        (pyramid(g), st)
+    }
+
+    /// F253-2: with 8 decoys ahead of the sharp word on the coarse level
+    /// (each takes one peak), 6 or 8 peaks do not reach it; the shipped 12 do.
+    #[test]
+    fn fast_search_refines_past_eight_decoys() {
+        for seed in [11, 12, 13] {
+            let (p, st) = decoy_region(seed, 8);
+            let full = search_full(&p, &st).score;
+            let fast = search_fast(&p, &st).score;
+            assert!(
+                (fast - full).abs() < 1e-9,
+                "{seed}: fast {fast} full {full}"
+            );
+            for peaks in [6, 8] {
+                let few = search_fast_with(&p, &st, peaks, REFINE_FIRST, REFINE).score;
+                assert!(few < full - 1e-6, "{seed}: {peaks} peaks {few} full {full}");
+            }
+        }
+    }
+
+    /// One region and its two 3-level stacks, from a seed (the cases below
+    /// were found by a search over seeds).
+    fn refine_case(seed: u64) -> (Vec<Level>, Vec<Stack>) {
+        let mut rng = Rng(seed * 7919 + 1);
+        let (tw, th) = [(100, 48), (120, 50), (140, 64)][(seed % 3) as usize];
+        let t = if seed.is_multiple_of(2) {
+            glyphs(seed, tw, th)
+        } else {
+            blobs(seed, tw, th)
+        };
+        let other = glyphs(seed + 9999, tw * 9 / 10, th);
+        let p = pyramid(random_region(&mut rng, &t, &other, tw + 60, th + 40));
+        let stacks = [&t, &other]
+            .into_iter()
+            .filter_map(|g| Stack::with_kept(g, TEST_KEPT))
+            .filter(|st| st.levels.len() == 3)
+            .collect();
+        (p, stacks)
+    }
+
+    /// F253-9: the refine windows are load-bearing. Seed 5 needs the ±3
+    /// window on the first finer level (±2 misses it), seed 1116 needs ±2
+    /// on the last (±1 misses it, with ±3 first), and seed 1449 misses with
+    /// ±1 on both. The shipped windows find all three.
+    #[test]
+    fn the_refine_windows_are_pinned() {
+        for (seed, narrow) in [(5, (2, 2)), (1116, (3, 1)), (1449, (1, 1))] {
+            let (p, stacks) = refine_case(seed);
+            let mut missed = false;
+            for st in &stacks {
+                let full = search_full(&p, st).score;
+                let fast = search_fast(&p, st).score;
+                assert!(
+                    (fast - full).abs() < 1e-9,
+                    "{seed}: fast {fast} full {full}"
+                );
+                let n = search_fast_with(&p, st, PEAKS, narrow.0, narrow.1).score;
+                missed |= full >= PRESENT as f64 && n < full - 1e-6;
+            }
+            assert!(missed, "{seed}: the narrower windows {narrow:?} miss");
+        }
+    }
+
+    /// Frames without a word: the fast search finds nothing above the
+    /// exhaustive search.
+    #[test]
+    fn fast_search_finds_nothing_more_on_noise() {
+        let mut rng = Rng(77);
+        for (k, &(tw, th, rw, rh)) in SIZES.iter().enumerate() {
+            let mut g = Gray::new(rw, rh);
+            for v in g.px.iter_mut() {
+                *v = rng.next(256) as f32 / 255.0;
+            }
+            let p = pyramid(g);
+            let st = Stack::new(&word(k as u32 + 1, tw, th)).unwrap();
+            let (fast, full) = (search_fast(&p, &st), search_full(&p, &st));
+            assert!(fast.score <= full.score + 1e-9, "{k}: {fast:?} {full:?}");
+            assert!(full.score < PRESENT as f64, "{k}: {full:?}");
+        }
+    }
+
+    /// Whole frames at 1440p and 1080p: the fast read is the exhaustive read.
+    #[test]
+    fn fast_reads_are_the_exhaustive_reads() {
+        let title = Layout::new(END_TITLE, [0.43, 0.43, 0.55, 0.53], Plane::Max);
+        let t = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 149, 32)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 123, 31)),
+            (title.clone(), Outcome::Victory, word(9, 100, 48)),
+            (title.clone(), Outcome::Defeat, word(4, 90, 48)),
+        ])
+        .unwrap();
+        let accolade = lay(ACCOLADE);
+        let frames = [
+            (&accolade, 1, 149, 32, [255, 220, 0], 90, 60, false),
+            (&accolade, 3, 123, 31, [150, 20, 160], 300, 52, true),
+            (&title, 9, 100, 48, [240, 240, 240], 1150, 640, true),
+            (&title, 4, 90, 48, [40, 200, 255], 1120, 650, false),
+        ];
+        for (k, (layout, seed, w, h, colour, x0, y0, shrink)) in frames.into_iter().enumerate() {
+            let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+            paint_at(&mut img, x0, y0, &word(seed, w, h), colour);
+            if shrink {
+                img = image::imageops::resize(
+                    &img,
+                    1920,
+                    1080,
+                    image::imageops::FilterType::Triangle,
+                );
+            }
+            let r = t.read(&img);
+            assert_eq!(r, t.read_exhaustive(&img), "frame {k}");
+            assert!(r.outcome.is_some() && !r.suspect, "frame {k}: {r:?}");
+            assert_eq!(r.source.as_deref(), Some(layout.id.as_str()), "frame {k}");
+        }
+    }
+
+    /// The point of the fast search: on the words-v1 end-title region with
+    /// end-title-sized templates it does about 1% of the exhaustive work
+    /// (the exhaustive count is the window count times the template area).
+    #[test]
+    fn fast_search_does_a_small_fraction_of_the_work() {
+        let wide = Layout::new(END_TITLE, [0.30, 0.30, 0.70, 0.62], Plane::Max);
+        let t = glyphs(4, 279, 100);
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([30, 30, 40]));
+        paint_at(&mut img, 900, 640, &t, [240, 240, 240]);
+        let p = region(&img, wide.roi, wide.plane).unwrap();
+        let st = Stack::new(&t).unwrap();
+        assert_eq!(st.levels.len(), 3);
+        let (k, r) = (&st.levels[0], &p[0]);
+        let full = (r.w - k.w + 1) * (r.h - k.h + 1) * k.w * k.h;
+        let fast = search_fast(&p, &st);
+        assert!(fast.macs * 50 < full, "fast {} full {full}", fast.macs);
+        assert!(fast.score > 0.95, "{fast:?}");
+    }
+
+    // ------------------------------------------------ folders and reload
+
+    fn pack(dir: &Path, victory_seed: u32) {
+        write_pack(
+            dir,
+            &[
+                ("accolade_victory.png", &word(victory_seed, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+            ],
+        );
+    }
+
+    /// A frame with `word(seed)` on the accolade screen.
+    fn accolade_frame(seed: u32) -> RgbImage {
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint(&mut img, &lay(ACCOLADE), &word(seed, 70, 30), [255, 220, 0]);
+        img
+    }
+
+    /// Which pack the live templates came from, and whether they read
+    /// `word(seed)` as VICTORY.
+    fn reads_victory(live: &LiveResults, seed: u32) -> (Option<ResultPack>, bool) {
+        let cur = live.current();
+        let ok = cur.as_ref().is_some_and(|l| {
+            let r = l.templates.read(&accolade_frame(seed));
+            r.outcome == Some(Outcome::Victory) && !r.suspect
+        });
+        (cur.map(|l| l.pack), ok)
+    }
+
+    #[test]
+    fn words_v1_is_preferred_over_the_old_folder() {
+        let data = tempfile::tempdir().unwrap();
+        pack(&data.path().join(WORDS_SUBDIR), 1);
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 1), (Some(ResultPack::WordsV1), true));
+        assert!(!reads_victory(&live, 5).1, "old folder not used");
+    }
+
+    #[test]
+    fn the_old_folder_is_the_fallback() {
+        let data = tempfile::tempdir().unwrap();
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        // a words-v1 folder without a DEFEAT template does not load either
+        let data = tempfile::tempdir().unwrap();
+        write_pack(
+            &data.path().join(WORDS_SUBDIR),
+            &[("accolade_victory.png", &word(1, 70, 30))],
+        );
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        // neither folder: no templates
+        let empty = tempfile::tempdir().unwrap();
+        let live = LiveResults::load(ResultDirs::in_data_dir(empty.path()));
+        assert!(live.current().is_none());
+    }
+
+    /// Install words-v1 the way pack sync does: staging folder, then swap.
+    fn swap_in_words(data: &Path, victory_seed: u32) {
+        let staging = data.join(format!("templates/.words-v1-staging-{victory_seed}"));
+        pack(&staging, victory_seed);
+        crate::packs::swap_dir(&staging, &data.join(WORDS_SUBDIR)).unwrap();
+    }
+
+    #[test]
+    fn words_v1_is_picked_up_after_it_is_swapped_in() {
+        let data = tempfile::tempdir().unwrap();
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        live.wait_reload();
+        assert_eq!(live.reload_spawns(), 0, "no change, no reload");
+        swap_in_words(data.path(), 1);
+        // this read keeps the templates it has; the load runs aside
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 1), (Some(ResultPack::WordsV1), true));
+        // a newer words-v1 over the installed one
+        swap_in_words(data.path(), 7);
+        live.current();
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 7), (Some(ResultPack::WordsV1), true));
+        assert_eq!(live.reload_spawns(), 2);
+    }
+
+    /// F253-8: a change to the old `templates/result/` folder alone is
+    /// picked up too (the stamp covers both folders).
+    #[test]
+    fn a_new_legacy_folder_is_picked_up() {
+        let data = tempfile::tempdir().unwrap();
+        let legacy = data.path().join(TEMPLATE_SUBDIR);
+        pack(&legacy, 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        let staging = data.path().join("templates/.result-staging");
+        pack(&staging, 7);
+        crate::packs::swap_dir(&staging, &legacy).unwrap();
+        live.current();
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 7), (Some(ResultPack::Legacy), true));
+        assert_eq!(live.reload_spawns(), 1);
+    }
+
+    /// A slow load never holds up a read, and only one load runs at a time.
+    #[test]
+    fn a_reload_never_blocks_a_read() {
+        let data = tempfile::tempdir().unwrap();
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        live.set_load_delay_ms(400);
+        swap_in_words(data.path(), 1);
+        let t0 = std::time::Instant::now();
+        for _ in 0..50 {
+            assert_eq!(
+                live.current().map(|l| l.pack),
+                Some(ResultPack::Legacy),
+                "load still in flight"
+            );
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_millis(300));
+        assert_eq!(live.reload_spawns(), 1);
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 1), (Some(ResultPack::WordsV1), true));
+    }
+
+    /// A load that saw a swap is thrown away (never a mix of two packs), and
+    /// a later read loads again.
+    #[test]
+    fn a_load_that_saw_a_swap_is_discarded() {
+        let data = tempfile::tempdir().unwrap();
+        pack(&data.path().join(TEMPLATE_SUBDIR), 5);
+        let live = LiveResults::load(ResultDirs::in_data_dir(data.path()));
+        swap_in_words(data.path(), 1);
+        let path = data.path().to_path_buf();
+        live.during_next_load(move || swap_in_words(&path, 7));
+        assert_eq!(reads_victory(&live, 5).0, Some(ResultPack::Legacy));
+        live.wait_reload();
+        // nothing was installed; this read keeps the old folder and retries
+        assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
+        live.wait_reload();
+        assert_eq!(reads_victory(&live, 7), (Some(ResultPack::WordsV1), true));
+        assert_eq!(live.reload_spawns(), 2);
     }
 }

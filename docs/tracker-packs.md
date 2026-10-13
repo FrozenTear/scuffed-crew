@@ -86,7 +86,7 @@ entry:
 | `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
-| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | nothing yet |
+| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames (hand-installed `templates/result/` is the fallback) |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is

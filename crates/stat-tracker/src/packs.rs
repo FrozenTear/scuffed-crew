@@ -14,8 +14,9 @@
 //! `heroes-v2-1080.tar` use the same layout; the new reader prefers them
 //! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]).
 //! `maps-v1.tar` is the new reader's map banner pack
-//! ([`crate::shadow::banner::MapDirs`]). The other packs are downloaded into
-//! folders no reader opens yet.
+//! ([`crate::shadow::banner::MapDirs`]) and `words-v1.tar` its result word
+//! pack ([`crate::shadow::result::ResultDirs`]). The other packs are
+//! downloaded into folders no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -1170,6 +1171,14 @@ fn is_key_byte(byte: u8) -> bool {
 /// Word ids: lowercase, digits and `_`.
 fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+}
+
+/// A word id the words-v1 layout allows as a file stem: 1 to 64 of `a-z`,
+/// `0-9`, `_`. No separator, no `..`, never absolute. The result reader
+/// checks layout ids from a pack's `layouts.json` with this before it joins
+/// them into a path.
+pub(crate) fn is_word_id(stem: &str) -> bool {
+    !stem.is_empty() && stem.len() <= MAX_STEM && stem.bytes().all(is_word_byte)
 }
 
 /// `g` plus four lowercase hex digits, then `.png`.
@@ -2430,14 +2439,15 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: only the hero packs and maps-v1 land in a
-        // folder a reader opens. The hand-installed maps folder is not a pack
-        // folder.
+        // Reader neutrality: only the hero packs, maps-v1 and words-v1 land
+        // in a folder a reader opens. The hand-installed maps and result
+        // folders are not pack folders.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
             crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
             crate::shadow::heroes::TEMPLATE_SUBDIR_V2_1080,
             crate::shadow::result::TEMPLATE_SUBDIR,
+            crate::shadow::result::WORDS_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR_V1,
         ];
@@ -2452,7 +2462,11 @@ mod tests {
                 used_by_reader,
                 matches!(
                     spec.name,
-                    HEROES_PACK_NAME | "heroes-v2.tar" | "heroes-v2-1080.tar" | "maps-v1.tar"
+                    HEROES_PACK_NAME
+                        | "heroes-v2.tar"
+                        | "heroes-v2-1080.tar"
+                        | "maps-v1.tar"
+                        | "words-v1.tar"
                 ),
                 "{}",
                 spec.name
@@ -2461,6 +2475,12 @@ mod tests {
                 dir,
                 data.join(crate::shadow::banner::TEMPLATE_SUBDIR),
                 "{} would overwrite a hand-installed map pack",
+                spec.name
+            );
+            assert_ne!(
+                dir,
+                data.join(crate::shadow::result::TEMPLATE_SUBDIR),
+                "{} would overwrite hand-installed result templates",
                 spec.name
             );
         }

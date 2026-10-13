@@ -4584,6 +4584,11 @@ struct InjectedCapture {
 #[cfg(test)]
 static INJECTED_CAPTURE: std::sync::Mutex<Option<InjectedCapture>> = std::sync::Mutex::new(None);
 
+/// Held by each test that injects a capture, so two such tests never take
+/// each other's injection.
+#[cfg(test)]
+static INJECTED_CAPTURE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)> {
     #[cfg(test)]
     {
@@ -9005,6 +9010,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_capture_new_reader_keeps_11_when_the_next_read_is_1() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         fn stat_rows(elims: u32) -> Vec<ocr::RowOcrResult> {
             let values = [
                 elims.to_string(),
@@ -9149,6 +9155,153 @@ mod tests {
         let saved = ctx.store.get_session_snapshots("held-11").await.unwrap();
         let elims: Vec<u32> = saved.iter().map(|row| row.elims).collect();
         assert_eq!(elims, vec![11, 11], "a read of 1 must not replace 11");
+    }
+
+    /// O1: the same capture, with a sure result in the match's word
+    /// evidence, stores that result only with `reader = "new"`. With the
+    /// default `ocr-v1` the stored row is ocr-v1's, whatever the evidence.
+    #[tokio::test]
+    async fn result_evidence_is_saved_only_with_the_new_reader() {
+        use shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, ResultRead};
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let sure = |src: &str| ResultRead {
+            outcome: Some(Outcome::Defeat),
+            source: Some(src.into()),
+            score: 0.97,
+            margin: 0.6,
+            suspect: false,
+        };
+        let rows = || -> Vec<ocr::RowOcrResult> {
+            (0..10)
+                .map(|_| ocr::RowOcrResult {
+                    name: Some(ocr::CellOcrResult {
+                        value: "PLAYER".into(),
+                        confidence: 80,
+                        suspect: false,
+                    }),
+                    name_alternates: Vec::new(),
+                    stats: ["7", "4", "2", "3000", "800", "400"]
+                        .iter()
+                        .map(|value| ocr::CellOcrResult {
+                            value: (*value).into(),
+                            confidence: 90,
+                            suspect: false,
+                        })
+                        .collect(),
+                    mean_confidence: 90,
+                })
+                .collect()
+        };
+        let analysis = || {
+            let frame = image::DynamicImage::new_rgb8(64, 64);
+            FrameAnalysis {
+                frame_outcome: detect::MatchOutcome::Unknown,
+                ocr: Ok(ocr::OcrResult {
+                    raw_text: "Ana\nBusan".into(),
+                    confidence: 80,
+                }),
+                rows: rows(),
+                portrait_hero: None,
+                career_hero: None,
+                map_from_panel: Some("Busan".into()),
+                map_panel_raw: Some("BUSAN".into()),
+                scoreboard: std::sync::Arc::new(frame.clone()),
+                player_row_idx: Some(0),
+                name_match: None,
+                team_size: 5,
+                frame,
+                shadow_input: None,
+                map_from_banner: false,
+                banner: None,
+            }
+        };
+        let mut fields = vec![shadow::FieldRead {
+            name: "result".into(),
+            value: None,
+            confidence: 0.0,
+            suspect: true,
+        }];
+        for (suffix, value) in [
+            ("e", 7),
+            ("a", 4),
+            ("d", 2),
+            ("dmg", 3000),
+            ("h", 800),
+            ("mit", 400),
+        ] {
+            fields.push(shadow::FieldRead {
+                name: format!("r0.{suffix}"),
+                value: Some(shadow::Value::Int(value)),
+                confidence: 0.9,
+                suspect: false,
+            });
+        }
+        let board = shadow::BoardRead {
+            status: shadow::BoardStatus::Read,
+            team_size: Some(5),
+            fields,
+            elapsed_ms: 1,
+        };
+        let mut stored = Vec::new();
+        for use_new_reader in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let ctx = DaemonCtx {
+                backend: capture::CaptureBackend::None,
+                store: store.clone(),
+                sync_client: None,
+                player_name: None,
+                capture_output: None,
+                auto_detect: config::AutoDetectConfig::default(),
+                finished_game_close: Duration::from_secs(90),
+                game_process_names: Vec::new(),
+                portrait_matcher: std::sync::Arc::new(
+                    detect::hero_portrait::PortraitMatcher::load(dir.path()),
+                ),
+                collect_portraits: false,
+                dump_poll_frames: false,
+                debug_ocr: false,
+                data_dir: dir.path().to_path_buf(),
+                empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
+                shadow: None,
+                use_new_reader,
+            };
+            let now = test_now();
+            let mut active = game(detect::MatchOutcome::Unknown, None, now);
+            active.session_id = "o1-result".into();
+            active.map = Some("Busan".into());
+            active.map_source = Some(boundary::MapSource::TopBar);
+            active.session_created = false;
+            active.result_evidence.add(sure(RANK_SCREEN));
+            active.result_evidence.add(sure(ACCOLADE));
+            let mut st = session(Some(active), now);
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+                analysis: analysis(),
+                board: Some(board.clone()),
+            });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(&ctx, req).await.unwrap();
+            assert!(report.recorded);
+            apply_capture_report(
+                &mut st,
+                &ctx.store,
+                &ctx.data_dir,
+                "o1-result",
+                Ok(report),
+                now,
+            )
+            .await;
+            let saved = ctx.store.get_session_snapshots("o1-result").await.unwrap();
+            assert_eq!(saved.len(), 1);
+            stored.push((saved[0].outcome.clone(), saved[0].recognizer.clone()));
+        }
+        assert_ne!(
+            stored[0].0, "defeat",
+            "ocr-v1 ignores the evidence: {stored:?}"
+        );
+        assert_eq!(stored[0].1, scuffed_types::RECOGNIZER_OCR_V1);
+        assert_eq!(stored[1].0, "defeat", "{stored:?}");
+        assert_eq!(stored[1].1, shadow::digits::RECOGNIZER_ID);
     }
 
     #[tokio::test]
