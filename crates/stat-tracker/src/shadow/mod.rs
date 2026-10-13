@@ -24,7 +24,7 @@ pub mod result;
 pub mod worker;
 
 pub use reader::{
-    BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, TopBarMap, Value,
-    field_names, init, map_name, read_banner, read_board, read_board_with_banner, read_result,
-    read_top_bar, result_field, suspect_field_names, top_bar_map,
+    BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, TabHeroes, TopBarMap, Value,
+    field_names, init, map_name, read_banner, read_board, read_board_with, read_board_with_banner,
+    read_heroes, read_result, read_top_bar, result_field, suspect_field_names, top_bar_map,
 };
