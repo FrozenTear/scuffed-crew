@@ -6024,6 +6024,9 @@ mod tests {
         wakes: Vec<Duration>,
         /// The run is given up when the clock would pass this.
         limit: Duration,
+        /// How many waits were asked for. A job that asks for more than
+        /// [`SimClock::MAX_SLEEPS`] is spinning, and the run is given up.
+        sleeps: usize,
         ran_out: bool,
     }
 
@@ -6048,6 +6051,8 @@ mod tests {
     }
 
     impl SimClock {
+        const MAX_SLEEPS: usize = 1000;
+
         fn new(actors: usize, limit: Duration) -> Arc<Self> {
             Arc::new(Self {
                 state: Mutex::new(SimState {
@@ -6055,6 +6060,7 @@ mod tests {
                     awake: actors,
                     wakes: Vec::new(),
                     limit,
+                    sleeps: 0,
                     ran_out: false,
                 }),
                 moved: tokio::sync::Notify::new(),
@@ -6072,6 +6078,10 @@ mod tests {
                 let wake = state.now + wait;
                 state.wakes.push(wake);
                 state.awake -= 1;
+                state.sleeps += 1;
+                if state.sleeps > Self::MAX_SLEEPS {
+                    state.ran_out = true;
+                }
                 state.settle();
                 wake
             };
@@ -6213,7 +6223,8 @@ mod tests {
     }
 
     /// Run the trackers to the end. `false` when the clock reached its
-    /// limit with a tracker still not done.
+    /// limit, or a tracker asked for too many waits, with one still not
+    /// done.
     async fn run_trackers(clock: &Arc<SimClock>, trackers: Vec<Nap>) -> bool {
         let handles: Vec<_> = trackers.into_iter().map(tokio::spawn).collect();
         let all = async {
@@ -6367,10 +6378,18 @@ mod tests {
             waits_a.lock().unwrap(),
             waits_b.lock().unwrap()
         );
-        // 14 requests are needed (two lists, twelve packs). The rest are
-        // refused ones, and they must stay few.
+        // 14 requests are needed (two lists, twelve packs). A is refused
+        // once and is done after 71.75 s. B comes second three more times,
+        // waits 12.25, 22.25 and 42.25 s, and then has the bucket to
+        // itself: 5 refused requests in all, both done after 150 s.
         assert_eq!(requests - refused, 14);
-        assert!(refused <= 8, "{refused} refused requests");
-        assert!(took <= secs(240), "took {took:?}");
+        assert_eq!(refused, 5);
+        assert_eq!(took, secs(150));
+        let mut expected_a = vec![ms(11_750)];
+        expected_a.extend([secs(10); 6]);
+        assert_eq!(*waits_a.lock().unwrap(), expected_a);
+        let mut expected_b = vec![ms(13_250), ms(12_250), ms(22_250), ms(42_250)];
+        expected_b.extend([secs(10); 6]);
+        assert_eq!(*waits_b.lock().unwrap(), expected_b);
     }
 }
