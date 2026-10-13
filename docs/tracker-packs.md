@@ -172,10 +172,26 @@ version does not reach trackers that already have it.
 
 Packs are fetched one after another, `heroes-v1.tar` first. A first install
 of all six is seven requests (the list and six files), inside the burst of 8
-below. A 401, 403, 429, or `packs_disabled` answer on one download stops the
-packs after it for that run; their folders are kept and the next run tries
-again. The setup guide shows the hero pack's line, plus "Extra reader packs
-ready: N of M." when the server lists any of the other packs.
+below.
+
+- **Daemon start** syncs `heroes-v1.tar` only (the list and one file, as
+  before) and then starts capture. The other five packs are synced in the
+  background with the same list, so capture never waits on them.
+- **Setup guide** ("Download reader pack") syncs all six.
+- **One sync at a time.** A sync holds an exclusive lock on
+  `<data_dir>/templates/.pack-sync.lock` before its first request. A second
+  sync (the daemon and the app at once) sends nothing and reports "A reader
+  pack sync is already running. Try again in a moment." That is not a failure.
+- A 401, 403, 429, or `packs_disabled` answer on one download stops the packs
+  after it for that run. Their folders are kept, a pack that is already
+  current is still reported as current, and the next run tries again.
+- Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
+  `templates/` by a killed sync are removed by the next sync once they are
+  an hour old.
+
+The setup guide shows the hero pack's line, plus "Extra reader packs ready:
+N of M." when the server lists any of the other packs, plus the rate-limit
+sentence when one of them was rate limited.
 
 ## Copy into the volume
 

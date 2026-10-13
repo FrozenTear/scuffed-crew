@@ -20,6 +20,13 @@
 //! bad or failed pack never blocks, rolls back, or deletes another. A pack
 //! the server does not list keeps whatever is installed. The token is never
 //! written to a log.
+//!
+//! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
+//! back [`ExtraPacks`] to run in the background, so capture never waits on a
+//! pack no reader uses. The setup guide ([`sync_reader_packs`]) syncs all of
+//! them. Every run holds an exclusive `flock` on
+//! `templates/.pack-sync.lock`; a second run at the same time is
+//! [`PackSync::Busy`] and sends no request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -140,6 +147,7 @@ pub const PACK_FAILED: &str =
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
 pub const PACK_FORBIDDEN: &str = "The site refused the reader pack (403). Check you're signed in with a member account. The installed pack was left in place.";
 pub const PACK_SIGN_IN: &str = "Sign in first. Then the tracker can download the reader pack.";
+pub const PACK_BUSY: &str = "A reader pack sync is already running. Try again in a moment.";
 
 /// A huge `Retry-After` must not be added to a clock.
 pub fn clamp_retry_after(seconds: u64) -> u64 {
@@ -151,9 +159,12 @@ pub fn rate_limit_seconds(retry_after: Option<u64>) -> u64 {
     clamp_retry_after(retry_after.unwrap_or(RATE_LIMIT_FALLBACK_SECS))
 }
 
+/// Start of every [`rate_limit_message`].
+const RATE_LIMIT_PREFIX: &str = "Too many tries, wait ";
+
 pub fn rate_limit_message(seconds: u64) -> String {
     let seconds = clamp_retry_after(seconds);
-    format!("Too many tries, wait {seconds} seconds and try again")
+    format!("{RATE_LIMIT_PREFIX}{seconds} seconds and try again")
 }
 
 /// Outcome for one pack.
@@ -169,6 +180,9 @@ pub enum PackSync {
     /// The server list does not name this optional pack. Its installed
     /// folder, if any, is kept.
     Missing,
+    /// Another sync (the daemon or the app) holds the pack sync lock. This
+    /// run changed nothing and sent no request. Not a failure.
+    Busy,
     Failed(String),
 }
 
@@ -180,12 +194,21 @@ impl PackSync {
             Self::Unavailable => Ok(PACK_UNAVAILABLE.to_string()),
             Self::Unsupported => Ok(PACK_UNSUPPORTED.to_string()),
             Self::Missing => Ok(PACK_NOT_LISTED.to_string()),
+            Self::Busy => Ok(PACK_BUSY.to_string()),
             Self::Failed(message) => Err(message),
         }
     }
 
     fn is_ready(&self) -> bool {
         matches!(self, Self::Installed | Self::Current)
+    }
+
+    /// The rate-limit sentence, when this is a 429 failure.
+    fn rate_limited(&self) -> Option<&str> {
+        match self {
+            Self::Failed(message) if message.starts_with(RATE_LIMIT_PREFIX) => Some(message),
+            _ => None,
+        }
     }
 }
 
@@ -196,19 +219,23 @@ pub struct PackStatus {
     pub outcome: PackSync,
 }
 
-/// Outcome of one sync: one entry per [`PACKS`] spec, in that order.
+/// Outcome of one sync: one entry per pack the run covered, in [`PACKS`]
+/// order. [`sync_reader_packs`] covers all of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackReport {
     pub packs: Vec<PackStatus>,
 }
 
+/// Reported for a pack a run did not cover.
+static NOT_COVERED: PackSync = PackSync::Missing;
+
 impl PackReport {
-    /// The same outcome for every pack, for failures before any pack is
-    /// looked at (sign-in, list errors).
-    fn all(outcome: PackSync) -> Self {
+    /// The same outcome for every pack in `scope`, for failures before any
+    /// pack is looked at (sign-in, the lock, list errors).
+    fn all(scope: Scope, outcome: PackSync) -> Self {
         Self {
-            packs: PACKS
-                .iter()
+            packs: scope
+                .specs()
                 .map(|spec| PackStatus {
                     name: spec.name,
                     outcome: outcome.clone(),
@@ -225,9 +252,9 @@ impl PackReport {
     }
 
     /// Outcome for `heroes-v1.tar`, the pack the hero reader uses.
+    /// [`PackSync::Missing`] when this run did not cover it.
     pub fn heroes(&self) -> &PackSync {
-        self.get(HEROES_PACK_NAME)
-            .expect("PACKS always holds heroes-v1.tar")
+        self.get(HEROES_PACK_NAME).unwrap_or(&NOT_COVERED)
     }
 
     /// `(ready, listed)` for the packs other than `heroes-v1.tar`. A pack
@@ -253,18 +280,29 @@ impl PackReport {
 
     /// The setup guide line: the `heroes-v1.tar` message, plus a count of
     /// the other packs when the hero pack is ready and the server lists any
-    /// of them. A server that lists only `heroes-v1.tar` gets the alpha.6
-    /// message unchanged.
+    /// of them, plus the rate-limit sentence when one of them hit a 429. A
+    /// server that lists only `heroes-v1.tar` gets the alpha.6 message
+    /// unchanged.
     pub fn guide_result(self) -> Result<String, String> {
         let heroes = self.heroes().clone();
         let ready_heroes = heroes.is_ready();
         let (ready, listed) = self.extras_ready();
         let message = heroes.guide_result()?;
-        if ready_heroes && listed > 0 {
-            Ok(format!("{message} {}", extra_packs_message(ready, listed)))
-        } else {
-            Ok(message)
+        if !(ready_heroes && listed > 0) {
+            return Ok(message);
         }
+        let mut line = format!("{message} {}", extra_packs_message(ready, listed));
+        let limited = self
+            .packs
+            .iter()
+            .filter(|status| status.name != HEROES_PACK_NAME)
+            .find_map(|status| status.outcome.rate_limited());
+        if let Some(limited) = limited {
+            line.push(' ');
+            line.push_str(limited);
+            line.push('.');
+        }
+        Ok(line)
     }
 }
 
@@ -272,15 +310,32 @@ pub fn extra_packs_message(ready: usize, listed: usize) -> String {
     format!("Extra reader packs ready: {ready} of {listed}.")
 }
 
-/// Daemon startup. Logs a plain warning on failure and never the token.
-pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) {
-    let report = sync_reader_packs(server_url, token, data_dir, PACK_MAX_BYTES).await;
+/// Which packs one run covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    All,
+    HeroesOnly,
+    ExtrasOnly,
+}
+
+impl Scope {
+    fn specs(self) -> impl Iterator<Item = &'static PackSpec> {
+        PACKS.iter().filter(move |spec| match self {
+            Self::All => true,
+            Self::HeroesOnly => spec.name == HEROES_PACK_NAME,
+            Self::ExtrasOnly => spec.name != HEROES_PACK_NAME,
+        })
+    }
+}
+
+fn log_report(report: &PackReport) {
     for status in &report.packs {
         let pack = status.name;
         match &status.outcome {
             PackSync::Installed => tracing::info!(pack, "reader pack installed"),
             PackSync::Current | PackSync::Unavailable => {}
             PackSync::Missing => tracing::debug!(pack, "reader pack not listed by the server"),
+            PackSync::Busy => tracing::info!(pack, "another reader pack sync is running"),
             PackSync::Unsupported => {
                 tracing::info!(pack, "reader packs are not supported on this server yet");
             }
@@ -291,48 +346,133 @@ pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) {
     }
 }
 
+/// Daemon startup. Syncs `heroes-v1.tar` only, the same two requests as
+/// alpha.6, so capture waits on nothing new. The other packs come back as
+/// [`ExtraPacks`] for the caller to run in the background once capture is
+/// up. `None` when the list was not read (signed out, list error, busy).
+/// Logs a plain warning on failure and never the token.
+pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> Option<ExtraPacks> {
+    sync_on_startup_capped(server_url, token, data_dir, PACK_MAX_BYTES).await
+}
+
+async fn sync_on_startup_capped(
+    server_url: &str,
+    token: &str,
+    data_dir: &Path,
+    max_bytes: u64,
+) -> Option<ExtraPacks> {
+    let (report, entries) = run_sync(
+        server_url,
+        token,
+        data_dir,
+        max_bytes,
+        Scope::HeroesOnly,
+        None,
+    )
+    .await;
+    log_report(&report);
+    entries.map(|entries| ExtraPacks {
+        server_url: server_url.to_string(),
+        token: token.to_string(),
+        data_dir: data_dir.to_path_buf(),
+        max_bytes,
+        entries,
+    })
+}
+
+/// The packs other than `heroes-v1.tar`, still to sync after daemon
+/// startup. No reader uses them yet, so they never hold up capture. Reuses
+/// the startup list, so a first install is still seven requests in all.
+/// Holds the token; it has no `Debug` so the token cannot reach a log.
+pub struct ExtraPacks {
+    server_url: String,
+    token: String,
+    data_dir: PathBuf,
+    max_bytes: u64,
+    entries: Vec<PackListEntry>,
+}
+
+impl ExtraPacks {
+    /// Sync the extra packs and log each outcome. Meant for `tokio::spawn`.
+    pub async fn run(self) {
+        let report = self.sync().await;
+        log_report(&report);
+    }
+
+    async fn sync(self) -> PackReport {
+        run_sync(
+            &self.server_url,
+            &self.token,
+            &self.data_dir,
+            self.max_bytes,
+            Scope::ExtrasOnly,
+            Some(self.entries),
+        )
+        .await
+        .0
+    }
+}
+
+/// Every pack, as the setup guide's "Download reader pack" runs it.
 pub async fn sync_reader_packs(
     server_url: &str,
     token: &str,
     data_dir: &Path,
     max_bytes: u64,
 ) -> PackReport {
+    run_sync(server_url, token, data_dir, max_bytes, Scope::All, None)
+        .await
+        .0
+}
+
+/// One run over `scope`. `listed` reuses a list already fetched. Returns the
+/// report and the list it used, when it got one.
+async fn run_sync(
+    server_url: &str,
+    token: &str,
+    data_dir: &Path,
+    max_bytes: u64,
+    scope: Scope,
+    listed: Option<Vec<PackListEntry>>,
+) -> (PackReport, Option<Vec<PackListEntry>>) {
     if token.trim().is_empty() || server_url.trim().is_empty() {
-        return PackReport::all(PackSync::Failed(PACK_SIGN_IN.to_string()));
+        let outcome = PackSync::Failed(PACK_SIGN_IN.to_string());
+        return (PackReport::all(scope, outcome), None);
     }
     if validate_sync_server_url(server_url).is_err() {
-        return PackReport::all(PackSync::Failed(PACK_FAILED.to_string()));
+        let outcome = PackSync::Failed(PACK_FAILED.to_string());
+        return (PackReport::all(scope, outcome), None);
     }
+    // One sync at a time across processes, taken before any request. The
+    // daemon and the app share pack-versions.json and the request budget.
+    let _lock = match SyncLock::try_acquire(data_dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return (PackReport::all(scope, PackSync::Busy), None),
+        Err(err) => {
+            tracing::warn!(error = %err, "reader pack sync lock was not taken");
+            let outcome = PackSync::Failed(PACK_FAILED.to_string());
+            return (PackReport::all(scope, outcome), None);
+        }
+    };
+    sweep_stale_staging(data_dir);
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
-        Err(_) => return PackReport::all(PackSync::Failed(PACK_FAILED.to_string())),
+        Err(_) => {
+            let outcome = PackSync::Failed(PACK_FAILED.to_string());
+            return (PackReport::all(scope, outcome), None);
+        }
     };
     let base = server_url.trim().trim_end_matches('/');
-    let listed = match get_bytes(
-        &client,
-        &format!("{base}/api/tracker/packs"),
-        token,
-        64 * 1024,
-    )
-    .await
-    {
-        Get::Ok(bytes) => bytes,
-        Get::Unavailable => return PackReport::all(PackSync::Unavailable),
-        Get::Unsupported => return PackReport::all(PackSync::Unsupported),
-        Get::Auth => return PackReport::all(PackSync::Failed(PACK_AUTH.to_string())),
-        Get::Forbidden => return PackReport::all(PackSync::Failed(PACK_FORBIDDEN.to_string())),
-        Get::Limited(seconds) => {
-            return PackReport::all(PackSync::Failed(rate_limit_message(seconds)));
-        }
-        Get::Failed(message) => return PackReport::all(PackSync::Failed(message)),
-    };
-    let entries: Vec<PackListEntry> = match serde_json::from_slice(&listed) {
-        Ok(entries) => entries,
-        Err(_) => return PackReport::all(PackSync::Failed(PACK_MISMATCH.to_string())),
+    let entries = match listed {
+        Some(entries) => entries,
+        None => match fetch_list(&client, base, token).await {
+            Ok(entries) => entries,
+            Err(outcome) => return (PackReport::all(scope, outcome), None),
+        },
     };
     let fetch = Fetch {
         client: &client,
@@ -340,53 +480,176 @@ pub async fn sync_reader_packs(
         token,
         max_bytes,
     };
+    // Read under the lock, so a run never writes back a stale map.
     let mut versions = read_versions(data_dir);
-    let mut packs = Vec::with_capacity(PACKS.len());
+    let mut packs = Vec::new();
     // A refused token, a rate limit, or packs switched off applies to every
     // download, so the packs after it are not tried. Their folders stay.
     let mut stopped: Option<PackSync> = None;
-    for spec in PACKS {
-        let skipped = match (select_pack(&entries, spec), &stopped) {
-            (Err(outcome), _) => Err(outcome),
-            (Ok(_), Some(outcome)) => Err(outcome.clone()),
-            (Ok(entry), None) => Ok(entry),
-        };
-        let entry = match skipped {
-            Ok(entry) => entry,
-            Err(outcome) => {
-                packs.push(PackStatus {
-                    name: spec.name,
-                    outcome,
-                });
-                continue;
-            }
-        };
-        let step = sync_one(&fetch, data_dir, spec, entry, &versions).await;
-        let outcome = match step {
-            Step::Done(outcome) => outcome,
-            Step::Stop(outcome) => {
-                stopped = Some(outcome.clone());
+    for spec in scope.specs() {
+        let outcome = match select_pack(&entries, spec) {
+            Err(outcome) => outcome,
+            // Checked before the stop, so a pack that is already in place
+            // is reported as current, not as the stop's failure.
+            Ok(entry) if is_current(data_dir, spec, entry, &versions) => PackSync::Current,
+            Ok(_) if stopped.is_some() => stopped.clone().unwrap_or(PackSync::Unavailable),
+            Ok(entry) => {
+                let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
+                    Step::Done(outcome) => outcome,
+                    Step::Stop(outcome) => {
+                        stopped = Some(outcome.clone());
+                        outcome
+                    }
+                };
+                if outcome == PackSync::Installed {
+                    // Keep the other packs' versions, including an alpha.6
+                    // file that only names heroes-v1.tar.
+                    versions.insert(spec.name.to_string(), entry.version.clone());
+                    if let Err(message) = write_versions(data_dir, &versions) {
+                        tracing::warn!(
+                            pack = spec.name,
+                            error = %message,
+                            "reader pack version was not stored"
+                        );
+                    }
+                }
                 outcome
             }
         };
-        if outcome == PackSync::Installed {
-            // Keep the other packs' versions, including an alpha.6 file
-            // that only names heroes-v1.tar.
-            versions.insert(spec.name.to_string(), entry.version.clone());
-            if let Err(message) = write_versions(data_dir, &versions) {
-                tracing::warn!(
-                    pack = spec.name,
-                    error = %message,
-                    "reader pack version was not stored"
-                );
-            }
-        }
         packs.push(PackStatus {
             name: spec.name,
             outcome,
         });
     }
-    PackReport { packs }
+    (PackReport { packs }, Some(entries))
+}
+
+async fn fetch_list(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<PackListEntry>, PackSync> {
+    let listed = match get_bytes(
+        client,
+        &format!("{base}/api/tracker/packs"),
+        token,
+        64 * 1024,
+    )
+    .await
+    {
+        Get::Ok(bytes) => bytes,
+        Get::Unavailable => return Err(PackSync::Unavailable),
+        Get::Unsupported => return Err(PackSync::Unsupported),
+        Get::Auth => return Err(PackSync::Failed(PACK_AUTH.to_string())),
+        Get::Forbidden => return Err(PackSync::Failed(PACK_FORBIDDEN.to_string())),
+        Get::Limited(seconds) => return Err(PackSync::Failed(rate_limit_message(seconds))),
+        Get::Failed(message) => return Err(PackSync::Failed(message)),
+    };
+    serde_json::from_slice(&listed).map_err(|_| PackSync::Failed(PACK_MISMATCH.to_string()))
+}
+
+/// The recorded version matches the list and the folder is there.
+/// pack-versions.json can outlive a deleted pack folder; then it downloads.
+fn is_current(
+    data_dir: &Path,
+    spec: &PackSpec,
+    entry: &PackListEntry,
+    installed: &BTreeMap<String, String>,
+) -> bool {
+    installed
+        .get(spec.name)
+        .is_some_and(|version| version == &entry.version)
+        && spec.dir_in(data_dir).is_dir()
+}
+
+/// File locked for the length of one sync, so the daemon and the app never
+/// sync at the same time.
+fn sync_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("templates").join(".pack-sync.lock")
+}
+
+/// Exclusive `flock` on [`sync_lock_path`]. Released when dropped, or when
+/// the process dies.
+struct SyncLock {
+    _file: std::fs::File,
+}
+
+impl SyncLock {
+    /// `Ok(None)` when another sync holds it. Never waits.
+    fn try_acquire(data_dir: &Path) -> std::io::Result<Option<Self>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = sync_lock_path(data_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(None)
+        } else {
+            Err(err)
+        }
+    }
+}
+
+/// A `.<pack>-next-*` or `.<pack>-prev-*` folder this old is left from a
+/// sync that was killed. Live syncs hold the lock, so none of theirs is here.
+const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove staging and backup folders left by a killed sync. Runs under the
+/// sync lock. Only names this module makes, only real folders (not links),
+/// and only when older than [`STALE_STAGING`].
+fn sweep_stale_staging(data_dir: &Path) {
+    let templates = data_dir.join("templates");
+    let Ok(entries) = std::fs::read_dir(&templates) else {
+        return;
+    };
+    let labels: Vec<String> = PACKS
+        .iter()
+        .map(|spec| dir_label(&spec.dir_in(data_dir)))
+        .collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = name.strip_prefix('.').is_some_and(|rest| {
+            labels.iter().any(|label| {
+                rest.strip_prefix(label.as_str())
+                    .is_some_and(|tail| tail.starts_with("-next-") || tail.starts_with("-prev-"))
+            })
+        });
+        if !ours {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = path.symlink_metadata() else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE_STAGING);
+        if meta.is_dir() && stale {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {
+                    tracing::info!(folder = %name, "removed a reader pack folder left by a stopped sync")
+                }
+                Err(err) => {
+                    tracing::warn!(folder = %name, error = %err, "left reader pack folder was not removed")
+                }
+            }
+        }
+    }
 }
 
 /// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
@@ -408,16 +671,8 @@ async fn sync_one(
     data_dir: &Path,
     spec: &PackSpec,
     entry: &PackListEntry,
-    installed: &BTreeMap<String, String>,
 ) -> Step {
     let live = spec.dir_in(data_dir);
-    let version_matches = installed
-        .get(spec.name)
-        .is_some_and(|version| version == &entry.version);
-    // pack-versions.json can outlive a deleted pack folder. Download again.
-    if version_matches && live.is_dir() {
-        return Step::Done(PackSync::Current);
-    }
     let parent = live
         .parent()
         .map(Path::to_path_buf)
@@ -539,7 +794,7 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
         return Get::Unsupported;
     }
     if status == 502 || status == 503 {
-        let body = response.text().await.unwrap_or_default();
+        let body = error_body(response).await;
         if status == 503 && packs_disabled_body(&body) {
             return Get::Unavailable;
         }
@@ -547,7 +802,7 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
     }
     if status == 429 {
         let header = retry_after_header(response.headers());
-        let body = response.text().await.unwrap_or_default();
+        let body = error_body(response).await;
         let from_json = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("retry_after").and_then(|item| item.as_u64()));
@@ -560,6 +815,17 @@ async fn get_bytes(client: &reqwest::Client, url: &str, token: &str, max_bytes: 
         Ok(bytes) => Get::Ok(bytes),
         Err(message) => Get::Failed(message.to_string()),
     }
+}
+
+/// Largest error body read for `packs_disabled` or `retry_after`. A proxy
+/// page or a stalled body past this is not read.
+const ERROR_BODY_MAX: u64 = 4 * 1024;
+
+async fn error_body(response: reqwest::Response) -> String {
+    read_body_capped(response, ERROR_BODY_MAX)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
 }
 
 /// True only for the site's packs-disabled body. A proxy page is not this.
@@ -765,14 +1031,23 @@ fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Resul
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
+    // A name of its own, so two writers never share one tmp file.
+    let tmp = path.with_file_name(format!("pack-versions.json.tmp-{}", unique_suffix()));
     let bytes = serde_json::to_vec(versions).map_err(|err| err.to_string())?;
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|err| err.to_string())?;
-        file.write_all(&bytes).map_err(|err| err.to_string())?;
-        file.sync_all().map_err(|err| err.to_string())?;
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.to_string());
     }
-    std::fs::rename(&tmp, &path).map_err(|err| err.to_string())
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1743,7 +2018,8 @@ mod tests {
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let result = sync_reader_packs(base.as_str(), token, Path::new("/tmp"), 32)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = sync_reader_packs(base.as_str(), token, tmp.path(), 32)
             .await
             .heroes()
             .clone();
@@ -1768,7 +2044,8 @@ mod tests {
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = sync_reader_packs(base.as_str(), "wrong-token", tmp.path(), 32)
             .await
             .heroes()
             .clone();
@@ -2144,6 +2421,7 @@ mod tests {
             (PackLayout::MapGlyphs, "g00zz.png"),
             (PackLayout::MapGlyphs, "g00411.png"),
             (PackLayout::MapGlyphs, "G0041.png"),
+            (PackLayout::MapGlyphs, "g003A.png"),
             (PackLayout::MapGlyphs, "other.json"),
             (PackLayout::MapGlyphs, "ana.png"),
             (PackLayout::Words, "end-title.png"),
@@ -2226,7 +2504,7 @@ mod tests {
             .unwrap()
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with('.'))
+            .filter(|name| name.starts_with('.') && name != ".pack-sync.lock")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         assert_eq!(report.extras_ready(), (5, 5));
@@ -2501,5 +2779,328 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(versions_path(dir.path())).unwrap()).unwrap();
         assert!(raw.as_object().unwrap().values().all(|v| v.is_string()));
+    }
+
+    // ---- review round 1 on #248 (F248-*, R248-A, N1) ----
+
+    fn list_requests(served: &Served) -> usize {
+        served
+            .requested
+            .lock()
+            .expect("paths")
+            .iter()
+            .filter(|path| path.as_str() == "/api/tracker/packs")
+            .count()
+    }
+
+    /// `all_packs` with `name` answering `status` on download.
+    fn all_packs_with_download(name: &str, status: u16, body: &[u8]) -> Served {
+        let (list, mut files, _) = all_packs();
+        files.insert(name.to_string(), (status, body.to_vec()));
+        serve(list, files)
+    }
+
+    #[tokio::test]
+    async fn daemon_startup_fetches_only_heroes_v1_and_the_extras_follow() {
+        let (list, files, contents) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extras =
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
+                .await
+                .expect("the list was read, so the extras are queued");
+        // Capture starts after this: only the alpha.6 requests happened.
+        assert_eq!(served.downloaded(), vec![HEROES_PACK_NAME.to_string()]);
+        assert_eq!(list_requests(&served), 1);
+        for spec in &PACKS[1..] {
+            assert!(!spec.dir_in(dir.path()).exists(), "{}", spec.name);
+        }
+        let report = extras.sync().await;
+        assert_eq!(report.packs.len(), PACKS.len() - 1);
+        for spec in &PACKS[1..] {
+            assert_eq!(
+                outcome(&report, spec.name),
+                &PackSync::Installed,
+                "{}",
+                spec.name
+            );
+            let (path, data) = &contents[spec.name][0];
+            assert_eq!(
+                &std::fs::read(spec.dir_in(dir.path()).join(path)).unwrap(),
+                data
+            );
+        }
+        assert_eq!(list_requests(&served), 1, "the startup list is reused");
+        assert_eq!(served.hits(), PACKS.len());
+        assert_eq!(stored_versions(dir.path()).len(), PACKS.len());
+    }
+
+    #[tokio::test]
+    async fn a_list_failure_at_startup_is_logged_once() {
+        let fake = Arc::new(Fake {
+            token: TOKEN.into(),
+            list_status: 403,
+            list_body: br#"{"error":"forbidden"}"#.to_vec(),
+            list_retry: None,
+            file_status: 200,
+            file_body: Vec::new(),
+            file_chunked: false,
+            named_files: BTreeMap::new(),
+            file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
+        });
+        let base = spawn_fake(fake);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || SharedWriter(writer.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let extras = sync_on_startup(base.as_str(), TOKEN, dir.path()).await;
+        drop(_guard);
+        assert!(extras.is_none());
+        let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.matches("reader pack left in place").count(),
+            1,
+            "{logs}"
+        );
+        assert!(!logs.contains(TOKEN), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn a_second_sync_while_one_runs_is_busy_and_sends_nothing() {
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = SyncLock::try_acquire(dir.path())
+            .expect("lock file")
+            .expect("free");
+        let report = sync(&served, dir.path()).await;
+        assert!(
+            report.packs.iter().all(|s| s.outcome == PackSync::Busy),
+            "{report:?}"
+        );
+        assert!(served.requested.lock().unwrap().is_empty(), "no request");
+        assert!(!versions_path(dir.path()).exists());
+        assert_eq!(report.guide_result(), Ok(PACK_BUSY.to_string()));
+        assert!(
+            sync_on_startup_capped(served.base.as_str(), TOKEN, dir.path(), PACK_MAX_BYTES)
+                .await
+                .is_none()
+        );
+        drop(held);
+        let report = sync(&served, dir.path()).await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_versions_file_does_not_use_a_shared_tmp_name() {
+        // A leftover (or another writer's) fixed-name tmp must not block
+        // recording versions.
+        let (list, files, _) = all_packs();
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("templates/pack-versions.json.tmp")).unwrap();
+        let report = sync(&served, dir.path()).await;
+        assert!(
+            report
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed)
+        );
+        assert_eq!(stored_versions(dir.path()).len(), PACKS.len());
+        let tmp_files: Vec<String> = std::fs::read_dir(dir.path().join("templates"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("pack-versions.json.tmp-"))
+            .collect();
+        assert!(tmp_files.is_empty(), "{tmp_files:?}");
+    }
+
+    #[tokio::test]
+    async fn after_a_stop_packs_already_in_place_are_current() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (list, files, _) = all_packs();
+        let first = serve(list, files);
+        let installed = sync(&first, dir.path()).await;
+        assert!(
+            installed
+                .packs
+                .iter()
+                .all(|s| s.outcome == PackSync::Installed)
+        );
+
+        // heroes-v2 gets a new version, and its download is rate limited.
+        let (mut list, files, _) = all_packs();
+        let bumped = build_pack("heroes-v2.tar", "2", &sample_files("heroes-v2.tar"));
+        for entry in &mut list {
+            if entry["name"] == "heroes-v2.tar" {
+                *entry = entry_json("heroes-v2.tar", "2", &bumped);
+            }
+        }
+        let mut files = files;
+        files.insert(
+            "heroes-v2.tar".to_string(),
+            (429, br#"{"error":"rate_limited"}"#.to_vec()),
+        );
+        let served = serve(list, files);
+        let report = sync(&served, dir.path()).await;
+        let limited = rate_limit_message(RATE_LIMIT_FALLBACK_SECS);
+        for spec in PACKS {
+            let expected = if spec.name == "heroes-v2.tar" {
+                PackSync::Failed(limited.clone())
+            } else {
+                PackSync::Current
+            };
+            assert_eq!(outcome(&report, spec.name), &expected, "{}", spec.name);
+        }
+        assert_eq!(served.downloaded(), vec!["heroes-v2.tar".to_string()]);
+        assert_eq!(report.extras_ready(), (4, 5));
+        assert_eq!(
+            report.guide_result(),
+            Ok(format!(
+                "The reader pack is already installed. Extra reader packs ready: 4 of 5. {limited}."
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mid_run_401_or_403_stops_the_rest() {
+        for (status, message) in [(401u16, PACK_AUTH), (403, PACK_FORBIDDEN)] {
+            let served = all_packs_with_download("heroes-v2.tar", status, br#"{"error":"no"}"#);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let bans = plant_keep(dir.path(), pack_spec("bans-v1.tar").unwrap());
+            let report = sync(&served, dir.path()).await;
+            assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Installed);
+            for spec in &PACKS[1..] {
+                assert_eq!(
+                    outcome(&report, spec.name),
+                    &PackSync::Failed(message.into()),
+                    "HTTP {status} {}",
+                    spec.name
+                );
+            }
+            assert_eq!(
+                served.downloaded(),
+                vec![HEROES_PACK_NAME.to_string(), "heroes-v2.tar".to_string()],
+                "HTTP {status}"
+            );
+            assert_eq!(std::fs::read(bans.join("keep.txt")).unwrap(), b"old");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_pack_stays_missing_after_a_stop() {
+        let (list, mut files, _) = all_packs();
+        let list: Vec<_> = list
+            .into_iter()
+            .filter(|entry| entry["name"] != "words-v1.tar")
+            .collect();
+        files.insert(
+            "heroes-v2.tar".to_string(),
+            (429, br#"{"error":"rate_limited"}"#.to_vec()),
+        );
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = sync(&served, dir.path()).await;
+        let limited = PackSync::Failed(rate_limit_message(RATE_LIMIT_FALLBACK_SECS));
+        assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Installed);
+        for name in [
+            "heroes-v2.tar",
+            "heroes-v2-1080.tar",
+            "bans-v1.tar",
+            "maps-v1.tar",
+        ] {
+            assert_eq!(outcome(&report, name), &limited, "{name}");
+        }
+        assert_eq!(outcome(&report, "words-v1.tar"), &PackSync::Missing);
+        assert_eq!(report.extras_ready(), (0, 4));
+    }
+
+    fn age_folder(path: &Path, age: std::time::Duration) {
+        let when = std::time::SystemTime::now() - age;
+        std::fs::File::open(path)
+            .expect("open folder")
+            .set_modified(when)
+            .expect("set mtime");
+    }
+
+    #[tokio::test]
+    async fn folders_left_by_a_killed_sync_are_swept_after_an_hour() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let templates = dir.path().join("templates");
+        let two_hours = std::time::Duration::from_secs(2 * 3600);
+        let old_ours = [
+            ".bans-v1-next-11-22",
+            ".heroes-prev-33-44",
+            ".words-v1-next-5-6",
+        ];
+        for name in old_ours {
+            let path = templates.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("x.png"), b"left").unwrap();
+            age_folder(&path, two_hours);
+        }
+        let fresh = templates.join(".maps-v1-next-77-88");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let foreign = templates.join(".other-next-1-2");
+        std::fs::create_dir_all(&foreign).unwrap();
+        age_folder(&foreign, two_hours);
+        let live = plant_keep(dir.path(), pack_spec("bans-v1.tar").unwrap());
+        age_folder(&live, two_hours);
+        // A link with our name is not followed.
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("keep.txt"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), templates.join(".heroes-v2-next-9-9")).unwrap();
+
+        let served = serve(Vec::new(), BTreeMap::new());
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(report.heroes(), &PackSync::Current, "empty list");
+        for name in old_ours {
+            assert!(!templates.join(name).exists(), "{name} swept");
+        }
+        assert!(fresh.is_dir(), "a folder under an hour old stays");
+        assert!(foreign.is_dir(), "a name this module does not make stays");
+        assert_eq!(std::fs::read(live.join("keep.txt")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_error_body_is_not_read_past_the_cap() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut sock, &mut buf);
+            let head = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n{\"error\":";
+            let _ = std::io::Write::write_all(&mut sock, head);
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = std::time::Instant::now();
+        let report =
+            sync_reader_packs(&format!("http://{addr}"), TOKEN, dir.path(), PACK_MAX_BYTES).await;
+        let elapsed = started.elapsed();
+        assert_eq!(report.heroes(), &PackSync::Failed(PACK_FAILED.into()));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "error body was read to the end: {elapsed:?}"
+        );
     }
 }
