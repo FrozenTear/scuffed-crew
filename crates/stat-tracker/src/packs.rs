@@ -24,9 +24,11 @@
 //! written to a log.
 //!
 //! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
-//! back [`ExtraPacks`] to run in the background, so capture never waits on a
-//! pack no reader uses. The setup guide ([`sync_reader_packs`]) syncs all of
-//! them. Every run holds an exclusive `flock` on
+//! back [`ExtraPacks`] to run in the background, so capture never waits on
+//! the extras. The new reader starts on heroes-v1 and re-loads its hero set
+//! once heroes-v2 or heroes-v2-1080 is swapped in
+//! ([`crate::shadow::heroes::LiveHeroSet`]). The setup guide
+//! ([`sync_reader_packs`]) syncs all of them. Every run holds an exclusive `flock` on
 //! `templates/.pack-sync.lock`; a second run at the same time is
 //! [`PackSync::Busy`] and sends no request.
 
@@ -385,7 +387,9 @@ async fn sync_on_startup_capped(
 }
 
 /// The packs other than `heroes-v1.tar`, still to sync after daemon
-/// startup. No reader uses them yet, so they never hold up capture. Reuses
+/// startup. They never hold up capture: heroes-v1 is the new reader's
+/// fallback until the v2 hero packs land, and the other packs have no reader
+/// yet. Reuses
 /// the startup list, so a first install is still seven requests in all.
 /// Holds the token; it has no `Debug` so the token cannot reach a log.
 pub struct ExtraPacks {

@@ -29,7 +29,8 @@ use image::DynamicImage;
 use super::confirm::{self, Frame};
 use super::digits::{self, BoardRead, FIELDS, ShadowError};
 use super::heroes::{
-    HERO_RECOGNIZER_ID, HeroBoard, HeroError, HeroRecord, HeroRowLog, HeroTemplates, HeroVoter,
+    HERO_RECOGNIZER_ID, HeroBoard, HeroError, HeroPack, HeroRecord, HeroRowLog, HeroTemplates,
+    HeroVoter,
 };
 use super::log::{CellDiff, ShadowLog, ShadowRecord};
 use crate::ocr::RowOcrResult;
@@ -188,6 +189,9 @@ pub fn hero_record(
         ts: job.captured_at.to_rfc3339_opts(SecondsFormat::Millis, true),
         session: job.session.clone(),
         recognizer: HERO_RECOGNIZER_ID,
+        // the log-only stage reads heroes-v1 on the fixed crop
+        hero_pack: HeroPack::V1,
+        recropped: false,
         resolution: job.frame_height,
         team_size: job.team_size,
         owner_row: job.owner_row,
@@ -537,6 +541,8 @@ mod tests {
             assert_eq!(r["suspect"], false);
         }
         assert_eq!(lines[0]["recognizer"], "hero-v1.1");
+        assert_eq!(lines[0]["hero_pack"], "heroes-v1");
+        assert_eq!(lines[0]["recropped"], false);
         assert!(lines[0]["elapsed_us"].as_u64().is_some());
     }
 

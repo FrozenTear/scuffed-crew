@@ -81,9 +81,9 @@ entry:
 
 | Pack | Folder | What may be inside (besides `manifest.json`) | Read by |
 | --- | --- | --- | --- |
-| `heroes-v1.tar` | `templates/heroes/` | `<hero>.png`, `special/<name>.png` | hero reader |
-| `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | nothing yet |
-| `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | nothing yet |
+| `heroes-v1.tar` | `templates/heroes/` | `<hero>.png`, `special/<name>.png` | shadow hero log; new reader's fallback |
+| `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | new reader, 1440p-scale boards (when complete) |
+| `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | nothing yet |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | nothing yet |
@@ -104,6 +104,11 @@ none is `heroes-v1.tar`, every tracker reports "The reader pack did not match
 the site" for the hero pack, keeps its hero folder, and still installs the
 other packs it finds. A pack the list does not name is reported as not
 listed, and its installed folder is kept.
+
+The new reader (`reader = "new"`) uses a v2 hero pack only when it has every
+hero and special class `heroes-v1.tar` has. The daemon installs the v2 packs
+after the reader has started; the reader notices the new folder on a later
+board and re-loads its hero set in the background.
 
 Each file is a plain ustar archive. At the top level it holds:
 

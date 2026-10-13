@@ -58,11 +58,9 @@ pub const TEMPLATE_SUBDIR: &str = "templates/heroes";
 pub const TEMPLATE_SUBDIR_V2: &str = "templates/heroes-v2";
 /// heroes-v2-1080 pack directory under the data dir (1080p-scale cuts).
 pub const TEMPLATE_SUBDIR_V2_1080: &str = "templates/heroes-v2-1080";
-/// Scoreboard crop height of a 1440p frame (`crop_scoreboard`).
-const CROP_H_1440: f64 = 1007.0;
-/// Boards below this scale (crop height over [`CROP_H_1440`]; 1080p is 0.75)
-/// use the 1080 set. Halfway between 1080p and 1440p.
-pub const SCALE_1080_BELOW: f64 = 0.875;
+/// Scoreboard crops at most this many px high use the 1080 set: about
+/// halfway between the 1080p crop (756 px) and the 1440p crop (1007 px).
+pub const MAX_1080_CROP_H: u32 = 881;
 /// Re-crop this many px (at 1440p, scaled by the 16:9 height) further left
 /// when the header bar starts at the scoreboard crop's left edge. 5v5 headers
 /// start 24 to 90 px left of the crop at 1440p; on the bench 90 to 200 px all
@@ -884,15 +882,17 @@ impl HeroPack {
 /// The new reader's hero templates: one set for 1440p-scale boards and an
 /// optional one for 1080p-scale boards.
 ///
-/// * 1440p-scale: heroes-v2 when it is complete, else heroes-v1.
-/// * 1080p-scale: heroes-v2-1080 when it is complete, else the 1440p set.
+/// * 1440p-scale (crop higher than [`MAX_1080_CROP_H`]): heroes-v2 when it
+///   is complete, else heroes-v1. heroes-v2-1080 is never used here.
+/// * 1080p-scale (crop at most [`MAX_1080_CROP_H`]): heroes-v2-1080 when it
+///   is complete, else the 1440p set.
 ///
 /// A v2 set is complete when it has every class heroes-v1 has (each hero and
 /// each special class). Without heroes-v1 there is nothing to compare with,
 /// and a v2 set that loads is used as it is.
 #[derive(Debug, Clone)]
 pub struct HeroSet {
-    main: (HeroPack, HeroTemplates),
+    main: Option<(HeroPack, HeroTemplates)>,
     at_1080: Option<(HeroPack, HeroTemplates)>,
 }
 
@@ -937,34 +937,39 @@ impl HeroSet {
         let v2 = complete(v2, HeroPack::V2);
         let v2_1080 = complete(v2_1080, HeroPack::V2At1080);
         let main = v2.or_else(|| v1.map(|t| (HeroPack::V1, t)));
-        match (main, v2_1080) {
-            (Some(main), at_1080) => Some(Self { main, at_1080 }),
-            (None, Some(only)) => Some(Self {
-                main: only,
-                at_1080: None,
-            }),
-            (None, None) => None,
+        if main.is_none() && v2_1080.is_none() {
+            return None;
         }
+        Some(Self {
+            main,
+            at_1080: v2_1080,
+        })
     }
 
-    /// The pack used for 1440p-scale boards.
-    pub fn main_pack(&self) -> HeroPack {
-        self.main.0
+    /// The pack used for 1440p-scale boards, if any.
+    pub fn main_pack(&self) -> Option<HeroPack> {
+        self.main.as_ref().map(|m| m.0)
     }
 
-    /// The pack used for 1080p-scale boards.
-    pub fn pack_1080(&self) -> HeroPack {
-        self.at_1080.as_ref().unwrap_or(&self.main).0
+    /// The pack used for 1080p-scale boards, if any.
+    pub fn pack_1080(&self) -> Option<HeroPack> {
+        self.at_1080.as_ref().or(self.main.as_ref()).map(|m| m.0)
     }
 
-    /// The set for a scoreboard crop `board_h` px high.
-    pub fn for_board_height(&self, board_h: u32) -> (HeroPack, &HeroTemplates) {
-        let scale = board_h as f64 / CROP_H_1440;
-        let (pack, t) = match &self.at_1080 {
-            Some(small) if scale < SCALE_1080_BELOW => small,
-            _ => &self.main,
+    /// The set for a scoreboard crop `board_h` px high. `None` for a
+    /// 1440p-scale board when only heroes-v2-1080 is installed.
+    pub fn for_board_height(&self, board_h: u32) -> Option<(HeroPack, &HeroTemplates)> {
+        let pick = if board_h <= MAX_1080_CROP_H {
+            self.at_1080.as_ref().or(self.main.as_ref())
+        } else {
+            self.main.as_ref()
         };
-        (*pack, t)
+        pick.map(|(pack, t)| (*pack, t))
+    }
+
+    fn set_for(&self, board_h: u32) -> Result<(HeroPack, &HeroTemplates), HeroError> {
+        self.for_board_height(board_h)
+            .ok_or(HeroError::Unsupported("no hero pack for this board size"))
     }
 
     /// Read a scoreboard crop with the set for its height (no re-crop).
@@ -974,7 +979,7 @@ impl HeroSet {
         team_size: usize,
         budget: Duration,
     ) -> Result<HeroFrameRead, HeroError> {
-        let (pack, t) = self.for_board_height(board.height());
+        let (pack, t) = self.set_for(board.height())?;
         Ok(HeroFrameRead {
             board: t.read_board(board, team_size, budget)?,
             pack,
@@ -985,7 +990,8 @@ impl HeroSet {
     /// Read the heroes of `scoreboard`, cut from the full `frame` by
     /// `crop_scoreboard`. When the header bar starts at the crop's left
     /// edge, the board is wider than the crop: re-cut it
-    /// [`clipped_header_pad`] px further left and read that instead.
+    /// [`clipped_header_pad`] px further left and read that instead. When
+    /// the wide crop gives no header or no rows, the fixed crop is read.
     pub fn read_frame(
         &self,
         frame: &DynamicImage,
@@ -997,25 +1003,32 @@ impl HeroSet {
         if !(5..=6).contains(&team_size) {
             return Err(HeroError::Unsupported("team size"));
         }
-        let (pack, t) = self.for_board_height(scoreboard.height());
+        let (pack, t) = self.set_for(scoreboard.height())?;
         let mut owned = None;
         let view = view_of(scoreboard, &mut owned);
         let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
-        let Some(pad) = clipped_header_pad(frame.width(), frame.height(), scoreboard, hdr.0) else {
-            return Ok(HeroFrameRead {
-                board: t.read_rows(view, hdr, team_size, budget, t0)?,
-                pack,
-                pad_px: None,
-            });
-        };
-        let wide = hero_crop(frame, pad);
-        let mut owned = None;
-        let view = view_of(&wide, &mut owned);
-        let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
+        if let Some(pad) = clipped_header_pad(frame.width(), frame.height(), scoreboard, hdr.0) {
+            let wide = hero_crop(frame, pad);
+            let mut wide_owned = None;
+            let wide_view = view_of(&wide, &mut wide_owned);
+            let read = find_header(wide_view)
+                .ok_or(HeroError::NoHeader)
+                .and_then(|h| t.read_rows(wide_view, h, team_size, budget, t0));
+            match read {
+                Ok(board) => {
+                    return Ok(HeroFrameRead {
+                        board,
+                        pack,
+                        pad_px: Some(pad),
+                    });
+                }
+                Err(e) => tracing::debug!(error = %e, "wide hero crop failed, fixed crop read"),
+            }
+        }
         Ok(HeroFrameRead {
             board: t.read_rows(view, hdr, team_size, budget, t0)?,
             pack,
-            pad_px: Some(pad),
+            pad_px: None,
         })
     }
 }
@@ -1051,6 +1064,162 @@ pub fn hero_crop(frame: &DynamicImage, pad: u32) -> DynamicImage {
         crate::ocr::preprocess::crop_scoreboard_rect(frame.width(), frame.height());
     let x0 = x.saturating_sub(pad);
     frame.crop_imm(x0, y, cw + (x - x0), ch)
+}
+
+// ---------------------------------------------------------------- live set
+
+/// The three hero pack folders a [`HeroSet`] loads from.
+#[derive(Debug, Clone, Default)]
+pub struct HeroDirs {
+    pub v1: Option<PathBuf>,
+    pub v2: Option<PathBuf>,
+    pub v2_1080: Option<PathBuf>,
+}
+
+/// Identity of one pack folder: device, inode and mtime, or `None` when it
+/// is missing. Pack sync swaps a folder in with `renameat2(RENAME_EXCHANGE)`
+/// or a rename, so a new pack gives the live path a new inode.
+type DirStamp = Option<(u64, u64, i64, i64)>;
+type Stamp = [DirStamp; 3];
+
+fn dir_stamp(dir: Option<&Path>) -> DirStamp {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir?).ok()?;
+    m.is_dir()
+        .then(|| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec()))
+}
+
+impl HeroDirs {
+    pub fn in_data_dir(data_dir: &Path) -> Self {
+        Self {
+            v1: Some(HeroTemplates::dir_in(data_dir)),
+            v2: Some(data_dir.join(TEMPLATE_SUBDIR_V2)),
+            v2_1080: Some(data_dir.join(TEMPLATE_SUBDIR_V2_1080)),
+        }
+    }
+
+    fn stamp(&self) -> Stamp {
+        [
+            dir_stamp(self.v1.as_deref()),
+            dir_stamp(self.v2.as_deref()),
+            dir_stamp(self.v2_1080.as_deref()),
+        ]
+    }
+
+    /// Load the set, or `None` when a folder changed while it loaded (a
+    /// swap ran meanwhile; the caller retries later). `during` runs between
+    /// the first stamp and the load (tests use it to swap a folder in).
+    fn load_stable(&self, during: impl FnOnce()) -> Option<(Option<HeroSet>, Stamp)> {
+        let before = self.stamp();
+        during();
+        let set = HeroSet::load_dirs(
+            self.v1.as_deref(),
+            self.v2.as_deref(),
+            self.v2_1080.as_deref(),
+        );
+        (self.stamp() == before).then_some((set, before))
+    }
+}
+
+/// The new reader's [`HeroSet`], re-loaded when a hero pack folder changes.
+///
+/// Pack sync installs heroes-v2 and heroes-v2-1080 in the background after
+/// the reader is set up. Each board checks the folders' stamps (three
+/// `stat` calls). On a change it starts one background load and keeps
+/// reading with the set it has, so capture never waits on a load. A load
+/// that saw a folder change while it ran is thrown away and retried on a
+/// later board, so a set never mixes files from before and after a swap.
+#[derive(Debug, Default)]
+pub struct LiveHeroSet {
+    inner: std::sync::Arc<LiveInner>,
+}
+
+type Current = (Option<std::sync::Arc<HeroSet>>, Stamp);
+
+#[derive(Debug, Default)]
+struct LiveInner {
+    dirs: HeroDirs,
+    current: std::sync::RwLock<Current>,
+    loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl LiveInner {
+    fn install(&self, (set, stamp): (Option<HeroSet>, Stamp)) {
+        tracing::info!(
+            heroes = set.is_some(),
+            hero_pack = set
+                .as_ref()
+                .and_then(HeroSet::main_pack)
+                .map(HeroPack::as_str),
+            hero_pack_1080 = set
+                .as_ref()
+                .and_then(HeroSet::pack_1080)
+                .map(HeroPack::as_str),
+            "new reader hero packs loaded"
+        );
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = (set.map(Into::into), stamp);
+    }
+}
+
+impl LiveHeroSet {
+    /// Load now (reader setup). A folder that keeps changing during the
+    /// first tries leaves the set empty; the next board loads it again.
+    pub fn load(dirs: HeroDirs) -> Self {
+        let inner = LiveInner {
+            dirs,
+            ..Default::default()
+        };
+        let first = (0..3).find_map(|_| inner.dirs.load_stable(|| {}));
+        // An all-zero stamp never matches a real one: the next board reloads.
+        inner.install(first.unwrap_or((None, [Some((0, 0, 0, 0)); 3])));
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    /// The set for this board. Starts a background reload when a pack
+    /// folder changed since the set was loaded.
+    pub fn current(&self) -> Option<std::sync::Arc<HeroSet>> {
+        let (set, stamp) = self
+            .inner
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if self.inner.dirs.stamp() != stamp {
+            self.start_reload();
+        }
+        set
+    }
+
+    fn start_reload(&self) {
+        let Ok(mut loader) = self.inner.loader.try_lock() else {
+            return;
+        };
+        if loader.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        let inner = std::sync::Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("hero-pack-reload".into())
+            .spawn(move || match inner.dirs.load_stable(|| {}) {
+                Some(loaded) => inner.install(loaded),
+                None => tracing::debug!("hero pack changed while loading, retry later"),
+            });
+        match spawned {
+            Ok(handle) => *loader = Some(handle),
+            Err(e) => tracing::warn!(error = %e, "hero pack reload not started"),
+        }
+    }
+
+    /// Wait for a reload in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_reload(&self) {
+        let handle = self.inner.loader.lock().unwrap().take();
+        if let Some(h) = handle {
+            h.join().unwrap();
+        }
+    }
 }
 
 // ---------------------------------------------------------------- voting
@@ -1125,6 +1294,10 @@ pub struct HeroRecord {
     pub ts: String,
     pub session: String,
     pub recognizer: &'static str,
+    /// Template pack that made the reads (fixed names, [`HeroPack`]).
+    pub hero_pack: HeroPack,
+    /// The hero crop was widened left for a clipped header.
+    pub recropped: bool,
     pub resolution: u32,
     pub team_size: usize,
     pub owner_row: Option<usize>,
@@ -1482,6 +1655,8 @@ mod tests {
             ts: "2026-10-09T05:00:00.000Z".into(),
             session: "s".into(),
             recognizer: HERO_RECOGNIZER_ID,
+            hero_pack: HeroPack::V2,
+            recropped: true,
             resolution: 1440,
             team_size: 6,
             owner_row: Some(0),
@@ -1494,6 +1669,8 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["recognizer"], "hero-v1.1");
+        assert_eq!(v["hero_pack"], "heroes-v2");
+        assert_eq!(v["recropped"], true);
         assert_eq!(v["rows"][0]["hero"], "ana");
         assert_eq!(v["rows"][0]["class"], "hero");
         assert_eq!(v["rows"][0]["voted"], "ana");
@@ -1549,7 +1726,7 @@ mod tests {
     fn v2_is_preferred_when_complete() {
         let data = data_dir(true, Some(&IDS), None);
         let set = HeroSet::load_data_dir(data.path()).unwrap();
-        assert_eq!(set.main_pack(), HeroPack::V2);
+        assert_eq!(set.main_pack(), Some(HeroPack::V2));
         let (pack, heroes) = reads(&set, ART_V2, 76);
         assert_eq!(pack, HeroPack::V2);
         assert!(all_right(&heroes), "{heroes:?}");
@@ -1559,7 +1736,7 @@ mod tests {
         // without v1 there is nothing to compare with: v2 alone is used
         let data = data_dir(false, Some(&IDS), None);
         let set = HeroSet::load_data_dir(data.path()).unwrap();
-        assert_eq!(set.main_pack(), HeroPack::V2);
+        assert_eq!(set.main_pack(), Some(HeroPack::V2));
         // and the reader looks where P1 installs the packs
         for (name, sub) in [
             ("heroes-v2.tar", TEMPLATE_SUBDIR_V2),
@@ -1588,7 +1765,7 @@ mod tests {
             ("no special", &no_special),
         ] {
             let set = HeroSet::load_data_dir(data.path()).unwrap();
-            assert_eq!(set.main_pack(), HeroPack::V1, "{what}");
+            assert_eq!(set.main_pack(), Some(HeroPack::V1), "{what}");
             let (pack, heroes) = reads(&set, 0, 76);
             assert_eq!(pack, HeroPack::V1, "{what}");
             assert!(all_right(&heroes), "{what}: {heroes:?}");
@@ -1600,16 +1777,23 @@ mod tests {
     fn the_1080_set_is_used_at_1080_scale() {
         let data = data_dir(true, Some(&IDS), Some(&IDS));
         let set = HeroSet::load_data_dir(data.path()).unwrap();
-        assert_eq!(set.pack_1080(), HeroPack::V2At1080);
-        // crop heights: 1080p 756, 1440p 1007, 4K 1512; the split is at 881
+        assert_eq!(set.pack_1080(), Some(HeroPack::V2At1080));
+        // crop heights: 1080p 756, 1440p 1007, 4K 1512; 881 and below use
+        // the 1080 set
+        assert_eq!(MAX_1080_CROP_H, 881);
         for (h, want) in [
             (756, HeroPack::V2At1080),
             (880, HeroPack::V2At1080),
+            (881, HeroPack::V2At1080),
             (882, HeroPack::V2),
             (1007, HeroPack::V2),
             (1512, HeroPack::V2),
         ] {
-            assert_eq!(set.for_board_height(h).0, want, "height {h}");
+            assert_eq!(
+                set.for_board_height(h).map(|p| p.0),
+                Some(want),
+                "height {h}"
+            );
         }
         // a 57 px pitch board is 820 px high (1080 scale), 76 px is 1093
         let (pack, heroes) = reads(&set, ART_1080, 57);
@@ -1621,7 +1805,7 @@ mod tests {
         // a partial 1080 set falls back to the 1440p set
         let data = data_dir(true, Some(&IDS), Some(&IDS[1..]));
         let set = HeroSet::load_data_dir(data.path()).unwrap();
-        assert_eq!(set.pack_1080(), HeroPack::V2);
+        assert_eq!(set.pack_1080(), Some(HeroPack::V2));
         let (pack, heroes) = reads(&set, ART_V2, 57);
         assert_eq!(pack, HeroPack::V2);
         assert!(all_right(&heroes), "{heroes:?}");
@@ -1689,6 +1873,12 @@ mod tests {
             assert_eq!(clipped_header_pad(w, h, &sb(w, h), 0), Some(pad), "{w}x{h}");
             assert_eq!(clipped_header_pad(w, h, &sb(w, h), 1), None, "{w}x{h}");
         }
+        // 16:10 is letterboxed: the 16:9 height is 1440 of 1600, so the pad
+        // is 120 (the frame height would give 133)
+        assert_eq!(
+            clipped_header_pad(2560, 1600, &sb(2560, 1600), 0),
+            Some(120)
+        );
         // ultrawide: scaled by the 16:9 height
         assert_eq!(
             clipped_header_pad(3440, 1440, &sb(3440, 1440), 0),
@@ -1702,6 +1892,94 @@ mod tests {
             (1664 + 120, 1007),
             "same right edge, top and height"
         );
+    }
+
+    #[test]
+    fn a_failed_wide_crop_falls_back_to_the_fixed_crop() {
+        let data = data_dir(true, None, None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        let ids = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
+        // the header starts right at the crop edge, so the board is read as
+        // clipped; a light strip left of it on the header rows, with no role
+        // column under it, leaves the wide crop without rows
+        let mut f = frame_with_board(&ids, 0).to_rgb8();
+        let (cx, cy, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+        for x in cx - CLIPPED_HEADER_PAD_1440..cx {
+            for y in cy..cy + 31 {
+                f.put_pixel(x, y, image::Rgb([205, 208, 212]));
+            }
+        }
+        let frame = DynamicImage::ImageRgb8(f);
+        let sb = crate::ocr::preprocess::crop_scoreboard(&frame);
+        let wide = hero_crop(&frame, CLIPPED_HEADER_PAD_1440);
+        assert_eq!(
+            set.read_board(&wide, 5, Duration::from_secs(5)),
+            Err(HeroError::NoRows),
+            "the wide crop alone fails"
+        );
+        let r = set
+            .read_frame(&frame, &sb, 5, Duration::from_secs(5))
+            .expect("fixed crop read");
+        assert_eq!(r.pad_px, None);
+        assert_eq!(five_v_five_right(&r.board.rows), 10, "{r:?}");
+    }
+
+    #[test]
+    fn a_lone_1080_set_never_reads_1440p_boards() {
+        let data = data_dir(false, None, Some(&IDS));
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        assert_eq!(set.main_pack(), None);
+        assert_eq!(set.pack_1080(), Some(HeroPack::V2At1080));
+        for h in [882, 1007, 1512] {
+            assert!(set.for_board_height(h).is_none(), "height {h}");
+        }
+        let img = DynamicImage::ImageRgb8(board(&[1; 12], 6, 76, [YELLOW, TEAL]));
+        assert_eq!(
+            set.read_board(&img, 6, Duration::from_secs(5)),
+            Err(HeroError::Unsupported("no hero pack for this board size"))
+        );
+        let (pack, heroes) = reads(&set, ART_1080, 57);
+        assert_eq!(pack, HeroPack::V2At1080);
+        assert!(all_right(&heroes), "{heroes:?}");
+    }
+
+    /// Install `templates/heroes-v2` the way pack sync does: build it in a
+    /// staging folder, then rename it into place.
+    fn swap_in_v2(data: &Path) {
+        let staging = data.join("templates/.heroes-v2-staging");
+        write_templates(&staging, &IDS, 74, ART_V2);
+        write_skull(&staging);
+        std::fs::rename(&staging, data.join(TEMPLATE_SUBDIR_V2)).unwrap();
+    }
+
+    #[test]
+    fn the_live_set_picks_up_v2_after_it_is_swapped_in() {
+        let data = data_dir(true, None, None);
+        let live = LiveHeroSet::load(HeroDirs::in_data_dir(data.path()));
+        let pack = |live: &LiveHeroSet| live.current().and_then(|s| s.main_pack());
+        assert_eq!(pack(&live), Some(HeroPack::V1));
+        live.wait_reload();
+        assert_eq!(pack(&live), Some(HeroPack::V1), "no change, no reload");
+        swap_in_v2(data.path());
+        // this board still reads with the set it has; the load runs aside
+        assert_eq!(pack(&live), Some(HeroPack::V1));
+        live.wait_reload();
+        assert_eq!(pack(&live), Some(HeroPack::V2));
+        let (got, heroes) = reads(&live.current().unwrap(), ART_V2, 76);
+        assert_eq!(got, HeroPack::V2);
+        assert!(all_right(&heroes), "{heroes:?}");
+    }
+
+    #[test]
+    fn a_load_that_sees_a_swap_is_thrown_away() {
+        let data = data_dir(true, None, None);
+        let dirs = HeroDirs::in_data_dir(data.path());
+        assert!(
+            dirs.load_stable(|| swap_in_v2(data.path())).is_none(),
+            "a folder changed while loading"
+        );
+        let (set, _) = dirs.load_stable(|| {}).expect("stable");
+        assert_eq!(set.unwrap().main_pack(), Some(HeroPack::V2));
     }
 
     #[test]

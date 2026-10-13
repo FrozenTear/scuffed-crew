@@ -41,7 +41,7 @@ use serde::Serialize;
 use super::banner::{MapInfo, MapTemplates};
 use super::digits;
 use super::heroes::{
-    HeroSet, HeroTemplates, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
+    HeroDirs, HeroTemplates, LiveHeroSet, RowClass, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080,
 };
 use super::result::{ResultEvidence, ResultRead, ResultTemplates};
 
@@ -158,7 +158,7 @@ pub fn field_names(team_size: usize) -> Vec<String> {
 
 /// Where the optional packs live. `None` skips that reader. The hero
 /// matcher uses heroes-v2 (`hero_v2_dir`, `hero_v2_1080_dir`) when complete
-/// and heroes-v1 (`hero_dir`) otherwise ([`HeroSet`]).
+/// and heroes-v1 (`hero_dir`) otherwise ([`super::heroes::HeroSet`]).
 #[derive(Debug, Clone, Default)]
 pub struct ReaderConfig {
     pub hero_dir: Option<PathBuf>,
@@ -192,27 +192,26 @@ impl ReaderConfig {
 /// The loaded packs. Digits need none (their templates are embedded).
 #[derive(Default)]
 pub struct Reader {
-    heroes: Option<HeroSet>,
+    /// Re-loaded when a hero pack folder changes (pack sync installs
+    /// heroes-v2 in the background after the reader is set up).
+    heroes: LiveHeroSet,
     maps: Option<MapTemplates>,
     results: Option<ResultTemplates>,
 }
 
 impl Reader {
     pub fn load(config: &ReaderConfig) -> Self {
-        let heroes = HeroSet::load_dirs(
-            config.hero_dir.as_deref(),
-            config.hero_v2_dir.as_deref(),
-            config.hero_v2_1080_dir.as_deref(),
-        );
+        let heroes = LiveHeroSet::load(HeroDirs {
+            v1: config.hero_dir.clone(),
+            v2: config.hero_v2_dir.clone(),
+            v2_1080: config.hero_v2_1080_dir.clone(),
+        });
         let maps = config.map_dir.as_deref().and_then(MapTemplates::load_dir);
         let results = config
             .result_dir
             .as_deref()
             .and_then(ResultTemplates::load_dir);
         tracing::info!(
-            heroes = heroes.is_some(),
-            hero_pack = heroes.as_ref().map(|h| h.main_pack().as_str()),
-            hero_pack_1080 = heroes.as_ref().map(|h| h.pack_1080().as_str()),
             maps = maps.is_some(),
             results = results.is_some(),
             "shadow reader packs"
@@ -225,7 +224,7 @@ impl Reader {
     }
 
     pub fn has_heroes(&self) -> bool {
-        self.heroes.is_some()
+        self.heroes.current().is_some()
     }
 
     /// Read every field of one full Tab frame. `result` stays suspect.
@@ -260,8 +259,15 @@ impl Reader {
         // when the board's header is clipped at the crop's left edge.
         let hero_read = self
             .heroes
-            .as_ref()
+            .current()
             .and_then(|h| h.read_frame(frame, &scoreboard, team_size, budget).ok());
+        if let Some(h) = &hero_read {
+            tracing::debug!(
+                hero_pack = h.pack.as_str(),
+                recropped = h.pad_px.is_some(),
+                "new reader heroes"
+            );
+        }
         let mut board = assemble(
             team_size,
             digit_read.as_ref(),
@@ -1170,6 +1176,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// R249-A: the reader starts with heroes-v1 only (pack sync installs the
+    /// extras after the reader is set up). Once heroes-v2 is swapped in, the
+    /// next board after the background reload reads with v2.
+    #[test]
+    fn heroes_v2_installed_after_start_is_used_on_a_later_board() {
+        use crate::shadow::heroes::test_fixtures::write_templates;
+        let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let data = tempfile::tempdir().unwrap();
+        write_templates(&HeroTemplates::dir_in(data.path()), &ids, 95, 0);
+        let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
+        let frame = clipped_tab_stand_in(&ids.map(|i| i + 100), 60);
+        let heroes_read = |b: &BoardRead| {
+            (0..10)
+                .filter(|r| {
+                    b.get(&format!("r{r}.hero")).unwrap().value
+                        == Some(Value::Text(format!("hero-{}", r + 1)))
+                })
+                .count()
+        };
+        assert_eq!(
+            heroes_read(&reader.read_board(&frame)),
+            0,
+            "v1 has no v2 art"
+        );
+        // the extras job: stage, then rename into place
+        let staging = data.path().join("templates/.heroes-v2-staging");
+        write_templates(&staging, &ids, 74, 100);
+        std::fs::rename(&staging, data.path().join(TEMPLATE_SUBDIR_V2)).unwrap();
+        // the board that notices the swap keeps the set it has
+        assert_eq!(heroes_read(&reader.read_board(&frame)), 0);
+        reader.heroes.wait_reload();
+        assert_eq!(heroes_read(&reader.read_board(&frame)), 10);
     }
 
     /// Columns found, but the digit read is empty (zero budget forces
