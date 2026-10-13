@@ -581,6 +581,15 @@ full-board text, while that game has shown no result or boundary signal; a
 session map from the top bar or an accolade is never replaced. With
 `reader = "ocr-v1"` the banner is not read.
 
+The pack holds letters, not map names: the names the banner read can return
+are a table in the tracker (`shadow::banner::MAPS`), and each is composed
+from the pack's glyphs. A new name needs a tracker release, and a new pack
+only when it uses a letter the pack lacks. `ADLERSBRUNN`, the Halloween
+event's label for Eichenwalde, is one of those names: a sure read of it is
+stored as Eichenwalde, the way the top-bar OCR stores it, and it marks the
+board for the Junkenstein check (a board with stats on one team only is not
+stored).
+
 The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
 at the end of a match) from the end-title templates of `words-v1.tar`:
 `end_title_<word>.png`, and variants named `end_title_<name>_<word>.png`. It
