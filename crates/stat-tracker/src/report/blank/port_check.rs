@@ -85,7 +85,9 @@ fn dump_board_measurements() {
 /// board: `SCUFFED_QA_FRAMES=<dir> SCUFFED_QA_OUT=<file>`; with
 /// `SCUFFED_QA_IMAGES=<dir>` the blanked crops are written there too.
 ///
-/// Portraits need an earlier capture (`SCUFFED_QA_MEMORY`):
+/// The blanker runs as it ships; `SCUFFED_QA_PORTRAITS=on` runs the
+/// portrait gates as with `COPY_PORTRAITS` on. Portraits need an earlier
+/// capture (`SCUFFED_QA_MEMORY`):
 /// * unset: none, so no portrait is kept;
 /// * `seq`: the files are captures of one member in time order (the
 ///   `YYYYMMDD_HHMMSS` in their names) and share one memory;
@@ -134,18 +136,18 @@ fn dump_blank_verdicts() {
     };
     // a 16:9 (or wider) full frame goes through the frame path, with chat
     // read from the frame
+    // SCUFFED_QA_PORTRAITS=on: the portrait gates as they run with
+    // `COPY_PORTRAITS` on; otherwise the blanker as it ships
+    let gated = std::env::var("SCUFFED_QA_PORTRAITS").as_deref() == Ok("on");
     let run = |img: &image::RgbImage, mem: &mut super::PortraitMemory, at: DateTime<Utc>| {
         let at = super::CaptureTime::wall(at);
         let ratio = f64::from(img.width()) / f64::from(img.height().max(1));
-        if ratio > 1.7 {
-            super::blanked_scoreboard_seen(
-                &image::DynamicImage::ImageRgb8(img.clone()),
-                Some(6),
-                mem,
-                at,
-            )
-        } else {
-            super::blank_crop_seen(img, Some(6), chat, mem, at)
+        let frame = || image::DynamicImage::ImageRgb8(img.clone());
+        match (ratio > 1.7, gated) {
+            (true, true) => super::blanked_scoreboard_gated(&frame(), Some(6), mem, at),
+            (true, false) => super::blanked_scoreboard_seen(&frame(), Some(6), mem, at),
+            (false, true) => super::blank_crop_gated(img, Some(6), chat, mem, at),
+            (false, false) => super::blank_crop_seen(img, Some(6), chat, mem, at),
         }
     };
     let t0 = DateTime::<Utc>::UNIX_EPOCH + Duration::days(20_000);

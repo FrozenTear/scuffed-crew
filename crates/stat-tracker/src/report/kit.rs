@@ -290,10 +290,7 @@ fn blank_seen(
     let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
     // a session with no capture for longer than a reference may be old
     // holds nothing usable
-    all.retain(|(_, m)| {
-        m.latest()
-            .is_none_or(|t| at.wall - t <= blank::REF_MAX_AGE)
-    });
+    all.retain(|(_, m)| m.latest().is_none_or(|t| at.wall - t <= blank::REF_MAX_AGE));
     let i = match all.iter().position(|(d, _)| d == dir) {
         Some(i) => i,
         None => {
@@ -985,7 +982,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|(d, m)| *d == dir && m.latest().is_some())
+            .any(|(d, m)| *d == dir && m.holds_cells())
     }
 
     #[test]
@@ -995,6 +992,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         record_scoreboard(tmp.path(), "mem-del", &frame(), Some(6), &reads()).unwrap();
         record_scoreboard(tmp.path(), "mem-end", &frame(), Some(6), &reads()).unwrap();
+        if !blank::COPY_PORTRAITS {
+            // portraits off: the memory holds no cell at all
+            let all = portrait_memory().lock().unwrap();
+            let dir = session_dir(tmp.path(), "mem-del").unwrap();
+            assert!(
+                all.iter()
+                    .filter(|(d, _)| *d == dir)
+                    .all(|(_, m)| !m.holds_cells())
+            );
+            return;
+        }
         assert!(memory_holds(tmp.path(), "mem-del"));
         assert!(memory_holds(tmp.path(), "mem-end"));
         remove(tmp.path(), "mem-del");

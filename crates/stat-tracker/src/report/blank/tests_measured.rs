@@ -74,14 +74,14 @@ fn t0() -> chrono::DateTime<chrono::Utc> {
 /// capture.
 fn blank_after(earlier: &RgbImage, img: &RgbImage, chat: super::Chat) -> super::BlankedBoard {
     let mut mem = super::PortraitMemory::replay();
-    super::blank_crop_seen(
+    super::blank_crop_gated(
         earlier,
         Some(6),
         chat,
         &mut mem,
         super::CaptureTime::wall(t0()),
     );
-    super::blank_crop_seen(
+    super::blank_crop_gated(
         img,
         Some(6),
         chat,
@@ -359,8 +359,8 @@ fn chat_on_the_frame_drops_the_portraits_it_can_reach() {
         let p = e.get_pixel(cx + cw - 1, cy + 2).0;
         e.put_pixel(cx + cw - 1, cy + 2, Rgb(p.map(|v| v ^ 0x10)));
         let e = image::DynamicImage::ImageRgb8(e);
-        super::blanked_scoreboard_seen(&e, Some(6), &mut mem, super::CaptureTime::wall(t0()));
-        super::blanked_scoreboard_seen(
+        super::blanked_scoreboard_gated(&e, Some(6), &mut mem, super::CaptureTime::wall(t0()));
+        super::blanked_scoreboard_gated(
             f,
             Some(6),
             &mut mem,
@@ -570,14 +570,14 @@ fn a_hero_swap_or_no_earlier_capture_keeps_no_portrait() {
     assert_eq!(b.portraits(), 10, "{}", verdicts(&b));
     // an earlier capture under a minute old is not a reference
     let mut mem = super::PortraitMemory::replay();
-    super::blank_crop_seen(
+    super::blank_crop_gated(
         &clean,
         Some(6),
         super::Chat::None,
         &mut mem,
         super::CaptureTime::wall(t0()),
     );
-    let b = super::blank_crop_seen(
+    let b = super::blank_crop_gated(
         &clean,
         Some(6),
         super::Chat::None,
@@ -685,8 +685,8 @@ fn a_clock_step_does_not_make_a_fresh_capture_a_reference() {
     };
     let kept_after = |mono_s: u64| {
         let mut mem = super::PortraitMemory::new();
-        super::blank_crop_seen(&live(&img), Some(6), super::Chat::None, &mut mem, at(0, 0));
-        super::blank_crop_seen(&img, Some(6), super::Chat::None, &mut mem, at(5, mono_s))
+        super::blank_crop_gated(&live(&img), Some(6), super::Chat::None, &mut mem, at(0, 0));
+        super::blank_crop_gated(&img, Some(6), super::Chat::None, &mut mem, at(5, mono_s))
     };
     // the wall clock jumped 5 minutes, the grabs were 30 s apart: no reference
     let b = kept_after(30);
@@ -705,7 +705,7 @@ fn fast_tab_presses_keep_a_reference_old_enough() {
     for i in 0..12i64 {
         let mut f = img.clone();
         f.put_pixel(img.width() - 1, 2, Rgb([i as u8, 0, 0]));
-        super::blank_crop_seen(
+        super::blank_crop_gated(
             &f,
             Some(6),
             super::Chat::None,
@@ -713,7 +713,7 @@ fn fast_tab_presses_keep_a_reference_old_enough() {
             super::CaptureTime::wall(t0() + chrono::Duration::seconds(5 * i)),
         );
     }
-    let b = super::blank_crop_seen(
+    let b = super::blank_crop_gated(
         &img,
         Some(6),
         super::Chat::None,

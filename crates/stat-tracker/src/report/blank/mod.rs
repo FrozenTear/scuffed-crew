@@ -53,7 +53,8 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 /// * 10: a portrait is copied only when it matches the same row on an
 ///   earlier capture of the game; a role icon and the separators over the
 ///   portrait must show; portraits only at the 1440p and 1080p scales.
-pub const BLANK_TABLE_VERSION: u32 = 10;
+/// * 11: no portrait is copied ([`COPY_PORTRAITS`] off).
+pub const BLANK_TABLE_VERSION: u32 = 11;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -64,7 +65,12 @@ pub const REF_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
 /// The one switch for portrait copying. Off, every portrait cell stays fill
 /// on every board (digits are kept as before) and no portrait cell is held
 /// in memory.
-pub const COPY_PORTRAITS: bool = true;
+///
+/// Off in blank table 11 (alpha.6, USER 2026-10-13): an overlay faint enough
+/// (about 9% or less) or pinned for a minute passes the earlier-capture
+/// check (attack round 3). The check and its gates stay here, tested with
+/// the switch on, for alpha.7's native-template portraits.
+pub const COPY_PORTRAITS: bool = false;
 
 /// When a capture was taken: the wall clock it is stamped with, and the
 /// monotonic instant of the frame grab (or the Tab press that asked for it),
@@ -146,6 +152,11 @@ impl PortraitMemory {
             seen: VecDeque::new(),
             monotonic: false,
         }
+    }
+
+    /// Whether any portrait cell is held.
+    pub fn holds_cells(&self) -> bool {
+        self.seen.iter().any(|s| !s.cells.is_empty())
     }
 
     /// Newest capture time held, if any.
@@ -480,10 +491,53 @@ pub fn blanked_scoreboard_seen(
     memory: &mut PortraitMemory,
     at: CaptureTime,
 ) -> BlankedBoard {
+    blanked_scoreboard_inner(frame, team_size, memory, at, COPY_PORTRAITS)
+}
+
+fn blanked_scoreboard_inner(
+    frame: &DynamicImage,
+    team_size: Option<usize>,
+    memory: &mut PortraitMemory,
+    at: CaptureTime,
+    copy_portraits: bool,
+) -> BlankedBoard {
     let rgb = frame.to_rgb8();
     let (x, y, w, h) = crop_scoreboard_rect(rgb.width(), rgb.height());
     let crop = image::imageops::crop_imm(&rgb, x, y, w, h).to_image();
-    blank_crop_seen(&crop, team_size, chat_over_board(&rgb), memory, at)
+    blank_crop_inner(
+        &crop,
+        team_size,
+        chat_over_board(&rgb),
+        memory,
+        at,
+        copy_portraits,
+    )
+}
+
+/// [`blanked_scoreboard_seen`] with portrait copying on, whatever
+/// [`COPY_PORTRAITS`] says: the tests and the port check keep the portrait
+/// gates measured for when they are turned back on.
+#[cfg(test)]
+pub(super) fn blanked_scoreboard_gated(
+    frame: &DynamicImage,
+    team_size: Option<usize>,
+    memory: &mut PortraitMemory,
+    at: CaptureTime,
+) -> BlankedBoard {
+    blanked_scoreboard_inner(frame, team_size, memory, at, true)
+}
+
+/// [`blank_crop_seen`] with portrait copying on (see
+/// [`blanked_scoreboard_gated`]).
+#[cfg(test)]
+pub(super) fn blank_crop_gated(
+    src: &RgbImage,
+    team_size: Option<usize>,
+    chat: Chat,
+    memory: &mut PortraitMemory,
+    at: CaptureTime,
+) -> BlankedBoard {
+    blank_crop_inner(src, team_size, chat, memory, at, true)
 }
 
 /// The allowlist on a cut scoreboard crop with no earlier capture: no
@@ -602,6 +656,7 @@ fn blank_crop_inner(
             _ => None,
         };
         let portrait = match (bar, &pe, &cell) {
+            _ if !copy_portraits => Err("portrait copying is off".to_string()),
             (None, _, _) => Err("row not verified".to_string()),
             (Some(Err(e)), _, _) => Err(format!("no portrait: {e}")),
             (_, Err(e), _) => Err(format!("no portrait edge: {}", e.0)),
@@ -742,7 +797,7 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 10 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 11 for this revision)",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
@@ -752,7 +807,7 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 10);
+        assert_eq!(BLANK_TABLE_VERSION, 11);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 
@@ -814,6 +869,45 @@ mod tests {
     }
 
     #[test]
+    fn this_revision_never_copies_a_portrait_pixel() {
+        // blank table 11: the public entry points keep no portrait, even
+        // after a matching earlier capture, on every layout and both paths
+        const { assert!(!COPY_PORTRAITS) };
+        let t0: DateTime<Utc> = "2026-10-12T20:00:00Z".parse().unwrap();
+        for layout in [
+            synth::Layout::L1,
+            synth::Layout::L2,
+            synth::Layout::L3,
+            synth::Layout::L4,
+            synth::Layout::PostMatch,
+        ] {
+            let img = synth::board(layout);
+            let mut e = img.clone();
+            let p = e.get_pixel(img.width() - 1, 2).0;
+            e.put_pixel(img.width() - 1, 2, Rgb(p.map(|v| v ^ 0x10)));
+            let mut mem = PortraitMemory::new();
+            let t = |m: i64| CaptureTime {
+                wall: t0 + chrono::Duration::minutes(m),
+                mono: std::time::Instant::now() + std::time::Duration::from_secs(60 * m as u64),
+            };
+            blank_crop_seen(&e, Some(6), Chat::None, &mut mem, t(0));
+            let b = blank_crop_seen(&img, Some(6), Chat::None, &mut mem, t(2));
+            assert_eq!(b.board, Ok(()), "{layout:?}");
+            assert_eq!(b.portraits(), 0, "{layout:?}");
+            assert!(mem.seen.iter().all(|s| s.cells.is_empty()));
+            let (l, _) = layout.edges();
+            for y in 0..img.height() {
+                for x in l..l + 104 {
+                    assert_eq!(*b.image.get_pixel(x, y), FILL, "{layout:?} px {x},{y}");
+                }
+            }
+        }
+        let f = synth::frame(synth::Layout::L1, &synth::VALUES);
+        let b = blanked_scoreboard(&f, Some(6));
+        assert_eq!(b.portraits(), 0);
+    }
+
+    #[test]
     fn with_portrait_copying_off_no_portrait_pixel_is_copied() {
         // the switch: every portrait cell stays fill, digits are unchanged
         let img = synth::board(synth::Layout::L1);
@@ -821,6 +915,8 @@ mod tests {
         let p = e.get_pixel(img.width() - 1, 2).0;
         e.put_pixel(img.width() - 1, 2, Rgb(p.map(|v| v ^ 0x10)));
         let t0: DateTime<Utc> = "2026-10-12T20:00:00Z".parse().unwrap();
+        // the earlier capture is always remembered with copying on, so only
+        // the switch itself keeps the second capture's portraits out
         let run = |copy: bool| {
             let mut mem = PortraitMemory::replay();
             blank_crop_inner(
@@ -829,8 +925,9 @@ mod tests {
                 Chat::None,
                 &mut mem,
                 CaptureTime::wall(t0),
-                copy,
+                true,
             );
+            let earlier = mem.seen.iter().map(|s| s.cells.len()).sum::<usize>();
             let b = blank_crop_inner(
                 &img,
                 Some(6),
@@ -839,13 +936,17 @@ mod tests {
                 CaptureTime::wall(t0 + chrono::Duration::minutes(2)),
                 copy,
             );
-            (b, mem.seen.iter().map(|s| s.cells.len()).sum::<usize>())
+            let held = mem.seen.iter().map(|s| s.cells.len()).sum::<usize>();
+            (b, held - earlier)
         };
         let (on, _) = run(true);
         let (off, held) = run(false);
         assert!(on.portraits() > 0);
         assert_eq!(off.portraits(), 0);
-        assert_eq!(held, 0, "no portrait cell is held in memory");
+        assert_eq!(
+            held, 0,
+            "no portrait cell of a board blanked with copying off is held"
+        );
         let (l, _) = synth::Layout::L1.edges();
         for y in 0..img.height() {
             for x in l..l + 104 {

@@ -4,7 +4,7 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
-Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4).
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4).
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
@@ -247,7 +247,7 @@ Pixel edges use the same truncation as the current scoreboard crop: scale by the
 
 The bands outside the playfield (the letterbox or pillarbox) are filled with the same solid colour on every frame we keep. Those bands are the complement of the playfield, not a row in the table. Overlays and notifications sit there on ultrawide and 16:10 captures.
 
-### Scoreboard (revision 5, measured)
+### Scoreboard (revision 6, measured)
 
 The scoreboard crop, as fractions of the playfield, matches the crop the tracker already uses:
 
@@ -266,7 +266,9 @@ Geometry, measured per board. Lengths are in the 1664 px crop of a 2560x1440 fra
 - Rows: each team's grid is fitted to the 2 px separators between rows: team 1 from the header bottom, team 2 from 556 to 576 `s`, pitch 74.5 to 75.75 `s`. A team's grid is trusted when 3 of its internal separators show, and a row is used only when the separators on both of its sides show.
 - Only 6v6 has measured geometry. Any other team size, or an unknown one, keeps nothing. A board whose geometry fails keeps nothing at all.
 
-A row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. A portrait is kept only when an earlier capture of the same game, at least 60 seconds older, matches it; with no such capture it is filled. It is copied whole only when all of these hold:
+**Portraits are not kept in this revision.** Every portrait cell (role bar and hero portrait) is filled on every board, and the digits are kept exactly as before. `COPY_PORTRAITS` in `src/report/blank/mod.rs` is off, and the daemon holds no portrait cell in memory. Attack round 3 (2026-10-13) showed two overlays that the earlier-capture check below cannot see: a faint overlay drawn on the current capture only (about 9% opacity or less, about 20 levels a channel or less), which can be read after subtracting the hero's clean art; and an overlay that stays within about 20 levels of the earlier capture, except about 20 px, for a minute or more (a pinned stream overlay, a menu held open). Both are listed under known limits. Alpha.7 plans to turn portraits back on with a native-template paste: hero templates at the board's own size (74 px at 1440p, 56 px at 1080p, from the game's 256 px portraits), where the output shows the template, not frame pixels.
+
+The rule below stays in the code behind `COPY_PORTRAITS` and is tested with the switch on. With the switch on, a row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`), 1 px inside the row. A portrait is kept only when an earlier capture of the same game, at least 60 seconds older, matches it; with no such capture it is filled. It is copied whole only when all of these hold:
 
 - the cell matches the same row's cell on an earlier capture of the same game, taken at least a minute earlier and at most 30 minutes earlier: of the difference between the two cells, minus its 15 `s` box mean (a team colour or world shift moves the whole bar or background and cancels), no channel may be off by more than 20 at more than 20 px (x `s` squared). Text, boxes and fades drawn on one capture and not the other, at more than about 10% opacity, differ at hundreds of px; a fainter overlay does not (known limits below). The daemon keeps the portrait cells of a game's last 8 captures in memory for this (never on disk), drops them when the game ends or is deleted, and when 8 are held always keeps the newest capture old enough to be a reference. The age is checked on the wall clock and on the monotonic clock, so a clock step never makes a seconds-old capture a reference, and a capture whose crop is byte-identical to the one checked (a frozen render) is never a reference. The first capture of a game, a hero swap, a death and a respawn keep no portrait until a matching earlier capture exists;
 - the role bar is one opaque colour: 55% of its non-icon pixels sit within 40 of their median;
@@ -276,7 +278,7 @@ A row's portrait cell runs from `L` to the measured portrait edge (`L + 104 s`),
 - the row separators above and below the portrait square show: on at most 35% of its columns may a separator sit within 12 of the pixels 3 `s` above and below it on every channel (real rows: at most 26%); a separator the crop cuts off (the bottom row of a 1440p crop) cannot show, so that row keeps no portrait;
 - no chat can be over the row (below).
 
-On the member's 34 boards of 2026-10-11 and 10-12, blanked in time order as one member's captures (the daemon's case), the edge gates drop 67 of 408 portraits (39 rows with no hero picked, which show no role icon, and 28 bottom rows whose lower separator the crop cuts off) and the content check drops 244 more (195 differ from every earlier capture at least a minute older, 49 have none): 97 of 408 portraits are kept at 1664 px and 73 of 408 at 1248 px. Those captures are a few minutes apart, with deaths and hero swaps between them; the daemon sees every accepted Tab, so it finds a matching earlier capture more often.
+With the switch on, on the member's 34 boards of 2026-10-11 and 10-12, blanked in time order as one member's captures (the daemon's case), the edge gates drop 67 of 408 portraits (39 rows with no hero picked, which show no role icon, and 28 bottom rows whose lower separator the crop cuts off) and the content check drops 244 more (195 differ from every earlier capture at least a minute older, 49 have none): 97 of 408 portraits are kept at 1664 px and 73 of 408 at 1248 px. Those captures are a few minutes apart, with deaths and hero swaps between them; the daemon sees every accepted Tab, so it finds a matching earlier capture more often.
 
 Chat is read on the full frame. The chat box stacks lines upward from a bottom line below the crop, and each line starts left of the crop. When the strip at x 60 to 448, y 1250 to 1340 of the 2560x1440 playfield holds chat text (more than 12 pixels with a channel more than 40 from its 5x5 median; the member's chat-free Tab frames hold 0 to 2, frames with chat 282 to 2,071; at 30 instead of 40 two chat-free Tab frames would read as chat, with 91 and 93), the stack is followed upward line by line. Every row it can reach keeps no portrait, and at least the rows reaching below 85% of the crop height. Blanking a crop with no frame drops those bottom portraits too. Chat drawn in a role bar's own colour cannot be seen on the bar, so this is the gate that stops it.
 
@@ -291,10 +293,11 @@ Copied from a kept cell are its glyphs' binarised pixels, plus the rim pixels ar
 
 Measured on 2026-10-12 with the Rust blanker:
 
-- The member's 34 real boards at 1664 px: 0 secret pixels kept, 97.5% of digit pixels, 407 of 408 rows of numbers (one row needed a slanted cut), and (blank table 10, in time order) 97 of 408 portraits.
+- The member's 34 real boards at 1664 px: 0 secret pixels kept, 97.5% of digit pixels, 407 of 408 rows of numbers (one row needed a slanted cut), and no portrait (blank table 11; 97 of 408 with `COPY_PORTRAITS` on, in time order). At 1248 px: 408 of 408 rows of numbers and no portrait.
 - Both post-match fixtures keep all 12 rows of numbers.
 - 118 forged attacks: 3 leak, 278 px in all, none readable.
 - 219 further forgeries (menus, notifications, killcam banners, coloured text beside digits, chat in every channel colour): all closed, except a box drawn wholly inside one portrait.
+- Blank table 11 copies no portrait pixel, so no portrait or overlay forgery leaks; what is left is the digit rim residue below. With `COPY_PORTRAITS` on:
 - Attack round 2, re-run on blank table 10 (582 forgeries with the clean board as the earlier capture): every portrait and overlay forgery copies 0 drawn px (context menus opened inside a portrait, menus mid fade-in, coloured or faded text across the portrait edge, translucent boxes, tooltips over the portrait column, panels over the role bar, text in the icon zone, chat in the bar colour, a translucent board over in-world nameplates). What is left is the digit rim residue below (53 forgeries, 4,959 px) and one 2 px sample.
 - The same forgeries with the overlay also on the earlier capture (it stayed within about 20 levels, except about 20 px, for a minute or more): the edge gates alone leave 124 forgeries leaking 96,398 px, besides the same digit rim residue. This is the pinned-overlay limit below.
 
@@ -302,12 +305,12 @@ Known limits:
 
 - An overlay that stays within about 20 levels of the earlier capture, except about 20 px, over a portrait for a minute or more (a pinned stream overlay, a menu held open through two captures a minute apart, a fade of up to about 9%, or about 16 to 24 px of animated change) passes the content check, and only the edge gates judge it. A box or text drawn wholly inside one portrait, or one whose edges miss every gate, is then copied with the portrait. Fades and translucent boxes over the moving world change by more than that within a minute; opaque ones do not.
 - A faint overlay on the current capture only, at about 9% opacity or less (about 20 levels a channel or less), passes the content check and every gate, and can be read after subtracting the hero's clean art: attack round 3 read a chat fragment drawn at 4% over the bottom-row portraits through the frame path. The chat gate misses chat fainter than about 17%. A lower content threshold (20 to 12 levels) only narrows this to about 5% and drops 29% of the matched rows, so it is not used.
-- `COPY_PORTRAITS` in `src/report/blank/mod.rs` turns portrait copying off: every portrait cell stays filled and no portrait cell is held in memory, while the digits are kept as before. It is on in this revision.
+- The two portrait limits above apply only with `COPY_PORTRAITS` on. It is off in this revision, so no portrait is kept.
 - Pale text behind a translucent row can leave rim samples on digit rims: chains of up to about 60 px per component, unreadable.
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 10 for this revision), and a kit from another version is never reported.
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 11 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
@@ -479,7 +482,7 @@ Tests use synthetic images drawn for the test, and the two post-match fixtures i
 Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates; plus the two post-match fixtures. After blanking:
 
 - Every name stroke is the solid colour, and the header and the world are filled.
-- Every portrait passes on a clean synthetic board blanked after an identical earlier capture, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
+- This revision copies no portrait pixel: on every synthetic layout, after a matching earlier capture, every portrait cell is fill and no portrait cell is held in memory. With `COPY_PORTRAITS` on (the tests switch it on for the rest of this list), every portrait passes on a clean synthetic board blanked after an earlier live capture, except the bottom row whose separator the crop cuts off, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
 - Each gate has a test that drops what it guards and copies none of the drawn pixels: a name in a stat cell, a notice across the columns, a grey row tint, a stroke over the role bar, a menu box laid across a portrait, touching glyphs joined by a thick stroke, chat on the frame (one line, and a stack), a crop with no frame, a board that is not 6v6, and a board whose header is gone.
 - The portrait content check, each against a clean earlier capture: a dark menu opened inside a portrait, a menu caught mid fade-in, and orange, grey and blue text across the portrait edge copy nothing of the overlay; a changed portrait and an earlier capture under a minute old keep no portrait. With the overlay on both captures: a box over the portrait column hides the separators, and a panel in the bar colour hides the role icon. A board at another scale keeps no portrait.
 - An ignored harness runs the blanker on a directory of member frames for retention, leaks, and read-back on the member's machine (`report::blank::port_check`).
@@ -540,7 +543,7 @@ Out of scope for this change, and out of scope for the first build unless a late
 
 Follow-ups:
 
-- A native-size hero pack (74 px templates for 1440p and 56 px for 1080p, each kept only when captures from different games agree, distributed by the server like the current pack) would let the portrait check match a hero reference instead of an earlier capture, and close the pinned-overlay limit in section 4. The current 95 px pack differs from board portraits by 8 to 17 levels on average, too much to see a short name over the art.
+- Portraits in alpha.7: a native-template paste. A hero pack built from the game's own 256 px portraits (heroes-v2), downscaled to the board's size (74 px at 1440p, 56 px at 1080p) and distributed by the server like the current pack. A row whose portrait matches a template gets the template pasted, so no frame pixel of the portrait is copied and neither a faint nor a pinned overlay can reach the output. The earlier-capture rule in section 4 stays behind `COPY_PORTRAITS` until then. The current 95 px pack differs from board portraits by 8 to 17 levels on average, too much to see a short name over the art.
 
 Open questions:
 

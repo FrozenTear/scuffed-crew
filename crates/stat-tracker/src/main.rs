@@ -5091,6 +5091,7 @@ const RANK_OUTCOME_MAX_IDLE: std::time::Duration = std::time::Duration::from_sec
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
 /// accepted capture. Written off the capture path; a failure is logged and
 /// never touches the stored match.
+#[allow(clippy::too_many_arguments)]
 fn record_report_kit(
     data_dir: &std::path::Path,
     session_id: &str,
