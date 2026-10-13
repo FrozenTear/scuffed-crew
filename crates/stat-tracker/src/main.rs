@@ -57,12 +57,14 @@ const POLL_DUMP_KEEP: usize = 150;
 /// How many rejected-capture frames are kept in `<data_dir>/debug/rejected/`.
 /// A rejected capture records nothing, so the frame is the only evidence for
 /// diagnosing why ("it didn't record my game" is undebuggable otherwise).
+/// Written only with `debug_ocr` on: the frame is unblanked and shows other
+/// players' names.
 const REJECTED_KEEP: usize = 30;
 
 /// How many ACCEPTED scoreboard crops are kept in `<data_dir>/debug/accepted/`.
 /// A silently-corrupt accepted board (OCR drift that still passed every trust
-/// gate) is otherwise unrecoverable for calibration retuning. Bounded so the
-/// always-on ring never grows without limit.
+/// gate) is otherwise unrecoverable for calibration retuning. Written only
+/// with `debug_ocr` on: the crop is unblanked and shows other players' names.
 const ACCEPTED_KEEP: usize = 20;
 
 /// After this many consecutive scoreboard captures that parsed but resolved no
@@ -280,7 +282,8 @@ struct DaemonCtx {
     dump_poll_frames: bool,
     /// Same gate as Tab OCR dumps (`debug_ocr` / `STAT_TRACKER_DEBUG_OCR`).
     /// When set, the poller writes Victory/Defeat evidence frames on confirm
-    /// and first word-OCR streak — not every mid-match tick.
+    /// and first word-OCR streak — not every mid-match tick. Also gates the
+    /// `debug/accepted` and `debug/rejected` rings (unblanked board pixels).
     debug_ocr: bool,
     data_dir: std::path::PathBuf,
     /// Consecutive scoreboard captures that parsed but resolved no map. Drives
@@ -788,6 +791,12 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
         tracing::info!(
             dir = %config.data_dir.join("debug").join("poll").display(),
             "debug_ocr: poll Victory/Defeat evidence frames on confirm and first streak (keeps the last {POLL_DUMP_KEEP} frames)"
+        );
+    }
+    for dir in stale_board_debug_dirs(config.debug_ocr_enabled(), &config.data_dir) {
+        tracing::info!(
+            dir = %dir.display(),
+            "this debug folder is no longer written while debug_ocr is off (it shows other players' names); existing files are left as they are"
         );
     }
     tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
@@ -4372,7 +4381,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     dip_count = scan.dip_count,
                     dip_pitch = ?scan.median_pitch,
                     spectral_pitch = ?scan.spectral_pitch,
-                    "capture rejected: not a scoreboard (saved to debug/rejected)"
+                    "capture rejected: not a scoreboard (saved to debug/rejected when debug_ocr is on)"
                 );
                 Err((outcome, frame, "preflight"))
             }
@@ -4385,7 +4394,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     dip_count = scan.dip_count,
                     dip_pitch = ?scan.median_pitch,
                     spectral_pitch = ?scan.spectral_pitch,
-                    "capture rejected: row pitch does not settle 5v5 vs 6v6 (saved to debug/rejected)"
+                    "capture rejected: row pitch does not settle 5v5 vs 6v6 (saved to debug/rejected when debug_ocr is on)"
                 );
                 Err((outcome, frame, "teamsize"))
             }
@@ -4398,7 +4407,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 if reason != "preflight" {
                     archive_map_label_crop(data_dir, session_id, &frame);
                 }
-                save_rejected_frame(data_dir, frame, reason);
+                save_rejected_frame(ctx.debug_ocr, data_dir, frame, reason);
                 return Ok(CaptureReport {
                     recorded: false,
                     outcome,
@@ -4499,10 +4508,10 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     if !parse::looks_like_scoreboard(&rows) {
         tracing::warn!(
             rows = rows.len(),
-            "capture rejected — frame does not look like a scoreboard (saved to debug/rejected)"
+            "capture rejected — frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
         );
         archive_map_label_crop(data_dir, session_id, &frame_img);
-        save_rejected_frame(data_dir, frame_img, "noscoreboard");
+        save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, "noscoreboard");
         return Ok(CaptureReport {
             recorded: false,
             outcome,
@@ -4867,7 +4876,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // Dump the accepted scoreboard crop to a bounded ring so a corrupt
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
-            save_accepted_frame(data_dir, scoreboard_img);
+            // Only with debug_ocr on: the crop shows other players' names.
+            save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img);
             record_report_kit(
                 data_dir,
                 &target_session,
@@ -4947,7 +4957,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             let reason = match miss {
                 parse::ScoreboardMiss::PlayerRowNotFound => {
                     tracing::warn!(
-                        "capture rejected: player row not found (saved to debug/rejected; \
+                        "capture rejected: player row not found (saved to debug/rejected when debug_ocr is on; \
                      set player_name in config.toml if it is missing)"
                     );
                     "noplayerrow"
@@ -4963,13 +4973,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     tracing::warn!(
                         ?player_row_idx,
                         ?cells,
-                        "capture rejected: stat cells unreadable (saved to debug/rejected)"
+                        "capture rejected: stat cells unreadable (saved to debug/rejected when debug_ocr is on)"
                     );
                     "unreadable"
                 }
             };
             archive_map_label_crop(data_dir, session_id, &frame_img);
-            save_rejected_frame(data_dir, frame_img, reason);
+            save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, reason);
             Ok(CaptureReport {
                 recorded: false,
                 outcome,
@@ -5075,13 +5085,26 @@ fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImag
     }
 }
 
+/// Debug rings that hold unblanked board pixels (other players' names).
+/// Written only while `debug_ocr` is on.
+const BOARD_PIXEL_DEBUG_DIRS: [&str; 2] = ["accepted", "rejected"];
+
 /// Archive a frame whose capture was rejected by a trust gate, for diagnosis.
-/// Runs the PNG encode off the async runtime; fire-and-forget.
-fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, reason: &'static str) {
+/// Only with `debug_ocr` on (`debug`): the frame is unblanked. Runs the PNG
+/// encode off the async runtime; fire-and-forget. The handle is for tests.
+fn save_rejected_frame(
+    debug: bool,
+    data_dir: &std::path::Path,
+    img: image::DynamicImage,
+    reason: &'static str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !debug {
+        return None;
+    }
     let dir = data_dir.join("debug").join("rejected");
-    tokio::task::spawn_blocking(move || {
+    Some(tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
-    });
+    }))
 }
 
 /// A rank screen's `outcome.png` goes to the active game only when that game
@@ -5136,12 +5159,35 @@ fn record_report_kit(
 /// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
-/// the only way to retune calibration). Fire-and-forget; encode off-runtime.
-fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImage>) {
+/// the only way to retune calibration). Only with `debug_ocr` on (`debug`):
+/// the crop is unblanked and shows other players' names. Fire-and-forget;
+/// encode off-runtime. The handle is for tests.
+fn save_accepted_frame(
+    debug: bool,
+    data_dir: &std::path::Path,
+    board: Arc<image::DynamicImage>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !debug {
+        return None;
+    }
     let dir = data_dir.join("debug").join("accepted");
-    tokio::task::spawn_blocking(move || {
+    Some(tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
-    });
+    }))
+}
+
+/// Board-pixel debug folders left over on disk while `debug_ocr` is off.
+/// They are never deleted (they are the user's files); startup only says
+/// they are no longer written.
+fn stale_board_debug_dirs(debug: bool, data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    if debug {
+        return Vec::new();
+    }
+    BOARD_PIXEL_DEBUG_DIRS
+        .iter()
+        .map(|name| data_dir.join("debug").join(name))
+        .filter(|dir| dir.is_dir())
+        .collect()
 }
 
 /// Keep the full top-bar map-label box from a Tab whose label is not a flat bar.
@@ -8005,6 +8051,70 @@ mod tests {
             poll_debug_prefix(PollDebugHit::Confirm, detect::MatchOutcome::Draw),
             "poll_confirm_draw"
         );
+    }
+
+    fn png_names(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn tiny_board() -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([8, 16, 32])))
+    }
+
+    #[tokio::test]
+    async fn accepted_and_rejected_rings_write_nothing_with_debug_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(save_accepted_frame(false, dir.path(), Arc::new(tiny_board())).is_none());
+        assert!(save_rejected_frame(false, dir.path(), tiny_board(), "unreadable").is_none());
+        assert!(
+            !dir.path().join("debug").exists(),
+            "debug off must not create debug/accepted or debug/rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_and_rejected_rings_write_with_debug_on() {
+        let dir = tempfile::tempdir().unwrap();
+        save_accepted_frame(true, dir.path(), Arc::new(tiny_board()))
+            .expect("debug on spawns the write")
+            .await
+            .unwrap();
+        save_rejected_frame(true, dir.path(), tiny_board(), "unreadable")
+            .expect("debug on spawns the write")
+            .await
+            .unwrap();
+        let accepted = png_names(&dir.path().join("debug").join("accepted"));
+        let rejected = png_names(&dir.path().join("debug").join("rejected"));
+        assert!(
+            accepted.len() == 1 && accepted[0].starts_with("accepted_"),
+            "accepted={accepted:?}"
+        );
+        assert!(
+            rejected.len() == 1 && rejected[0].starts_with("rejected_unreadable_"),
+            "rejected={rejected:?}"
+        );
+    }
+
+    #[test]
+    fn stale_board_debug_dirs_are_reported_only_with_debug_off_and_never_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(stale_board_debug_dirs(false, dir.path()).is_empty());
+        let accepted = dir.path().join("debug").join("accepted");
+        std::fs::create_dir_all(&accepted).unwrap();
+        let keep = accepted.join("accepted_old.png");
+        std::fs::write(&keep, b"x").unwrap();
+        assert_eq!(
+            stale_board_debug_dirs(false, dir.path()),
+            vec![accepted.clone()]
+        );
+        assert!(stale_board_debug_dirs(true, dir.path()).is_empty());
+        assert!(keep.exists(), "the user's files are left untouched");
     }
 
     #[test]
