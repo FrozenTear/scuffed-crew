@@ -55,6 +55,9 @@ fn the_daemon_reads_the_result_word_from_the_words_pack() {
         ("accolade_defeat.png", &accolade.1),
         ("rank_screen_victory.png", &rank.0),
         ("rank_screen_defeat.png", &rank.1),
+        // end titles too, so the new reader reads no title with OCR
+        ("end_title_victory.png", &bars(2, 90, 34)),
+        ("end_title_defeat.png", &bars(4, 80, 34)),
     ] {
         img.save(words_dir.join(name)).unwrap();
     }
@@ -98,9 +101,12 @@ fn the_daemon_reads_the_result_word_from_the_words_pack() {
         ),
     ] {
         let img = DynamicImage::ImageRgb8(rgb.clone());
-        // no end-title templates in this pack: the end title reads nothing
+        // no end title on these frames
         let titles = Titles::for_rgb(true, &rgb);
-        assert_eq!(titles, Titles::Words(None));
+        let Titles::Words(title) = &titles else {
+            panic!("no end-title read: {titles:?}");
+        };
+        assert_eq!((title.outcome, title.sure()), (None, None), "{title:?}");
 
         // reader = "new", the poll tick. A first sighting is deferred, and
         // the frame is not read.

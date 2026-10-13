@@ -84,10 +84,12 @@
 //!
 //! The words-v1 pack also ships `p4_final_score.png`, the FINAL SCORE line
 //! under the end title ([`FinalScoreTemplate`], region x 36-64%, y 70-84%,
-//! plane `min`). It is not a result word: under `reader = "new"` the
-//! end-title gate in `detect::match_end` reads it in place of ocr-v1's P4
-//! OCR, with the same search and certification against
-//! [`FINAL_SCORE_FLOOR`].
+//! plane `min`). It is not a result word: it opens the gate of the
+//! end-title OCR in `detect::match_end` in place of ocr-v1's P4 OCR, with
+//! the same search and certification against [`FINAL_SCORE_FLOOR`]. Since
+//! alpha.7 O2 `reader = "new"` runs that OCR, and so this read, only while
+//! no end-title templates are loaded; with them loaded the end title is
+//! the template read above and nothing reads this line.
 //!
 //! The words-v1 folder also holds the phase-screen titles ([`phrase`]),
 //! loaded with the result words and read with the same search.
@@ -488,6 +490,13 @@ fn search_full(region: &[Level], st: &Stack) -> Found {
 /// Coarse to fine: every position at the coarsest level where the template
 /// fits, then the best [`PEAKS`] peaks, each refined level by level in a
 /// small window around twice its position. The score is level 0's.
+///
+/// Peaks that sit close together refine over the same windows. A window is
+/// scored once per search (F263-3): its score is the same every time, so
+/// the result is the same and only the repeats are saved.
+///
+/// [`search_fast_skipping`] also leaves out the level-0 windows that
+/// cannot reach [`PRESENT`].
 fn search_fast(region: &[Level], st: &Stack) -> Found {
     search_fast_with(region, st, PEAKS, REFINE_FIRST, REFINE)
 }
@@ -500,6 +509,43 @@ fn search_fast_with(
     n_peaks: usize,
     refine_first: usize,
     refine: usize,
+) -> Found {
+    search_fast_once(region, st, n_peaks, refine_first, refine, true, &[])
+}
+
+/// Block sizes of the projection bounds [`search_fast_skipping`] checks,
+/// coarsest first. Measured on 107 in-match frames with the words-v1 end
+/// titles (2026-10-13): the 8-block bound puts 96.7% of the level-0 refine
+/// windows under [`PRESENT`] and the 4-block bound the rest; they cost
+/// about 1.5% and 6% of one exact score.
+const SKIP_BLOCKS: [usize; 2] = [8, 4];
+
+/// [`search_fast`] for a read that runs on every poll tick (F263-3): a
+/// level-0 refine window is scored only when no bound of `skip`
+/// ([`bound_at`], an upper bound on its score) is below [`PRESENT`].
+///
+/// A window that is left out scores under [`PRESENT`], so a best score at
+/// or above [`PRESENT`] is the same score [`search_fast`] returns, and one
+/// below it stays below (it may be lower, or -1). The refine path does not
+/// change: the levels above 0 are scored as before. The bound has the
+/// float error [`certify`] describes (about 2e-4), far from the
+/// [`FLOOR`] a sure read needs.
+fn search_fast_skipping(region: &[Level], st: &Stack, skip: &[(&Proj, &Phased)]) -> Found {
+    search_fast_once(region, st, PEAKS, REFINE_FIRST, REFINE, true, skip)
+}
+
+/// [`search_fast_with`]; `once` = false scores a window again every time a
+/// peak's refine reaches it (the reference the tests compare with), and
+/// `skip` is [`search_fast_skipping`]'s bounds (empty: every refine window
+/// is scored).
+fn search_fast_once(
+    region: &[Level],
+    st: &Stack,
+    n_peaks: usize,
+    refine_first: usize,
+    refine: usize,
+    once: bool,
+    skip: &[(&Proj, &Phased)],
 ) -> Found {
     let fits = |l: usize| {
         l < region.len()
@@ -538,6 +584,9 @@ fn search_fast_with(
         }
     }
     let mut best = -1.0f64;
+    // The windows scored so far in this search: (level, x, y) to its score.
+    let mut scored: std::collections::HashMap<(usize, usize, usize), Option<f64>> =
+        std::collections::HashMap::new();
     for (mut x, mut y) in peaks {
         let mut score = None;
         for l in (0..top).rev() {
@@ -547,8 +596,26 @@ fn search_fast_with(
             let mut lvl_best: Option<(f64, usize, usize)> = None;
             for yy in cy.saturating_sub(r)..=(cy + r).min(p.h - k.h) {
                 for xx in cx.saturating_sub(r)..=(cx + r).min(p.w - k.w) {
-                    macs += k.w * k.h;
-                    if let Some(v) = ncc_at(p, k, xx, yy)
+                    let v = match scored.get(&(l, xx, yy)) {
+                        Some(&v) if once => v,
+                        _ => {
+                            // a flat window has no score either way
+                            let out = l == 0
+                                && skip.iter().any(|(pr, ph)| {
+                                    bound_at(p, ph, k, pr, xx, yy)
+                                        .is_none_or(|ub| ub + BOUND_SLACK < PRESENT as f64)
+                                });
+                            let v = if out {
+                                None
+                            } else {
+                                macs += k.w * k.h;
+                                ncc_at(p, k, xx, yy)
+                            };
+                            scored.insert((l, xx, yy), v);
+                            v
+                        }
+                    };
+                    if let Some(v) = v
                         && lvl_best.is_none_or(|b| v > b.0)
                     {
                         lvl_best = Some((v, xx, yy));
@@ -865,9 +932,20 @@ pub struct ResultTemplates {
     final_score: Option<FinalScoreTemplate>,
 }
 
+/// The largest template PNG [`load_gray`] decodes: the 16:9 game rect at the
+/// work scale. A template is a cut of a region of that rect, so a larger
+/// file is not a template (F260-7).
+const MAX_TEMPLATE_PX: (u32, u32) = (1280, 720);
+
 /// An 8-bit grey PNG as a [`Gray`] in 0..1, or `None` (missing, unreadable,
-/// empty).
+/// empty, or larger than [`MAX_TEMPLATE_PX`]). The size is read from the
+/// header, before any pixel is decoded.
 fn load_gray(p: &Path) -> Option<Gray> {
+    let (w, h) = image::image_dimensions(p).ok()?;
+    if w > MAX_TEMPLATE_PX.0 || h > MAX_TEMPLATE_PX.1 {
+        tracing::warn!(file = %p.display(), w, h, "template image too large; left out");
+        return None;
+    }
     let l = image::open(p).ok()?.to_luma8();
     if l.width() == 0 || l.height() == 0 {
         return None;
@@ -1052,18 +1130,40 @@ impl ResultTemplates {
     }
 
     fn scores_in(&self, regions: &Regions, exhaustive: bool) -> Vec<Found> {
+        self.scores_with(
+            regions,
+            if exhaustive {
+                Search::Full
+            } else {
+                Search::Fast
+            },
+        )
+    }
+
+    fn scores_with(&self, regions: &Regions, search: Search) -> Vec<Found> {
         let mut out = Vec::with_capacity(self.tpls.len());
         for (i, t) in self.tpls.iter().enumerate() {
-            let Some(p) = &regions.levels[regions.of[i]] else {
+            let ri = regions.of[i];
+            let Some(p) = &regions.levels[ri] else {
                 out.push(NONE_FOUND);
                 continue;
             };
             let mut best = NONE_FOUND;
             for st in &t.stacks {
-                let f = if exhaustive {
-                    search_full(p, st)
-                } else {
-                    search_fast(p, st)
+                let f = match search {
+                    Search::Full => search_full(p, st),
+                    Search::Fast => search_fast(p, st),
+                    Search::Skipping => {
+                        let skip: Vec<(&Proj, &Phased)> = st
+                            .projs
+                            .iter()
+                            .filter_map(|pr| {
+                                let ph = regions.phased.iter().find(|(k, _)| *k == (ri, pr.f))?;
+                                Some((pr, &ph.1))
+                            })
+                            .collect();
+                        search_fast_skipping(p, st, &skip)
+                    }
                 };
                 best.macs += f.macs;
                 if f.score > best.score {
@@ -1088,6 +1188,50 @@ impl ResultTemplates {
         let mut regions = self.regions(rgb);
         let scores = self.scores_in(&regions, false);
         self.settle(&mut regions, scores, CERT_MACS)
+    }
+
+    /// [`Self::read`] behind a cheaper test for "no word on this frame",
+    /// for a read that runs on every poll tick (the end title, F263-3).
+    ///
+    /// The templates are first searched with [`search_fast_skipping`],
+    /// which does not score a refine window that a block-projection bound
+    /// puts under [`PRESENT`]. Its scores at or above [`PRESENT`] are the
+    /// fast search's, and the ones below stay below. So:
+    /// * when no template reaches [`PRESENT`], [`Self::read`] names no word
+    ///   either, and this returns "no word" without the rest of the work.
+    ///   Its score is then some score under [`PRESENT`], not the best one,
+    ///   and its margin is 0;
+    /// * when one does, this is [`Self::read`] itself, every field: the
+    ///   plain fast search, then the certification.
+    pub fn read_skipping(&self, rgb: &RgbImage) -> ResultRead {
+        let mut regions = self.skip_regions(rgb);
+        let quick = self.scores_with(&regions, Search::Skipping);
+        let best = quick.iter().map(|f| f.score).fold(-1.0f64, f64::max);
+        if best < PRESENT as f64 {
+            return ResultRead::nothing(best, 0.0);
+        }
+        let scores = self.scores_in(&regions, false);
+        self.settle(&mut regions, scores, CERT_MACS)
+    }
+
+    /// [`Self::regions`] with the phase images [`Search::Skipping`] checks
+    /// its bounds on ([`SKIP_BLOCKS`]).
+    fn skip_regions(&self, rgb: &RgbImage) -> Regions {
+        let mut regions = self.regions(rgb);
+        for (i, t) in self.tpls.iter().enumerate() {
+            let ri = regions.of[i];
+            let Regions { levels, phased, .. } = &mut regions;
+            let Some(lv) = &levels[ri] else { continue };
+            for f in SKIP_BLOCKS {
+                if t.stacks
+                    .iter()
+                    .any(|st| st.projs.iter().any(|pr| pr.f == f))
+                {
+                    make_phased(phased, ri, lv, f);
+                }
+            }
+        }
+        regions
     }
 
     /// [`Self::read`] with every window of every region scored: the
@@ -1178,6 +1322,19 @@ impl ResultTemplates {
             suspect,
         }
     }
+}
+
+/// Which search [`ResultTemplates::scores_with`] runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Search {
+    /// Every window ([`search_full`]).
+    Full,
+    /// Coarse to fine ([`search_fast`]).
+    Fast,
+    /// Coarse to fine, leaving out the refine windows that cannot reach
+    /// [`PRESENT`] ([`search_fast_skipping`]). The caller makes the
+    /// [`SKIP_BLOCKS`] phase images first.
+    Skipping,
 }
 
 /// A read that must not be sure: flagged, or nothing for a DRAW (only a
@@ -1383,6 +1540,8 @@ pub struct LoadedResults {
 }
 
 impl LoadedResults {
+    /// One load: the word templates of `pack` with their end titles cut
+    /// out, and the phase-screen titles of the words-v1 folder.
     pub fn new(
         templates: ResultTemplates,
         pack: ResultPack,
@@ -1539,6 +1698,10 @@ impl LiveInner {
             results = loaded.is_some(),
             result_pack = loaded.as_ref().map(|l| l.pack.as_str()),
             result_sources = ?loaded.as_ref().map(|l| l.templates.sources()),
+            end_titles = ?loaded
+                .as_ref()
+                .and_then(|l| l.end_titles.as_ref())
+                .map(|t| t.sources()),
             phrases = ?loaded.as_ref().and_then(|l| l.phrases.as_ref()).map(|p| p.ids()),
             "new reader result words loaded"
         );
@@ -1661,10 +1824,19 @@ impl ResultTemplates {
     /// `None` unless a VICTORY and a DEFEAT end-title template are loaded,
     /// because a sure read is a lead over the best other word.
     pub fn end_titles(&self) -> Option<ResultTemplates> {
-        let mut only = self.clone();
-        only.tpls.retain(|t| is_end_title(&t.layout.id));
-        let has = |o| only.tpls.iter().any(|t| t.outcome == o);
-        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(only)
+        // only the end-title templates are copied (F263-10); the FINAL
+        // SCORE template stays with the whole set, which is what reads it
+        let tpls: Vec<Template> = self
+            .tpls
+            .iter()
+            .filter(|t| is_end_title(&t.layout.id))
+            .cloned()
+            .collect();
+        let has = |o| tpls.iter().any(|t| t.outcome == o);
+        (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(ResultTemplates {
+            tpls,
+            final_score: None,
+        })
     }
 }
 
@@ -1741,12 +1913,17 @@ impl ResultTemplates {
     /// [`ResultScreen`]): the first look of [`LoadedResults::read_screens`].
     /// `None` when they can name no screen.
     pub fn screen_words(&self) -> Option<ResultTemplates> {
-        let mut only = self.clone();
-        only.tpls.retain(|t| {
-            ResultScreen::ALL
-                .iter()
-                .any(|screen| screen.has_layout(&t.layout.id))
-        });
+        // only the result screens' templates are copied
+        let tpls: Vec<Template> = self
+            .tpls
+            .iter()
+            .filter(|t| ResultScreen::ALL.iter().any(|s| s.has_layout(&t.layout.id)))
+            .cloned()
+            .collect();
+        let only = ResultTemplates {
+            tpls,
+            final_score: None,
+        };
         let screens = only.screens();
         (screens.accolade || screens.rank_screen).then_some(only)
     }
@@ -3473,6 +3650,184 @@ mod tests {
         assert!(fast.score > 0.95, "{fast:?}");
     }
 
+    /// Regions for the search tests below: six small ones (the template
+    /// builds one refine level there) and one of the words-v1 end-title
+    /// shape (two refine levels). Each has `t` and `other` drawn into noise.
+    fn search_cases() -> Vec<(Vec<Level>, [Gray; 3])> {
+        let mut rng = Rng(0x2633);
+        let mut out = Vec::new();
+        for (n, (tw, th, rw, rh)) in [(6, SIZES[2]), (1, (279, 100, 512, 230))] {
+            let words = [glyphs(4, tw, th), glyphs(7, tw, th), glyphs(11, tw, th)];
+            for _ in 0..n {
+                let g = random_region(&mut rng, &words[0], &words[1], rw, rh);
+                out.push((pyramid(g), words.clone()));
+            }
+        }
+        out
+    }
+
+    /// A window is scored once per search (F263-3). The score is the one a
+    /// search gets that scores a window again every time a peak's refine
+    /// reaches it, bit for bit: for the word in the region, for the other
+    /// word in it and for a word that is not there. The work is never more,
+    /// and it is less where peaks sit close together.
+    #[test]
+    fn a_window_is_scored_once_per_search() {
+        let (mut all, mut saved, mut deep) = (0, 0, 0);
+        for (i, (p, words)) in search_cases().iter().enumerate() {
+            for (k, word) in words.iter().enumerate() {
+                let st = Stack::new(word).unwrap();
+                deep += usize::from(st.levels.len() == 3);
+                let again = search_fast_once(p, &st, PEAKS, REFINE_FIRST, REFINE, false, &[]);
+                let once = search_fast_once(p, &st, PEAKS, REFINE_FIRST, REFINE, true, &[]);
+                assert_eq!(
+                    once.score.to_bits(),
+                    again.score.to_bits(),
+                    "region {i}, word {k}"
+                );
+                assert_eq!(once, search_fast(p, &st), "region {i}, word {k}");
+                assert!(once.macs <= again.macs, "region {i}, word {k}");
+                all += again.macs;
+                saved += again.macs - once.macs;
+            }
+        }
+        assert!(deep > 0, "a search with two refine levels is covered");
+        assert!(saved > 0, "close peaks share windows: {saved} of {all}");
+    }
+
+    /// The skipping search (F263-3) leaves out only windows that cannot
+    /// reach `PRESENT`. A best score at or above `PRESENT` is the fast
+    /// search's score bit for bit, also for a word that is only partly
+    /// there; a score below it stays below; and the work is less.
+    #[test]
+    fn the_skipping_search_keeps_every_score_at_present() {
+        let (mut kept, mut partial, mut below) = (0, 0, 0);
+        let (mut fast_macs, mut skip_macs) = (0, 0);
+        for (i, (p, words)) in search_cases().iter().enumerate() {
+            // words that are `t` on the left and another word on the right
+            let (t, other) = (&words[0], &words[1]);
+            let mixed = [25, 40, 55, 70].map(|pc| {
+                let mut g = t.clone();
+                for y in 0..g.h {
+                    for x in g.w * pc / 100..g.w {
+                        g.px[y * g.w + x] = other.px[y * g.w + x];
+                    }
+                }
+                g
+            });
+            let phased: Vec<Phased> = SKIP_BLOCKS.iter().map(|&f| Phased::new(&p[0], f)).collect();
+            for (k, word) in words.iter().chain(&mixed).enumerate() {
+                let st = Stack::new(word).unwrap();
+                let skip: Vec<(&Proj, &Phased)> = st
+                    .projs
+                    .iter()
+                    .filter_map(|pr| Some((pr, phased.iter().find(|ph| ph.f == pr.f)?)))
+                    .collect();
+                assert_eq!(skip.len(), SKIP_BLOCKS.len(), "both bounds are checked");
+                let fast = search_fast(p, &st);
+                let skipping = search_fast_skipping(p, &st, &skip);
+                if fast.score >= PRESENT as f64 {
+                    assert_eq!(
+                        skipping.score.to_bits(),
+                        fast.score.to_bits(),
+                        "region {i}, word {k}"
+                    );
+                    kept += 1;
+                    partial += usize::from(fast.score < 0.9);
+                } else {
+                    assert!(skipping.score <= fast.score, "region {i}, word {k}");
+                    below += 1;
+                }
+                assert!(skipping.macs <= fast.macs, "region {i}, word {k}");
+                fast_macs += fast.macs;
+                skip_macs += skipping.macs;
+            }
+        }
+        assert!(
+            kept > 0 && partial > 0 && below > 0,
+            "kept {kept}, partial {partial}, below {below}"
+        );
+        assert!(skip_macs < fast_macs, "{skip_macs} of {fast_macs}");
+    }
+
+    /// `read_skipping` is `read`, every field, wherever a template reaches
+    /// `PRESENT`: a sure word, a word that is only partly there, two words
+    /// at once. A frame with no word reads nothing either way, and the
+    /// skipping read scores fewer windows to find that out.
+    #[test]
+    fn the_skipping_read_is_the_read_wherever_a_word_is_present() {
+        let titles = with_end_titles().end_titles().unwrap();
+        // no word: a flat frame, and one with texture all over
+        let textured = RgbImage::from_fn(2560, 1440, |x, y| {
+            let n = ((x.wrapping_mul(37) ^ y.wrapping_mul(17)) % 97) as u8;
+            Rgb([20 + n, 26 + n / 2, 50 + n / 3])
+        });
+        let mut frames = vec![dark_frame(), textured];
+        for (layout, seed, w, colour) in [
+            (lay(END_TITLE), 2, 90, [150, 20, 160]),
+            (lay(END_TITLE), 4, 80, [40, 200, 255]),
+            (lay(END_TITLE), 6, 60, [255, 220, 0]),
+            (end_title_plain(), 5, 90, [240, 240, 240]),
+        ] {
+            let mut img = dark_frame();
+            paint(&mut img, &layout, &word(seed, w, 34), colour);
+            frames.push(img.clone());
+            // the right part of the word painted over
+            let [fx0, fy0, _, _] = layout.roi;
+            let (x0, y0) = ((fx0 * 2560.0) as u32 + 20, (fy0 * 1440.0) as u32 + 10);
+            for cut in [w as u32, w as u32 * 3 / 2] {
+                let mut part = img.clone();
+                for y in y0..y0 + 68 {
+                    for x in x0 + cut..x0 + 2 * w as u32 {
+                        part.put_pixel(x, y, Rgb([20, 26, 50]));
+                    }
+                }
+                frames.push(part);
+            }
+        }
+        // an end-title VICTORY and DEFEAT on one frame
+        let mut both = dark_frame();
+        paint(&mut both, &lay(END_TITLE), &word(2, 90, 34), [150, 20, 160]);
+        paint_at(&mut both, 1300, 600, &word(4, 80, 34), [150, 20, 160]);
+        frames.push(both);
+
+        let (mut sure, mut flagged, mut nothing, mut saved) = (0, 0, 0, 0);
+        for (k, img) in frames.iter().enumerate() {
+            let (read, skipping) = (titles.read(img), titles.read_skipping(img));
+            let work = |f: Vec<Found>| f.iter().map(|f| f.macs).sum::<usize>();
+            let fast = work(titles.scores_in(&titles.regions(img), false));
+            let quick = work(titles.scores_with(&titles.skip_regions(img), Search::Skipping));
+            if read.score >= PRESENT {
+                assert_eq!(skipping, read, "frame {k}");
+                assert!(quick <= fast, "frame {k}: {quick} of {fast}");
+                sure += usize::from(read.sure().is_some());
+                flagged += usize::from(read.outcome.is_some() && read.suspect);
+            } else {
+                assert_eq!(read.outcome, None, "frame {k}");
+                assert_eq!(
+                    skipping,
+                    ResultRead {
+                        outcome: None,
+                        source: None,
+                        score: skipping.score,
+                        margin: 0.0,
+                        suspect: true,
+                    },
+                    "frame {k}"
+                );
+                assert!(skipping.score <= read.score, "frame {k}");
+                assert!(quick <= fast, "frame {k}: {quick} of {fast}");
+                saved += fast - quick;
+                nothing += 1;
+            }
+        }
+        assert!(
+            sure >= 4 && nothing >= 2,
+            "sure {sure}, flagged {flagged}, nothing {nothing}"
+        );
+        assert!(saved > 0, "no word: fewer windows are scored");
+    }
+
     // ------------------------------------------------ folders and reload
 
     fn pack(dir: &Path, victory_seed: u32) {
@@ -3785,6 +4140,25 @@ mod tests {
             assert_eq!(read.suspect, flagged, "gap {gap}: {read:?}");
             assert_eq!(read.outcome, Some(Outcome::Victory));
         }
+    }
+
+    /// F260-7: a template PNG larger than the work-scale game rect is not
+    /// decoded.
+    #[test]
+    fn an_oversized_template_png_is_not_loaded() {
+        let d = tempfile::tempdir().unwrap();
+        let save = |name: &str, w: u32, h: u32| {
+            let p = d.path().join(name);
+            image::GrayImage::from_pixel(w, h, image::Luma([200]))
+                .save(&p)
+                .unwrap();
+            p
+        };
+        assert!(load_gray(&save("ok.png", 1280, 720)).is_some());
+        assert!(load_gray(&save("wide.png", 1281, 4)).is_none());
+        assert!(load_gray(&save("tall.png", 4, 721)).is_none());
+        assert!(load_gray(&save("huge.png", 5000, 5000)).is_none());
+        assert_eq!(MAX_TEMPLATE_PX, (1280, 720));
     }
 
     /// A layouts.json that cannot be read refuses the folder like one that

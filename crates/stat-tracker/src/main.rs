@@ -367,8 +367,21 @@ fn package_version() -> &'static str {
     option_env!("SST_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // First, before any thread, log line or Tesseract use: libgomp reads
+    // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
+    // app with no unit installed) is replaced here by the same binary with
+    // it set.
+    // Under the systemd unit the variable is already there and this returns.
+    let omp = stat_tracker::omp::ensure_thread_limit();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?
+        .block_on(run(omp))
+}
+
+async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     lock_down_umask();
     // No core file, also when the GUI starts the daemon outside systemd.
     let core_dumps = stat_tracker::fs_mode::disable_core_dumps();
@@ -387,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = core_dumps {
         tracing::warn!(error = %e, "could not turn off core dumps");
     }
+    stat_tracker::omp::log_startup(&omp);
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
     let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
@@ -548,6 +562,10 @@ async fn main() -> anyhow::Result<()> {
 /// used by smoke tests and humans). Returns true if a flag was handled and
 /// `main` should exit successfully.
 fn handle_preinit_flags() -> bool {
+    if std::env::args().any(|a| a == stat_tracker::omp::PRINT_FLAG) {
+        print!("{}", stat_tracker::omp::print_report());
+        return true;
+    }
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("scuffed-stat-tracker {}", package_version());
         return true;
@@ -565,7 +583,8 @@ fn handle_preinit_flags() -> bool {
              \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
              \x20 --collect-portraits   only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
-             \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
+             \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\
+             \x20 --print-omp-limit     print the OpenMP thread limit OCR runs with and exit\n\n\
              With no flags, runs the capture daemon (see README).",
             package_version()
         );
@@ -3610,11 +3629,15 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // combat frames stop paying a Tesseract call per
                             // tick; static post-match/phase screens still read
                             // (one tick later at most).
-                            // `reader = "new"` reads the FINAL SCORE line with the
-                            // words-v1 template, not OCR (alpha.7 O3).
-                            // It reads the end title from the words-v1 pack
-                            // too, once per tick, for the outcome signal and
-                            // for the wake. No OCR reads it (alpha.7 O2).
+                            // `reader = "new"` reads the end title from the
+                            // words-v1 pack, once per tick, for the outcome
+                            // signal and for the wake, and no OCR reads it
+                            // (alpha.7 O2). A first sure read only wakes;
+                            // the same word on the next tick is the signal.
+                            // With no end-title templates loaded the titles
+                            // fall back to OCR, as before O2. Only that
+                            // fallback still reads the FINAL SCORE line (its
+                            // gate), with the words-v1 template (alpha.7 O3).
                             let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);
                             // And it reads the accolade and rank-screen
                             // result word from the words-v1 pack, behind the
@@ -3935,11 +3958,11 @@ fn analyze_frame(
     // end-title read alone. T1, an OCR of the top-centre band for a result
     // header, is gone (alpha.7 O4; what that was measured on is in
     // `detect_outcome_text`). The full-board OCR's header line (ET-2, in
-    // `handle_capture`) still runs. `reader = "new"` reads the FINAL SCORE
-    // line with the words-v1 template (O3). The end title is read once
-    // (F257-3).
-    // `reader = "new"` also takes the end title itself from the words-v1
-    // pack, not OCR (O2).
+    // `handle_capture`) still runs. The end title is read once (F257-3).
+    // `reader = "new"` takes the end title from the words-v1 pack, not OCR
+    // (O2). With no end-title templates loaded it falls back to the OCR
+    // read, and only that fallback still reads the FINAL SCORE line (its
+    // gate), with the words-v1 template (O3).
     let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);
     let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);
     // And the accolade and rank-screen words, when this frame is one of
@@ -4807,6 +4830,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             let started = Instant::now();
             let analysis = analyze_frame(img, matcher, player_name_owned, game_outcome, flags);
             stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
+            stat_tracker::omp::log_threads_after_first_ocr();
             analysis
         })
         .await?;
@@ -8605,6 +8629,58 @@ mod tests {
             .find("let accolade_map =")
             .expect("the poll tick's accolade map follows its signal");
         assert!(all[signal_at..signal_at + to_map].contains("&titles, &words, );"));
+    }
+
+    /// `reader = "new"` on the poll tick (F263-2, F263-6): a sure end title
+    /// is nothing but a wake on its first poll, one unconfirmed word (a
+    /// hint) on its second, and confirmed on its third, the polls ocr-v1
+    /// needs. One sure read of one frame never reaches the session machine.
+    #[test]
+    fn a_sure_end_title_is_a_word_on_its_second_poll_and_confirms_on_its_third() {
+        use detect::match_end::{FinalScoreSource, OutcomeSource, Titles};
+        use shadow::result::{END_TITLE, Outcome, ResultRead};
+        let rgb = image::RgbImage::from_pixel(640, 360, image::Rgb([10, 10, 10]));
+        let img = image::DynamicImage::ImageRgb8(rgb.clone());
+        let titles = Titles::Words(ResultRead {
+            outcome: Some(Outcome::Defeat),
+            source: Some(END_TITLE.to_string()),
+            score: 0.9,
+            margin: 0.4,
+            suspect: false,
+        });
+        let mut stability = detect::stability::FrameStability::default();
+        let mut streak = None;
+        let t0 = Instant::now();
+        let mut ticks = Vec::new();
+        for n in 0..3 {
+            let signal = detect::match_end::detect_outcome_signal_polled(
+                &img,
+                &rgb,
+                &mut stability,
+                FinalScoreSource::Words,
+                &titles,
+                &detect::match_end::ResultWords::for_reader(true),
+            );
+            let wake = detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+            let tick =
+                resolve_word_tick(&mut streak, signal, t0 + Duration::from_secs(4 * n), None);
+            ticks.push((
+                wake,
+                signal.map(|s| s.1),
+                tick.signal,
+                tick.signal_confirmed,
+            ));
+        }
+        let defeat = Some(detect::MatchOutcome::Defeat);
+        let title = Some(OutcomeSource::EndTitle);
+        assert_eq!(
+            ticks,
+            vec![
+                (true, None, None, false),
+                (true, title, defeat, false),
+                (true, title, defeat, true),
+            ]
+        );
     }
 
     /// The poll tick confirms the vote, ban and select screens with the

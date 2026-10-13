@@ -473,10 +473,12 @@ impl Reader {
     /// The end title of one full frame (the centred VICTORY / DEFEAT / DRAW
     /// at the end of a match), read from the loaded end-title templates
     /// alone. `None` when no words pack with end-title templates is loaded.
-    /// Only [`ResultRead::sure`] is a signal.
+    /// Only [`ResultRead::sure`] is a signal. This read runs on every poll
+    /// tick, so it is the one that skips the windows that cannot show a
+    /// word ([`ResultTemplates::read_skipping`]).
     pub fn read_end_title(&self, frame: &RgbImage) -> Option<ResultRead> {
         let loaded = self.results.current()?;
-        Some(loaded.end_titles.as_ref()?.read(frame))
+        Some(loaded.end_titles.as_ref()?.read_skipping(frame))
     }
 
     /// The result screens the loaded templates can name (accolade, rank
