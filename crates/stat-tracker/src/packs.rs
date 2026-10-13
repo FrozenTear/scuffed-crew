@@ -2331,14 +2331,7 @@ mod tests {
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let log = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || SharedWriter(writer.clone()))
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_logs();
         let startup = sync_on_startup(base.as_str(), token, dir.path()).await;
         // The keeper says what went wrong, then tries the pack twice more.
         let creds = move || {
@@ -2350,13 +2343,12 @@ mod tests {
         let (finished, waits) = rig_with(creds, dir.path(), Some(startup), 2, no_nap)
             .run()
             .await;
-        drop(_guard);
+        let logs = logs.text();
         assert!(!finished, "a pack that never matches is never settled");
         assert_eq!(waits, [secs(60), secs(300), secs(900)]);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
         assert!(!heroes.join("ana.png").exists());
-        let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert!(logs.contains(PACK_MISMATCH), "{logs}");
         assert_eq!(
             logs.matches("reader packs are still missing").count(),
@@ -3343,22 +3335,14 @@ mod tests {
         });
         let base = spawn_fake(fake);
         let dir = tempfile::tempdir().expect("tempdir");
-        let log = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || SharedWriter(writer.clone()))
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_logs();
         let startup = sync_on_startup(base.as_str(), TOKEN, dir.path()).await;
         assert!(startup.entries.is_none());
         // The keeper writes the line, with the wait before its next try.
         let (finished, waits) = rig(&base, dir.path(), Some(startup), 0, no_nap).run().await;
-        drop(_guard);
+        let logs = logs.text();
         assert!(!finished);
         assert_eq!(waits, [secs(60)]);
-        let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert_eq!(
             logs.matches("reader packs are still missing").count(),
             1,
@@ -4142,6 +4126,14 @@ mod tests {
     struct Logs {
         buf: Arc<Mutex<Vec<u8>>>,
         _guard: tracing::subscriber::DefaultGuard,
+        /// A second registered dispatcher, so that this one is never the
+        /// only one. While exactly one dispatcher is registered,
+        /// tracing-core decides whether a log call is on from the thread
+        /// that reaches it first and keeps that answer for every thread.
+        /// A test on another thread, without a subscriber, could then turn
+        /// a line off for this test (seen once on CI and about 1 run in
+        /// 150 here). With two registered, every one of them is asked.
+        _not_the_only_one: tracing::Dispatch,
     }
 
     fn capture_logs() -> Logs {
@@ -4152,9 +4144,11 @@ mod tests {
             .with_ansi(false)
             .with_writer(move || SharedWriter(writer.clone()))
             .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
         Logs {
             buf,
-            _guard: tracing::subscriber::set_default(subscriber),
+            _guard: guard,
+            _not_the_only_one: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
         }
     }
 
