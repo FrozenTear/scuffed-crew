@@ -98,11 +98,21 @@ fn candidate(img: &RgbImage, team: usize, row: usize) -> Candidate {
     measure(img, team).candidate(row).expect("candidate")
 }
 
+/// The game of session `session`: every session is its own game, on its
+/// own map.
+fn game(session: &str) -> GameTag {
+    GameTag {
+        session: session.to_string(),
+        map: format!("map of {session}"),
+        at: 0,
+    }
+}
+
 /// Offer the member's name from three boards of two games.
 fn fill(store: &mut SeedStore, team: usize, pitch: u32) {
-    for (i, game) in ["g1", "g1", "g2"].into_iter().enumerate() {
+    for (i, session) in ["g1", "g1", "g2"].into_iter().enumerate() {
         let img = named_board(team, pitch, [TEAL, PURPLE], &roster(team, i));
-        store.offer(candidate(&img, team, i), game);
+        store.offer(candidate(&img, team, i), &game(session));
     }
 }
 
@@ -150,69 +160,117 @@ fn the_best_row_needs_the_floor_and_a_lead() {
 
 #[test]
 fn a_seed_is_trusted_only_after_three_boards_from_two_games_agree() {
-    let offer = |store: &mut SeedStore, own: usize, names: Vec<Vec<usize>>, game: &str| {
+    let offer = |store: &mut SeedStore, own: usize, names: Vec<Vec<usize>>, tag: &GameTag| {
         let img = named_board(5, 88, [TEAL, PURPLE], &names);
-        store.offer(candidate(&img, 5, own), game)
+        store.offer(candidate(&img, 5, own), tag)
     };
     // three boards of one game are not enough
     let mut store = SeedStore::in_memory(None);
     for own in 0..3 {
-        assert_eq!(offer(&mut store, own, roster(5, own), "g1"), Offer::Pending);
+        assert_eq!(
+            offer(&mut store, own, roster(5, own), &game("g1")),
+            Offer::Pending
+        );
     }
     assert!(store.trusted().is_empty());
     // a board of a second game completes the group
-    assert_eq!(offer(&mut store, 4, roster(5, 4), "g2"), Offer::Promoted);
+    assert_eq!(
+        offer(&mut store, 4, roster(5, 4), &game("g2")),
+        Offer::Promoted
+    );
     assert_eq!(store.trusted().len(), PROMOTE);
     assert_eq!(store.pending_len(), 0);
     // once trusted, the same name is known and nothing more is kept
-    assert_eq!(offer(&mut store, 2, roster(5, 2), "g3"), Offer::Known);
+    assert_eq!(
+        offer(&mut store, 2, roster(5, 2), &game("g3")),
+        Offer::Known
+    );
     assert_eq!(store.pending_len(), 0);
 
     // two boards from two games are not enough
     let mut store = SeedStore::in_memory(None);
-    assert_eq!(offer(&mut store, 0, roster(5, 0), "g1"), Offer::Pending);
-    assert_eq!(offer(&mut store, 1, roster(5, 1), "g2"), Offer::Pending);
+    assert_eq!(
+        offer(&mut store, 0, roster(5, 0), &game("g1")),
+        Offer::Pending
+    );
+    assert_eq!(
+        offer(&mut store, 1, roster(5, 1), &game("g2")),
+        Offer::Pending
+    );
     assert!(store.trusted().is_empty());
     // a third crop that shows another name does not complete it
-    assert_eq!(offer(&mut store, 2, other_names(10), "g3"), Offer::Pending);
+    assert_eq!(
+        offer(&mut store, 2, other_names(10), &game("g3")),
+        Offer::Pending
+    );
     assert!(store.trusted().is_empty());
     assert_eq!(store.pending_len(), 3);
     // nor does a look-alike: one glyph of the member's name changed
     let mut names = other_names(10);
     names[3] = OWN.to_vec();
     names[3][2] = 9;
-    assert_eq!(offer(&mut store, 3, names, "g4"), Offer::Pending);
+    assert_eq!(offer(&mut store, 3, names, &game("g4")), Offer::Pending);
     assert!(store.trusted().is_empty());
 }
 
 #[test]
 fn the_waiting_list_and_the_trusted_set_stay_small() {
-    let mut store = SeedStore::in_memory(None);
-    // 20 different names, one board each: none is ever trusted
-    for i in 0..20usize {
-        let mut names = other_names(10);
+    let name_of = |i: usize| {
         let dense = [0, 1, 5, 6, 8, 9];
-        names[0] = vec![
+        vec![
             dense[i % 6],
             dense[(i / 6) % 6],
             dense[(i / 2 + 1) % 6],
             0,
             1,
-        ];
-        let img = named_board(5, 88, [TEAL, PURPLE], &names);
-        store.offer(candidate(&img, 5, 0), &format!("g{i}"));
+        ]
+    };
+    let crop_of = |i: usize| {
+        let mut names = other_names(10);
+        names[0] = name_of(i);
+        candidate(&named_board(5, 88, [TEAL, PURPLE], &names), 5, 0)
+    };
+    let mut store = SeedStore::in_memory(None);
+    // 20 different names, one board each: none is ever trusted
+    for i in 0..20usize {
+        store.offer(crop_of(i), &game(&format!("g{i}")));
     }
     assert!(store.trusted().is_empty());
     assert_eq!(store.pending_len(), PENDING_MAX);
-    // a second name trusted at one scale: the oldest seeds make room
+    // The oldest waiting crops made room, not the newest: the last name is
+    // still waiting (two more crops complete it), the first is gone (two
+    // more crops of it are only two).
+    assert_eq!(store.offer(crop_of(0), &game("x1")), Offer::Pending);
+    assert_eq!(store.offer(crop_of(0), &game("x2")), Offer::Pending);
+    assert_eq!(store.offer(crop_of(19), &game("x3")), Offer::Pending);
+    assert_eq!(store.offer(crop_of(19), &game("x4")), Offer::Promoted);
+
+    // Trusted seeds: at most TRUSTED_PER_SCALE per scale, the oldest go.
     let mut store = seeded(5, 88);
-    for (i, game) in ["h1", "h1", "h2"].into_iter().enumerate() {
-        let mut names = other_names(10);
-        names[i] = vec![9, 9, 1, 5, 0];
-        let img = named_board(5, 88, [TEAL, PURPLE], &names);
-        store.offer(candidate(&img, 5, i), game);
+    let first: Vec<Seed> = store.trusted().to_vec();
+    let mut groups: Vec<Vec<Seed>> = Vec::new();
+    for (n, name) in [[9, 9, 1, 5, 0], [8, 6, 0, 1, 9]].into_iter().enumerate() {
+        let mut group = Vec::new();
+        for (i, session) in ["a", "a", "b"].into_iter().enumerate() {
+            let mut names = other_names(10);
+            names[i] = name.to_vec();
+            let crop = candidate(&named_board(5, 88, [TEAL, PURPLE], &names), 5, i);
+            group.push(crop.seed().clone());
+            store.offer(crop, &game(&format!("{session}{n}")));
+        }
+        groups.push(group);
+        assert!(store.trusted().len() <= TRUSTED_PER_SCALE);
     }
+    assert_eq!(TRUSTED_PER_SCALE, 2 * PROMOTE, "two names fit whole");
     assert_eq!(store.trusted().len(), TRUSTED_PER_SCALE);
+    // the first name's seeds are the ones that left; the two later groups
+    // are whole, oldest first
+    assert!(first.iter().all(|seed| !store.trusted().contains(seed)));
+    assert_eq!(store.trusted()[..PROMOTE], groups[0][..]);
+    assert_eq!(store.trusted()[PROMOTE..], groups[1][..]);
+    // a seed of another scale is not counted against this one
+    fill(&mut store, 6, 75);
+    assert_eq!(store.trusted().len(), TRUSTED_PER_SCALE + PROMOTE);
 }
 
 #[test]
@@ -317,21 +375,33 @@ fn the_five_and_six_player_tables_each_keep_their_own_seeds() {
     }
 }
 
+fn lit(row: usize, lead: f64) -> Option<Highlight> {
+    Some(Highlight { row, lead })
+}
+
 #[test]
 fn combine_is_sure_only_when_seed_and_highlight_agree() {
     let own = |row, trust, source| OwnRow { row, trust, source };
+    let (strong, weak) = (SEED_HIGHLIGHT_LEAD, SEED_HIGHLIGHT_LEAD - 0.01);
+    for lead in [strong, weak] {
+        assert_eq!(
+            combine(Some(2), lit(2, lead), true),
+            own(Some(2), Trust::Sure, Source::Both)
+        );
+    }
+    // different rows, strong highlight: no row, whichever is which
     assert_eq!(
-        combine(Some(2), Some(2), true),
-        own(Some(2), Trust::Sure, Source::Both)
-    );
-    // different rows: no row, whichever is which
-    assert_eq!(
-        combine(Some(2), Some(0), true),
+        combine(Some(2), lit(0, strong), true),
         own(None, Trust::Suspect, Source::Disagree)
     );
     assert_eq!(
-        combine(Some(0), Some(2), true),
+        combine(Some(0), lit(2, strong), true),
         own(None, Trust::Suspect, Source::Disagree)
+    );
+    // different rows, weak highlight: the seed's row, marked (F262-7)
+    assert_eq!(
+        combine(Some(2), lit(0, weak), true),
+        own(Some(2), Trust::Suspect, Source::SeedOverWeakHighlight)
     );
     // one alone is used and marked
     assert_eq!(
@@ -339,13 +409,18 @@ fn combine_is_sure_only_when_seed_and_highlight_agree() {
         own(Some(7), Trust::Suspect, Source::SeedOnly)
     );
     assert_eq!(
-        combine(None, Some(1), true),
+        combine(None, lit(1, strong), true),
         own(Some(1), Trust::Suspect, Source::HighlightOnly)
     );
-    // before any seed of this scale exists the highlight is all there is
+    // before any seed of this scale exists a strong highlight stands
+    // unmarked, as it always did; a weak one is marked
     assert_eq!(
-        combine(None, Some(1), false),
+        combine(None, lit(1, strong), false),
         own(Some(1), Trust::Unconfirmed, Source::HighlightOnly)
+    );
+    assert_eq!(
+        combine(None, lit(1, weak), false),
+        own(Some(1), Trust::Suspect, Source::HighlightOnly)
     );
     assert_eq!(
         combine(None, None, true),
@@ -353,10 +428,27 @@ fn combine_is_sure_only_when_seed_and_highlight_agree() {
     );
     assert_eq!(combine(None, None, false).row, None);
     assert!(combine(Some(7), None, true).suspect());
-    assert!(combine(None, Some(1), true).suspect());
-    assert!(!combine(Some(2), Some(2), true).suspect());
-    assert!(!combine(None, Some(1), false).suspect());
-    assert!(!combine(Some(2), Some(0), true).suspect());
+    assert!(combine(None, lit(1, strong), true).suspect());
+    assert!(combine(None, lit(1, weak), false).suspect());
+    assert!(combine(Some(2), lit(0, weak), true).suspect());
+    assert!(!combine(Some(2), lit(2, strong), true).suspect());
+    assert!(!combine(None, lit(1, strong), false).suspect());
+    assert!(!combine(Some(2), lit(0, strong), true).suspect());
+    // the name fallback's row is stored as main stores a name match
+    let named = OwnRow::from_name(6);
+    assert_eq!(
+        named,
+        own(Some(6), Trust::Unconfirmed, Source::NameFallback)
+    );
+    assert!(!named.suspect());
+    assert!(
+        Highlight {
+            row: 0,
+            lead: strong
+        }
+        .strong()
+    );
+    assert!(!Highlight { row: 0, lead: weak }.strong());
 }
 
 fn read(
@@ -381,9 +473,19 @@ fn read_own_row_combines_the_seed_with_the_highlight() {
     let sure = read(&img, 5, Some((2, 1.5)), store.trusted());
     assert_eq!((sure.own.row, sure.own.trust), (Some(2), Trust::Sure));
     assert!(sure.best > 0.97 && sure.next < MATCH_FLOOR);
-    // the highlight on another row than the member's name: held
+    assert_eq!(sure.verdict, Verdict::Agree(88));
+    // a strong highlight on another row than the member's name: held, and
+    // counted against the seeds
     let split = read(&img, 5, Some((0, 1.5)), store.trusted());
     assert_eq!((split.own.row, split.own.source), (None, Source::Disagree));
+    assert_eq!(split.verdict, Verdict::Disagree(88));
+    // a weak highlight on another row: the seed's row, marked
+    let over = read(&img, 5, Some((0, 1.1)), store.trusted());
+    assert_eq!(
+        (over.own.row, over.own.trust, over.own.source),
+        (Some(2), Trust::Suspect, Source::SeedOverWeakHighlight)
+    );
+    assert_eq!(over.verdict, Verdict::Silent);
     // no highlight: the seed alone, marked
     let alone = read(&img, 5, None, store.trusted());
     assert_eq!((alone.own.row, alone.own.trust), (Some(2), Trust::Suspect));
@@ -424,7 +526,11 @@ fn a_candidate_is_cut_only_from_a_clearly_highlighted_unmatched_row() {
     // two rows could be lit (a hover, a party tint): no candidate
     let dim = read(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD - 0.01)), &[]);
     assert!(dim.candidate.is_none());
-    assert_eq!(dim.own.row, Some(2), "the row itself is still used");
+    assert_eq!(
+        (dim.own.row, dim.own.trust),
+        (Some(2), Trust::Suspect),
+        "the row is still used, and marked"
+    );
     assert!(read(&img, 5, None, &[]).candidate.is_none());
     // a seed already matches the row: nothing more to learn
     let store = seeded(5, 88);
@@ -555,36 +661,17 @@ fn a_board_seeds_only_when_it_is_the_members_own_live_board() {
     // no hero pack, or no career panel: a replay, a spectated board, a
     // post-match table
     assert!(!seed_gate(2, 300, 1007, Chat::None, None));
-    assert!(!seed_gate(
-        2,
-        300,
-        1007,
-        Chat::None,
-        Some(&tab(&rows, None))
-    ));
+    let no_panel = tab(&rows, None);
+    assert!(!seed_gate(2, 300, 1007, Chat::None, Some(&no_panel)));
     // the panel shows another hero than the highlighted row
-    assert!(!seed_gate(
-        2,
-        300,
-        1007,
-        Chat::None,
-        Some(&tab(&rows, Some("ana")))
-    ));
+    let other = tab(&rows, Some("ana"));
+    assert!(!seed_gate(2, 300, 1007, Chat::None, Some(&other)));
     assert!(!seed_gate(1, 300, 1007, Chat::None, Some(&live)));
     // the highlighted row's icon was not read (an ult ring, a skull): the
-    // panel alone says this is the member's live board
+    // row is not shown to be the member's, so it does not seed (F262-3)
     rows[2] = None;
     let unread = tab(&rows, Some("juno"));
-    assert!(seed_gate(2, 300, 1007, Chat::None, Some(&unread)));
-    // ...but still not under chat, and still not without the panel
-    assert!(!seed_gate(2, 300, 1007, Chat::Unknown, Some(&unread)));
-    assert!(!seed_gate(
-        2,
-        300,
-        1007,
-        Chat::None,
-        Some(&tab(&rows, None))
-    ));
+    assert!(!seed_gate(2, 300, 1007, Chat::None, Some(&unread)));
 }
 
 #[cfg(unix)]
@@ -627,7 +714,7 @@ fn seeds_are_kept_private_and_survive_a_restart() {
     assert_eq!(again.trusted(), store.trusted());
     // a waiting crop does not survive a restart: it was never written
     let before = std::fs::read(&file).unwrap();
-    assert_eq!(again.offer(waiting_crop(), "g9"), Offer::Pending);
+    assert_eq!(again.offer(waiting_crop(), &game("g9")), Offer::Pending);
     assert_eq!(again.pending_len(), 1);
     assert_eq!(std::fs::read(&file).unwrap(), before);
     let restarted = SeedStore::open(data, Some("Made Up Name"));
@@ -657,17 +744,23 @@ fn only_confirmed_crops_are_ever_written() {
     // two crops of the member's name wait: nothing is written at all
     for own in 0..2 {
         let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, own));
-        assert_eq!(store.offer(candidate(&img, 5, own), "g1"), Offer::Pending);
+        assert_eq!(
+            store.offer(candidate(&img, 5, own), &game("g1")),
+            Offer::Pending
+        );
         assert!(!data.join("private").exists(), "a waiting crop was written");
     }
     // and so does a crop of another name
     let other = waiting_crop();
-    assert_eq!(store.offer(other.clone(), "g1"), Offer::Pending);
+    assert_eq!(store.offer(other.clone(), &game("g1")), Offer::Pending);
     assert!(!data.join("private").exists(), "a waiting crop was written");
     // the third crop of the member's name, from a second game, is trusted:
     // now the file exists and holds the trusted seeds and nothing else
     let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 2));
-    assert_eq!(store.offer(candidate(&img, 5, 2), "g2"), Offer::Promoted);
+    assert_eq!(
+        store.offer(candidate(&img, 5, 2), &game("g2")),
+        Offer::Promoted
+    );
     assert_eq!(
         store.pending_len(),
         1,
@@ -704,13 +797,20 @@ fn only_confirmed_crops_are_ever_written() {
     let first = check(&store);
     // another waiting crop does not touch the file
     let img = named_board(6, 75, [TEAL, PURPLE], &roster(6, 0));
-    assert_eq!(store.offer(candidate(&img, 6, 0), "g2"), Offer::Pending);
+    assert_eq!(
+        store.offer(candidate(&img, 6, 0), &game("g2")),
+        Offer::Pending
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), first);
     // a later write (seeds of another table trusted) still leaves it out
     fill(&mut store, 6, 75);
     assert_eq!(store.trusted().len(), 2 * PROMOTE);
     assert_eq!(store.pending_len(), 1);
     assert_ne!(check(&store), first);
+    // a restart: the trusted seeds are back, the waiting crop is not
+    let restarted = SeedStore::open(data, None);
+    assert_eq!(restarted.trusted(), store.trusted());
+    assert_eq!(restarted.pending_len(), 0);
     // a store that cannot write keeps working from memory
     let mut memory = SeedStore::in_memory(None);
     fill(&mut memory, 5, 88);
@@ -780,46 +880,358 @@ fn a_loose_private_folder_is_tightened_on_the_next_write() {
 }
 
 #[test]
-fn a_changed_name_clears_the_seeds() {
+fn another_configured_name_clears_the_seeds_and_an_unknown_one_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
     let file = seed_dir(data).join(SEED_FILE);
-    for changed in [Some("Second Name"), None] {
-        let mut store = SeedStore::open(data, Some("First Name"));
-        fill(&mut store, 5, 88);
-        assert!(file.is_file());
-        let reopened = SeedStore::open(data, changed);
-        assert!(reopened.trusted().is_empty(), "{changed:?}");
-        assert_eq!(reopened.pending_len(), 0);
-        assert!(!file.exists(), "the old seeds are deleted, not kept");
-    }
     let mut store = SeedStore::open(data, Some("First Name"));
     fill(&mut store, 5, 88);
-    // a file from another version, or one that is not a seed file
-    let mut value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let seeds = store.trusted().to_vec();
+    let bytes = std::fs::read(&file).unwrap();
+    // F262-2: the name is not known in this run (not set locally, the fetch
+    // failed, blank). That is not a changed name: the seeds stay and are
+    // used, for as many runs as it lasts, and a write keeps the binding.
+    for unknown in [None, Some(""), Some("   ")] {
+        let mut opened = SeedStore::open(data, unknown);
+        assert_eq!(opened.trusted(), seeds, "{unknown:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), bytes, "{unknown:?}");
+        fill(&mut opened, 6, 75);
+        assert_eq!(opened.trusted().len(), 2 * PROMOTE);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&name_hash(Some("First Name"))), "{unknown:?}");
+        // back to the first name's file for the next case
+        std::fs::write(&file, &bytes).unwrap();
+    }
+    // the same name again: kept
+    assert_eq!(SeedStore::open(data, Some("first name")).trusted(), seeds);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    // another name: cleared, once
+    let other = SeedStore::open(data, Some("Second Name"));
+    assert!(other.trusted().is_empty() && other.pending_len() == 0);
+    assert!(!file.exists(), "the old seeds are deleted, not kept");
+    // ...and the first name does not get them back
+    assert!(
+        SeedStore::open(data, Some("First Name"))
+            .trusted()
+            .is_empty()
+    );
+
+    // Learned with no name known, then a name is set for the first time:
+    // kept, and bound to that name from then on.
+    let mut store = SeedStore::open(data, None);
+    fill(&mut store, 5, 88);
+    let seeds = store.trusted().to_vec();
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains(r#""name_hash":"""#)
+    );
+    let bound = SeedStore::open(data, Some("First Name"));
+    assert_eq!(bound.trusted(), seeds);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains(&name_hash(Some("First Name"))));
+    // a run with no name keeps that binding; another name then clears
+    assert_eq!(SeedStore::open(data, None).trusted(), seeds);
+    assert!(
+        SeedStore::open(data, Some("Second Name"))
+            .trusted()
+            .is_empty()
+    );
+    assert!(!file.exists());
+}
+
+#[test]
+fn a_file_that_is_not_this_versions_seed_file_is_deleted_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let folder = seed_dir(data);
+    let file = folder.join(SEED_FILE);
+    let mut store = SeedStore::open(data, None);
+    fill(&mut store, 5, 88);
+    let good = std::fs::read_to_string(&file).unwrap();
+    let empty = |opened: SeedStore| opened.trusted().is_empty() && opened.pending_len() == 0;
+    // another version
+    let mut value: serde_json::Value = serde_json::from_str(&good).unwrap();
     value["version"] = serde_json::json!(SEED_FILE_VERSION + 1);
     std::fs::write(&file, value.to_string()).unwrap();
-    assert!(
-        SeedStore::open(data, Some("First Name"))
-            .trusted()
-            .is_empty()
-    );
+    assert!(empty(SeedStore::open(data, None)));
     assert!(!file.exists());
-    std::fs::create_dir_all(seed_dir(data)).unwrap();
+    // not a seed file
     std::fs::write(&file, b"not json").unwrap();
-    assert!(
-        SeedStore::open(data, Some("First Name"))
-            .trusted()
-            .is_empty()
-    );
+    assert!(empty(SeedStore::open(data, None)));
     assert!(!file.exists());
-    // clear() deletes the file too
-    let mut store = SeedStore::open(data, Some("First Name"));
+    // not text at all (the read itself fails)
+    std::fs::write(&file, [0xff, 0xfe, 0x00, 0xff]).unwrap();
+    assert!(empty(SeedStore::open(data, None)));
+    assert!(!file.exists());
+    // larger than any file this module writes (F262-15): not read
+    let mut big = good.clone().into_bytes();
+    big.resize(MAX_SEED_FILE as usize + 1, b' ');
+    std::fs::write(&file, &big).unwrap();
+    assert!(empty(SeedStore::open(data, None)));
+    assert!(!file.exists());
+    // a seed whose sizes do not fit its pixels or a board is not loaded
+    let mut value: serde_json::Value = serde_json::from_str(&good).unwrap();
+    value["trusted"][0]["w"] = serde_json::json!(1);
+    value["trusted"][1]["row_h"] = serde_json::json!(5000);
+    std::fs::write(&file, value.to_string()).unwrap();
+    assert_eq!(SeedStore::open(data, None).trusted().len(), PROMOTE - 2);
+    // more seeds than the cap: the oldest are not loaded
+    let mut value: serde_json::Value = serde_json::from_str(&good).unwrap();
+    let one = value["trusted"][0].clone();
+    let many = vec![one; 3 * TRUSTED_PER_SCALE];
+    value["trusted"] = serde_json::json!(many);
+    std::fs::write(&file, value.to_string()).unwrap();
+    assert_eq!(
+        SeedStore::open(data, None).trusted().len(),
+        TRUSTED_PER_SCALE
+    );
+    // a temp file left by a crash is removed
+    std::fs::write(&file, &good).unwrap();
+    std::fs::write(folder.join(SEED_TMP), b"half a file").unwrap();
+    assert_eq!(SeedStore::open(data, None).trusted(), store.trusted());
+    assert!(!folder.join(SEED_TMP).exists());
+    // a link where the file should be is not followed: the link goes, its
+    // target stays
+    #[cfg(unix)]
+    {
+        let target = dir.path().join("elsewhere.json");
+        std::fs::write(&target, &good).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        assert!(empty(SeedStore::open(data, None)));
+        assert!(
+            std::fs::symlink_metadata(&file).is_err(),
+            "the link is gone"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), good);
+    }
+}
+
+/// F262-3: two session ids are not two games. A stat split inside one
+/// match opens a new session on the same map a moment later.
+#[test]
+fn two_sessions_of_one_match_are_one_game() {
+    let tag = |session: &str, map: &str, at: u64| GameTag {
+        session: session.into(),
+        map: map.into(),
+        at,
+    };
+    let a = tag("s1", "Busan", 1000);
+    assert!(!a.other_game(&a));
+    // the same session is one game whatever else differs
+    assert!(!a.other_game(&tag("s1", "Ilios", 1000 + 2 * GAME_GAP_SECS)));
+    // a split: another session, the same map, minutes later
+    assert!(!a.other_game(&tag("s2", "Busan", 1300)));
+    assert!(!a.other_game(&tag("s2", " Busan ", 1000 + GAME_GAP_SECS - 1)));
+    // another map: another game
+    assert!(a.other_game(&tag("s2", "Ilios", 1300)));
+    assert!(tag("s2", "Ilios", 1300).other_game(&a));
+    // the same map again after longer than a match runs: another game
+    assert!(a.other_game(&tag("s2", "Busan", 1000 + GAME_GAP_SECS)));
+    // no map known: only the time can tell
+    assert!(!a.other_game(&tag("s2", "", 1300)));
+    assert!(!tag("s1", "", 1000).other_game(&tag("s2", "", 1300)));
+    assert!(tag("s1", "", 1000).other_game(&tag("s2", "", 1000 + GAME_GAP_SECS)));
+
+    // through the store: three matching crops over a split game wait; a
+    // crop from a real second game completes them
+    let mut store = SeedStore::in_memory(None);
+    let crop = |own: usize| candidate(&named_board(5, 88, [TEAL, PURPLE], &roster(5, own)), 5, own);
+    assert_eq!(
+        store.offer(crop(0), &tag("s1", "Busan", 1000)),
+        Offer::Pending
+    );
+    assert_eq!(
+        store.offer(crop(1), &tag("s2", "Busan", 1200)),
+        Offer::Pending
+    );
+    assert_eq!(
+        store.offer(crop(2), &tag("s3", "Busan", 1400)),
+        Offer::Pending
+    );
+    assert!(store.trusted().is_empty());
+    assert_eq!(
+        store.offer(crop(3), &tag("s4", "Ilios", 1900)),
+        Offer::Promoted
+    );
+}
+
+/// F262-3: a trusted seed must not be able to hide the member's real row
+/// for good. Seeds that name another row than a strong highlight
+/// DISAGREE_DROPS boards in a row are dropped.
+#[test]
+fn seeds_that_keep_contradicting_a_strong_highlight_are_dropped() {
+    assert_eq!(DISAGREE_DROPS, 3);
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let file = seed_dir(data).join(SEED_FILE);
+    let mut store = SeedStore::open(data, None);
     fill(&mut store, 5, 88);
-    assert!(file.is_file());
-    store.clear();
-    assert!(store.trusted().is_empty() && !file.exists());
+    fill(&mut store, 6, 75);
+    assert_eq!(store.trusted().len(), 2 * PROMOTE);
+    // two in a row, then a board where seed and highlight agree: kept
+    assert_eq!(store.note(Verdict::Disagree(88), "s"), Noted::default());
+    assert_eq!(store.note(Verdict::Disagree(89), "s"), Noted::default());
+    assert_eq!(store.note(Verdict::Agree(88), "s"), Noted::default());
+    assert_eq!(store.note(Verdict::Disagree(88), "s"), Noted::default());
+    assert_eq!(store.note(Verdict::Disagree(88), "s"), Noted::default());
+    // a silent board, or one of the other table, is not "in between"
+    assert_eq!(store.note(Verdict::Silent, "s"), Noted::default());
+    assert_eq!(store.note(Verdict::Agree(75), "s"), Noted::default());
+    assert_eq!(store.trusted().len(), 2 * PROMOTE);
+    // the third in a row: the seeds of that scale go, the others stay
+    let noted = store.note(Verdict::Disagree(88), "s");
+    assert_eq!(noted.dropped, PROMOTE);
+    assert_eq!(store.trusted().len(), PROMOTE);
+    assert!(store.trusted().iter().all(|seed| seed.row_h == 75));
+    // off the disk too, and the count starts again
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(SeedStore::open(data, None).trusted(), store.trusted());
+    assert!(!text.is_empty());
+    assert_eq!(store.note(Verdict::Disagree(88), "s"), Noted::default());
+    // the last scale goes the same way, and then the file itself
+    for _ in 0..DISAGREE_DROPS - 1 {
+        assert_eq!(store.note(Verdict::Disagree(75), "s").dropped, 0);
+    }
+    assert_eq!(store.note(Verdict::Disagree(75), "s").dropped, PROMOTE);
+    assert!(store.trusted().is_empty());
+    assert!(!file.exists());
+    // the member's name is learned again from the highlight
+    fill(&mut store, 5, 88);
+    assert_eq!(store.trusted().len(), PROMOTE);
+}
+
+#[test]
+fn games_without_a_trusted_seed_are_reported_once() {
+    let mut store = SeedStore::in_memory(None);
+    let mut notices = 0;
+    for game in 0..3 * UNSEEDED_NOTICE_GAMES {
+        // several boards per game: a game counts once
+        for _ in 0..3 {
+            let noted = store.note(Verdict::Silent, &format!("s{game}"));
+            if noted.unseeded_notice {
+                notices += 1;
+                assert_eq!(game + 1, UNSEEDED_NOTICE_GAMES, "on the fifth game");
+            }
+        }
+    }
+    assert_eq!(notices, 1);
+    // with a trusted seed there is nothing to report
+    let mut store = seeded(5, 88);
+    for game in 0..3 * UNSEEDED_NOTICE_GAMES {
+        assert!(
+            !store
+                .note(Verdict::Silent, &format!("s{game}"))
+                .unseeded_notice
+        );
+    }
+}
+
+/// F262-8: a word at the cell's left edge may be the tail of a name that
+/// started further left. It is never cut, so it can never become a seed
+/// that matches every name ending the same way.
+#[test]
+fn a_name_cut_by_the_cells_left_edge_gives_no_candidate() {
+    let blank = board(&[1; 10], 5, 88, [TEAL, PURPLE]);
+    // (A row with no ult disc, where a name could start far left of the
+    // cell, never seeds at all: the gate needs the career panel.)
+    for x in [1.95, 2.00, 2.05] {
+        let mut img = blank.clone();
+        draw_name(&mut img, 5, 88, 0, &OWN, At { x, y: NAME_Y });
+        assert!(measure(&img, 5).candidate(0).is_none(), "name at {x}");
+    }
+    // clear of the edge it is cut whole
+    for x in [2.12, 2.20, 2.30] {
+        let mut img = blank.clone();
+        draw_name(&mut img, 5, 88, 0, &OWN, At { x, y: NAME_Y });
+        let c = measure(&img, 5).candidate(0).expect("candidate");
+        assert_eq!(c.seed().w, 5 * 22 + 18, "name at {x}");
+    }
+}
+
+#[test]
+fn zncc_is_zero_for_a_flat_block() {
+    let ramp: Vec<u8> = (0..64u8).map(|v| v * 4).collect();
+    let score = |a: &[u8], b: &[u8]| zncc(a.iter().copied(), b.iter().copied());
+    assert!((score(&ramp, &ramp) - 1.0).abs() < 1e-9);
+    let inverted: Vec<u8> = ramp.iter().map(|v| 255 - v).collect();
+    assert!((score(&ramp, &inverted) + 1.0).abs() < 1e-9);
+    // a flat block carries no shape: it matches nothing, itself included
+    assert_eq!(score(&ramp, &[0; 64]), 0.0);
+    assert_eq!(score(&[255; 64], &ramp), 0.0);
+    assert_eq!(score(&[7; 64], &[7; 64]), 0.0);
+}
+
+/// The chunks cover the whole crop: a change in its last columns, right of
+/// the last regular chunk, is still seen.
+#[test]
+fn the_weakest_chunk_reaches_the_end_of_the_crop() {
+    // 88 px rows: chunks are 26 px wide, 13 px apart. A 46 px crop has
+    // regular chunks at 0 and 13 (to column 39) and a tail chunk to 46.
+    let (w, h) = (46usize, 12usize);
+    let px: Vec<u8> = (0..w * h)
+        .map(|i| {
+            if (i % w / 3 + i / w / 3) % 2 == 0 {
+                255
+            } else {
+                0
+            }
+        })
+        .collect();
+    let seed = Seed {
+        row_h: 88,
+        w: w as u32,
+        h: h as u32,
+        px: px.clone(),
+        left_blank: false,
+    };
+    let tpl = Tpl::of(&seed).unwrap();
+    let same = Plane::new(w, h, px.clone());
+    assert!((weakest_chunk(&tpl, &same, 88, 0, 0) - 1.0).abs() < 1e-9);
+    // invert the last 6 columns only
+    let mut changed = px;
+    for y in 0..h {
+        for x in 40..w {
+            changed[y * w + x] = 255 - changed[y * w + x];
+        }
+    }
+    let plane = Plane::new(w, h, changed);
+    assert!(weakest_chunk(&tpl, &plane, 88, 0, 0) < 0.8);
+}
+
+/// Two crops are one name only when each matches on the other's row.
+#[test]
+fn crops_agree_only_when_each_matches_on_the_others_row() {
+    let blank = board(&[1; 10], 5, 88, [TEAL, PURPLE]);
+    // a: the member's name with a thin stroke just left of it (a badge
+    // edge), so its left side is not blank
+    let mut img = blank.clone();
+    let at = At {
+        x: NAME_X + GLYPH_STEP,
+        y: NAME_Y,
+    };
+    draw_name(&mut img, 5, 88, 0, &OWN, at);
+    let x0 = 44 + ((NAME_X + GLYPH_STEP) * 88.0).round() as u32;
+    let mid = row_top(5, 88, 0) + (NAME_Y * 88.0).round() as u32 + 14;
+    for y in mid..mid + 3 {
+        for x in x0 - 9..x0 - 1 {
+            img.put_pixel(x, y, Rgb([255; 3]));
+        }
+    }
+    let a = candidate(&img, 5, 0);
+    assert!(!a.seed().left_blank);
+    // b: the same name with one more glyph in front
+    let mut img = blank;
+    let longer: Vec<usize> = [0].into_iter().chain(OWN).collect();
+    draw_name(&mut img, 5, 88, 0, &longer, HOME);
+    let b = candidate(&img, 5, 0);
+    // a's crop sits inside b's name line; b's does not sit on a's row
+    assert!(seed_on(a.seed(), &b) >= AGREE);
+    assert!(seed_on(b.seed(), &a) < AGREE);
+    assert!(!agree(&a, &b));
+    assert!(!agree(&b, &a));
+    assert!(agree(&a, &a) && agree(&b, &b));
 }
 
 #[cfg(unix)]

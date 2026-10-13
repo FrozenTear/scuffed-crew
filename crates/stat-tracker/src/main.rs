@@ -532,8 +532,8 @@ async fn main() -> anyhow::Result<()> {
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
-        use_new_reader: config.uses_new_reader(),
-        own_name: open_own_name_seeds(&config),
+        use_new_reader: new_reader_in_effect(&config),
+        own_name: open_own_name_seeds(new_reader_in_effect(&config), &config),
     });
     // Capture never waits on the extra packs: a stalled download only
     // delays this task.
@@ -645,13 +645,26 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
     }
 }
 
-/// The own-name seed store, opened only for `reader = "new"`. A store kept
-/// for another configured in-game name is cleared on open
+/// Whether the new reader is in effect for this run.
+///
+/// The capture path (`DaemonCtx::use_new_reader`) and the own-name seed
+/// store ([`open_own_name_seeds`]) both read this one function, so the new
+/// reader can never run without its seed store. A lane that turns the new
+/// reader on by another setting changes it here and nowhere else.
+fn new_reader_in_effect(config: &config::Config) -> bool {
+    config.uses_new_reader()
+}
+
+/// The own-name seed store, opened only when the new reader is in effect
+/// (`new_reader`, from [`new_reader_in_effect`]). A store kept for another
+/// configured in-game name is cleared on open; a name that is not known in
+/// this run (not set, or the fetch failed) keeps it
 /// ([`detect::own_row::SeedStore::open`]).
 fn open_own_name_seeds(
+    new_reader: bool,
     config: &config::Config,
 ) -> Option<Arc<std::sync::Mutex<detect::own_row::SeedStore>>> {
-    config.uses_new_reader().then(|| {
+    new_reader.then(|| {
         Arc::new(std::sync::Mutex::new(detect::own_row::SeedStore::open(
             &config.data_dir,
             config.player_name.as_deref(),
@@ -674,20 +687,60 @@ fn own_name_seeds(
         .unwrap_or_default()
 }
 
+/// Tell the own-name seed store what one Tab's board says about the trusted
+/// seeds, held Tab or stored (session `session_id`). Seeds that keep naming
+/// another row than a strong highlight are dropped, so a wrong seed cannot
+/// hide the member's real row for good; and the log says once when games go
+/// by without any trusted seed.
+async fn note_own_seed_verdict(
+    store: Option<&Arc<std::sync::Mutex<detect::own_row::SeedStore>>>,
+    verdict: detect::own_row::Verdict,
+    session_id: &str,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let session = detect::own_row::game_key(session_id);
+    // No disk write unless seeds are dropped, and that is rare: no
+    // blocking task for the common case.
+    let noted = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .note(verdict, &session);
+    if noted.dropped > 0 {
+        tracing::warn!(
+            dropped = noted.dropped,
+            boards = detect::own_row::DISAGREE_DROPS,
+            "own-row seeds named another row than a clear highlight on this many boards in a row: dropped, the name line is learned again"
+        );
+    }
+    if noted.unseeded_notice {
+        tracing::info!(
+            games = detect::own_row::UNSEEDED_NOTICE_GAMES,
+            "no own-name seed is trusted yet after this many games: the own row comes from the highlight alone"
+        );
+    }
+}
+
 /// Hand a gated crop of the highlighted row's name line to the seed store,
-/// for the game `session_id`. The store trusts it only once crops from
-/// three boards over two games match each other. Runs off the async
-/// threads because a kept crop is written to disk.
+/// for the game `session_id` on `map`. The store trusts it only once crops
+/// from three boards over two games match each other. Runs off the async
+/// threads because trusted seeds are written to disk.
 async fn offer_own_name_seed(
     store: Option<&Arc<std::sync::Mutex<detect::own_row::SeedStore>>>,
     candidate: Option<detect::own_row::Candidate>,
     session_id: &str,
+    map: &str,
 ) {
     let (Some(store), Some(candidate)) = (store, candidate) else {
         return;
     };
     let store = Arc::clone(store);
-    let game = detect::own_row::game_key(session_id);
+    let game = detect::own_row::GameTag {
+        session: detect::own_row::game_key(session_id),
+        map: map.to_string(),
+        at: Utc::now().timestamp().max(0) as u64,
+    };
     let offered = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let offer = store.offer(candidate, &game);
@@ -2543,6 +2596,9 @@ struct FrameAnalysis {
     /// the seeding gate, for the own-name seed store. Pixels only; never
     /// logged, reported or uploaded.
     own_name_candidate: Option<detect::own_row::Candidate>,
+    /// `reader = "new"`: what this board says about the trusted own-name
+    /// seeds (agree, or name another row than a strong highlight).
+    own_seed_verdict: detect::own_row::Verdict,
     /// Detected team size (5 or 6) — portrait geometry depends on it.
     team_size: usize,
     /// The full frame, kept for the rejected-capture archive.
@@ -4040,12 +4096,20 @@ fn analyze_frame(
     // teams) for a name match — this handles replays and post-match screens
     // where the player may be on team 2. Fall back to brightness-detected row
     // otherwise. `reader = "new"`: the seed match combined with the
-    // highlight, and never a name read.
+    // highlight. Only when neither names a row are this board's name
+    // windows read, to match the configured name as main does.
+    let highlight = brightness_row_idx.map(|row| detect::own_row::Highlight {
+        row,
+        lead: detect::hero_portrait::player_row_highlight(&scoreboard, team_size)
+            .filter(|(lit, _)| *lit == row)
+            .map_or(0.0, |(_, lead)| lead),
+    });
     let OwnRowChoice {
         row_idx,
         name_match,
         own_row,
         candidate,
+        verdict: own_seed_verdict,
     } = find_own_row(
         use_new_reader,
         || {
@@ -4053,16 +4117,10 @@ fn analyze_frame(
                 .as_deref()
                 .and_then(|name| parse::match_player_row_by_name(&rows, name))
         },
-        || {
-            let highlight = brightness_row_idx.map(|row| detect::own_row::Highlight {
-                row,
-                lead: detect::hero_portrait::player_row_highlight(&scoreboard, team_size)
-                    .filter(|(lit, _)| *lit == row)
-                    .map_or(0.0, |(_, lead)| lead),
-            });
-            detect::own_row::read_own_row(Some(&img), &scoreboard, team_size, highlight, &own_seeds)
-        },
-        brightness_row_idx,
+        || detect::own_row::read_own_row(Some(&img), &scoreboard, team_size, highlight, &own_seeds),
+        || own_row_name_fallback(player_name_owned.as_deref(), &scoreboard, team_size),
+        highlight,
+        !own_seeds.is_empty(),
     );
 
     // Hero authority (OCR site T5). ocr-v1 reads the career-panel hero
@@ -4159,6 +4217,7 @@ fn analyze_frame(
         name_match,
         own_row,
         own_name_candidate: own_name_candidate.map(|c| c.candidate),
+        own_seed_verdict,
         team_size,
         frame: img,
     }))
@@ -4167,12 +4226,30 @@ fn analyze_frame(
 /// The own row of one Tab (OCR site T4).
 struct OwnRowChoice {
     row_idx: Option<usize>,
-    /// ocr-v1: the name match behind `row_idx`. `None` under the new reader.
+    /// The name match behind `row_idx`: ocr-v1's, or the new reader's name
+    /// fallback. `None` when the row came from seeds or the highlight.
     name_match: Option<parse::NameMatch>,
     /// New reader: how the row was found. `None` under ocr-v1.
     own_row: Option<detect::own_row::OwnRow>,
     /// New reader: the highlighted row's name line, before the seeding gate.
     candidate: Option<detect::own_row::RowCandidate>,
+    /// New reader: what the board says about the trusted seeds.
+    verdict: detect::own_row::Verdict,
+}
+
+/// The new reader's name fallback (OCR site T4, kept for one case): when
+/// neither an own-name seed nor the highlight names a row, read this
+/// board's name windows with Tesseract and match the configured name, as
+/// main does for every board. This is the only name read under
+/// `reader = "new"`, and the one call site to gate when OCR is off.
+fn own_row_name_fallback(
+    player_name: Option<&str>,
+    scoreboard: &image::DynamicImage,
+    team_size: usize,
+) -> Option<parse::NameMatch> {
+    let name = player_name.filter(|name| !name.trim().is_empty())?;
+    let rows = ocr::recognize_scoreboard_names_pre_cropped(scoreboard, team_size);
+    parse::match_player_row_by_name(&rows, name)
 }
 
 /// Find the member's own row with the daemon's reader switch.
@@ -4180,47 +4257,63 @@ struct OwnRowChoice {
 /// * `reader = "ocr-v1"`: `name_match` (the name OCR over every row) runs,
 ///   and the row is that match, else the highlighted row, exactly as before.
 ///   The seeds are not read.
-/// * `reader = "new"`: no name is read. `seed_read` (the own-name seeds
-///   matched on every row, combined with the highlight in
-///   [`detect::own_row::combine`]) gives the row. Seed and highlight on
-///   different rows is no row, and so is neither firing: the capture is
-///   held, never rescued by a name read. A panic in the seed read does not
-///   fail the Tab: the highlight is used as it was before seeds existed.
+/// * `reader = "new"`: `seed_read` (the own-name seeds matched on every row,
+///   combined with the highlight in [`detect::own_row::combine`]) gives the
+///   row. A seed against a strong highlight is no row: the capture is held.
+///   When neither names a row, `name_fallback` is asked: the one name read
+///   left under the new reader, main's own (the name windows OCRed and
+///   matched against the configured name), for this board only. Its row is
+///   stored as main stores a name-matched row. A lane that turns Tesseract
+///   off passes a fallback that returns `None`; such a board is then held.
+///   A panic in the seed read does not fail the Tab: the highlight is used,
+///   marked suspect when seeds exist (`seeded`).
 fn find_own_row(
     use_new_reader: bool,
     name_match: impl FnOnce() -> Option<parse::NameMatch>,
     seed_read: impl FnOnce() -> detect::own_row::OwnRowRead,
-    highlight: Option<usize>,
+    name_fallback: impl FnOnce() -> Option<parse::NameMatch>,
+    highlight: Option<detect::own_row::Highlight>,
+    seeded: bool,
 ) -> OwnRowChoice {
     if !use_new_reader {
         let name_match = name_match();
         return OwnRowChoice {
-            row_idx: name_match.map(|m| m.row).or(highlight),
+            row_idx: name_match.map(|m| m.row).or(highlight.map(|h| h.row)),
             name_match,
             own_row: None,
             candidate: None,
+            verdict: detect::own_row::Verdict::Silent,
         };
     }
     let read = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(seed_read)) {
         Ok(read) => read,
         Err(_) => {
             tracing::warn!("own-row seed read panicked; the highlight row is used");
-            detect::own_row::OwnRowRead::highlight_only(highlight)
+            detect::own_row::OwnRowRead::unread(highlight, seeded)
         }
     };
+    let mut own = read.own;
+    let mut name_match = None;
+    if own.source == detect::own_row::Source::Neither
+        && let Some(found) = name_fallback()
+    {
+        own = detect::own_row::OwnRow::from_name(found.row);
+        name_match = Some(found);
+    }
     tracing::info!(
-        row = ?read.own.row,
-        source = read.own.source.label(),
-        trust = ?read.own.trust,
+        row = ?own.row,
+        source = own.source.label(),
+        trust = ?own.trust,
         best = read.best,
         next = read.next,
         "own row from seeds and highlight"
     );
     OwnRowChoice {
-        row_idx: read.own.row,
-        name_match: None,
-        own_row: Some(read.own),
+        row_idx: own.row,
+        name_match,
+        own_row: Some(own),
         candidate: read.candidate,
+        verdict: read.verdict,
     }
 }
 
@@ -5060,10 +5153,14 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         name_match,
         own_row,
         own_name_candidate,
+        own_seed_verdict,
         team_size,
         frame: frame_img,
         shadow_input,
     } = analysis;
+    if ctx.use_new_reader {
+        note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;
+    }
     let ocr_result = ocr
         .map_err(anyhow::Error::from_boxed)
         .context("full-board OCR failed")?;
@@ -5475,8 +5572,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ocr_parsed.mitigation,
             ) = tesseract_stats;
             if ctx.use_new_reader {
-                offer_own_name_seed(ctx.own_name.as_ref(), own_name_candidate, &target_session)
-                    .await;
+                offer_own_name_seed(
+                    ctx.own_name.as_ref(),
+                    own_name_candidate,
+                    &target_session,
+                    &parsed.map_name,
+                )
+                .await;
                 apply_new_reader(
                     &mut parsed,
                     &frame_img,
@@ -5490,8 +5592,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 )
                 .await;
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-                staged.gate =
-                    hold_new_reader_stats(&mut parsed, prior, suspect, split, trusted_cells);
+                // A suspect own row may be another player's: its counters go
+                // through the capture gate as a low-trust read, so they can
+                // not latch and hold later reads of the right row as drops.
+                let own_row_trusted = !own_row.is_some_and(|own| own.suspect());
+                staged.gate = hold_new_reader_stats(
+                    &mut parsed,
+                    prior,
+                    suspect,
+                    split,
+                    trusted_cells && own_row_trusted,
+                );
                 // A member's own hero pick on this game is never overridden
                 // by a later Tab's read (O8): this row carries the pick too.
                 if !split && target_session == session_id {
@@ -5595,6 +5706,19 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // frame where the row itself is missing. CellsUnreadable also fires
             // when the name shows up only in chat or the kill feed.
             let reason = match miss {
+                parse::ScoreboardMiss::PlayerRowNotFound if ctx.use_new_reader => {
+                    // The new reader finds the row from the own-name seeds
+                    // and the highlight; `player_name` only feeds the name
+                    // fallback, so "set player_name" is not the fix here.
+                    tracing::warn!(
+                        source = ?own_row.map(|own| own.source.label()),
+                        "capture held: own row not found. No own-name seed matched a row and no row is \
+                         highlighted (and the name read found none), or a seed and a clear highlight \
+                         name different rows. Nothing is stored for this Tab (saved to debug/rejected \
+                         when debug_ocr is on)"
+                    );
+                    "noplayerrow"
+                }
                 parse::ScoreboardMiss::PlayerRowNotFound => {
                     tracing::warn!(
                         "capture rejected: player row not found (saved to debug/rejected when debug_ocr is on; \
@@ -9513,6 +9637,7 @@ mod tests {
                 name_match: None,
                 own_row: None,
                 own_name_candidate: None,
+                own_seed_verdict: detect::own_row::Verdict::Silent,
                 team_size: 5,
                 frame,
                 shadow_input: None,
@@ -9668,6 +9793,7 @@ mod tests {
                 name_match: None,
                 own_row: None,
                 own_name_candidate: None,
+                own_seed_verdict: detect::own_row::Verdict::Silent,
                 team_size: 5,
                 frame,
                 shadow_input: None,
@@ -9814,6 +9940,7 @@ mod tests {
             name_match: None,
             own_row: None,
             own_name_candidate: None,
+            own_seed_verdict: detect::own_row::Verdict::Silent,
             team_size: 5,
             frame,
             shadow_input: None,
@@ -9979,19 +10106,27 @@ mod tests {
             .expect("name line")
     }
 
-    /// One Tab of the game `session_id` through `handle_capture`.
+    /// One Tab of the game `session_id` on `map` through `handle_capture`.
     async fn o9_tab(
         ctx: &DaemonCtx,
         session_id: &str,
-        analysis: FrameAnalysis,
+        map: &str,
+        mut analysis: FrameAnalysis,
         board: Option<shadow::BoardRead>,
     ) -> CaptureReport {
         let now = test_now();
         let mut active = game(detect::MatchOutcome::Unknown, None, now);
         active.session_id = session_id.into();
-        active.map = Some("Busan".into());
+        active.map = Some(map.into());
         active.map_source = Some(boundary::MapSource::TopBar);
         active.session_created = false;
+        analysis.map_from_panel = Some(map.into());
+        analysis.map_panel_raw = Some(map.to_uppercase());
+        if let Ok(read) = &mut analysis.ocr
+            && read.raw_text == "Ana\nBusan"
+        {
+            read.raw_text = format!("Ana\n{map}");
+        }
         *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
         let req = build_capture_request(&active, false, now);
         handle_capture(ctx, req).await.unwrap()
@@ -10003,63 +10138,146 @@ mod tests {
         )))
     }
 
-    /// The seed store is opened only for `reader = "new"`: ocr-v1 never
-    /// opens or creates the private folder.
+    fn o9_lit(row: usize, lead: f64) -> Option<detect::own_row::Highlight> {
+        Some(detect::own_row::Highlight { row, lead })
+    }
+
+    /// The seed store opens exactly when the new reader is in effect, and
+    /// both read one function (F262-5): whatever turns the new reader on,
+    /// the store is there. ocr-v1 never opens or creates the private folder.
     #[test]
-    fn the_own_name_seeds_open_only_under_the_new_reader() {
+    fn the_own_name_seeds_open_exactly_when_the_new_reader_is_in_effect() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = config::Config {
             data_dir: dir.path().to_path_buf(),
             ..config::Config::default()
         };
-        assert!(!config.uses_new_reader(), "ocr-v1 is the default");
-        assert!(open_own_name_seeds(&config).is_none());
+        assert!(!new_reader_in_effect(&config), "ocr-v1 is the default");
+        assert!(open_own_name_seeds(new_reader_in_effect(&config), &config).is_none());
         assert!(own_name_seeds(None).is_empty());
+        // the bool decides, not the `reader` setting on its own
+        assert!(open_own_name_seeds(true, &config).is_some());
         config.reader = config::ReaderSetting::New;
-        let store = open_own_name_seeds(&config).expect("store");
+        assert!(new_reader_in_effect(&config));
+        let store = open_own_name_seeds(new_reader_in_effect(&config), &config).expect("store");
         assert!(own_name_seeds(Some(&store)).is_empty());
         assert!(!dir.path().join("private").exists(), "nothing until a crop");
+        // the daemon builds both from that one function
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(norm(include_str!("main.rs")).contains(
+            "use_new_reader: new_reader_in_effect(&config), own_name: open_own_name_seeds(new_reader_in_effect(&config), &config),"
+        ));
     }
 
     #[test]
     fn find_own_row_reads_only_the_switched_source() {
         use detect::own_row::{OwnRowRead, Source, Trust, combine};
-        let name = || {
+        let found = |row| {
             Some(parse::NameMatch {
-                row: 4,
+                row,
                 window: 0,
                 sole_window: true,
             })
         };
-        let seeds = |seed: Option<usize>, lit: Option<usize>| OwnRowRead {
+        let seeds = |seed: Option<usize>, lit| OwnRowRead {
             own: combine(seed, lit, true),
-            ..OwnRowRead::highlight_only(None)
+            ..OwnRowRead::unread(None, false)
         };
-        // ocr-v1: the name match, else the highlight. The seeds are not read.
-        let v1 = find_own_row(false, name, || panic!("seeds read under ocr-v1"), Some(1));
+        let no_name = || -> Option<parse::NameMatch> { panic!("name read") };
+        // ocr-v1: the name match, else the highlight. Neither the seeds nor
+        // the fallback are touched.
+        let v1 = find_own_row(
+            false,
+            || found(4),
+            || panic!("seeds read under ocr-v1"),
+            no_name,
+            o9_lit(1, 1.5),
+            true,
+        );
         assert_eq!(v1.row_idx, Some(4));
         assert_eq!(v1.name_match.map(|m| m.row), Some(4));
         assert!(v1.own_row.is_none() && v1.candidate.is_none());
-        let v1 = find_own_row(false, || None, || panic!("seeds read"), Some(1));
+        let v1 = find_own_row(
+            false,
+            || None,
+            || panic!("seeds read"),
+            no_name,
+            o9_lit(1, 1.5),
+            true,
+        );
         assert_eq!((v1.row_idx, v1.name_match), (Some(1), None));
-        // new reader: the seeds and the highlight. No name is matched.
-        let no_name = || -> Option<parse::NameMatch> { panic!("name read under the new reader") };
-        let both = find_own_row(true, no_name, || seeds(Some(2), Some(2)), Some(2));
+        // new reader: the seeds and the highlight. With a row from them no
+        // name is read at all.
+        let both = find_own_row(
+            true,
+            no_name,
+            || seeds(Some(2), o9_lit(2, 1.5)),
+            no_name,
+            o9_lit(2, 1.5),
+            true,
+        );
         assert_eq!((both.row_idx, both.name_match), (Some(2), None));
         assert_eq!(both.own_row.map(|o| o.trust), Some(Trust::Sure));
-        // seed and highlight on different rows: no row, and not the highlight
-        let split = find_own_row(true, no_name, || seeds(Some(2), Some(0)), Some(0));
+        // seed against a strong highlight: no row, and the name read is not
+        // asked to break the tie
+        let split = find_own_row(
+            true,
+            no_name,
+            || seeds(Some(2), o9_lit(0, 1.5)),
+            no_name,
+            o9_lit(0, 1.5),
+            true,
+        );
         assert_eq!(split.row_idx, None);
         assert_eq!(split.own_row.map(|o| o.source), Some(Source::Disagree));
         // the seed alone names a row the highlight never saw (team 2)
-        let alone = find_own_row(true, no_name, || seeds(Some(7), None), None);
+        let alone = find_own_row(true, no_name, || seeds(Some(7), None), no_name, None, true);
         assert_eq!(alone.row_idx, Some(7));
         assert!(alone.own_row.is_some_and(|o| o.suspect()));
-        // a panic in the seed read: the highlight, as before seeds existed
-        let panicked = find_own_row(true, no_name, || panic!("seed reader"), Some(3));
+        // neither names a row: main's name read is asked, for this board
+        let named = find_own_row(true, no_name, || seeds(None, None), || found(6), None, true);
+        assert_eq!(named.row_idx, Some(6));
+        assert_eq!(named.name_match.map(|m| m.row), Some(6));
+        let own = named.own_row.expect("own row");
+        assert_eq!(
+            (own.source, own.trust),
+            (Source::NameFallback, Trust::Unconfirmed)
+        );
+        assert!(!own.suspect(), "stored as main stores a name-matched row");
+        // ...and when that finds no row either (or OCR is off): held
+        let none = find_own_row(true, no_name, || seeds(None, None), || None, None, true);
+        assert_eq!((none.row_idx, none.name_match), (None, None));
+        assert_eq!(none.own_row.map(|o| o.source), Some(Source::Neither));
+        // a panic in the seed read: the highlight, marked when seeds exist
+        let panicked = find_own_row(
+            true,
+            no_name,
+            || panic!("seed reader"),
+            no_name,
+            o9_lit(3, 1.5),
+            true,
+        );
         assert_eq!(panicked.row_idx, Some(3));
-        assert_eq!(panicked.own_row.map(|o| o.trust), Some(Trust::Unconfirmed));
+        assert_eq!(panicked.own_row.map(|o| o.trust), Some(Trust::Suspect));
         assert!(panicked.candidate.is_none());
+        let panicked = find_own_row(
+            true,
+            no_name,
+            || panic!("seed reader"),
+            no_name,
+            o9_lit(3, 1.5),
+            false,
+        );
+        assert_eq!(panicked.own_row.map(|o| o.trust), Some(Trust::Unconfirmed));
+    }
+
+    #[test]
+    fn the_name_fallback_needs_a_configured_name() {
+        // No name, or a blank one: nothing is read (a blank board would give
+        // no match anyway; the point is that no window is OCRed).
+        let board = o9_board(0);
+        assert_eq!(own_row_name_fallback(None, &board, 5), None);
+        assert_eq!(own_row_name_fallback(Some("  "), &board, 5), None);
     }
 
     #[test]
@@ -10068,16 +10286,18 @@ mod tests {
         // ocr-v1: unchanged, with or without a row
         assert_eq!(text_fallback_name(false, None, name), name);
         assert_eq!(text_fallback_name(false, Some(2), name), name);
-        // new reader: only beside a row the seeds or the highlight found
+        // new reader: only beside a row the seeds, the highlight or the
+        // name fallback found
         assert_eq!(text_fallback_name(true, Some(2), name), name);
         assert_eq!(text_fallback_name(true, None, name), None);
         assert_eq!(text_fallback_name(true, None, None), None);
     }
 
-    /// T4 (O9): the vision pass reads names only under ocr-v1 and finds the
-    /// own row only through `find_own_row` with the daemon's reader switch.
-    /// Whitespace is ignored. Hard-wiring the switch, reading names under the
-    /// new reader, or matching a name in `apply_new_reader` breaks this.
+    /// T4 (O9): the vision pass reads names in the per-cell pass only under
+    /// ocr-v1 and finds the own row only through `find_own_row` with the
+    /// daemon's reader switch. Whitespace is ignored. Hard-wiring the switch,
+    /// reading names in the cell pass under the new reader, a second name
+    /// fallback, or matching a name in `apply_new_reader` breaks this.
     #[test]
     fn the_own_row_goes_through_the_reader_switch() {
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -10092,9 +10312,20 @@ mod tests {
         ));
         assert_eq!(body.matches("recognize_scoreboard_cells").count(), 1);
         assert!(body.contains("} = find_own_row( use_new_reader, || {"));
+        // ocr-v1's match in its closure; the new reader's only through the
+        // one named fallback
         assert_eq!(body.matches("match_player_row_by_name").count(), 1);
+        assert_eq!(body.matches("own_row_name_fallback(").count(), 1);
+        assert_eq!(body.matches("recognize_scoreboard_names").count(), 0);
+        // one call in the daemon; the text of this assertion is the second match
+        assert_eq!(
+            src.matches("recognize_scoreboard_names_pre_cropped(")
+                .count(),
+            2
+        );
         assert_eq!(body.matches("detect::own_row::read_own_row(").count(), 1);
         assert_eq!(body.matches("detect::own_row::seed_gate(").count(), 1);
+        assert!(body.contains("!own_seeds.is_empty(), );"));
         assert!(body.contains("player_row_idx: row_idx, name_match, own_row,"));
         let an = src
             .find("\nasync fn apply_new_reader(")
@@ -10114,30 +10345,38 @@ mod tests {
                 .contains("text_fallback_name(ctx.use_new_reader, player_row_idx, player_name),")
         );
         assert!(hc_body.contains(
-            "if ctx.use_new_reader { offer_own_name_seed(ctx.own_name.as_ref(), own_name_candidate, &target_session) .await; apply_new_reader("
+            "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;"
         ));
+        assert!(hc_body.contains("if ctx.use_new_reader { offer_own_name_seed("));
         assert!(hc_body.contains("own_row.is_some_and(|own| own.suspect()),"));
+        assert!(hc_body.contains("trusted_cells && own_row_trusted, );"));
         assert!(hc_body.contains("let own_seeds = own_name_seeds(ctx.own_name.as_ref());"));
     }
 
     #[tokio::test]
-    async fn a_suspect_own_row_marks_every_field_read_off_it() {
+    async fn a_suspect_own_row_marks_every_field_and_is_not_a_trusted_read() {
         use detect::own_row::combine;
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         for (seed, lit, seeded, marked) in [
             // seed and highlight agree: nothing is marked
-            (Some(0), Some(0), true, false),
+            (Some(0), o9_lit(0, 1.5), true, false),
             // only the seed, or only the highlight where a seed exists
             (Some(0), None, true, true),
-            (None, Some(0), true, true),
-            // the highlight before any seed exists: as it always was
-            (None, Some(0), false, false),
+            (None, o9_lit(0, 1.5), true, true),
+            // a seed over a weak highlight that names another row
+            (Some(0), o9_lit(3, 1.1), true, true),
+            // a strong highlight before any seed exists: as it always was
+            (None, o9_lit(0, 1.5), false, false),
+            // a weak highlight before any seed exists
+            (None, o9_lit(0, 1.1), false, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let ctx = o8_ctx(dir.path(), true).await;
             let mut analysis = o8_analysis(None, Some("zenyatta"));
             analysis.own_row = Some(combine(seed, lit, seeded));
-            let report = o9_tab(&ctx, "o9", analysis, Some(o8_board(Some("zenyatta")))).await;
+            assert_eq!(analysis.own_row.unwrap().row, Some(0));
+            let board = Some(o8_board(Some("zenyatta")));
+            let report = o9_tab(&ctx, "o9", "Busan", analysis, board).await;
             assert!(report.recorded);
             let rows = ctx.store.get_session_snapshots("o9").await.unwrap();
             let flags = &rows[0].suspect_fields;
@@ -10152,6 +10391,13 @@ mod tests {
             );
             // the values themselves are still the row's
             assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
+            // F262-11: a suspect row's counters enter the capture gate as a
+            // low-trust read, so they cannot latch
+            assert_eq!(
+                report.gate_state.expect("gate").low_trust,
+                marked,
+                "seed {seed:?} highlight {lit:?} seeded {seeded}"
+            );
         }
     }
 
@@ -10174,14 +10420,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = o8_ctx(dir.path(), false).await;
         ctx.player_name = Some("MadeUp".into());
-        assert!(o9_tab(&ctx, "o9", tab(), None).await.recorded);
-        // the new reader holds the capture: seed and highlight disagree
+        assert!(o9_tab(&ctx, "o9", "Busan", tab(), None).await.recorded);
+        // the new reader holds the capture: a seed names another row than a
+        // strong highlight
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = o8_ctx(dir.path(), true).await;
         ctx.player_name = Some("MadeUp".into());
         let mut analysis = tab();
-        analysis.own_row = Some(combine(Some(2), Some(0), true));
-        let report = o9_tab(&ctx, "o9", analysis, Some(o8_board(Some("zenyatta")))).await;
+        analysis.own_row = Some(combine(Some(2), o9_lit(0, 1.5), true));
+        assert_eq!(analysis.own_row.unwrap().row, None);
+        let board = Some(o8_board(Some("zenyatta")));
+        let report = o9_tab(&ctx, "o9", "Busan", analysis, board).await;
         assert!(!report.recorded);
         assert!(
             ctx.store
@@ -10193,16 +10442,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_games() {
+    async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games() {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = o8_ctx(dir.path(), true).await;
         ctx.own_name = Some(o9_store(dir.path()));
         let file = detect::own_row::seed_dir(dir.path()).join("seeds.json");
-        for (i, (session, trusted)) in [("g1", 0), ("g1", 0), ("g2", 3)].into_iter().enumerate() {
+        // Four boards of one game are one game, and so is a second session
+        // on the same map a moment later (a stat split of that game). A
+        // session on another map is a second game.
+        for (i, (session, map, trusted)) in [
+            ("g1", "Busan", 0),
+            ("g1", "Busan", 0),
+            ("g1", "Busan", 0),
+            ("g1-split", "Busan", 0),
+            ("g2", "Ilios", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut analysis = o8_analysis(None, Some("zenyatta"));
             analysis.own_name_candidate = Some(o9_candidate(i));
-            let report = o9_tab(&ctx, session, analysis, Some(o8_board(Some("zenyatta")))).await;
+            let board = Some(o8_board(Some("zenyatta")));
+            let report = o9_tab(&ctx, session, map, analysis, board).await;
             assert!(report.recorded, "tab {i}");
             assert_eq!(
                 own_name_seeds(ctx.own_name.as_ref()).len(),
@@ -10221,8 +10483,51 @@ mod tests {
         // a Tab without a gated crop offers nothing
         let before = std::fs::read(&file).unwrap();
         let analysis = o8_analysis(None, Some("zenyatta"));
-        o9_tab(&ctx, "g3", analysis, Some(o8_board(Some("zenyatta")))).await;
+        let board = Some(o8_board(Some("zenyatta")));
+        o9_tab(&ctx, "g3", "Busan", analysis, board).await;
         assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn seeds_that_keep_contradicting_a_strong_highlight_are_dropped() {
+        use detect::own_row::{DISAGREE_DROPS, Verdict, combine};
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = o8_ctx(dir.path(), true).await;
+        ctx.own_name = Some(o9_store(dir.path()));
+        let file = detect::own_row::seed_dir(dir.path()).join("seeds.json");
+        for (i, (session, map)) in [("g1", "Busan"), ("g1", "Busan"), ("g2", "Ilios")]
+            .into_iter()
+            .enumerate()
+        {
+            let mut analysis = o8_analysis(None, Some("zenyatta"));
+            analysis.own_name_candidate = Some(o9_candidate(i));
+            o9_tab(
+                &ctx,
+                session,
+                map,
+                analysis,
+                Some(o8_board(Some("zenyatta"))),
+            )
+            .await;
+        }
+        assert_eq!(own_name_seeds(ctx.own_name.as_ref()).len(), 3);
+        // Held boards (a seed against a strong highlight) are not stored,
+        // but they are counted: the seeds go on the third in a row.
+        let held = || {
+            let mut analysis = o8_analysis(None, Some("zenyatta"));
+            analysis.player_row_idx = None;
+            analysis.own_row = Some(combine(Some(2), o9_lit(0, 1.5), true));
+            analysis.own_seed_verdict = Verdict::Disagree(88);
+            analysis
+        };
+        for i in 1..=DISAGREE_DROPS {
+            assert_eq!(own_name_seeds(ctx.own_name.as_ref()).len(), 3, "board {i}");
+            let report = o9_tab(&ctx, "g3", "Busan", held(), Some(o8_board(None))).await;
+            assert!(!report.recorded);
+        }
+        assert!(own_name_seeds(ctx.own_name.as_ref()).is_empty());
+        assert!(!file.exists(), "the dropped seeds are off the disk too");
     }
 
     #[tokio::test]
@@ -10230,12 +10535,17 @@ mod tests {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = o8_ctx(dir.path(), false).await;
-        // Even with a store and a crop handed in, the ocr-v1 path uses neither.
+        // Even with a store, a crop and a verdict handed in, the ocr-v1
+        // path uses none of them.
         ctx.own_name = Some(o9_store(dir.path()));
-        for (i, session) in ["g1", "g1", "g2"].into_iter().enumerate() {
+        for (i, (session, map)) in [("g1", "Busan"), ("g1", "Busan"), ("g2", "Ilios")]
+            .into_iter()
+            .enumerate()
+        {
             let mut analysis = o8_analysis(Some("Ana"), None);
             analysis.own_name_candidate = Some(o9_candidate(i));
-            assert!(o9_tab(&ctx, session, analysis, None).await.recorded);
+            analysis.own_seed_verdict = detect::own_row::Verdict::Disagree(88);
+            assert!(o9_tab(&ctx, session, map, analysis, None).await.recorded);
         }
         assert!(own_name_seeds(ctx.own_name.as_ref()).is_empty());
         assert!(!dir.path().join("private").exists());

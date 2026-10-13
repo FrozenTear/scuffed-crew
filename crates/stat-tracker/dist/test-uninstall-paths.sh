@@ -510,4 +510,35 @@ env HOME="$HOME_DIR" PREFIX="$PREFIX" \
 [[ ! -e "$DATA" ]] || fail "purge left the data dir with own-name crops in it"
 pass "own-name crops are removed on every uninstall"
 
+# The own-name step deletes only inside the home and install folders, and
+# never through a link. A saved-games folder outside home (data-dir.conf),
+# or one that is itself a link, keeps its crops and says so.
+OUTSIDE="$TMP/outside-data"
+run_install "$HOME_DIR" "$PREFIX"
+mkdir -p "$OUTSIDE/private/own-name"
+printf 'seed\n' > "$OUTSIDE/private/own-name/seeds.json"
+write_dropin "$HOME_DIR" "$OUTSIDE"
+out="$(env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes 2>&1 >/dev/null)"
+[[ "$(cat "$OUTSIDE/private/own-name/seeds.json")" == "seed" ]] \
+    || fail "own-name removal reached a folder outside home"
+grep -q 'delete it by hand' <<< "$out" || fail "no hint for crops left outside home"
+
+REAL="$HOME_DIR/real-data"
+LINKED="$HOME_DIR/linked-data"
+run_install "$HOME_DIR" "$PREFIX"
+mkdir -p "$REAL/private/own-name"
+printf 'seed\n' > "$REAL/private/own-name/seeds.json"
+ln -s "$REAL" "$LINKED"
+write_dropin "$HOME_DIR" "$LINKED"
+out="$(env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes 2>&1 >/dev/null)"
+[[ "$(cat "$REAL/private/own-name/seeds.json")" == "seed" ]] \
+    || fail "own-name removal went through a linked saved-games folder"
+grep -q 'delete it by hand' <<< "$out" || fail "no hint for crops behind a link"
+rm -f "$LINKED" "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf"
+pass "own-name crops outside home or behind a link are left, with a hint"
+
 echo "all uninstall path checks passed"

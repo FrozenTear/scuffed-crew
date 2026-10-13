@@ -512,9 +512,12 @@ pub fn recognize_row(
 pub enum Names {
     /// ocr-v1: every name window is read.
     Read,
-    /// `reader = "new"`: no name window is cropped or read. The own row
-    /// comes from [`crate::detect::own_row`], and other players' names are
-    /// never read at all.
+    /// `reader = "new"`: no name window is cropped or read by the per-cell
+    /// pass. The own row comes from [`crate::detect::own_row`]. This is not
+    /// "no name is read on the Tab": the lazy full-board read still covers
+    /// the whole board when the cell path could not supply everything, and
+    /// a board with neither a seed match nor a highlight has its name
+    /// windows read by [`recognize_scoreboard_names_pre_cropped`].
     Skip,
 }
 
@@ -664,6 +667,45 @@ pub fn recognize_scoreboard_cells_pre_cropped_with(
     }
 
     results
+}
+
+/// The name windows of every row, and nothing else: no stat cell is read.
+///
+/// `reader = "new"` skips the name windows in the per-cell pass
+/// ([`Names::Skip`]). This is its fallback for a board on which neither an
+/// own-name seed nor the highlight names a row: the same crops and the same
+/// read ocr-v1 makes, so [`crate::parse::match_player_row_by_name`] sees
+/// what it sees on main. Rows are in board order; `stats` is empty.
+pub fn recognize_scoreboard_names_pre_cropped(
+    cropped: &DynamicImage,
+    team_size: usize,
+) -> Vec<RowOcrResult> {
+    let row_images: Vec<DynamicImage> = (0..team_size * 2)
+        .filter_map(|i| preprocess::crop_player_row(cropped, i, team_size))
+        .collect();
+    ocr_pool().install(|| {
+        row_images
+            .par_iter()
+            .map(|row_img| {
+                let mut reads: Vec<Option<CellOcrResult>> =
+                    preprocess::crop_name_cells(row_img, team_size)
+                        .par_iter()
+                        .map(|crop| recognize_name(crop).ok())
+                        .collect();
+                let name = if reads.is_empty() {
+                    None
+                } else {
+                    reads.remove(0)
+                };
+                RowOcrResult {
+                    name,
+                    name_alternates: reads,
+                    stats: Vec::new(),
+                    mean_confidence: 0,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Column calibration (CG-4 revision). Preferred path: anchor each stat

@@ -376,15 +376,19 @@ remove_own_name_seed() {
     seed="$private/own-name"
     [[ -e "$seed" || -L "$seed" ]] || return 0
     if [[ -L "$d" || -L "$private" || -L "$seed" || ! -d "$seed" ]]; then
-        warn "not removing $seed (a link, not a folder)"
+        warn "not removing $seed (a link, not a folder; delete it by hand)"
         return 0
     fi
     resolved=""
     if ! resolved="$(confine_file "$seed")"; then
-        warn "not removing $seed (outside your home folder and the install folder)"
+        warn "not removing $seed (outside your home folder and the install folder; delete it by hand)"
         return 0
     fi
-    rm -rf -- "$resolved"
+    # A failure here must not stop the uninstall before --purge runs.
+    if ! rm -rf -- "$resolved"; then
+        warn "could not remove $seed (delete it by hand)"
+        return 0
+    fi
     rmdir -- "$(dirname "$resolved")" 2>/dev/null || true
     info "Removed the saved crops of your own name."
 }

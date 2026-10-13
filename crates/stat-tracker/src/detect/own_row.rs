@@ -16,24 +16,29 @@
 //!   its brightest half percent. A team colour, magenta and yellow included,
 //!   has a low channel and stays dark. No luma, no Otsu.
 //! * **Seed.** [`SeedStore`] trusts a crop only after three boards from two
-//!   games gave crops that match each other. A crop is offered only from a
-//!   board whose highlight is clear, whose career panel shows the hero on the
-//!   highlighted row, and whose row is not under chat ([`seed_gate`]).
+//!   games ([`GameTag`]) gave crops that match each other. A crop is offered
+//!   only from a board whose highlight is strong, whose career panel shows
+//!   the hero read on the highlighted row, and whose row is not under chat
+//!   ([`seed_gate`]). Seeds that keep naming another row than a strong
+//!   highlight are dropped ([`SeedStore::note`]).
 //! * **Match.** A seed slides over each row's name area. A row's score is
 //!   the best whole-crop ZNCC, capped by the ZNCC of that window's weakest
 //!   glyph-wide chunk, so one changed glyph is enough to fail. The best row
 //!   wins when it reaches [`MATCH_FLOOR`] and leads the next row by
 //!   [`MATCH_MARGIN`].
 //! * **Combine.** [`combine`]: seed and highlight on one row is sure, one of
-//!   them alone is used and marked, two different rows is no row.
+//!   them alone is used and marked, a seed against a strong highlight is no
+//!   row. This module reads no name. When neither speaks, the daemon may
+//!   still ask ocr-v1's name read for that one board
+//!   ([`Source::NameFallback`]).
 //!
 //! The trusted seeds live in `<data_dir>/private/own-name/seeds.json` (dir
 //! 0700, file 0600, written atomically). Only crops confirmed as the member's
 //! own name line are ever written: a crop still waiting for confirmation may
 //! be another player's name, so it stays in memory and a restart drops it.
 //! The file holds a hash of the configured name, never the name, and is
-//! dropped when that hash changes. No report bundle, upload or log line
-//! reads it.
+//! dropped when another name is configured (a name that is merely not known
+//! in one run keeps it). No report bundle, upload or log line reads it.
 
 use std::path::{Path, PathBuf};
 
@@ -107,12 +112,24 @@ pub const AGREE: f32 = 0.85;
 pub const SEED_BOARDS: usize = 3;
 pub const SEED_GAMES: usize = 2;
 /// The highlighted row must be this much brighter than the next brightest
-/// row before a board may seed (two lit rows: a cursor hover, a party tint).
-/// On the alpha.7 own-row boards a right highlight led by 1.11 to 1.71 (5th
-/// percentile 1.24) and the one wrong highlight by 1.18.
-pub const SEED_HIGHLIGHT_LEAD: f64 = 1.20;
+/// row to count as strong: to seed from, to stand unmarked on its own, and
+/// to hold a capture against a seed that names another row (two lit rows: a
+/// cursor hover, a party tint). On the alpha.7 own-row boards, with the
+/// capture path's own team size, the four wrong highlights led by 1.18 to
+/// 1.22; 86 of the 97 right ones on lossless captures lead by 1.30 or more.
+pub const SEED_HIGHLIGHT_LEAD: f64 = 1.30;
 /// Trusted seeds kept per board scale, and crops kept while waiting.
-const TRUSTED_PER_SCALE: usize = 4;
+const TRUSTED_PER_SCALE: usize = 6;
+/// Two crops this far apart are from two games even on one map, or with no
+/// map known: longer than one match runs.
+pub const GAME_GAP_SECS: u64 = 40 * 60;
+/// Boards in a row on which the seeds of one scale name another row than a
+/// strong highlight before those seeds are dropped.
+pub const DISAGREE_DROPS: usize = 3;
+/// Games without a trusted seed after which the log says so, once per run.
+pub const UNSEEDED_NOTICE_GAMES: usize = 5;
+/// A seed file larger than this is not one this module wrote.
+const MAX_SEED_FILE: u64 = 1 << 20;
 const PENDING_MAX: usize = 12;
 /// Crops of a newly trusted group that become seeds.
 const PROMOTE: usize = 3;
@@ -123,6 +140,7 @@ const SEED_FILE_VERSION: u32 = 2;
 const PRIVATE_DIR: &str = "private";
 const OWN_NAME_DIR: &str = "own-name";
 const SEED_FILE: &str = "seeds.json";
+const SEED_TMP: &str = "seeds.json.tmp";
 
 fn px(v: f64) -> usize {
     v.round().max(0.0) as usize
@@ -427,8 +445,8 @@ pub struct Candidate {
     area_w: u32,
     area_h: u32,
     area: Vec<u8>,
-    /// Opaque game key (a hash of the session id).
-    game: String,
+    /// The game it was seen in, set when it is offered.
+    game: Option<GameTag>,
 }
 
 impl std::fmt::Debug for Candidate {
@@ -609,8 +627,8 @@ impl NameBoard {
 
     /// The name line of `row` as a seeding candidate. `None` when the row
     /// has no clean name line: no word in the name cell, a word that
-    /// reaches the perk icons, ink right after the word, or a line of the
-    /// wrong height.
+    /// touches the cell's left edge or reaches the perk icons, ink right
+    /// after the word, or a line of the wrong height.
     pub fn candidate(&self, row: usize) -> Option<Candidate> {
         let plane = self.rows.get(row)?.as_ref()?;
         let rh = f64::from(self.row_h);
@@ -628,6 +646,13 @@ impl NameBoard {
             }
         }
         let &(x0, x1) = words.iter().max_by_key(|w| w.1 - w.0)?;
+        // A word at the cell's left edge may have started before it (a name
+        // drawn further left, or ink of the ult disc run into it). Such a
+        // crop would be the tail of a name and match every name that ends
+        // the same way.
+        if x0 <= self.cell_x0 {
+            return None;
+        }
         if ((x1 - x0) as f64) < MIN_NAME_W * rh || x1 + 1 >= plane.w {
             return None;
         }
@@ -682,7 +707,7 @@ impl NameBoard {
             area_w: plane.w as u32,
             area_h: plane.h as u32,
             area: plane.v.clone(),
-            game: String::new(),
+            game: None,
         })
     }
 
@@ -737,11 +762,14 @@ pub fn seed_row(scores: &[f32]) -> Option<usize> {
 pub enum Trust {
     /// The seed and the highlight name the same row.
     Sure,
-    /// The highlight alone, on a board no seed exists for yet. This is
-    /// the row the new reader used before seeds existed.
+    /// One clear voice with nothing to contradict it: a strong highlight on
+    /// a board no seed exists for yet (the row the new reader used before
+    /// seeds existed), or the name read of [`Source::NameFallback`]. Stored
+    /// unmarked, as main stores such a row.
     Unconfirmed,
-    /// One of the two fired where both could have. The row is used and its
-    /// fields are marked suspect.
+    /// One voice where two could have spoken, or a weak highlight alone. The
+    /// row is used, its fields are marked suspect, and the capture gate
+    /// takes its counters as not trusted.
     Suspect,
 }
 
@@ -750,10 +778,16 @@ pub enum Trust {
 pub enum Source {
     Both,
     SeedOnly,
+    /// Seed and highlight name different rows and the highlight is weak:
+    /// the seed's row.
+    SeedOverWeakHighlight,
     HighlightOnly,
-    /// Seed and highlight name different rows: no row.
+    /// Seed and a strong highlight name different rows: no row.
     Disagree,
     Neither,
+    /// Neither spoke, and the name read (ocr-v1's, still available while
+    /// Tesseract is) matched a row.
+    NameFallback,
 }
 
 impl Source {
@@ -761,9 +795,11 @@ impl Source {
         match self {
             Source::Both => "both",
             Source::SeedOnly => "seed",
+            Source::SeedOverWeakHighlight => "seed_over_weak_highlight",
             Source::HighlightOnly => "highlight",
             Source::Disagree => "disagree",
             Source::Neither => "none",
+            Source::NameFallback => "name",
         }
     }
 }
@@ -781,29 +817,16 @@ impl OwnRow {
     pub fn suspect(&self) -> bool {
         self.row.is_some() && self.trust == Trust::Suspect
     }
-}
 
-/// Combine the seed match with the highlight. `seeded` says a seed of the
-/// board's scale exists, so the seed had its say.
-///
-/// * both on one row: that row, sure;
-/// * both, on different rows: no row (the capture is held);
-/// * the seed alone: its row, suspect;
-/// * the highlight alone: its row, suspect when a seed exists and
-///   unconfirmed when none does;
-/// * neither: no row.
-///
-/// No case falls back to a name read.
-pub fn combine(seed: Option<usize>, highlight: Option<usize>, seeded: bool) -> OwnRow {
-    let (row, trust, source) = match (seed, highlight) {
-        (Some(s), Some(h)) if s == h => (Some(s), Trust::Sure, Source::Both),
-        (Some(_), Some(_)) => (None, Trust::Suspect, Source::Disagree),
-        (Some(s), None) => (Some(s), Trust::Suspect, Source::SeedOnly),
-        (None, Some(h)) if seeded => (Some(h), Trust::Suspect, Source::HighlightOnly),
-        (None, Some(h)) => (Some(h), Trust::Unconfirmed, Source::HighlightOnly),
-        (None, None) => (None, Trust::Suspect, Source::Neither),
-    };
-    OwnRow { row, trust, source }
+    /// The row a name read matched when neither the seed nor the highlight
+    /// named one. Stored the way main stores a name-matched row: unmarked.
+    pub fn from_name(row: usize) -> Self {
+        Self {
+            row: Some(row),
+            trust: Trust::Unconfirmed,
+            source: Source::NameFallback,
+        }
+    }
 }
 
 /// The highlighted row, with how far it leads the next brightest row.
@@ -812,6 +835,53 @@ pub struct Highlight {
     pub row: usize,
     /// Brightness of the row over the next brightest row's.
     pub lead: f64,
+}
+
+impl Highlight {
+    /// Clear enough to stand on its own and to seed from.
+    pub fn strong(&self) -> bool {
+        self.lead >= SEED_HIGHLIGHT_LEAD
+    }
+}
+
+/// Combine the seed match with the highlight. `seeded` says a seed that
+/// could be compared with this board exists, so the seed had its say.
+///
+/// * both on one row: that row, sure;
+/// * different rows, strong highlight: no row (the capture is held);
+/// * different rows, weak highlight: the seed's row, suspect;
+/// * the seed alone: its row, suspect;
+/// * the highlight alone: its row. Suspect when a seed exists or the
+///   highlight is weak, unconfirmed when it is strong and no seed exists;
+/// * neither: no row.
+///
+/// No case reads a name.
+pub fn combine(seed: Option<usize>, highlight: Option<Highlight>, seeded: bool) -> OwnRow {
+    let (row, trust, source) = match (seed, highlight) {
+        (Some(s), Some(h)) if s == h.row => (Some(s), Trust::Sure, Source::Both),
+        (Some(_), Some(h)) if h.strong() => (None, Trust::Suspect, Source::Disagree),
+        (Some(s), Some(_)) => (Some(s), Trust::Suspect, Source::SeedOverWeakHighlight),
+        (Some(s), None) => (Some(s), Trust::Suspect, Source::SeedOnly),
+        (None, Some(h)) if seeded || !h.strong() => {
+            (Some(h.row), Trust::Suspect, Source::HighlightOnly)
+        }
+        (None, Some(h)) => (Some(h.row), Trust::Unconfirmed, Source::HighlightOnly),
+        (None, None) => (None, Trust::Suspect, Source::Neither),
+    };
+    OwnRow { row, trust, source }
+}
+
+/// What one board says about the trusted seeds of its scale, for
+/// [`SeedStore::note`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verdict {
+    /// Nothing to learn (no seed fired, or the highlight was weak).
+    #[default]
+    Silent,
+    /// A seed and the highlight named one row, at this row pitch.
+    Agree(u32),
+    /// A seed named another row than a strong highlight, at this row pitch.
+    Disagree(u32),
 }
 
 /// The highlighted row's name line, cut for seeding, and where it was.
@@ -830,27 +900,29 @@ pub struct OwnRowRead {
     /// Best and next best row score against the seeds (`-1` without one).
     pub best: f32,
     pub next: f32,
-    /// The highlighted row's name line, when the highlight is clear enough
-    /// to seed from and no seed matched that row. The caller still has to
-    /// pass [`seed_gate`].
+    /// The highlighted row's name line, when the highlight is strong and no
+    /// seed matched that row. The caller still has to pass [`seed_gate`].
     pub candidate: Option<RowCandidate>,
+    pub verdict: Verdict,
 }
 
 impl OwnRowRead {
-    /// The highlight alone, unconfirmed: what the new reader used before
-    /// seeds existed.
-    pub fn highlight_only(highlight: Option<usize>) -> Self {
+    /// The seeds could not be consulted (the name areas cannot be measured,
+    /// or the read failed): the highlight alone. With seeds in hand it is
+    /// one of two voices and is marked; with none it is judged on its own.
+    pub fn unread(highlight: Option<Highlight>, seeded: bool) -> Self {
         Self {
-            own: combine(None, highlight, false),
+            own: combine(None, highlight, seeded),
             best: -1.0,
             next: -1.0,
             candidate: None,
+            verdict: Verdict::Silent,
         }
     }
 }
 
 /// Read the own row of one board: match `seeds` on every row, combine with
-/// `highlight`, and cut a seeding candidate from a clearly highlighted row
+/// `highlight`, and cut a seeding candidate from a strongly highlighted row
 /// that no seed matched. `frame` is the full frame when there is one (a
 /// saved board crop has none).
 pub fn read_own_row(
@@ -860,22 +932,15 @@ pub fn read_own_row(
     highlight: Option<Highlight>,
     seeds: &[Seed],
 ) -> OwnRowRead {
-    let lit = highlight.map(|h| h.row);
     let Some(board) = NameBoard::measure(frame, scoreboard, team_size) else {
-        // No name area to compare. With seeds in hand the highlight is
-        // still only one of two voices, so its row is marked like any other
-        // highlight a seed did not confirm.
-        return OwnRowRead {
-            own: combine(None, lit, !seeds.is_empty()),
-            ..OwnRowRead::highlight_only(lit)
-        };
+        return OwnRowRead::unread(highlight, !seeds.is_empty());
     };
     let scores = board.scores(seeds);
     let mut sorted = scores.clone();
     sorted.sort_by(|a, b| b.total_cmp(a));
-    let own = combine(seed_row(&scores), lit, board.seeded(seeds));
+    let own = combine(seed_row(&scores), highlight, board.seeded(seeds));
     let candidate = highlight
-        .filter(|h| own.source == Source::HighlightOnly && h.lead >= SEED_HIGHLIGHT_LEAD)
+        .filter(|h| own.source == Source::HighlightOnly && h.strong())
         .and_then(|h| {
             Some(RowCandidate {
                 candidate: board.candidate(h.row)?,
@@ -883,11 +948,17 @@ pub fn read_own_row(
                 row_bottom: board.row_bottom(h.row)?,
             })
         });
+    let verdict = match own.source {
+        Source::Both => Verdict::Agree(board.row_h()),
+        Source::Disagree => Verdict::Disagree(board.row_h()),
+        _ => Verdict::Silent,
+    };
     OwnRowRead {
         own,
         best: sorted.first().copied().unwrap_or(-1.0),
         next: sorted.get(1).copied().unwrap_or(-1.0),
         candidate,
+        verdict,
     }
 }
 
@@ -895,12 +966,11 @@ pub fn read_own_row(
 ///
 /// * `chat`: what the full frame says about chat over the board. A row the
 ///   chat stack reaches, or an unknown chat state, refuses.
-/// * `heroes`: the hero icons of the Tab. The career panel must show a hero:
-///   that panel is drawn only on the member's own live board, not on a
-///   replay, a spectated board or a post-match table. The highlighted row's
-///   icon must not name another hero. It may be unread (an ult ring or a
-///   skull over the portrait), the way the hero authority accepts one read
-///   beside an abstain ([`TabHeroes::authority`]).
+/// * `heroes`: the hero icons of the Tab. The career panel must show a hero
+///   (it is drawn only on the member's own live board), and the highlighted
+///   row's icon must be read and show that same hero. An unread icon (an
+///   ult ring, a skull) refuses: the row is then not shown to be the
+///   member's.
 pub fn seed_gate(
     row: usize,
     row_bottom: u32,
@@ -911,12 +981,13 @@ pub fn seed_gate(
     if chat == Chat::Unknown || chat.covers(row_bottom, crop_h) {
         return false;
     }
-    let Some(panel) = heroes.and_then(|h| h.panel_hero()) else {
+    let Some(heroes) = heroes else {
         return false;
     };
-    heroes
-        .and_then(|h| h.own_hero(row))
-        .is_none_or(|own| own == panel)
+    match (heroes.panel_hero(), heroes.own_hero(row)) {
+        (Some(panel), Some(own)) => panel == own,
+        _ => false,
+    }
 }
 
 // ------------------------------------------------------------------- store
@@ -926,11 +997,39 @@ pub fn seed_gate(
 pub enum Offer {
     /// A trusted seed already matches it.
     Known,
-    /// Kept, waiting for more boards or another game.
+    /// Kept in memory, waiting for more boards or another game.
     Pending,
     /// It completed a group of [`SEED_BOARDS`] matching crops from
     /// [`SEED_GAMES`] games: the group is trusted now.
     Promoted,
+}
+
+/// The game a crop was seen in.
+///
+/// A session id alone is not a game: a stat split inside one match opens a
+/// new session. Two crops are from two games only when their sessions
+/// differ and either both maps are known and differ, or they were captured
+/// at least [`GAME_GAP_SECS`] apart (longer than one match).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameTag {
+    /// Opaque session key ([`game_key`]).
+    pub session: String,
+    /// The game's map as capture policy knows it, empty when unknown.
+    pub map: String,
+    /// Capture time, unix seconds.
+    pub at: u64,
+}
+
+impl GameTag {
+    fn other_game(&self, other: &Self) -> bool {
+        if self.session == other.session {
+            return false;
+        }
+        let maps_differ = !self.map.trim().is_empty()
+            && !other.map.trim().is_empty()
+            && self.map.trim() != other.map.trim();
+        maps_differ || self.at.abs_diff(other.at) >= GAME_GAP_SECS
+    }
 }
 
 /// What is on disk: the trusted seeds, and nothing else. A file with any
@@ -940,7 +1039,8 @@ pub enum Offer {
 #[serde(deny_unknown_fields)]
 struct SeedFile {
     version: u32,
-    /// SHA-256 of the configured in-game name. Never the name.
+    /// SHA-256 of the configured in-game name the seeds were learned
+    /// under, never the name. Empty when no name was known.
     name_hash: String,
     trusted: Vec<Seed>,
 }
@@ -960,12 +1060,32 @@ pub struct SeedStore {
     name_hash: String,
     trusted: Vec<Seed>,
     pending: Vec<Candidate>,
+    /// Strong disagreements in a row, per row pitch ([`SeedStore::note`]).
+    strikes: Vec<(u32, usize)>,
+    /// Sessions seen while no seed is trusted, and whether the notice for
+    /// [`UNSEEDED_NOTICE_GAMES`] was given.
+    unseeded_games: Vec<String>,
+    noticed: bool,
 }
 
-/// Hash of the configured in-game name, as stored next to the seeds. A name
-/// that is not set hashes like an empty one.
+/// What [`SeedStore::note`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Noted {
+    /// Trusted seeds dropped for contradicting a strong highlight
+    /// [`DISAGREE_DROPS`] times in a row.
+    pub dropped: usize,
+    /// [`UNSEEDED_NOTICE_GAMES`] games have gone by without a trusted seed
+    /// (reported once per run).
+    pub unseeded_notice: bool,
+}
+
+/// Hash of a configured in-game name, as stored next to the seeds. Empty for
+/// a name that is not known (not set, not fetched, blank).
 pub fn name_hash(configured_name: Option<&str>) -> String {
     let name = configured_name.unwrap_or("").trim().to_lowercase();
+    if name.is_empty() {
+        return String::new();
+    }
     let mut hasher = Sha256::new();
     hasher.update(b"scuffed-own-name-v1\0");
     hasher.update(name.as_bytes());
@@ -976,7 +1096,7 @@ pub fn name_hash(configured_name: Option<&str>) -> String {
         .collect()
 }
 
-/// Opaque key for one game, from its session id.
+/// Opaque key for one session, from its id.
 pub fn game_key(session_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"scuffed-own-name-game\0");
@@ -994,6 +1114,10 @@ pub fn seed_dir(data_dir: &Path) -> PathBuf {
 
 fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+fn is_real_dir_or_absent(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err() || is_real_dir(path)
 }
 
 /// Create `path` as a real directory with mode 0700. `false` when it is, or
@@ -1017,6 +1141,15 @@ fn private_dir(path: &Path) -> bool {
     true
 }
 
+/// A seed a file may hold: sizes that fit its pixels and a board.
+fn seed_is_sane(seed: &Seed) -> bool {
+    let (w, h) = (seed.w as usize, seed.h as usize);
+    (ROW_H.0..=ROW_H.1).contains(&(seed.row_h as usize))
+        && (1..=4 * ROW_H.1).contains(&w)
+        && (1..=ROW_H.1).contains(&h)
+        && seed.px.len() == w * h
+}
+
 impl SeedStore {
     /// Seeds kept in memory only (tests, and a data dir that cannot hold
     /// the private folder).
@@ -1026,14 +1159,27 @@ impl SeedStore {
             name_hash: name_hash(configured_name),
             trusted: Vec::new(),
             pending: Vec::new(),
+            strikes: Vec::new(),
+            unseeded_games: Vec::new(),
+            noticed: false,
         }
     }
 
-    /// Open the trusted seeds under `data_dir`. A file written for another
-    /// configured name, another file version, or one that does not parse
-    /// (which includes a file with waiting crops in it) is deleted and the
-    /// store starts empty. Nothing is created until a group of crops is
-    /// trusted. The waiting list always starts empty.
+    /// Open the trusted seeds under `data_dir`. Nothing is created until a
+    /// group of crops is trusted, and the waiting list always starts empty.
+    ///
+    /// The configured name decides whether a stored file is the member's:
+    /// * no name known (not set, the fetch failed, blank): the file is kept
+    ///   and used. An unknown name is not a changed name;
+    /// * the name the file was learned under: kept;
+    /// * a name, and the file was learned with no name known: kept, and
+    ///   bound to that name from now on;
+    /// * another name: the file is deleted, once.
+    ///
+    /// A file that is not a plain file of a sane size, another file version,
+    /// or content that does not parse (which includes a file with waiting
+    /// crops in it) is deleted and the store starts empty. A link is never
+    /// followed.
     pub fn open(data_dir: &Path, configured_name: Option<&str>) -> Self {
         let dir = seed_dir(data_dir);
         let mut store = Self::in_memory(configured_name);
@@ -1045,23 +1191,44 @@ impl SeedStore {
         }
         store.dir = Some(dir.clone());
         let file = dir.join(SEED_FILE);
-        let Ok(text) = std::fs::read_to_string(&file) else {
+        let _ = std::fs::remove_file(dir.join(SEED_TMP));
+        let Ok(meta) = std::fs::symlink_metadata(&file) else {
             return store;
         };
-        match serde_json::from_str::<SeedFile>(&text) {
-            Ok(saved)
-                if saved.version == SEED_FILE_VERSION && saved.name_hash == store.name_hash =>
-            {
-                store.trusted = saved.trusted;
-            }
-            Ok(_) => {
-                tracing::info!("configured in-game name changed: own-row seeds cleared");
-                let _ = std::fs::remove_file(&file);
-            }
-            Err(_) => {
-                tracing::warn!("own-row seed file unreadable: cleared");
-                let _ = std::fs::remove_file(&file);
-            }
+        let drop_file = |why: &'static str| {
+            tracing::warn!(why, "own-row seed file cleared");
+            let _ = std::fs::remove_file(&file);
+        };
+        if !meta.is_file() || meta.len() > MAX_SEED_FILE {
+            drop_file("not a plain file of a sane size");
+            return store;
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            drop_file("unreadable");
+            return store;
+        };
+        let Ok(saved) = serde_json::from_str::<SeedFile>(&text) else {
+            drop_file("not a seed file");
+            return store;
+        };
+        if saved.version != SEED_FILE_VERSION {
+            drop_file("another file version");
+            return store;
+        }
+        let known = store.name_hash.clone();
+        if !known.is_empty() && !saved.name_hash.is_empty() && known != saved.name_hash {
+            tracing::info!("configured in-game name changed: own-row seeds cleared");
+            let _ = std::fs::remove_file(&file);
+            return store;
+        }
+        store.trusted = saved.trusted.into_iter().filter(seed_is_sane).collect();
+        store.trim_trusted();
+        if known.is_empty() {
+            // The name is not known in this run: the file's binding stays.
+            store.name_hash = saved.name_hash;
+        } else if saved.name_hash.is_empty() {
+            // Learned with no name known, and now there is one: bind it.
+            store.save();
         }
         store
     }
@@ -1071,19 +1238,32 @@ impl SeedStore {
         &self.trusted
     }
 
-    /// Crops waiting for more boards or another game.
+    /// Crops waiting (in memory) for more boards or another game.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
-    /// Take a crop from a board that passed [`seed_gate`], seen in the game
-    /// `game` ([`game_key`]).
+    /// At most [`TRUSTED_PER_SCALE`] seeds per row pitch: the oldest go.
+    fn trim_trusted(&mut self) {
+        let scales: Vec<u32> = self.trusted.iter().map(|s| s.row_h).collect();
+        for row_h in scales {
+            while self.trusted.iter().filter(|s| s.same_scale(row_h)).count() > TRUSTED_PER_SCALE {
+                let Some(oldest) = self.trusted.iter().position(|s| s.same_scale(row_h)) else {
+                    break;
+                };
+                self.trusted.remove(oldest);
+            }
+        }
+    }
+
+    /// Take a crop from a board that passed [`seed_gate`], seen in `game`.
     ///
     /// A crop a trusted seed already matches changes nothing. Any other is
-    /// kept in memory, and once [`SEED_BOARDS`] kept crops from
-    /// [`SEED_GAMES`] games match each other, that group is trusted and the
-    /// trusted seeds are written. A waiting crop is never written.
-    pub fn offer(&mut self, mut candidate: Candidate, game: &str) -> Offer {
+    /// kept in memory, and once [`SEED_BOARDS`] kept crops that span
+    /// [`SEED_GAMES`] games ([`GameTag`]) match each other, that group is
+    /// trusted and the trusted seeds are written. A waiting crop is never
+    /// written.
+    pub fn offer(&mut self, mut candidate: Candidate, game: &GameTag) -> Offer {
         if self
             .trusted
             .iter()
@@ -1091,20 +1271,18 @@ impl SeedStore {
         {
             return Offer::Known;
         }
-        candidate.game = game.to_string();
+        candidate.game = Some(game.clone());
         let mut group: Vec<usize> = (0..self.pending.len())
             .filter(|&i| agree(&self.pending[i], &candidate))
             .collect();
         self.pending.push(candidate);
         group.push(self.pending.len() - 1);
-        let mut games: Vec<&str> = group
+        let tags: Vec<&GameTag> = group
             .iter()
-            .map(|&i| self.pending[i].game.as_str())
+            .filter_map(|&i| self.pending[i].game.as_ref())
             .collect();
-        games.sort_unstable();
-        games.dedup();
-        let offer = if group.len() >= SEED_BOARDS && games.len() >= SEED_GAMES {
-            let row_h = self.pending[group[0]].seed.row_h;
+        let two_games = tags.iter().any(|a| tags.iter().any(|b| a.other_game(b)));
+        if group.len() >= SEED_BOARDS && two_games {
             // The newest crops of the group become seeds; the whole group
             // leaves the waiting list.
             let first = group.len().saturating_sub(PROMOTE);
@@ -1118,43 +1296,84 @@ impl SeedStore {
                 !group.contains(&(index - 1))
             });
             self.trusted.extend(seeds);
-            // The oldest seeds of this scale make room.
-            while self.trusted.iter().filter(|s| s.same_scale(row_h)).count() > TRUSTED_PER_SCALE {
-                let Some(oldest) = self.trusted.iter().position(|s| s.same_scale(row_h)) else {
-                    break;
-                };
-                self.trusted.remove(oldest);
-            }
-            Offer::Promoted
-        } else {
-            if self.pending.len() > PENDING_MAX {
-                let extra = self.pending.len() - PENDING_MAX;
-                self.pending.drain(..extra);
-            }
-            Offer::Pending
-        };
-        if offer == Offer::Promoted {
+            self.trim_trusted();
+            self.unseeded_games.clear();
             self.save();
+            return Offer::Promoted;
         }
-        offer
+        if self.pending.len() > PENDING_MAX {
+            let extra = self.pending.len() - PENDING_MAX;
+            self.pending.drain(..extra);
+        }
+        Offer::Pending
     }
 
-    /// Forget every seed and delete the file.
-    pub fn clear(&mut self) {
-        self.trusted.clear();
-        self.pending.clear();
-        if let Some(dir) = &self.dir {
-            let _ = std::fs::remove_file(dir.join(SEED_FILE));
+    /// Take one accepted board's [`Verdict`], seen in the session `session`.
+    ///
+    /// * A trusted seed must not be able to hide the member's real row for
+    ///   good. When the seeds of one row pitch name another row than a
+    ///   strong highlight [`DISAGREE_DROPS`] boards in a row, with no board
+    ///   in between on which seed and highlight agreed, those seeds are
+    ///   dropped. The member's name is then learned again from the
+    ///   highlight.
+    /// * While no seed is trusted, the sessions are counted, and the
+    ///   [`UNSEEDED_NOTICE_GAMES`]th is reported once.
+    pub fn note(&mut self, verdict: Verdict, session: &str) -> Noted {
+        let mut noted = Noted::default();
+        match verdict {
+            Verdict::Silent => {}
+            Verdict::Agree(row_h) => self.strikes.retain(|(h, _)| h.abs_diff(row_h) > SCALE_TOL),
+            Verdict::Disagree(row_h) => {
+                let at = match self
+                    .strikes
+                    .iter()
+                    .position(|(h, _)| h.abs_diff(row_h) <= SCALE_TOL)
+                {
+                    Some(at) => at,
+                    None => {
+                        self.strikes.push((row_h, 0));
+                        self.strikes.len() - 1
+                    }
+                };
+                self.strikes[at].1 += 1;
+                if self.strikes[at].1 >= DISAGREE_DROPS {
+                    self.strikes.remove(at);
+                    let before = self.trusted.len();
+                    self.trusted.retain(|s| !s.same_scale(row_h));
+                    noted.dropped = before - self.trusted.len();
+                    if noted.dropped > 0 {
+                        self.save();
+                    }
+                }
+            }
         }
+        if self.trusted.is_empty() {
+            if !self.unseeded_games.iter().any(|s| s == session)
+                && self.unseeded_games.len() < UNSEEDED_NOTICE_GAMES
+            {
+                self.unseeded_games.push(session.to_string());
+            }
+            if self.unseeded_games.len() >= UNSEEDED_NOTICE_GAMES && !self.noticed {
+                self.noticed = true;
+                noted.unseeded_notice = true;
+            }
+        }
+        noted
     }
 
     /// Write the trusted seeds, and only those: a 0600 temp file in the 0700
-    /// folder, then a rename. A failure keeps the seeds in memory and logs
-    /// no path and no content.
+    /// folder, then a rename. With no trusted seed the file is removed
+    /// instead. A failure keeps the seeds in memory and logs no path and no
+    /// content.
     fn save(&self) {
         let Some(dir) = &self.dir else {
             return;
         };
+        if self.trusted.is_empty() {
+            let _ = std::fs::remove_file(dir.join(SEED_TMP));
+            let _ = std::fs::remove_file(dir.join(SEED_FILE));
+            return;
+        }
         let written = (|| -> std::io::Result<()> {
             let private = dir
                 .parent()
@@ -1168,7 +1387,7 @@ impl SeedStore {
                 trusted: self.trusted.clone(),
             })
             .map_err(std::io::Error::other)?;
-            let tmp = dir.join(format!("{SEED_FILE}.tmp"));
+            let tmp = dir.join(SEED_TMP);
             let _ = std::fs::remove_file(&tmp);
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -1190,10 +1409,6 @@ impl SeedStore {
             tracing::warn!(kind = ?error.kind(), "own-row seeds not saved");
         }
     }
-}
-
-fn is_real_dir_or_absent(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_err() || is_real_dir(path)
 }
 
 #[cfg(test)]
