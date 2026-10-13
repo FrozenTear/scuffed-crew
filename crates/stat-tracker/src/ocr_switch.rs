@@ -108,7 +108,13 @@ impl Read {
             // Lane O10: the board is still accepted and parsed from the OCR
             // cell rows.
             Read::StatCells => false,
-            // Lane O9 (#262).
+            // #262 (O9) is in: the row comes from the highlight and the
+            // own-name seeds, and the name read is its last fallback, not
+            // asked for with OCR off. Not flipped: without that fallback a
+            // member with no highlight and no seed gets no row, and in the
+            // bench 3 boards that are read correctly with OCR are lost. It
+            // waits for a reader for that case (a seed without a highlight)
+            // or for the USER to accept it as a limit of the opt-in.
             Read::OwnRow => false,
             // Lane O11: the poll tick's result signal is still the OCR word.
             Read::ResultWord => false,

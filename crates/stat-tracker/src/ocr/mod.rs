@@ -581,17 +581,42 @@ pub fn recognize_row(
     if gate::check("recognize_row").is_err() {
         return unread_row();
     }
+    recognize_row_with(row_img, columns, team_size, Names::Read)
+}
+
+/// Whether the per-row OCR reads the name windows (OCR site T4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Names {
+    /// ocr-v1: every name window is read.
+    Read,
+    /// `reader = "new"`: no name window is cropped or read by the per-cell
+    /// pass. The own row comes from [`crate::detect::own_row`]. This is not
+    /// "no name is read on the Tab": the lazy full-board read still covers
+    /// the whole board when the cell path could not supply everything, and
+    /// a board with neither a seed match nor a highlight has its name
+    /// windows read by [`recognize_scoreboard_names_pre_cropped`].
+    Skip,
+}
+
+fn recognize_row_with(
+    row_img: &DynamicImage,
+    columns: &preprocess::StatColumns,
+    team_size: usize,
+    names: Names,
+) -> RowOcrResult {
     let Ok(pool) = ocr_pool() else {
         return unread_row();
     };
     // One read per name window. 5v5 has a window per table layout (in-match,
     // in-match with perks, centred); which one holds the name is only known
     // once the configured name is compared, so all of them are read.
-    let mut name_reads: Vec<Option<CellOcrResult>> =
-        preprocess::crop_name_cells(row_img, team_size)
+    let mut name_reads: Vec<Option<CellOcrResult>> = match names {
+        Names::Read => preprocess::crop_name_cells(row_img, team_size)
             .par_iter()
             .map(|crop| recognize_name(crop).ok())
-            .collect();
+            .collect(),
+        Names::Skip => Vec::new(),
+    };
     let name = if name_reads.is_empty() {
         None
     } else {
@@ -708,6 +733,24 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     if gate::check("recognize_scoreboard_cells_pre_cropped").is_err() {
         return Vec::new();
     }
+    recognize_scoreboard_cells_pre_cropped_with(cropped, team_size, Names::Read)
+}
+
+/// [`recognize_scoreboard_cells_pre_cropped`] with the name windows read or
+/// skipped. With [`Names::Skip`] every row's `name` is `None` and
+/// `name_alternates` is empty; the stat cells are read exactly the same.
+///
+/// With OCR off ([`gate`]) it reads nothing and returns no rows, like the
+/// functions above.
+#[track_caller]
+pub fn recognize_scoreboard_cells_pre_cropped_with(
+    cropped: &DynamicImage,
+    team_size: usize,
+    names: Names,
+) -> Vec<RowOcrResult> {
+    if gate::check("recognize_scoreboard_cells_pre_cropped_with").is_err() {
+        return Vec::new();
+    }
     let Ok(pool) = ocr_pool() else {
         return Vec::new();
     };
@@ -724,7 +767,12 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     let mut results: Vec<(usize, RowOcrResult)> = pool.install(|| {
         row_images
             .par_iter()
-            .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns, team_size)))
+            .map(|(idx, row_img)| {
+                (
+                    *idx,
+                    recognize_row_with(row_img, &columns, team_size, names),
+                )
+            })
             .collect()
     });
 
@@ -741,6 +789,56 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     }
 
     results
+}
+
+/// The name windows of every row, and nothing else: no stat cell is read.
+///
+/// `reader = "new"` skips the name windows in the per-cell pass
+/// ([`Names::Skip`]). This is its fallback for a board on which neither an
+/// own-name seed nor the highlight names a row: the same crops and the same
+/// read ocr-v1 makes, so [`crate::parse::match_player_row_by_name`] sees
+/// what it sees on main. Rows are in board order; `stats` is empty.
+///
+/// With OCR off ([`gate`]) it reads nothing and returns no rows: the caller
+/// has no name fallback then, and should not ask
+/// (`own_row_name_fallback` in the daemon returns before this).
+#[track_caller]
+pub fn recognize_scoreboard_names_pre_cropped(
+    cropped: &DynamicImage,
+    team_size: usize,
+) -> Vec<RowOcrResult> {
+    if gate::check("recognize_scoreboard_names_pre_cropped").is_err() {
+        return Vec::new();
+    }
+    let Ok(pool) = ocr_pool() else {
+        return Vec::new();
+    };
+    let row_images: Vec<DynamicImage> = (0..team_size * 2)
+        .filter_map(|i| preprocess::crop_player_row(cropped, i, team_size))
+        .collect();
+    pool.install(|| {
+        row_images
+            .par_iter()
+            .map(|row_img| {
+                let mut reads: Vec<Option<CellOcrResult>> =
+                    preprocess::crop_name_cells(row_img, team_size)
+                        .par_iter()
+                        .map(|crop| recognize_name(crop).ok())
+                        .collect();
+                let name = if reads.is_empty() {
+                    None
+                } else {
+                    reads.remove(0)
+                };
+                RowOcrResult {
+                    name,
+                    name_alternates: reads,
+                    stats: Vec::new(),
+                    mean_confidence: 0,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Column calibration (CG-4 revision). Preferred path: anchor each stat
@@ -1263,7 +1361,9 @@ mod tests {
                 "recognize_row",
                 "recognize_scoreboard_cells",
                 "recognize_scoreboard_cells_pre_cropped",
+                "recognize_scoreboard_cells_pre_cropped_with",
                 "recognize_scoreboard_cells_with_team_size",
+                "recognize_scoreboard_names_pre_cropped",
                 "recognize_sparse_region",
             ],
             "the entry points changed: update this list and tests/ocr_switch.rs"
@@ -1397,6 +1497,38 @@ mod tests {
             source.contains(&format!("#[track_caller]\n{prefix}{name}("))
                 || source.contains(&format!("#[track_caller]\n{prefix}{name}<"))
         })
+    }
+
+    /// alpha.7 O9 (OCR site T4): with [`Names::Skip`] no name window is read,
+    /// on either table. ocr-v1 ([`Names::Read`]) still reads every window:
+    /// one on 6v6, three on 5v5.
+    #[test]
+    fn skipping_names_reads_no_name_window() {
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        for (team_size, alternates) in [(5usize, 2usize), (6, 0)] {
+            let skipped =
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Skip);
+            assert_eq!(skipped.len(), 2 * team_size);
+            for row in &skipped {
+                assert!(row.name.is_none(), "{team_size}v{team_size}");
+                assert!(row.name_alternates.is_empty(), "{team_size}v{team_size}");
+                assert_eq!(row.stats.len(), STATS_PER_ROW);
+            }
+            for rows in [
+                recognize_scoreboard_cells_pre_cropped_with(&board, team_size, Names::Read),
+                recognize_scoreboard_cells_pre_cropped(&board, team_size),
+            ] {
+                assert_eq!(rows.len(), 2 * team_size);
+                for row in &rows {
+                    assert!(row.name.is_some(), "the first window is read");
+                    assert_eq!(row.name_alternates.len(), alternates);
+                }
+            }
+        }
     }
 
     #[test]

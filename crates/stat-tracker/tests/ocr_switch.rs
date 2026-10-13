@@ -126,6 +126,11 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     assert!(ocr::recognize_scoreboard_cells(&frame).is_empty());
     assert!(ocr::recognize_scoreboard_cells_with_team_size(&frame, Some(5)).is_empty());
     assert!(ocr::recognize_scoreboard_cells_pre_cropped(&board, 5).is_empty());
+    for names in [ocr::Names::Read, ocr::Names::Skip] {
+        // one call site, counted twice
+        assert!(ocr::recognize_scoreboard_cells_pre_cropped_with(&board, 5, names).is_empty());
+    }
+    assert!(ocr::recognize_scoreboard_names_pre_cropped(&board, 5).is_empty());
     assert_eq!(
         ocr::recognize_map_label(&frame, ScoreboardPreflight::Ready(5)),
         ""
@@ -147,13 +152,20 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
             "recognize_row",
             "recognize_scoreboard_cells",
             "recognize_scoreboard_cells_pre_cropped",
+            "recognize_scoreboard_cells_pre_cropped_with",
             "recognize_scoreboard_cells_with_team_size",
+            "recognize_scoreboard_names_pre_cropped",
             "recognize_sparse_region",
         ],
         "one line per call above, each under its own name"
     );
     for b in &direct {
-        assert_eq!(b.count, 1, "{}", b.site);
+        let calls = if b.site.entry == "recognize_scoreboard_cells_pre_cropped_with" {
+            2
+        } else {
+            1
+        };
+        assert_eq!(b.count, calls, "{}", b.site);
         assert!(
             b.site.file.ends_with("tests/ocr_switch.rs"),
             "a call is counted where it was made, not inside ocr: {}",
@@ -166,7 +178,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
              that leaves the process has no path"
         );
     }
-    assert_eq!(gate::blocked_total(), 12);
+    assert_eq!(gate::blocked_total(), 15);
 
     // The readers on top hold: no outcome, no map, no phase, and no panic.
     assert_eq!(match_end::detect_outcome_signal(&frame), None);

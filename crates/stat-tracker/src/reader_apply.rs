@@ -238,6 +238,24 @@ pub fn upload_suspect_fields(stored: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The fields read off the member's own row: the hero and the six stats.
+/// The map, the mode and the result are the same on every row.
+pub const OWN_ROW_FIELDS: [&str; 7] = ["hero", "e", "a", "d", "dmg", "h", "mit"];
+
+/// Mark every own-row field suspect.
+///
+/// `reader = "new"` finds the own row from the own-name seeds and the
+/// highlight ([`crate::detect::own_row`]). When only one of the two named
+/// the row where both could have, the row is still used, but the values on
+/// it may be another player's: each of them is marked. The upload allowlist
+/// has no name for the row itself, so the row's fields carry the mark.
+pub fn mark_own_row_suspect(fields: &mut Vec<String>) {
+    for name in OWN_ROW_FIELDS {
+        push_suspect(fields, name);
+    }
+    *fields = upload_suspect_fields(fields);
+}
+
 /// Drop suspect names cleared by a manual edit.
 ///
 /// `storage_field` is the tracker's edit name (`elims`, `map_name`, ...).
@@ -974,6 +992,30 @@ mod tests {
         assert!(
             flat.iter()
                 .all(|name| SUSPECT_FIELD_NAMES.contains(&name.as_str()))
+        );
+    }
+
+    #[test]
+    fn a_suspect_own_row_marks_the_fields_read_off_the_row_and_no_other() {
+        let mut fields = Vec::new();
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, ["hero", "e", "a", "d", "dmg", "h", "mit"]);
+        // the map, the mode and the result are not read off the row
+        for shared in ["map", "mode", "result"] {
+            assert!(!fields.iter().any(|f| f == shared));
+        }
+        // marks already there stay, nothing repeats, the order is the API's
+        let mut fields = vec!["mit".to_string(), "map".into(), "r2.e".into()];
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, ["map", "hero", "e", "a", "d", "dmg", "h", "mit"]);
+        let again = fields.clone();
+        mark_own_row_suspect(&mut fields);
+        assert_eq!(fields, again);
+        // every name is one the server accepts
+        assert!(
+            OWN_ROW_FIELDS
+                .iter()
+                .all(|f| SUSPECT_FIELD_NAMES.contains(f))
         );
     }
 
