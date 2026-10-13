@@ -17,11 +17,16 @@
 //!   best other map by at least [`MARGIN`]. Anything else is flagged. Brightness
 //!   only, no hue: nothing here depends on team colour.
 //!
-//! The glyph atlas is game art and is not embedded. It loads at start from
-//! `<data_dir>/templates/maps/` (`atlas.json` plus one 8-bit grey PNG per
-//! glyph), the same policy as the hero icons. Without it the map is not read.
-//! A map whose banner spelling needs a glyph the atlas lacks gets no template;
-//! the floor keeps that from turning into a sure read of another map.
+//! The glyph atlas is game art and is not embedded. It comes from the
+//! `maps-v1.tar` pack, which pack sync installs into
+//! `<data_dir>/templates/maps-v1/` (`atlas.json` plus one 8-bit grey PNG per
+//! glyph), the same policy as the hero icons. A member who copied a pack in
+//! by hand has it in `<data_dir>/templates/maps/`; that folder is used only
+//! when `maps-v1/` is missing or does not load ([`MapDirs`]). Without either
+//! the map is not read. [`LiveMaps`] notices a folder that appears or is
+//! swapped after the reader started and re-loads it in the background. A map
+//! whose banner spelling needs a glyph the atlas lacks gets no template; the
+//! floor keeps that from turning into a sure read of another map.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,8 +39,12 @@ use crate::ocr::preprocess::game_rect_16_9;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
 pub const MAP_RECOGNIZER_ID: &str = "map-v1";
-/// Template directory under the data dir.
+/// Hand-installed template directory under the data dir (the
+/// `reader_pack_url` location before alpha.7). The fallback for
+/// [`TEMPLATE_SUBDIR_V1`].
 pub const TEMPLATE_SUBDIR: &str = "templates/maps";
+/// Where pack sync installs `maps-v1.tar` (`packs::PACKS`). Preferred.
+pub const TEMPLATE_SUBDIR_V1: &str = "templates/maps-v1";
 /// Minimum score for a sure read.
 pub const FLOOR: f32 = 0.80;
 /// Minimum lead over the best other map for a sure read.
@@ -788,8 +797,14 @@ pub struct MapTemplates {
 }
 
 impl MapTemplates {
+    /// The hand-installed folder, `<data_dir>/templates/maps`.
     pub fn dir_in(data_dir: &Path) -> PathBuf {
         data_dir.join(TEMPLATE_SUBDIR)
+    }
+
+    /// The pack sync folder, `<data_dir>/templates/maps-v1`.
+    pub fn dir_v1_in(data_dir: &Path) -> PathBuf {
+        data_dir.join(TEMPLATE_SUBDIR_V1)
     }
 
     /// Load `<dir>/atlas.json` and its glyph PNGs. `None` when missing or bad.
@@ -910,14 +925,276 @@ pub struct MapRead {
     pub found_banner: bool,
 }
 
+// ---------------------------------------------------------------- live pack
+
+/// Which folder the map templates came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapPack {
+    /// `templates/maps-v1/`, installed by pack sync.
+    V1,
+    /// `templates/maps/`, copied in by hand.
+    Legacy,
+}
+
+impl MapPack {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "maps-v1",
+            Self::Legacy => "maps",
+        }
+    }
+}
+
+/// The two map pack folders, in order of preference.
+#[derive(Debug, Clone, Default)]
+pub struct MapDirs {
+    pub v1: Option<PathBuf>,
+    pub legacy: Option<PathBuf>,
+}
+
+/// Identity of one pack folder: device, inode and mtime, or `None` when it
+/// is missing. Pack sync swaps a folder in with `renameat2(RENAME_EXCHANGE)`
+/// or a rename, so a new pack gives the live path a new inode. Adding or
+/// removing a file in a hand-kept folder moves its mtime.
+type DirStamp = Option<(u64, u64, i64, i64)>;
+type MapStamp = [DirStamp; 2];
+
+fn dir_stamp(dir: Option<&Path>) -> DirStamp {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir?).ok()?;
+    m.is_dir()
+        .then(|| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec()))
+}
+
+/// Loaded templates and the folder they came from.
+#[derive(Debug, Clone)]
+pub struct LoadedMaps {
+    pub templates: MapTemplates,
+    pub pack: MapPack,
+}
+
+impl MapDirs {
+    pub fn in_data_dir(data_dir: &Path) -> Self {
+        Self {
+            v1: Some(MapTemplates::dir_v1_in(data_dir)),
+            legacy: Some(MapTemplates::dir_in(data_dir)),
+        }
+    }
+
+    /// maps-v1 when it loads, else the hand-installed folder, else nothing.
+    pub fn load(&self) -> Option<LoadedMaps> {
+        if let Some(templates) = self.v1.as_deref().and_then(MapTemplates::load_dir) {
+            return Some(LoadedMaps {
+                templates,
+                pack: MapPack::V1,
+            });
+        }
+        if self.v1.as_deref().is_some_and(Path::exists) {
+            tracing::warn!("maps-v1 pack folder does not load; trying templates/maps");
+        }
+        let templates = self.legacy.as_deref().and_then(MapTemplates::load_dir)?;
+        Some(LoadedMaps {
+            templates,
+            pack: MapPack::Legacy,
+        })
+    }
+
+    fn stamp(&self) -> MapStamp {
+        [
+            dir_stamp(self.v1.as_deref()),
+            dir_stamp(self.legacy.as_deref()),
+        ]
+    }
+
+    /// Load, or `None` when a folder changed while it loaded (a swap ran
+    /// meanwhile; the caller retries later). `during` runs between the first
+    /// stamp and the load (tests use it to swap a folder in).
+    fn load_stable(&self, during: impl FnOnce()) -> Option<(Option<LoadedMaps>, MapStamp)> {
+        let before = self.stamp();
+        during();
+        let maps = self.load();
+        (self.stamp() == before).then_some((maps, before))
+    }
+}
+
+/// The new reader's map templates, re-loaded when a map pack folder changes.
+///
+/// The same rules as [`super::heroes::LiveHeroSet`]: pack sync installs
+/// maps-v1 in the background after the reader is set up. Each read checks
+/// the two folders' stamps (two `stat` calls). On a change it starts one
+/// background load and keeps reading with the templates it has, so capture
+/// never waits on a load. A load that saw a folder change while it ran is
+/// thrown away and retried on a later read, so the templates never mix
+/// files from before and after a swap.
+#[derive(Debug, Default)]
+pub struct LiveMaps {
+    inner: std::sync::Arc<LiveInner>,
+}
+
+type Current = (Option<std::sync::Arc<LoadedMaps>>, MapStamp);
+
+#[derive(Debug, Default)]
+struct LiveInner {
+    dirs: MapDirs,
+    current: std::sync::RwLock<Current>,
+    loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    hooks: TestHooks,
+}
+
+/// Test probes on the reload thread: a spawn count, a delay before the
+/// load, and a step run between the first stamp and the load.
 #[cfg(test)]
-mod tests {
+#[derive(Default)]
+struct TestHooks {
+    spawns: std::sync::atomic::AtomicUsize,
+    delay_ms: std::sync::atomic::AtomicU64,
+    during: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestHooks")
+    }
+}
+
+impl LiveInner {
+    /// What runs between the reload's first stamp and its load: nothing,
+    /// except in tests.
+    fn before_load(&self) -> impl FnOnce() + use<> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let ms = self.hooks.delay_ms.load(Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let during = self.hooks.during.lock().unwrap().take();
+            move || {
+                if let Some(f) = during {
+                    f();
+                }
+            }
+        }
+        #[cfg(not(test))]
+        || {}
+    }
+
+    fn install(&self, (maps, stamp): (Option<LoadedMaps>, MapStamp)) {
+        tracing::info!(
+            maps = maps.is_some(),
+            map_pack = maps.as_ref().map(|m| m.pack.as_str()),
+            map_templates = maps.as_ref().map(|m| m.templates.template_count()),
+            "new reader map pack loaded"
+        );
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = (maps.map(Into::into), stamp);
+    }
+}
+
+impl LiveMaps {
+    /// Load now (reader setup). A folder that keeps changing during the
+    /// first tries leaves it empty; the next read loads it again.
+    pub fn load(dirs: MapDirs) -> Self {
+        let inner = LiveInner {
+            dirs,
+            ..Default::default()
+        };
+        let first = (0..3).find_map(|_| inner.dirs.load_stable(|| {}));
+        // An all-zero stamp never matches a real one: the next read reloads.
+        inner.install(first.unwrap_or((None, [Some((0, 0, 0, 0)); 2])));
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    /// The templates for this read. Starts a background reload when a pack
+    /// folder changed since they were loaded.
+    pub fn current(&self) -> Option<std::sync::Arc<LoadedMaps>> {
+        let (maps, stamp) = self
+            .inner
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if self.inner.dirs.stamp() != stamp {
+            self.start_reload();
+        }
+        maps
+    }
+
+    fn start_reload(&self) {
+        let Ok(mut loader) = self.inner.loader.try_lock() else {
+            return;
+        };
+        if loader.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        let inner = std::sync::Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("map-pack-reload".into())
+            .spawn(move || {
+                let during = inner.before_load();
+                match inner.dirs.load_stable(during) {
+                    Some(loaded) => inner.install(loaded),
+                    None => tracing::debug!("map pack changed while loading, retry later"),
+                }
+            });
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                self.inner
+                    .hooks
+                    .spawns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *loader = Some(handle);
+            }
+            Err(e) => tracing::warn!(error = %e, "map pack reload not started"),
+        }
+    }
+
+    /// Reload threads started so far (tests).
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.inner
+            .hooks
+            .spawns
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make each reload wait `ms` before it loads (tests).
+    #[cfg(test)]
+    pub(crate) fn set_load_delay_ms(&self, ms: u64) {
+        self.inner
+            .hooks
+            .delay_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Run `f` inside the next reload, between its first stamp and its load
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn during_next_load(&self, f: impl FnOnce() + Send + 'static) {
+        *self.inner.hooks.during.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// Wait for a reload in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_reload(&self) {
+        let handle = self.inner.loader.lock().unwrap().take();
+        if let Some(h) = handle {
+            h.join().unwrap();
+        }
+    }
+}
+
+/// Synthetic glyph packs for tests. No game art.
+#[cfg(test)]
+pub(crate) mod test_fixtures {
     use super::*;
-    use image::Rgb;
+    use image::{GrayImage, Rgb};
 
     /// Synthetic 5x7-ish block glyphs, one distinct bit pattern per letter,
     /// scaled to `H` rows. Not the game font: only the pipeline is under test.
-    fn glyph(c: char) -> Gray {
+    pub(crate) fn glyph(c: char) -> Gray {
         let w = 12;
         let mut g = Gray::new(w, H);
         let code = c as u32;
@@ -935,19 +1212,45 @@ mod tests {
         g
     }
 
-    fn atlas() -> HashMap<char, Gray> {
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ':6"
-            .chars()
-            .map(|c| (c, glyph(c)))
-            .collect()
+    pub(crate) const LETTERS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ':6";
+    pub(crate) const GAP: f64 = 2.0;
+    pub(crate) const SPACE: f64 = 9.0;
+
+    pub(crate) fn atlas() -> HashMap<char, Gray> {
+        LETTERS.chars().map(|c| (c, glyph(c))).collect()
+    }
+
+    /// Write a synthetic pack (`atlas.json` plus one PNG per glyph) the way
+    /// maps-v1 lays it out, with every glyph in `letters`.
+    pub(crate) fn write_pack(dir: &Path, letters: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut entries = Vec::new();
+        for c in letters.chars() {
+            let g = glyph(c);
+            let file = format!("g{:04x}.png", c as u32);
+            let img = GrayImage::from_fn(g.w as u32, H as u32, |x, y| {
+                image::Luma([(g.at(x as usize, y as usize) * 255.0).round() as u8])
+            });
+            img.save(dir.join(&file)).unwrap();
+            entries.push(format!(
+                "{}: {}",
+                serde_json::json!(c.to_string()),
+                serde_json::json!(file)
+            ));
+        }
+        let json = format!(
+            "{{\"height\": {H}, \"gap\": {GAP}, \"space\": {SPACE}, \"glyphs\": {{{}}}}}",
+            entries.join(", ")
+        );
+        std::fs::write(dir.join("atlas.json"), json).unwrap();
     }
 
     /// A dark 1920x1080 frame with a banner: `|` then `text` drawn from the
     /// synthetic glyphs at 1080p scale, then a tall `TIME` block.
-    fn frame_with_banner(text: &str) -> RgbImage {
+    pub(crate) fn frame_with_banner(text: &str) -> RgbImage {
         let mut img = RgbImage::from_pixel(1920, 1080, Rgb([20, 24, 40]));
         let glyphs = atlas();
-        let t = compose(&glyphs, 2.0, 9.0, text).unwrap();
+        let t = compose(&glyphs, GAP, SPACE, text).unwrap();
         let tpl = t.render(&vec![0; t.parts.len()]);
         // bar window: 1080p bar is 20 px tall at y 35; strip window adds 15%/12%
         let (bar_t, bar_h) = (35u32, 20u32);
@@ -980,6 +1283,13 @@ mod tests {
         }
         img
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::{GAP, LETTERS, SPACE, atlas, frame_with_banner, write_pack};
+    use super::*;
+    use image::Rgb;
 
     #[test]
     fn every_map_has_a_banner_spelling_and_unique_key() {
@@ -993,7 +1303,7 @@ mod tests {
 
     #[test]
     fn synthetic_banner_reads_back_sure() {
-        let t = MapTemplates::compose_all(&atlas(), 2.0, 9.0);
+        let t = MapTemplates::compose_all(&atlas(), GAP, SPACE);
         for name in ["NEPAL", "KING'S ROW", "SHAMBALI MONASTERY", "ILIOS"] {
             let img = frame_with_banner(name);
             let r = t.read(&img);
@@ -1009,7 +1319,7 @@ mod tests {
         let mut glyphs = atlas();
         // drop 'P': NEPAL (and others with P) can no longer be spelled
         glyphs.remove(&'P');
-        let t = MapTemplates::compose_all(&glyphs, 2.0, 9.0);
+        let t = MapTemplates::compose_all(&glyphs, GAP, SPACE);
         assert!(t.unrenderable.contains(&"NEPAL"));
         let r = t.read(&frame_with_banner("NEPAL"));
         assert!(
@@ -1021,7 +1331,7 @@ mod tests {
 
     #[test]
     fn no_banner_on_a_blank_frame() {
-        let t = MapTemplates::compose_all(&atlas(), 2.0, 9.0);
+        let t = MapTemplates::compose_all(&atlas(), GAP, SPACE);
         let r = t.read(&RgbImage::from_pixel(1920, 1080, Rgb([20, 24, 40])));
         assert!(!r.found_banner && r.map.is_none() && r.suspect);
     }
@@ -1029,6 +1339,166 @@ mod tests {
     #[test]
     fn missing_pack_dir_loads_nothing() {
         assert!(MapTemplates::load_dir(Path::new("/nonexistent/maps")).is_none());
+    }
+
+    fn sure_key(maps: &LoadedMaps, text: &str) -> Option<&'static str> {
+        let r = maps.templates.read(&frame_with_banner(text));
+        (!r.suspect).then(|| r.map.map(|m| m.key)).flatten()
+    }
+
+    /// Without `P`, NEPAL has no template: a frame of it is not a sure read.
+    fn no_p() -> String {
+        LETTERS.replace('P', "")
+    }
+
+    #[test]
+    fn a_written_pack_loads_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pack(dir.path(), LETTERS);
+        let t = MapTemplates::load_dir(dir.path()).expect("synthetic pack loads");
+        assert!(t.unrenderable.is_empty(), "{:?}", t.unrenderable);
+        let r = t.read(&frame_with_banner("NEPAL"));
+        assert_eq!(r.map.map(|m| m.key), Some("nepal"));
+        assert!(!r.suspect);
+    }
+
+    #[test]
+    fn maps_v1_is_preferred_over_the_hand_installed_folder() {
+        let data = tempfile::tempdir().unwrap();
+        write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
+        write_pack(&MapTemplates::dir_in(data.path()), &no_p());
+        let maps = MapDirs::in_data_dir(data.path()).load().unwrap();
+        assert_eq!(maps.pack, MapPack::V1);
+        assert_eq!(sure_key(&maps, "NEPAL"), Some("nepal"));
+    }
+
+    #[test]
+    fn the_hand_installed_folder_is_the_fallback() {
+        let data = tempfile::tempdir().unwrap();
+        write_pack(&MapTemplates::dir_in(data.path()), &no_p());
+        let dirs = MapDirs::in_data_dir(data.path());
+        let maps = dirs.load().unwrap();
+        assert_eq!(maps.pack, MapPack::Legacy);
+        assert_eq!(sure_key(&maps, "ILIOS"), Some("ilios"));
+        assert_eq!(sure_key(&maps, "NEPAL"), None, "the legacy pack has no P");
+
+        // a maps-v1 folder that does not load is skipped, not used empty
+        let v1 = MapTemplates::dir_v1_in(data.path());
+        std::fs::create_dir_all(&v1).unwrap();
+        std::fs::write(v1.join("atlas.json"), "not json").unwrap();
+        assert_eq!(dirs.load().unwrap().pack, MapPack::Legacy);
+
+        assert!(
+            MapDirs::in_data_dir(Path::new("/nonexistent"))
+                .load()
+                .is_none()
+        );
+    }
+
+    /// Install `templates/maps-v1` the way pack sync does: build it in a
+    /// staging folder, then swap it into place.
+    fn swap_in_v1(data: &Path, letters: &str, tag: &str) {
+        let staging = data.join(format!("templates/.maps-v1-staging-{tag}"));
+        write_pack(&staging, letters);
+        crate::packs::swap_dir(&staging, &MapTemplates::dir_v1_in(data)).unwrap();
+    }
+
+    #[test]
+    fn the_live_pack_picks_up_maps_v1_after_it_is_swapped_in() {
+        let data = tempfile::tempdir().unwrap();
+        let live = LiveMaps::load(MapDirs::in_data_dir(data.path()));
+        assert!(live.current().is_none());
+        live.wait_reload();
+        assert!(live.current().is_none(), "nothing installed");
+        swap_in_v1(data.path(), LETTERS, "a");
+        // this read keeps what it has; the load runs aside
+        assert!(live.current().is_none());
+        live.wait_reload();
+        let maps = live.current().expect("loaded after the swap");
+        assert_eq!(maps.pack, MapPack::V1);
+        assert_eq!(sure_key(&maps, "NEPAL"), Some("nepal"));
+    }
+
+    #[test]
+    fn an_updated_maps_v1_replaces_the_old_one() {
+        let data = tempfile::tempdir().unwrap();
+        swap_in_v1(data.path(), &no_p(), "old");
+        let live = LiveMaps::load(MapDirs::in_data_dir(data.path()));
+        let old = live.current().unwrap();
+        assert_eq!(sure_key(&old, "NEPAL"), None);
+        swap_in_v1(data.path(), LETTERS, "new");
+        live.current();
+        live.wait_reload();
+        let new = live.current().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old, &new), "re-loaded");
+        assert_eq!(sure_key(&new, "NEPAL"), Some("nepal"));
+    }
+
+    #[test]
+    fn a_hand_installed_pack_that_appears_later_is_picked_up() {
+        let data = tempfile::tempdir().unwrap();
+        let live = LiveMaps::load(MapDirs::in_data_dir(data.path()));
+        assert!(live.current().is_none());
+        write_pack(&MapTemplates::dir_in(data.path()), LETTERS);
+        live.current();
+        live.wait_reload();
+        assert_eq!(live.current().unwrap().pack, MapPack::Legacy);
+    }
+
+    #[test]
+    fn only_one_map_reload_runs_at_a_time() {
+        let data = tempfile::tempdir().unwrap();
+        let live = LiveMaps::load(MapDirs::in_data_dir(data.path()));
+        live.set_load_delay_ms(400);
+        swap_in_v1(data.path(), LETTERS, "a");
+        for _ in 0..50 {
+            assert!(live.current().is_none(), "load still in flight");
+        }
+        assert_eq!(live.reload_spawns(), 1);
+        live.wait_reload();
+        assert!(live.current().is_some());
+        assert_eq!(live.reload_spawns(), 1, "stamp matches again: no reload");
+    }
+
+    /// A load that saw a swap while it ran is thrown away (never a
+    /// half-swapped pack), and a later read loads again.
+    #[test]
+    fn the_map_reload_discards_a_load_that_saw_a_swap() {
+        let data = tempfile::tempdir().unwrap();
+        swap_in_v1(data.path(), &no_p(), "old");
+        let live = LiveMaps::load(MapDirs::in_data_dir(data.path()));
+        swap_in_v1(data.path(), &no_p(), "mid");
+        let path = data.path().to_path_buf();
+        live.during_next_load(move || swap_in_v1(&path, LETTERS, "new"));
+        let first = live.current().unwrap();
+        live.wait_reload();
+        // nothing was installed; this read keeps the old pack and retries
+        let kept = live.current().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &kept),
+            "the racing load was dropped"
+        );
+        live.wait_reload();
+        let maps = live.current().unwrap();
+        assert_eq!(
+            sure_key(&maps, "NEPAL"),
+            Some("nepal"),
+            "the pack after the swap"
+        );
+        assert_eq!(live.reload_spawns(), 2);
+    }
+
+    #[test]
+    fn a_map_load_that_sees_a_swap_is_thrown_away() {
+        let data = tempfile::tempdir().unwrap();
+        let dirs = MapDirs::in_data_dir(data.path());
+        assert!(
+            dirs.load_stable(|| swap_in_v1(data.path(), LETTERS, "a"))
+                .is_none(),
+            "a folder changed while loading"
+        );
+        let (maps, _) = dirs.load_stable(|| {}).expect("stable");
+        assert_eq!(maps.unwrap().pack, MapPack::V1);
     }
 
     #[test]

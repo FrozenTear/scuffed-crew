@@ -12,8 +12,10 @@
 //! `<hero-key>.png` or `special/<class>*.png`, the layout
 //! [`HeroTemplates::load_dir`] reads. `heroes-v2.tar` and
 //! `heroes-v2-1080.tar` use the same layout; the new reader prefers them
-//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]). The
-//! other packs are downloaded into folders no reader opens yet.
+//! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]).
+//! `maps-v1.tar` is the new reader's map banner pack
+//! ([`crate::shadow::banner::MapDirs`]). The other packs are downloaded into
+//! folders no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -27,7 +29,8 @@
 //! back [`ExtraPacks`] to run in the background, so capture never waits on
 //! the extras. The new reader starts on heroes-v1 and re-loads its hero set
 //! once heroes-v2 or heroes-v2-1080 is swapped in
-//! ([`crate::shadow::heroes::LiveHeroSet`]). The setup guide
+//! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
+//! once it lands ([`crate::shadow::banner::LiveMaps`]). The setup guide
 //! ([`sync_reader_packs`]) syncs all of them. Every run holds an exclusive `flock` on
 //! `templates/.pack-sync.lock`; a second run at the same time is
 //! [`PackSync::Busy`] and sends no request.
@@ -93,7 +96,8 @@ impl PackSpec {
 /// first so a rate limit or refused token hits it the way it did in alpha.6.
 /// The hero packs are read by a reader today (heroes-v1 by the shadow log and
 /// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
-/// reader); the others are not yet.
+/// reader), and so is maps-v1 (the new reader's map banner); the others are
+/// not yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -2426,11 +2430,16 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: only heroes-v1 lands in a folder a reader opens.
+        // Reader neutrality: only the hero packs and maps-v1 land in a
+        // folder a reader opens. The hand-installed maps folder is not a pack
+        // folder.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
+            crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
+            crate::shadow::heroes::TEMPLATE_SUBDIR_V2_1080,
             crate::shadow::result::TEMPLATE_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR,
+            crate::shadow::banner::TEMPLATE_SUBDIR_V1,
         ];
         let mut seen = BTreeSet::new();
         for spec in PACKS {
@@ -2441,8 +2450,17 @@ mod tests {
             let used_by_reader = reader_dirs.iter().any(|sub| dir == data.join(sub));
             assert_eq!(
                 used_by_reader,
-                spec.name == HEROES_PACK_NAME,
+                matches!(
+                    spec.name,
+                    HEROES_PACK_NAME | "heroes-v2.tar" | "heroes-v2-1080.tar" | "maps-v1.tar"
+                ),
                 "{}",
+                spec.name
+            );
+            assert_ne!(
+                dir,
+                data.join(crate::shadow::banner::TEMPLATE_SUBDIR),
+                "{} would overwrite a hand-installed map pack",
                 spec.name
             );
         }

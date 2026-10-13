@@ -7,9 +7,15 @@
 //! ocr-v1 value. A field is listed in `suspect_fields` only when the new
 //! reader actually attempted it and did not supply a value to store.
 //!
-//! The map and mode already chosen by capture policy stay as they are. A
-//! confident or suspect board map that names a different map adds `map` to
-//! `suspect_fields` and does not replace the policy map or mode.
+//! The map and mode already chosen by capture policy stay as they are. Under
+//! `reader = "new"` that policy map already comes from the map pack: the
+//! capture path takes a sure banner read as the top-bar map
+//! (`boundary::MapSource::TopBar`, see `choose_top_bar_map` in main.rs) and
+//! uses the top-bar OCR only when the banner reader abstains. The policy then
+//! keeps a session's first map, applies the vote-candidate veto, and keeps
+//! untracked maps local, exactly as for the OCR label. A confident or suspect
+//! board map that names a different map adds `map` to `suspect_fields` and
+//! does not replace the policy map or mode.
 //!
 //! The whole ocr-v1 read is kept, with recognizer `ocr-v1` and no suspect
 //! list, when the board is missing, the team size is unknown or disagrees,

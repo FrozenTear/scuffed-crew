@@ -6,8 +6,8 @@
 //! Nothing in here changes stored stats, uploads or capture decisions.
 //!
 //! Saved stats use [`reader`] only when config `reader` is `new`. That switch
-//! lives in `reader_apply`, not in this worker. `reader = "new"` also forces
-//! the log on.
+//! lives in `reader_apply` and, for the top-bar map ([`read_top_bar`]), in the
+//! capture path, not in this worker. `reader = "new"` also forces the log on.
 //!
 //! [`reader`] is the single entry point for the main-reader switch
 //! ([`read_board`]: every field with value, confidence and suspect flag). It
@@ -24,6 +24,7 @@ pub mod result;
 pub mod worker;
 
 pub use reader::{
-    BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, Value, field_names, init,
-    map_name, read_board, read_result, result_field, suspect_field_names,
+    BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, TopBarMap, Value,
+    field_names, init, map_name, read_board, read_result, read_top_bar, result_field,
+    suspect_field_names, top_bar_map,
 };
