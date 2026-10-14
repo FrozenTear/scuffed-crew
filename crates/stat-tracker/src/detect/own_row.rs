@@ -19,16 +19,25 @@
 //!   games ([`GameTag`]) gave crops that match each other. A crop is offered
 //!   only from a board whose highlight is strong, whose career panel shows
 //!   the hero read on the highlighted row, and whose row is not under chat
-//!   ([`seed_gate`]). Seeds that keep naming another row than a strong
-//!   highlight are dropped ([`SeedStore::note`]).
+//!   ([`seed_gate`]). Seeds that keep naming another row than the one the
+//!   career hero is read on are dropped ([`SeedStore::note`]).
 //! * **Match.** A seed slides over each row's name area. A row's score is
 //!   the best whole-crop ZNCC, capped by the ZNCC of that window's weakest
 //!   glyph-wide chunk, so one changed glyph is enough to fail. The best row
 //!   wins when it reaches [`MATCH_FLOOR`] and leads the next row by
 //!   [`MATCH_MARGIN`].
-//! * **Combine.** [`combine`]: seed and highlight on one row is sure, one of
-//!   them alone is used and marked, a seed against a strong highlight is no
-//!   row. This module reads no name. When neither speaks, the daemon may
+//! * **Combine.** [`combine_with_hero`]: seed and highlight on one row is
+//!   sure, one of them alone is used and marked, a seed against a strong
+//!   highlight is no row.
+//! * **Career hero.** A member whose highlight is never found has no seed
+//!   and no row from the two above. The Tab's career panel shows the
+//!   member's own hero, and a team has one player per hero, so the one row
+//!   of the member's team whose icon is read as that hero is the member's
+//!   ([`career_hero_row`]). It names the row when seed and highlight name
+//!   none, marked ([`Source::CareerHero`]); it confirms a seed that has no
+//!   highlight beside it ([`Source::SeedAndHero`]); and its row may seed,
+//!   under a stricter rule than a highlighted row ([`Proof::CareerHero`]).
+//!   This module reads no name. When nothing names a row, the daemon may
 //!   still ask ocr-v1's name read for that one board
 //!   ([`Source::NameFallback`]).
 //!
@@ -118,13 +127,23 @@ pub const SEED_GAMES: usize = 2;
 /// capture path's own team size, the four wrong highlights led by 1.18 to
 /// 1.22; 86 of the 97 right ones on lossless captures lead by 1.30 or more.
 pub const SEED_HIGHLIGHT_LEAD: f64 = 1.30;
+/// Boards, games and different career heroes a group of matching crops
+/// needs when its rows were shown by the career hero alone
+/// ([`Proof::CareerHero`]): one board and one game more than highlighted
+/// rows need, and the crop has to follow the career hero through a hero
+/// swap. Another player lands on the career hero's row only when an icon is
+/// misread or a mode allows two players on one hero; that the same player
+/// does so on four boards, in three games, on two heroes, is not expected.
+pub const HERO_SEED_BOARDS: usize = 4;
+pub const HERO_SEED_GAMES: usize = 3;
+pub const HERO_SEED_HEROES: usize = 2;
 /// Trusted seeds kept per board scale, and crops kept while waiting.
 const TRUSTED_PER_SCALE: usize = 6;
 /// Two crops this far apart are from two games even on one map, or with no
 /// map known: longer than one match runs.
 pub const GAME_GAP_SECS: u64 = 40 * 60;
-/// Boards in a row on which the seeds of one scale name another row than a
-/// strong highlight before those seeds are dropped.
+/// Boards in a row on which the seeds of one scale name another row than
+/// the one the career hero is read on before those seeds are dropped.
 pub const DISAGREE_DROPS: usize = 3;
 /// Games without a trusted seed after which the log says so, once per run.
 pub const UNSEEDED_NOTICE_GAMES: usize = 5;
@@ -447,6 +466,30 @@ pub struct Candidate {
     area: Vec<u8>,
     /// The game it was seen in, set when it is offered.
     game: Option<GameTag>,
+    /// What showed its row to be the member's.
+    proof: Proof,
+    /// The career panel's hero on its board (a hero key, nothing private).
+    hero: Option<String>,
+}
+
+/// What showed a seeding crop's row to be the member's. The seeding gate
+/// ([`seed_gate`]) asks for the career panel's hero on the row either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proof {
+    /// A strong highlight on the row as well.
+    Highlight,
+    /// The career hero alone: no highlight, or a weak one on that row. The
+    /// weaker proof, so its crops wait longer ([`HERO_SEED_BOARDS`]).
+    CareerHero,
+}
+
+impl Proof {
+    pub fn label(self) -> &'static str {
+        match self {
+            Proof::Highlight => "highlight",
+            Proof::CareerHero => "career_hero",
+        }
+    }
 }
 
 impl std::fmt::Debug for Candidate {
@@ -464,6 +507,18 @@ impl Candidate {
     /// The crop that becomes a seed when this candidate is trusted.
     pub fn seed(&self) -> &Seed {
         &self.seed
+    }
+
+    /// What showed its row to be the member's.
+    pub fn proof(&self) -> Proof {
+        self.proof
+    }
+
+    /// The same crop with its proof and the career panel's hero set.
+    pub fn proved(mut self, proof: Proof, career_hero: Option<&str>) -> Self {
+        self.proof = proof;
+        self.hero = career_hero.map(str::to_string);
+        self
     }
 }
 
@@ -625,7 +680,8 @@ impl NameBoard {
         self.bands.get(row).map(|b| b.1 as u32)
     }
 
-    /// The name line of `row` as a seeding candidate. `None` when the row
+    /// The name line of `row` as a seeding candidate, with the proof of a
+    /// highlighted row until [`Candidate::proved`] says otherwise. `None` when the row
     /// has no clean name line: no word in the name cell, a word that
     /// touches the cell's left edge or reaches the perk icons, ink right
     /// after the word, or a line of the wrong height.
@@ -708,6 +764,8 @@ impl NameBoard {
             area_h: plane.h as u32,
             area: plane.v.clone(),
             game: None,
+            proof: Proof::Highlight,
+            hero: None,
         })
     }
 
@@ -760,16 +818,17 @@ pub fn seed_row(scores: &[f32]) -> Option<usize> {
 /// How far the own row can be trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
-    /// The seed and the highlight name the same row.
+    /// Two voices name the same row: the seed and the highlight, or the
+    /// seed and the career hero where there is no highlight.
     Sure,
     /// One clear voice with nothing to contradict it: a strong highlight on
     /// a board no seed exists for yet (the row the new reader used before
     /// seeds existed), or the name read of [`Source::NameFallback`]. Stored
     /// unmarked, as main stores such a row.
     Unconfirmed,
-    /// One voice where two could have spoken, or a weak highlight alone. The
-    /// row is used, its fields are marked suspect, and the capture gate
-    /// takes its counters as not trusted.
+    /// One voice where two could have spoken, a weak highlight alone, or
+    /// the career hero alone. The row is used, its fields are marked
+    /// suspect, and the capture gate takes its counters as not trusted.
     Suspect,
 }
 
@@ -788,6 +847,11 @@ pub enum Source {
     /// Neither spoke, and the name read (ocr-v1's, still available while
     /// Tesseract is) matched a row.
     NameFallback,
+    /// No highlight, and the seed names the row the career hero is read on.
+    SeedAndHero,
+    /// Neither seed nor highlight spoke: the row the career hero is read on
+    /// ([`career_hero_row`]).
+    CareerHero,
 }
 
 impl Source {
@@ -800,6 +864,8 @@ impl Source {
             Source::Disagree => "disagree",
             Source::Neither => "none",
             Source::NameFallback => "name",
+            Source::SeedAndHero => "seed_and_hero",
+            Source::CareerHero => "career_hero",
         }
     }
 }
@@ -818,12 +884,18 @@ impl OwnRow {
         self.row.is_some() && self.trust == Trust::Suspect
     }
 
-    /// The row a name read matched when neither the seed nor the highlight
-    /// named one. Stored the way main stores a name-matched row: unmarked.
-    pub fn from_name(row: usize) -> Self {
+    /// The row a name read matched when nothing else named one. With no
+    /// seed for this board it is stored the way main stores a name-matched
+    /// row: unmarked. With one (`seeded`) the seed could have spoken and
+    /// did not, so the row is marked, as a highlight alone is (F262-18).
+    pub fn from_name(row: usize, seeded: bool) -> Self {
         Self {
             row: Some(row),
-            trust: Trust::Unconfirmed,
+            trust: if seeded {
+                Trust::Suspect
+            } else {
+                Trust::Unconfirmed
+            },
             source: Source::NameFallback,
         }
     }
@@ -844,47 +916,109 @@ impl Highlight {
     }
 }
 
-/// Combine the seed match with the highlight. `seeded` says a seed that
-/// could be compared with this board exists, so the seed had its say.
+/// Combine the seed match with the highlight, on a board whose career hero
+/// names no row. See [`combine_with_hero`].
+pub fn combine(seed: Option<usize>, highlight: Option<Highlight>, seeded: bool) -> OwnRow {
+    combine_with_hero(seed, highlight, None, seeded)
+}
+
+/// Combine the seed match with the highlight and the career hero's row
+/// ([`career_hero_row`]). `seeded` says a seed that could be compared with
+/// this board exists, so the seed had its say.
 ///
-/// * both on one row: that row, sure;
+/// * seed and highlight on one row: that row, sure;
 /// * different rows, strong highlight: no row (the capture is held);
 /// * different rows, weak highlight: the seed's row, suspect;
-/// * the seed alone: its row, suspect;
+/// * the seed alone: its row. Sure when the career hero is read on that
+///   row, else suspect;
 /// * the highlight alone: its row. Suspect when a seed exists or the
 ///   highlight is weak, unconfirmed when it is strong and no seed exists;
-/// * neither: no row.
+/// * neither: the career hero's row, suspect. Without one, no row.
 ///
-/// No case reads a name.
-pub fn combine(seed: Option<usize>, highlight: Option<Highlight>, seeded: bool) -> OwnRow {
+/// The career hero never overrules a seed or a highlight: it speaks only
+/// where they are silent, and it can only raise a lone seed to sure. No
+/// case reads a name.
+pub fn combine_with_hero(
+    seed: Option<usize>,
+    highlight: Option<Highlight>,
+    hero: Option<usize>,
+    seeded: bool,
+) -> OwnRow {
     let (row, trust, source) = match (seed, highlight) {
         (Some(s), Some(h)) if s == h.row => (Some(s), Trust::Sure, Source::Both),
         (Some(_), Some(h)) if h.strong() => (None, Trust::Suspect, Source::Disagree),
         (Some(s), Some(_)) => (Some(s), Trust::Suspect, Source::SeedOverWeakHighlight),
+        (Some(s), None) if hero == Some(s) => (Some(s), Trust::Sure, Source::SeedAndHero),
         (Some(s), None) => (Some(s), Trust::Suspect, Source::SeedOnly),
         (None, Some(h)) if seeded || !h.strong() => {
             (Some(h.row), Trust::Suspect, Source::HighlightOnly)
         }
         (None, Some(h)) => (Some(h.row), Trust::Unconfirmed, Source::HighlightOnly),
-        (None, None) => (None, Trust::Suspect, Source::Neither),
+        (None, None) => match hero {
+            Some(row) => (Some(row), Trust::Suspect, Source::CareerHero),
+            None => (None, Trust::Suspect, Source::Neither),
+        },
     };
     OwnRow { row, trust, source }
+}
+
+/// The row the career panel's hero names.
+///
+/// The career panel is drawn on the member's own live board only, and shows
+/// the hero the member plays. On that board the member's team is the upper
+/// table (rows `0..team_size`), which is also the only table the highlight
+/// is looked for in, and a team has one player per hero. So when the panel's
+/// read is accepted ([`TabHeroes::panel_hero`]) and exactly one row of the
+/// upper table has an accepted icon read of that hero
+/// ([`TabHeroes::own_hero`]), that row is the member's.
+///
+/// * The other team is not looked at: it may play the same hero (a mirror),
+///   and the member is never in the lower table of a board with a career
+///   panel.
+/// * Two rows of the member's team on that hero (a mode without the hero
+///   limit, or a misread) name no row.
+/// * An unread icon on the member's own row (an ult ring, a skull) names no
+///   row: no other row of the team shows the hero.
+///
+/// The weak spot is an icon misread while the member's own icon is unread,
+/// so the row is always marked ([`Source::CareerHero`]) until a seed agrees.
+pub fn career_hero_row(heroes: &TabHeroes) -> Option<usize> {
+    let panel = heroes.panel_hero()?;
+    let mut rows = (0..heroes.team_size).filter(|&row| heroes.own_hero(row) == Some(panel));
+    let row = rows.next()?;
+    rows.next().is_none().then_some(row)
+}
+
+/// The career panel's hero is read on `row`: the proof a seeding crop needs
+/// ([`seed_gate`]), and the proof a strike against trusted seeds needs
+/// ([`read_own_row`]).
+fn career_hero_on(heroes: Option<&TabHeroes>, row: usize) -> bool {
+    heroes.is_some_and(
+        |heroes| match (heroes.panel_hero(), heroes.own_hero(row)) {
+            (Some(panel), Some(own)) => panel == own,
+            _ => false,
+        },
+    )
 }
 
 /// What one board says about the trusted seeds of its scale, for
 /// [`SeedStore::note`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Verdict {
-    /// Nothing to learn (no seed fired, or the highlight was weak).
+    /// Nothing to learn: no seed fired, the highlight was weak, or the row
+    /// the seed contradicts is not shown to be the member's.
     #[default]
     Silent,
-    /// A seed and the highlight named one row, at this row pitch.
+    /// A seed and the highlight named one row, or with no highlight a seed
+    /// and the career hero did, at this row pitch.
     Agree(u32),
-    /// A seed named another row than a strong highlight, at this row pitch.
+    /// A seed named another row than the one the career hero is read on, at
+    /// this row pitch: a strongly highlighted row with the career hero on
+    /// it, or with no highlight the career hero's row.
     Disagree(u32),
 }
 
-/// The highlighted row's name line, cut for seeding, and where it was.
+/// A row's name line, cut for seeding, and where it was.
 #[derive(Debug, Clone)]
 pub struct RowCandidate {
     pub candidate: Candidate,
@@ -900,57 +1034,87 @@ pub struct OwnRowRead {
     /// Best and next best row score against the seeds (`-1` without one).
     pub best: f32,
     pub next: f32,
-    /// The highlighted row's name line, when the highlight is strong and no
-    /// seed matched that row. The caller still has to pass [`seed_gate`].
+    /// The name line of a row no seed matched: a strongly highlighted row
+    /// ([`Proof::Highlight`]), or the career hero's row where there is no
+    /// highlight or a weak one on that same row ([`Proof::CareerHero`]). The
+    /// caller still has to pass [`seed_gate`].
     pub candidate: Option<RowCandidate>,
     pub verdict: Verdict,
+    /// A seed that could be compared with this board exists.
+    pub seeded: bool,
+    /// The row the career hero names ([`career_hero_row`]).
+    pub hero_row: Option<usize>,
 }
 
 impl OwnRowRead {
     /// The seeds could not be consulted (the name areas cannot be measured,
-    /// or the read failed): the highlight alone. With seeds in hand it is
-    /// one of two voices and is marked; with none it is judged on its own.
-    pub fn unread(highlight: Option<Highlight>, seeded: bool) -> Self {
+    /// or the read failed): the highlight, else the career hero's row
+    /// (`hero_row`). With seeds in hand a highlight is one of two voices
+    /// and is marked; with none it is judged on its own.
+    pub fn unread(highlight: Option<Highlight>, hero_row: Option<usize>, seeded: bool) -> Self {
         Self {
-            own: combine(None, highlight, seeded),
+            own: combine_with_hero(None, highlight, hero_row, seeded),
             best: -1.0,
             next: -1.0,
             candidate: None,
             verdict: Verdict::Silent,
+            seeded,
+            hero_row,
         }
     }
 }
 
 /// Read the own row of one board: match `seeds` on every row, combine with
-/// `highlight`, and cut a seeding candidate from a strongly highlighted row
-/// that no seed matched. `frame` is the full frame when there is one (a
-/// saved board crop has none).
+/// `highlight` and the career hero's row (from `heroes`, the Tab's icon
+/// reads), and cut a seeding candidate from a row no seed matched. `frame`
+/// is the full frame when there is one (a saved board crop has none).
+///
+/// A board counts against the trusted seeds ([`Verdict::Disagree`]) only
+/// when it shows the other row to be the member's by the proof a seed
+/// itself needs, the career hero read on that row (F262-17): a strong
+/// highlight on a replay or a spectated board has no career panel and is
+/// no strike.
 pub fn read_own_row(
     frame: Option<&DynamicImage>,
     scoreboard: &DynamicImage,
     team_size: usize,
     highlight: Option<Highlight>,
+    heroes: Option<&TabHeroes>,
     seeds: &[Seed],
 ) -> OwnRowRead {
+    let hero_row = heroes.and_then(career_hero_row);
     let Some(board) = NameBoard::measure(frame, scoreboard, team_size) else {
-        return OwnRowRead::unread(highlight, !seeds.is_empty());
+        return OwnRowRead::unread(highlight, hero_row, !seeds.is_empty());
     };
     let scores = board.scores(seeds);
     let mut sorted = scores.clone();
     sorted.sort_by(|a, b| b.total_cmp(a));
-    let own = combine(seed_row(&scores), highlight, board.seeded(seeds));
-    let candidate = highlight
-        .filter(|h| own.source == Source::HighlightOnly && h.strong())
-        .and_then(|h| {
-            Some(RowCandidate {
-                candidate: board.candidate(h.row)?,
-                row: h.row,
-                row_bottom: board.row_bottom(h.row)?,
-            })
-        });
-    let verdict = match own.source {
-        Source::Both => Verdict::Agree(board.row_h()),
-        Source::Disagree => Verdict::Disagree(board.row_h()),
+    let seeded = board.seeded(seeds);
+    let own = combine_with_hero(seed_row(&scores), highlight, hero_row, seeded);
+    let cut = match (own.source, highlight) {
+        (Source::HighlightOnly, Some(h)) if h.strong() => Some((h.row, Proof::Highlight)),
+        (Source::HighlightOnly, Some(h)) if hero_row == Some(h.row) => {
+            Some((h.row, Proof::CareerHero))
+        }
+        (Source::CareerHero, _) => own.row.map(|row| (row, Proof::CareerHero)),
+        _ => None,
+    };
+    let panel = heroes.and_then(|heroes| heroes.panel_hero());
+    let candidate = cut.and_then(|(row, proof)| {
+        Some(RowCandidate {
+            candidate: board.candidate(row)?.proved(proof, panel),
+            row,
+            row_bottom: board.row_bottom(row)?,
+        })
+    });
+    let verdict = match (own.source, highlight) {
+        (Source::Both | Source::SeedAndHero, _) => Verdict::Agree(board.row_h()),
+        (Source::Disagree, Some(h)) if career_hero_on(heroes, h.row) => {
+            Verdict::Disagree(board.row_h())
+        }
+        // No highlight, and the seed names another row than the career
+        // hero's: the seed's row is used, and the board counts against it.
+        (Source::SeedOnly, None) if hero_row.is_some() => Verdict::Disagree(board.row_h()),
         _ => Verdict::Silent,
     };
     OwnRowRead {
@@ -959,18 +1123,20 @@ pub fn read_own_row(
         next: sorted.get(1).copied().unwrap_or(-1.0),
         candidate,
         verdict,
+        seeded,
+        hero_row,
     }
 }
 
-/// Whether a board may offer its highlighted row's crop as a seed.
+/// Whether a board may offer the crop of `row` (the highlighted row, or the
+/// career hero's) as a seed.
 ///
 /// * `chat`: what the full frame says about chat over the board. A row the
 ///   chat stack reaches, or an unknown chat state, refuses.
 /// * `heroes`: the hero icons of the Tab. The career panel must show a hero
-///   (it is drawn only on the member's own live board), and the highlighted
-///   row's icon must be read and show that same hero. An unread icon (an
-///   ult ring, a skull) refuses: the row is then not shown to be the
-///   member's.
+///   (it is drawn only on the member's own live board), and the row's icon
+///   must be read and show that same hero. An unread icon (an ult ring, a
+///   skull) refuses: the row is then not shown to be the member's.
 pub fn seed_gate(
     row: usize,
     row_bottom: u32,
@@ -981,13 +1147,7 @@ pub fn seed_gate(
     if chat == Chat::Unknown || chat.covers(row_bottom, crop_h) {
         return false;
     }
-    let Some(heroes) = heroes else {
-        return false;
-    };
-    match (heroes.panel_hero(), heroes.own_hero(row)) {
-        (Some(panel), Some(own)) => panel == own,
-        _ => false,
-    }
+    career_hero_on(heroes, row)
 }
 
 // ------------------------------------------------------------------- store
@@ -999,8 +1159,8 @@ pub enum Offer {
     Known,
     /// Kept in memory, waiting for more boards or another game.
     Pending,
-    /// It completed a group of [`SEED_BOARDS`] matching crops from
-    /// [`SEED_GAMES`] games: the group is trusted now.
+    /// It completed a group of matching crops that may be trusted
+    /// ([`SeedStore::offer`]): the group is trusted now.
     Promoted,
 }
 
@@ -1032,6 +1192,53 @@ impl GameTag {
     }
 }
 
+/// Whether `want` of `tags` are from `want` different games: each of them
+/// another game than each other one ([`GameTag::other_game`]).
+fn spans_games(tags: &[&GameTag], want: usize) -> bool {
+    fn grow(tags: &[&GameTag], chosen: &mut Vec<usize>, from: usize, want: usize) -> bool {
+        if chosen.len() >= want {
+            return true;
+        }
+        for i in from..tags.len() {
+            if chosen.iter().all(|&c| tags[c].other_game(tags[i])) {
+                chosen.push(i);
+                if grow(tags, chosen, i + 1, want) {
+                    return true;
+                }
+                chosen.pop();
+            }
+        }
+        false
+    }
+    grow(tags, &mut Vec::new(), 0, want)
+}
+
+/// Whether a group of crops that match each other may be trusted.
+///
+/// * Crops of strongly highlighted rows ([`Proof::Highlight`]): [`SEED_BOARDS`]
+///   of them from [`SEED_GAMES`] games.
+/// * Else the whole group, whatever showed each row: [`HERO_SEED_BOARDS`]
+///   crops from [`HERO_SEED_GAMES`] games with [`HERO_SEED_HEROES`] different
+///   career heroes among them. A crop that stays on the career hero's row
+///   through a hero swap is the member's own name line.
+fn group_trusted(group: &[&Candidate]) -> bool {
+    let lit: Vec<&GameTag> = group
+        .iter()
+        .filter(|c| c.proof == Proof::Highlight)
+        .filter_map(|c| c.game.as_ref())
+        .collect();
+    if lit.len() >= SEED_BOARDS && spans_games(&lit, SEED_GAMES) {
+        return true;
+    }
+    let all: Vec<&GameTag> = group.iter().filter_map(|c| c.game.as_ref()).collect();
+    let mut heroes: Vec<&str> = group.iter().filter_map(|c| c.hero.as_deref()).collect();
+    heroes.sort_unstable();
+    heroes.dedup();
+    all.len() >= HERO_SEED_BOARDS
+        && heroes.len() >= HERO_SEED_HEROES
+        && spans_games(&all, HERO_SEED_GAMES)
+}
+
 /// What is on disk: the trusted seeds, and nothing else. A file with any
 /// other key (the waiting crops an earlier draft of this file held) does not
 /// parse, and a file that does not parse is deleted on open.
@@ -1048,7 +1255,8 @@ struct SeedFile {
 /// The member's own-name seeds.
 ///
 /// * `trusted`: crops confirmed as the member's own name line (three
-///   matching crops from two games). In memory and in
+///   matching crops of highlighted rows from two games, or four matching
+///   crops from three games on two career heroes). In memory and in
 ///   `<data_dir>/private/own-name/seeds.json`.
 /// * `pending`: crops still waiting for that confirmation. In memory only,
 ///   never written: an unconfirmed crop may be another player's name. A
@@ -1071,7 +1279,7 @@ pub struct SeedStore {
 /// What [`SeedStore::note`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Noted {
-    /// Trusted seeds dropped for contradicting a strong highlight
+    /// Trusted seeds dropped for contradicting the career hero's row
     /// [`DISAGREE_DROPS`] times in a row.
     pub dropped: usize,
     /// [`UNSEEDED_NOTICE_GAMES`] games have gone by without a trusted seed
@@ -1259,10 +1467,12 @@ impl SeedStore {
     /// Take a crop from a board that passed [`seed_gate`], seen in `game`.
     ///
     /// A crop a trusted seed already matches changes nothing. Any other is
-    /// kept in memory, and once [`SEED_BOARDS`] kept crops that span
-    /// [`SEED_GAMES`] games ([`GameTag`]) match each other, that group is
-    /// trusted and the trusted seeds are written. A waiting crop is never
-    /// written.
+    /// kept in memory, and once the kept crops that match it are enough
+    /// ([`SEED_BOARDS`] crops of highlighted rows from [`SEED_GAMES`] games,
+    /// or [`HERO_SEED_BOARDS`] crops from [`HERO_SEED_GAMES`] games on
+    /// [`HERO_SEED_HEROES`] career heroes; games as [`GameTag`] counts them),
+    /// that group is trusted and the trusted seeds are written. A waiting
+    /// crop is never written.
     pub fn offer(&mut self, mut candidate: Candidate, game: &GameTag) -> Offer {
         if self
             .trusted
@@ -1277,12 +1487,8 @@ impl SeedStore {
             .collect();
         self.pending.push(candidate);
         group.push(self.pending.len() - 1);
-        let tags: Vec<&GameTag> = group
-            .iter()
-            .filter_map(|&i| self.pending[i].game.as_ref())
-            .collect();
-        let two_games = tags.iter().any(|a| tags.iter().any(|b| a.other_game(b)));
-        if group.len() >= SEED_BOARDS && two_games {
+        let members: Vec<&Candidate> = group.iter().map(|&i| &self.pending[i]).collect();
+        if group_trusted(&members) {
             // The newest crops of the group become seeds; the whole group
             // leaves the waiting list.
             let first = group.len().saturating_sub(PROMOTE);
@@ -1311,11 +1517,11 @@ impl SeedStore {
     /// Take one accepted board's [`Verdict`], seen in the session `session`.
     ///
     /// * A trusted seed must not be able to hide the member's real row for
-    ///   good. When the seeds of one row pitch name another row than a
-    ///   strong highlight [`DISAGREE_DROPS`] boards in a row, with no board
-    ///   in between on which seed and highlight agreed, those seeds are
-    ///   dropped. The member's name is then learned again from the
-    ///   highlight.
+    ///   good. When the seeds of one row pitch name another row than the
+    ///   one the career hero is read on ([`Verdict::Disagree`])
+    ///   [`DISAGREE_DROPS`] boards in a row, with no board in between on
+    ///   which a seed was confirmed ([`Verdict::Agree`]), those seeds are
+    ///   dropped. The member's name is then learned again.
     /// * While no seed is trusted, the sessions are counted, and the
     ///   [`UNSEEDED_NOTICE_GAMES`]th is reported once.
     pub fn note(&mut self, verdict: Verdict, session: &str) -> Noted {

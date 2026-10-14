@@ -708,9 +708,9 @@ fn own_name_seeds(
 
 /// Tell the own-name seed store what one Tab's board says about the trusted
 /// seeds, held Tab or stored (session `session_id`). Seeds that keep naming
-/// another row than a strong highlight are dropped, so a wrong seed cannot
-/// hide the member's real row for good; and the log says once when games go
-/// by without any trusted seed.
+/// another row than the one the career hero is read on are dropped, so a
+/// wrong seed cannot hide the member's real row for good; and the log says
+/// once when games go by without any trusted seed.
 async fn note_own_seed_verdict(
     store: Option<&Arc<std::sync::Mutex<detect::own_row::SeedStore>>>,
     verdict: detect::own_row::Verdict,
@@ -730,21 +730,23 @@ async fn note_own_seed_verdict(
         tracing::warn!(
             dropped = noted.dropped,
             boards = detect::own_row::DISAGREE_DROPS,
-            "own-row seeds named another row than a clear highlight on this many boards in a row: dropped, the name line is learned again"
+            "own-row seeds named another row than the career hero's on this many boards in a row: dropped, the name line is learned again"
         );
     }
     if noted.unseeded_notice {
         tracing::info!(
             games = detect::own_row::UNSEEDED_NOTICE_GAMES,
-            "no own-name seed is trusted yet after this many games: the own row comes from the highlight alone"
+            "no own-name seed is trusted yet after this many games: the own row comes from the highlight or the career hero alone"
         );
     }
 }
 
-/// Hand a gated crop of the highlighted row's name line to the seed store,
-/// for the game `session_id` on `map`. The store trusts it only once crops
-/// from three boards over two games match each other. Runs off the async
-/// threads because trusted seeds are written to disk.
+/// Hand a gated crop of the own row's name line to the seed store, for the
+/// game `session_id` on `map`. The store trusts it only once enough crops
+/// match each other: three from highlighted rows over two games, or four
+/// over three games on two career heroes
+/// ([`detect::own_row::SeedStore::offer`]). Runs off the async threads
+/// because trusted seeds are written to disk.
 async fn offer_own_name_seed(
     store: Option<&Arc<std::sync::Mutex<detect::own_row::SeedStore>>>,
     candidate: Option<detect::own_row::Candidate>,
@@ -760,6 +762,7 @@ async fn offer_own_name_seed(
         map: map.to_string(),
         at: Utc::now().timestamp().max(0) as u64,
     };
+    let proof = candidate.proof().label();
     let offered = tokio::task::spawn_blocking(move || {
         let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let offer = store.offer(candidate, &game);
@@ -767,7 +770,13 @@ async fn offer_own_name_seed(
     })
     .await;
     if let Ok((offer, trusted, pending)) = offered {
-        tracing::info!(?offer, trusted, pending, "own-row seed crop offered");
+        tracing::info!(
+            ?offer,
+            proof,
+            trusted,
+            pending,
+            "own-row seed crop offered"
+        );
     }
 }
 
@@ -4132,13 +4141,20 @@ fn analyze_frame(
     // teams) for a name match — this handles replays and post-match screens
     // where the player may be on team 2. Fall back to brightness-detected row
     // otherwise. `reader = "new"`: the seed match combined with the
-    // highlight. Only when neither names a row are this board's name
-    // windows read, to match the configured name as main does.
+    // highlight, and where both are silent the row the career panel's hero
+    // is read on (alpha.7 O9b). Only when none of them names a row are this
+    // board's name windows read, to match the configured name as main does.
     let highlight = brightness_row_idx.map(|row| detect::own_row::Highlight {
         row,
         lead: detect::hero_portrait::player_row_highlight(&scoreboard, team_size)
             .filter(|(lit, _)| *lit == row)
             .map_or(0.0, |(_, lead)| lead),
+    });
+    // The Tab's hero icons (heroes-v2), read once, before the own row: the
+    // career hero's row is one of the own row's voices, and the same read
+    // is the hero authority below. Never read under ocr-v1.
+    let tab_heroes = read_tab_heroes(use_new_reader, || {
+        shadow::read_heroes(&img, &scoreboard, team_size)
     });
     let OwnRowChoice {
         row_idx,
@@ -4153,9 +4169,21 @@ fn analyze_frame(
                 .as_deref()
                 .and_then(|name| parse::match_player_row_by_name(&rows, name))
         },
-        || detect::own_row::read_own_row(Some(&img), &scoreboard, team_size, highlight, &own_seeds),
+        || {
+            detect::own_row::read_own_row(
+                Some(&img),
+                &scoreboard,
+                team_size,
+                highlight,
+                tab_heroes.as_ref(),
+                &own_seeds,
+            )
+        },
         || own_row_name_fallback(player_name_owned.as_deref(), &scoreboard, team_size),
         highlight,
+        tab_heroes
+            .as_ref()
+            .and_then(detect::own_row::career_hero_row),
         !own_seeds.is_empty(),
     );
 
@@ -4176,12 +4204,13 @@ fn analyze_frame(
                 .ok()
                 .and_then(|t| parse::match_hero_in_text(&t))
         },
-        || shadow::read_heroes(&img, &scoreboard, team_size),
+        tab_heroes,
         row_idx,
     );
-    // A crop of the highlighted row's name line may seed the own-name set
-    // only from a live board of the member's own: no chat over the row, and
-    // the career panel showing the hero on that row.
+    // A crop of the own row's name line (the highlighted row, or the career
+    // hero's) may seed the own-name set only from a live board of the
+    // member's own: no chat over the row, and the career panel showing the
+    // hero on that row.
     let own_name_candidate = candidate.filter(|c| {
         let chat = match img.as_rgb8() {
             Some(rgb) => stat_tracker::report::blank::chat_over_board(rgb),
@@ -4297,19 +4326,26 @@ fn own_row_name_fallback(
 /// * `reader = "new"`: `seed_read` (the own-name seeds matched on every row,
 ///   combined with the highlight in [`detect::own_row::combine`]) gives the
 ///   row. A seed against a strong highlight is no row: the capture is held.
-///   When neither names a row, `name_fallback` is asked: the one name read
-///   left under the new reader, main's own (the name windows OCRed and
+///   Where seed and highlight are both silent, the row the career panel's
+///   hero is read on is the row, marked suspect (O9b; no name is read for
+///   it, so it works with Tesseract off).
+///   When none of them names a row, `name_fallback` is asked: the one name
+///   read left under the new reader, main's own (the name windows OCRed and
 ///   matched against the configured name), for this board only. Its row is
-///   stored as main stores a name-matched row. A lane that turns Tesseract
-///   off passes a fallback that returns `None`; such a board is then held.
+///   stored as main stores a name-matched row, and marked suspect when a
+///   seed for this board exists and matched no row (F262-18). A lane that
+///   turns Tesseract off passes a fallback that returns `None`; such a
+///   board is then held.
 ///   A panic in the seed read does not fail the Tab: the highlight is used,
-///   marked suspect when seeds exist (`seeded`).
+///   marked suspect when seeds exist (`seeded`), else the career hero's row
+///   (`hero_row`).
 fn find_own_row(
     use_new_reader: bool,
     name_match: impl FnOnce() -> Option<parse::NameMatch>,
     seed_read: impl FnOnce() -> detect::own_row::OwnRowRead,
     name_fallback: impl FnOnce() -> Option<parse::NameMatch>,
     highlight: Option<detect::own_row::Highlight>,
+    hero_row: Option<usize>,
     seeded: bool,
 ) -> OwnRowChoice {
     if !use_new_reader {
@@ -4326,7 +4362,7 @@ fn find_own_row(
         Ok(read) => read,
         Err(_) => {
             tracing::warn!("own-row seed read panicked; the highlight row is used");
-            detect::own_row::OwnRowRead::unread(highlight, seeded)
+            detect::own_row::OwnRowRead::unread(highlight, hero_row, seeded)
         }
     };
     let mut own = read.own;
@@ -4334,7 +4370,7 @@ fn find_own_row(
     if own.source == detect::own_row::Source::Neither
         && let Some(found) = name_fallback()
     {
-        own = detect::own_row::OwnRow::from_name(found.row);
+        own = detect::own_row::OwnRow::from_name(found.row, read.seeded);
         name_match = Some(found);
     }
     tracing::info!(
@@ -4343,7 +4379,8 @@ fn find_own_row(
         trust = ?own.trust,
         best = read.best,
         next = read.next,
-        "own row from seeds and highlight"
+        hero_row = ?read.hero_row,
+        "own row from seeds, highlight and career hero"
     );
     OwnRowChoice {
         row_idx: own.row,
@@ -4368,21 +4405,46 @@ struct OwnHeroRead {
     tab_heroes: Option<shadow::TabHeroes>,
 }
 
+/// The hero icons of one Tab (the heroes-v2 read of the whole board and of
+/// the career panel's portrait) with the daemon's reader switch.
+///
+/// * `reader = "ocr-v1"`: `heroes` is never called.
+/// * `reader = "new"`: `heroes` runs once per Tab. Its read names the own
+///   row where seed and highlight are silent
+///   ([`detect::own_row::career_hero_row`]) and is the hero authority
+///   ([`read_own_hero`]). A panic in the icon reader is `None`: no hero
+///   authority and no career-hero row, and never a failed Tab, the same
+///   isolation [`choose_top_bar_map`] gives the banner.
+fn read_tab_heroes(
+    use_new_reader: bool,
+    heroes: impl FnOnce() -> shadow::TabHeroes,
+) -> Option<shadow::TabHeroes> {
+    if !use_new_reader {
+        return None;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(heroes)) {
+        Ok(read) => Some(read),
+        Err(_) => {
+            tracing::warn!("hero icon reader panicked; no hero authority for this Tab");
+            None
+        }
+    }
+}
+
 /// Read the hero authority of one Tab with the daemon's reader switch.
 ///
 /// * `reader = "ocr-v1"`: `career` (the career-panel OCR) runs, exactly as
 ///   before. The icons are not read.
-/// * `reader = "new"`: the career-panel title is never read. `heroes` (the
-///   heroes-v2 icon read of the whole board and of the career panel's
-///   portrait) runs, and `pack_hero` is the hero those reads authenticate
-///   ([`shadow::TabHeroes::authority`]). Suspect or special reads, two reads
-///   naming different heroes, or a panic in the icon reader are an abstain:
-///   no hero, and never an OCR read in its place. A panic does not fail the
-///   Tab, the same isolation [`choose_top_bar_map`] gives the banner.
+/// * `reader = "new"`: the career-panel title is never read. `tab_heroes`
+///   is this Tab's icon read ([`read_tab_heroes`]), and `pack_hero` is the
+///   hero those reads authenticate ([`shadow::TabHeroes::authority`]).
+///   Suspect or special reads, two reads naming different heroes, or no icon
+///   read (a panic in the icon reader) are an abstain: no hero, and never an
+///   OCR read in its place.
 fn read_own_hero(
     use_new_reader: bool,
     career: impl FnOnce() -> Option<String>,
-    heroes: impl FnOnce() -> shadow::TabHeroes,
+    tab_heroes: Option<shadow::TabHeroes>,
     own_row: Option<usize>,
 ) -> OwnHeroRead {
     if !use_new_reader {
@@ -4392,13 +4454,6 @@ fn read_own_hero(
             tab_heroes: None,
         };
     }
-    let tab_heroes = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(heroes)) {
-        Ok(read) => Some(read),
-        Err(_) => {
-            tracing::warn!("hero icon reader panicked; no hero authority for this Tab");
-            None
-        }
-    };
     let pack_hero = tab_heroes
         .as_ref()
         .and_then(|read| read.authority(own_row))
@@ -5771,14 +5826,16 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // when the name shows up only in chat or the kill feed.
             let reason = match miss {
                 parse::ScoreboardMiss::PlayerRowNotFound if ctx.use_new_reader => {
-                    // The new reader finds the row from the own-name seeds
-                    // and the highlight; `player_name` only feeds the name
-                    // fallback, so "set player_name" is not the fix here.
+                    // The new reader finds the row from the own-name seeds,
+                    // the highlight and the career hero; `player_name` only
+                    // feeds the name fallback, so "set player_name" is not
+                    // the fix here.
                     tracing::warn!(
                         source = ?own_row.map(|own| own.source.label()),
-                        "capture held: own row not found. No own-name seed matched a row and no row is \
-                         highlighted (and the name read found none), or a seed and a clear highlight \
-                         name different rows. Nothing is stored for this Tab (saved to debug/rejected \
+                        "capture held: own row not found. No own-name seed matched a row, no row is \
+                         highlighted and the career panel's hero is on no single row of your team \
+                         (and the name read found none), or a seed and a clear highlight name \
+                         different rows. Nothing is stored for this Tab (saved to debug/rejected \
                          when debug_ocr is on)"
                     );
                     "noplayerrow"
@@ -8952,7 +9009,17 @@ mod tests {
             1,
             "one career read"
         );
-        assert!(body.contains("|| shadow::read_heroes(&img, &scoreboard, team_size), row_idx, );"));
+        // the icons are read once, behind the switch, before the own row
+        // (O9b: the career hero's row is one of its voices), and that one
+        // read is the hero authority
+        assert!(body.contains(
+            "let tab_heroes = read_tab_heroes(use_new_reader, || { shadow::read_heroes(&img, &scoreboard, team_size) });"
+        ));
+        assert!(body.contains("tab_heroes, row_idx, );"));
+        assert!(
+            body.find("read_tab_heroes(").unwrap() < body.find("} = find_own_row(").unwrap(),
+            "the icons are read before the own row"
+        );
         assert!(body.contains("career_hero, pack_hero, tab_heroes,"));
         let hc = src
             .find("\nasync fn handle_capture(")
@@ -10340,7 +10407,7 @@ mod tests {
 
     #[test]
     fn find_own_row_reads_only_the_switched_source() {
-        use detect::own_row::{OwnRowRead, Source, Trust, combine};
+        use detect::own_row::{OwnRowRead, Source, Trust, combine, combine_with_hero};
         let found = |row| {
             Some(parse::NameMatch {
                 row,
@@ -10350,17 +10417,18 @@ mod tests {
         };
         let seeds = |seed: Option<usize>, lit| OwnRowRead {
             own: combine(seed, lit, true),
-            ..OwnRowRead::unread(None, false)
+            ..OwnRowRead::unread(None, None, true)
         };
         let no_name = || -> Option<parse::NameMatch> { panic!("name read") };
-        // ocr-v1: the name match, else the highlight. Neither the seeds nor
-        // the fallback are touched.
+        // ocr-v1: the name match, else the highlight. Neither the seeds, the
+        // career hero nor the fallback are touched.
         let v1 = find_own_row(
             false,
             || found(4),
             || panic!("seeds read under ocr-v1"),
             no_name,
             o9_lit(1, 1.5),
+            Some(3),
             true,
         );
         assert_eq!(v1.row_idx, Some(4));
@@ -10372,9 +10440,12 @@ mod tests {
             || panic!("seeds read"),
             no_name,
             o9_lit(1, 1.5),
+            Some(3),
             true,
         );
         assert_eq!((v1.row_idx, v1.name_match), (Some(1), None));
+        let v1 = find_own_row(false, || None, || panic!("seeds"), no_name, None, Some(3), true);
+        assert_eq!(v1.row_idx, None, "ocr-v1 never takes the career hero's row");
         // new reader: the seeds and the highlight. With a row from them no
         // name is read at all.
         let both = find_own_row(
@@ -10383,6 +10454,7 @@ mod tests {
             || seeds(Some(2), o9_lit(2, 1.5)),
             no_name,
             o9_lit(2, 1.5),
+            None,
             true,
         );
         assert_eq!((both.row_idx, both.name_match), (Some(2), None));
@@ -10395,16 +10467,43 @@ mod tests {
             || seeds(Some(2), o9_lit(0, 1.5)),
             no_name,
             o9_lit(0, 1.5),
+            None,
             true,
         );
         assert_eq!(split.row_idx, None);
         assert_eq!(split.own_row.map(|o| o.source), Some(Source::Disagree));
         // the seed alone names a row the highlight never saw (team 2)
-        let alone = find_own_row(true, no_name, || seeds(Some(7), None), no_name, None, true);
+        let alone = find_own_row(
+            true,
+            no_name,
+            || seeds(Some(7), None),
+            no_name,
+            None,
+            None,
+            true,
+        );
         assert_eq!(alone.row_idx, Some(7));
         assert!(alone.own_row.is_some_and(|o| o.suspect()));
-        // neither names a row: main's name read is asked, for this board
-        let named = find_own_row(true, no_name, || seeds(None, None), || found(6), None, true);
+        // seed and highlight silent, the career hero on one row of the
+        // team: that row, marked, and no name is read (O9b)
+        let hero = |seeded| OwnRowRead {
+            own: combine_with_hero(None, None, Some(3), seeded),
+            ..OwnRowRead::unread(None, Some(3), seeded)
+        };
+        for seeded in [false, true] {
+            let by_hero = find_own_row(true, no_name, || hero(seeded), no_name, None, Some(3), seeded);
+            assert_eq!((by_hero.row_idx, by_hero.name_match), (Some(3), None));
+            let own = by_hero.own_row.expect("own row");
+            assert_eq!((own.source, own.trust), (Source::CareerHero, Trust::Suspect));
+            assert!(own.suspect());
+        }
+        // nothing names a row: main's name read is asked, for this board.
+        // With no seed for the board the row is stored as main stores it.
+        let silent = |seeded| OwnRowRead {
+            own: combine(None, None, seeded),
+            ..OwnRowRead::unread(None, None, seeded)
+        };
+        let named = find_own_row(true, no_name, || silent(false), || found(6), None, None, false);
         assert_eq!(named.row_idx, Some(6));
         assert_eq!(named.name_match.map(|m| m.row), Some(6));
         let own = named.own_row.expect("own row");
@@ -10413,8 +10512,18 @@ mod tests {
             (Source::NameFallback, Trust::Unconfirmed)
         );
         assert!(!own.suspect(), "stored as main stores a name-matched row");
+        // With a seed for the board that matched no row, the name's row is
+        // marked: one voice where two could have spoken (F262-18). The
+        // board's own answer decides, not the caller's "any seed exists".
+        let named = find_own_row(true, no_name, || silent(true), || found(6), None, None, false);
+        let own = named.own_row.expect("own row");
+        assert_eq!((named.row_idx, own.source), (Some(6), Source::NameFallback));
+        assert_eq!(own.trust, Trust::Suspect);
+        assert!(own.suspect());
+        let named = find_own_row(true, no_name, || silent(false), || found(6), None, None, true);
+        assert!(!named.own_row.expect("own row").suspect());
         // ...and when that finds no row either (or OCR is off): held
-        let none = find_own_row(true, no_name, || seeds(None, None), || None, None, true);
+        let none = find_own_row(true, no_name, || silent(true), || None, None, None, true);
         assert_eq!((none.row_idx, none.name_match), (None, None));
         assert_eq!(none.own_row.map(|o| o.source), Some(Source::Neither));
         // a panic in the seed read: the highlight, marked when seeds exist
@@ -10424,6 +10533,7 @@ mod tests {
             || panic!("seed reader"),
             no_name,
             o9_lit(3, 1.5),
+            Some(1),
             true,
         );
         assert_eq!(panicked.row_idx, Some(3));
@@ -10435,9 +10545,25 @@ mod tests {
             || panic!("seed reader"),
             no_name,
             o9_lit(3, 1.5),
+            None,
             false,
         );
         assert_eq!(panicked.own_row.map(|o| o.trust), Some(Trust::Unconfirmed));
+        // ...and with no highlight either, the career hero's row, marked
+        let panicked = find_own_row(
+            true,
+            no_name,
+            || panic!("seed reader"),
+            no_name,
+            None,
+            Some(1),
+            false,
+        );
+        assert_eq!(panicked.row_idx, Some(1));
+        assert_eq!(
+            panicked.own_row.map(|o| (o.source, o.trust)),
+            Some((Source::CareerHero, Trust::Suspect))
+        );
     }
 
     #[test]
@@ -10494,7 +10620,12 @@ mod tests {
         );
         assert_eq!(body.matches("detect::own_row::read_own_row(").count(), 1);
         assert_eq!(body.matches("detect::own_row::seed_gate(").count(), 1);
-        assert!(body.contains("!own_seeds.is_empty(), );"));
+        // the career hero's row comes from the one icon read, in the seed
+        // read and in its panic fallback (O9b)
+        assert!(body.contains("highlight, tab_heroes.as_ref(), &own_seeds, ) },"));
+        assert!(body.contains(
+            "highlight, tab_heroes .as_ref() .and_then(detect::own_row::career_hero_row), !own_seeds.is_empty(), );"
+        ));
         assert!(body.contains("player_row_idx: row_idx, name_match, own_row,"));
         let an = src
             .find("\nasync fn apply_new_reader(")
@@ -10524,25 +10655,32 @@ mod tests {
 
     #[tokio::test]
     async fn a_suspect_own_row_marks_every_field_and_is_not_a_trusted_read() {
-        use detect::own_row::combine;
+        use detect::own_row::combine_with_hero;
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
-        for (seed, lit, seeded, marked) in [
+        for (seed, lit, hero, seeded, marked) in [
             // seed and highlight agree: nothing is marked
-            (Some(0), o9_lit(0, 1.5), true, false),
+            (Some(0), o9_lit(0, 1.5), None, true, false),
             // only the seed, or only the highlight where a seed exists
-            (Some(0), None, true, true),
-            (None, o9_lit(0, 1.5), true, true),
+            (Some(0), None, None, true, true),
+            (None, o9_lit(0, 1.5), None, true, true),
             // a seed over a weak highlight that names another row
-            (Some(0), o9_lit(3, 1.1), true, true),
+            (Some(0), o9_lit(3, 1.1), None, true, true),
             // a strong highlight before any seed exists: as it always was
-            (None, o9_lit(0, 1.5), false, false),
+            (None, o9_lit(0, 1.5), None, false, false),
             // a weak highlight before any seed exists
-            (None, o9_lit(0, 1.1), false, true),
+            (None, o9_lit(0, 1.1), None, false, true),
+            // the career hero's row alone (O9b): marked, seeds or not
+            (None, None, Some(0), false, true),
+            (None, None, Some(0), true, true),
+            // a seed the career hero confirms: nothing is marked
+            (Some(0), None, Some(0), true, false),
+            // a seed the career hero contradicts: the seed's row, marked
+            (Some(0), None, Some(2), true, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let ctx = o8_ctx(dir.path(), true).await;
             let mut analysis = o8_analysis(None, Some("zenyatta"));
-            analysis.own_row = Some(combine(seed, lit, seeded));
+            analysis.own_row = Some(combine_with_hero(seed, lit, hero, seeded));
             assert_eq!(analysis.own_row.unwrap().row, Some(0));
             let board = Some(o8_board(Some("zenyatta")));
             let report = o9_tab(&ctx, "o9", "Busan", analysis, board).await;
@@ -10556,7 +10694,7 @@ mod tests {
             };
             assert_eq!(
                 flags, &want,
-                "seed {seed:?} highlight {lit:?} seeded {seeded}"
+                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
             );
             // the values themselves are still the row's
             assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
@@ -10565,7 +10703,7 @@ mod tests {
             assert_eq!(
                 report.gate_state.expect("gate").low_trust,
                 marked,
-                "seed {seed:?} highlight {lit:?} seeded {seeded}"
+                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
             );
         }
     }
@@ -10655,6 +10793,61 @@ mod tests {
         let board = Some(o8_board(Some("zenyatta")));
         o9_tab(&ctx, "g3", "Busan", analysis, board).await;
         assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    /// O9b: a crop from the career hero's row (no highlight) reaches the
+    /// store like a highlighted row's, and is trusted only after four
+    /// boards from three real games on two career heroes.
+    #[tokio::test]
+    async fn career_hero_crops_reach_the_seed_store_and_need_three_games_and_a_hero_swap() {
+        use detect::own_row::{Proof, combine_with_hero};
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = o8_ctx(dir.path(), true).await;
+        ctx.own_name = Some(o9_store(dir.path()));
+        let file = detect::own_row::seed_dir(dir.path()).join("seeds.json");
+        // What trusts three highlighted crops (two games) leaves these
+        // waiting; a split of the second game is not a third game; one
+        // hero through three games is not enough either.
+        for (i, (session, map, hero, trusted)) in [
+            ("g1", "Busan", "zenyatta", 0),
+            ("g1", "Busan", "zenyatta", 0),
+            ("g2", "Ilios", "zenyatta", 0),
+            ("g2-split", "Ilios", "zenyatta", 0),
+            ("g3", "Oasis", "zenyatta", 0),
+            ("g3", "Oasis", "ana", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut analysis = o8_analysis(None, Some(hero));
+            analysis.own_row = Some(combine_with_hero(None, None, Some(0), false));
+            analysis.own_name_candidate =
+                Some(o9_candidate(i).proved(Proof::CareerHero, Some(hero)));
+            let board = Some(o8_board(Some(hero)));
+            let report = o9_tab(&ctx, session, map, analysis, board).await;
+            assert!(report.recorded, "tab {i}");
+            // the row is stored marked and as a low-trust read
+            if i == 0 {
+                let rows = ctx.store.get_session_snapshots(session).await.unwrap();
+                assert_eq!(
+                    rows[0].suspect_fields,
+                    reader_apply::OWN_ROW_FIELDS.to_vec()
+                );
+            }
+            assert!(report.gate_state.expect("gate").low_trust, "tab {i}");
+            assert_eq!(
+                own_name_seeds(ctx.own_name.as_ref()).len(),
+                trusted,
+                "tab {i}"
+            );
+            // a waiting crop is never on disk; the trusted seeds are
+            assert_eq!(file.is_file(), trusted > 0, "tab {i}");
+        }
+        let seeds = own_name_seeds(ctx.own_name.as_ref());
+        let board = detect::own_row::NameBoard::measure(None, &o9_board(7), 5).unwrap();
+        assert_eq!(detect::own_row::seed_row(&board.scores(&seeds)), Some(7));
+        assert_eq!(own_name_seeds(Some(&o9_store(dir.path()))).len(), 3);
     }
 
     #[tokio::test]
@@ -10921,35 +11114,37 @@ mod tests {
             panel: None,
         };
         // ocr-v1: the career panel, and the icons are never read
-        let v1 = read_own_hero(
-            false,
-            || Some("Reinhardt".into()),
-            || panic!("ocr-v1 must not read the hero icons"),
-            Some(0),
-        );
+        let icons = read_tab_heroes(false, || panic!("ocr-v1 must not read the hero icons"));
+        assert_eq!(icons, None);
+        let v1 = read_own_hero(false, || Some("Reinhardt".into()), icons, Some(0));
         assert_eq!(v1.career_hero.as_deref(), Some("Reinhardt"));
+        assert_eq!((v1.pack_hero, v1.tab_heroes), (None, None));
+        // ocr-v1 ignores an icon read even if one were handed to it
+        let v1 = read_own_hero(false, || None, Some(tab(Some("zenyatta"))), Some(0));
         assert_eq!((v1.pack_hero, v1.tab_heroes), (None, None));
         // new: the icons, and the career panel is never read
         let career =
             || -> Option<String> { panic!("the new reader must not read the career panel") };
-        let new = read_own_hero(true, career, || tab(Some("zenyatta")), Some(3));
+        let icons = read_tab_heroes(true, || tab(Some("zenyatta")));
+        assert!(icons.is_some());
+        let new = read_own_hero(true, career, icons, Some(3));
         assert_eq!(new.career_hero, None);
         assert_eq!(new.pack_hero.as_deref(), Some("zenyatta"));
         assert!(new.tab_heroes.is_some(), "kept for the board read");
         // an abstaining own row, an unknown own row, a row off the board
         let career = || -> Option<String> { panic!("no career read") };
         assert_eq!(
-            read_own_hero(true, career, || tab(None), Some(3)).pack_hero,
+            read_own_hero(true, career, Some(tab(None)), Some(3)).pack_hero,
             None
         );
         let career = || -> Option<String> { panic!("no career read") };
         assert_eq!(
-            read_own_hero(true, career, || tab(Some("zenyatta")), None).pack_hero,
+            read_own_hero(true, career, Some(tab(Some("zenyatta"))), None).pack_hero,
             None
         );
         let career = || -> Option<String> { panic!("no career read") };
         assert_eq!(
-            read_own_hero(true, career, || tab(Some("zenyatta")), Some(10)).pack_hero,
+            read_own_hero(true, career, Some(tab(Some("zenyatta"))), Some(10)).pack_hero,
             None
         );
         // the career panel's portrait authenticates when the row abstains
@@ -10974,14 +11169,17 @@ mod tests {
         };
         let career = || -> Option<String> { panic!("no career read") };
         assert_eq!(
-            read_own_hero(true, career, panel, Some(3))
+            read_own_hero(true, career, Some(panel()), Some(3))
                 .pack_hero
                 .as_deref(),
             Some("ana")
         );
-        // a panic in the icon reader is an abstain, not a failed Tab
+        // a panic in the icon reader is an abstain, not a failed Tab: no
+        // icon read, so no hero authority and no career hero's row
         let career = || -> Option<String> { panic!("no career read") };
-        let panicked = read_own_hero(true, career, || panic!("icon reader"), Some(0));
+        let icons = read_tab_heroes(true, || panic!("icon reader"));
+        assert_eq!(icons, None);
+        let panicked = read_own_hero(true, career, icons, Some(0));
         assert_eq!((panicked.pack_hero, panicked.tab_heroes), (None, None));
     }
 
