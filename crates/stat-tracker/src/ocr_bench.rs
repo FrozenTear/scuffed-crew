@@ -229,12 +229,13 @@ fn poll(
         detect::match_end::FinalScoreSource::for_reader(new),
         &titles,
     );
-    let accolade_map = match &signal {
-        Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
-            detect::match_end::read_accolade_map(img)
-        }
-        _ => None,
-    };
+    let accolade_map = choose_accolade_map(
+        new,
+        false,
+        signal.as_ref().map(|(_, source)| *source),
+        || shadow::read_accolade_map(&rgb),
+        || detect::match_end::read_accolade_map(img),
+    );
     let phase = detect::match_start::detect_phase_polled(
         img,
         &rgb,

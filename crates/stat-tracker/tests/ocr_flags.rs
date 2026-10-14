@@ -43,16 +43,17 @@ enum Checked {
     TabPass,
     /// `main.rs`: `the_pve_board_check_cannot_count_both_teams_without_ocr_so_off_stays_refused`.
     PveBoard,
+    /// `main.rs`: `with_ocr_off_the_accolade_map_is_never_asked_of_ocr`. The
+    /// choice between the map pack's read and the OCR read is made in the
+    /// daemon (`choose_accolade_map`), not in the library.
+    AccoladeChoice,
 }
 
 /// Every read has a place. A new [`Read`] does not compile until it has one.
 fn checked(read: Read) -> Checked {
     match read {
-        Read::ResultWord
-        | Read::EndTitle
-        | Read::AccoladeMap
-        | Read::MatchStart
-        | Read::FinalScore => Checked::Here,
+        Read::ResultWord | Read::EndTitle | Read::MatchStart | Read::FinalScore => Checked::Here,
+        Read::AccoladeMap => Checked::AccoladeChoice,
         Read::StatCells | Read::OwnRow | Read::Hero | Read::TopBarMap => Checked::TabPass,
         Read::PveBoard => Checked::PveBoard,
     }
@@ -264,17 +265,6 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
         Read::EndTitle,
         "the end reel's title read",
         count(&blocked, END, &["recognize_prepared"]),
-        &blocked,
-    );
-
-    // The map beside the accolade screen's result word.
-    let blocked = blocked_during(|| {
-        assert_eq!(match_end::read_accolade_map(&end), None);
-    });
-    judge(
-        Read::AccoladeMap,
-        "the accolade map read",
-        blocked.iter().map(|(_, _, n)| n).sum(),
         &blocked,
     );
 

@@ -127,8 +127,11 @@ impl Read {
             // loaded both are held with OCR off (`Titles::Held`), and the
             // pack check asks for them ([`PackGroup::EndTitles`]).
             Read::EndTitle => true,
-            // Lane O5 (#265).
-            Read::AccoladeMap => false,
+            // #265 (O5): the map pack reads the accolade map line. Without
+            // a map pack and with OCR off there is no map and no OCR call
+            // (`choose_accolade_map` in the daemon), and the pack check
+            // asks for the map pack ([`PackGroup::MapNames`]).
+            Read::AccoladeMap => true,
             // Two lanes, and both have to be in. M1 (#271) is: ADLERSBRUNN
             // from the Tab banner under the new reader. O10 (#266) is not:
             // both teams counted on the new reader's cells. Until then, with
@@ -199,6 +202,7 @@ pub const READER_ENTRIES: &[(&str, &[PackGroup])] = &[
     ),
     ("read_top_bar", &[PackGroup::MapNames]),
     ("read_banner", &[PackGroup::MapNames]),
+    ("read_accolade_map", &[PackGroup::MapNames]),
     ("read_heroes", &[PackGroup::HeroIcons]),
     ("read_result", &[PackGroup::ResultWords]),
     // The FINAL SCORE line only opens the gate of the end title's OCR
@@ -1077,7 +1081,6 @@ mod tests {
                 Read::StatCells,
                 Read::OwnRow,
                 Read::ResultWord,
-                Read::AccoladeMap,
                 Read::PveBoard
             ]
         );
@@ -1439,7 +1442,7 @@ mod tests {
             "shadow/reader.rs and ocr_switch::READER_ENTRIES name different reads"
         );
         assert!(
-            found.len() >= 10,
+            found.len() >= 11,
             "the scan found the entry points: {found:?}"
         );
         // A reader with nothing loaded has none of the groups, and one with

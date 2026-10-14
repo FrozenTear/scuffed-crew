@@ -295,7 +295,8 @@ struct DaemonCtx {
     shadow: Option<shadow::worker::ShadowWorker>,
     /// `reader = "new"`, or `ocr = "off"`, which implies it
     /// ([`stat_tracker::ocr_switch`]). Saved rows may use the new reader.
-    /// With `ocr = "on"`, game boundaries stay on ocr-v1.
+    /// With `ocr = "on"`, game boundaries stay on ocr-v1, but the accolade
+    /// map they are given is the map pack's ([`choose_accolade_map`]).
     use_new_reader: bool,
     /// `reader = "new"`: the member's own-name seeds, which find the own row
     /// without a name read (`<data_dir>/private/own-name`, alpha.7 O9).
@@ -1778,6 +1779,7 @@ async fn apply_poll_decision(
     data_dir: &std::path::Path,
     decision: boundary::PollDecision,
     now: Instant,
+    use_new_reader: bool,
 ) {
     if let boundary::PollDecision::IgnoreContradictory { kept, ignored } = &decision {
         tracing::info!(
@@ -1898,8 +1900,29 @@ async fn apply_poll_decision(
         );
         g.touch_at(now);
         if g.session_created {
-            if let Err(e) = store.set_session_map(&g.session_id, &map).await {
-                tracing::warn!(error = %e, "failed to set session map");
+            // `reader = "new"`: a member's own map choice is never renamed,
+            // and the mode stored with it is never rewritten (the top-bar
+            // rule of F252-3, for the accolade). That is a rule for the
+            // rows that carry the choice, not for the session (F265-1): a
+            // choice is stamped on the rows that exist when it is made, and
+            // the rows captured after it, the game's newest row among them,
+            // take the accolade map like any other row. With ocr-v1 every
+            // row is written as before.
+            let written = if use_new_reader {
+                store
+                    .set_session_map_keeping_member_choices(&g.session_id, &map)
+                    .await
+            } else {
+                store.set_session_map(&g.session_id, &map).await.map(|()| 0)
+            };
+            match written {
+                Ok(0) => {}
+                Ok(kept) => tracing::info!(
+                    session_id = %g.session_id,
+                    kept,
+                    "accolade map not written to the rows whose map a member chose"
+                ),
+                Err(e) => tracing::warn!(error = %e, "failed to set session map"),
             }
             refresh_snapshot(store, data_dir).await;
         }
@@ -2731,12 +2754,17 @@ async fn session_has_member_map_edit(store: &storage::LocalStore, req: &CaptureR
     if !untrusted_map {
         return false;
     }
-    match store.get_session_snapshots(&req.session_id).await {
-        Ok(rows) => rows
-            .iter()
-            .any(|m| m.corrected_map_name.is_some() || m.field_edited("map_name")),
+    session_rows_have_member_map_edit(store, &req.session_id).await
+}
+
+/// A row of `session_id` carries a member's own map choice (a map edit or
+/// pick: `corrected_map_name`, or `map_name` in `edited_fields`). A store
+/// error answers true, so nothing of the member's is renamed.
+async fn session_rows_have_member_map_edit(store: &storage::LocalStore, session_id: &str) -> bool {
+    match store.get_session_snapshots(session_id).await {
+        Ok(rows) => rows.iter().any(|m| m.has_member_map_edit()),
         Err(e) => {
-            tracing::warn!(error = %e, "session rows unreadable; no banner rename");
+            tracing::warn!(error = %e, "session rows unreadable; the map is not renamed");
             true
         }
     }
@@ -3597,6 +3625,7 @@ fn poll_input_from_game<'a>(
 /// start-screen block, [`poll_input_from_game`] (including the carried
 /// accolade map), [`apply_poll_decision`], a confirmed word with no game
 /// open, and [`open_detected_game`].
+#[allow(clippy::too_many_arguments)]
 async fn apply_poll_tick(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -3605,6 +3634,7 @@ async fn apply_poll_tick(
     start_screen: Option<boundary::StartScreen>,
     now: Instant,
     debounce: std::time::Duration,
+    use_new_reader: bool,
 ) {
     let block_map_vote = start_screen.as_ref().is_some_and(|screen| {
         start_screen_blocked(
@@ -3628,7 +3658,7 @@ async fn apply_poll_tick(
     });
     let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
     if let Some(decision) = decision {
-        apply_poll_decision(st, store, data_dir, decision, now).await;
+        apply_poll_decision(st, store, data_dir, decision, now, use_new_reader).await;
     } else if tick.signal_confirmed
         && let Some(outcome) = tick.signal
     {
@@ -3966,28 +3996,22 @@ async fn run_loop(
                                 detect::match_end::FinalScoreSource::for_reader(use_new_reader),
                                 &titles,
                             );
-                            // Cheap wake path: skip phase + accolade-map OCR
-                            // so Tab cell OCR keeps the pool. Outcome signal
-                            // and end-reel refresh still run (same confirm /
-                            // on-hit dump machinery below).
-                            let accolade_map = if outcome_only {
-                                // Tab cell OCR is in flight. This tick still
-                                // reads the outcome word, but not the map, so
-                                // two of these ticks confirm with no map and
-                                // seal onto the open session.
-                                None
-                            } else {
-                                // Only a result-word tick reads the map. The
-                                // rank screen does not. A banner tick is the
-                                // gameplay HUD under a result flash, so that
-                                // crop is not a map.
-                                match &signal {
-                                    Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
-                                        detect::match_end::read_accolade_map(&img)
-                                    }
-                                    _ => None,
-                                }
-                            };
+                            // Cheap wake path: while Tab cell OCR is in
+                            // flight, skip the phase and accolade-map reads
+                            // so it keeps the pool. Outcome signal and
+                            // end-reel refresh still run (same confirm /
+                            // on-hit dump machinery below). Such a tick
+                            // reads the outcome word but not the map, so two
+                            // of them confirm with no map and seal onto the
+                            // open session. Otherwise only a result-word
+                            // tick reads the map ([`choose_accolade_map`]).
+                            let accolade_map = choose_accolade_map(
+                                use_new_reader,
+                                outcome_only,
+                                signal.map(|(_, source)| source),
+                                || shadow::read_accolade_map(&rgb),
+                                || detect::match_end::read_accolade_map(&img),
+                            );
                             // `reader = "new"` confirms the vote, ban and
                             // select screens with the words-v1 phrase masks,
                             // not OCR (alpha.7 O7).
@@ -4118,6 +4142,7 @@ async fn run_loop(
                             start_screen,
                             now,
                             new_game_debounce,
+                            use_new_reader,
                         )
                         .await;
                     }
@@ -5208,6 +5233,81 @@ struct TopBarChoice {
     /// The banner read, for the board's map field (see
     /// [`FrameAnalysis::banner`]).
     banner: Option<Option<shadow::banner::MapRead>>,
+}
+
+/// Under `reader = "new"`, the accolade map was read with OCR because no
+/// map pack is loaded (none synced yet, or none that loads). Logged once
+/// per process (F265-3), like the FINAL SCORE line's fallback. With OCR off
+/// there is no such fallback and no such line ([`choose_accolade_map`]).
+/// Returns whether this call logged (tests).
+fn warn_accolade_map_ocr_fallback() -> bool {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    if first {
+        tracing::warn!(
+            "reader = \"new\" but no map pack is loaded; \
+             the accolade map is read with OCR"
+        );
+    }
+    first
+}
+
+/// The map on this poll tick's accolade screen, for the session machine.
+///
+/// Only a result-word tick reads the map. The rank screen does not, and a
+/// banner tick is the gameplay HUD under a result flash, so that crop is not
+/// a map. A tick taken while Tab cell OCR is in flight (`outcome_only`) reads
+/// no map either.
+///
+/// With `reader = "ocr-v1"` the map is the title OCR of the strip, as
+/// before. With `reader = "new"` it is the map pack's read of the accolade
+/// map line ([`shadow::read_accolade_map`]): sure and storable, or nothing.
+/// When the pack read the frame and abstains there is no map; the OCR is
+/// not run in its place, and a panic in the pack reader is an abstain too,
+/// so it never costs the tick its result word. When no map pack is loaded
+/// nothing read the frame, and the OCR reads it as under ocr-v1, with one
+/// warning ([`warn_accolade_map_ocr_fallback`]): the rule of the top bar,
+/// the FINAL SCORE line and the phase titles without their packs. With
+/// classic OCR off there is no OCR to read it: no map pack means no map,
+/// and the OCR read is not asked for (the switch does not grant off
+/// without the map pack, so this is a pack that went away). What the
+/// session does with the map is the same for both readers
+/// (`boundary::decide_poll`).
+fn choose_accolade_map(
+    use_new_reader: bool,
+    outcome_only: bool,
+    signal: Option<detect::match_end::OutcomeSource>,
+    pack: impl FnOnce() -> shadow::AccoladeRead,
+    ocr: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if outcome_only || signal != Some(detect::match_end::OutcomeSource::ResultWord) {
+        return None;
+    }
+    if !use_new_reader {
+        return ocr();
+    }
+    let read = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(pack)) {
+        Ok(shadow::AccoladeRead::Map(read)) => read,
+        Ok(shadow::AccoladeRead::Abstain) => return None,
+        // No map pack, and classic OCR is off: held. `ocr` is not called.
+        Ok(shadow::AccoladeRead::NoPack) if ocr::gate::is_off() => return None,
+        Ok(shadow::AccoladeRead::NoPack) => {
+            warn_accolade_map_ocr_fallback();
+            return ocr();
+        }
+        Err(_) => {
+            tracing::warn!("accolade map reader panicked; no accolade map for this tick");
+            return None;
+        }
+    };
+    tracing::info!(
+        map = %read.name,
+        score = read.score,
+        margin = read.margin,
+        recognizer = shadow::banner::ACCOLADE_MAP_RECOGNIZER_ID,
+        "map read from accolade screen (map pack)"
+    );
+    Some(read.name)
 }
 
 /// The top-bar map of one Tab: the read capture policy stores as
@@ -8266,7 +8366,7 @@ mod tests {
                 now: Instant::now(),
             })
         };
-        apply_poll_decision(&mut st, &store, dir.path(), decision, Instant::now()).await;
+        apply_poll_decision(&mut st, &store, dir.path(), decision, Instant::now(), false).await;
         let g = st.active_game.expect("the confirm stays on this session");
         assert_eq!(g.outcome, detect::MatchOutcome::Defeat);
         let stamped = g.outcome_recorded_at.expect("grace is stamped");
@@ -9020,6 +9120,495 @@ mod tests {
         ] {
             assert!(!all.contains(ocr_only), "{ocr_only}");
         }
+    }
+
+    fn accolade_read(name: &str) -> shadow::AccoladeRead {
+        shadow::AccoladeRead::Map(shadow::TopBarMap {
+            name: name.into(),
+            mode: None,
+            score: 0.95,
+            margin: 0.3,
+        })
+    }
+
+    /// `reader = "ocr-v1"` (the default): the accolade map is the title OCR,
+    /// on a result-word tick only, and the map pack is never read.
+    #[test]
+    fn ocr_v1_reads_the_accolade_map_by_ocr_only() {
+        use detect::match_end::OutcomeSource as S;
+        let pack = || -> shadow::AccoladeRead { panic!("map pack read under ocr-v1") };
+        let ocr = || Some("Busan".to_string());
+        assert_eq!(
+            choose_accolade_map(false, false, Some(S::ResultWord), pack, ocr).as_deref(),
+            Some("Busan")
+        );
+        assert_eq!(
+            choose_accolade_map(false, false, Some(S::ResultWord), pack, || None),
+            None
+        );
+        // no result word on the tick, or Tab cell OCR in flight: nothing runs
+        let no_ocr = || -> Option<String> { panic!("accolade OCR off a result-word tick") };
+        for signal in [
+            None,
+            Some(S::Banner),
+            Some(S::RankScreen),
+            Some(S::EndTitle),
+        ] {
+            assert_eq!(
+                choose_accolade_map(false, false, signal, pack, no_ocr),
+                None
+            );
+        }
+        assert_eq!(
+            choose_accolade_map(false, true, Some(S::ResultWord), pack, no_ocr),
+            None
+        );
+    }
+
+    /// `reader = "new"` with a map pack: the accolade map is the pack's
+    /// read, on the same ticks, and the OCR is never run, not even when the
+    /// pack abstains.
+    #[test]
+    fn the_new_reader_reads_the_accolade_map_from_the_pack_and_never_by_ocr() {
+        use detect::match_end::OutcomeSource as S;
+        let ocr = || -> Option<String> { panic!("accolade OCR under reader = new") };
+        assert_eq!(
+            choose_accolade_map(
+                true,
+                false,
+                Some(S::ResultWord),
+                || accolade_read("Ilios"),
+                ocr
+            )
+            .as_deref(),
+            Some("Ilios")
+        );
+        // an abstain is no map: no fallback
+        assert_eq!(
+            choose_accolade_map(
+                true,
+                false,
+                Some(S::ResultWord),
+                || shadow::AccoladeRead::Abstain,
+                ocr
+            ),
+            None
+        );
+        // the pack is read on a result-word tick only (a counter, not a
+        // panic: a panic in the pack read is caught and would hide a call)
+        let reads = std::cell::Cell::new(0);
+        let counted = || {
+            reads.set(reads.get() + 1);
+            accolade_read("Ilios")
+        };
+        for signal in [
+            None,
+            Some(S::Banner),
+            Some(S::RankScreen),
+            Some(S::EndTitle),
+        ] {
+            assert_eq!(choose_accolade_map(true, false, signal, counted, ocr), None);
+        }
+        assert_eq!(
+            choose_accolade_map(true, true, Some(S::ResultWord), counted, ocr),
+            None
+        );
+        assert_eq!(
+            reads.get(),
+            0,
+            "the map pack was read off a result-word tick"
+        );
+    }
+
+    /// `reader = "new"` with no map pack loaded (F265-3): nothing read the
+    /// frame, so the OCR reads it, as it does under ocr-v1 and as the top
+    /// bar, the FINAL SCORE line and the phase titles do without their
+    /// packs. Once per result-word tick, on those ticks only, and the
+    /// warning is logged once per process.
+    #[test]
+    fn the_new_reader_reads_the_accolade_map_by_ocr_when_no_map_pack_is_loaded() {
+        use detect::match_end::OutcomeSource as S;
+        let no_pack = || shadow::AccoladeRead::NoPack;
+        let calls = std::cell::Cell::new(0);
+        let ocr = |map: Option<&str>| {
+            let map = map.map(str::to_string);
+            let calls = &calls;
+            move || {
+                calls.set(calls.get() + 1);
+                map
+            }
+        };
+        assert_eq!(
+            choose_accolade_map(
+                true,
+                false,
+                Some(S::ResultWord),
+                no_pack,
+                ocr(Some("Busan"))
+            )
+            .as_deref(),
+            Some("Busan")
+        );
+        assert_eq!(calls.get(), 1, "one OCR read for the tick");
+        // the OCR finds no map either: no map
+        assert_eq!(
+            choose_accolade_map(true, false, Some(S::ResultWord), no_pack, ocr(None)),
+            None
+        );
+        assert_eq!(calls.get(), 2);
+        // off a result-word tick, or with Tab cell OCR in flight: nothing runs
+        for (outcome_only, signal) in [
+            (false, None),
+            (false, Some(S::Banner)),
+            (false, Some(S::RankScreen)),
+            (false, Some(S::EndTitle)),
+            (true, Some(S::ResultWord)),
+        ] {
+            let pack = || -> shadow::AccoladeRead { panic!("pack read off a result-word tick") };
+            assert_eq!(
+                choose_accolade_map(true, outcome_only, signal, pack, ocr(Some("Busan"))),
+                None
+            );
+        }
+        assert_eq!(calls.get(), 2, "no OCR off a result-word tick");
+        // the fallback above has logged its warning; it does not log again
+        assert!(!warn_accolade_map_ocr_fallback());
+        assert!(!warn_accolade_map_ocr_fallback());
+    }
+
+    /// A panic in the accolade map reader is an abstain: the tick keeps its
+    /// result word (the poll closure does not unwind) and the OCR stays off.
+    #[test]
+    fn a_panicking_accolade_reader_is_no_map() {
+        use detect::match_end::OutcomeSource as S;
+        let map = choose_accolade_map(
+            true,
+            false,
+            Some(S::ResultWord),
+            || -> shadow::AccoladeRead { panic!("accolade reader") },
+            || -> Option<String> { panic!("accolade OCR under reader = new") },
+        );
+        assert_eq!(map, None);
+    }
+
+    /// The poll tick reads the accolade map only through
+    /// `choose_accolade_map`, with the daemon's reader switch, and the
+    /// member-edit rule reaches `apply_poll_decision` with the same switch.
+    #[test]
+    fn the_poll_tick_chooses_the_accolade_map_with_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = include_str!("main.rs");
+        let at = src.find("\nasync fn run_loop(").expect("run_loop");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        assert!(
+            body.contains(
+                "choose_accolade_map( use_new_reader, outcome_only, signal.map(|(_, source)| source), || shadow::read_accolade_map(&rgb), || detect::match_end::read_accolade_map(&img), );"
+            ),
+            "the accolade map goes through choose_accolade_map with the switch"
+        );
+        assert_eq!(
+            body.matches("read_accolade_map").count(),
+            2,
+            "one call each"
+        );
+        assert!(body.contains("let use_new_reader = ctx.use_new_reader;"));
+        assert!(body.contains("start_screen, now, new_game_debounce, use_new_reader, ) .await;"));
+        let tick = src
+            .find("\nasync fn apply_poll_tick(")
+            .expect("apply_poll_tick");
+        let tick_body = norm(src[tick..].split("\n}\n").next().unwrap());
+        assert!(
+            tick_body.contains(
+                "apply_poll_decision(st, store, data_dir, decision, now, use_new_reader)"
+            )
+        );
+    }
+
+    async fn adopt_accolade_map(
+        store: &storage::LocalStore,
+        dir: &std::path::Path,
+        session_id: &str,
+        use_new_reader: bool,
+    ) -> ActiveGame {
+        adopt_accolade_map_over(store, dir, session_id, use_new_reader, None).await
+    }
+
+    /// One confirmed result-word tick that read `Ilios` off the accolade
+    /// screen, on a session whose map is `fallback` (a text fallback) or
+    /// not known.
+    async fn adopt_accolade_map_over(
+        store: &storage::LocalStore,
+        dir: &std::path::Path,
+        session_id: &str,
+        use_new_reader: bool,
+        fallback: Option<&str>,
+    ) -> ActiveGame {
+        let now = Instant::now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = session_id.into();
+        g.session_created = true;
+        g.map = fallback.map(str::to_string);
+        g.map_source = fallback.map(|_| boundary::MapSource::TextFallback);
+        let mut st = session(Some(g), now);
+        let decision = {
+            let g = st.active_game.as_ref().unwrap();
+            let tick = ResolvedWordTick {
+                signal: Some(detect::MatchOutcome::Victory),
+                signal_confirmed: true,
+                accolade_map: Some("Ilios".into()),
+            };
+            boundary::decide_poll(&poll_input_from_game(
+                g,
+                tick.signal,
+                tick.signal_confirmed,
+                tick.accolade_map.as_deref(),
+                None,
+                false,
+                now,
+            ))
+        };
+        apply_poll_decision(&mut st, store, dir, decision, now, use_new_reader).await;
+        st.active_game.expect("the accolade stays on this session")
+    }
+
+    /// A game with two boards, a member's map pick (`King's Row`) stamped
+    /// on both, and a third board captured after the pick with the
+    /// session's map (`later_map`): the pick is not carried to later rows.
+    async fn insert_game_with_a_mid_game_pick(
+        store: &storage::LocalStore,
+        session_id: &str,
+        later_map: &str,
+    ) {
+        let t0 = Utc::now() - chrono::Duration::minutes(10);
+        let row = |minute: i64, map: &str| {
+            let mut row = test_match(session_id, "unknown");
+            row.map_name = map.into();
+            row.played_at = SurrealDatetime::from(t0 + chrono::Duration::minutes(minute));
+            row
+        };
+        store.insert_match(row(0, later_map)).await.unwrap();
+        store.insert_match(row(1, later_map)).await.unwrap();
+        store
+            .edit_match(
+                session_id,
+                &storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        store.insert_match(row(2, later_map)).await.unwrap();
+        let rows = store.get_session_snapshots(session_id).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.has_member_map_edit())
+                .collect::<Vec<_>>(),
+            [true, true, false],
+            "the pick is on the rows that existed when it was made"
+        );
+    }
+
+    /// `reader = "new"`: the accolade map never renames a game whose map a
+    /// member chose, and never rewrites the mode stored with that choice.
+    /// The session still takes the accolade map for its boundary checks.
+    #[tokio::test]
+    async fn the_accolade_map_never_renames_a_member_map_pick_under_the_new_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("picked", "unknown");
+        row.map_name = String::new();
+        store.insert_match(row).await.unwrap();
+        store
+            .edit_match(
+                "picked",
+                &storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        let before = store.get_session_snapshots("picked").await.unwrap();
+        assert_eq!(before[0].game_mode, "Hybrid");
+
+        let g = adopt_accolade_map(&store, dir.path(), "picked", true).await;
+        assert_eq!(g.map.as_deref(), Some("Ilios"));
+        assert_eq!(g.map_source, Some(boundary::MapSource::Accolade));
+        let rows = store.get_session_snapshots("picked").await.unwrap();
+        assert_eq!(
+            rows[0].map_name, "",
+            "the read under the pick is not renamed"
+        );
+        assert_eq!(rows[0].display_map_name(), "King's Row");
+        assert_eq!(rows[0].game_mode, "Hybrid", "the pick's mode is kept");
+        // the outcome of the same tick is still written
+        assert_eq!(rows[0].outcome, "victory");
+    }
+
+    /// The member-pick rule is per row (F265-1). A pick made mid-game is on
+    /// the rows that existed then; the board captured after it, the game's
+    /// newest row, has none. Under `reader = "new"` the accolade map is
+    /// written to that row, whether it held nothing or a text fallback, and
+    /// the picked rows keep their read and their mode. One picked row does
+    /// not stop the write for the session.
+    #[tokio::test]
+    async fn the_accolade_map_is_written_to_the_rows_a_member_did_not_choose() {
+        for later_map in ["", "Busan"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            insert_game_with_a_mid_game_pick(&store, "mixed", later_map).await;
+            for row in store.get_session_snapshots("mixed").await.unwrap() {
+                storage::append_match_log(dir.path(), &row);
+            }
+            let fallback = (!later_map.is_empty()).then_some(later_map);
+            let g = adopt_accolade_map_over(&store, dir.path(), "mixed", true, fallback).await;
+            assert_eq!(
+                g.map.as_deref(),
+                Some("Ilios"),
+                "session map over {later_map:?}"
+            );
+            assert_eq!(g.map_source, Some(boundary::MapSource::Accolade));
+
+            let rows = store.get_session_snapshots("mixed").await.unwrap();
+            for picked in &rows[..2] {
+                assert_eq!(picked.map_name, later_map, "the read under the pick stays");
+                assert_eq!(picked.display_map_name(), "King's Row");
+                assert_eq!(picked.game_mode, "Hybrid", "the pick's mode is kept");
+            }
+            let newest = &rows[2];
+            assert_eq!(
+                newest.map_name, "Ilios",
+                "the row after the pick, over {later_map:?}"
+            );
+            assert_eq!(newest.game_mode, "Control");
+            assert_eq!(newest.display_map_name(), "Ilios");
+            // the game's row is the newest one: it shows the accolade map
+            let shown = storage::latest_per_game(rows.iter().rev().cloned().collect());
+            assert_eq!(shown.len(), 1);
+            assert_eq!(shown[0].display_map_name(), "Ilios");
+            // the outcome of the same tick is written to every row
+            assert!(rows.iter().all(|r| r.outcome == "victory"));
+            // the match log is rewritten the same way, row for row
+            let log = std::fs::read_to_string(dir.path().join("matches.jsonl")).unwrap();
+            let logged: Vec<storage::PersonalMatch> = log
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            assert_eq!(
+                logged
+                    .iter()
+                    .map(|m| (m.map_name.as_str(), m.game_mode.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    (later_map, "Hybrid"),
+                    (later_map, "Hybrid"),
+                    ("Ilios", "Control")
+                ]
+            );
+        }
+        // ocr-v1 is unchanged: every row is written, the picked ones too
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_game_with_a_mid_game_pick(&store, "mixed-v1", "").await;
+        adopt_accolade_map(&store, dir.path(), "mixed-v1", false).await;
+        let rows = store.get_session_snapshots("mixed-v1").await.unwrap();
+        assert!(
+            rows.iter()
+                .all(|r| r.map_name == "Ilios" && r.game_mode == "Control")
+        );
+    }
+
+    /// The per-row write itself: every row without a member's map choice
+    /// takes the map, with the mode and the sync queue of `set_session_map`;
+    /// a session with no choice at all is written by `set_session_map`.
+    #[tokio::test]
+    async fn set_session_map_keeping_member_choices_writes_the_other_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_game_with_a_mid_game_pick(&store, "kept", "").await;
+        let before = store.get_session_snapshots("kept").await.unwrap();
+        let kept = store
+            .set_session_map_keeping_member_choices("kept", "Ilios")
+            .await
+            .unwrap();
+        assert_eq!(kept, 2);
+        let rows = store.get_session_snapshots("kept").await.unwrap();
+        for (was, now) in before.iter().zip(&rows).take(2) {
+            assert_eq!(
+                (&now.map_name, &now.game_mode, now.sync_rev),
+                (&was.map_name, &was.game_mode, was.sync_rev),
+                "a picked row is not touched"
+            );
+        }
+        assert_eq!(
+            (rows[2].map_name.as_str(), rows[2].game_mode.as_str()),
+            ("Ilios", "Control")
+        );
+        assert_eq!(rows[2].sync_rev, before[2].sync_rev + 1);
+        // a second write of the same map changes nothing
+        store
+            .set_session_map_keeping_member_choices("kept", "Ilios")
+            .await
+            .unwrap();
+        let again = store.get_session_snapshots("kept").await.unwrap();
+        assert_eq!(again[2].sync_rev, rows[2].sync_rev);
+
+        // no choice in the session: every row, as `set_session_map`
+        let mut plain = test_match("plain", "unknown");
+        plain.map_name = String::new();
+        store.insert_match(plain).await.unwrap();
+        assert_eq!(
+            store
+                .set_session_map_keeping_member_choices("plain", "Ilios")
+                .await
+                .unwrap(),
+            0
+        );
+        let rows = store.get_session_snapshots("plain").await.unwrap();
+        assert_eq!(
+            (rows[0].map_name.as_str(), rows[0].game_mode.as_str()),
+            ("Ilios", "Control")
+        );
+    }
+
+    /// Without a member's pick the accolade map is written under both
+    /// readers, and `reader = "ocr-v1"` writes it over a pick as before.
+    #[tokio::test]
+    async fn the_accolade_map_is_written_when_no_member_chose_the_map() {
+        for use_new_reader in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let mut row = test_match("unpicked", "unknown");
+            row.map_name = String::new();
+            store.insert_match(row).await.unwrap();
+            let g = adopt_accolade_map(&store, dir.path(), "unpicked", use_new_reader).await;
+            assert_eq!(g.map.as_deref(), Some("Ilios"));
+            let rows = store.get_session_snapshots("unpicked").await.unwrap();
+            assert_eq!(rows[0].map_name, "Ilios", "reader new = {use_new_reader}");
+            assert_eq!(rows[0].game_mode, "Control");
+        }
+        // ocr-v1 is unchanged: the accolade map is written under a pick too
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("picked-v1", "unknown");
+        row.map_name = String::new();
+        store.insert_match(row).await.unwrap();
+        store
+            .edit_match(
+                "picked-v1",
+                &storage::MatchEdit {
+                    map_name: Some("King's Row".into()),
+                    ..storage::MatchEdit::default()
+                },
+            )
+            .await
+            .unwrap();
+        adopt_accolade_map(&store, dir.path(), "picked-v1", false).await;
+        let rows = store.get_session_snapshots("picked-v1").await.unwrap();
+        assert_eq!(rows[0].map_name, "Ilios");
+        assert_eq!(rows[0].game_mode, "Control");
+        assert_eq!(rows[0].display_map_name(), "King's Row");
     }
 
     /// The end title (P3) and the end-of-match wake (P5) go through the
@@ -10839,6 +11428,64 @@ mod tests {
             body.contains("run_loop(ctx, early_sigterm)"),
             "the same handler goes on to the run loop"
         );
+    }
+
+    /// With classic OCR off the accolade map is the map pack's read or
+    /// nothing. The OCR read behind a missing map pack is not asked for, so
+    /// nothing of it reaches the gate
+    /// ([`stat_tracker::ocr_switch::Read::AccoladeMap`]). With OCR on that
+    /// fallback is as #265 left it.
+    #[test]
+    fn with_ocr_off_the_accolade_map_is_never_asked_of_ocr() {
+        use detect::match_end::OutcomeSource;
+        use stat_tracker::ocr_switch::Read;
+        let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1920,
+            1080,
+            image::Rgb([16, 25, 50]),
+        ));
+        // The daemon's own OCR read as the fallback, on a result-word tick.
+        let choose = |pack: shadow::AccoladeRead| {
+            choose_accolade_map(
+                true,
+                false,
+                Some(OutcomeSource::ResultWord),
+                || pack,
+                || detect::match_end::read_accolade_map(&frame),
+            )
+        };
+        let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
+        // That OCR read does reach the gate when it is called.
+        assert_eq!(detect::match_end::read_accolade_map(&frame), None);
+        assert_eq!(off.blocked_total(), 1, "the frame reaches the OCR read");
+        // No map pack, or a pack that abstains: no map, and no OCR call.
+        assert_eq!(choose(shadow::AccoladeRead::NoPack), None);
+        assert_eq!(choose(shadow::AccoladeRead::Abstain), None);
+        assert_eq!(
+            off.blocked_total(),
+            1,
+            "the accolade map was asked of OCR with classic OCR off: {:?}",
+            off.blocked()
+        );
+        assert!(
+            Read::AccoladeMap.without_ocr(),
+            "the accolade map is read without OCR on this build"
+        );
+        drop(off);
+        // With OCR on, no map pack still falls back to the OCR read.
+        let asked = std::cell::Cell::new(false);
+        let map = choose_accolade_map(
+            true,
+            false,
+            Some(OutcomeSource::ResultWord),
+            || shadow::AccoladeRead::NoPack,
+            || {
+                asked.set(true);
+                Some("Busan".to_string())
+            },
+        );
+        assert!(asked.get(), "with OCR on the fallback runs");
+        assert_eq!(map.as_deref(), Some("Busan"));
     }
 
     /// F261-1. The check that drops a co-op event board (Junkenstein on
@@ -12840,6 +13487,8 @@ mod tests {
                 start_screen,
                 self.now,
                 night_debounce(),
+                // the member-edit rule of `reader = "new"`, as on the Tab path
+                true,
             )
             .await;
         }
@@ -18063,6 +18712,7 @@ mod tests {
                 new_result: None,
             }),
             now,
+            false,
         )
         .await;
         let logged = LAST_END_SCREEN_SPLIT.with(|slot| slot.take()).unwrap();
