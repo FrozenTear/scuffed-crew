@@ -700,13 +700,37 @@ impl GameReportInput {
         names: Vec<String>,
         built_at: DateTime<Utc>,
     ) -> Result<Self, ReportError> {
-        let kit = super::kit::load(&config.data_dir, session_id);
-        if kit.scoreboard_png.is_none() && category != GameCategory::MissedGame {
+        let mut kit = super::kit::load(&config.data_dir, session_id);
+        let snapshot = crate::storage::read_snapshot(&config.data_dir);
+        // A game from before alpha.8 (or one whose kit was pruned) has no
+        // saved reads. Its stored row still names the game, so the report
+        // carries those values and the session id, with no pictures.
+        if kit.reads.is_none()
+            && let Some(m) = snapshot
+                .as_ref()
+                .and_then(|s| s.matches.iter().find(|m| m.session_id == session_id))
+        {
+            let at: DateTime<Utc> = m.played_at.into();
+            let mut reads = super::kit::KitReads::from_capture(
+                m,
+                m,
+                0,
+                0,
+                super::blank::TeamLayout::Unknown,
+                at,
+            );
+            reads.map = Some(m.display_map_name().to_string()).filter(|s| !s.trim().is_empty());
+            kit = super::kit::Kit {
+                scoreboard_png: None,
+                outcome_png: None,
+                reads: Some(reads),
+            };
+        }
+        if kit.reads.is_none() && category != GameCategory::MissedGame {
             return Err(ReportError::InvalidInput(
-                "this game has no saved scoreboard to report",
+                "this game is not in the tracker's history",
             ));
         }
-        let snapshot = crate::storage::read_snapshot(&config.data_dir);
         let corrections = snapshot
             .as_ref()
             .map(|s| session_corrections(s, session_id))
@@ -722,9 +746,10 @@ impl GameReportInput {
         let resolution = kit
             .reads
             .as_ref()
+            .filter(|r| r.width > 0 && r.height > 0)
             .map(|r| Resolution {
-                width: r.width,
-                height: r.height,
+                width: r.width.max(r.height),
+                height: r.width.min(r.height),
             })
             .unwrap_or(Resolution {
                 width: 1920,

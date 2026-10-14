@@ -1692,8 +1692,11 @@ impl TrackerApp {
         let mut without_kit = 0;
         let mut choices = Vec::new();
         for game in &self.games {
-            let has_kit = self.sessions_with_kit.contains(&game.session_id);
-            if !has_kit {
+            // Every stored game can be reported: without a saved picture
+            // the report carries the stored values and the session id.
+            let has_picture = self.sessions_with_kit.contains(&game.session_id);
+            let has_kit = true;
+            if !has_picture {
                 if without_kit == RECENT_WITHOUT_KIT {
                     continue;
                 }
@@ -1702,10 +1705,18 @@ impl TrackerApp {
             choices.push(crate::report::GameChoice {
                 session_id: game.session_id.clone(),
                 label: format!(
-                    "{} · {} · {}",
+                    "{} · {} · {} {}{}",
                     game.display_hero(),
                     game.display_map(),
-                    local_hm(game.played_at)
+                    game.played_at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d"),
+                    local_hm(game.played_at),
+                    if has_picture {
+                        ""
+                    } else {
+                        " · no picture saved"
+                    }
                 ),
                 has_kit,
             });
@@ -1714,7 +1725,7 @@ impl TrackerApp {
     }
 
     fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
-        if !crate::report::has_kit(&self.data_dir, session_id) {
+        if !self.games.iter().any(|g| g.session_id == session_id) {
             self.toast_action = None;
             return;
         }
@@ -1943,11 +1954,17 @@ impl TrackerApp {
             }
             ReportMessage::Sent(outcome) => {
                 let sent = matches!(outcome, SendOutcome::Sent { .. });
+                let data_dir = self.data_dir.clone();
                 if let Some(d) = self.report_dialog_mut() {
                     if sent {
-                        // The app keeps no copy after a successful send.
+                        // The app keeps no copy after a successful send,
+                        // and the game's saved pictures go too: the server
+                        // accepted them.
                         d.built = None;
                         d.show_log = false;
+                        if let Some(sid) = d.game_session.clone() {
+                            stat_tracker::report::kit::remove(&data_dir, &sid);
+                        }
                     }
                     d.send = SendState::Done(outcome);
                 }

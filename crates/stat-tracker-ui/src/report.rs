@@ -624,7 +624,12 @@ pub fn display_resolution() -> Resolution {
     if width == 0 || height == 0 {
         return FALLBACK_RESOLUTION;
     }
-    Resolution { width, height }
+    // A rotated or portrait monitor reports its edges the other way round.
+    // Overwatch runs landscape, so the long edge is the width.
+    Resolution {
+        width: width.max(height),
+        height: width.min(height),
+    }
 }
 
 pub fn category_label(category: LogOnlyCategory) -> &'static str {
@@ -926,7 +931,7 @@ fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
 
 fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![
-        text("What will be sent")
+        text(if d.sent() { "Sent" } else { "What will be sent" })
             .size(SIZE_BODY)
             .font(FONT_BOLD)
             .color(TEXT)
@@ -1069,8 +1074,9 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
         }) => {
             let expiry = match expires_at {
                 Some(t) => format!(
-                    "It is deleted on {}.",
-                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                    "It is deleted on {} (your local time, UTC{}).",
+                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    t.with_timezone(&Local).format("%:z")
                 ),
                 None => "It is kept for training until you withdraw it.".into(),
             };

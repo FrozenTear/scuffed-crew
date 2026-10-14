@@ -1029,14 +1029,24 @@ mod game {
     }
 
     #[test]
-    fn a_board_the_blanker_cannot_measure_writes_no_kit() {
-        // Unknown team size and 5v5 (no measured geometry yet) keep nothing,
-        // so no kit is written and only a missed-game report can be built.
+    fn a_board_the_blanker_cannot_measure_saves_reads_and_no_picture() {
+        // Unknown team size and 5v5 (no measured geometry yet) keep nothing
+        // of the board. The reads are still saved, so the report links its
+        // game, and it carries no picture at all: a picture whose player
+        // names were not blanked never goes into a report.
         for team in [None, Some(5)] {
             let tmp = tempfile::tempdir().unwrap();
             kit::record_scoreboard(tmp.path(), "sess-1", &frame(), team, &reads(None)).unwrap();
             assert!(!kit::has_kit(tmp.path(), "sess-1"), "{team:?}");
-            assert!(build_game_report(&input(tmp.path(), GameCategory::WrongStats)).is_err());
+            assert!(kit::has_reads(tmp.path(), "sess-1"), "{team:?}");
+            let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
+            assert!(zip.images.is_empty(), "{team:?}");
+            assert!(
+                zip.manifest_json.contains("\"session_id\": \"sess-1\""),
+                "{}",
+                zip.manifest_json
+            );
+            assert!(!zip.manifest_json.contains("crops/"), "{team:?}");
         }
     }
 

@@ -546,7 +546,41 @@ pub fn read_daemon_logs(data_dir: &Path) -> String {
             }
         }
     }
+    // The service logs to journald; daemon.log may be old or missing. The
+    // window filter in [`scrub_log`] keeps only the game's own lines.
+    if !cfg!(test) {
+        out.push_str(&read_journal_lines());
+    }
     out
+}
+
+/// The systemd user unit the tracker runs under.
+pub const TRACKER_UNIT: &str = "scuffed-stat-tracker.service";
+
+/// The tracker's own lines from the user journal, used when there is no
+/// `daemon.log` (the service logs to journald). Only this unit is read
+/// (`-u`), message text only (`-o cat`), so each line starts with the
+/// tracker's own RFC 3339 timestamp and the window filter applies as for
+/// the file. Bounded to the newest lines. No journal, no lines.
+pub fn read_journal_lines() -> String {
+    let out = std::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            TRACKER_UNIT,
+            "-o",
+            "cat",
+            "--no-pager",
+            "-n",
+            "20000",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
