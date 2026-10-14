@@ -108,8 +108,8 @@ pub mod phrase;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
 /// Nothing reads it yet: no snapshot, manifest or log carries it, so a field
-/// report cannot tell a result-v1 read from a result-v2 one.
-pub const RESULT_RECOGNIZER_ID: &str = "result-v2";
+/// report cannot tell a result-v2 read from a result-v3 one.
+pub const RESULT_RECOGNIZER_ID: &str = "result-v3";
 /// The old manual template folder under the data dir (the fallback).
 pub const TEMPLATE_SUBDIR: &str = "templates/result";
 /// The words-v1 pack folder under the data dir (preferred).
@@ -278,14 +278,25 @@ impl ResultRead {
 
 // ------------------------------------------------------------------ search
 
+/// A window's variance sum at or below this was flat before [`FLAT_ROUNDING`]
+/// and still is: the new rule only adds flat windows.
+const FLAT_VAR: f64 = 1e-9;
+/// The rounding error of a window's variance sum as [`Level::window`]
+/// computes it, per window pixel and per level pixel (the bound is derived
+/// there). A window at or under it is flat.
+const FLAT_ROUNDING: f64 = 12.0 * f64::EPSILON;
+
 /// One pyramid level of a region: pixels plus integral images (sum and sum
-/// of squares) for window statistics.
+/// of squares) for window statistics. Pixels are in 0..1.
 struct Level {
     w: usize,
     h: usize,
     px: Vec<f32>,
     s1: Vec<f64>,
     s2: Vec<f64>,
+    /// [`FLAT_ROUNDING`] times this level's pixel count: what the variance
+    /// sum of a flat window can be per window pixel ([`Level::window`]).
+    flat: f64,
 }
 
 impl Level {
@@ -300,7 +311,15 @@ impl Level {
                 s2[i] = v * v + s2[i - 1] + s2[i - w - 1] - s2[i - w - 2];
             }
         }
-        Self { w, h, px, s1, s2 }
+        let flat = FLAT_ROUNDING * (w * h) as f64;
+        Self {
+            w,
+            h,
+            px,
+            s1,
+            s2,
+            flat,
+        }
     }
 
     /// Sum of `s` over the `tw` x `th` window at (x, y).
@@ -309,6 +328,47 @@ impl Level {
         let a = y * (self.w + 1) + x;
         let b = (y + th) * (self.w + 1) + x;
         s[b + tw] - s[b] - s[a + tw] + s[a]
+    }
+
+    /// The pixel sum and the variance sum (`sum((p - mean)^2)`, not divided
+    /// by the pixel count) of the `tw` x `th` window at (x, y), or `None`
+    /// when the window is flat: nothing in it can match a word.
+    ///
+    /// A window of one grey value has a variance of 0, but the value
+    /// computed here from the f64 integral images is their rounding error,
+    /// positive or negative. On a 512 x 230 band of one grey value it
+    /// reaches 1e-7 for an end-title window (R3-1). The old test, a fixed
+    /// [`FLAT_VAR`], let about a third of those windows through, and
+    /// [`ncc_at`] scored them: the rounding error of its f32 dot product
+    /// over the square root of that noise. Measured on such bands: up to
+    /// 0.38 for a words-v1 end title, 0.63 for a synthetic word of the
+    /// tests. So a window is flat when its variance sum is within what that
+    /// rounding can be.
+    ///
+    /// The bound, with `A` this level's pixel count, `n` the window's, and
+    /// `u = EPSILON / 2`. An integral-image entry is three rounded additions
+    /// of values up to `A`, `2 A` and `A` (pixels are in 0..1, and a square
+    /// of an f32 is exact in f64), so it is off by at most `4 u A` from the
+    /// same sum of exact entries. The recurrence is linear, so the table is
+    /// the exact table of pixels that are each off by that much, and a
+    /// window sum, with the three additions of [`Self::rect`], is off by at
+    /// most `(4 n + 3) u A`, for the sums and for the squares. The variance
+    /// sum `s2 - s1 * s1 / n` is then off by at most that for `s2`, twice
+    /// that for `s1` (its error times `2 * mean`, and the mean is at most 1)
+    /// and `3 u n` for its own three operations:
+    /// `3 (4 n + 3) u A + 3 u n <= 24 u n A = 12 EPSILON n A`
+    /// ([`FLAT_ROUNDING`]). A window of one value is therefore always flat.
+    ///
+    /// Nothing real is that faint. A title one 8-bit grey level off its
+    /// background over 2% of the window has a variance sum of `3e-7 n`; the
+    /// bound is `3.1e-10 n` on the end-title band (512 x 230) and `2.5e-9 n`
+    /// on the largest region there is, the whole 1280 x 720 work rect.
+    #[inline]
+    fn window(&self, x: usize, y: usize, tw: usize, th: usize) -> Option<(f64, f64)> {
+        let n = (tw * th) as f64;
+        let sum = self.rect(&self.s1, x, y, tw, th);
+        let var = self.rect(&self.s2, x, y, tw, th) - sum * sum / n;
+        (var > FLAT_VAR.max(n * self.flat)).then_some((sum, var))
     }
 }
 
@@ -438,15 +498,11 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
-/// Zero-mean NCC of `k` at (x, y) of `p`; `None` on a flat window.
+/// Zero-mean NCC of `k` at (x, y) of `p`; `None` on a flat window
+/// ([`Level::window`]).
 #[inline]
 fn ncc_at(p: &Level, k: &Kernel, x: usize, y: usize) -> Option<f64> {
-    let n = (k.w * k.h) as f64;
-    let sum = p.rect(&p.s1, x, y, k.w, k.h);
-    let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
-    if var <= 1e-9 {
-        return None;
-    }
+    let (_, var) = p.window(x, y, k.w, k.h)?;
     let mut num = 0.0f64;
     for ty in 0..k.h {
         let row = &p.px[(y + ty) * p.w + x..][..k.w];
@@ -732,11 +788,7 @@ fn dot_centred(a: &[f64], b: &[f64], m: f64) -> f64 {
 #[inline]
 fn bound_at(p: &Level, ph: &Phased, k: &Kernel, pr: &Proj, x: usize, y: usize) -> Option<f64> {
     let n = (k.w * k.h) as f64;
-    let sum = p.rect(&p.s1, x, y, k.w, k.h);
-    let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
-    if var <= 1e-9 {
-        return None;
-    }
+    let (sum, var) = p.window(x, y, k.w, k.h)?;
     let m = sum / n;
     let f = ph.f;
     let q = &ph.phases[(y % f) * f + x % f];
@@ -4143,6 +4195,321 @@ mod tests {
             "bound below the score by {}",
             -worst
         );
+    }
+
+    // ------------------------------------------------ flat windows (R3-1)
+
+    /// The exact variance sum `sum((p - mean)^2)` of a window, in f64.
+    fn var64(p: &Level, k: &Kernel, x: usize, y: usize) -> f64 {
+        let n = (k.w * k.h) as f64;
+        let win = |tx: usize, ty: usize| p.px[(y + ty) * p.w + x + tx] as f64;
+        let mut mean = 0.0;
+        for ty in 0..k.h {
+            for tx in 0..k.w {
+                mean += win(tx, ty);
+            }
+        }
+        mean /= n;
+        let mut pp = 0.0;
+        for ty in 0..k.h {
+            for tx in 0..k.w {
+                pp += (win(tx, ty) - mean) * (win(tx, ty) - mean);
+            }
+        }
+        pp
+    }
+
+    /// The variance sum at or under which `p` calls a `k`-sized window flat.
+    fn flat_line(p: &Level, k: &Kernel) -> f64 {
+        FLAT_VAR.max((k.w * k.h) as f64 * p.flat)
+    }
+
+    /// The same level under the rule before the fix: flat at `FLAT_VAR` only.
+    fn old_rule(mut p: Level) -> Level {
+        p.flat = 0.0;
+        p
+    }
+
+    /// R3-1: a band of one grey value has no window to score, at any pyramid
+    /// level, for the end-title shape and a phrase shape, at every third
+    /// grey level. Before the fix most of these windows were scored (their
+    /// variance from the integral images is rounding noise above 1e-9), and
+    /// the score was noise too. The old rule is run beside the new one and
+    /// must show both, so this test cannot pass on bands that were never a
+    /// problem.
+    #[test]
+    fn a_band_of_one_grey_value_has_no_window_to_score() {
+        let (mut leaked, mut worst) = (0usize, 0.0f64);
+        for (tw, th, rw, rh, seed) in [(279, 100, 512, 230, 911), (120, 27, 358, 90, 912)] {
+            let st = Stack::with_kept(&glyphs(seed, tw, th), TEST_KEPT).unwrap();
+            assert!(!st.projs.is_empty());
+            for g in (1..255u32).step_by(3) {
+                let band = || {
+                    let mut b = Gray::new(rw, rh);
+                    b.px.fill(g as f32 / 255.0);
+                    b
+                };
+                let p = pyramid(band());
+                let old: Vec<Level> = pyramid(band()).into_iter().map(old_rule).collect();
+                for (l, k) in st.levels.iter().enumerate() {
+                    let ph = (l == 0).then(|| Phased::new(&p[0], st.projs[0].f));
+                    // the old rule's scored window with the least variance
+                    let mut least: Option<(f64, usize, usize)> = None;
+                    for y in 0..=p[l].h - k.h {
+                        for x in 0..=p[l].w - k.w {
+                            assert_eq!(p[l].window(x, y, k.w, k.h), None, "grey {g} level {l}");
+                            if let Some(ph) = &ph {
+                                assert_eq!(bound_at(&p[0], ph, k, &st.projs[0], x, y), None);
+                            }
+                            if let Some((_, var)) = old[l].window(x, y, k.w, k.h) {
+                                leaked += 1;
+                                if least.is_none_or(|b| var < b.0) {
+                                    least = Some((var, x, y));
+                                }
+                            }
+                        }
+                    }
+                    if let Some((_, x, y)) = least {
+                        worst = worst.max(ncc_at(&old[l], k, x, y).unwrap().abs());
+                    }
+                    assert_eq!(search_full(&p[l..], &st_at(&st, l)).score, -1.0);
+                }
+                assert_eq!(search_fast(&p, &st).score, -1.0, "grey {g}");
+            }
+        }
+        // measured: 943,008 windows, the worst at 0.633
+        assert!(
+            leaked > 500_000,
+            "the old rule scored {leaked} flat windows"
+        );
+        assert!(worst > 0.5, "and the worst of them scored {worst}");
+    }
+
+    /// `st` from level `l` down, as a stack of its own (to search one level
+    /// in full).
+    fn st_at(st: &Stack, l: usize) -> Stack {
+        Stack {
+            levels: st.levels[l..].to_vec(),
+            projs: Vec::new(),
+        }
+    }
+
+    /// The property behind the fix, on thousands of windows: `ncc_at` is
+    /// the exact score (all in f64, centred) wherever it gives one, and it
+    /// gives none exactly on the windows that are flat. Random planes and
+    /// the edge cases: one grey value, black, white, one odd pixel, one
+    /// grey level of contrast, the last-bit jitter a resize leaves on a
+    /// flat area, a flat half beside noise, values that are not 8-bit,
+    /// 1-pixel-wide and 1-pixel-high templates, widths around the dot
+    /// product's chunk of 8.
+    #[test]
+    fn ncc_at_is_the_exact_score_or_none() {
+        let mut rng = Rng(0x51ab_f1a7);
+        let shapes = [
+            (1, 24),
+            (24, 1),
+            (7, 5),
+            (8, 8),
+            (9, 9),
+            (15, 4),
+            (16, 6),
+            (17, 3),
+            (31, 12),
+            (64, 20),
+            (100, 33),
+        ];
+        // (windows scored, windows flat, largest error where the window has
+        // real contrast, largest error anywhere)
+        let (mut scored, mut flat, mut err_real, mut err_any) = (0usize, 0usize, 0.0f64, 0.0f64);
+        let mut check = |p: &Level, k: &Kernel, x: usize, y: usize| {
+            let n = (k.w * k.h) as f64;
+            let (pp, line) = (var64(p, k, x, y), flat_line(p, k));
+            match ncc_at(p, k, x, y) {
+                None => {
+                    // flat: the exact variance is within the rounding bound
+                    // of the line
+                    assert!(
+                        pp <= 2.0 * line,
+                        "({x},{y}) {}x{}: {pp} is not flat",
+                        k.w,
+                        k.h
+                    );
+                    flat += 1;
+                }
+                Some(v) => {
+                    assert!(
+                        pp > 0.0,
+                        "({x},{y}) {}x{}: a window of one value scored {v}",
+                        k.w,
+                        k.h
+                    );
+                    let e = (v - ncc64(p, k, x, y)).abs();
+                    err_any = err_any.max(e);
+                    // one 8-bit grey level over 2% of the window, or more
+                    if pp >= 3e-7 * n {
+                        err_real = err_real.max(e);
+                    }
+                    scored += 1;
+                }
+            }
+            // a window with twice the line's variance is always scored
+            if pp > 2.0 * line {
+                assert!(
+                    ncc_at(p, k, x, y).is_some(),
+                    "({x},{y}): {pp} was called flat"
+                );
+            }
+        };
+        for (si, &(tw, th)) in shapes.iter().enumerate() {
+            // a template of 8-bit values (the packs') or of any f32
+            let mut t = Gray::new(tw, th);
+            for v in t.px.iter_mut() {
+                *v = if si % 2 == 0 {
+                    rng.next(256) as f32 / 255.0
+                } else {
+                    rng.next(1 << 24) as f32 / (1 << 24) as f32
+                };
+            }
+            let k = Kernel::new(tw, th, &t.px).unwrap();
+            let (rw, rh) = (tw + 13, th + 11);
+            for kind in 0..12 {
+                for rep in 0..4 {
+                    let c = [0.0, 1.0, 242.0 / 255.0, 128.0 / 255.0, 37.0 / 255.0]
+                        [rng.next(5) as usize];
+                    let c = if rep == 3 {
+                        rng.next(256) as f32 / 255.0
+                    } else {
+                        c
+                    };
+                    let mut g = Gray::new(rw, rh);
+                    g.px.fill(c);
+                    let step = if c > 0.5 { -1.0 } else { 1.0 } / 255.0;
+                    match kind {
+                        // one grey value
+                        0 => {}
+                        // noise of 8-bit values
+                        1 => {
+                            g.px.iter_mut()
+                                .for_each(|v| *v = rng.next(256) as f32 / 255.0)
+                        }
+                        // any f32 in 0..1
+                        2 => {
+                            g.px.iter_mut()
+                                .for_each(|v| *v = rng.next(1 << 24) as f32 / (1 << 24) as f32)
+                        }
+                        // one odd pixel, one grey level off
+                        3 => {
+                            let i = rng.next((rw * rh) as u64) as usize;
+                            g.px[i] += step;
+                        }
+                        // the template at one grey level of contrast
+                        4 => {
+                            for y in 0..th {
+                                for x in 0..tw {
+                                    if t.at(x, y) > 0.5 {
+                                        g.px[(y + 5) * rw + x + 6] += step;
+                                    }
+                                }
+                            }
+                        }
+                        // the last-bit jitter of a resized flat area
+                        5 => g.px.iter_mut().for_each(|v| {
+                            let bits = v.to_bits();
+                            *v = f32::from_bits(match rng.next(3) {
+                                0 => bits.saturating_sub(1),
+                                1 if *v < 1.0 => bits + 1,
+                                _ => bits,
+                            });
+                        }),
+                        // a flat half beside noise
+                        6 => {
+                            for y in 0..rh {
+                                for x in rw / 2..rw {
+                                    g.px[y * rw + x] = rng.next(256) as f32 / 255.0;
+                                }
+                            }
+                        }
+                        // white with a few black pixels, black with a few white
+                        7 => {
+                            g.px.fill(if rep % 2 == 0 { 1.0 } else { 0.0 });
+                            for _ in 0..3 {
+                                let i = rng.next((rw * rh) as u64) as usize;
+                                g.px[i] = if rep % 2 == 0 { 0.0 } else { 1.0 };
+                            }
+                        }
+                        // low-contrast noise: two neighbouring grey levels
+                        8 => {
+                            g.px.iter_mut()
+                                .for_each(|v| *v = c + step * rng.next(2) as f32)
+                        }
+                        // a ramp, one grey level end to end
+                        9 => {
+                            for y in 0..rh {
+                                for x in 0..rw {
+                                    g.px[y * rw + x] = c + step * x as f32 / rw as f32;
+                                }
+                            }
+                        }
+                        // the template itself, full contrast and faint
+                        10 => {
+                            let a = [1.0, 0.01, 1e-3, 1e-4][rep];
+                            for y in 0..th {
+                                for x in 0..tw {
+                                    g.px[(y + 3) * rw + x + 4] = 0.5 + a * (t.at(x, y) - 0.5);
+                                }
+                            }
+                        }
+                        // sub-grey-level noise
+                        _ => {
+                            g.px.iter_mut()
+                                .for_each(|v| *v = 0.9 + 1e-3 * rng.next(256) as f32 / 255.0)
+                        }
+                    }
+                    for v in g.px.iter_mut() {
+                        *v = v.clamp(0.0, 1.0);
+                    }
+                    let p = Level::new(rw, rh, g.px);
+                    for y in 0..=rh - th {
+                        for x in 0..=rw - tw {
+                            check(&p, &k, x, y);
+                        }
+                    }
+                }
+            }
+        }
+        // the end-title shape in its band: a word one grey level off a
+        // bright flat band, and the flat stretch beside it
+        let t = glyphs(921, 279, 100);
+        let k = Kernel::new(t.w, t.h, &t.px).unwrap();
+        let mut g = Gray::new(512, 230);
+        g.px.fill(242.0 / 255.0);
+        for y in 0..t.h {
+            for x in 0..t.w {
+                if t.at(x, y) > 0.5 {
+                    g.px[(y + 125) * 512 + x + 220] = 243.0 / 255.0;
+                }
+            }
+        }
+        let p = Level::new(512, 230, g.px);
+        for (x, y) in [(220, 125), (219, 125), (220, 124), (233, 130), (150, 80)] {
+            check(&p, &k, x, y);
+        }
+        for (x, y) in [(0, 0), (100, 20), (233, 25)] {
+            assert_eq!(ncc_at(&p, &k, x, y), None, "({x},{y}) is beside the word");
+            check(&p, &k, x, y);
+        }
+        let on = ncc_at(&p, &k, 220, 125).expect("a word one grey level off its band is not flat");
+        assert!(on > 0.99, "{on}");
+        // measured: 58,008 scored and 30,704 flat; errors 6.8e-5 and 2.4e-4
+        assert!(
+            scored > 50_000 && flat > 25_000,
+            "scored {scored}, flat {flat}"
+        );
+        assert!(
+            err_real < 5e-4,
+            "error on a window with real contrast: {err_real}"
+        );
+        assert!(err_any < 2e-3, "error on any scored window: {err_any}");
     }
 
     /// The certification threshold is `s1 - MARGIN`, exactly: a runner-up
