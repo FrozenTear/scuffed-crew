@@ -11152,9 +11152,16 @@ mod tests {
             }),
             panel: None,
         };
-        // ocr-v1: the career panel, and the icons are never read
-        let icons = read_tab_heroes(false, || panic!("ocr-v1 must not read the hero icons"));
+        // ocr-v1: the career panel, and the icons are never read. (A panic
+        // in the closure would be caught and look like "not read", so the
+        // closure counts its calls instead.)
+        let reads = std::cell::Cell::new(0);
+        let icons = read_tab_heroes(false, || {
+            reads.set(reads.get() + 1);
+            tab(Some("zenyatta"))
+        });
         assert_eq!(icons, None);
+        assert_eq!(reads.get(), 0, "ocr-v1 must not read the hero icons");
         let v1 = read_own_hero(false, || Some("Reinhardt".into()), icons, Some(0));
         assert_eq!(v1.career_hero.as_deref(), Some("Reinhardt"));
         assert_eq!((v1.pack_hero, v1.tab_heroes), (None, None));
@@ -11164,8 +11171,12 @@ mod tests {
         // new: the icons, and the career panel is never read
         let career =
             || -> Option<String> { panic!("the new reader must not read the career panel") };
-        let icons = read_tab_heroes(true, || tab(Some("zenyatta")));
+        let icons = read_tab_heroes(true, || {
+            reads.set(reads.get() + 1);
+            tab(Some("zenyatta"))
+        });
         assert!(icons.is_some());
+        assert_eq!(reads.get(), 1, "one icon read per Tab");
         let new = read_own_hero(true, career, icons, Some(3));
         assert_eq!(new.career_hero, None);
         assert_eq!(new.pack_hero.as_deref(), Some("zenyatta"));
