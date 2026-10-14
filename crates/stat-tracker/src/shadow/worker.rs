@@ -361,6 +361,11 @@ fn mark_confirmed(record: &mut ShadowRecord, cells: &[(usize, usize)]) {
 
 /// Build the log record for one job: per-cell agreement with ocr-v1, plus
 /// every disagreeing or suspect cell.
+///
+/// A job with no ocr-v1 cell at all (`reader = "new"` reads none, so every
+/// `ocr_conf` is `None`) has nothing to agree or disagree with: `agree`
+/// stays 0 and only the suspect cells are listed, where every cell would
+/// otherwise be logged as a disagreement with a number that was never read.
 pub fn compare(
     job: &ShadowJob,
     result: Result<BoardRead, ShadowError>,
@@ -388,11 +393,15 @@ pub fn compare(
         }
     };
     record.elapsed_ms = Some(board.elapsed_ms);
+    let has_ocr = job
+        .ocr_conf
+        .iter()
+        .any(|row| row.iter().any(Option::is_some));
     for (row, (read, ocr)) in board.rows.iter().zip(&job.ocr_values).enumerate() {
         for (i, cell) in read.cells.iter().enumerate() {
             record.cells += 1;
-            let same = cell.value == ocr[i];
-            if same {
+            let same = !has_ocr || cell.value == ocr[i];
+            if has_ocr && same {
                 record.agree += 1;
             }
             if !same || cell.suspect {
@@ -597,6 +606,7 @@ mod tests {
             }],
             elapsed_ms: 12,
         };
+        let board_clone = board.clone();
         let r = compare(&job("s1"), Ok(board), 3);
         assert_eq!(r.recognizer, digits::RECOGNIZER_ID);
         assert_eq!((r.cells, r.agree), (6, 4));
@@ -606,6 +616,16 @@ mod tests {
         assert_eq!(fields, ["A", "D", "H"]);
         assert_eq!(r.diffs[1].ocr, Some(3));
         assert_eq!(r.diffs[1].matcher, Some(8));
+
+        // reader = "new" hands over rows with no stat cell: there is no
+        // ocr-v1 side, so only the two suspect cells are listed
+        let rows = crate::ocr::unread_rows(5);
+        let cv_only = ShadowJob::new(&input(), &rows, Some(0), "s3", Utc::now());
+        let r = compare(&cv_only, Ok(board_clone), 0);
+        assert_eq!((r.cells, r.agree), (6, 0));
+        let fields: Vec<_> = r.diffs.iter().map(|d| d.field).collect();
+        assert_eq!(fields, ["A", "H"]);
+        assert_eq!((r.diffs[0].ocr, r.diffs[0].ocr_conf), (None, None));
 
         let err = compare(&job("s2"), Err(ShadowError::OverBudget), 0);
         assert_eq!(err.error.as_deref(), Some("over budget"));

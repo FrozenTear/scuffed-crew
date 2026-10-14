@@ -42,7 +42,11 @@ pub struct KitRead {
     /// The tracker does not keep a per-field confidence today, so this is
     /// `null` unless a reader supplies one.
     pub confidence: Option<f64>,
-    /// The Tesseract (`ocr-v1`) read before the digit reader merged.
+    /// The read before the capture gate (spec section 2). `reader =
+    /// "ocr-v1"`: the Tesseract read. `reader = "new"`: Tesseract reads no
+    /// stat cell, so for the six stats this is the digit read (for a held
+    /// cell, the stored value). [`KitReads::recognizer`] tells the two
+    /// apart. The wire name is unchanged.
     pub ocr_v1: Option<String>,
     pub suspect: bool,
 }
@@ -58,6 +62,11 @@ pub struct KitReads {
     pub map: Option<String>,
     pub mode: Option<String>,
     pub result: Option<String>,
+    /// The stored row's recognizer tag: the matcher id (`cv-v5`) for a
+    /// capture whose stats came from the digit reader, `ocr-v1` for a
+    /// Tesseract capture. Under `reader = "new"` every stored capture has
+    /// at least four digit-read stats, so this is always the matcher id
+    /// there, and the stats' `ocr_v1` are then digit reads too.
     pub recognizer: String,
     /// [`blank::BLANK_TABLE_VERSION`] the scoreboard was blanked with. A kit
     /// from another table is not reported ([`load`] drops its scoreboard).
@@ -75,9 +84,10 @@ pub struct KitReads {
 }
 
 impl KitReads {
-    /// Reads of one accepted capture. `before` is the match as the Tesseract
-    /// pass parsed it, before the capture gate or the digit reader changed a
-    /// stat (the `ocr_v1` read); `after` is what was stored.
+    /// Reads of one accepted capture. `before` is the match as it was read,
+    /// before the capture gate changed a stat (the `ocr_v1` read: the
+    /// Tesseract pass under `reader = "ocr-v1"`, the digit reads under
+    /// `reader = "new"`); `after` is what was stored.
     pub fn from_capture(
         before: &crate::storage::PersonalMatch,
         after: &crate::storage::PersonalMatch,

@@ -77,9 +77,21 @@ pub struct Config {
     /// Which reader supplies saved and uploaded stats.
     ///
     /// Missing, or `"ocr-v1"`, keeps today's Tesseract reads. `"new"` stores
-    /// the shadow reader's values when a field is read and not suspect, and
-    /// falls back to ocr-v1 per field otherwise. Game start, game end, screen
-    /// detection, and plausibility holds stay on ocr-v1 either way.
+    /// the shadow reader's values when a field is read and not suspect. The
+    /// six stats then come from that reader only: a Tab whose board it does
+    /// not vouch for is not stored, and a stat cell it is unsure of keeps
+    /// the game's last accepted value and is marked, with no OCR number in
+    /// its place. A game has no stored row until each of the six stats has
+    /// had a sure read on some Tab of it: a stat never read is not stored
+    /// or uploaded as 0, and a game that ends that way is not stored at
+    /// all. The member's own row is found from the own-name seeds and the
+    /// highlight; a name is read with OCR only on a board where neither
+    /// names a row and a player name is set. The top-bar map still falls
+    /// back to OCR when the banner reader abstains. Under `"new"` the
+    /// result words, the FINAL SCORE line and the
+    /// game-start screens are read from the words pack, with OCR only where
+    /// a template or mask is not loaded; the accolade and rank words and
+    /// the accolade map are still OCR.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
     pub reader: ReaderSetting,
 }

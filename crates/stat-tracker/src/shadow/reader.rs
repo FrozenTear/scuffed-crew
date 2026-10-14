@@ -52,7 +52,8 @@ use super::heroes::{
 };
 use super::result::phrase::{Phrase, PhraseRead};
 use super::result::{
-    FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultTemplates,
+    FinalScoreRead, LiveResults, ResultDirs, ResultEvidence, ResultRead, ResultScreens,
+    ResultTemplates, ScreenRead,
 };
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
@@ -495,6 +496,27 @@ impl Reader {
         Some(loaded.end_titles.as_ref()?.read_skipping(frame))
     }
 
+    /// The result screens the loaded templates can name (accolade, rank
+    /// screen), without reading a frame. Both false when no result templates
+    /// are loaded.
+    pub fn result_screens(&self) -> ResultScreens {
+        self.results
+            .current()
+            .map(|loaded| loaded.screens)
+            .unwrap_or_default()
+    }
+
+    /// One full frame's read for the poller's accolade and rank-screen
+    /// signal under `reader = "new"` (alpha.7 O11), with the result screens
+    /// the loaded templates can name. `None` when no result templates are
+    /// loaded. The read inside is [`Self::read_result`]'s read of the frame,
+    /// made only when a first look at the two result screens found a sure
+    /// word ([`super::result::LoadedResults::read_screens`]). Only
+    /// [`ScreenRead::word_on`] is a signal.
+    pub fn read_result_screens(&self, frame: &RgbImage) -> Option<ScreenRead> {
+        Some(self.results.current()?.read_screens(frame))
+    }
+
     /// One phase-screen title read (P7) of one full frame, or `None` when
     /// the loaded words pack has no mask for `phrase` (or no words pack is
     /// loaded). Only [`PhraseRead::Sure`] is a signal.
@@ -861,6 +883,20 @@ pub fn read_final_score(frame: &RgbImage) -> Option<FinalScoreRead> {
         .read_final_score(frame)
 }
 
+/// [`Reader::result_screens`] with the process-wide reader.
+pub fn result_screens() -> ResultScreens {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .result_screens()
+}
+
+/// [`Reader::read_result_screens`] with the process-wide reader.
+pub fn read_result_screens(frame: &RgbImage) -> Option<ScreenRead> {
+    READER
+        .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
+        .read_result_screens(frame)
+}
+
 /// [`Reader::read_phrase`] with the process-wide reader.
 pub fn read_phrase(phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
     READER
@@ -1094,6 +1130,74 @@ mod tests {
         );
     }
 
+    /// The poller's result-word read (alpha.7 O11) is `read_result`'s read
+    /// of the same frame, made when the frame shows a result-screen word,
+    /// with the result screens the loaded pack can name. With no pack there
+    /// is no read, and no screen is named.
+    #[test]
+    fn the_result_screens_read_is_the_result_read_of_the_frame() {
+        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
+        use crate::shadow::result::{ACCOLADE, Outcome, ResultScreen, WORDS_SUBDIR};
+        let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
+        let mut victory = blank();
+        paint(
+            &mut victory,
+            &lay(ACCOLADE),
+            &word(1, 70, 30),
+            [255, 220, 0],
+        );
+
+        let none = Reader::load(&ReaderConfig::default());
+        assert_eq!(none.read_result_screens(&victory), None);
+        assert_eq!(none.result_screens(), ResultScreens::default());
+
+        let data = tempfile::tempdir().unwrap();
+        let words = data.path().join(WORDS_SUBDIR);
+        write_pack(
+            &words,
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+            ],
+        );
+        let config = ReaderConfig {
+            words_dir: Some(words.clone()),
+            ..Default::default()
+        };
+        let reader = Reader::load(&config);
+        let accolade_only = ResultScreens {
+            accolade: true,
+            rank_screen: false,
+        };
+        assert_eq!(reader.result_screens(), accolade_only);
+        let got = reader.read_result_screens(&victory).expect("a read");
+        assert_eq!(got.screens, accolade_only);
+        assert_eq!(
+            got.read,
+            Some(reader.read_result(&DynamicImage::ImageRgb8(victory.clone()))),
+            "one read serves as signal and as evidence"
+        );
+        assert_eq!(
+            got.word_on(ResultScreen::Accolade),
+            Some(Outcome::Victory),
+            "{got:?}"
+        );
+        assert_eq!(got.word_on(ResultScreen::RankScreen), None);
+        // no word on a result screen: the frame is not read in full
+        let got = reader.read_result_screens(&blank()).expect("a look");
+        assert_eq!((got.read, got.screens), (None, accolade_only));
+
+        write_pack(
+            &words,
+            &[
+                ("rank_screen_victory.png", &word(5, 66, 20)),
+                ("rank_screen_defeat.png", &word(7, 50, 20)),
+            ],
+        );
+        let both = Reader::load(&config).result_screens();
+        assert!(both.accolade && both.rank_screen);
+    }
+
     /// Shadow-first, through the save merge `reader = "new"` uses: a sure
     /// result (two agreeing sure reads from the words pack) is stored, a
     /// suspect one never is (ocr-v1's result stays and `result` is marked),
@@ -1101,7 +1205,7 @@ mod tests {
     /// mark.
     #[test]
     fn only_a_sure_result_from_the_words_pack_is_saved() {
-        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
         use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, WORDS_SUBDIR};
         let data = tempfile::tempdir().unwrap();
@@ -1136,7 +1240,7 @@ mod tests {
         );
         let rank_victory = DynamicImage::ImageRgb8(rank_victory);
         let nothing = DynamicImage::ImageRgb8(blank());
-        let ocr = OcrSnapshot {
+        let ocr = PolicyRow {
             map: "Ilios".into(),
             mode: "Control".into(),
             result: "defeat".into(),

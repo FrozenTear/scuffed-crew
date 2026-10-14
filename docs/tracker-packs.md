@@ -601,7 +601,7 @@ inside `PACKS_DIR`.
 | `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
-| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
+| `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -659,6 +659,20 @@ sure read only wakes the poller; the same sure word on the next poll tick
 counts as one result-word read, and a result still needs a second agreeing
 word read. A Tab frame's sure read is that frame's result. With
 `reader = "ocr-v1"` the templates are not read.
+
+The new reader also reads the result word on the post-match accolade screen
+and on the competitive rank screen from `words-v1.tar`: `accolade_<word>.png`
+and `rank_screen_<word>.png`, and variants named `<screen>_<name>_<word>.png`.
+Each screen needs a VICTORY and a DEFEAT template. Without that pair for a
+screen, or with no words pack at all, that screen's word is read with OCR,
+as `reader = "ocr-v1"` does, with one warning per screen. With the pair
+loaded no OCR reads it. The read is made on the poll ticks the OCR was made
+on: the screen's top-left crop must be lit and must have held still since
+the previous tick. A sure read counts as one result-word read, and a result
+still needs a second agreeing word read; a Tab frame's sure read is that
+frame's result. The pack has no DRAW template for these two screens, so a
+draw is not read from them. With `reader = "ocr-v1"` the templates are not
+read.
 
 Every glyph file that `atlas.json` names must be a `g<4 lowercase hex>.png`
 file in the pack folder, the same names pack sync allows. Any other path

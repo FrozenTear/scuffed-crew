@@ -218,6 +218,69 @@ pub struct GateState {
     /// keeps the value. Missing on an older save means not a row shift.
     #[serde(default)]
     pub row_shift: [bool; GATE_COLS],
+    /// The column has had no read at all in this game: every capture so far
+    /// held it ([`HoldKind::Unread`], `reader = "new"`), so `accepted` is a
+    /// placeholder 0 and not a number off the board. While any column is
+    /// unread the game has no complete row: the capture path stores none
+    /// ([`Self::unread_cols`]) and the boundary plan leaves the column out of
+    /// every comparison. The first read of the column is stored as a first
+    /// capture's would be, unless another column drops on that capture.
+    /// Missing on an older save means every column was read.
+    #[serde(default)]
+    pub unread: [bool; GATE_COLS],
+    /// Seconds between the column's last accepted read and the last capture.
+    ///
+    /// The gap of every capture that held the column ([`HoldKind::Unread`])
+    /// is added, and so is the gap of every gate hold that follows until a
+    /// read is accepted. The rate checks of the column's next read measure
+    /// from its last accepted read, not from the last capture: the accepted
+    /// value is that much older. Zero for a column that was read and
+    /// accepted on the last capture, and always zero under ocr-v1, which has
+    /// a number for every column on every capture. Missing on an older save
+    /// means zero.
+    #[serde(default)]
+    pub held_secs: [u32; GATE_COLS],
+    /// A first read of this still-unread column was seen and not taken,
+    /// because another column dropped on that capture. Only for the line
+    /// that says why a game was not stored: "never read" and "read, and not
+    /// taken" are different things to tell the member. Missing on an older
+    /// save means none.
+    #[serde(default)]
+    pub refused_first_read: [bool; GATE_COLS],
+}
+
+impl GateState {
+    /// The unread columns whose first read was seen and not taken
+    /// ([`Self::refused_first_read`]), as `suspect_fields` names. A subset of
+    /// [`Self::unread_cols`].
+    pub fn refused_cols(&self) -> Vec<&'static str> {
+        (0..GATE_COLS)
+            .filter(|&col| self.unread[col] && self.refused_first_read[col])
+            .map(|col| COL_FIELD[col])
+            .collect()
+    }
+
+    /// The game has no row yet (a column is still unread) and no read column
+    /// is confirmed by a trusted read as it stands now. That is a game read
+    /// only on suspect own rows, and also a game whose trusted board had
+    /// every one of its read columns moved by a later suspect board (a moved
+    /// column is unconfirmed again). A trusted board then starts the game
+    /// over ([`apply_gate_seeded`]): it is taken as a first capture, with no
+    /// check against the boards before it. No row of the game is stored at
+    /// that point, so no stored number changes.
+    pub fn only_low_trust_reads(&self) -> bool {
+        self.unread.iter().any(|&unread| unread)
+            && (0..GATE_COLS).all(|col| self.unread[col] || self.unconfirmed[col])
+    }
+    /// The columns with no read yet in this game, as `suspect_fields` names.
+    /// Empty once every column has had a sure read: only then does the
+    /// capture path store a row for the game.
+    pub fn unread_cols(&self) -> Vec<&'static str> {
+        (0..GATE_COLS)
+            .filter(|&col| self.unread[col])
+            .map(|col| COL_FIELD[col])
+            .collect()
+    }
 }
 
 /// Why a cell was held, for per-capture observability logging.
@@ -239,6 +302,14 @@ pub enum HoldKind {
     /// from a lower accepted base). Does not fire on real rollovers like
     /// `9906` → `10311` (prefix `1031` < accepted).
     DigitInject,
+    /// The capture has no number to store for this column (`reader = "new"`).
+    /// Either the reader did not vouch for the cell (a suspect or empty
+    /// digit read), or it is the first read of a never-read column on a
+    /// capture where another column dropped: that board may be the next
+    /// game's, so the read is not taken into this one. The accepted value
+    /// stays, and the read is not recorded as the previous raw read, so it
+    /// cannot corroborate, drop or un-latch anything.
+    Unread,
 }
 
 /// One held cell in a capture — which column, why, and the raw→held swap.
@@ -422,12 +493,16 @@ fn sudden_single_field_jump(col: usize, prev: [u32; GATE_COLS], cur: [u32; GATE_
 
 /// Flat suspect names for holds that kept the previous value.
 ///
-/// A monotonic drop and a single-field jump are unsure. A rate-cap spike and
-/// a trailing-digit inject stay on their own hold kinds and are not added here.
+/// A monotonic drop, a single-field jump and a cell the reader did not vouch
+/// for are unsure. A rate-cap spike and a trailing-digit inject stay on
+/// their own hold kinds and are not added here.
 pub fn unsure_fields(holds: &[Hold]) -> Vec<&'static str> {
     let mut names = Vec::new();
     for hold in holds {
-        if !matches!(hold.kind, HoldKind::Monotonic | HoldKind::Jump) {
+        if !matches!(
+            hold.kind,
+            HoldKind::Monotonic | HoldKind::Jump | HoldKind::Unread
+        ) {
             continue;
         }
         let name = COL_FIELD[hold.col];
@@ -436,6 +511,55 @@ pub fn unsure_fields(holds: &[Hold]) -> Vec<&'static str> {
         }
     }
     names
+}
+
+/// Flat names of every cell whose stored value is not this capture's read,
+/// whatever the hold kind.
+///
+/// `reader = "new"` flags all of them: a rate-cap or trailing-digit hold
+/// keeps an older number just as a drop does, and after a run of held
+/// captures that number can be minutes old (F266-3). ocr-v1 keeps
+/// [`unsure_fields`], which leaves those two kinds unflagged.
+pub fn held_fields(holds: &[Hold]) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for hold in holds {
+        let name = COL_FIELD[hold.col];
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Flat names of the cells an un-latch revised down on this capture.
+///
+/// The gate lets two matching clean reads replace an unconfirmed column
+/// with a lower number, and that is not a hold. Under `reader = "new"` a
+/// suspect own row leaves every column it moved unconfirmed, so the next
+/// reads can lower several stats at once (R3-1): the row that stores the
+/// lower number names those fields.
+pub fn revised_fields(unlatches: &[Unlatch]) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for unlatch in unlatches {
+        let name = COL_FIELD[unlatch.col];
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Flat names of the stats that are lower in `after` than in `before`.
+///
+/// `before` is the row stored just before in the same game. Whatever let
+/// the number down (an un-latch, a restart, a board carried onto a split),
+/// a stat that goes down inside one game is flagged under `reader = "new"`.
+pub fn lowered_fields(before: Counters, after: Counters) -> Vec<&'static str> {
+    let (before, after) = (before.to_array(), after.to_array());
+    (0..GATE_COLS)
+        .filter(|&col| after[col] < before[col])
+        .map(|col| COL_FIELD[col])
+        .collect()
 }
 
 /// Apply the per-cell capture gate.
@@ -542,11 +666,119 @@ pub fn apply_gate_with_trust(
     split: bool,
     trusted: bool,
 ) -> GateOutcome {
-    let Some((state, elapsed)) = prev.filter(|_| !split) else {
+    apply_gate_held(prev, raw, suspect, [false; GATE_COLS], split, trusted)
+}
+
+/// [`apply_gate_with_trust`] with cells the reader did not vouch for.
+///
+/// `held[col]` means this capture has no number for the column
+/// (`reader = "new"`: the digit read was suspect or empty, and nothing else
+/// may supply it). `raw` for that column is ignored. The accepted value
+/// stays ([`HoldKind::Unread`]), and the column's previous raw read, its
+/// suspect bit and its streaks are carried over untouched, so the next
+/// capture is compared with the last real read. A held column never votes:
+/// it cannot corroborate a jump, make another column's jump look lone or
+/// quiet, confirm an unconfirmed column, or tag a row shift.
+///
+/// On a first capture or a split there is no accepted value to keep. The
+/// column is a placeholder 0 marked [`GateState::unread`], and the caller
+/// stores no row for the game while any column is unread
+/// ([`GateState::unread_cols`]). The first real read of the column is then
+/// taken as a first capture's would be, with no rate cap or jump hold
+/// against the placeholder, unless another column takes the monotonic hold
+/// on that capture: a board whose read columns drop may be the next game's,
+/// and its number must not land in this game's never-read column. That
+/// read is an [`HoldKind::Unread`] hold and the column stays unread.
+///
+/// The rate checks of a column measure from its last accepted read
+/// ([`GateState::held_secs`]), so the first sure read after a run of held
+/// captures is not judged against one capture interval.
+///
+/// A game with no row yet whose reads so far were all low-trust
+/// ([`GateState::only_low_trust_reads`]: a suspect own row, which may be
+/// another player's) is started over by the first trusted board: that board
+/// is gated as a first capture. Nothing of the game is stored yet, so there
+/// is no row the trusted read has to agree with, and holding it against a
+/// suspect row's numbers would keep the game from ever getting a row
+/// (R3-2).
+///
+/// With no held column and no unread column this is exactly
+/// [`apply_gate_with_trust`].
+pub fn apply_gate_held(
+    prev: Option<(GateState, Duration)>,
+    raw: Counters,
+    suspect: [bool; GATE_COLS],
+    held: [bool; GATE_COLS],
+    split: bool,
+    trusted: bool,
+) -> GateOutcome {
+    apply_gate_seeded(prev, raw, suspect, held, split, trusted, None)
+}
+
+/// [`apply_gate_held`] for a capture that opens a game together with an
+/// earlier board of that same game.
+///
+/// `seed` is that board (the fresh-match board the boundary plan held off
+/// the previous game and now writes onto the new one) and how long before
+/// this capture it was read. It is a complete board: every column on it was
+/// a sure read. On a first capture or a split, a held column takes the
+/// seed's value instead of the placeholder 0, as an [`HoldKind::Unread`]
+/// hold, and is not unread: the game has a read of it, on the row stored
+/// just before this one. Without the seed that row would show a number and
+/// this one a 0 under it. The seed does nothing on any other capture, and
+/// nothing for a column that was read.
+pub fn apply_gate_seeded(
+    prev: Option<(GateState, Duration)>,
+    raw: Counters,
+    mut suspect: [bool; GATE_COLS],
+    held: [bool; GATE_COLS],
+    split: bool,
+    trusted: bool,
+    seed: Option<(Counters, Duration)>,
+) -> GateOutcome {
+    for col in 0..GATE_COLS {
+        suspect[col] |= held[col];
+    }
+    let restart = trusted && prev.is_some_and(|(state, _)| state.only_low_trust_reads());
+    let Some((state, elapsed)) = prev.filter(|_| !split && !restart) else {
+        let read = raw.to_array();
+        let mut first = read;
+        let mut unread = held;
+        let mut held_secs = [0u32; GATE_COLS];
+        let mut holds = Vec::new();
+        for col in 0..GATE_COLS {
+            if !held[col] {
+                continue;
+            }
+            first[col] = 0;
+            if let Some((board, age)) = seed {
+                first[col] = board.to_array()[col];
+                unread[col] = false;
+                held_secs[col] = secs_u32(age);
+                holds.push(Hold {
+                    col,
+                    kind: HoldKind::Unread,
+                    raw: read[col],
+                    held: first[col],
+                });
+            }
+        }
+        let accepted = Counters::from_array(first);
+        let mut state = fresh_state(accepted, suspect, trusted);
+        state.unread = unread;
+        state.held_secs = held_secs;
+        if seed.is_some() {
+            // A seeded column's previous raw read is the seed's, a sure read.
+            for (flag, &cell) in state.last_raw_suspect.iter_mut().zip(&held) {
+                if cell {
+                    *flag = !trusted;
+                }
+            }
+        }
         return GateOutcome {
-            accepted: raw,
-            state: fresh_state(raw, suspect, trusted),
-            holds: Vec::new(),
+            accepted,
+            state,
+            holds,
             unlatches: Vec::new(),
         };
     };
@@ -554,7 +786,40 @@ pub fn apply_gate_with_trust(
     let prev_acc = state.accepted.to_array();
     let prev_raw = state.last_raw.to_array();
     let prev_raw_suspect = state.last_raw_suspect;
-    let cur = raw.to_array();
+    let read = raw.to_array();
+    // A held column reads as "no change", so no other column's check sees a
+    // move in it. The first read of an unread column has no previous value:
+    // `jump_prev` takes the read itself for that column, for the same reason.
+    let mut cur = read;
+    let mut jump_prev = prev_acc;
+    let mut first_read = [false; GATE_COLS];
+    let mut unread = state.unread;
+    let mut refused_first_read = state.refused_first_read;
+    for col in 0..GATE_COLS {
+        if held[col] {
+            cur[col] = prev_acc[col];
+        } else if state.unread[col] {
+            first_read[col] = true;
+            jump_prev[col] = cur[col];
+            unread[col] = false;
+            refused_first_read[col] = false;
+        }
+    }
+    // A column's accepted value is as old as its last accepted read. After a
+    // run of held captures that is longer than `elapsed` (F266-3).
+    let col_elapsed = |col: usize| elapsed + Duration::from_secs(u64::from(state.held_secs[col]));
+    // The single-field jump check of `col`. Another column that is back
+    // from a held run moved over that whole run, not on this capture: its
+    // rise is neither a second jump nor a busy board for `col`.
+    let lone_jump = |col: usize| {
+        let mut before = jump_prev;
+        for other in 0..GATE_COLS {
+            if other != col && state.held_secs[other] > 0 {
+                before[other] = cur[other];
+            }
+        }
+        sudden_single_field_jump(col, before, cur)
+    };
     let mut out = cur;
     let mut down_len = state.down_streak_len;
     let mut down_last = state.down_streak_last;
@@ -569,6 +834,22 @@ pub fn apply_gate_with_trust(
     let replacing = state.low_trust && trusted && !suspect.iter().any(|&s| s);
 
     for col in 0..GATE_COLS {
+        if held[col] {
+            // No number for this column on this capture. Streaks stay.
+            holds.push(Hold {
+                col,
+                kind: HoldKind::Unread,
+                raw: read[col],
+                held: prev_acc[col],
+            });
+            continue;
+        }
+        if first_read[col] {
+            // Nothing was accepted for this column yet: store the read.
+            down_len[col] = 0;
+            down_last[col] = 0;
+            continue;
+        }
         // A confirmed value stays. An unconfirmed high, and a row-shift high,
         // come down only when this raw read equals the previous raw read, so
         // one low read cannot replace either of them.
@@ -584,8 +865,8 @@ pub fn apply_gate_with_trust(
             // digit cut off. Both are clips. Fall through to the monotonic
             // hold instead of storing them as the new trusted value.
             let below_floor = has_confirmed_floor[col] && cur[col] < confirmed_floor[col];
-            let wide_clip =
-                !is_kill_col(col) && is_trailing_digit_inject(cur[col], prev_acc[col], elapsed);
+            let wide_clip = !is_kill_col(col)
+                && is_trailing_digit_inject(cur[col], prev_acc[col], col_elapsed(col));
             if !below_floor && !wide_clip {
                 unlatches.push(Unlatch {
                     col,
@@ -622,7 +903,7 @@ pub fn apply_gate_with_trust(
             // inject cannot corroborate itself past the guard.
             if !is_kill_col(col)
                 && cur[col] > prev_acc[col]
-                && is_trailing_digit_inject(prev_acc[col], cur[col], elapsed)
+                && is_trailing_digit_inject(prev_acc[col], cur[col], col_elapsed(col))
             {
                 out[col] = prev_acc[col];
                 holds.push(Hold {
@@ -634,7 +915,8 @@ pub fn apply_gate_with_trust(
                 continue;
             }
 
-            let ceiling = prev_acc[col].saturating_add(max_delta(col, elapsed, suspect[col]));
+            let ceiling =
+                prev_acc[col].saturating_add(max_delta(col, col_elapsed(col), suspect[col]));
             // A suspect prior read must never corroborate the current jump.
             let corroborated = !prev_raw_suspect[col] && corroborates(prev_raw[col], cur[col]);
             if cur[col] > ceiling && !corroborated {
@@ -646,7 +928,7 @@ pub fn apply_gate_with_trust(
                     raw: cur[col],
                     held: prev_acc[col],
                 });
-            } else if !corroborated && sudden_single_field_jump(col, prev_acc, cur) {
+            } else if !corroborated && lone_jump(col) {
                 // One column jumped past JUMP_MAX. Keep the old value until
                 // the next capture matches.
                 out[col] = prev_acc[col];
@@ -661,6 +943,33 @@ pub fn apply_gate_with_trust(
         }
     }
 
+    // The first read of a never-read column is not taken on a capture where
+    // another column dropped. Nothing vouches for which game that board is
+    // from: with the game end missed, it is the next game's first board, and
+    // its number would land unflagged in this game's column (F266-2). The
+    // column stays unread, so the game still has no complete row.
+    let mut refused = [false; GATE_COLS];
+    if holds.iter().any(|hold| hold.kind == HoldKind::Monotonic) {
+        for col in 0..GATE_COLS {
+            if !first_read[col] {
+                continue;
+            }
+            first_read[col] = false;
+            refused[col] = true;
+            unread[col] = true;
+            refused_first_read[col] = true;
+            out[col] = prev_acc[col];
+            holds.push(Hold {
+                col,
+                kind: HoldKind::Unread,
+                raw: cur[col],
+                held: prev_acc[col],
+            });
+        }
+    }
+    // No number for the column on this capture.
+    let no_read = |col: usize| held[col] || refused[col];
+
     // A kill column that rose past JUMP_MAX is a row shift when it sits in
     // the same adjacent run of cells as a column held down this frame: the
     // next cell, or the next risen cell along that run. A drop on the far
@@ -674,6 +983,7 @@ pub fn apply_gate_with_trust(
         .collect();
     let rose = |col: usize| {
         is_kill_col(col)
+            && !first_read[col]
             && out[col] > prev_acc[col]
             && cur[col].saturating_sub(prev_acc[col]) > JUMP_MAX[col]
     };
@@ -695,6 +1005,10 @@ pub fn apply_gate_with_trust(
         }
     }
     for col in 0..GATE_COLS {
+        if no_read(col) {
+            // No read: the tag is carried as it was.
+            continue;
+        }
         if beside_drop[col] {
             row_shift[col] = true;
         } else if out[col] < prev_acc[col] {
@@ -712,6 +1026,12 @@ pub fn apply_gate_with_trust(
     // cannot replace it.
     if !trusted {
         for col in 0..GATE_COLS {
+            if first_read[col] {
+                // The placeholder under a first read is not a confirmed
+                // value, so it leaves no floor.
+                unconfirmed[col] = true;
+                continue;
+            }
             if out[col] == cur[col] && out[col] != prev_acc[col] {
                 if !unconfirmed[col] {
                     confirmed_floor[col] = prev_acc[col];
@@ -747,23 +1067,48 @@ pub fn apply_gate_with_trust(
     // shifted one stays where it is: a confirmed column does not decrease.
     mark_implausible(&mut unconfirmed, accepted);
     let low_trust = unconfirmed.iter().any(|&c| c) || (state.low_trust && !holds.is_empty());
+    // A held column was not read: its previous raw read and that read's
+    // suspect bit stand for the next capture.
+    let mut last_raw = read;
+    let mut last_raw_suspect = raw_suspect_mask(suspect, trusted);
+    let mut held_secs = [0u32; GATE_COLS];
+    for col in 0..GATE_COLS {
+        if no_read(col) {
+            last_raw[col] = prev_raw[col];
+            last_raw_suspect[col] = prev_raw_suspect[col];
+        }
+        // The accepted value gets older while the column is held, and while
+        // a gate hold keeps a read out after such a run. A column with no
+        // held run behind it keeps the capture interval, as under ocr-v1.
+        let kept_out = out[col] != cur[col];
+        if !unread[col] && (held[col] || (kept_out && state.held_secs[col] > 0)) {
+            held_secs[col] = state.held_secs[col].saturating_add(secs_u32(elapsed));
+        }
+    }
     GateOutcome {
         accepted,
         state: GateState {
             accepted,
-            last_raw: raw,
+            last_raw: Counters::from_array(last_raw),
             down_streak_len: down_len,
             down_streak_last: down_last,
-            last_raw_suspect: raw_suspect_mask(suspect, trusted),
+            last_raw_suspect,
             low_trust,
             unconfirmed,
             confirmed_floor,
             has_confirmed_floor,
             row_shift,
+            unread,
+            held_secs,
+            refused_first_read,
         },
         holds,
         unlatches,
     }
+}
+
+fn secs_u32(span: Duration) -> u32 {
+    u32::try_from(span.as_secs()).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -2382,5 +2727,849 @@ mod tests {
             hlg_hist.iter().all(|&h| h != 22994),
             "22994 must never be stored: {hlg_hist:?}"
         );
+    }
+
+    // ----- alpha.7 O10: cells the reader did not vouch for (`held`) -----
+
+    /// Column 4 (healing) held, nothing else.
+    const HELD_H: [bool; GATE_COLS] = [false, false, false, false, true, false];
+
+    #[test]
+    fn a_held_column_keeps_the_accepted_value_whatever_the_read_says() {
+        let prev = state(c(11, 4, 2, 3000, 800, 400));
+        // the reader's unsure guess for healing is 8000; it is not a number
+        let gate = apply_gate_held(
+            Some((prev, secs(20))),
+            c(12, 4, 2, 3200, 8000, 450),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(gate.accepted, c(12, 4, 2, 3200, 800, 450));
+        assert_eq!(
+            gate.holds,
+            vec![Hold {
+                col: 4,
+                kind: HoldKind::Unread,
+                raw: 8000,
+                held: 800,
+            }]
+        );
+        assert_eq!(unsure_fields(&gate.holds), vec!["h"], "the cell is flagged");
+        // the guess is not the previous raw read of the next capture
+        assert_eq!(gate.state.last_raw, c(12, 4, 2, 3200, 800, 450));
+        assert!(!gate.state.last_raw_suspect[4]);
+        assert!(!gate.state.low_trust && gate.state.unread == [false; GATE_COLS]);
+    }
+
+    #[test]
+    fn a_held_read_never_corroborates_the_next_jump() {
+        let prev = state(c(11, 4, 2, 3000, 800, 400));
+        let held = apply_gate_held(
+            Some((prev, secs(20))),
+            c(11, 4, 2, 3000, 5000, 400),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        // the next sure read is the same 5000, alone on a quiet board: with
+        // the held 5000 as its previous raw read it would be corroborated
+        let next = apply_gate(
+            Some((held.state, secs(20))),
+            c(11, 4, 2, 3000, 5000, 400),
+            CLEAN,
+            false,
+        );
+        assert_eq!(next.accepted.healing, 800, "one sure 5000 still waits");
+        assert_eq!(next.holds[0].kind, HoldKind::Jump);
+        // and a second sure 5000 is what stores it, as for any other jump
+        let third = apply_gate(
+            Some((next.state, secs(20))),
+            c(11, 4, 2, 3000, 5000, 400),
+            CLEAN,
+            false,
+        );
+        assert_eq!(third.accepted.healing, 5000);
+    }
+
+    #[test]
+    fn a_first_capture_stores_zero_for_a_held_column_and_then_its_first_read() {
+        let held = [true, false, false, false, true, false];
+        let first = apply_gate_held(None, c(7, 1, 0, 900, 351, 0), CLEAN, held, false, true);
+        assert_eq!(first.accepted, c(0, 1, 0, 900, 0, 0), "no guess is stored");
+        assert_eq!(first.state.unread, held);
+        assert!(first.holds.is_empty() && !first.state.low_trust);
+        // 20 s later both cells read sure. Against the placeholder 0 the 25
+        // elims are past the rate cap and the 3511 healing is a lone jump.
+        let second = apply_gate(
+            Some((first.state, secs(20))),
+            c(25, 1, 0, 950, 3511, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!(second.accepted, c(25, 1, 0, 950, 3511, 0));
+        assert!(second.holds.is_empty(), "{:?}", second.holds);
+        assert_eq!(second.state.unread, [false; GATE_COLS]);
+        assert_eq!(second.state.row_shift, [false; GATE_COLS]);
+        // from here the column is an ordinary one: a drop is held
+        let third = apply_gate(
+            Some((second.state, secs(20))),
+            c(25, 1, 0, 950, 35, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!(third.accepted.healing, 3511);
+    }
+
+    #[test]
+    fn a_column_held_twice_stays_unread_until_it_is_read() {
+        let first = apply_gate_held(None, c(3, 1, 0, 900, 351, 0), CLEAN, HELD_H, false, true);
+        let again = apply_gate_held(
+            Some((first.state, secs(20))),
+            c(3, 1, 0, 950, 77, 0),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(again.accepted.healing, 0);
+        assert!(again.state.unread[4]);
+        let read = apply_gate(
+            Some((again.state, secs(20))),
+            c(3, 1, 0, 950, 3511, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!(read.accepted.healing, 3511);
+    }
+
+    #[test]
+    fn the_first_read_of_an_unread_column_is_not_a_move_on_the_board() {
+        // healing was never read; damage is at 3000
+        let first = apply_gate_held(None, c(3, 1, 0, 3000, 0, 0), CLEAN, HELD_H, false, true);
+        // healing reads 3000 for the first time while damage alone jumps
+        // 5000: the first read does not make that jump one of two
+        let second = apply_gate(
+            Some((first.state, secs(20))),
+            c(3, 1, 0, 8000, 3000, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!(second.accepted, c(3, 1, 0, 3000, 3000, 0));
+        assert_eq!(
+            second.holds,
+            vec![Hold {
+                col: 3,
+                kind: HoldKind::Jump,
+                raw: 8000,
+                held: 3000,
+            }]
+        );
+        // elims unread, then read as 20 on the frame where assists drop:
+        // with a column down the first read is not taken at all (F266-2),
+        // so it is no row-shift rise next to that drop either
+        let held_e = [true, false, false, false, false, false];
+        let first = apply_gate_held(None, c(0, 10, 2, 3000, 0, 0), CLEAN, held_e, false, true);
+        let second = apply_gate(
+            Some((first.state, secs(20))),
+            c(20, 2, 2, 3000, 0, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!((second.accepted.elims, second.accepted.assists), (0, 10));
+        assert!(second.state.unread[0], "still unread");
+        assert!(
+            !second.state.row_shift[0],
+            "a first read is not a shifted row"
+        );
+        // the next board, with assists back, gives elims its first read
+        let third = apply_gate(
+            Some((second.state, secs(20))),
+            c(21, 10, 2, 3100, 0, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!((third.accepted.elims, third.accepted.assists), (21, 10));
+        assert!(third.holds.is_empty(), "{:?}", third.holds);
+        assert!(!third.state.row_shift[0]);
+    }
+
+    #[test]
+    fn an_untrusted_first_read_is_unconfirmed_and_leaves_no_floor() {
+        let first = apply_gate_held(None, c(3, 1, 0, 900, 0, 0), CLEAN, HELD_H, false, true);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(3, 1, 0, 900, 500, 0),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(second.accepted.healing, 500);
+        assert!(second.state.unconfirmed[4] && second.state.low_trust);
+        assert!(
+            !second.state.has_confirmed_floor[4],
+            "the placeholder 0 is not a confirmed value"
+        );
+    }
+
+    #[test]
+    fn a_held_column_keeps_its_row_shift_tag() {
+        let mut prev = state(c(30, 4, 2, 3000, 800, 400));
+        prev.row_shift[0] = true;
+        let held_e = [true, false, false, false, false, false];
+        let held = apply_gate_held(
+            Some((prev, secs(20))),
+            c(30, 4, 2, 3000, 800, 400),
+            CLEAN,
+            held_e,
+            false,
+            true,
+        );
+        assert!(
+            held.state.row_shift[0],
+            "no read, so nothing clears the tag"
+        );
+        // a real read of the same number, with no drop held, does clear it
+        let read = apply_gate(
+            Some((prev, secs(20))),
+            c(30, 4, 2, 3000, 800, 400),
+            CLEAN,
+            false,
+        );
+        assert!(!read.state.row_shift[0]);
+    }
+
+    #[test]
+    fn a_split_does_not_carry_a_held_column_into_the_new_game() {
+        let prev = state(c(30, 12, 9, 14000, 5000, 900));
+        // the caller fills a held column with the old game's value
+        let gate = apply_gate_held(
+            Some((prev, secs(200))),
+            c(1, 0, 0, 300, 5000, 0),
+            CLEAN,
+            HELD_H,
+            true,
+            true,
+        );
+        assert_eq!(gate.accepted, c(1, 0, 0, 300, 0, 0));
+        assert!(gate.state.unread[4]);
+    }
+
+    #[test]
+    fn a_held_column_is_not_a_clean_read_for_an_unconfirmed_latch() {
+        // a fallback latched assists 40; one clean 0 keeps it, a second
+        // clean 0 replaces it
+        let first = apply_gate_with_trust(None, c(2, 40, 1, 450, 0, 2), CLEAN, false, false);
+        let once = apply_gate(
+            Some((first.state, secs(20))),
+            c(2, 0, 1, 500, 0, 2),
+            CLEAN,
+            false,
+        );
+        assert_eq!(once.accepted.assists, 40);
+        // ...but not on a capture with a held cell: that board is not clean
+        let held = apply_gate_held(
+            Some((once.state, secs(20))),
+            c(2, 0, 1, 500, 0, 2),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(
+            held.accepted.assists, 40,
+            "a board with a held cell replaces nothing"
+        );
+        let clean = apply_gate(
+            Some((once.state, secs(20))),
+            c(2, 0, 1, 500, 0, 2),
+            CLEAN,
+            false,
+        );
+        assert_eq!(
+            clean.accepted.assists, 0,
+            "the same read, fully clean, does"
+        );
+    }
+
+    #[test]
+    fn a_game_with_no_held_cell_never_uses_the_held_state() {
+        // ocr-v1 has a number for every column on every capture. Through a
+        // noisy game (drops, a rate cap, a fallback, an inject, an un-latch)
+        // nothing of the held machinery may switch on: no column is unread,
+        // no held time builds up behind a gate hold, no cell is `Unread`.
+        let reads = [
+            (c(3, 1, 0, 900, 0, 120), CLEAN, true),
+            (c(5, 1, 1, 1500, 0, 300), CLEAN, true),
+            (
+                c(1, 1, 1, 15031, 0, 300),
+                [false, false, false, true, false, false],
+                true,
+            ),
+            (c(40, 18, 1, 1600, 0, 310), CLEAN, false),
+            (c(6, 2, 1, 1700, 0, 22994), CLEAN, true),
+            (c(6, 2, 1, 1700, 0, 350), CLEAN, true),
+            (c(6, 2, 1, 1700, 0, 350), CLEAN, true),
+        ];
+        let mut state: Option<GateState> = None;
+        let mut kinds = Vec::new();
+        for (i, (raw, suspect, trusted)) in reads.into_iter().enumerate() {
+            let prev = state.map(|s| (s, secs(20)));
+            let out = apply_gate_with_trust(prev, raw, suspect, false, trusted);
+            assert_eq!(out.state.unread, [false; GATE_COLS], "step {i}");
+            assert_eq!(out.state.held_secs, [0; GATE_COLS], "step {i}");
+            assert!(out.state.unread_cols().is_empty(), "step {i}");
+            assert!(
+                out.holds.iter().all(|hold| hold.kind != HoldKind::Unread),
+                "step {i}: {:?}",
+                out.holds
+            );
+            // ocr-v1 flags a drop and a lone jump only; the new reader's
+            // list is that plus the rate-cap and inject holds
+            let unsure = unsure_fields(&out.holds);
+            let all = held_fields(&out.holds);
+            assert!(unsure.iter().all(|name| all.contains(name)), "step {i}");
+            kinds.extend(out.holds.iter().map(|hold| hold.kind));
+            state = Some(out.state);
+        }
+        // the game above really does exercise the holds this is about
+        for kind in [
+            HoldKind::Monotonic,
+            HoldKind::RateCap,
+            HoldKind::DigitInject,
+        ] {
+            assert!(kinds.contains(&kind), "{kind:?} never fired: {kinds:?}");
+        }
+    }
+
+    /// Healing held over a 5 minute run, the rest of the board read.
+    fn after_a_held_healing_run() -> GateState {
+        let first = apply_gate(None, c(11, 4, 2, 3000, 800, 400), CLEAN, false);
+        let held = apply_gate_held(
+            Some((first.state, secs(300))),
+            c(20, 8, 4, 9000, 0, 1500),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(held.accepted, c(20, 8, 4, 9000, 800, 1500));
+        assert_eq!(held.state.held_secs, [0, 0, 0, 0, 300, 0]);
+        held.state
+    }
+
+    /// F266-3 (R266-A), the reviewer's first trace: 800, held, then a sure
+    /// 8,500 after 20 s. Against one 20 s interval that is a trailing-digit
+    /// inject, held with no flag and with no way out. The accepted 800 is
+    /// 320 s old, and over 320 s the rise is ordinary.
+    #[test]
+    fn a_sure_read_after_a_held_run_is_not_a_trailing_digit_inject() {
+        let run = after_a_held_healing_run();
+        // the board moved on this capture: the read is stored at once
+        let busy = apply_gate(
+            Some((run, secs(20))),
+            c(21, 8, 4, 9600, 8500, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(busy.accepted.healing, 8500, "{:?}", busy.holds);
+        assert!(busy.holds.is_empty());
+        assert_eq!(busy.state.held_secs, [0; GATE_COLS]);
+        // on a quiet board it is a lone jump: kept one capture, FLAGGED,
+        // and the held time keeps counting behind that hold
+        let quiet = apply_gate(
+            Some((run, secs(20))),
+            c(20, 8, 4, 9100, 8500, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(quiet.accepted.healing, 800);
+        assert_eq!(
+            quiet.holds,
+            vec![Hold {
+                col: 4,
+                kind: HoldKind::Jump,
+                raw: 8500,
+                held: 800,
+            }]
+        );
+        assert_eq!(unsure_fields(&quiet.holds), vec!["h"]);
+        assert_eq!(quiet.state.held_secs[4], 320);
+        // the next sure read agrees and is stored: no inject hold repeats
+        let next = apply_gate(
+            Some((quiet.state, secs(20))),
+            c(20, 8, 4, 9200, 8700, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(next.accepted.healing, 8700, "{:?}", next.holds);
+        assert_eq!(next.state.held_secs, [0; GATE_COLS]);
+
+        // the same reads with no held run are an inject, as on ocr-v1; the
+        // new reader's list flags that hold, ocr-v1's does not
+        let prev = state(c(20, 8, 4, 9000, 800, 1500));
+        let inject = apply_gate(
+            Some((prev, secs(20))),
+            c(20, 8, 4, 9100, 8500, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(inject.accepted.healing, 800);
+        assert_eq!(inject.holds[0].kind, HoldKind::DigitInject);
+        assert!(unsure_fields(&inject.holds).is_empty());
+        assert_eq!(held_fields(&inject.holds), vec!["h"]);
+        assert_eq!(inject.state.held_secs, [0; GATE_COLS]);
+    }
+
+    /// F266-3, the second trace: elims 10, held, then a sure 25 after 20 s.
+    /// One interval allows 10 + 20/5 + 8 = 22, a rate-cap hold with no
+    /// flag. The 10 is 320 s old.
+    #[test]
+    fn a_sure_read_after_a_held_run_is_not_over_the_kill_rate_cap() {
+        let held_e = [true, false, false, false, false, false];
+        let first = apply_gate(None, c(10, 4, 2, 3000, 800, 400), CLEAN, false);
+        let held = apply_gate_held(
+            Some((first.state, secs(300))),
+            c(0, 9, 5, 9000, 4000, 1500),
+            CLEAN,
+            held_e,
+            false,
+            true,
+        );
+        assert_eq!(held.accepted.elims, 10);
+        assert_eq!(held.state.held_secs[0], 300);
+        // a second held capture adds its own gap
+        let again = apply_gate_held(
+            Some((held.state, secs(15))),
+            c(0, 9, 5, 9100, 4000, 1500),
+            CLEAN,
+            held_e,
+            false,
+            true,
+        );
+        assert_eq!(again.state.held_secs[0], 315);
+        // assists moved too: stored at once
+        let busy = apply_gate(
+            Some((held.state, secs(20))),
+            c(25, 11, 5, 9300, 4000, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(busy.accepted.elims, 25, "{:?}", busy.holds);
+        // alone on a quiet board: a flagged lone jump, then stored
+        let quiet = apply_gate(
+            Some((held.state, secs(20))),
+            c(25, 9, 5, 9100, 4000, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(quiet.accepted.elims, 10);
+        assert_eq!(quiet.holds[0].kind, HoldKind::Jump);
+        assert_eq!(unsure_fields(&quiet.holds), vec!["e"]);
+        let next = apply_gate(
+            Some((quiet.state, secs(20))),
+            c(25, 9, 5, 9200, 4000, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(next.accepted.elims, 25);
+
+        // no held run: 25 is past 22, a rate cap; only the new reader's
+        // list flags it
+        let prev = state(c(10, 9, 5, 9000, 4000, 1500));
+        let capped = apply_gate(
+            Some((prev, secs(20))),
+            c(25, 9, 5, 9100, 4000, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(capped.accepted.elims, 10);
+        assert_eq!(capped.holds[0].kind, HoldKind::RateCap);
+        assert!(unsure_fields(&capped.holds).is_empty());
+        assert_eq!(held_fields(&capped.holds), vec!["e"]);
+    }
+
+    /// A column back from a held run moved over that whole run. Its rise
+    /// must not make another column's lone jump look like one of two.
+    #[test]
+    fn a_column_back_from_a_held_run_does_not_vouch_for_another_jump() {
+        let run = after_a_held_healing_run();
+        // healing reads 3,800 (+3,000 over 320 s) while damage alone jumps
+        // 9,000 to 15,000 in 20 s
+        let out = apply_gate(
+            Some((run, secs(20))),
+            c(20, 8, 4, 15000, 3800, 1500),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.damage, 9000, "the damage jump still waits");
+        assert!(
+            out.holds
+                .iter()
+                .any(|hold| hold.col == 3 && hold.kind == HoldKind::Jump),
+            "{:?}",
+            out.holds
+        );
+    }
+
+    /// F266-2: a game whose healing was never read, its end missed, and the
+    /// next game's first board 60 s later. Every read column drops. The
+    /// healing on that board is the next game's and is not taken into this
+    /// one, where nothing would ever flag it.
+    #[test]
+    fn the_first_read_of_an_unread_column_is_not_taken_when_the_board_drops() {
+        let first = apply_gate_held(
+            None,
+            c(30, 12, 9, 14000, 0, 900),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(first.state.unread_cols(), vec!["h"]);
+        let next_game = apply_gate(
+            Some((first.state, secs(60))),
+            c(1, 0, 0, 300, 100, 0),
+            CLEAN,
+            false,
+        );
+        assert_eq!(next_game.accepted, c(30, 12, 9, 14000, 0, 900));
+        assert_eq!(
+            next_game.state.unread_cols(),
+            vec!["h"],
+            "the column is still unread, so the game still has no row"
+        );
+        assert!(next_game.holds.contains(&Hold {
+            col: 4,
+            kind: HoldKind::Unread,
+            raw: 100,
+            held: 0,
+        }));
+        assert!(held_fields(&next_game.holds).contains(&"h"));
+        // the refused read is not the previous raw read either
+        assert_eq!(next_game.state.last_raw.healing, 0);
+        // and the state remembers it was seen, for the not-stored line
+        assert_eq!(next_game.state.refused_cols(), vec!["h"]);
+        assert!(
+            first.state.refused_cols().is_empty(),
+            "never read is not refused"
+        );
+        // one dropped column is enough to refuse it
+        let one_drop = apply_gate(
+            Some((first.state, secs(60))),
+            c(31, 12, 9, 300, 100, 900),
+            CLEAN,
+            false,
+        );
+        assert!(one_drop.state.unread[4]);
+        assert_eq!(one_drop.accepted.healing, 0);
+        // a board of this game, no column down: the first read is stored
+        let same_game = apply_gate(
+            Some((first.state, secs(60))),
+            c(31, 12, 9, 14200, 100, 900),
+            CLEAN,
+            false,
+        );
+        assert_eq!(same_game.accepted.healing, 100);
+        assert!(same_game.state.unread_cols().is_empty());
+        assert!(same_game.holds.is_empty());
+        // a refused read that is taken later is no longer "refused"
+        let taken = apply_gate(
+            Some((next_game.state, secs(60))),
+            c(31, 12, 9, 14200, 100, 900),
+            CLEAN,
+            false,
+        );
+        assert!(taken.state.refused_cols().is_empty());
+        assert_eq!(taken.state.refused_first_read, [false; GATE_COLS]);
+    }
+
+    /// The board carried onto a new session is a row of that game. A cell
+    /// the splitting capture has no number for takes the carried board's:
+    /// not a 0 under the number on the row before, and not the previous
+    /// game's value the caller filled it with.
+    #[test]
+    fn a_seeded_first_capture_takes_the_carried_board_in_a_held_column() {
+        let old_game = state(c(30, 12, 9, 14000, 5000, 900));
+        let carried = c(1, 0, 0, 300, 120, 0);
+        let split = apply_gate_seeded(
+            Some((old_game, secs(200))),
+            c(3, 1, 0, 900, 5000, 0),
+            CLEAN,
+            HELD_H,
+            true,
+            true,
+            Some((carried, secs(50))),
+        );
+        assert_eq!(split.accepted, c(3, 1, 0, 900, 120, 0));
+        assert!(split.state.unread_cols().is_empty(), "the game has a read");
+        assert_eq!(
+            split.holds,
+            vec![Hold {
+                col: 4,
+                kind: HoldKind::Unread,
+                raw: 5000,
+                held: 120,
+            }]
+        );
+        assert_eq!(split.state.held_secs, [0, 0, 0, 0, 50, 0]);
+        assert_eq!(split.state.last_raw.healing, 120);
+        assert!(!split.state.last_raw_suspect[4]);
+        // the same on a session's first capture (no split, no gate yet)
+        let first = apply_gate_seeded(
+            None,
+            c(3, 1, 0, 900, 0, 0),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+            Some((carried, secs(50))),
+        );
+        assert_eq!(first.accepted.healing, 120);
+        // without a carried board there is nothing to take: unread
+        let bare = apply_gate_held(
+            Some((old_game, secs(200))),
+            c(3, 1, 0, 900, 5000, 0),
+            CLEAN,
+            HELD_H,
+            true,
+            true,
+        );
+        assert_eq!(bare.accepted.healing, 0);
+        assert_eq!(bare.state.unread_cols(), vec!["h"]);
+        // the seed is for held columns of a first capture only: a read
+        // column keeps its read, and a later capture ignores the seed
+        let later = apply_gate_seeded(
+            Some((old_game, secs(20))),
+            c(31, 12, 9, 14100, 0, 900),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+            Some((carried, secs(50))),
+        );
+        assert_eq!(later.accepted, c(31, 12, 9, 14100, 5000, 900));
+    }
+
+    /// R3-2: a suspect own row opened the game (untrusted, healing held),
+    /// higher than the member's real row. Trusted reads of the real row then
+    /// sit below it on every board and never repeat, so they would be
+    /// monotonic holds for the rest of the game and healing would never get
+    /// its first read. Nothing of the game is stored yet: the first trusted
+    /// board starts it over.
+    #[test]
+    fn a_trusted_board_restarts_a_game_that_has_only_low_trust_reads() {
+        let first = apply_gate_held(
+            None,
+            c(20, 6, 3, 8000, 77, 450),
+            CLEAN,
+            HELD_H,
+            false,
+            false,
+        );
+        assert!(first.state.only_low_trust_reads());
+        assert_eq!(first.state.unread_cols(), vec!["h"]);
+        // another low-trust board does not restart anything
+        let again = apply_gate_held(
+            Some((first.state, secs(30))),
+            c(21, 6, 3, 8200, 77, 450),
+            CLEAN,
+            HELD_H,
+            false,
+            false,
+        );
+        assert!(again.state.only_low_trust_reads());
+        assert_eq!(again.accepted.elims, 21);
+        // ...also not a lower one that reads healing: it is gated against
+        // the first, so the game still has no row
+        let lower = apply_gate_with_trust(
+            Some((first.state, secs(30))),
+            c(10, 6, 3, 4000, 500, 450),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(lower.accepted, c(20, 6, 3, 8000, 0, 450));
+        assert_eq!(lower.state.unread_cols(), vec!["h"]);
+        assert_eq!(lower.state.refused_cols(), vec!["h"]);
+        // the member's real row, trusted: taken as a first capture
+        let real = apply_gate(
+            Some((again.state, secs(30))),
+            c(12, 6, 3, 3500, 700, 450),
+            CLEAN,
+            false,
+        );
+        assert_eq!(real.accepted, c(12, 6, 3, 3500, 700, 450));
+        assert!(real.holds.is_empty() && real.unlatches.is_empty());
+        assert!(real.state.unread_cols().is_empty());
+        assert!(!real.state.low_trust && !real.state.only_low_trust_reads());
+        assert_eq!(real.state, state(c(12, 6, 3, 3500, 700, 450)));
+        // a trusted board with a held cell restarts too, and stays pending
+        let held = apply_gate_held(
+            Some((again.state, secs(30))),
+            c(12, 6, 3, 3500, 0, 450),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert_eq!(held.accepted, c(12, 6, 3, 3500, 0, 450));
+        assert_eq!(held.state.unread_cols(), vec!["h"]);
+        assert!(!held.state.only_low_trust_reads(), "e..mit are confirmed");
+
+        // a game that has a row is never restarted: a suspect row in the
+        // middle of it leaves low-trust columns, and a lower trusted read
+        // is still held
+        let game = apply_gate(None, c(12, 5, 3, 3500, 700, 300), CLEAN, false);
+        let suspect = apply_gate_with_trust(
+            Some((game.state, secs(20))),
+            c(20, 9, 5, 8000, 2000, 900),
+            CLEAN,
+            false,
+            false,
+        );
+        assert!(suspect.state.low_trust && !suspect.state.only_low_trust_reads());
+        let lower = apply_gate(
+            Some((suspect.state, secs(20))),
+            c(13, 5, 3, 3700, 720, 300),
+            CLEAN,
+            false,
+        );
+        assert_eq!(lower.accepted, c(20, 9, 5, 8000, 2000, 900));
+        // and a pending game a trusted board opened is not restarted either
+        let trusted_first = apply_gate_held(
+            None,
+            c(30, 12, 9, 14000, 0, 900),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert!(!trusted_first.state.only_low_trust_reads());
+    }
+
+    /// The names for a row whose number went down: the un-latched cells,
+    /// and any stat lower than on the row before.
+    #[test]
+    fn a_revised_or_lowered_stat_is_named() {
+        let game = apply_gate(None, c(12, 5, 3, 3500, 700, 300), CLEAN, false);
+        let suspect = apply_gate_with_trust(
+            Some((game.state, secs(20))),
+            c(20, 9, 5, 8000, 2000, 900),
+            CLEAN,
+            false,
+            false,
+        );
+        let once = apply_gate(
+            Some((suspect.state, secs(20))),
+            c(13, 5, 3, 3700, 720, 300),
+            CLEAN,
+            false,
+        );
+        assert!(once.unlatches.is_empty());
+        assert_eq!(held_fields(&once.holds).len(), 6, "all six held, flagged");
+        // the second matching read replaces all six with lower numbers:
+        // that is no hold, so `held_fields` alone would flag nothing
+        let twice = apply_gate(
+            Some((once.state, secs(20))),
+            c(13, 5, 3, 3700, 720, 300),
+            CLEAN,
+            false,
+        );
+        assert_eq!(twice.accepted, c(13, 5, 3, 3700, 720, 300));
+        assert!(twice.holds.is_empty());
+        let all = vec!["e", "a", "d", "dmg", "h", "mit"];
+        assert_eq!(revised_fields(&twice.unlatches), all);
+        assert_eq!(lowered_fields(once.accepted, twice.accepted), all);
+        assert!(lowered_fields(twice.accepted, twice.accepted).is_empty());
+        assert_eq!(
+            lowered_fields(c(9, 3, 9, 100, 5, 900), c(9, 4, 0, 100, 5, 150)),
+            vec!["d", "mit"]
+        );
+    }
+
+    /// Reviewer mutant: `unread` carried across a split. The new game's
+    /// unread columns are this capture's held cells and nothing else.
+    #[test]
+    fn unread_does_not_survive_a_split() {
+        let first = apply_gate_held(
+            None,
+            c(30, 12, 9, 14000, 0, 900),
+            CLEAN,
+            HELD_H,
+            false,
+            true,
+        );
+        assert!(first.state.unread[4]);
+        let split = apply_gate(
+            Some((first.state, secs(200))),
+            c(1, 0, 0, 300, 100, 0),
+            CLEAN,
+            true,
+        );
+        assert_eq!(split.accepted, c(1, 0, 0, 300, 100, 0));
+        assert_eq!(split.state.unread, [false; GATE_COLS]);
+        // a split with another column held: that one, not the old one
+        let held_e = [true, false, false, false, false, false];
+        let split = apply_gate_held(
+            Some((first.state, secs(200))),
+            c(7, 0, 0, 300, 100, 0),
+            CLEAN,
+            held_e,
+            true,
+            true,
+        );
+        assert_eq!(split.state.unread, held_e);
+        assert_eq!(split.state.held_secs, [0; GATE_COLS]);
+    }
+
+    /// Reviewer mutant: the held guess written into `confirmed_floor`. An
+    /// untrusted capture leaves a floor under the column it moved, and
+    /// nothing under a column it has no number for.
+    #[test]
+    fn an_untrusted_capture_leaves_no_floor_under_a_held_cell() {
+        let prev = state(c(11, 4, 2, 3000, 800, 400));
+        let out = apply_gate_held(
+            Some((prev, secs(20))),
+            c(11, 4, 2, 3300, 8000, 400),
+            CLEAN,
+            HELD_H,
+            false,
+            false,
+        );
+        assert_eq!(out.accepted, c(11, 4, 2, 3300, 800, 400));
+        // damage moved on an untrusted read: unconfirmed, floor 3000
+        assert!(out.state.unconfirmed[3] && out.state.has_confirmed_floor[3]);
+        assert_eq!(out.state.confirmed_floor[3], 3000);
+        // healing was not read: still confirmed at 800, no floor, no guess
+        assert!(!out.state.unconfirmed[4]);
+        assert!(!out.state.has_confirmed_floor[4]);
+        assert_eq!(out.state.confirmed_floor[4], 0);
+    }
+
+    #[test]
+    fn a_save_from_before_the_unread_column_loads_as_all_read() {
+        let now = serde_json::to_value(state(c(11, 4, 2, 3000, 800, 400))).unwrap();
+        let mut old = now.clone();
+        for field in ["unread", "held_secs", "refused_first_read"] {
+            old.as_object_mut()
+                .unwrap()
+                .remove(field)
+                .expect("the field is saved");
+        }
+        let loaded: GateState = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.unread, [false; GATE_COLS]);
+        assert_eq!(loaded.held_secs, [0; GATE_COLS]);
+        assert_eq!(loaded, state(c(11, 4, 2, 3000, 800, 400)));
+        // a pending game survives a restart: both fields round-trip
+        let mut pending = state(c(30, 12, 9, 14000, 0, 900));
+        pending.unread[4] = true;
+        pending.held_secs[0] = 315;
+        let back: GateState =
+            serde_json::from_value(serde_json::to_value(pending).unwrap()).unwrap();
+        assert_eq!(back, pending);
+        assert_eq!(back.unread_cols(), vec!["h"]);
     }
 }

@@ -814,12 +814,12 @@ mod tests {
 
     #[test]
     fn upload_json_names_recognizer_on_every_row() {
-        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved, own_row};
+        use crate::reader_apply::{OwnRow, PolicyRow, merge_saved, own_row};
         use crate::shadow::digits::RECOGNIZER_ID;
         use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
 
-        fn snap() -> OcrSnapshot {
-            OcrSnapshot {
+        fn snap() -> PolicyRow {
+            PolicyRow {
                 map: "Busan".into(),
                 mode: "Control".into(),
                 result: "victory".into(),
@@ -950,12 +950,12 @@ mod tests {
 
     #[test]
     fn mixed_row_uploads_cv_v5_when_any_stat_came_from_the_new_reader() {
-        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
         use crate::shadow::digits::RECOGNIZER_ID;
         use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
 
-        fn snap() -> OcrSnapshot {
-            OcrSnapshot {
+        fn snap() -> PolicyRow {
+            PolicyRow {
                 map: "Busan".into(),
                 mode: "Control".into(),
                 result: "victory".into(),

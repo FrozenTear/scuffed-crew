@@ -87,48 +87,73 @@ pub fn read_scoreboard(
     };
 
     let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
-    let role = guess_role(&hero);
     let map_name = find_map(&lines).unwrap_or_default();
-    let game_mode = map_mode(&map_name).unwrap_or("").to_string();
 
     Ok(ScoreboardRead {
         trusted_cells,
-        matched: PersonalMatch {
-            id: None,
-            hero,
-            map_name,
-            game_mode,
-            role,
-            outcome: outcome.to_string(),
-            elims: stats.elims,
-            deaths: stats.deaths,
-            assists: stats.assists,
-            damage: stats.damage,
-            healing: stats.healing,
-            mitigation: stats.mitigation,
-            played_at: SurrealDatetime::from(Utc::now()),
-            synced: false,
-            sync_rev: 0,
-            upload_reject: None,
-            session_id: String::new(),
-            corrected_hero: None,
-            corrected_role: None,
-            corrected_map_name: None,
-            corrected_outcome: None,
-            corrected_elims: None,
-            corrected_deaths: None,
-            corrected_assists: None,
-            corrected_damage: None,
-            corrected_healing: None,
-            corrected_mitigation: None,
-            edited_fields: Vec::new(),
-            edited_at: None,
-            heroes_played: Vec::new(),
-            segment_resolutions: Vec::new(),
-            recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
-            suspect_fields: Vec::new(),
-        },
+        matched: new_match(stats, hero, map_name, outcome),
     })
+}
+
+/// A fresh, unsaved row for one board read with no text off the frame: the
+/// six stats in board order (E, A, D, DMG, H, MIT), hero `Unknown`, no map.
+/// `reader = "new"` starts from this; the hero and the map come from the
+/// icon and banner readers, never from OCR text.
+pub fn match_from_stats(stats: [u32; 6], outcome: &str) -> PersonalMatch {
+    let [elims, assists, deaths, damage, healing, mitigation] = stats;
+    new_match(
+        PlayerStats {
+            elims,
+            deaths,
+            assists,
+            damage,
+            healing,
+            mitigation,
+        },
+        "Unknown".to_string(),
+        String::new(),
+        outcome,
+    )
+}
+
+fn new_match(stats: PlayerStats, hero: String, map_name: String, outcome: &str) -> PersonalMatch {
+    let role = guess_role(&hero);
+    let game_mode = map_mode(&map_name).unwrap_or("").to_string();
+    PersonalMatch {
+        id: None,
+        hero,
+        map_name,
+        game_mode,
+        role,
+        outcome: outcome.to_string(),
+        elims: stats.elims,
+        deaths: stats.deaths,
+        assists: stats.assists,
+        damage: stats.damage,
+        healing: stats.healing,
+        mitigation: stats.mitigation,
+        played_at: SurrealDatetime::from(Utc::now()),
+        synced: false,
+        sync_rev: 0,
+        upload_reject: None,
+        session_id: String::new(),
+        corrected_hero: None,
+        corrected_role: None,
+        corrected_map_name: None,
+        corrected_outcome: None,
+        corrected_elims: None,
+        corrected_deaths: None,
+        corrected_assists: None,
+        corrected_damage: None,
+        corrected_healing: None,
+        corrected_mitigation: None,
+        edited_fields: Vec::new(),
+        edited_at: None,
+        heroes_played: Vec::new(),
+        segment_resolutions: Vec::new(),
+        recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+        suspect_fields: Vec::new(),
+    }
 }
 
 /// Whether this capture's stats came from the identified player row.
@@ -1745,6 +1770,26 @@ mod tests {
             ["118", "3", "2", "4,316", "1,200", "899"],
         )];
         assert!(parse_scoreboard_cells(&rows, Some(0), "", "defeat", Some("FROZEN")).is_none());
+    }
+
+    #[test]
+    fn match_from_stats_takes_the_six_stats_in_board_order() {
+        let m = match_from_stats([1, 2, 3, 4000, 5000, 6000], "victory");
+        assert_eq!(
+            (
+                m.elims,
+                m.assists,
+                m.deaths,
+                m.damage,
+                m.healing,
+                m.mitigation
+            ),
+            (1, 2, 3, 4000, 5000, 6000)
+        );
+        assert_eq!((m.hero.as_str(), m.role.as_str()), ("Unknown", "Unknown"));
+        assert_eq!((m.map_name.as_str(), m.game_mode.as_str()), ("", ""));
+        assert_eq!(m.outcome, "victory");
+        assert!(m.suspect_fields.is_empty() && !m.synced);
     }
 
     #[test]
