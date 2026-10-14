@@ -3378,6 +3378,18 @@ mod tests {
         );
         assert!(again.state.only_low_trust_reads());
         assert_eq!(again.accepted.elims, 21);
+        // ...also not a lower one that reads healing: it is gated against
+        // the first, so the game still has no row
+        let lower = apply_gate_with_trust(
+            Some((first.state, secs(30))),
+            c(10, 6, 3, 4000, 500, 450),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(lower.accepted, c(20, 6, 3, 8000, 0, 450));
+        assert_eq!(lower.state.unread_cols(), vec!["h"]);
+        assert_eq!(lower.state.refused_cols(), vec!["h"]);
         // the member's real row, trusted: taken as a first capture
         let real = apply_gate(
             Some((again.state, secs(30))),
