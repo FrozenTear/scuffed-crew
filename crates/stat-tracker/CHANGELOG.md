@@ -22,6 +22,7 @@ Install this update between games, not during one. Report this game works again 
 ### Highlights
 
 - With the new reader, the tracker looks for Victory and Defeat screens every 1.5 seconds instead of every 4, so short end screens are no longer missed.
+- With the new reader, a saved 4 s poll interval now means auto (1.5 s); to keep 4 s on a low-power laptop, set 5 or any other value.
 - With classic OCR off, a game where one stat was never read clearly is saved with its best guess instead of being dropped. That stat is marked unsure, and clicking it opens Edit stats.
 - An update waits until the game you are in is saved before it restarts the tracker.
 - A game whose scoreboard picture could not be kept safely can still be reported. The report then carries the saved values and no picture.

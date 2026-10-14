@@ -1108,6 +1108,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 None,
             )),
         ));
+        body = body.push(hint(POLL_INTERVAL_HELP));
     }
 
     settings_card("Auto-detect", body.into())
@@ -1302,6 +1303,7 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
+const POLL_INTERVAL_HELP: &str = "With the new reader, a saved 4 s poll interval now means auto (1.5 s); to keep 4 s on a low-power laptop, set 5 or any other value.";
 const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture — leave off unless diagnosing.";
 
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
