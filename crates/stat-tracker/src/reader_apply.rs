@@ -126,9 +126,10 @@ pub fn own_row(
     }
 }
 
-/// A player name is configured and is not blank. Only then can a name cell
-/// find the member's row, so only then are the name cells read at all under
-/// `reader = "new"` (OCR site T4, F266-10).
+/// A player name is configured and is not blank. [`own_row`] takes a name
+/// match only then. The daemon's one call passes no name: under
+/// `reader = "new"` the row is `detect::own_row`'s, and ocr-v1 matches the
+/// name in the vision pass.
 pub fn player_name_is_set(player_name: Option<&str>) -> bool {
     player_name.is_some_and(|name| !name.trim().is_empty())
 }

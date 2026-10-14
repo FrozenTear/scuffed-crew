@@ -93,7 +93,7 @@ For `e`, `a`, `d`, `dmg`, `h`, and `mit`, `value` is the stat the tracker stored
 
 A capture is stored, and so has a kit, only when the game has a number for every stat (under `reader` `new` a game has no stored row until each stat has had a sure read). `confidence` is `null`. `suspect` is `true` when the tracker flags the cell (for the matcher `cv-v5` that includes confidence below 0.35), or when `value` and `ocr_v1` differ, which includes a gate-held value and a stat Tesseract did not read when the stored value is not 0.
 
-For `mode`, `result`, and `hero`, the matcher does not read the field. `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
+For `mode`, `result`, and `hero`, under `reader` `ocr-v1` the matcher does not read the field: `value` and `ocr_v1` are the Tesseract read (the same string twice when it exists). Under `reader` `new` the hero is the hero-icon read and the result comes from the result-word evidence, with no Tesseract value behind them; `ocr_v1` then holds the capture path's own value from before that read was merged, not a Tesseract string. `confidence` is `null`. `suspect` is `true` when the tracker would not trust that read, or when the value is `null`.
 
 `system` is optional and only allowed in `bundle_version` 2. The app includes it on every report it writes. It describes the tracker setup, not the person. Every key except `ocr` and `ocr_blocked_calls` is required when the object is present, and unknown keys are invalid:
 

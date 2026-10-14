@@ -363,6 +363,9 @@ pub struct BoardObs {
     /// Growth past the time-scaled ceiling. Stored, and not a baseline.
     pub implausible: bool,
     pub frame_outcome: MatchOutcome,
+    /// `reader = "new"`: the own row is suspect ([`BoardDoubt::suspect_row`]).
+    /// A fresh-match board on such a row never commits a split by itself.
+    pub suspect_row: bool,
 }
 
 /// An observation the machine can accept.
@@ -592,7 +595,21 @@ fn hinted_different_map(input: &CapturePlanInput<'_>) -> bool {
 /// Decide whether this capture closes the session, and which outcome the
 /// landing session stores. The decision is [`transition`].
 pub fn plan_capture(input: &CapturePlanInput<'_>) -> CapturePlan {
-    plan_capture_held(input, [false; GATE_COLS])
+    plan_capture_held(input, BoardDoubt::default())
+}
+
+/// What `reader = "new"` knows about one board beyond its counters. All
+/// false under ocr-v1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoardDoubt {
+    /// Columns this capture has no number for.
+    pub held: [bool; GATE_COLS],
+    /// The own row is suspect (alpha.7 O9): one voice named it where two
+    /// could have, or a weak highlight alone. It may be another player's.
+    pub suspect_row: bool,
+    /// A trusted fresh-match board is already held off this game, to be
+    /// carried onto the next one.
+    pub board_deferred: bool,
 }
 
 /// [`plan_capture`] for a board with cells the reader did not vouch for
@@ -620,9 +637,35 @@ pub fn plan_capture(input: &CapturePlanInput<'_>) -> CapturePlan {
 ///   other, and counts as the first reset signal, but it is not carried
 ///   onto the next session as a row: it has no number for that cell.
 ///
-/// With nothing held and nothing unread this is exactly [`plan_capture`].
-pub fn plan_capture_held(input: &CapturePlanInput<'_>, held: [bool; GATE_COLS]) -> CapturePlan {
+/// # A suspect own row
+///
+/// A suspect own row ([`BoardDoubt::suspect_row`]) may be another player's.
+/// It takes part in the plan like this:
+///
+/// * **It anchors.** On the baseline's own row, or when the game has no
+///   baseline yet, it re-anchors the reset baseline like any identified row.
+///   Without that, a game whose every Tab has a suspect row has no baseline,
+///   no reset can fire for it, and the next game's boards are appended to it
+///   (R3-1). It never moves the baseline to another row.
+/// * **It can say "reset", never alone.** A fresh-match board on a suspect
+///   row is held off the game and counts as a reset signal, but it is not
+///   carried as a row and it does not commit the split by itself: it splits
+///   only after two earlier signals, or when a trusted fresh-match board is
+///   already held ([`BoardDoubt::board_deferred`]). A trusted board splits on
+///   one earlier signal, as before. So one wrong suspect row cannot split a
+///   real game, also not after a hero-select screen primed the streak.
+/// * **It is not progress.** It does not count toward dropping a result
+///   hint.
+///
+/// With nothing held, nothing unread and no suspect row this is exactly
+/// [`plan_capture`].
+pub fn plan_capture_held(input: &CapturePlanInput<'_>, doubt: BoardDoubt) -> CapturePlan {
+    let held = doubt.held;
     let mut state = BoundaryState::new(None);
+    if doubt.board_deferred {
+        // Only its presence is read (`board_effect`), as in `decide_poll`.
+        state.deferred = Some(Counters::default());
+    }
     state.outcome = input.inherited_outcome;
     state.reset_streak = input.streak;
     state.reset_baseline = input.baseline.copied();
@@ -654,7 +697,7 @@ pub fn plan_capture_held(input: &CapturePlanInput<'_>, held: [bool; GATE_COLS]) 
             },
         );
         if let Effect::Split { .. } = &decided.effect {
-            return plan_from_effect(input, held, &decided.effect, false);
+            return plan_from_effect(input, doubt, &decided.effect, false);
         }
     }
 
@@ -674,7 +717,7 @@ pub fn plan_capture_held(input: &CapturePlanInput<'_>, held: [bool; GATE_COLS]) 
             },
         );
         if let Effect::Split { .. } = &decided.effect {
-            return plan_from_effect(input, held, &decided.effect, false);
+            return plan_from_effect(input, doubt, &decided.effect, false);
         }
     }
 
@@ -694,17 +737,19 @@ pub fn plan_capture_held(input: &CapturePlanInput<'_>, held: [bool; GATE_COLS]) 
             progressed,
             implausible,
             frame_outcome: input.frame_outcome,
+            suspect_row: doubt.suspect_row,
         }),
     );
-    plan_from_effect(input, held, &decided.effect, implausible)
+    plan_from_effect(input, doubt, &decided.effect, implausible)
 }
 
 fn plan_from_effect(
     input: &CapturePlanInput<'_>,
-    held: [bool; GATE_COLS],
+    doubt: BoardDoubt,
     effect: &Effect,
     implausible: bool,
 ) -> CapturePlan {
+    let held = doubt.held;
     let stored_if_stay = if input.inherited_outcome.is_decided() {
         input.inherited_outcome
     } else {
@@ -719,14 +764,18 @@ fn plan_from_effect(
     // A different row re-anchors only when the stats continue. A low-total
     // teammate row is fresh-shaped: it is stored, and it neither replaces
     // the baseline nor counts toward the reset streak.
+    // A suspect row anchors its own row's baseline, or the first one. It
+    // does not take the baseline over from another row.
     let refresh = input.row_id.is_some()
         && input.row_counts
         && !implausible
-        && (same_or_unset || !fresh_shaped);
+        && (same_or_unset || (!fresh_shaped && !doubt.suspect_row));
+    // A suspect row is not progress: it may be another player's.
+    let counts = input.row_counts && !doubt.suspect_row;
     // An unidentified or implausible row is stored and leaves a held board
     // where it is. Only a refresh, or a counted progression, ends the streak.
     let counted_progress =
-        input.row_counts && matches!(effect, Effect::CountProgress | Effect::ClearHintAndAppend);
+        counts && matches!(effect, Effect::CountProgress | Effect::ClearHintAndAppend);
     let drop_streak = refresh || counted_progress;
     match effect {
         Effect::Ignore
@@ -741,8 +790,8 @@ fn plan_from_effect(
             defer: false,
             ignore_row: false,
             skip_store: false,
-            clear_hint: matches!(effect, Effect::ClearHintAndAppend) && input.row_counts,
-            count_progress: matches!(effect, Effect::CountProgress) && input.row_counts,
+            clear_hint: matches!(effect, Effect::ClearHintAndAppend) && counts,
+            count_progress: matches!(effect, Effect::CountProgress) && counts,
             reset_streak: if drop_streak { 0 } else { input.streak },
             reset_baseline: if refresh {
                 None
@@ -773,9 +822,11 @@ fn plan_from_effect(
             count_progress: false,
             stored_outcome: stored_if_stay,
             // A board with a held cell is not a row: `input.cur` has the
-            // previous game's number in that column. It still counts as the
-            // first reset signal; nothing is carried onto the next session.
-            deferred_counters: (!held.iter().any(|&cell| cell)).then_some(input.cur),
+            // previous game's number in that column. A suspect row may be
+            // another player's. Either still counts as a reset signal;
+            // nothing is carried onto the next session.
+            deferred_counters: (!held.iter().any(|&cell| cell) && !doubt.suspect_row)
+                .then_some(input.cur),
             seal: None,
             close_reason: None,
         },
@@ -1183,7 +1234,15 @@ fn end_screen(state: &BoundaryState, phase: Phase, outcome: MatchOutcome) -> Eff
 
 fn board_effect(state: &BoundaryState, _phase: Phase, board: &BoardObs) -> Effect {
     if board.fresh_reset {
-        if state.reset_streak >= 1 || state.pending_boundary {
+        // A trusted board splits on one earlier signal. A suspect row needs
+        // two, or a trusted fresh board already held: it never commits the
+        // split by itself (`plan_capture_held`).
+        let commits = if board.suspect_row {
+            state.reset_streak >= 2 || state.deferred.is_some()
+        } else {
+            state.reset_streak >= 1 || state.pending_boundary
+        };
+        if commits {
             return Effect::Split {
                 reason: CloseReason::StatReset,
                 seal: sealable_hint(state),
@@ -1746,7 +1805,112 @@ mod tests {
         age_secs: u64,
     ) -> CapturePlan {
         // main passes the held cells as the suspect mask
-        plan_capture_held(&held_input(prev, cur, held, age_secs), held)
+        plan_capture_held(
+            &held_input(prev, cur, held, age_secs),
+            BoardDoubt {
+                held,
+                ..BoardDoubt::default()
+            },
+        )
+    }
+
+    /// A board on a suspect own row against `prev`, with `streak` earlier
+    /// reset signals and maybe a trusted fresh board already held.
+    fn suspect_plan(
+        prev: &GateState,
+        cur: Counters,
+        row: u32,
+        streak: u32,
+        board_deferred: bool,
+    ) -> CapturePlan {
+        let mut input = held_input(prev, cur, CLEAN, 60);
+        input.row_id = Some(row);
+        input.streak = streak;
+        plan_capture_held(
+            &input,
+            BoardDoubt {
+                suspect_row: true,
+                board_deferred,
+                ..BoardDoubt::default()
+            },
+        )
+    }
+
+    /// R3-1: a suspect own row anchors the reset baseline, and can say
+    /// "reset" but never commit the split alone.
+    #[test]
+    fn a_suspect_row_anchors_the_baseline_and_never_splits_alone() {
+        let prev = gate(counters(30, 12, 9, 14000, 5000, 900));
+        // the game goes on, on the baseline's row: the baseline moves along
+        let on = suspect_plan(&prev, counters(31, 12, 9, 14400, 5100, 900), 0, 0, false);
+        assert!(on.refresh_baseline && !on.skip_store, "{on:?}");
+        // a game with no baseline yet gets one from a suspect row
+        let mut first = held_input(&prev, counters(31, 12, 9, 14400, 5100, 900), CLEAN, 60);
+        first.baseline = None;
+        first.baseline_row = None;
+        let doubt = BoardDoubt {
+            suspect_row: true,
+            ..BoardDoubt::default()
+        };
+        let plan = plan_capture_held(&first, doubt);
+        assert!(plan.refresh_baseline, "{plan:?}");
+        assert_eq!(plan.baseline_row, Some(0));
+        // another row's numbers do not take the baseline over (a trusted
+        // row that continues does)
+        let other = suspect_plan(&prev, counters(34, 14, 10, 15000, 0, 2000), 1, 0, false);
+        assert!(!other.refresh_baseline && !other.skip_store, "{other:?}");
+        assert_eq!(other.baseline_row, Some(0));
+        let mut trusted = held_input(&prev, counters(34, 14, 10, 15000, 0, 2000), CLEAN, 60);
+        trusted.row_id = Some(1);
+        assert!(plan_capture(&trusted).refresh_baseline);
+
+        // a fresh-match board on the baseline's row: a reset signal, held
+        // off the game, not carried
+        let fresh = counters(1, 0, 0, 300, 100, 0);
+        let one = suspect_plan(&prev, fresh, 0, 0, false);
+        assert!(one.defer && one.skip_store && !one.split, "{one:?}");
+        assert_eq!((one.reset_streak, one.deferred_counters), (1, None));
+        // one earlier signal (a second suspect board, or a hero select that
+        // primed the streak) is still not enough for a suspect row...
+        let two = suspect_plan(&prev, fresh, 0, 1, false);
+        assert!(two.defer && !two.split, "{two:?}");
+        assert_eq!(two.reset_streak, 2);
+        // ...where a trusted row splits
+        let mut sure = held_input(&prev, fresh, CLEAN, 60);
+        sure.streak = 1;
+        assert!(plan_capture(&sure).split);
+        // two earlier signals, or a trusted fresh board already held: split
+        assert!(suspect_plan(&prev, fresh, 0, 2, false).split);
+        assert!(suspect_plan(&prev, fresh, 0, 1, true).split);
+        assert!(suspect_plan(&prev, fresh, 0, 0, true).split);
+        // on another row a fresh-shaped suspect board is no signal at all
+        let stray = suspect_plan(&prev, fresh, 1, 2, true);
+        assert!(
+            !stray.split && !stray.defer && !stray.refresh_baseline,
+            "{stray:?}"
+        );
+    }
+
+    /// A suspect row is not progress: two of them do not drop a result hint.
+    #[test]
+    fn a_suspect_row_does_not_count_as_progress() {
+        let prev = gate(counters(30, 12, 9, 14000, 5000, 900));
+        let cur = counters(31, 12, 9, 14400, 5100, 900);
+        let mut input = held_input(&prev, cur, CLEAN, 60);
+        input.hint = Some(MatchOutcome::Defeat);
+        input.progressed_boards = 1;
+        let sure = plan_capture(&input);
+        assert!(sure.clear_hint, "{sure:?}");
+        let doubt = BoardDoubt {
+            suspect_row: true,
+            ..BoardDoubt::default()
+        };
+        let suspect = plan_capture_held(&input, doubt);
+        assert!(
+            !suspect.clear_hint && !suspect.count_progress,
+            "{suspect:?}"
+        );
+        assert!(suspect.refresh_baseline, "it still anchors");
     }
 
     /// F266-2: a held cell abstains from the reset, it does not veto it.
@@ -3275,6 +3439,7 @@ mod tests {
             progressed,
             implausible: false,
             frame_outcome: frame,
+            suspect_row: false,
         }
     }
 
@@ -3295,6 +3460,7 @@ mod tests {
             progressed: false,
             implausible: true,
             frame_outcome: MatchOutcome::Unknown,
+            suspect_row: false,
         };
         let gap = Obs::Gap {
             frame_outcome: MatchOutcome::Defeat,
