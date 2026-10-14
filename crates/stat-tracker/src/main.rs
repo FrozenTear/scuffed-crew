@@ -20135,6 +20135,100 @@ mod tests {
         assert_eq!(ctx.store.match_count().await.unwrap(), 2);
     }
 
+    /// R2-1 of the #266 review, and what S1 decides for it. A game is left
+    /// pending under the new reader (healing never read), the member turns
+    /// classic OCR back on with `reader = "ocr-v1"` in the file, restarts,
+    /// and the game is resumed. `active_game.json` has no reader tag, so the
+    /// ocr-v1 run finds a gate state only the new reader writes.
+    ///
+    /// The decision: the saved state is honoured as it is. The unread column
+    /// is neither cleared on load nor ignored under ocr-v1, because either
+    /// would let the placeholder 0 be stored as a number.
+    ///
+    /// * A Tab on which another column drops: the first read of healing is
+    ///   not taken and no row is written. (A game that was ocr-v1 from its
+    ///   start stores that Tab. This is the one way an ocr-v1 run holds a
+    ///   board on gate state.)
+    /// * The first Tab with no drop: OCR's number is the column's first
+    ///   read, the row is written, and nothing on it is flagged.
+    #[tokio::test]
+    async fn a_pending_game_resumed_under_ocr_v1_keeps_its_unread_column() {
+        async fn ocr_v1_tab(
+            ctx: &DaemonCtx,
+            st: &mut SessionState,
+            cells: [u32; 6],
+            now: Instant,
+        ) -> bool {
+            let mut analysis = o8_analysis(None, Some("ana"));
+            for row in &mut analysis.rows {
+                for (cell, value) in row.stats.iter_mut().zip(cells) {
+                    cell.value = value.to_string();
+                }
+            }
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+                analysis,
+                board: None,
+            });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let sid = req.session_id.clone();
+            let report = handle_capture(ctx, req).await.unwrap();
+            assert!(!report.split, "the Tab must stay on this game");
+            let recorded = report.recorded;
+            apply_capture_report(st, &ctx.store, &ctx.data_dir, &sid, Ok(report), now).await;
+            recorded
+        }
+
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = o8_ctx(dir.path(), true).await;
+        let pending = [
+            sure(12),
+            sure(5),
+            sure(3),
+            sure(3500),
+            Some((7000, true)),
+            sure(450),
+        ];
+        let (mut st, seen) = o10_run(&ctx, vec![(0, pending)]).await;
+        assert!(seen[0].pending, "{:?}", seen[0]);
+
+        // What the restart finds on disk: the gate, and no word of which
+        // reader wrote it.
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(active_game_path(dir.path())).unwrap()).unwrap();
+        assert_eq!(persisted.get("reader"), None);
+        let saved: capture_gate::GateState =
+            serde_json::from_value(persisted["gate"].clone()).unwrap();
+        assert_eq!(saved.unread_cols(), vec!["h"]);
+        st.active_game.as_mut().unwrap().gate = Some(saved);
+
+        // The restart: classic OCR on, `reader = "ocr-v1"`.
+        ctx.use_new_reader = false;
+        let now = test_now() + Duration::from_secs(20);
+
+        // Damage reads below the accepted 3500 on this Tab.
+        let recorded = ocr_v1_tab(&ctx, &mut st, [13, 5, 3, 3400, 7300, 450], now).await;
+        assert!(!recorded, "healing's first read is not taken on a drop");
+        assert_eq!(ctx.store.match_count().await.unwrap(), 0, "no row");
+        let gate = st.active_game.as_ref().unwrap().gate.expect("the gate");
+        assert_eq!(gate.unread_cols(), vec!["h"], "still unread");
+
+        // No drop: the column is read, and the row is OCR's.
+        let now = now + Duration::from_secs(20);
+        let recorded = ocr_v1_tab(&ctx, &mut st, [14, 5, 3, 3700, 7400, 450], now).await;
+        assert!(recorded);
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(o10_stats(&rows[0]), [14, 5, 3, 3700, 7400, 450]);
+        assert!(
+            rows[0].suspect_fields.is_empty(),
+            "{:?}",
+            rows[0].suspect_fields
+        );
+        let gate = st.active_game.as_ref().unwrap().gate.expect("the gate");
+        assert!(gate.unread_cols().is_empty());
+    }
+
     /// F266-2, the reviewer's trace through `handle_capture`: game 1 has one
     /// Tab with healing held, its end is missed, and game 2's first Tab
     /// comes 60 s later with every cell sure. That board used to be appended

@@ -149,10 +149,14 @@ pub(crate) const CLASSIC_OCR_LABEL: &str = "Use classic OCR (Tesseract)";
 
 /// The hint while this tracker version can turn classic OCR off. It says
 /// what the member gives up: the map on the scoreboard has no second reader.
+/// That has two effects, and both are named: the map is missing more often,
+/// and a co-op event board is told apart only when its map name is read
+/// sure.
 pub(crate) const CLASSIC_OCR_HINT: &str = "\
 Tesseract is the classic text reader. Off: the tracker reads the game with its own reader \
 and does not start Tesseract. With classic OCR off the map can be missing more often, \
-mostly at 1080p.";
+mostly at 1080p, and a co-op event scoreboard (Junkenstein) can be saved as a game when \
+its map name is not read.";
 
 /// The hint while this tracker version still needs classic OCR for a read:
 /// no build of it turns the switch off, so nothing is promised.
@@ -2897,6 +2901,13 @@ token = \"not-a-real-token\"
         // where the member decides, the cost of off is said
         assert!(
             CLASSIC_OCR_HINT.contains("the map can be missing more often, mostly at 1080p"),
+            "{CLASSIC_OCR_HINT}"
+        );
+        assert!(
+            CLASSIC_OCR_HINT.contains(
+                "a co-op event scoreboard (Junkenstein) can be saved as a game when its map \
+                 name is not read"
+            ),
             "{CLASSIC_OCR_HINT}"
         );
         let cannot = ocr_hint_lines(&[OcrRead::StatCells]);
