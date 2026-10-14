@@ -35,14 +35,20 @@ pub enum FinalScoreSource {
     Ocr,
     /// The words-v1 `p4_final_score` template (`reader = "new"`). Only a
     /// sure read is a signal; a suspect or absent read is not, and no OCR
-    /// runs. Without that template loaded the line is read with OCR.
+    /// runs. Without that template loaded the line is read with OCR, unless
+    /// OCR is off (`ocr = "off"`): then the line is not read at all.
     ///
     /// Since alpha.7 O2 the daemon reaches this only on the fallback: the
     /// FINAL SCORE line opens the gate of the end-title OCR, and `reader =
     /// "new"` runs that OCR only while no end-title templates are loaded
     /// ([`Titles`]). With them loaded the end title is the words-v1 read,
-    /// which has no gate, and this template is not read. Whether to delete
-    /// it is lane S1's call.
+    /// which has no gate, and this template is not read.
+    ///
+    /// Kept (lane S1's call): with OCR on and a word pack from before the
+    /// end titles, it is still what keeps Tesseract off the FINAL SCORE
+    /// line. With OCR off that fallback does not exist, so the template is
+    /// not read at all and the switch does not ask for it
+    /// (`ocr_switch::PackGroup`).
     Words,
 }
 
@@ -66,10 +72,16 @@ pub enum Titles {
     /// = "new"` while no end-title templates are loaded (no words-v1 pack,
     /// or one without an `end_title` VICTORY and DEFEAT pair): the same
     /// reads main makes, logged once per process
-    /// ([`warn_end_title_ocr_fallback`]). S1 holds that fallback when OCR
-    /// is off.
+    /// ([`warn_end_title_ocr_fallback`]). With OCR off that fallback is
+    /// [`Titles::Held`] instead.
     #[default]
     Ocr,
+    /// `reader = "new"` with classic OCR off and no end-title templates
+    /// loaded: neither title is read. The end title is no outcome and the
+    /// title card is no wake, and no OCR call is made. The switch does not
+    /// grant off without the templates, so this is a pack that went away
+    /// while the tracker runs (`ocr_switch::PackGroup::EndTitles`).
+    Held,
     /// `reader = "new"` with end-title templates loaded: no OCR. This is
     /// the frame's words-v1 end-title read (`shadow::read_end_title`). Only
     /// a sure read counts: a flagged read and a frame with no word are "no
@@ -104,8 +116,10 @@ impl Titles {
         }
         match words(rgb) {
             Some(read) => Titles::Words(read),
-            // S1 (OCR off) must close this: under `reader = "new"` with no
-            // end-title templates loaded, P3 and P5 still run Tesseract.
+            // No end-title templates are loaded. With OCR off there is no
+            // OCR to fall back to: both titles are held.
+            None if crate::ocr::gate::is_off() => Titles::Held,
+            // With OCR on, P3 and P5 run Tesseract, as on main.
             None => {
                 warn_end_title_ocr_fallback();
                 Titles::Ocr
@@ -132,7 +146,7 @@ impl Titles {
     fn sure_end_title(&self) -> Option<Outcome> {
         match self {
             Titles::Words(read) => read.sure(),
-            Titles::Ocr => None,
+            Titles::Ocr | Titles::Held => None,
         }
     }
 }
@@ -291,10 +305,14 @@ impl ResultWords {
 /// Under `reader = "new"`, a result word fell back to OCR because the
 /// loaded templates cannot name its screen (no words-v1 pack yet, or one
 /// without that screen's VICTORY and DEFEAT). Logged once per screen and
-/// process; S1 (OCR off) is to forbid the fallback. Returns whether this
+/// process. With classic OCR off there is no such fallback (the word is
+/// held in [`read_outcome_word`]) and no such line. Returns whether this
 /// call logged (tests).
 fn warn_result_word_ocr_fallback(screen: ResultScreen) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
+    if crate::ocr::gate::is_off() {
+        return false;
+    }
     static WARNED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
     let first = !WARNED[screen as usize].swap(true, Ordering::Relaxed);
     if first {
@@ -407,7 +425,8 @@ fn detect_outcome_signal_inner(
             Some(stability) => polled_end_title(stability, read),
             None => end_title_from_words(read),
         }),
-        Titles::Ocr => None,
+        // Held is settled in `read_end_title`, which reads nothing for it.
+        Titles::Ocr | Titles::Held => None,
     };
     if let Some(outcome) = detect_banner(rgb) {
         return Some((outcome, OutcomeSource::Banner));
@@ -490,6 +509,11 @@ fn read_end_title(
 ) -> MatchOutcome {
     if let Titles::Words(read) = titles {
         return end_title_from_words(read);
+    }
+    if matches!(titles, Titles::Held) {
+        // OCR is off and no end-title templates are loaded: no gate, no
+        // FINAL SCORE read, no OCR.
+        return MatchOutcome::Unknown;
     }
     let mass = center_title_mass(rgb);
     let scoreline = mass < END_TITLE_MASS_MIN
@@ -753,7 +777,8 @@ fn scoreline_looks_present(
 
 /// Under `reader = "new"`, P4 fell back to OCR because no
 /// `p4_final_score` template is loaded (an older words-v1 pack, or none
-/// yet). Logged once per process (F257-1); S1 is to forbid the fallback.
+/// yet). Logged once per process (F257-1). With OCR off the fallback never
+/// runs (see [`scoreline_looks_present_with`]).
 /// Returns whether this call logged (tests).
 fn warn_final_score_ocr_fallback() -> bool {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -769,7 +794,9 @@ fn warn_final_score_ocr_fallback() -> bool {
 
 /// [`scoreline_looks_present`] with the words-v1 read as an argument
 /// (tests). `words` is called only for [`FinalScoreSource::Words`]; `None`
-/// from it (no template loaded) falls back to the OCR read.
+/// from it (no template loaded) falls back to the OCR read while OCR is on.
+/// With OCR off ([`crate::ocr::gate`]) there is no fallback: the line is not
+/// read, P4 is not a signal, and no OCR call is made.
 fn scoreline_looks_present_with(
     img: &DynamicImage,
     rgb: &RgbImage,
@@ -814,8 +841,11 @@ fn scoreline_looks_present_with(
                 tracing::trace!(?read, "final score line (words-v1)");
                 return read.is_signal();
             }
-            // S1 (OCR off) must close this: under `reader = "new"` with no
-            // p4_final_score template loaded, P4 still runs Tesseract below.
+            // No p4_final_score template is loaded. OCR off: hold. The
+            // out-of-date words pack is what the switch reports
+            // (`ocr_switch::PackProblem::WordsLackEndTitles`: a pack without the end titles).
+            None if crate::ocr::gate::is_off() => return false,
+            // OCR on: under `reader = "new"` P4 still runs Tesseract below.
             None => {
                 warn_final_score_ocr_fallback();
             }
@@ -1557,6 +1587,14 @@ fn read_outcome_word(
     };
     if let Some(outcome) = words.word_on(at, rgb) {
         return outcome;
+    }
+    // The loaded templates cannot name this screen. Under the new reader
+    // with classic OCR off there is no OCR to read the crop: the word is
+    // held, and the OCR read is not asked for. The switch does not grant
+    // off without both screens' words, so this is a pack that went away
+    // (`ocr_switch::PackGroup::ResultWords`).
+    if words.from_words() && crate::ocr::gate::is_off() {
+        return MatchOutcome::Unknown;
     }
     ocr_outcome_word(&crop, at.context)
 }
@@ -2845,6 +2883,213 @@ mod tests {
             FinalScoreSource::Words,
             |_| Some(FinalScoreRead::Sure(0.9))
         ));
+    }
+
+    /// A 1440p frame with FINAL SCORE in white on the P4 line.
+    fn final_score_frame() -> (DynamicImage, RgbImage) {
+        let (_, mut rgb) = scoreline_frame(false);
+        let label = crate::ocr::map_label_fixtures::draw_label("FINAL SCORE", 250).to_rgb8();
+        // P4's crop is x 768..1792, y 1051..1166 at 1440p.
+        for (x, y, px) in label.enumerate_pixels().filter(|(x, ..)| *x < 520) {
+            rgb.put_pixel(1270 + x, 1066 + y, *px);
+        }
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// With OCR on, `reader = "new"` without a template reads the line with
+    /// OCR and gets what ocr-v1 gets (F257-10: the fallback in its positive
+    /// direction).
+    #[test]
+    fn without_a_template_the_ocr_fallback_reads_the_line_while_ocr_is_on() {
+        let (img, rgb) = final_score_frame();
+        assert!(
+            scoreline_looks_present_with(&img, &rgb, None, FinalScoreSource::Ocr, never),
+            "ocr-v1 reads FINAL SCORE on the synthetic line"
+        );
+        assert!(scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| None
+        ));
+    }
+
+    /// With classic OCR off, a result word the loaded templates cannot name
+    /// is held: no outcome, and the OCR read behind it is not asked for.
+    /// With OCR on the same frame falls back to OCR, as #270 left it.
+    #[test]
+    fn with_ocr_off_a_result_word_the_templates_cannot_name_is_held() {
+        // White bars where the accolade screen and the rank screen print
+        // the word: both title crops pass their gate.
+        let mut rgb = RgbImage::from_pixel(1920, 1080, Rgb([16, 25, 50]));
+        for (x0, y0, x1, y1) in [(40, 45, 400, 95), (40, 165, 400, 235)] {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    rgb.put_pixel(x, y, Rgb([250, 250, 250]));
+                }
+            }
+        }
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        // The new reader with no result templates loaded.
+        let no_templates = || {
+            ResultWords::with_reader(WordsReader {
+                screens: ResultScreens::default,
+                read: |_| None,
+            })
+        };
+        let read = |words: &ResultWords| {
+            detect_outcome_signal_inner(
+                &img,
+                &rgb,
+                None,
+                FinalScoreSource::Words,
+                &Titles::Held,
+                words,
+            )
+        };
+
+        // OCR on: each screen's word is read with OCR.
+        let before = ocr_calls();
+        let _ = read(&no_templates());
+        assert_eq!(ocr_calls() - before, 2, "both screens reach OCR");
+
+        let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+        let before = ocr_calls();
+        assert_eq!(read(&no_templates()), None);
+        assert_eq!(ocr_calls(), before, "no Tesseract read");
+        assert_eq!(
+            off.blocked(),
+            [],
+            "the result word was not asked of OCR under the new reader"
+        );
+        // ocr-v1's own read is not held by this: it is stopped at the gate.
+        assert_eq!(read(&ResultWords::ocr()), None);
+        assert_eq!(off.blocked_total(), 2);
+    }
+
+    /// With OCR off and no end-title templates loaded the titles are held:
+    /// the end title is no outcome, the title card is no wake, and nothing
+    /// is sent to OCR, not even to the gate. With OCR on the same frames
+    /// fall back to OCR, as on main.
+    #[test]
+    fn with_ocr_off_and_no_end_title_templates_both_titles_are_held() {
+        let none = |_: &RgbImage| None::<ResultRead>;
+        // a frame with the end title's colour mass, and a title card
+        let mut title = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        for y in 126..180 {
+            for x in 192..448 {
+                title.put_pixel(x, y, Rgb([220, 40, 220]));
+            }
+        }
+        let title_img = DynamicImage::ImageRgb8(title.clone());
+        let mut card = RgbImage::from_pixel(640, 360, Rgb([12, 12, 12]));
+        for y in 36..100 {
+            for x in (80..560).step_by(3) {
+                card.put_pixel(x, y, Rgb([220, 220, 220]));
+            }
+        }
+        let card_img = DynamicImage::ImageRgb8(card.clone());
+
+        // OCR on: the fallback, and both frames reach Tesseract.
+        assert_eq!(Titles::for_rgb_with(true, &title, none), Titles::Ocr);
+        let before = ocr_calls();
+        let _ = read_end_title(
+            &title_img,
+            &title,
+            None,
+            FinalScoreSource::Words,
+            &Titles::Ocr,
+        );
+        assert_eq!(ocr_calls() - before, 1, "the end title frame reaches OCR");
+        let before = ocr_calls();
+        let _ = detect_end_reel_with(&card_img, &card, &Titles::Ocr);
+        assert_eq!(ocr_calls() - before, 1, "the title card reaches OCR");
+
+        let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+        let before = ocr_calls();
+        for (img, rgb) in [(&title_img, &title), (&card_img, &card)] {
+            assert_eq!(Titles::for_rgb_with(true, rgb, none), Titles::Held);
+            assert_eq!(Titles::for_frame_with(true, img, none), Titles::Held);
+            let held = Titles::Held;
+            assert_eq!(held.sure_end_title(), None);
+            assert_eq!(
+                read_end_title(img, rgb, None, FinalScoreSource::Words, &held),
+                MatchOutcome::Unknown
+            );
+            assert_eq!(
+                detect_outcome_text_with(img, FinalScoreSource::Words, &held),
+                MatchOutcome::Unknown
+            );
+            let mut st = FrameStability::default();
+            for _ in 0..2 {
+                let _ = detect_outcome_signal_polled(
+                    img,
+                    rgb,
+                    &mut st,
+                    FinalScoreSource::Words,
+                    &held,
+                    &ResultWords::ocr(),
+                );
+            }
+            assert!(!detect_end_reel_with(img, rgb, &held), "no wake");
+        }
+        // Nothing of the end title or the title card went to the gate. (The
+        // result word reads of the polled signal are another read's.)
+        assert_eq!(ocr_calls(), before, "no Tesseract read");
+        assert!(
+            off.blocked()
+                .iter()
+                .all(|b| b.site.entry != "recognize_prepared_lang"),
+            "the end title was not asked for: {:?}",
+            off.blocked()
+        );
+        // With the templates loaded the words read decides, also with OCR off.
+        let read = read_of(Some(Outcome::Defeat), false);
+        assert_eq!(
+            Titles::for_rgb_with(true, &title, |_| Some(read.clone())),
+            Titles::Words(read)
+        );
+        // ocr-v1 is not held by this: it reads with OCR, and is blocked.
+        assert_eq!(Titles::for_rgb_with(false, &title, none), Titles::Ocr);
+    }
+
+    /// With OCR off there is no fallback: no template means the line is not
+    /// read, and the OCR entry point is not even called.
+    #[test]
+    fn with_ocr_off_a_missing_template_holds_and_never_calls_ocr() {
+        let (img, rgb) = final_score_frame();
+        let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| None
+        ));
+        assert_eq!(
+            off.blocked(),
+            [],
+            "the fallback is not attempted, so nothing reaches the gate"
+        );
+        // a loaded template still decides, with OCR off
+        assert!(scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Words,
+            |_| Some(FinalScoreRead::Sure(0.9))
+        ));
+        assert_eq!(off.blocked_total(), 0);
+        // ocr-v1's own read is blocked at the gate and is not a signal
+        assert!(!scoreline_looks_present_with(
+            &img,
+            &rgb,
+            None,
+            FinalScoreSource::Ocr,
+            never
+        ));
+        assert_eq!(off.blocked_total(), 1);
     }
 
     /// Under `reader = "new"`, a P4 that falls back to OCR (no template) is

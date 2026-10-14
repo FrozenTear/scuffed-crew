@@ -11,7 +11,7 @@ use super::bundle::{self, LogOnlyCategory, LogReportInput, Resolution, SessionTy
 use super::marker::LastExit;
 use super::scrub::{LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
-use crate::config::ReaderSetting;
+use crate::config::{OcrSetting, ReaderSetting};
 
 const TOKEN: &str = "sct_FAKEsyncTOKEN0123456789abcdef";
 const BEARER_SECRET: &str = "qxBearerSecret42";
@@ -55,6 +55,8 @@ fn system() -> SystemInfo {
         cpu_threads: 16,
         ocr_threads: 4,
         reader: ReaderSetting::New,
+        ocr: OcrSetting::On,
+        ocr_blocked_calls: Vec::new(),
         shadow_recognizer: false,
         prerelease: true,
         daemon_running: true,
@@ -424,6 +426,254 @@ fn check_log_only_manifest(m: &Value) {
     assert!(f["bytes"].as_u64().unwrap() > 0);
     assert_eq!(f["role"], "log");
     assert!(f["screen_class"].is_null());
+}
+
+/// The OCR switch in `system`: nothing with classic OCR on (the object a
+/// site from before the switch accepts), `ocr` and the blocked calls per
+/// call site with it off. Both forms pass the site's validator.
+#[test]
+fn system_reports_the_ocr_switch_only_when_classic_ocr_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    let window = || LogWindow::log_only(t("2026-10-09T12:06:00Z"));
+    let manifest = |system: SystemInfo| -> Value {
+        let mut inp = input(dir.path(), window());
+        inp.system = system;
+        let json = bundle::build_log_report(&inp).unwrap().manifest_json;
+        scuffed_types::stat_report::parse_bundle_manifest(json.as_bytes())
+            .expect("the site's validator takes the manifest");
+        serde_json::from_str(&json).unwrap()
+    };
+    let sites = || {
+        vec![
+            ("detect/match_end.rs:1133 recognize_prepared".to_string(), 7),
+            ("main.rs:3966 recognize".to_string(), 2),
+        ]
+    };
+
+    let on = manifest(SystemInfo {
+        // sites left over from an earlier run with OCR off are not sent
+        ocr_blocked_calls: sites(),
+        ..system()
+    });
+    assert_eq!(keys(&on["system"]), sorted(SYSTEM_KEYS));
+
+    let off = manifest(SystemInfo {
+        ocr: OcrSetting::Off,
+        ocr_blocked_calls: sites(),
+        ..system()
+    });
+    let mut with_switch: Vec<&str> = SYSTEM_KEYS.to_vec();
+    with_switch.extend(["ocr", "ocr_blocked_calls"]);
+    assert_eq!(keys(&off["system"]), sorted(&with_switch));
+    assert_eq!(off["system"]["ocr"], "off");
+    assert_eq!(
+        off["system"]["ocr_blocked_calls"],
+        serde_json::json!({
+            "detect/match_end.rs:1133 recognize_prepared": 7,
+            "main.rs:3966 recognize": 2
+        })
+    );
+    assert_eq!(off["system"]["reader"], on["system"]["reader"]);
+
+    // OCR off and nothing blocked: the map is there and empty.
+    let clean = manifest(SystemInfo {
+        ocr: OcrSetting::Off,
+        ..system()
+    });
+    assert_eq!(clean["system"]["ocr_blocked_calls"], serde_json::json!({}));
+}
+
+/// The report takes the switch from a status file the tracker's daemon
+/// wrote, never from the config value, and reports the reader in use.
+#[test]
+fn system_collects_the_ocr_switch_from_the_daemon_status() {
+    use crate::ocr_switch::{self, Status, StatusSite};
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config {
+        data_dir: dir.path().to_path_buf(),
+        ..crate::config::Config::default()
+    };
+    let collect =
+        |config: &crate::config::Config| SystemInfo::collect(config, CaptureBackend::None, false);
+    let none = collect(&config);
+    assert_eq!(none.ocr, OcrSetting::On);
+    assert!(none.ocr_blocked_calls.is_empty());
+    // `ocr = "off"` in the file, and no daemon ever wrote a status (an
+    // older daemon, or a refusal nobody recorded): not reported as off.
+    config.ocr = OcrSetting::Off;
+    let from_config = collect(&config);
+    assert_eq!(from_config.ocr, OcrSetting::On, "the config value alone");
+    assert_eq!(from_config.reader, ReaderSetting::OcrV1);
+
+    let status = |pid, effective, sites: &[(&str, u64)]| Status {
+        pid,
+        requested: OcrSetting::Off,
+        effective,
+        refusal: None,
+        packs: None,
+        blocked_total: sites.iter().map(|(_, n)| n).sum(),
+        blocked: sites
+            .iter()
+            .map(|(site, count)| StatusSite {
+                site: site.to_string(),
+                count: *count,
+            })
+            .collect(),
+        leptess_created: 0,
+    };
+    // The daemon refused off (a pack was missing): what ran was on.
+    ocr_switch::write_status(dir.path(), &status(1, OcrSetting::On, &[])).unwrap();
+    let refused = collect(&config);
+    assert_eq!(refused.ocr, OcrSetting::On);
+    assert_eq!(
+        refused.reader,
+        ReaderSetting::OcrV1,
+        "the file's reader ran"
+    );
+    // It ran with OCR off: off, the new reader, and the sites, busiest first.
+    let sites = [("main.rs:1 recognize", 3), ("main.rs:9 recognize_cell", 17)];
+    ocr_switch::write_status(dir.path(), &status(1, OcrSetting::Off, &sites)).unwrap();
+    let off = collect(&config);
+    assert_eq!(off.ocr, OcrSetting::Off);
+    assert_eq!(
+        off.reader,
+        ReaderSetting::New,
+        "off implies the new reader, whatever `reader` says"
+    );
+    assert_eq!(
+        off.ocr_blocked_calls,
+        [
+            ("main.rs:9 recognize_cell".to_string(), 17),
+            ("main.rs:1 recognize".to_string(), 3)
+        ]
+    );
+
+    // With a daemon running, only the file that daemon wrote counts.
+    let written = ocr_switch::read_status(dir.path());
+    let used = |running, pid| bundle::switch_for_report(written.clone(), running, pid).is_some();
+    assert!(used(false, None), "no daemon: the last run's file");
+    assert!(used(true, Some(1)), "this daemon's file");
+    assert!(!used(true, Some(2)), "another run's file");
+    assert!(!used(true, None), "a daemon without a pid file");
+    assert!(bundle::switch_for_report(None, false, None).is_none());
+
+    assert!(bundle::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
+}
+
+/// Whatever the status file holds, the call sites a report sends pass the
+/// site's validator: a populated map, an empty one, more than 64 sites, a
+/// key with an absolute path, free text, an over-long key, the same key
+/// twice and a count above `u32`.
+#[test]
+fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
+    use crate::ocr_switch::{Status, StatusSite};
+    use scuffed_types::stat_report::{OCR_BLOCKED_SITE_MAX_BYTES, is_ocr_call_site};
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    let status = |sites: &[(String, u64)]| Status {
+        pid: 1,
+        requested: OcrSetting::Off,
+        effective: OcrSetting::Off,
+        refusal: None,
+        packs: None,
+        blocked_total: sites
+            .iter()
+            .map(|(_, n)| n)
+            .fold(0, |a, n| a.saturating_add(*n)),
+        blocked: sites
+            .iter()
+            .map(|(site, count)| StatusSite {
+                site: site.clone(),
+                count: *count,
+            })
+            .collect(),
+        leptess_created: 0,
+    };
+    // The manifest a report with these sites carries, through the validator.
+    let sent = |sites: &[(String, u64)]| -> Value {
+        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
+        inp.system = SystemInfo {
+            ocr: OcrSetting::Off,
+            ocr_blocked_calls: bundle::blocked_sites(&status(sites)),
+            ..system()
+        };
+        let json = bundle::build_log_report(&inp).unwrap().manifest_json;
+        scuffed_types::stat_report::parse_bundle_manifest(json.as_bytes())
+            .expect("the site's validator takes the manifest");
+        let manifest: Value = serde_json::from_str(&json).unwrap();
+        manifest["system"]["ocr_blocked_calls"].clone()
+    };
+    let site = |key: &str, count: u64| (key.to_string(), count);
+
+    assert_eq!(sent(&[]), serde_json::json!({}), "nothing blocked");
+    assert_eq!(
+        sent(&[
+            site("detect/match_end.rs:1133 recognize_prepared", 7),
+            site("other.rs:1 recognize", 2)
+        ]),
+        serde_json::json!({
+            "detect/match_end.rs:1133 recognize_prepared": 7,
+            "other.rs:1 recognize": 2
+        })
+    );
+
+    // Keys the site refuses. Each alone would make the report a 400.
+    let over_long = format!("{}.rs:1 x", "a".repeat(OCR_BLOCKED_SITE_MAX_BYTES));
+    let refused = [
+        "/home/alice/github/scuffed-crew/crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+        "crates/stat-tracker/src/main.rs:3966 recognize_prepared",
+        "PLAYER said hi",
+        "player",
+        "main.rs:0 recognize",
+        "",
+        over_long.as_str(),
+    ];
+    for key in refused {
+        assert!(!is_ocr_call_site(key), "{key:?}");
+        assert_eq!(
+            sent(&[site(key, 5), site("main.rs:1 recognize", 3)]),
+            serde_json::json!({ "main.rs:1 recognize": 3 }),
+            "{key:?} is left out and the rest goes"
+        );
+    }
+
+    // More than 64 sites, with the odd ones among them.
+    let mut many: Vec<(String, u64)> = (1..=100u64)
+        .map(|i| (format!("main.rs:{i} recognize"), 1000 - i))
+        .collect();
+    many.extend(refused.iter().map(|key| site(key, 5000)));
+    many.push(site("main.rs:7 recognize_cell", u64::from(u32::MAX) + 9));
+    many.push(site("detect/match_end.rs:1133 recognize_prepared", 4000));
+    many.push(site("detect/match_end.rs:1133 recognize_prepared", 500));
+    let capped = bundle::blocked_sites(&status(&many));
+    assert_eq!(capped.len(), bundle::OCR_BLOCKED_SITES_MAX);
+    assert_eq!(
+        capped[0],
+        ("main.rs:7 recognize_cell".to_string(), u32::MAX),
+        "a count above u32 is sent as the largest u32"
+    );
+    assert_eq!(
+        capped[1],
+        (
+            "detect/match_end.rs:1133 recognize_prepared".to_string(),
+            4500
+        ),
+        "the same key twice is one site"
+    );
+    assert_eq!(capped[2], ("main.rs:1 recognize".to_string(), 999));
+    assert_eq!(
+        capped[63],
+        ("main.rs:62 recognize".to_string(), 938),
+        "the 64 largest counts are kept"
+    );
+    assert!(capped.iter().all(|(key, _)| is_ocr_call_site(key)));
+    let map = sent(&many);
+    assert_eq!(
+        map.as_object().unwrap().len(),
+        bundle::OCR_BLOCKED_SITES_MAX
+    );
+    assert_eq!(map["main.rs:7 recognize_cell"], u32::MAX);
 }
 
 #[test]

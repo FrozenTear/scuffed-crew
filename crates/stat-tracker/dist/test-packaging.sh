@@ -12,6 +12,8 @@ UNINSTALL="$DIST/uninstall.sh"
 bash "$DIST/test-bootstrap-pin.sh"
 bash "$DIST/test-atomic-install.sh"
 bash "$DIST/test-safe-extract.sh"
+# The tessdata check always runs; its wording follows `ocr` in config.toml.
+bash "$DIST/test-ocr-off.sh"
 FAILS=0
 
 pass() { echo "PASS  $*"; }
