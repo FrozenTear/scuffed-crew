@@ -977,12 +977,12 @@ mod own_name_seeds {
         log.push_str(&line(
             "2026-10-09T12:05:30.000001Z",
             "scuffed_stat_tracker",
-            "own row from seeds and highlight row=Some(2) source=\"both\" trust=Sure best=0.97 next=0.41",
+            "own row from seeds, highlight and career hero row=Some(2) source=\"both\" trust=Sure best=0.97 next=0.41 hero_row=Some(2)",
         ));
         log.push_str(&line(
             "2026-10-09T12:05:31.000001Z",
             "scuffed_stat_tracker",
-            "own-row seed crop offered offer=Promoted trusted=3 pending=0",
+            "own-row seed crop offered offer=Promoted proof=\"career_hero\" trusted=3 pending=0",
         ));
         log.push_str(&line(
             "2026-10-09T12:05:32.000001Z",
@@ -1013,7 +1013,11 @@ mod own_name_seeds {
                 }
                 if name == "log.txt" {
                     // the own-row lines carry no name and stay readable
-                    assert!(text.contains("own row from seeds and highlight"), "{text}");
+                    assert!(
+                        text.contains("own row from seeds, highlight and career hero"),
+                        "{text}"
+                    );
+                    assert!(text.contains("hero_row=Some(2)"), "{text}");
                     assert!(text.contains("best=0.97"), "{text}");
                     assert!(text.contains("own-row seed crop offered"), "{text}");
                 }
