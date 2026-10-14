@@ -778,6 +778,12 @@ impl GameReportInput {
 /// The zip may not be bigger than this (section 8).
 pub const MAX_ZIP_BYTES: usize = 10 * 1024 * 1024;
 
+/// Files in the zip besides `manifest.json` (the site's limit).
+pub const MAX_FILES: usize = 30;
+
+/// Widest and tallest picture the site accepts, in pixels.
+pub const MAX_IMAGE_SIDE: u32 = 7680;
+
 fn png_size(png: &[u8]) -> Result<(u32, u32), ReportError> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|_| ReportError::InvalidInput("a saved crop is not a PNG"))?;
@@ -822,6 +828,11 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     ] {
         if let (Some(png), Some(_)) = (png, reads) {
             let (width, height) = png_size(png)?;
+            if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
+                return Err(ReportError::InvalidInput(
+                    "a picture is larger than 7680 px on a side",
+                ));
+            }
             images.push(ReportImage {
                 path: path.to_string(),
                 png: png.clone(),
@@ -850,6 +861,10 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
                 "scoreboard"
             }),
         });
+    }
+
+    if files.len() > MAX_FILES {
+        return Err(ReportError::InvalidInput("a report holds at most 30 files"));
     }
 
     // Every game category carries a game object. A missed game with no kit

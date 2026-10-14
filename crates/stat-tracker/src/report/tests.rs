@@ -1051,6 +1051,32 @@ mod game {
     }
 
     #[test]
+    fn a_report_stays_within_the_site_file_and_picture_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let good = input(tmp.path(), GameCategory::WrongStats);
+        let zip = build_game_report(&good).unwrap();
+        let listed = zip.manifest_json.matches("\"path\"").count();
+        assert!(listed <= crate::report::bundle::MAX_FILES, "{listed}");
+        for img in &zip.images {
+            assert!(img.width <= crate::report::bundle::MAX_IMAGE_SIDE);
+            assert!(img.height <= crate::report::bundle::MAX_IMAGE_SIDE);
+        }
+        // A picture wider than 7680 px is refused, never sent.
+        let wide = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(RgbImage::new(7681, 1))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let mut big = good.clone();
+        big.kit.outcome_png = Some(wide);
+        assert!(build_game_report(&big).is_err());
+    }
+
+    #[test]
     fn a_mismatched_kit_is_never_put_in_a_report() {
         // R2-4 on #236: a hand-built kit must pass kit::load's checks.
         let tmp = tempfile::tempdir().unwrap();
