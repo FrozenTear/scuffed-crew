@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use image::{DynamicImage, Rgb, RgbImage};
 use stat_tracker::config::{Config, OcrSetting, ReaderSetting};
-use stat_tracker::detect::match_end::{self, FinalScoreSource, Titles};
+use stat_tracker::detect::match_end::{self, FinalScoreSource, ResultWords, Titles};
 use stat_tracker::detect::match_start::{self, PhaseSource};
 use stat_tracker::detect::stability::FrameStability;
 use stat_tracker::detect::{GamePhase, MatchOutcome};
@@ -223,14 +223,20 @@ fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
                     &end_rgb,
                     &mut stability,
                     words,
-                    &titles
+                    &titles,
+                    &ResultWords::for_reader(true)
                 ),
                 None
             );
         }
         // as the Tab pass does
         assert_eq!(
-            match_end::detect_outcome_with(&end, words, &Titles::for_frame(true, &end)),
+            match_end::detect_outcome_with(
+                &end,
+                words,
+                &Titles::for_frame(true, &end),
+                &ResultWords::for_reader(true)
+            ),
             MatchOutcome::Unknown
         );
     });

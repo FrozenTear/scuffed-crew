@@ -27,6 +27,6 @@ pub use reader::{
     AccoladeRead, BoardRead, BoardStatus, FieldRead, MapName, Reader, ReaderConfig, TabHeroes,
     TopBarMap, Value, field_names, init, install, map_name, pack_readiness, read_accolade_map,
     read_banner, read_board, read_board_with, read_board_with_banner, read_end_title,
-    read_final_score, read_heroes, read_phrase, read_result, read_top_bar, result_field,
-    suspect_field_names, top_bar_map,
+    read_final_score, read_heroes, read_phrase, read_result, read_result_screens, read_top_bar,
+    result_field, result_screens, suspect_field_names, top_bar_map,
 };

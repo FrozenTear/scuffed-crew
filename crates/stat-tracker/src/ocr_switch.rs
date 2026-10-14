@@ -120,8 +120,12 @@ impl Read {
             // waits for a reader for that case (a seed without a highlight)
             // or for the USER to accept it as a limit of the opt-in.
             Read::OwnRow => false,
-            // Lane O11: the poll tick's result signal is still the OCR word.
-            Read::ResultWord => false,
+            // #270 (O11): the words-v1 result templates name the word on
+            // the accolade screen and the rank screen, for the poll tick's
+            // signal and for the Tab frame's outcome. Without them and with
+            // OCR off the word is held (`read_outcome_word`), and the pack
+            // check asks for both screens ([`PackGroup::ResultWords`]).
+            Read::ResultWord => true,
             // #263 (O2): the words-v1 end-title templates read the end
             // title and stand in for the end-reel title card. Without them
             // loaded both are held with OCR off (`Titles::Held`), and the
@@ -205,6 +209,7 @@ pub const READER_ENTRIES: &[(&str, &[PackGroup])] = &[
     ("read_accolade_map", &[PackGroup::MapNames]),
     ("read_heroes", &[PackGroup::HeroIcons]),
     ("read_result", &[PackGroup::ResultWords]),
+    ("read_result_screens", &[PackGroup::ResultWords]),
     // The FINAL SCORE line only opens the gate of the end title's OCR
     // read (#263). With OCR off nothing asks for it, so it needs no group.
     ("read_final_score", &[]),
@@ -1077,12 +1082,7 @@ mod tests {
     fn this_build_refuses_off_for_the_reads_that_still_need_ocr() {
         assert_eq!(
             Read::needing_ocr(),
-            [
-                Read::StatCells,
-                Read::OwnRow,
-                Read::ResultWord,
-                Read::PveBoard
-            ]
+            [Read::StatCells, Read::OwnRow, Read::PveBoard]
         );
         let decision = decide(OcrSetting::Off, &READY, &Read::needing_ocr());
         assert_eq!(decision.effective, OcrSetting::On);
@@ -1442,7 +1442,7 @@ mod tests {
             "shadow/reader.rs and ocr_switch::READER_ENTRIES name different reads"
         );
         assert!(
-            found.len() >= 11,
+            found.len() >= 12,
             "the scan found the entry points: {found:?}"
         );
         // A reader with nothing loaded has none of the groups, and one with

@@ -228,6 +228,7 @@ fn poll(
         stability,
         detect::match_end::FinalScoreSource::for_reader(new),
         &titles,
+        &detect::match_end::ResultWords::for_reader(new),
     );
     let accolade_map = choose_accolade_map(
         new,

@@ -17,6 +17,14 @@
 //!   every real frame is held out. Under `reader = "new"` the poller reads
 //!   the end-title layouts on their own ([`ResultTemplates::end_titles`],
 //!   `detect::match_end`).
+//!
+//! The `accolade` and `rank_screen` layouts are the poller's two result
+//! screens ([`ResultScreen`]). Under `reader = "new"` a sure read of the
+//! whole frame whose word was found on one of them is that screen's outcome
+//! signal ([`ScreenRead`], `detect::match_end`), in place of ocr-v1's OCR of
+//! the same crop. The frame is read in full only after a first look at
+//! those two layouts alone found a sure word
+//! ([`LoadedResults::read_screens`]).
 //! * `tab_header`: post-match Tab board header; region x 30-70%, y 2-24%;
 //!   plane `min`; real frames: none.
 //!
@@ -1139,14 +1147,6 @@ impl ResultTemplates {
         self.tpls.iter().map(|t| &t.layout).find(|l| l.id == id)
     }
 
-    /// True when `layout` (a layout id such as [`ACCOLADE`]) has a template
-    /// for `outcome`.
-    pub fn has(&self, layout: &str, outcome: Outcome) -> bool {
-        self.tpls
-            .iter()
-            .any(|t| t.layout.id == layout && t.outcome == outcome)
-    }
-
     /// Source ids that have at least one template.
     pub fn sources(&self) -> Vec<&str> {
         let mut v: Vec<&str> = self.tpls.iter().map(|t| t.layout.id.as_str()).collect();
@@ -1580,6 +1580,13 @@ pub struct LoadedResults {
     /// The end-title templates of `templates` on their own
     /// ([`ResultTemplates::end_titles`]), cut once per load.
     pub end_titles: Option<ResultTemplates>,
+    /// The result screens `templates` can name
+    /// ([`ResultTemplates::screens`]), found once per load.
+    pub screens: ResultScreens,
+    /// The result screens' templates of `templates` on their own
+    /// ([`ResultTemplates::screen_words`]), cut once per load: the first
+    /// look of [`Self::read_screens`].
+    pub screen_words: Option<ResultTemplates>,
     /// The phase-screen titles, from the words-v1 folder only (the old
     /// folder has none), whichever folder the result words came from.
     pub phrases: Option<phrase::PhraseTemplates>,
@@ -1594,11 +1601,42 @@ impl LoadedResults {
         phrases: Option<phrase::PhraseTemplates>,
     ) -> Self {
         let end_titles = templates.end_titles();
+        let screens = templates.screens();
+        let screen_words = templates.screen_words();
         Self {
             templates,
             pack,
             end_titles,
+            screens,
+            screen_words,
             phrases,
+        }
+    }
+
+    /// One frame's result read for the poller's result screens (accolade,
+    /// rank screen), in two looks.
+    ///
+    /// The first look reads the result screens' own templates
+    /// ([`Self::screen_words`]): two small regions. Only when it is sure of
+    /// a word is the frame read in full ([`ResultTemplates::read`], every
+    /// layout, #253's result read), and that second read is the answer.
+    ///
+    /// The first look loses no word. A full read that is sure of a word
+    /// found on a result screen has its leading template among the result
+    /// screens' templates, with the same score, and every rival there is a
+    /// rival in the full read too. So the first look is sure of that word
+    /// whenever the full read is, and this names exactly the words the full
+    /// read alone would name on a result screen. What it saves is the full
+    /// read, most of which is the end-title region, on every frame that
+    /// shows no result-screen word.
+    pub fn read_screens(&self, rgb: &RgbImage) -> ScreenRead {
+        let seen = self
+            .screen_words
+            .as_ref()
+            .is_some_and(|words| words.read(rgb).sure().is_some());
+        ScreenRead {
+            read: seen.then(|| self.templates.read(rgb)),
+            screens: self.screens,
         }
     }
 }
@@ -1852,6 +1890,124 @@ impl ResultTemplates {
             tpls,
             final_score: None,
         })
+    }
+}
+
+// ---------------------------------------------------------- result screens
+
+/// A post-match screen that prints the result word top-left and stays up
+/// for many seconds: the poller's two word signals (`detect::match_end`,
+/// `OutcomeSource::ResultWord` and `OutcomeSource::RankScreen`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultScreen {
+    /// The accolade screen ([`ACCOLADE`] layouts).
+    Accolade,
+    /// The competitive rank-update screen ([`RANK_SCREEN`] layouts).
+    RankScreen,
+}
+
+impl ResultScreen {
+    pub const ALL: [ResultScreen; 2] = [ResultScreen::Accolade, ResultScreen::RankScreen];
+
+    /// The built-in layout id of this screen.
+    pub fn id(self) -> &'static str {
+        match self {
+            ResultScreen::Accolade => ACCOLADE,
+            ResultScreen::RankScreen => RANK_SCREEN,
+        }
+    }
+
+    /// Is `id` a layout of this screen: [`Self::id`] itself, or a variant
+    /// of it named `<id>_<name>` (the rule [`is_end_title`] uses)?
+    pub fn has_layout(self, id: &str) -> bool {
+        id.strip_prefix(self.id())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+    }
+}
+
+/// The result screens a set of templates can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResultScreens {
+    pub accolade: bool,
+    pub rank_screen: bool,
+}
+
+impl ResultScreens {
+    pub fn has(self, screen: ResultScreen) -> bool {
+        match screen {
+            ResultScreen::Accolade => self.accolade,
+            ResultScreen::RankScreen => self.rank_screen,
+        }
+    }
+}
+
+impl ResultTemplates {
+    /// Can these templates name the word on `screen`? Only with a VICTORY
+    /// and a DEFEAT template of that screen's layouts: with one word alone
+    /// the screen could only ever say that word.
+    pub fn reads_screen(&self, screen: ResultScreen) -> bool {
+        let has = |o| {
+            self.tpls
+                .iter()
+                .any(|t| t.outcome == o && screen.has_layout(&t.layout.id))
+        };
+        has(Outcome::Victory) && has(Outcome::Defeat)
+    }
+
+    /// The result screens these templates can name.
+    pub fn screens(&self) -> ResultScreens {
+        ResultScreens {
+            accolade: self.reads_screen(ResultScreen::Accolade),
+            rank_screen: self.reads_screen(ResultScreen::RankScreen),
+        }
+    }
+
+    /// The templates of the result screens alone (every layout of a
+    /// [`ResultScreen`]): the first look of [`LoadedResults::read_screens`].
+    /// `None` when they can name no screen.
+    pub fn screen_words(&self) -> Option<ResultTemplates> {
+        // only the result screens' templates are copied
+        let tpls: Vec<Template> = self
+            .tpls
+            .iter()
+            .filter(|t| ResultScreen::ALL.iter().any(|s| s.has_layout(&t.layout.id)))
+            .cloned()
+            .collect();
+        let only = ResultTemplates {
+            tpls,
+            final_score: None,
+        };
+        let screens = only.screens();
+        (screens.accolade || screens.rank_screen).then_some(only)
+    }
+}
+
+/// One frame's result read for the poller's result screens
+/// ([`LoadedResults::read_screens`]), with the screens the templates behind
+/// it can name. Under `reader = "new"` this is the poller's accolade and
+/// rank-screen outcome signal, and its read is the frame's result evidence
+/// (`detect::match_end::ResultWords`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenRead {
+    /// [`ResultTemplates::read`] of the frame (every layout, certified),
+    /// made only when the result screens' own templates found a sure word.
+    /// `None`: they did not, and the frame was not read in full.
+    pub read: Option<ResultRead>,
+    pub screens: ResultScreens,
+}
+
+impl ScreenRead {
+    /// The word of a sure read that was found on `screen`. `None` for a
+    /// flagged read, for a frame that shows no word, and for a sure word
+    /// found on another screen's layout (the end title, the other result
+    /// screen).
+    pub fn word_on(&self, screen: ResultScreen) -> Option<Outcome> {
+        let read = self.read.as_ref()?;
+        let on_screen = read
+            .source
+            .as_deref()
+            .is_some_and(|id| screen.has_layout(id));
+        read.sure().filter(|_| on_screen)
     }
 }
 
@@ -2284,6 +2440,354 @@ mod tests {
         let loaded = dirs.load().unwrap();
         assert_eq!(loaded.pack, ResultPack::WordsV1);
         assert_eq!(loaded.end_titles.unwrap().sources(), vec![END_TITLE]);
+    }
+
+    // ------------------------------------------------- result screens (O11)
+
+    #[test]
+    fn result_screen_layouts_are_the_id_and_its_variants() {
+        use ResultScreen::{Accolade, RankScreen};
+        assert_eq!((Accolade.id(), RankScreen.id()), (ACCOLADE, RANK_SCREEN));
+        for id in [ACCOLADE, "accolade_wide", "accolade_x"] {
+            assert!(Accolade.has_layout(id), "{id}");
+            assert!(!RankScreen.has_layout(id), "{id}");
+        }
+        for id in [RANK_SCREEN, "rank_screen_wide"] {
+            assert!(RankScreen.has_layout(id), "{id}");
+            assert!(!Accolade.has_layout(id), "{id}");
+        }
+        for id in [
+            END_TITLE,
+            "end_title_plain",
+            TAB_HEADER,
+            "accolades",
+            "accoladewide",
+            "xaccolade",
+            "rank_screens",
+            "rank_title",
+            "rank",
+            "",
+        ] {
+            for screen in ResultScreen::ALL {
+                assert!(!screen.has_layout(id), "{screen:?} {id}");
+            }
+        }
+    }
+
+    /// A screen is named only with a VICTORY and a DEFEAT template of its
+    /// own layouts. A DRAW template, or another screen's words, do not count.
+    #[test]
+    fn a_result_screen_needs_a_victory_and_a_defeat() {
+        let both = templates().screens();
+        assert_eq!((both.accolade, both.rank_screen), (true, true));
+        for screen in ResultScreen::ALL {
+            assert!(both.has(screen));
+            assert!(!ResultScreens::default().has(screen));
+        }
+        let accolade_only = with_end_titles().screens();
+        assert_eq!(
+            (accolade_only.accolade, accolade_only.rank_screen),
+            (true, false)
+        );
+        assert!(accolade_only.has(ResultScreen::Accolade));
+        assert!(!accolade_only.has(ResultScreen::RankScreen));
+        // one word of a screen, however many other templates
+        let one_word = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Draw, word(6, 50, 30)),
+            (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
+            (lay(RANK_SCREEN), Outcome::Draw, word(6, 50, 20)),
+            (lay(END_TITLE), Outcome::Victory, word(2, 90, 34)),
+            (lay(END_TITLE), Outcome::Defeat, word(4, 80, 34)),
+        ])
+        .unwrap();
+        assert_eq!(one_word.screens(), ResultScreens::default());
+        // a variant layout counts for its screen
+        let variant = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (
+                Layout::new("accolade_wide", lay(ACCOLADE).roi, Plane::Max),
+                Outcome::Defeat,
+                word(3, 60, 30),
+            ),
+        ])
+        .unwrap();
+        assert!(variant.reads_screen(ResultScreen::Accolade));
+        assert!(!variant.reads_screen(ResultScreen::RankScreen));
+    }
+
+    /// A screen's word is the word of a sure read found on that screen's
+    /// layout: not a flagged word, not no word, not another layout's word.
+    #[test]
+    fn a_screens_word_is_a_sure_read_found_on_that_screen() {
+        use ResultScreen::{Accolade, RankScreen};
+        let screens = templates().screens();
+        let on = |read: ResultRead| {
+            let r = ScreenRead {
+                read: Some(read),
+                screens,
+            };
+            (r.word_on(Accolade), r.word_on(RankScreen))
+        };
+        for o in Outcome::ALL {
+            assert_eq!(on(sure(o, ACCOLADE)), (Some(o), None));
+            assert_eq!(on(sure(o, RANK_SCREEN)), (None, Some(o)));
+            assert_eq!(on(sure(o, "accolade_wide")), (Some(o), None));
+            assert_eq!(on(sure(o, END_TITLE)), (None, None));
+            assert_eq!(on(sure(o, TAB_HEADER)), (None, None));
+            for src in [ACCOLADE, RANK_SCREEN] {
+                let flagged = ResultRead {
+                    suspect: true,
+                    ..sure(o, src)
+                };
+                assert_eq!(on(flagged), (None, None), "{o:?} {src}");
+            }
+            let no_source = ResultRead {
+                source: None,
+                ..sure(o, ACCOLADE)
+            };
+            assert_eq!(on(no_source), (None, None));
+        }
+        assert_eq!(on(ResultRead::nothing(0.2, 0.1)), (None, None));
+        let unread = ScreenRead {
+            read: None,
+            screens,
+        };
+        assert_eq!(
+            (unread.word_on(Accolade), unread.word_on(RankScreen)),
+            (None, None)
+        );
+    }
+
+    /// Every layout the words pack ships: both result screens and the end
+    /// titles.
+    fn loaded_with_end_titles() -> LoadedResults {
+        let all = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+            (lay(RANK_SCREEN), Outcome::Victory, word(5, 66, 20)),
+            (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
+            (lay(END_TITLE), Outcome::Victory, word(2, 90, 34)),
+            (lay(END_TITLE), Outcome::Defeat, word(4, 80, 34)),
+        ])
+        .unwrap();
+        LoadedResults::new(all, ResultPack::WordsV1, None)
+    }
+
+    fn accolade_victory() -> RgbImage {
+        let mut img = dark_frame();
+        paint(&mut img, &lay(ACCOLADE), &word(1, 70, 30), [255, 220, 0]);
+        img
+    }
+
+    fn rank_defeat() -> RgbImage {
+        let mut img = dark_frame();
+        paint(
+            &mut img,
+            &lay(RANK_SCREEN),
+            &word(7, 50, 20),
+            [245, 245, 245],
+        );
+        img
+    }
+
+    /// The first look is the result screens' templates alone.
+    #[test]
+    fn the_screen_words_are_the_result_screens_templates() {
+        let loaded = loaded_with_end_titles();
+        let words = loaded.screen_words.as_ref().expect("screen words");
+        assert_eq!(words.sources(), vec![ACCOLADE, RANK_SCREEN]);
+        assert_eq!(loaded.templates.sources().len(), 3);
+        // end titles alone name no result screen
+        let titles = loaded.end_titles.as_ref().unwrap();
+        assert!(titles.screen_words().is_none());
+        // one word of each screen names none either
+        let one_word = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
+        ])
+        .unwrap();
+        assert!(one_word.screen_words().is_none());
+        // one whole screen is enough, and the other screen's lone word stays
+        let accolade = ResultTemplates::from_templates(vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+            (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
+            (lay(END_TITLE), Outcome::Victory, word(2, 90, 34)),
+        ])
+        .unwrap();
+        let words = accolade.screen_words().unwrap();
+        assert_eq!(words.sources(), vec![ACCOLADE, RANK_SCREEN]);
+    }
+
+    /// The real reads: a word painted on each screen is that screen's word
+    /// and not the other's, and the read behind it is the frame's full
+    /// result read.
+    #[test]
+    fn a_frame_read_names_the_screen_its_word_is_on() {
+        use ResultScreen::{Accolade, RankScreen};
+        let loaded = loaded_with_end_titles();
+        let on = |r: &ScreenRead| (r.word_on(Accolade), r.word_on(RankScreen));
+
+        let accolade = accolade_victory();
+        let r = loaded.read_screens(&accolade);
+        assert_eq!(on(&r), (Some(Outcome::Victory), None), "{r:?}");
+        assert_eq!(r.read, Some(loaded.templates.read(&accolade)));
+        assert_eq!(r.screens, loaded.screens);
+
+        let rank = rank_defeat();
+        let r = loaded.read_screens(&rank);
+        assert_eq!(on(&r), (None, Some(Outcome::Defeat)), "{r:?}");
+        assert_eq!(r.read, Some(loaded.templates.read(&rank)));
+
+        // a VICTORY on one screen and a DEFEAT on the other: no sure word
+        let mut two = accolade.clone();
+        paint(
+            &mut two,
+            &lay(RANK_SCREEN),
+            &word(7, 50, 20),
+            [245, 245, 245],
+        );
+        let r = loaded.read_screens(&two);
+        assert_eq!(on(&r), (None, None), "{r:?}");
+        assert_eq!(r.read, None, "the first look was not sure: no full read");
+    }
+
+    /// A frame with no sure word on a result screen is not read in full:
+    /// a blank frame, and a frame that shows only an end title, which the
+    /// full read would name.
+    #[test]
+    fn a_frame_without_a_result_screen_word_is_not_read_in_full() {
+        let loaded = loaded_with_end_titles();
+        let r = loaded.read_screens(&dark_frame());
+        assert_eq!(r.read, None);
+
+        let mut title = dark_frame();
+        paint(
+            &mut title,
+            &lay(END_TITLE),
+            &word(4, 80, 34),
+            [150, 20, 160],
+        );
+        assert_eq!(
+            loaded.templates.read(&title).sure(),
+            Some(Outcome::Defeat),
+            "the full read names the end title"
+        );
+        assert_eq!(loaded.read_screens(&title).read, None);
+
+        // lit texture in both result regions that is no word (not a flat
+        // plane, so the first look has something to score)
+        let mut busy = dark_frame();
+        paint(&mut busy, &lay(ACCOLADE), &blobs(3, 110, 30), [255, 220, 0]);
+        paint(
+            &mut busy,
+            &lay(RANK_SCREEN),
+            &glyphs(5, 100, 34),
+            [245, 245, 245],
+        );
+        let first = loaded.screen_words.as_ref().unwrap().read(&busy);
+        assert!(first.score > 0.0, "the texture is scored: {first:?}");
+        assert_eq!(first.sure(), None, "{first:?}");
+        assert_eq!(loaded.read_screens(&busy).read, None);
+
+        // no result-screen templates at all: never read
+        let titles_only = LoadedResults::new(
+            loaded.end_titles.clone().unwrap(),
+            ResultPack::WordsV1,
+            None,
+        );
+        assert_eq!(titles_only.screens, ResultScreens::default());
+        assert_eq!(titles_only.read_screens(&accolade_victory()).read, None);
+    }
+
+    /// The full read has the last word. An accolade VICTORY with an
+    /// end-title DEFEAT on the same frame passes the first look, and the
+    /// full read, which sees both words, is not sure: no word.
+    #[test]
+    fn the_full_read_decides_after_the_first_look() {
+        use ResultScreen::{Accolade, RankScreen};
+        let loaded = loaded_with_end_titles();
+        let mut both = accolade_victory();
+        paint(&mut both, &lay(END_TITLE), &word(4, 80, 34), [150, 20, 160]);
+        let first = loaded.screen_words.as_ref().unwrap().read(&both);
+        assert_eq!(first.sure(), Some(Outcome::Victory), "{first:?}");
+        let r = loaded.read_screens(&both);
+        let full = loaded.templates.read(&both);
+        assert_eq!(full.sure(), None, "two words: {full:?}");
+        assert_eq!(r.read, Some(full));
+        assert_eq!((r.word_on(Accolade), r.word_on(RankScreen)), (None, None));
+    }
+
+    /// The first look loses no word: on every frame, the two looks name
+    /// what the full read alone names on each result screen.
+    #[test]
+    fn the_first_look_loses_no_word_of_the_full_read() {
+        let loaded = loaded_with_end_titles();
+        let mut frames = vec![dark_frame(), accolade_victory(), rank_defeat()];
+        for (layout, seed, w, h, colour) in [
+            (ACCOLADE, 3, 60, 30, [40, 200, 255]),
+            (RANK_SCREEN, 5, 66, 20, [245, 245, 245]),
+            (END_TITLE, 2, 90, 34, [150, 20, 160]),
+            (END_TITLE, 4, 80, 34, [255, 220, 0]),
+        ] {
+            let mut img = dark_frame();
+            paint(&mut img, &lay(layout), &word(seed, w, h), colour);
+            // each word alone, and with every word painted before it
+            let mut stacked = frames.last().unwrap().clone();
+            paint(&mut stacked, &lay(layout), &word(seed, w, h), colour);
+            frames.push(img);
+            frames.push(stacked);
+        }
+        let mut named = 0;
+        for (i, frame) in frames.iter().enumerate() {
+            let full = ScreenRead {
+                read: Some(loaded.templates.read(frame)),
+                screens: loaded.screens,
+            };
+            let two_looks = loaded.read_screens(frame);
+            for screen in ResultScreen::ALL {
+                assert_eq!(
+                    two_looks.word_on(screen),
+                    full.word_on(screen),
+                    "frame {i} {screen:?}"
+                );
+                named += usize::from(full.word_on(screen).is_some());
+            }
+        }
+        assert!(named >= 4, "the frames name a word on a screen: {named}");
+    }
+
+    /// Each load says which result screens the folder it loaded can name.
+    #[test]
+    fn a_load_carries_its_result_screens() {
+        let data = tempfile::tempdir().unwrap();
+        let words = data.path().join(WORDS_SUBDIR);
+        write_pack(
+            &words,
+            &[
+                ("accolade_victory.png", &word(1, 70, 30)),
+                ("accolade_defeat.png", &word(3, 60, 30)),
+                ("rank_screen_victory.png", &word(5, 66, 20)),
+            ],
+        );
+        let dirs = ResultDirs::in_data_dir(data.path());
+        let loaded = dirs.load().unwrap();
+        assert_eq!(
+            (loaded.screens.accolade, loaded.screens.rank_screen),
+            (true, false)
+        );
+        assert_eq!(loaded.screen_words.unwrap().screens(), loaded.screens);
+        write_pack(&words, &[("rank_screen_defeat.png", &word(7, 50, 20))]);
+        let loaded = dirs.load().unwrap();
+        assert_eq!(
+            loaded.screens,
+            ResultScreens {
+                accolade: true,
+                rank_screen: true
+            }
+        );
+        assert_eq!(loaded.screen_words.unwrap().sources().len(), 2);
     }
 
     #[test]
