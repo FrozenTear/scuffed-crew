@@ -148,18 +148,23 @@ pub(crate) const NEW_READER_RESTART: &str =
 pub(crate) const CLASSIC_OCR_LABEL: &str = "Use classic OCR (Tesseract)";
 
 /// The hint while this tracker version can turn classic OCR off. It says
-/// what the member gives up: the map on the scoreboard has no second reader.
-/// That has two effects, and both are named: the map is missing more often,
-/// and a co-op event board is told apart only when its map name is read
-/// sure. And the names are not read, so one kind of scoreboard has no way
-/// left to find the member's row.
+/// what the member gives up.
+///
+/// * The map on the scoreboard has no second reader. That has two effects,
+///   and both are named: a game whose map is never read has no map, and a
+///   co-op event board is told apart only when its map name is read sure.
+/// * The names are not read, so one kind of scoreboard has no way left to
+///   find the member's row.
+/// * The new reader, which off implies, stores no game that ends with a
+///   stat it never read.
 pub(crate) const CLASSIC_OCR_HINT: &str = "\
 Tesseract is the classic text reader. Off: the tracker reads the game with its own reader \
-and does not start Tesseract. With classic OCR off the map can be missing more often, \
-mostly at 1080p, and a co-op event scoreboard (Junkenstein) can be saved as a game when \
-its map name is not read. A scoreboard is not saved when your row has never been \
-highlighted, your hero icon is dead or covered, and the tracker has not learned your name \
-yet.";
+and does not start Tesseract. With classic OCR off the map name on the scoreboard has no \
+second reader: a game whose map is never read is saved without a map until you pick one, \
+and a co-op event scoreboard (Junkenstein) can be saved as a game when its map name is not \
+read. A scoreboard is not saved when your row has never been highlighted, your hero icon \
+is dead or covered, and the tracker has not learned your name yet. A game that ends with \
+a stat never read is not saved.";
 
 /// The hint while this tracker version still needs classic OCR for a read:
 /// no build of it turns the switch off, so nothing is promised.
@@ -2903,7 +2908,20 @@ token = \"not-a-real-token\"
         assert!(can.restart_and_packs);
         // where the member decides, the cost of off is said
         assert!(
-            CLASSIC_OCR_HINT.contains("the map can be missing more often, mostly at 1080p"),
+            CLASSIC_OCR_HINT.contains(
+                "the map name on the scoreboard has no second reader: a game whose map is \
+                 never read is saved without a map until you pick one"
+            ),
+            "{CLASSIC_OCR_HINT}"
+        );
+        // no rate is claimed for it: against OCR the map is not missing
+        // more often in the members' model re-run
+        assert!(
+            !CLASSIC_OCR_HINT.contains("more often"),
+            "{CLASSIC_OCR_HINT}"
+        );
+        assert!(
+            CLASSIC_OCR_HINT.contains("A game that ends with a stat never read is not saved."),
             "{CLASSIC_OCR_HINT}"
         );
         assert!(
