@@ -672,6 +672,8 @@ fn tail_useful(output: &str) -> String {
 
 trait UpdateIo {
     async fn control_daemon(&self, data_dir: &Path, verb: DaemonVerb, service_installed: bool);
+    /// Sleep between checks for a game in progress.
+    async fn pause(&self, d: std::time::Duration);
     async fn install(
         &self,
         url: &str,
@@ -689,6 +691,10 @@ impl UpdateIo for LiveUpdateIo {
         let _ = crate::daemon::run_verb(data_dir.to_path_buf(), verb, service_installed).await;
     }
 
+    async fn pause(&self, d: std::time::Duration) {
+        tokio::time::sleep(d).await;
+    }
+
     async fn install(
         &self,
         url: &str,
@@ -699,6 +705,31 @@ impl UpdateIo for LiveUpdateIo {
     ) -> Result<String, String> {
         download_and_run_bootstrap(url, script, latest, prefix, tag).await
     }
+}
+
+/// The tracker has a game open: `active_game.json` exists in the data dir
+/// from the game's start until it is closed and saved.
+pub fn game_in_progress(data_dir: &Path) -> bool {
+    data_dir.join("active_game.json").exists()
+}
+
+/// How often the update checks whether the open game was saved.
+pub const GAME_WAIT_STEP: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest the update waits for an open game before it goes ahead.
+pub const GAME_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Wait (up to [`GAME_WAIT_MAX`]) until no game is open, so stopping the
+/// tracker for the install never cuts a game that is not saved yet.
+/// Returns whether it had to wait.
+async fn wait_for_game_saved(data_dir: &Path, io: &impl UpdateIo) -> bool {
+    let mut waited = std::time::Duration::ZERO;
+    let mut any = false;
+    while game_in_progress(data_dir) && waited < GAME_WAIT_MAX {
+        any = true;
+        io.pause(GAME_WAIT_STEP).await;
+        waited += GAME_WAIT_STEP;
+    }
+    any
 }
 
 pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> {
@@ -719,6 +750,10 @@ async fn run_planned_update(
     };
 
     if req.stop_daemon {
+        // alpha.8: the restart waits until the open game is saved.
+        if wait_for_game_saved(&req.data_dir, io).await {
+            tracing::info!("update waited for the game in progress to be saved");
+        }
         io.control_daemon(&req.data_dir, DaemonVerb::Stop, req.service_installed)
             .await;
     }
@@ -1633,6 +1668,8 @@ mod tests {
     }
 
     struct FakeIo {
+        pauses: std::sync::Mutex<u32>,
+        game_dir: Option<PathBuf>,
         verbs: std::sync::Mutex<Vec<DaemonVerb>>,
         urls: std::sync::Mutex<Vec<String>>,
         install_result: Result<String, String>,
@@ -1646,6 +1683,17 @@ mod tests {
             _service_installed: bool,
         ) {
             self.verbs.lock().expect("verbs").push(verb);
+        }
+
+        async fn pause(&self, _d: std::time::Duration) {
+            // The game "closes" after three checks.
+            let mut n = self.pauses.lock().expect("pauses");
+            *n += 1;
+            if *n >= 3
+                && let Some(dir) = self.game_dir.as_ref()
+            {
+                let _ = std::fs::remove_file(dir.join("active_game.json"));
+            }
         }
 
         async fn install(
@@ -1678,9 +1726,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_restart_waits_until_the_open_game_is_saved() {
+        let data = tempfile::tempdir().expect("tempdir");
+        std::fs::write(data.path().join("active_game.json"), "{}").unwrap();
+        let prefix = tempfile::tempdir().expect("tempdir");
+        let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: Some(data.path().to_path_buf()),
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Ok("Installed.".into()),
+        };
+        let mut req = run_request(true);
+        req.data_dir = data.path().to_path_buf();
+        run_planned_update(&req, ready_plan(prefix.path()), &io)
+            .await
+            .expect("installed");
+        // Three checks while the game was open, then stop, install, start.
+        assert_eq!(*io.pauses.lock().unwrap(), 3);
+        assert_eq!(
+            io.verbs.lock().expect("verbs").as_slice(),
+            &[DaemonVerb::Stop, DaemonVerb::Start]
+        );
+        assert!(!game_in_progress(data.path()));
+    }
+
+    #[tokio::test]
     async fn failed_install_stops_and_does_not_start() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: None,
             verbs: std::sync::Mutex::new(Vec::new()),
             urls: std::sync::Mutex::new(Vec::new()),
             install_result: Err("disk full".into()),
@@ -1706,6 +1782,8 @@ mod tests {
     async fn successful_install_restarts_from_the_tag_url() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: None,
             verbs: std::sync::Mutex::new(Vec::new()),
             urls: std::sync::Mutex::new(Vec::new()),
             install_result: Ok("installed".into()),
@@ -1724,6 +1802,8 @@ mod tests {
     async fn install_without_a_running_daemon_does_not_start_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: None,
             verbs: std::sync::Mutex::new(Vec::new()),
             urls: std::sync::Mutex::new(Vec::new()),
             install_result: Err("nope".into()),
