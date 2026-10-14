@@ -430,6 +430,18 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // tree before the store opens so the DB and command queue are owner-only.
     stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
 
+    // Refuse to start alongside a live daemon. On drop the guard removes
+    // daemon.pid only if the file still names this process. Held across
+    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
+    // The store-directory flock (see LocalStore::open) is the single-writer
+    // lock; this file is how the GUI finds the process.
+    // Taken before anything talks to the site: a start that is going to
+    // exit here must not sync reader packs first. It used to, and by
+    // holding the pack lock it left the daemon that stayed without its
+    // packs. The app also sees the daemon from here on, not only once the
+    // startup sync is over.
+    let _pid_guard = acquire_pid_guard(&config.data_dir)?;
+
     // One client for the whole process. An unsafe URL logs once here and
     // leaves sync off — including the startup player-name fetch — so the
     // bearer token is never sent. The daemon keeps running.
@@ -440,19 +452,36 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     let mut extra_packs = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
+        let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
             tracing::error!(
                 "sync paused — the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
-            extra_packs = stat_tracker::packs::sync_on_startup(
-                &creds.server_url,
-                &creds.token,
-                &config.data_dir,
-            )
-            .await;
+            pack_startup = Some(
+                stat_tracker::packs::sync_on_startup(
+                    &creds.server_url,
+                    &creds.token,
+                    &config.data_dir,
+                )
+                .await,
+            );
         }
+        // The background job for every pack. It is made for every daemon
+        // that has sync set up, whatever the startup sync came to (a busy
+        // lock, a 429, packs switched off, no network, or no startup sync
+        // at all while the token is paused), and it keeps trying while the
+        // daemon runs. The client clone shares the URL and token with the
+        // sync client, so when the daemon takes a new pair from Settings
+        // (it does that while sync is paused on a rejected token) the job
+        // uses it on its next try.
+        let (data_dir, client) = (config.data_dir.clone(), client.clone());
+        extra_packs = Some(stat_tracker::packs::PackKeeper::new(
+            &config.data_dir,
+            pack_startup,
+            move || pack_credentials(&data_dir, &client),
+        ));
     }
 
     // Single wiring point for OCR debug dumps — the lib reads this switch
@@ -462,13 +491,6 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // OCR pool size (Tesseract instances ≈ workers). Must run before first OCR.
     let ocr_threads = config.ocr_threads_resolved();
     ocr::set_ocr_threads(ocr_threads);
-
-    // Refuse to start alongside a live daemon. On drop the guard removes
-    // daemon.pid only if the file still names this process. Held across
-    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
-    // The store-directory flock (see LocalStore::open) is the single-writer
-    // lock; this file is how the GUI finds the process.
-    let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
     if maybe_vacuum(&config.data_dir).await? {
@@ -738,6 +760,26 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
             None
         }
     }
+}
+
+/// The server URL and token for one try of the reader pack job: the sync
+/// client's pair at that moment. The daemon swaps that pair only while sync
+/// is paused on a rejected token (`maybe_resume_sync_after_settings_change`
+/// then re-reads Settings); until then a pair saved in Settings waits for
+/// a restart, for the job as for uploads. `None` while sync is paused: the
+/// rejected token is not sent again.
+fn pack_credentials(
+    data_dir: &std::path::Path,
+    client: &sync::SyncClient,
+) -> Option<stat_tracker::packs::PackCredentials> {
+    if sync_credentials_rejected(data_dir, Some(client)) {
+        return None;
+    }
+    let creds = client.credentials();
+    Some(stat_tracker::packs::PackCredentials {
+        server_url: creds.server_url,
+        token: creds.token,
+    })
 }
 
 /// Whether the new reader is in effect for this run.
@@ -12260,6 +12302,65 @@ mod tests {
             session_close_log("superseded by Tab-opened game"),
             "closed session at new-game boundary"
         );
+    }
+
+    /// P1c. A start that the pid guard is going to refuse must not reach
+    /// the site or the pack files first, and the reader pack job must be
+    /// started for every signed-in daemon, not only when the startup sync
+    /// got a list. The crash marker stays where it was: after the guard and
+    /// after the vacuum exit.
+    #[test]
+    fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper() {
+        let src = include_str!("main.rs");
+        let begin = src
+            .find("    lock_down_umask();\n")
+            .expect("startup begins");
+        let body = &src[begin..];
+        let end = body
+            .find("\nfn handle_preinit_flags()")
+            .expect("startup ends before handle_preinit_flags");
+        let body = &body[..end];
+        let at = |needle: &str| {
+            assert_eq!(body.matches(needle).count(), 1, "{needle} once in startup");
+            body.find(needle).expect("counted above")
+        };
+        // The call of the run loop, without its arguments: another lane
+        // adds one.
+        const RUN_LOOP: &str = "let result = run_loop(";
+        let guard = at("acquire_pid_guard(&config.data_dir)?");
+        for later in [
+            "open_sync_client(",
+            "auth_pause_matches(",
+            "fetch_player_name_if_needed(",
+            "packs::sync_on_startup(",
+            "maybe_vacuum(",
+            "marker::start_run(",
+            "startup_maintenance(",
+            "open_store(",
+            "packs::PackKeeper::new(",
+            RUN_LOOP,
+        ] {
+            assert!(guard < at(later), "{later} must come after the pid guard");
+        }
+        // The run loop is awaited in place, whatever arguments it takes.
+        let run_loop = at(RUN_LOOP);
+        let call = body[run_loop..].split(';').next().expect("a statement");
+        assert!(call.ends_with(".await"), "{call}");
+        assert!(at("maybe_vacuum(") < at("marker::start_run("));
+        assert!(at("packs::sync_on_startup(") < at("marker::start_run("));
+        // The keeper is made after the paused / not paused branches have
+        // both closed, so it does not depend on what the startup sync
+        // returned or on whether one ran.
+        let (sync, keeper) = (at("packs::sync_on_startup("), at("packs::PackKeeper::new("));
+        assert!(sync < keeper);
+        assert!(
+            body[sync..keeper].contains("\n        }\n"),
+            "the keeper must be made outside the startup sync's branch: {}",
+            &body[sync..keeper]
+        );
+        let spawn =
+            at("    if let Some(extras) = extra_packs {\n        tokio::spawn(extras.run());\n");
+        assert!(keeper < spawn && spawn < run_loop);
     }
 
     /// Deleting the command-tick call, or the upload inside the timer, fails
