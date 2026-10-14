@@ -147,6 +147,10 @@ pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
 const TRACKER_PLATFORM_COPY: &str =
     "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
+/// Release-week install note on `/stats`. Remove this const, [`tracker_release_notice`],
+/// and its one call site when the week is over.
+const TRACKER_RELEASE_NOTICE: &str = "Install alpha.8 between games, not during one.";
+
 fn format_date(dt: &DateTime<Utc>) -> String {
     let now = Utc::now();
     let secs = now.signed_duration_since(*dt).num_seconds().max(0);
@@ -666,6 +670,16 @@ const STATS_CSS: &str = r#"
         color: var(--text);
         border-color: var(--accent-soft);
     }
+    .tracker-release-notice {
+        margin: 0 0 1rem;
+        padding: 0.55rem 0.85rem;
+        border-radius: 8px;
+        border: 1px solid var(--warn);
+        background: color-mix(in srgb, var(--warn) 12%, transparent);
+        color: var(--text);
+        font-size: 0.85rem;
+        line-height: 1.4;
+    }
 
     /* Daemon settings panel */
     .daemon-settings {
@@ -917,7 +931,8 @@ const STATS_CSS: &str = r#"
         font-variant-numeric: tabular-nums;
     }
     @media (max-width: 900px) {
-        /* Header labels need full width; hide when tracks would crush. */
+        /* Wide header needs the single-row tracks. Phone widths bring the
+           stat labels back in the 720px block below. */
         .match-list-head { display: none; }
     }
     @media (max-width: 720px) {
@@ -940,7 +955,28 @@ const STATS_CSS: &str = r#"
         .overview-grid { grid-template-columns: 1fr; }
         .stats-summary { grid-template-columns: 1fr; }
         /* W5b mobile: row1 outcome | identity | date; row2 equal stats strip.
-           title= on each .match-stat keeps E/D/A/dmg/heal discoverable. */
+           Compact E/D/A/DMG/HEAL labels sit on that same five-column track.
+           The 900px rule hides the wide header; this block shows it again. */
+        .match-list-head {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            padding: 0 calc(0.85rem + 1px) 0.15rem;
+        }
+        .match-list-head .match-h-outcome,
+        .match-list-head .match-h-id,
+        .match-list-head .match-h-date {
+            display: none;
+        }
+        .match-list-head .match-stats {
+            justify-self: stretch;
+            width: 100%;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+        .match-list-head .match-h-stat {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .match-card {
             grid-template-columns: 4.5rem minmax(0, 1fr) auto;
             grid-template-areas:
@@ -973,6 +1009,13 @@ const STATS_CSS: &str = r#"
         .map-callouts { flex-direction: column; }
     }
 "#;
+
+/// Release-week banner. Delete with [`TRACKER_RELEASE_NOTICE`].
+fn tracker_release_notice() -> Element {
+    rsx! {
+        p { class: "tracker-release-notice", "{TRACKER_RELEASE_NOTICE}" }
+    }
+}
 
 #[component]
 pub fn Stats() -> Element {
@@ -1123,6 +1166,8 @@ pub fn Stats() -> Element {
                     Link { to: Route::StatsTokens {}, "Daemon Tokens" }
                 }
             }
+
+            {tracker_release_notice()}
 
             if slim_tracker {
                 div { class: "tracker-slim",
@@ -1445,11 +1490,41 @@ mod header_layout_tests {
             "{flagged_head}"
         );
     }
+
+    #[test]
+    fn phone_history_shows_compact_stat_headings() {
+        let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
+        let head = block_after(phone, ".match-list-head {");
+        let head_block = head.split('}').next().unwrap();
+        assert!(
+            has_declaration(head_block, "display: grid"),
+            "390px widths show the history headings: {head_block}"
+        );
+        assert!(
+            !has_declaration(head_block, "display: none"),
+            "{head_block}"
+        );
+        let stats = block_after(phone, ".match-list-head .match-stats {");
+        let stats_block = stats.split('}').next().unwrap();
+        assert!(
+            stats_block.contains("repeat(5, minmax(0, 1fr))"),
+            "E/D/A/DMG/HEAL share the phone stat tracks: {stats_block}"
+        );
+        let hidden = block_after(phone, ".match-list-head .match-h-outcome,");
+        assert!(
+            hidden.contains("display: none"),
+            "only the empty outcome, map, and date header cells stay hidden: {hidden}"
+        );
+        assert!(
+            !phone.contains(".stat-unsure-mark { display: none"),
+            "the unsure mark stays visible at phone width"
+        );
+    }
 }
 
 #[cfg(test)]
 mod tracker_platform_copy_tests {
-    use super::TRACKER_PLATFORM_COPY;
+    use super::{TRACKER_PLATFORM_COPY, TRACKER_RELEASE_NOTICE};
 
     /// The install blurb on `/stats`, from the heading through the curl command.
     fn tracker_download_blurb(src: &str) -> &str {
@@ -1494,6 +1569,28 @@ mod tracker_platform_copy_tests {
         assert!(
             !src.contains(&wayland_only),
             "crates/app stats page still limits the tracker to one display server"
+        );
+    }
+
+    #[test]
+    fn release_notice_is_one_const_above_the_tracker_block() {
+        assert_eq!(
+            TRACKER_RELEASE_NOTICE,
+            "Install alpha.8 between games, not during one."
+        );
+        assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2014}'));
+        assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2013}'));
+        let src = include_str!("mod.rs");
+        let notice = src.find("{tracker_release_notice()}").expect("notice call");
+        let slim = src.find("if slim_tracker {").expect("slim tracker");
+        assert!(
+            notice < slim,
+            "the notice stays up when reinstall steps are collapsed"
+        );
+        assert_eq!(
+            src.matches(TRACKER_RELEASE_NOTICE).count(),
+            2,
+            "the sentence lives on the const and in this test"
         );
     }
 }

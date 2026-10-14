@@ -8,7 +8,7 @@
 //! the zip). The member column on the officer list is the member id from the
 //! API. It is not a display name.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use dioxus::prelude::*;
 use serde::Serialize;
 
@@ -100,6 +100,7 @@ const REPORTS_CSS: &str = r#"
     color: var(--text-3); font-weight: 600;
 }
 .reports-sub { display: block; color: var(--text-2); font-size: 0.8rem; margin-top: 0.2rem; }
+.report-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reports-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 .report-btn {
     font-family: var(--font-body); font-weight: 600; font-size: 0.85rem;
@@ -270,8 +271,53 @@ pub(crate) fn download_action(report_id: &str) -> Option<String> {
     Some(format!("/api/stat-reports/{report_id}"))
 }
 
+/// Officer list stamp, labelled UTC.
 pub(crate) fn format_report_when(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+const REPORT_MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Short stamp in a fixed offset from UTC: `Nov 8, 15:30`.
+///
+/// `minutes_east` is local time minus UTC (`-300` is five hours behind).
+/// My reports passes the browser offset. Native tests pass `0`.
+pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32) -> String {
+    let local = at + chrono::Duration::minutes(i64::from(minutes_east));
+    let month = REPORT_MONTHS[local.month0() as usize];
+    format!(
+        "{month} {}, {:02}:{:02}",
+        local.day(),
+        local.hour(),
+        local.minute()
+    )
+}
+
+/// Sent and delete dates on `/reports`, in the viewer zone.
+///
+/// Wasm reads the offset for this instant from the browser. Native builds
+/// (unit tests) use UTC with the same short layout, and do not append `UTC`.
+pub(crate) fn format_report_when_local(at: DateTime<Utc>) -> String {
+    format_report_local(at, viewer_minutes_east(at))
+}
+
+fn viewer_minutes_east(at: DateTime<Utc>) -> i32 {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        let iso = at.to_rfc3339();
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(&iso));
+        let offset = date.get_timezone_offset();
+        if offset.is_finite() {
+            return (-offset).round() as i32;
+        }
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        let _ = at;
+    }
+    0
 }
 
 pub(crate) fn format_report_size(bytes: u64) -> String {
@@ -326,7 +372,7 @@ pub(crate) fn expiry_text(training_consent: bool, expires_at: Option<DateTime<Ut
     if training_consent {
         COPY_NO_DELETION.into()
     } else if let Some(at) = expires_at {
-        format!("Deleted on {}", format_report_when(at))
+        format!("Deleted on {}", format_report_when_local(at))
     } else {
         COPY_DELETION_MISSING.into()
     }
@@ -727,7 +773,7 @@ fn member_row(
     on_arm_delete: EventHandler<String>,
     on_arm_withdraw: EventHandler<String>,
 ) -> Element {
-    let when = format_report_when(row.created_at);
+    let when = format_report_when_local(row.created_at);
     let size = format_report_size(row.size_bytes);
     let status = status_text(row.training_consent);
     let consent = training_consent_text(row.training_consent);
@@ -743,14 +789,14 @@ fn member_row(
     let training = row.training_consent;
     rsx! {
         tr {
-            td { "{when}" }
+            td { class: "report-when", "{when}" }
             td { "{size}" }
             td { "{status}" }
             td {
                 "{consent}"
                 span { class: "reports-sub", "{extra}" }
             }
-            td { "{expiry}" }
+            td { class: "report-when", "{expiry}" }
             td {
                 if usable {
                     div { class: "reports-actions",
@@ -1298,10 +1344,33 @@ mod tests {
     }
 
     #[test]
+    fn format_report_local_uses_the_viewer_offset() {
+        let noon = at(2026, 11, 8, 15, 30);
+        assert_eq!(format_report_local(noon, 0), "Nov 8, 15:30");
+        assert_eq!(format_report_local(noon, -300), "Nov 8, 10:30");
+        assert_eq!(format_report_local(noon, 330), "Nov 8, 21:00");
+        assert_eq!(
+            format_report_local(at(2026, 11, 8, 2, 15), -300),
+            "Nov 7, 21:15"
+        );
+        assert_eq!(
+            format_report_local(at(2026, 1, 1, 0, 30), -120),
+            "Dec 31, 22:30"
+        );
+        let shown = format_report_local(noon, -300);
+        assert!(!shown.contains("UTC"), "{shown}");
+        assert_plain(&shown);
+        assert!(
+            REPORTS_CSS.contains(".report-when { white-space: nowrap;"),
+            "narrow screens keep the date on one line"
+        );
+    }
+
+    #[test]
     fn expiry_text_names_a_deletion_date_only_without_training_consent() {
         let when = at(2026, 11, 8, 15, 30);
         let scheduled = expiry_text(false, Some(when));
-        assert_eq!(scheduled, "Deleted on 2026-11-08 15:30 UTC");
+        assert_eq!(scheduled, "Deleted on Nov 8, 15:30");
         assert_plain(&scheduled);
         let kept = expiry_text(true, Some(when));
         assert_eq!(kept, "No deletion date");
@@ -1422,7 +1491,7 @@ mod tests {
         assert!(parsed.reports[0].reason_text.is_none());
         assert_eq!(
             expiry_text(false, parsed.reports[0].expires_at),
-            "Deleted on 2026-11-08 12:00 UTC"
+            "Deleted on Nov 8, 12:00"
         );
     }
 
@@ -1468,7 +1537,10 @@ mod tests {
             }
         }
         let html = html_of(closed);
-        assert!(html.contains("Deleted on 2026-11-08 15:30 UTC"), "{html}");
+        assert!(html.contains("Deleted on Nov 8, 15:30"), "{html}");
+        assert!(html.contains("Oct 9, 12:00"), "{html}");
+        assert!(html.contains("class=\"report-when\""), "{html}");
+        assert!(!html.contains(" UTC"), "my reports dates are local: {html}");
         assert!(html.contains("Scheduled for deletion"), "{html}");
         assert!(html.contains("Training consent off"), "{html}");
         assert!(!html.contains("QXNAME"), "{html}");
