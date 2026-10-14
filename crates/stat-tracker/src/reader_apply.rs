@@ -1,11 +1,25 @@
 //! Saved-stat merge for `reader = "new"`.
 //!
-//! ocr-v1 still decides game start and end, screen detection, and the
-//! plausibility holds. This module only chooses the values stored on the
-//! member's own row. A stat, hero, or result from [`BoardRead`] is used when
-//! that field was read and is not suspect. Anything else keeps that field's
-//! ocr-v1 value. A field is listed in `suspect_fields` only when the new
-//! reader actually attempted it and did not supply a value to store.
+//! Under `reader = "new"` the six stats of the member's row come from the
+//! digit reader only (alpha.7 O10). The capture path refuses a board this
+//! reader cannot vouch for ([`board_refusal`], [`read_own_row_stats`]) and stores
+//! nothing from that Tab. On an accepted board each stat cell is either
+//! sure, and stored, or held ([`crate::shadow::confirm::CellTrust`]): a
+//! suspect or empty digit read is never stored and no OCR number takes its
+//! place. A held cell keeps the game's last accepted value through the
+//! capture gate (`capture_gate::apply_gate_held`), is listed in
+//! `suspect_fields`, and is replaced by the next sure read. A column the
+//! game has never read has no value to keep, and a placeholder is not a
+//! number: the capture path stores no row for the game until every column
+//! has had a sure read (`capture_gate::GateState::unread_cols`).
+//!
+//! [`merge_saved`] then chooses the values stored on the member's own row.
+//! It starts from the row capture policy built ([`PolicyRow`]: the gated
+//! stats, the policy map and mode, the hero authority's hero, the game's
+//! result). A stat, hero, or result from [`BoardRead`] is used when that
+//! field was read and is not suspect. Anything else keeps the policy row's
+//! value. A field is listed in `suspect_fields` only when the new reader
+//! actually attempted it and did not supply a value to store.
 //!
 //! The map and mode already chosen by capture policy stay as they are. Under
 //! `reader = "new"` that policy map already comes from the map pack: the
@@ -19,29 +33,35 @@
 //! board map that names a different map adds `map` to `suspect_fields` and
 //! does not replace the policy map or mode.
 //!
-//! The whole ocr-v1 read is kept, with recognizer `ocr-v1` and no suspect
-//! list, when the board is missing, the team size is unknown or disagrees,
-//! the member's own row was not identified, the row index is outside the
-//! board, or the board is marked read but has no digit values (the digit
-//! pass can miss its time budget after the columns are found). Each of
-//! those full fallbacks logs one info line with the reason. A blank map, a
-//! hero key that is not the display name, and a hero that came from the
-//! career panel or the portrait matcher are per-field: confident digits
-//! stay on this reader. The recognizer is also `ocr-v1` when every stored
-//! field fell back to ocr-v1.
+//! [`merge_saved`] keeps the whole policy row, with recognizer `ocr-v1` and
+//! no suspect list, when the board is missing, the team size is unknown or
+//! disagrees, the member's own row was not identified, the row index is
+//! outside the board, or the board is marked read but has no digit values
+//! (the digit pass can miss its time budget after the columns are found).
+//! The capture path refuses every one of those boards before it gets here,
+//! so under `reader = "new"` that branch stores nothing; it stays as the
+//! switch-off answer and as a guard. A blank map, a hero key that is not
+//! the display name, and a hero that came from the career panel or the
+//! portrait matcher are per-field: confident digits stay on this reader.
 //!
 //! The recognizer tag describes the stat, hero and result fields only, never
-//! the map: a row tagged `ocr-v1` may carry a map from the banner reader, and
-//! a `cv-v5` row may carry one from the top-bar OCR or the full-board text.
+//! the map: a `cv-v5` row may carry a map from the top-bar OCR.
 
 use scuffed_types::{RECOGNIZER_OCR_V1, SUSPECT_FIELD_NAMES};
 
+use crate::parse::ScoreboardMiss;
+use crate::shadow::confirm::{CellTrust, cell_trust};
 use crate::shadow::digits::RECOGNIZER_ID;
 use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
+use crate::storage::PersonalMatch;
 
-/// ocr-v1 values for the row that will be stored, after holds and map policy.
+/// The six stat fields of a board row, in capture gate column order.
+pub const STAT_SUFFIXES: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
+
+/// The row capture policy built for this Tab, after holds and map policy:
+/// what is stored for every field the new reader does not supply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OcrSnapshot {
+pub struct PolicyRow {
     pub map: String,
     pub mode: String,
     pub result: String,
@@ -95,8 +115,7 @@ pub fn own_row(
     fallback_row: Option<usize>,
     team_size: usize,
 ) -> OwnRow {
-    let named = player_name.is_some_and(|name| !name.trim().is_empty());
-    let index = if named {
+    let index = if player_name_is_set(player_name) {
         name_match.or(fallback_row)
     } else {
         fallback_row
@@ -107,22 +126,124 @@ pub fn own_row(
     }
 }
 
+/// A player name is configured and is not blank. [`own_row`] takes a name
+/// match only then. The daemon's one call passes no name: under
+/// `reader = "new"` the row is `detect::own_row`'s, and ocr-v1 matches the
+/// name in the vision pass.
+pub fn player_name_is_set(player_name: Option<&str>) -> bool {
+    player_name.is_some_and(|name| !name.trim().is_empty())
+}
+
+/// Why the capture path stores nothing from this board under
+/// `reader = "new"`, before the member's row is looked at. `None` is a board
+/// the digit reader vouches for: found, with the capture path's team size,
+/// and with digit values (the reader's own check, 3 rows with 4 read cells,
+/// is behind [`BoardStatus::Read`]). This is the trust gate ocr-v1 runs on
+/// its cell text (`parse::looks_like_scoreboard`, OCR site T3).
+pub fn board_refusal(board: &BoardRead, team_size: usize) -> Option<&'static str> {
+    if let Some(reason) = board_fallback_reason(board) {
+        return Some(reason);
+    }
+    match board.team_size {
+        None => Some("team size is missing"),
+        Some(read_size) if read_size != team_size => Some("team size disagrees"),
+        Some(_) => None,
+    }
+}
+
+/// The stats of the member's row off an accepted board ([`board_refusal`]
+/// is `None`). Which row that is, and how sure, is not decided here: that
+/// is `detect::own_row` (`OwnRow`, `OwnRowRead`, `read_own_row`), whose
+/// names these are kept apart from.
+#[derive(Debug)]
+pub struct OwnRowStats {
+    /// A fresh row with the sure stats. A held cell is 0 here: the capture
+    /// gate puts the game's last accepted value in its place.
+    pub matched: PersonalMatch,
+    /// Per stat column: the digit reader did not vouch for the cell.
+    pub held: [bool; 6],
+}
+
+/// Trust in each stat cell of board row `index`, in gate column order. A
+/// field the board does not have is held.
+pub fn row_cells(board: &BoardRead, index: usize) -> [CellTrust; 6] {
+    STAT_SUFFIXES.map(|suffix| match board.get(&format!("r{index}.{suffix}")) {
+        Some(field) => match field.value {
+            Some(Value::Int(n)) => cell_trust(Some(n), field.suspect),
+            _ => CellTrust::Held,
+        },
+        None => CellTrust::Held,
+    })
+}
+
+/// Sure stat cells a row needs before it is read at all: the same four the
+/// team rule ([`both_teams_have_stats`]) and the reader's own board check
+/// ask for. Under it a single cell just above the reader's suspect line
+/// would be the only read of the row (F266-6).
+pub const MIN_SURE_CELLS: usize = 4;
+
+/// Read the member's stats off an accepted board, with no OCR text.
+///
+/// The refusals are ocr-v1's two (`parse::read_scoreboard`), decided on the
+/// digit reads: no identified row is [`ScoreboardMiss::PlayerRowNotFound`],
+/// and a row with fewer than [`MIN_SURE_CELLS`] sure cells is
+/// [`ScoreboardMiss::CellsUnreadable`]. There is no third path: a row is
+/// never rebuilt from text.
+pub fn read_own_row_stats(
+    board: &BoardRead,
+    own: OwnRow,
+    outcome: &str,
+) -> Result<OwnRowStats, ScoreboardMiss> {
+    let OwnRow::Identified { index, team_size } = own else {
+        return Err(ScoreboardMiss::PlayerRowNotFound);
+    };
+    if index >= team_size.saturating_mul(2) {
+        return Err(ScoreboardMiss::PlayerRowNotFound);
+    }
+    let cells = row_cells(board, index);
+    if sure_cells(&cells) < MIN_SURE_CELLS {
+        return Err(ScoreboardMiss::CellsUnreadable);
+    }
+    let stats = cells.map(|cell| match cell {
+        CellTrust::Sure(n) => n,
+        CellTrust::Held => 0,
+    });
+    Ok(OwnRowStats {
+        matched: crate::parse::match_from_stats(stats, outcome),
+        held: cells.map(|cell| cell == CellTrust::Held),
+    })
+}
+
+/// Both teams show a row with four sure stat cells: ocr-v1's
+/// `parse::both_teams_have_stats` on the digit reads.
+pub fn both_teams_have_stats(board: &BoardRead, team_size: usize) -> bool {
+    let plausible = |row: usize| sure_cells(&row_cells(board, row)) >= MIN_SURE_CELLS;
+    team_size > 0 && (0..team_size).any(plausible) && (team_size..2 * team_size).any(plausible)
+}
+
+fn sure_cells(cells: &[CellTrust; 6]) -> usize {
+    cells
+        .iter()
+        .filter(|cell| matches!(cell, CellTrust::Sure(_)))
+        .count()
+}
+
 /// Merge one accepted board.
 ///
-/// `board == None` is the switch off: the snapshot is returned unchanged,
+/// `board == None` is the switch off: the policy row is returned unchanged,
 /// tagged `ocr-v1`, with no suspect list.
-pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) -> SavedRead {
+pub fn merge_saved(policy: &PolicyRow, own: OwnRow, board: Option<&BoardRead>) -> SavedRead {
     let keep = || SavedRead {
-        map: ocr.map.clone(),
-        mode: ocr.mode.clone(),
-        result: ocr.result.clone(),
-        hero: canonical_board_hero(&ocr.hero),
-        elims: ocr.elims,
-        assists: ocr.assists,
-        deaths: ocr.deaths,
-        damage: ocr.damage,
-        healing: ocr.healing,
-        mitigation: ocr.mitigation,
+        map: policy.map.clone(),
+        mode: policy.mode.clone(),
+        result: policy.result.clone(),
+        hero: canonical_board_hero(&policy.hero),
+        elims: policy.elims,
+        assists: policy.assists,
+        deaths: policy.deaths,
+        damage: policy.damage,
+        healing: policy.healing,
+        mitigation: policy.mitigation,
         recognizer: RECOGNIZER_OCR_V1,
         suspect_fields: Vec::new(),
     };
@@ -142,10 +263,10 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     // Capture policy already chose the map and mode (including Deathmatch,
     // which must stay local). The board may disagree, and that is the only
     // reason `map` is marked. The stored mode stays with the policy map.
-    let map = ocr.map.clone();
-    let mode = ocr.mode.clone();
+    let map = policy.map.clone();
+    let mode = policy.mode.clone();
     if let Some(board_map) = text_on(board, "map")
-        && board_map.trim() != ocr.map.trim()
+        && board_map.trim() != policy.map.trim()
     {
         push_suspect(&mut suspect, "map");
     }
@@ -154,7 +275,7 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
             used_cv = true;
             value
         }
-        None => ocr.result.clone(),
+        None => policy.result.clone(),
     };
     let hero_name = format!("r{index}.hero");
     let hero = match take_text(board, &hero_name, &mut suspect, "hero") {
@@ -162,22 +283,25 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         // read, so the career panel or portrait hero already on the snapshot
         // stays.
         Some(value) if scuffed_types::is_placeholder_hero(&value) => {
-            canonical_board_hero(&ocr.hero)
+            canonical_board_hero(&policy.hero)
         }
         Some(value) => {
             used_cv = true;
             canonical_board_hero(&value)
         }
-        None => canonical_board_hero(&ocr.hero),
+        None => canonical_board_hero(&policy.hero),
     };
     let stats = [
-        ("e", ocr.elims),
-        ("a", ocr.assists),
-        ("d", ocr.deaths),
-        ("dmg", ocr.damage),
-        ("h", ocr.healing),
-        ("mit", ocr.mitigation),
+        ("e", policy.elims),
+        ("a", policy.assists),
+        ("d", policy.deaths),
+        ("dmg", policy.damage),
+        ("h", policy.healing),
+        ("mit", policy.mitigation),
     ];
+    // A stat the digit reader does not vouch for keeps the policy row's
+    // number. Under `reader = "new"` that number is the capture gate's held
+    // value (the game's last accepted one), never an OCR read.
     let row_attempted = stat_row_attempted(board, index);
     let mut numbers = [0u32; 6];
     for (slot, (suffix, fallback)) in stats.into_iter().enumerate() {
@@ -279,13 +403,8 @@ pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
 /// older source named the hero are not reasons: those fields fall back on
 /// their own and confident digits keep [`RECOGNIZER_ID`].
 fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> {
-    match board.status {
-        BoardStatus::Read => {}
-        BoardStatus::NotFound => return Some("board was not found"),
-        BoardStatus::TeamSizeUnknown => return Some("team size is unknown"),
-    }
-    if !has_digit_value(board) {
-        return Some("read board has no digit values");
+    if let Some(reason) = board_fallback_reason(board) {
+        return Some(reason);
     }
     let OwnRow::Identified { index, team_size } = own else {
         return Some("own row is uncertain");
@@ -298,6 +417,19 @@ fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> 
     }
     if index >= team_size.saturating_mul(2) {
         return Some("row index is outside the board");
+    }
+    None
+}
+
+/// The board itself is no read: not found, no team size, or no digit value.
+fn board_fallback_reason(board: &BoardRead) -> Option<&'static str> {
+    match board.status {
+        BoardStatus::Read => {}
+        BoardStatus::NotFound => return Some("board was not found"),
+        BoardStatus::TeamSizeUnknown => return Some("team size is unknown"),
+    }
+    if !has_digit_value(board) {
+        return Some("read board has no digit values");
     }
     None
 }
@@ -438,8 +570,8 @@ mod tests {
     use super::*;
     use crate::shadow::{FieldRead, Value};
 
-    fn ocr() -> OcrSnapshot {
-        OcrSnapshot {
+    fn ocr() -> PolicyRow {
+        PolicyRow {
             map: "Busan".into(),
             mode: "Control".into(),
             result: "victory".into(),
@@ -511,6 +643,175 @@ mod tests {
         OwnRow::Identified { index, team_size }
     }
 
+    // ----- alpha.7 O10: the trust gate and the stats without OCR -----
+
+    #[test]
+    fn board_refusal_names_every_board_the_reader_does_not_vouch_for() {
+        assert_eq!(board_refusal(&confident_board(5, 2), 5), None);
+        let mut gone = confident_board(5, 2);
+        gone.status = BoardStatus::NotFound;
+        assert_eq!(board_refusal(&gone, 5), Some("board was not found"));
+        let mut unsized_board = confident_board(5, 2);
+        unsized_board.status = BoardStatus::TeamSizeUnknown;
+        assert_eq!(
+            board_refusal(&unsized_board, 5),
+            Some("team size is unknown")
+        );
+        // a Read board whose digit pass returned nothing
+        let mut empty = confident_board(5, 2);
+        for field in &mut empty.fields {
+            if matches!(field.value, Some(Value::Int(_))) {
+                *field = unread(&field.name.clone());
+            }
+        }
+        assert_eq!(
+            board_refusal(&empty, 5),
+            Some("read board has no digit values")
+        );
+        // the capture path measured another team size: row 2 is another row
+        assert_eq!(
+            board_refusal(&confident_board(6, 2), 5),
+            Some("team size disagrees")
+        );
+        let mut sizeless = confident_board(5, 2);
+        sizeless.team_size = None;
+        assert_eq!(board_refusal(&sizeless, 5), Some("team size is missing"));
+    }
+
+    #[test]
+    fn read_own_row_takes_sure_cells_and_holds_the_rest() {
+        let mut board = confident_board(5, 2);
+        for field in &mut board.fields {
+            match field.name.as_str() {
+                // a plausible suspect number, and a cell with no number
+                "r2.h" => *field = int_field("r2.h", 1250, true),
+                "r2.mit" => *field = unread("r2.mit"),
+                _ => {}
+            }
+        }
+        let read = read_own_row_stats(&board, identified(2, 5), "defeat").unwrap();
+        assert_eq!(read.held, [false, false, false, false, true, true]);
+        let m = &read.matched;
+        assert_eq!(
+            (
+                m.elims,
+                m.assists,
+                m.deaths,
+                m.damage,
+                m.healing,
+                m.mitigation
+            ),
+            (21, 9, 3, 9100, 0, 0),
+            "a held cell carries no number, least of all the suspect one"
+        );
+        assert_eq!((m.hero.as_str(), m.map_name.as_str()), ("Unknown", ""));
+        assert_eq!(m.outcome, "defeat");
+        assert_eq!(
+            row_cells(&board, 2),
+            [
+                CellTrust::Sure(21),
+                CellTrust::Sure(9),
+                CellTrust::Sure(3),
+                CellTrust::Sure(9100),
+                CellTrust::Held,
+                CellTrust::Held
+            ]
+        );
+        // a row the board does not have is held throughout
+        assert_eq!(row_cells(&board, 7), [CellTrust::Held; 6]);
+    }
+
+    #[test]
+    fn read_own_row_refuses_without_a_row_or_with_under_four_sure_cells() {
+        let board = confident_board(5, 2);
+        assert_eq!(
+            read_own_row_stats(&board, OwnRow::Uncertain, "unknown").unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        assert_eq!(
+            read_own_row_stats(&board, identified(10, 5), "unknown").unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        // the row is on the board, but every cell of it is suspect
+        let mut unsure = confident_board(5, 2);
+        for field in &mut unsure.fields {
+            if matches!(field.value, Some(Value::Int(_))) {
+                field.suspect = true;
+            }
+        }
+        assert_eq!(
+            read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // one, two and three sure cells are still not a row (F266-6): a
+        // single read just over the suspect line is not stored alone
+        let sure = |board: &mut BoardRead, suffix: &str, value: u32| {
+            let name = format!("r2.{suffix}");
+            board.fields.retain(|f| f.name != name);
+            board.fields.push(int_field(&name, value, false));
+        };
+        for (suffix, value) in [("e", 4), ("a", 2), ("d", 1)] {
+            sure(&mut unsure, suffix, value);
+            assert_eq!(
+                read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap_err(),
+                ScoreboardMiss::CellsUnreadable,
+                "sure up to {suffix}"
+            );
+        }
+        // the fourth makes it a row: the other two are held
+        sure(&mut unsure, "dmg", 900);
+        let read = read_own_row_stats(&unsure, identified(2, 5), "unknown").unwrap();
+        assert_eq!(read.held, [false, false, false, false, true, true]);
+        assert_eq!(
+            (
+                read.matched.elims,
+                read.matched.damage,
+                read.matched.healing
+            ),
+            (4, 900, 0)
+        );
+        assert_eq!(MIN_SURE_CELLS, 4);
+    }
+
+    #[test]
+    fn a_blank_player_name_is_no_name() {
+        assert!(!player_name_is_set(None));
+        assert!(!player_name_is_set(Some("")));
+        assert!(!player_name_is_set(Some("  \t")));
+        assert!(player_name_is_set(Some("Soot")));
+        // and it does not pick a row either: the highlight row stands
+        assert_eq!(
+            own_row(Some(" "), Some(7), Some(2), 5),
+            OwnRow::Identified {
+                index: 2,
+                team_size: 5
+            }
+        );
+    }
+
+    #[test]
+    fn both_teams_need_a_row_with_four_sure_cells() {
+        let row = |board: &mut BoardRead, index: usize, sure: usize| {
+            for (k, suffix) in STAT_SUFFIXES.iter().enumerate() {
+                board
+                    .fields
+                    .push(int_field(&format!("r{index}.{suffix}"), 5, k >= sure));
+            }
+        };
+        let mut board = confident_board(5, 2);
+        assert!(!both_teams_have_stats(&board, 5), "team 2 has no row");
+        row(&mut board, 7, 3);
+        assert!(
+            !both_teams_have_stats(&board, 5),
+            "three sure cells are not a row"
+        );
+        row(&mut board, 5, 4);
+        assert!(both_teams_have_stats(&board, 5));
+        // on a 6v6 board row 5 is team 1, and row 7 is still not a row
+        assert!(!both_teams_have_stats(&board, 6));
+        assert!(!both_teams_have_stats(&board, 0));
+    }
+
     #[test]
     fn switch_off_keeps_ocr_v1_values_and_omits_suspects() {
         let before = ocr();
@@ -576,7 +877,11 @@ mod tests {
         deaths.suspect = true;
         deaths.value = Some(Value::Int(99));
         let saved = merge_saved(&ocr(), identified(1, 5), Some(&board));
-        assert_eq!(saved.deaths, ocr().deaths, "suspect digit stays on ocr-v1");
+        assert_eq!(
+            saved.deaths,
+            ocr().deaths,
+            "suspect digit keeps the policy row"
+        );
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.damage, 9100);
         assert_eq!(saved.hero, "Kiriko");
