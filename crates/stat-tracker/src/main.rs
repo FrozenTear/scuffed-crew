@@ -2606,22 +2606,23 @@ struct FrameAnalysis {
     /// with the shadow worker when it is on, never copied.
     scoreboard: Arc<image::DynamicImage>,
     /// The player's row index. ocr-v1: by name match or brightness
-    /// highlight. `reader = "new"`: by the own-name seeds and the highlight
-    /// ([`find_own_row`]), never by a name read.
+    /// highlight. `reader = "new"`: by the own-name seeds, the highlight
+    /// and the career hero's row ([`find_own_row`]); by a name read only
+    /// when none of them names a row.
     player_row_idx: Option<usize>,
     /// The name match behind `player_row_idx`, with the name window that
     /// matched. `None` when the row came from the highlight alone, and
     /// always under the new reader.
     name_match: Option<parse::NameMatch>,
     /// `reader = "new"`: how `player_row_idx` was found (seed, highlight,
-    /// both). `None` under ocr-v1.
+    /// career hero, name fallback). `None` under ocr-v1.
     own_row: Option<detect::own_row::OwnRow>,
-    /// `reader = "new"`: the highlighted row's name line, already through
-    /// the seeding gate, for the own-name seed store. Pixels only; never
-    /// logged, reported or uploaded.
+    /// `reader = "new"`: the own row's name line (the highlighted row's,
+    /// or the career hero's), already through the seeding gate, for the
+    /// own-name seed store. Pixels only; never logged, reported or uploaded.
     own_name_candidate: Option<detect::own_row::Candidate>,
     /// `reader = "new"`: what this board says about the trusted own-name
-    /// seeds (agree, or name another row than a strong highlight).
+    /// seeds (confirmed, or naming another row than the career hero's).
     own_seed_verdict: detect::own_row::Verdict,
     /// Detected team size (5 or 6) — portrait geometry depends on it.
     team_size: usize,
@@ -4123,7 +4124,8 @@ fn analyze_frame(
 
     // The name windows are read only by ocr-v1 (OCR site T4). The new
     // reader never crops or reads a name: its own row comes from the
-    // member's own-name seeds and the highlight (alpha.7 O9).
+    // member's own-name seeds, the highlight and the career hero's row
+    // (alpha.7 O9, O9b).
     let names = if use_new_reader {
         ocr::Names::Skip
     } else {
