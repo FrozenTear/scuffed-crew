@@ -34,7 +34,10 @@ fn main() {
         let crop = image::imageops::crop_imm(&img, x, y, cw, ch).to_image();
         (crop, blank::blanked_scoreboard(&frame, Some(team)))
     };
-    println!("input {input} {w}x{h} ({})", if is_crop { "crop" } else { "frame" });
+    println!(
+        "input {input} {w}x{h} ({})",
+        if is_crop { "crop" } else { "frame" }
+    );
     println!("board: {:?}", blanked.board);
     for r in &blanked.rows {
         println!(
@@ -67,5 +70,9 @@ fn main() {
     }
     let boxes_path = out_dir.join(format!("{stem}.boxes.png"));
     boxes.save(&boxes_path).expect("write boxes");
-    println!("wrote {} and {}", blanked_path.display(), boxes_path.display());
+    println!(
+        "wrote {} and {}",
+        blanked_path.display(),
+        boxes_path.display()
+    );
 }

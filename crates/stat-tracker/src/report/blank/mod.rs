@@ -791,7 +791,11 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
     let n0 = (f64::from(b.l) + NAME_COL.0 * s).floor().max(0.0) as u32;
     let n1 = ((f64::from(b.l) + NAME_COL.1 * s).ceil() as u32).min(w);
     let mut kept = 0;
-    for r in b.rows.iter().filter(|r| r.verified && !chat.covers(r.bot, h)) {
+    for r in b
+        .rows
+        .iter()
+        .filter(|r| r.verified && !chat.covers(r.bot, h))
+    {
         for y in r.top..r.bot.min(h) {
             for x in x0..x1 {
                 let px = if (n0..n1).contains(&x) {
