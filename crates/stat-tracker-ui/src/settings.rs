@@ -418,7 +418,13 @@ impl SettingsForm {
             session_window_secs: config.session_window_secs.to_string(),
             game_process_names: config.game_process_names.join(", "),
             auto_detect_enabled: config.auto_detect.enabled,
-            poll_interval_secs: config.auto_detect.poll_interval_secs.to_string(),
+            // Empty means automatic (1.5 s new reader, 4 s classic OCR);
+            // 4 is also automatic (`AutoDetectConfig::poll_interval`).
+            poll_interval_secs: config
+                .auto_detect
+                .poll_interval_secs
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             cooldown_secs: config.auto_detect.cooldown_secs.to_string(),
             sync_url: config
                 .sync
@@ -504,7 +510,12 @@ impl SettingsForm {
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
                 enabled: self.auto_detect_enabled,
-                poll_interval_secs: parse_u64(&self.poll_interval_secs, 4),
+                poll_interval_secs: self
+                    .poll_interval_secs
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&s| s > 0),
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
@@ -1080,7 +1091,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(compact_row(
             Some(field_input(
                 "Check every (seconds)",
-                "4",
+                "auto",
                 &app.settings.poll_interval_secs,
                 SettingsField::PollInterval,
                 false,
@@ -1635,7 +1646,7 @@ mod tests {
             session_window_secs: "1800".into(),
             game_process_names: String::new(),
             auto_detect_enabled: true,
-            poll_interval_secs: "4".into(),
+            poll_interval_secs: String::new(),
             cooldown_secs: "120".into(),
             sync_url: String::new(),
             sync_token: "tok".into(),
@@ -1711,7 +1722,7 @@ mod tests {
         form.cooldown_secs = "".into();
         form.session_window_secs = "oops".into();
         let c = form.to_config(&base());
-        assert_eq!(c.auto_detect.poll_interval_secs, 4);
+        assert_eq!(c.auto_detect.poll_interval_secs, None);
         assert_eq!(c.auto_detect.cooldown_secs, 120);
         assert_eq!(c.session_window_secs, 1800);
     }
@@ -1727,7 +1738,7 @@ mod tests {
         });
         base.auto_detect = AutoDetectConfig {
             enabled: false,
-            poll_interval_secs: 8,
+            poll_interval_secs: Some(8),
             cooldown_secs: 60,
         };
         base.session_window_secs = 900;
@@ -1747,7 +1758,7 @@ mod tests {
             out.sync.as_ref().map(|s| s.server_url.as_str()),
             Some("https://crew.example")
         );
-        assert_eq!(out.auto_detect.poll_interval_secs, 8);
+        assert_eq!(out.auto_detect.poll_interval_secs, Some(8));
         assert_eq!(out.session_window_secs, 900);
         assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);

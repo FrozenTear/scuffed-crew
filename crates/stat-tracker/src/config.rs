@@ -259,7 +259,12 @@ fn default_game_process_names() -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct AutoDetectConfig {
     pub enabled: bool,
-    pub poll_interval_secs: u64,
+    /// Seconds between end-screen polls. Missing means automatic
+    /// ([`AutoDetectConfig::poll_interval`]): 1.5 s with the new reader,
+    /// 4 s with classic OCR. 4, the value older Settings always wrote, also
+    /// counts as automatic so existing configs get the faster rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
     pub cooldown_secs: u64,
 }
 
@@ -270,11 +275,34 @@ impl Default for AutoDetectConfig {
             // accolade (win/loss) screens — required for automatic win/loss
             // detection — at ~25-35ms of CPU per tick. Enabled by default.
             enabled: true,
-            poll_interval_secs: 4,
+            poll_interval_secs: None,
             // Debounce between opening new games: long enough that a map-vote
             // screen lingering across several ticks only opens one game, far
             // shorter than a real match so back-to-back games are still caught.
             cooldown_secs: 120,
+        }
+    }
+}
+
+/// Automatic poll interval with classic OCR (Tesseract reads the boards).
+pub const CLASSIC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+/// Automatic poll interval with the new reader. Its end-screen checks are
+/// cheap, and a 4 s tick missed short Victory or Defeat screens.
+pub const NEW_READER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+/// The value older Settings wrote on every save; treated as automatic.
+pub const LEGACY_DEFAULT_POLL_SECS: u64 = 4;
+
+impl AutoDetectConfig {
+    /// The poll interval in effect: an explicit `poll_interval_secs` (at
+    /// least 1 s) other than [`LEGACY_DEFAULT_POLL_SECS`], else the
+    /// automatic rate for the reader in use.
+    pub fn poll_interval(&self, new_reader: bool) -> std::time::Duration {
+        match self.poll_interval_secs {
+            Some(secs) if secs != LEGACY_DEFAULT_POLL_SECS => {
+                std::time::Duration::from_secs(secs.max(1))
+            }
+            _ if new_reader => NEW_READER_POLL_INTERVAL,
+            _ => CLASSIC_POLL_INTERVAL,
         }
     }
 }
@@ -1583,7 +1611,7 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
             }),
             auto_detect: AutoDetectConfig {
                 enabled: false,
-                poll_interval_secs: 8,
+                poll_interval_secs: Some(8),
                 cooldown_secs: 30,
             },
             session_window_secs: 900,
@@ -2231,5 +2259,37 @@ cooldown_secs = 120
             Config::parse_file_contents(&on).unwrap().ocr,
             OcrSetting::On
         );
+    }
+
+    #[test]
+    fn poll_interval_is_faster_by_default_only_with_the_new_reader() {
+        use std::time::Duration;
+        let auto = AutoDetectConfig::default();
+        assert_eq!(auto.poll_interval(true), Duration::from_millis(1500));
+        assert_eq!(auto.poll_interval(false), Duration::from_secs(4));
+        // 4 is what older Settings wrote: still automatic.
+        let legacy = AutoDetectConfig {
+            poll_interval_secs: Some(4),
+            ..auto
+        };
+        assert_eq!(legacy.poll_interval(true), Duration::from_millis(1500));
+        assert_eq!(legacy.poll_interval(false), Duration::from_secs(4));
+        // Any other value overrides both readers.
+        let set = AutoDetectConfig {
+            poll_interval_secs: Some(2),
+            ..auto
+        };
+        assert_eq!(set.poll_interval(true), Duration::from_secs(2));
+        assert_eq!(set.poll_interval(false), Duration::from_secs(2));
+        let zero = AutoDetectConfig {
+            poll_interval_secs: Some(0),
+            ..auto
+        };
+        assert_eq!(zero.poll_interval(false), Duration::from_secs(1));
+        // A config without the key parses as automatic.
+        let parsed: AutoDetectConfig =
+            toml::from_str("enabled = true\ncooldown_secs = 120\n").unwrap();
+        assert_eq!(parsed.poll_interval_secs, None);
+        assert_eq!(parsed.poll_interval(true), Duration::from_millis(1500));
     }
 }

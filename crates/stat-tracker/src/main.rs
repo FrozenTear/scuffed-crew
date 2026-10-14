@@ -1138,7 +1138,7 @@ async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::Local
 fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collect_portraits: bool) {
     if config.auto_detect.enabled {
         tracing::info!(
-            poll_secs = config.auto_detect.poll_interval_secs,
+            poll_secs = ?config.auto_detect.poll_interval_secs,
             cooldown_secs = config.auto_detect.cooldown_secs,
             "auto-detect mode enabled — polling for match end screens"
         );
@@ -3904,7 +3904,12 @@ async fn run_loop(
         None => return Ok(()),
     };
 
-    let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
+    let poll_interval = auto_detect.poll_interval(ctx.use_new_reader);
+    tracing::info!(
+        poll_ms = poll_interval.as_millis() as u64,
+        new_reader = ctx.use_new_reader,
+        "end-screen poll interval"
+    );
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
     let tab_debounce = std::time::Duration::from_secs(3);
     let finished_close = ctx.finished_game_close;
@@ -14345,7 +14350,7 @@ mod tests {
     const NIGHT_TICKS: usize = 4;
 
     fn night_tick() -> Duration {
-        Duration::from_secs(config::AutoDetectConfig::default().poll_interval_secs)
+        config::AutoDetectConfig::default().poll_interval(false)
     }
 
     fn night_debounce() -> Duration {
