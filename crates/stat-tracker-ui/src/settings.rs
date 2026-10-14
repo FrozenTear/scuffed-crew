@@ -141,7 +141,7 @@ pub(crate) const NEW_READER_LABEL: &str = "New reader (alpha)";
 pub(crate) const NEW_READER_HINT: &str = "\
 Saved games and uploads use the new scoreboard reader. \
 With classic OCR on, a field it is not sure about keeps the classic read and is marked unsure. \
-With classic OCR off, a stat it is not sure about waits for a later Tab that reads it clearly.";
+With classic OCR off, a stat it is not sure about waits for a later Tab that reads it clearly. If none does, the game is saved with its best guess and that stat is marked unsure.";
 
 pub(crate) const NEW_READER_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";

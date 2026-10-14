@@ -1184,6 +1184,11 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 /// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
     session_id: String,
+    /// alpha.8: the newest pending board's row with the reader's best guess
+    /// in each unread stat column, those columns in `suspect_fields`. Stored
+    /// when the game closes with no row ([`retire_active_game`]); a board
+    /// that stores a row makes it moot.
+    best_guess: Option<storage::PersonalMatch>,
     outcome: detect::MatchOutcome,
     /// The map actually being played, once a read names it. Never set from
     /// the map vote. [`Self::map_source`] says which read stored it. A
@@ -1291,6 +1296,7 @@ impl ActiveGame {
         now: Instant,
     ) -> Self {
         ActiveGame {
+            best_guess: None,
             session_id,
             outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
             outcome,
@@ -1722,6 +1728,7 @@ async fn retire_active_game(
             );
         }
     }
+    store_best_guess_on_close(store, data_dir, &mut g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
             .set_session_outcome(&g.session_id, &g.outcome.to_string())
@@ -2110,6 +2117,7 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     );
     let hint_recovered = result_mark.is_some();
     Some(ActiveGame {
+        best_guess: None,
         session_id: p.session_id,
         outcome: p.outcome,
         map: p.map.clone(),
@@ -2953,6 +2961,9 @@ enum FrameAnalysisOutcome {
 
 /// What a Tab capture actually did, reported back to the session state machine.
 struct CaptureReport {
+    /// A pending board's row with the best guess in its unread columns
+    /// ([`apply_best_guess`]). `None` for every other report.
+    best_guess: Option<storage::PersonalMatch>,
     /// A snapshot row was written (and the session row created if this was the
     /// session's first capture). False = rejected by a trust gate.
     recorded: bool,
@@ -3468,6 +3479,9 @@ async fn apply_capture_report(
                 // opened the game without a row: the session row is made by
                 // the first capture that stores one.
                 g.session_created = report.recorded;
+                if !report.recorded {
+                    g.best_guess = report.best_guess.clone();
+                }
                 tracing::info!(
                     old_session = %sid,
                     session_id = %g.session_id,
@@ -3490,6 +3504,16 @@ async fn apply_capture_report(
             if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
                 if recorded {
                     g.session_created = true;
+                    g.best_guess = None;
+                } else if report.best_guess.is_some()
+                    && report
+                        .gate_state
+                        .is_none_or(|state| state.refused_cols().is_empty())
+                {
+                    // A Tab whose first read of a column was not taken
+                    // (other columns dropped: likely the next game's board)
+                    // does not replace the guess.
+                    g.best_guess = report.best_guess.clone();
                 }
                 g.touch_at(now);
                 if let Some(accepted) = report.gate_state {
@@ -5104,6 +5128,7 @@ fn skipped_capture_report(
     held_at: Option<chrono::DateTime<Utc>>,
 ) -> CaptureReport {
     CaptureReport {
+        best_guess: None,
         recorded: false,
         outcome: plan.stored_outcome,
         map: None,
@@ -5301,6 +5326,7 @@ fn blank_rejected_report(
     req: &CaptureRequest,
 ) -> CaptureReport {
     CaptureReport {
+        best_guess: None,
         recorded: false,
         outcome,
         map: None,
@@ -5329,6 +5355,70 @@ fn blank_rejected_report(
 
 /// Insert the current row, then the carried board. The carried write runs
 /// only after the insert succeeds.
+/// Put the reader's best guess in each unread column of `parsed` and list
+/// those columns in `suspect_fields` (upload names: `e`, `a`, `d`, `dmg`,
+/// `h`, `mit`), so the app marks them for a one-click edit.
+fn apply_best_guess(
+    parsed: &mut storage::PersonalMatch,
+    unread: &[&'static str],
+    guess: [u32; capture_gate::GATE_COLS],
+) {
+    let cells = [
+        &mut parsed.elims,
+        &mut parsed.assists,
+        &mut parsed.deaths,
+        &mut parsed.damage,
+        &mut parsed.healing,
+        &mut parsed.mitigation,
+    ];
+    for (col, cell) in cells.into_iter().enumerate() {
+        if unread.contains(&capture_gate::COL_FIELD[col]) {
+            *cell = guess[col];
+        }
+    }
+    for name in unread {
+        if !parsed.suspect_fields.iter().any(|f| f == name) {
+            parsed.suspect_fields.push((*name).to_string());
+        }
+    }
+}
+
+/// alpha.8: a game that closes with no stored row but a best guess stores
+/// the guess, with the game's outcome and map. Returns whether it stored.
+async fn store_best_guess_on_close(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    g: &mut ActiveGame,
+) -> bool {
+    if g.session_created {
+        return false;
+    }
+    let Some(mut row) = g.best_guess.take() else {
+        return false;
+    };
+    row.session_id = g.session_id.clone();
+    if g.finished() {
+        row.outcome = g.outcome.to_string();
+    }
+    storage::append_match_log(data_dir, &row);
+    match store.insert_match(row.clone()).await {
+        Ok(_) => {
+            tracing::info!(
+                session_id = %g.session_id,
+                suspect = ?row.suspect_fields,
+                "game closed with a stat never read for sure: stored the best guess, marked unsure"
+            );
+            g.session_created = true;
+            refresh_snapshot(store, data_dir).await;
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, session_id = %g.session_id, "best guess not stored");
+            false
+        }
+    }
+}
+
 async fn commit_capture_rows(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
@@ -5861,6 +5951,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 );
                 save_rejected_frame(ctx.debug_ocr, data_dir, frame, reason);
                 return Ok(CaptureReport {
+                    best_guess: None,
                     recorded: false,
                     outcome,
                     map: None,
@@ -6005,6 +6096,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         );
         save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, "noscoreboard");
         return Ok(CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome,
             map: None,
@@ -6426,7 +6518,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ocr_parsed.healing,
                 ocr_parsed.mitigation,
             ) = tesseract_stats;
+            // The new reader's own read of each stat before the gate held
+            // any: the best guess for a column that never gets a sure read.
+            let mut raw_guess: Option<[u32; capture_gate::GATE_COLS]> = None;
             if let Some(board) = new_board {
+                let guesses = reader_apply::own_row_guesses(&board, board_row);
                 offer_own_name_seed(
                     ctx.own_name.as_ref(),
                     own_name_candidate,
@@ -6441,6 +6537,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     own_row_suspect,
                     board,
                 );
+                // The reader's number for each cell, sure or not; a cell with
+                // none keeps what the row holds.
+                let held = [
+                    parsed.elims,
+                    parsed.assists,
+                    parsed.deaths,
+                    parsed.damage,
+                    parsed.healing,
+                    parsed.mitigation,
+                ];
+                raw_guess = Some(std::array::from_fn(|col| guesses[col].unwrap_or(held[col])));
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
                 staged.gate = hold_new_reader_stats(
                     &mut parsed,
@@ -6488,6 +6595,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 );
             }
             let report = CaptureReport {
+                best_guess: None,
                 recorded: true,
                 outcome,
                 map: staged.recorded_map.clone(),
@@ -6525,8 +6633,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     split,
                     "board read but not stored: a stat column of this game has no sure read yet"
                 );
+                // The best guess waits on the active game. A later Tab with
+                // a sure read stores the real row; if none comes, the game
+                // stores this guess when it closes (alpha.8).
+                let best_guess = raw_guess.map(|guess| {
+                    let mut row = parsed.clone();
+                    apply_best_guess(&mut row, &unread, guess);
+                    row
+                });
                 return Ok(CaptureReport {
                     recorded: false,
+                    best_guess,
                     ..report
                 });
             }
@@ -6655,6 +6772,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             );
             save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, reason);
             Ok(CaptureReport {
+                best_guess: None,
                 recorded: false,
                 outcome,
                 map: None,
@@ -8072,6 +8190,7 @@ mod tests {
         now: Instant,
     ) -> ActiveGame {
         ActiveGame {
+            best_guess: None,
             session_id: "test".into(),
             outcome,
             map: None,
@@ -13043,7 +13162,9 @@ mod tests {
             "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;"
         ));
         // the offer sits on the new reader's own read path (O10)
-        assert!(hc_body.contains("if let Some(board) = new_board { offer_own_name_seed("));
+        assert!(hc_body.contains(
+            "if let Some(board) = new_board { let guesses = reader_apply::own_row_guesses(&board, board_row); offer_own_name_seed("
+        ));
         // no name is matched for the board's row
         assert!(hc_body.contains(
             "let board_row = reader_apply::own_row(None, None, player_row_idx, team_size);"
@@ -14737,6 +14858,7 @@ mod tests {
             ) == PreparedRow::Drop
             {
                 let report = CaptureReport {
+                    best_guess: None,
                     recorded: false,
                     outcome: staged.outcome,
                     map: None,
@@ -14800,6 +14922,7 @@ mod tests {
             .await
             .unwrap();
             let report = CaptureReport {
+                best_guess: None,
                 recorded: true,
                 outcome: staged.outcome,
                 map: staged.recorded_map,
@@ -16845,6 +16968,7 @@ mod tests {
         let mut night = Night::new().await;
         let busan = arm_busan_defeat(&mut night).await;
         let report = CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome: detect::MatchOutcome::Victory,
             map: None,
@@ -17452,6 +17576,7 @@ mod tests {
 
     fn rejected_report(session_id: &str) -> CaptureReport {
         CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -20518,11 +20643,13 @@ mod tests {
         );
     }
 
-    /// F266-1 at game end: a game where a column was never read stores
-    /// nothing, and one line names the column. The reviewer's probe: two
-    /// Tabs, healing suspect on both, used to upload healing 0.
+    /// alpha.8 (replaces F266-1 at game end): a game where a column never
+    /// had a sure read stores the reader's best guess when it closes, and
+    /// lists the column in `suspect_fields` so the app marks it unsure.
+    /// While the game runs no row is written (the Tabs stay pending), so a
+    /// later sure read is still taken as the column's first read.
     #[tokio::test]
-    async fn new_reader_game_with_a_never_read_column_is_not_stored() {
+    async fn new_reader_game_with_a_never_read_column_stores_its_best_guess() {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(dir.path(), true).await;
@@ -20542,20 +20669,29 @@ mod tests {
         )
         .await;
         assert!(seen.iter().all(|tab| tab.pending), "{seen:?}");
-        retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
-        assert_eq!(ctx.store.match_count().await.unwrap(), 0);
-        assert!(ctx.store.get_all_sessions().await.unwrap().is_empty());
-        assert!(
-            st.settle_closed_unknown.is_none(),
-            "nothing to settle: no row"
+        assert_eq!(
+            ctx.store.match_count().await.unwrap(),
+            0,
+            "nothing mid-game"
         );
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        let line: serde_json::Value = serde_json::from_str(note.trim()).unwrap();
-        assert_eq!(line["session_id"], "o10");
-        assert_eq!(line["unread"], serde_json::json!(["h"]));
-        assert_eq!(line["never_read"], serde_json::json!(["h"]));
-        assert_eq!(line["read_not_taken"], serde_json::json!([]));
+        retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
+        let rows = ctx.store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1, "the best guess is stored at game end");
+        let row = &rows[0];
+        assert_eq!(row.session_id, "o10");
+        // The newest Tab's guess, the sure columns as read.
+        assert_eq!((row.elims, row.damage, row.healing), (13, 3700, 7300));
+        assert_eq!(
+            crate::reader_apply::upload_suspect_fields(&row.suspect_fields),
+            vec!["h".to_string()]
+        );
+        assert!(
+            !dir.path()
+                .join("debug")
+                .join("unrecorded_games.jsonl")
+                .exists(),
+            "a stored game is not an unrecorded one"
+        );
 
         // ocr-v1 on the same Tabs has a number for every cell and stores both
         let dir = tempfile::tempdir().unwrap();
@@ -20698,9 +20834,13 @@ mod tests {
             seen[1]
         );
         assert!(seen[2].split && seen[2].recorded, "{:?}", seen[2]);
-        // game 1 never had a healing read: nothing of it is stored, and
-        // above all not game 2's 100
-        assert!(o10_rows(&ctx, "o10").await.is_empty());
+        // game 1 never had a sure healing read: at its close it stores its
+        // own best guess (5000, marked unsure), and above all not game 2's
+        // 100 (alpha.8)
+        assert_eq!(
+            o10_rows(&ctx, "o10").await,
+            vec![[30, 12, 9, 14000, 5000, 900]]
+        );
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         assert_ne!(new_id, "o10");
         assert_eq!(seen[2].session_id, new_id);
@@ -20708,10 +20848,7 @@ mod tests {
             o10_rows(&ctx, &new_id).await,
             vec![[1, 0, 0, 300, 100, 0], [3, 1, 0, 900, 400, 0]]
         );
-        assert_eq!(ctx.store.match_count().await.unwrap(), 2);
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        assert!(note.contains("\"unread\":[\"h\"]"), "{note}");
+        assert_eq!(ctx.store.match_count().await.unwrap(), 3);
 
         // 30 s after game 1's Tab is too soon for the reset rule. The gate
         // is then the guard: the read columns drop, so the first read of
@@ -20729,16 +20866,15 @@ mod tests {
         assert_eq!(gate.unread_cols(), vec!["h"]);
         assert_eq!(gate.accepted.healing, 0);
         assert_eq!(gate.accepted.elims, 30);
-        // the not-stored line tells "read, and not taken" from "never read"
-        // (R3-2): healing was read on the second Tab
+        // At close the game stores game 1's own guess. The second Tab's
+        // healing read was not taken (the other columns dropped), so its
+        // 100 is not the guess (alpha.8).
         let mut st = st;
         retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        let line: serde_json::Value = serde_json::from_str(note.trim()).unwrap();
-        assert_eq!(line["unread"], serde_json::json!(["h"]));
-        assert_eq!(line["read_not_taken"], serde_json::json!(["h"]));
-        assert_eq!(line["never_read"], serde_json::json!([]));
+        assert_eq!(
+            o10_rows(&ctx, "o10").await,
+            vec![[30, 12, 9, 14000, 5000, 900]]
+        );
     }
 
     /// A split under `reader = "new"`, with the carried board (F266-1's
