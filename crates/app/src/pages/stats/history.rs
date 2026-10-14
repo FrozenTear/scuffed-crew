@@ -24,17 +24,13 @@ const NEW_READER_BADGE: &str = "New reader (alpha)";
 const NEW_READER_BADGE_SHORT: &str = "alpha";
 /// Tooltip for [`NEW_READER_BADGE`].
 const NEW_READER_TITLE: &str = "Read by the new stat reader, still in testing";
-/// Rest of the unsure tooltip, after the stat name.
-const UNSURE_TAIL: &str = "the reader was unsure about this value";
+/// Tooltip on every flagged stat cell.
+const UNSURE_TITLE: &str = "Unsure read. Check and edit if wrong.";
 
 /// `true` when this row should show the new-reader badge.
 /// Empty and missing ids count as `ocr-v1`.
 pub(super) fn show_new_reader_badge(recognizer: &str) -> bool {
     scuffed_types::effective_recognizer(recognizer) != scuffed_types::RECOGNIZER_OCR_V1
-}
-
-fn unsure_title(stat_name: &str) -> String {
-    format!("{stat_name}: {UNSURE_TAIL}")
 }
 
 /// `true` when `name` is a known match cell and this row flagged it.
@@ -54,7 +50,7 @@ fn unsure_note() -> Element {
 }
 
 /// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
-/// text, and a tooltip that still names the stat.
+/// text, and [`UNSURE_TITLE`]. A sure numeric cell keeps the stat name as its title.
 fn marked_value(
     class: &str,
     text: &str,
@@ -73,7 +69,7 @@ fn marked_value(
     };
     let text = text.to_string();
     let title = if unsure {
-        Some(unsure_title(stat_name))
+        Some(UNSURE_TITLE.to_string())
     } else if titled_when_sure {
         Some(stat_name.to_string())
     } else {
@@ -525,14 +521,16 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("class=\"sr-only\""), "{html}");
-        assert!(
-            html.contains(&format!("title=\"{}\"", unsure_title("Eliminations"))),
-            "{html}"
+        assert_eq!(
+            html.matches(&format!("title=\"{UNSURE_TITLE}\"")).count(),
+            scuffed_types::SUSPECT_FIELD_NAMES.len(),
+            "each flagged cell uses the unsure tooltip: {html}"
         );
         assert!(
-            html.contains(&format!("title=\"{}\"", unsure_title("Mitigation"))),
-            "{html}"
+            !html.contains("the reader was unsure"),
+            "old unsure copy must stay off the row: {html}"
         );
+        assert!(!UNSURE_TITLE.contains('\u{2014}'), "{UNSURE_TITLE}");
         assert!(
             html.contains("class=\"stat-value-text\">Ana</span><span class=\"stat-unsure-mark\""),
             "the mark sits outside the clipped hero text: {html}"
