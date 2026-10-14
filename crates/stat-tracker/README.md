@@ -286,13 +286,25 @@ name as it is drawn on the scoreboard, and compares each row with them. A
 crop is taken only from a board where your row is clearly highlighted, the
 hero panel shows the same hero as that row, and no chat covers it. It is
 trusted only after three boards from two games gave matching crops in one
-run of the tracker. Crops that keep pointing at another row than a clearly
-highlighted one are dropped and learned again.
+run of the tracker.
 
-Names are still read in two places while Tesseract is on. When neither a
-crop nor the highlight finds your row, the tracker reads the name column
-of that one scoreboard and looks for your configured `player_name`, as
-`reader = "ocr-v1"` does on every scoreboard. And the full-scoreboard text
+When no crop matches and no row is highlighted, your row is the one row of
+your team that shows the hero on the hero panel. A row found that way is
+marked as uncertain until a crop confirms it. Its crop is learned too, but
+it has to match on four boards from three games, on at least two different
+heroes, in one run of the tracker. If you play one hero only and your row
+is never highlighted, your row is still found this way on every scoreboard
+where your hero icon can be read, and it stays marked. On a scoreboard
+where it cannot be read (you are dead, or the icon is covered) and no crop
+is trusted yet, the Tab is not stored.
+
+Crops that keep pointing at another row than the one the hero panel's hero
+is on are dropped and learned again.
+
+Names are still read in two places while Tesseract is on. When no crop,
+no highlight and no hero panel finds your row, the tracker reads the name
+column of that one scoreboard and looks for your configured `player_name`,
+as `reader = "ocr-v1"` does on every scoreboard. And the full-scoreboard text
 read still runs when the per-cell read could not supply everything (#266
 removes it under the new reader).
 
@@ -300,7 +312,8 @@ Only trusted crops are written to the file: crops confirmed as your own
 name line. A crop that is still waiting for confirmation could be another
 player's name, so it is kept in memory only and is gone when the tracker
 stops. If you restart the tracker between games the count starts again,
-and until your name is trusted your row is found by its highlight alone.
+and until your name is trusted your row is found by its highlight or by
+the hero panel alone.
 The file holds pixels and a hash of the configured `player_name`, never
 the name. It is cleared when another name is configured, which the tracker
 notices when it next starts with `reader = "new"`; a start where the name
