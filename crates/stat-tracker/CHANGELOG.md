@@ -15,6 +15,62 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.7
+
+This alpha adds a switch in Settings that turns classic OCR (Tesseract) off, so the tracker reads the game with its own reader. The switch is opt-in: if you leave it alone, OCR stays on and the tracker reads as before.
+
+### Highlights
+
+- The switch is Settings → Scoreboard reading → Use classic OCR (Tesseract). Turn it off, save, and restart the tracker. It needs three reader packs from the site (heroes, maps and words). While one is missing, the tracker keeps OCR on and tells you which.
+- Classic OCR off has limits. The map can be missing more often, mostly at 1080p, and a game with a stat that was never read is not stored. The full list is further down.
+- With classic OCR on, reading uses about a third of the CPU it did, with identical reads (#259). That was measured on our test machine with Tesseract 5. The Tesseract 4.1.1 in the release build was not measured.
+- When an update changed the app while its window is open, the window asks: The app was updated. Restart now? (#255). Settings now uses the width of a wide window (#258).
+
+The OCR switch (#261). In config.toml the setting is `ocr = "on"` or `ocr = "off"`. A config without that line means on, so nothing changes until you change it. Off means the new reader reads every screen and Tesseract is not started for reading. Install reading model and Rebuild reading model in Settings still run the Tesseract tools when you press them. The tracker reads the setting when it starts, so restart it after you save. The tracker turns OCR off only when nothing would go unread: it needs a hero pack, the map pack and a current word pack. Settings shows Reader packs ready: N of 3. If a pack is missing, the tracker keeps OCR on for that run and says why, and Settings refuses the click with the same reason. If a pack goes away while the tracker runs with OCR off, what that pack reads is put on hold and the app says which pack it is. The tracker does not go back to OCR by itself. While the tracker runs with OCR off it always uses the new reader, and Settings says so in place of the New reader (alpha) switch.
+
+What classic OCR off costs:
+
+- The map. The map name on the scoreboard has no second reader. On our test scoreboards it was read on 19 of 27 at 1080p and on 116 of 128 at 1440p (#261). A game can still get its map from another scoreboard of the same game or from the end screen. If nothing reads it, the game is saved without a map and stays on this PC until you pick one.
+- Stats. A stat the reader is not sure of is never stored as a guess: the game keeps the last sure number and marks the stat. A game shows up only once each of its six stats has been read. A game that ends with a stat never read is not stored. On our timed test games, 25 were stored with the new reader against 27 with OCR, and one of those two was lost to this rule (#266). A follow-up is planned before off can become the default: keep such a game on this PC and upload it when the stat is read or typed in.
+- Your row. A scoreboard is not stored when all of these are true: your row has never been highlighted, your hero icon is dead or covered, and the tracker has not learned your name yet. With OCR on, the name read finds your row on such a scoreboard. On our test scoreboards that was 1 of 150 (#273).
+- Co-op event. A co-op event scoreboard (Junkenstein on Adlersbrunn, stats on one team only) is left out only when its map name is read sure. When it is not, that scoreboard can be saved as a game (#261, #271).
+- A draw. On the post-match and rank screens the new reader reads VICTORY and DEFEAT only. A draw is read from the end title (#270).
+- Not tested on real pictures, because we had none: the ESPERANÇA line on the end screen (#265), ADLERSBRUNN on the scoreboard and on the end screen (#271, #265), and a Junkenstein scoreboard (#271). The first two were tested on lines drawn with the map pack's own letters. SELECTING MAP was read on 13 pictures at 1080p, and at 1440p only on the one picture its template was cut from (#269).
+
+What the new reader reads without OCR in this alpha. It is used when classic OCR is off, or when New reader (alpha) is on:
+
+- The six stats on the scoreboard (#266).
+- Your row: from the highlight, from a few small crops of your own name that the tracker learns, and from the hero on your hero panel when the highlight is not found (#262, #273). The crops stay on this PC, are never sent, and are deleted on uninstall.
+- Your hero, from the hero icons on your row and on the hero panel (#249, #256). A 5v5 scoreboard that is wider than the usual cut is cut again, so the icons line up (#249).
+- The map and mode, from the map name on the scoreboard (#251, #252) and from the end screen (#265). Adlersbrunn, the Halloween name for Eichenwalde, is in the map list and is saved as Eichenwalde (#271).
+- The result: VICTORY or DEFEAT on the post-match and rank screens (#253, #270), and the end title (#263). The end title counts when two checks in a row read the same word.
+- The match start: VOTE FOR A MAP, BAN HEROES and SELECT A PREFERRED HERO (#260), and SELECTING MAP, which needs version 2 of the word pack (#269).
+- A flat area of one colour can no longer score as a word (#272).
+
+Other changes:
+
+- Classic OCR no longer starts extra threads inside each read (`OMP_THREAD_LIMIT=1`). An update sets it by itself, so you do not need to change anything. In the test, reads were identical on 10,784 + 816 samples, and the CPU time for one 1440p scoreboard read went from 3.7 s to 1.2 s (#259).
+- The tracker now downloads all six reader packs from the site, not only the first hero pack (#248, #250). If the site was busy, offline or had downloads turned off when the tracker started, it tries again by itself, so you no longer need to restart the tracker to get them (#268).
+- The tracker no longer runs an OCR pass on the top of the Tab screen looking for a VICTORY or DEFEAT header, because the current game shows no result word there. The result is still read from the end title, the post-match screens and the scoreboard's own text. This changes the default reader too. Not checked: end-of-match Tabs in Push, Flashpoint or Clash, quick play, arcade, custom games, Stadium, and a draw (#257).
+- The old CHOOSE YOUR HERO title is no longer looked for at match start, with either reader. The game does not show it any more (#260).
+- With the new reader, Practice Range Tabs are recognised and kept local (#251, #252).
+- The restart question appears only when the app itself changed. After an in-app update that did not change the app, the button says No restart needed (#255).
+- Settings on a wide window: three columns at 1920 and 2560 wide, four at 3440. Before, it stayed at two narrow columns. A portrait monitor keeps one column (#258).
+- A problem report now says when the tracker ran with classic OCR off, and the site accepts that (#267, #261).
+- Report pictures still have hero portraits filled. The plan from alpha.6 to bring them back in this alpha has not happened yet.
+
+The default is unchanged. With the switch untouched, the tracker reads as in alpha.6, apart from the changes listed above. Off becomes the default only when it is better than OCR on every point, and it is not yet: the map at 1080p and the games that are not stored are behind.
+
+Stable installs are not offered this alpha. The desktop app skips it until Settings → Get alpha updates is on (or config.toml has `update_channel = "prerelease"`). bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.7/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.7 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.6
 
 This alpha lets you report a game the tracker got wrong, with a picture of the scoreboard in which every player name is blanked before the picture is saved.
