@@ -3414,6 +3414,28 @@ fn resolve_word_tick(
     }
 }
 
+/// The words-pack result read one poll tick adds to the open game's result
+/// evidence (`reader = "new"`, #253). Only a tick with an outcome signal
+/// adds one, as before.
+///
+/// `taken` is the read the tick's signal detection already made of this
+/// frame's result words (the accolade or rank screen, alpha.7 O11). It is
+/// `shadow::read_result`'s read of the same frame, so it is the evidence
+/// and the frame is not read again. Without one (a colour flood, an end
+/// title, or a word OCR read because the pack lacks that screen) `read`
+/// reads the frame here.
+fn tick_result_read(
+    use_new_reader: bool,
+    has_signal: bool,
+    taken: Option<shadow::result::ResultRead>,
+    read: impl FnOnce() -> shadow::result::ResultRead,
+) -> Option<shadow::result::ResultRead> {
+    if !(use_new_reader && has_signal) {
+        return None;
+    }
+    Some(taken.unwrap_or_else(read))
+}
+
 /// The [`boundary::PollInput`] for one open session. `map_trusted` is the
 /// stored source, so a text fallback stays absent on the poll path.
 fn poll_input_from_game<'a>(
@@ -3816,12 +3838,18 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // fallback still reads the FINAL SCORE line (its
                             // gate), with the words-v1 template (alpha.7 O3).
                             let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);
+                            // And it reads the accolade and rank-screen
+                            // result word from the words-v1 pack, behind the
+                            // same lit-crop gate and stability wait as the
+                            // OCR it replaces (alpha.7 O11).
+                            let words = detect::match_end::ResultWords::for_reader(use_new_reader);
                             let signal = detect::match_end::detect_outcome_signal_polled(
                                 &img,
                                 &rgb,
                                 &mut stability,
                                 detect::match_end::FinalScoreSource::for_reader(use_new_reader),
                                 &titles,
+                                &words,
                             );
                             // Cheap wake path: while Tab cell OCR is in
                             // flight, skip the phase and accolade-map reads
@@ -3862,12 +3890,14 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
-                            // result only. It does not decide the game end.
-                            let result_read = if use_new_reader && signal.is_some() {
-                                Some(shadow::read_result(&img))
-                            } else {
-                                None
-                            };
+                            // result. The read the signal came from is that
+                            // evidence: the frame is not read twice (O11).
+                            let result_read = tick_result_read(
+                                use_new_reader,
+                                signal.is_some(),
+                                words.into_taken(),
+                                || shadow::read_result(&img),
+                            );
                             if let Some(dir) = &on_hit_dir
                                 && let Some((kind, outcome)) =
                                     poll_debug_hit(signal, prior_streak, OUTCOME_CONFIRM_WINDOW)
@@ -4130,8 +4160,11 @@ fn analyze_frame(
     // gate), with the words-v1 template (O3).
     let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);
     let titles = detect::match_end::Titles::for_frame(use_new_reader, &img);
+    // And the accolade and rank-screen words, when this frame is one of
+    // those screens (O11). A Tab frame's read is not result evidence.
+    let words = detect::match_end::ResultWords::for_reader(use_new_reader);
     let frame_outcome = if allow_banner_recovery {
-        detect::match_end::detect_outcome_with(&img, p4, &titles)
+        detect::match_end::detect_outcome_with(&img, p4, &titles, &words)
     } else {
         detect::match_end::detect_outcome_text_with(&img, p4, &titles)
     };
@@ -8877,14 +8910,14 @@ mod tests {
         // one end-title read per Tab frame (F257-3)
         assert!(body.contains(
             "let frame_outcome = if allow_banner_recovery { \
-             detect::match_end::detect_outcome_with(&img, p4, &titles) } else { \
+             detect::match_end::detect_outcome_with(&img, p4, &titles, &words) } else { \
              detect::match_end::detect_outcome_text_with(&img, p4, &titles) };"
         ));
         assert_eq!(body.matches("detect::match_end::detect_outcome").count(), 2);
         let all = norm(src);
         assert!(all.contains(
             "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
-             detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );"
+             detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, &words, );"
         ));
         for ocr_only in [
             "detect::match_end::detect_outcome(",
@@ -9407,7 +9440,7 @@ mod tests {
             ),
             (
                 "the Tab pass hands them to both outcome reads",
-                body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles)")
+                body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles, &words)")
                     && body
                         .contains("detect::match_end::detect_outcome_text_with(&img, p4, &titles)"),
             ),
@@ -9421,7 +9454,8 @@ mod tests {
                 "the poll tick hands them to the outcome signal",
                 all.contains(
                     "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
-                     detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, );",
+                     detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, \
+                     &words, );",
                 ),
             ),
             (
@@ -9437,6 +9471,176 @@ mod tests {
         ];
         let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
         assert!(broken.is_empty(), "{broken:?}");
+    }
+
+    /// The accolade and rank-screen result words (P1, P2) go through the
+    /// reader switch (alpha.7 O11): on the poll tick and in the Tab frame's
+    /// vision pass. Each makes its `ResultWords` from the switch and hands
+    /// it to the outcome read, and the poll tick gives the read it took to
+    /// the result evidence. Every broken wire is named. Whitespace is
+    /// ignored.
+    #[test]
+    fn the_result_words_go_through_the_reader_switch() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let src = full.split("\nmod tests {").next().unwrap();
+        let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
+        let body = norm(src[at..].split("\n}\n").next().unwrap());
+        let all = norm(src);
+        // everything but the Tab pass
+        let rest = all.replacen(body.as_str(), "", 1);
+        assert!(rest.len() < all.len(), "the Tab pass is part of the source");
+        let from_switch = "let words = detect::match_end::ResultWords::for_reader(use_new_reader);";
+        let checks = [
+            (
+                "the Tab pass makes its result words from the switch",
+                body.matches(from_switch).count() == 1,
+            ),
+            (
+                "the Tab pass hands them to the outcome read",
+                body.contains("detect::match_end::detect_outcome_with(&img, p4, &titles, &words)"),
+            ),
+            (
+                "the poll tick makes its result words from the switch",
+                rest.matches(from_switch).count() == 1,
+            ),
+            (
+                "the poll tick hands them to the outcome signal",
+                all.contains(
+                    "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
+                     detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, \
+                     &words, );",
+                ),
+            ),
+            (
+                "the poll tick's result evidence is the read the signal took",
+                all.contains(
+                    "let result_read = tick_result_read( use_new_reader, signal.is_some(), \
+                     words.into_taken(), || shadow::read_result(&img), );",
+                ),
+            ),
+            (
+                "result words are made in those two places only",
+                all.matches("ResultWords::").count() == 2,
+            ),
+            (
+                "the frame's result is read in that one place only",
+                all.matches("shadow::read_result(").count() == 1
+                    && !all.contains("shadow::read_result_screens"),
+            ),
+        ];
+        let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
+        assert!(broken.is_empty(), "{broken:?}");
+    }
+
+    /// One words-pack read per poll tick: the read the signal detection took
+    /// is the tick's result evidence, and the frame is not read again. A
+    /// tick whose signal came without one (colour flood, end title, an OCR
+    /// word) reads the frame as before. No signal, or `reader = "ocr-v1"`:
+    /// no evidence and no read.
+    #[test]
+    fn a_poll_tick_reads_the_frames_result_words_once() {
+        use shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, ResultRead};
+        let read_of = |source: &str| ResultRead {
+            outcome: Some(Outcome::Victory),
+            source: Some(source.into()),
+            score: 0.9,
+            margin: 0.4,
+            suspect: false,
+        };
+        let no_second_read = || -> ResultRead { panic!("the frame was read a second time") };
+        let no_read = || -> ResultRead { panic!("the frame was read with no evidence due") };
+        // the signal's own read is the evidence
+        assert_eq!(
+            tick_result_read(true, true, Some(read_of(ACCOLADE)), no_second_read),
+            Some(read_of(ACCOLADE))
+        );
+        // no read was taken: the frame is read here, once
+        let reads = std::cell::Cell::new(0);
+        let counted = || {
+            reads.set(reads.get() + 1);
+            read_of(RANK_SCREEN)
+        };
+        assert_eq!(
+            tick_result_read(true, true, None, counted),
+            Some(read_of(RANK_SCREEN))
+        );
+        assert_eq!(reads.get(), 1);
+        // no signal: nothing is added, whether or not a read was taken
+        assert_eq!(tick_result_read(true, false, None, no_read), None);
+        assert_eq!(
+            tick_result_read(true, false, Some(read_of(ACCOLADE)), no_read),
+            None
+        );
+        // ocr-v1: never
+        assert_eq!(tick_result_read(false, true, None, no_read), None);
+        assert_eq!(
+            tick_result_read(false, true, Some(read_of(ACCOLADE)), no_read),
+            None
+        );
+        assert_eq!(tick_result_read(false, false, None, no_read), None);
+    }
+
+    /// The accolade map read still starts from a result-word tick under
+    /// `reader = "new"` (alpha.7 O11 with O5). The new reader's accolade
+    /// signal carries the source ocr-v1's does (`OutcomeSource::ResultWord`;
+    /// see `a_sure_words_read_is_the_result_word_signal` in
+    /// `detect::match_end` and `tests/result_signal_wiring.rs`). The poll
+    /// tick hands the source of its own signal to `choose_accolade_map`, and
+    /// that source alone decides whether the map pack is read: a rank-screen
+    /// word, an end title, a colour flood and no signal read no map.
+    #[test]
+    fn a_result_word_tick_still_starts_the_accolade_map_read() {
+        use detect::match_end::OutcomeSource as S;
+        // The tick's own signal, made with the reader switch's result
+        // words, is what the map read is keyed on. Whitespace is ignored.
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let full = include_str!("main.rs");
+        let all = norm(full.split("\nmod tests {").next().unwrap());
+        let signal_at = all
+            .find("let signal = detect::match_end::detect_outcome_signal_polled(")
+            .expect("the poll tick's signal");
+        let to_map = all[signal_at..]
+            .find(
+                "let accolade_map = choose_accolade_map( use_new_reader, outcome_only, \
+                 signal.map(|(_, source)| source),",
+            )
+            .expect("the poll tick's accolade map follows its signal and takes its source");
+        assert!(all[signal_at..signal_at + to_map].contains("&titles, &words, );"));
+
+        // A result-word signal under the new reader reads the map pack.
+        let ocr = || -> Option<String> { panic!("accolade OCR with a map pack loaded") };
+        assert_eq!(
+            choose_accolade_map(
+                true,
+                false,
+                Some(S::ResultWord),
+                || accolade_read("Ilios"),
+                ocr
+            )
+            .as_deref(),
+            Some("Ilios")
+        );
+        // No other source does (a counter, not a panic: a panic in the pack
+        // read is caught and would hide a call).
+        let reads = std::cell::Cell::new(0);
+        for source in [
+            None,
+            Some(S::RankScreen),
+            Some(S::EndTitle),
+            Some(S::Banner),
+        ] {
+            let counted = || {
+                reads.set(reads.get() + 1);
+                accolade_read("Ilios")
+            };
+            assert_eq!(choose_accolade_map(true, false, source, counted, ocr), None);
+        }
+        assert_eq!(
+            reads.get(),
+            0,
+            "the map pack was read off a result-word tick"
+        );
     }
 
     /// `reader = "new"` on the poll tick (F263-2, F263-6): a sure end title
@@ -9467,6 +9671,7 @@ mod tests {
                 &mut stability,
                 FinalScoreSource::Words,
                 &titles,
+                &detect::match_end::ResultWords::for_reader(true),
             );
             let wake = detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
             let tick =

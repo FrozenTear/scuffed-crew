@@ -1,13 +1,17 @@
+use std::cell::OnceCell;
+
 use image::{DynamicImage, GrayImage, Luma, RgbImage};
 
 use super::MatchOutcome;
 use super::stability::FrameStability;
-use crate::shadow::result::{Outcome, ResultRead};
+use crate::shadow::result::{Outcome, ResultRead, ResultScreen, ResultScreens, ScreenRead};
 
 /// Which detector produced an outcome. The banner color-flood is specific
-/// enough to act on from a single frame; the word-OCR sources (accolade
+/// enough to act on from a single frame; the word sources (accolade
 /// screen, competitive rank screen) are cheap but weaker evidence, so the
 /// poller requires two agreeing word reads inside a confirmation window.
+/// Who reads those two words depends on the reader ([`ResultWords`]): OCR
+/// under `reader = "ocr-v1"`, the words-v1 pack under `reader = "new"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeSource {
     Banner,
@@ -152,20 +156,177 @@ fn warn_end_title_ocr_fallback() -> bool {
     first
 }
 
-/// One-shot outcome read for a single frame (Tab captures, dev tools).
-pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
-    detect_outcome_with(img, FinalScoreSource::Ocr, &Titles::Ocr)
+/// The words-v1 side of [`ResultWords`].
+#[derive(Debug, Clone, Copy)]
+struct WordsReader {
+    /// The result screens the loaded templates can name. Reads no frame.
+    screens: fn() -> ResultScreens,
+    /// The frame's result-screens read, `None` when no result templates
+    /// are loaded.
+    read: fn(&RgbImage) -> Option<ScreenRead>,
 }
 
-/// [`detect_outcome`] with the FINAL SCORE line read by `p4` and the end
-/// title from `titles`.
+/// One frame's result word on the accolade screen and on the rank screen
+/// (P1 and P2, [`read_result_word`] and [`read_rank_screen_result`]), by
+/// reader. Make one per frame.
+///
+/// `reader = "ocr-v1"` ([`Self::ocr`]): Tesseract reads each screen's title
+/// crop. Nothing is read from the words pack and nothing is kept here.
+///
+/// `reader = "new"`: no OCR. Behind the same gates as that OCR (a lit crop
+/// and, on a poll tick, a crop that held still since the previous tick) the
+/// frame's result screens are read from the words pack
+/// (`shadow::read_result_screens`), at most once per frame, and the read is
+/// kept here. A sure read whose word was found on a screen's layout is that
+/// screen's word. A flagged read, a frame with no word, and a word found
+/// on another layout are all "no word", and nothing falls back to OCR.
+///
+/// One read is one unconfirmed word, exactly as one OCR read is. The poller
+/// confirms an outcome on a second agreeing word read inside its window
+/// (`resolve_word_tick`). Until then the session machine keeps the word as
+/// a hint, and a hint can still become the stored outcome when a start
+/// screen or a split seals it (`boundary`). That rule is not changed here,
+/// and the evidence behind such a hint is not weaker than under ocr-v1:
+/// the same lit crop, the same wait for it to hold still, then a certified
+/// template read in place of a fuzzy OCR match.
+///
+/// A screen the loaded templates cannot name (no words pack, or one without
+/// that screen's VICTORY and DEFEAT) keeps its OCR read.
+///
+/// The read behind a word is `shadow::read_result`'s read of the same
+/// frame, so the caller takes it for the frame's result evidence
+/// ([`Self::into_taken`]) and does not read the frame a second time.
+#[derive(Debug, Default)]
+pub struct ResultWords {
+    /// `None` under `reader = "ocr-v1"`.
+    reader: Option<WordsReader>,
+    screens: OnceCell<ResultScreens>,
+    read: OnceCell<Option<ScreenRead>>,
+}
+
+impl ResultWords {
+    /// `reader = "ocr-v1"`: both words are read with OCR.
+    pub fn ocr() -> Self {
+        Self::default()
+    }
+
+    /// The result words of one frame for this reader setting (`reader =
+    /// "new"` or not). Reads nothing yet.
+    pub fn for_reader(use_new_reader: bool) -> Self {
+        if use_new_reader {
+            Self::with_reader(WordsReader {
+                screens: crate::shadow::result_screens,
+                read: crate::shadow::read_result_screens,
+            })
+        } else {
+            Self::ocr()
+        }
+    }
+
+    fn with_reader(reader: WordsReader) -> Self {
+        Self {
+            reader: Some(reader),
+            ..Self::default()
+        }
+    }
+
+    /// Does this frame take its result words from the words pack (`reader =
+    /// "new"`)?
+    pub fn from_words(&self) -> bool {
+        self.reader.is_some()
+    }
+
+    /// The frame's words-v1 result read, when one was made: a screen's
+    /// gates passed, the loaded templates can name that screen, and the
+    /// frame shows a result-screen word.
+    pub fn taken(&self) -> Option<&ResultRead> {
+        self.read.get()?.as_ref()?.read.as_ref()
+    }
+
+    /// [`Self::taken`], by value: the frame's result evidence.
+    pub fn into_taken(self) -> Option<ResultRead> {
+        self.read.into_inner()??.read
+    }
+
+    /// The word on `at`'s screen from the words pack, for a frame whose
+    /// title crop passed its gates. `None` when OCR is to read the crop:
+    /// under `reader = "ocr-v1"`, and when the loaded templates cannot name
+    /// this screen. Otherwise the frame's read decides, and `Unknown` is
+    /// final.
+    fn word_on(&self, at: &WordScreen, rgb: &RgbImage) -> Option<MatchOutcome> {
+        let reader = self.reader?;
+        if !self.screens.get_or_init(reader.screens).has(at.screen) {
+            warn_result_word_ocr_fallback(at.screen);
+            return None;
+        }
+        let read = self.read.get_or_init(|| (reader.read)(rgb)).as_ref();
+        // The templates went away between the two looks (a pack swap).
+        let Some(read) = read.filter(|r| r.screens.has(at.screen)) else {
+            warn_result_word_ocr_fallback(at.screen);
+            return None;
+        };
+        let outcome = match read.word_on(at.screen) {
+            Some(Outcome::Victory) => MatchOutcome::Victory,
+            Some(Outcome::Defeat) => MatchOutcome::Defeat,
+            Some(Outcome::Draw) => MatchOutcome::Draw,
+            None => MatchOutcome::Unknown,
+        };
+        match &read.read {
+            Some(r) if outcome.is_decided() => tracing::info!(
+                score = r.score,
+                margin = r.margin,
+                context = at.context,
+                "result word (words-v1): {outcome:?}"
+            ),
+            read => tracing::trace!(
+                ?read,
+                context = at.context,
+                "result word (words-v1): no sure word on this screen"
+            ),
+        }
+        Some(outcome)
+    }
+}
+
+/// Under `reader = "new"`, a result word fell back to OCR because the
+/// loaded templates cannot name its screen (no words-v1 pack yet, or one
+/// without that screen's VICTORY and DEFEAT). Logged once per screen and
+/// process; S1 (OCR off) is to forbid the fallback. Returns whether this
+/// call logged (tests).
+fn warn_result_word_ocr_fallback(screen: ResultScreen) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+    let first = !WARNED[screen as usize].swap(true, Ordering::Relaxed);
+    if first {
+        tracing::warn!(
+            screen = screen.id(),
+            "reader = \"new\" but no VICTORY and DEFEAT templates are loaded for this \
+             screen; its result word is read with OCR"
+        );
+    }
+    first
+}
+
+/// One-shot outcome read for a single frame (Tab captures, dev tools).
+pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
+    detect_outcome_with(
+        img,
+        FinalScoreSource::Ocr,
+        &Titles::Ocr,
+        &ResultWords::ocr(),
+    )
+}
+
+/// [`detect_outcome`] with the FINAL SCORE line read by `p4`, the end
+/// title from `titles` and the accolade and rank-screen words by `words`.
 pub fn detect_outcome_with(
     img: &DynamicImage,
     p4: FinalScoreSource,
     titles: &Titles,
+    words: &ResultWords,
 ) -> MatchOutcome {
     let rgb = img.to_rgb8();
-    detect_outcome_signal_inner(img, &rgb, None, p4, titles)
+    detect_outcome_signal_inner(img, &rgb, None, p4, titles, words)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
 }
@@ -179,6 +340,9 @@ pub fn detect_outcome_with(
 /// break any assumption about the screen's dominant color, and the full-frame
 /// pixel scan cost more than the small-crop OCR it was guarding. The Otsu-based
 /// `read_result_word` is color-scheme-independent.
+///
+/// This entry point is ocr-v1's. The daemon's go through the reader switch:
+/// [`detect_outcome_signal_polled`] and [`detect_outcome_with`].
 pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, OutcomeSource)> {
     let rgb = img.to_rgb8();
     detect_outcome_signal_with_rgb(img, &rgb)
@@ -189,7 +353,14 @@ pub fn detect_outcome_signal_with_rgb(
     img: &DynamicImage,
     rgb: &RgbImage,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, None, FinalScoreSource::Ocr, &Titles::Ocr)
+    detect_outcome_signal_inner(
+        img,
+        rgb,
+        None,
+        FinalScoreSource::Ocr,
+        &Titles::Ocr,
+        &ResultWords::ocr(),
+    )
 }
 
 /// Poll-tick outcome detection: identical to
@@ -206,14 +377,19 @@ pub fn detect_outcome_signal_with_rgb(
 /// ([`polled_end_title`]): its read is already made, a first sure sighting
 /// is no signal (it only wakes, [`detect_end_reel_with`]), and the same
 /// sure word on the next poll tick is the signal.
+/// `words` reads the accolade and rank-screen words ([`ResultWords`]).
+/// Under `reader = "new"` they keep both gates: the words-v1 read is made
+/// only for a lit crop that held still since the previous tick, as the OCR
+/// it replaces was.
 pub fn detect_outcome_signal_polled(
     img: &DynamicImage,
     rgb: &RgbImage,
     stability: &mut FrameStability,
     p4: FinalScoreSource,
     titles: &Titles,
+    words: &ResultWords,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
-    detect_outcome_signal_inner(img, rgb, Some(stability), p4, titles)
+    detect_outcome_signal_inner(img, rgb, Some(stability), p4, titles, words)
 }
 
 fn detect_outcome_signal_inner(
@@ -222,6 +398,7 @@ fn detect_outcome_signal_inner(
     mut stability: Option<&mut FrameStability>,
     p4: FinalScoreSource,
     titles: &Titles,
+    words: &ResultWords,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
     // `reader = "new"`: settle this tick's end title before any other
     // source answers, so its two-tick memory moves on every poll tick.
@@ -235,11 +412,11 @@ fn detect_outcome_signal_inner(
     if let Some(outcome) = detect_banner(rgb) {
         return Some((outcome, OutcomeSource::Banner));
     }
-    match read_result_word(img, stability.as_deref_mut()) {
+    match read_result_word(img, rgb, stability.as_deref_mut(), words) {
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::ResultWord)),
     }
-    match read_rank_screen_result(img, stability.as_deref_mut()) {
+    match read_rank_screen_result(img, rgb, stability.as_deref_mut(), words) {
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::RankScreen)),
     }
@@ -1272,9 +1449,26 @@ fn end_reel_title_match(raw: &str) -> bool {
 /// 07-15 frame), so the crop is OCR'd through `prepare_title_trimmed`, which
 /// cuts the binary back to the tall title glyphs; measured on both fixtures
 /// the 25% crop then reads "VICTORY" / "DEFEAT" exactly like the old 14% one.
-fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) -> MatchOutcome {
-    ocr_outcome_word(img, 5, 35, 250, 60, "accolade screen", stability)
+///
+/// Under `reader = "new"` the crop only gates: the word is the words-v1
+/// read of the accolade layout ([`ResultWords`]).
+fn read_result_word(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: Option<&mut FrameStability>,
+    words: &ResultWords,
+) -> MatchOutcome {
+    read_outcome_word(img, rgb, &ACCOLADE_WORD, stability, words)
 }
+
+const ACCOLADE_WORD: WordScreen = WordScreen {
+    x_pm: 5,
+    y_pm: 35,
+    w_pm: 250,
+    h_pm: 60,
+    context: "accolade screen",
+    screen: ResultScreen::Accolade,
+};
 
 /// Read the result word off the competitive summary (rank update) screen —
 /// VICTORY/DEFEAT printed under the big "COMPETITIVE" title, top-left. The
@@ -1284,12 +1478,26 @@ fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) 
 /// Right edge widened 16% -> 25% alongside the accolade crop (C6): same
 /// title face, same "VICTORY is wider than DEFEAT" clipping risk — journal
 /// 08-13..08-17 read DEFEAT off this screen 78 times and VICTORY zero.
+///
+/// Under `reader = "new"` the crop only gates: the word is the words-v1
+/// read of the rank-screen layout ([`ResultWords`]).
 fn read_rank_screen_result(
     img: &DynamicImage,
+    rgb: &RgbImage,
     stability: Option<&mut FrameStability>,
+    words: &ResultWords,
 ) -> MatchOutcome {
-    ocr_outcome_word(img, 10, 145, 240, 80, "rank screen", stability)
+    read_outcome_word(img, rgb, &RANK_WORD, stability, words)
 }
+
+const RANK_WORD: WordScreen = WordScreen {
+    x_pm: 10,
+    y_pm: 145,
+    w_pm: 240,
+    h_pm: 80,
+    context: "rank screen",
+    screen: ResultScreen::RankScreen,
+};
 
 /// Read the map name printed beside the accolade screen's result word
 /// ("DEFEAT  |  COLOSSEO / MATCH TIME: 10:10"). Color-scheme-independent like
@@ -1318,32 +1526,61 @@ pub fn read_accolade_map(img: &DynamicImage) -> Option<String> {
     map
 }
 
-/// OCR a crop (given in 1/1000ths of the 16:9 playfield via [`game_rect_16_9`])
-/// prepared as title text, and map VICTORY/DEFEAT/DRAW to an outcome.
-fn ocr_outcome_word(
-    img: &DynamicImage,
+/// One result-word screen of the poller: its title crop in 1/1000ths of the
+/// 16:9 playfield (via [`game_rect_16_9`]), the key of its log lines and of
+/// its stability history, and the words-v1 screen that names its word under
+/// `reader = "new"`.
+struct WordScreen {
     x_pm: u32,
     y_pm: u32,
     w_pm: u32,
     h_pm: u32,
     context: &'static str,
+    screen: ResultScreen,
+}
+
+/// The result word of one screen: VICTORY/DEFEAT/DRAW mapped to an outcome.
+/// The crop's gates come first ([`gated_title_crop`]). Then `words` names
+/// the word under `reader = "new"`, or OCR reads the crop
+/// ([`ocr_outcome_word`]).
+fn read_outcome_word(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    at: &WordScreen,
     stability: Option<&mut FrameStability>,
+    words: &ResultWords,
 ) -> MatchOutcome {
+    let Some(crop) = gated_title_crop(img, at, stability) else {
+        return MatchOutcome::Unknown;
+    };
+    if let Some(outcome) = words.word_on(at, rgb) {
+        return outcome;
+    }
+    ocr_outcome_word(&crop, at.context)
+}
+
+/// The title crop of `at`, when it is worth a read: lit and, on the poll
+/// path, held still since the previous tick. `None` otherwise.
+fn gated_title_crop(
+    img: &DynamicImage,
+    at: &WordScreen,
+    stability: Option<&mut FrameStability>,
+) -> Option<DynamicImage> {
     let (fw, fh) = (img.width(), img.height());
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
-    let x = gx + gw * x_pm / 1000;
-    let y = gy + gh * y_pm / 1000;
-    let cw = gw * w_pm / 1000;
-    let ch = gh * h_pm / 1000;
+    let x = gx + gw * at.x_pm / 1000;
+    let y = gy + gh * at.y_pm / 1000;
+    let cw = gw * at.w_pm / 1000;
+    let ch = gh * at.h_pm / 1000;
     if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
-        return MatchOutcome::Unknown;
+        return None;
     }
     let crop = img.crop_imm(x, y, cw, ch);
 
     // P8: most idle ticks are in-game — the title crop is near-black. Skip the
     // Lanczos+Otsu+Tess pipeline when the crop has no bright glyph mass.
     if !title_crop_has_signal(&crop) {
-        return MatchOutcome::Unknown;
+        return None;
     }
 
     // PR-A: brightness cannot distinguish a lit combat frame from a real title
@@ -1352,15 +1589,21 @@ fn ocr_outcome_word(
     // static for 15-20s+; combat never is. `context` doubles as the history
     // key so the accolade and rank crops track independently.
     if let Some(stability) = stability
-        && !stability.check(context, &crop)
+        && !stability.check(at.context, &crop)
     {
+        let context = at.context;
         tracing::trace!(context, "title crop lit but not stable — deferring OCR");
-        return MatchOutcome::Unknown;
+        return None;
     }
+    Some(crop)
+}
 
+/// OCR a gated title crop prepared as title text, and map
+/// VICTORY/DEFEAT/DRAW to an outcome.
+fn ocr_outcome_word(crop: &DynamicImage, context: &'static str) -> MatchOutcome {
     // Trimmed: the widened crops (C6) run into the map/time block right of
     // the title; the trim cuts the binary back to the title glyphs.
-    let prepared = crate::ocr::preprocess::prepare_title_trimmed(&crop);
+    let prepared = crate::ocr::preprocess::prepare_title_trimmed(crop);
 
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
         Ok(text) => {
@@ -1644,9 +1887,9 @@ mod tests {
         // P3 on the poll tick: the stability wait, then the OCR
         let mut st = FrameStability::default();
         let before = ocr_calls();
-        let _ = detect_outcome_signal_polled(&img, &rgb, &mut st, NEW, &fallback);
+        let _ = detect_outcome_signal_polled(&img, &rgb, &mut st, NEW, &fallback, &unread_words());
         assert_eq!(ocr_calls(), before, "a first sighting is deferred");
-        let _ = detect_outcome_signal_polled(&img, &rgb, &mut st, NEW, &fallback);
+        let _ = detect_outcome_signal_polled(&img, &rgb, &mut st, NEW, &fallback, &unread_words());
         assert!(ocr_calls() > before, "the second tick reads with OCR");
         // P5: the phrase OCR behind the title card's pixel gate
         let (card_img, card_rgb) = title_card_frame();
@@ -1743,7 +1986,7 @@ mod tests {
         let (img, rgb) = dark_frame();
         let before = ocr_calls();
         let poll = |st: &mut FrameStability, titles: &Titles| {
-            detect_outcome_signal_polled(&img, &rgb, st, NEW, titles)
+            detect_outcome_signal_polled(&img, &rgb, st, NEW, titles, &unread_words())
         };
         let signal = |o| Some((o, OutcomeSource::EndTitle));
         let defeat = words(Some(Outcome::Defeat), false);
@@ -1795,23 +2038,30 @@ mod tests {
         let mut st = FrameStability::default();
         assert_eq!(poll(&mut st, &defeat), None);
         assert_eq!(
-            detect_outcome_signal_polled(&gold, &gold_rgb, &mut st, NEW, &words(None, true)),
+            detect_outcome_signal_polled(
+                &gold,
+                &gold_rgb,
+                &mut st,
+                NEW,
+                &words(None, true),
+                &unread_words()
+            ),
             banner
         );
         assert_eq!(poll(&mut st, &defeat), None, "the banner tick had no title");
         assert_eq!(
-            detect_outcome_signal_polled(&gold, &gold_rgb, &mut st, NEW, &defeat),
+            detect_outcome_signal_polled(&gold, &gold_rgb, &mut st, NEW, &defeat, &unread_words()),
             banner
         );
         assert_eq!(poll(&mut st, &defeat), signal(MatchOutcome::Defeat));
 
         // a Tab frame is one shot: a sure word is that frame's outcome
         assert_eq!(
-            detect_outcome_with(&img, NEW, &victory),
+            detect_outcome_with(&img, NEW, &victory, &unread_words()),
             MatchOutcome::Victory
         );
         assert_eq!(
-            detect_outcome_with(&img, NEW, &words(None, true)),
+            detect_outcome_with(&img, NEW, &words(None, true), &unread_words()),
             MatchOutcome::Unknown
         );
         assert_eq!(ocr_calls(), before, "no OCR under the new reader");
@@ -1820,7 +2070,14 @@ mod tests {
         let (img, rgb) = title_mass_frame();
         let mut st = FrameStability::default();
         assert_eq!(
-            detect_outcome_signal_polled(&img, &rgb, &mut st, FinalScoreSource::Ocr, &Titles::Ocr),
+            detect_outcome_signal_polled(
+                &img,
+                &rgb,
+                &mut st,
+                FinalScoreSource::Ocr,
+                &Titles::Ocr,
+                &ResultWords::ocr()
+            ),
             None
         );
     }
@@ -2599,5 +2856,481 @@ mod tests {
             !warn_final_score_ocr_fallback(),
             "the fallback logged already"
         );
+    }
+
+    // ------------- accolade and rank-screen result words without OCR (O11)
+
+    use crate::shadow::result::{ACCOLADE, RANK_SCREEN};
+    use std::cell::{Cell, RefCell};
+
+    const BOTH: ResultScreens = ResultScreens {
+        accolade: true,
+        rank_screen: true,
+    };
+    const NO_SCREENS: ResultScreens = ResultScreens {
+        accolade: false,
+        rank_screen: false,
+    };
+
+    thread_local! {
+        /// What the test words pack can name, what it reads on every
+        /// frame, and how many frames it was asked to read.
+        static PACK_SCREENS: Cell<ResultScreens> = const { Cell::new(NO_SCREENS) };
+        static PACK_READ: RefCell<Option<ScreenRead>> = const { RefCell::new(None) };
+        static PACK_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn pack_reads() -> usize {
+        PACK_READS.get()
+    }
+
+    /// `reader = "new"` with a words pack that can name `screens` and reads
+    /// `read` on every frame it is asked to read (`None`: no pack loaded).
+    fn pack_words(screens: ResultScreens, read: Option<ScreenRead>) -> ResultWords {
+        PACK_SCREENS.set(screens);
+        PACK_READ.set(read);
+        ResultWords::with_reader(WordsReader {
+            screens: || PACK_SCREENS.get(),
+            read: |_| {
+                PACK_READS.set(PACK_READS.get() + 1);
+                PACK_READ.with_borrow(|r| r.clone())
+            },
+        })
+    }
+
+    /// `reader = "new"` for a frame whose accolade and rank crops stay
+    /// behind their gates: the words pack is not even asked what it loaded.
+    fn unread_words() -> ResultWords {
+        ResultWords::with_reader(WordsReader {
+            screens: || panic!("the words pack was asked for its screens"),
+            read: |_| panic!("the words pack read a frame behind its gates"),
+        })
+    }
+
+    /// A read of a pack that names both screens: `outcome` found on layout
+    /// `source`, sure unless `suspect`.
+    fn screen_read(outcome: Option<Outcome>, source: &str, suspect: bool) -> ScreenRead {
+        ScreenRead {
+            read: Some(ResultRead {
+                outcome,
+                source: outcome.map(|_| source.to_string()),
+                score: if outcome.is_some() { 0.9 } else { 0.2 },
+                margin: 0.4,
+                suspect,
+            }),
+            screens: BOTH,
+        }
+    }
+
+    /// The first look found no result-screen word: the frame was not read
+    /// in full.
+    fn unread_frame() -> ScreenRead {
+        ScreenRead {
+            read: None,
+            screens: BOTH,
+        }
+    }
+
+    fn sure(outcome: Outcome, source: &str) -> Option<ScreenRead> {
+        Some(screen_read(Some(outcome), source, false))
+    }
+
+    /// A dark frame with bright bars in the accolade title crop and / or in
+    /// the rank-screen crop, shifted right by `dx`. A crop with bars passes
+    /// its lit gate, so ocr-v1 runs Tesseract on it once it held still; the
+    /// bars spell no word.
+    fn result_frame(accolade: bool, rank: bool, dx: u32) -> (DynamicImage, RgbImage) {
+        let mut rgb = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        let mut bars = |rows: std::ops::Range<u32>| {
+            for y in rows {
+                for x in (12 + dx)..(110 + dx) {
+                    if (x - dx) % 6 < 3 {
+                        rgb.put_pixel(x, y, Rgb([235, 235, 235]));
+                    }
+                }
+            }
+        };
+        if accolade {
+            bars(16..30);
+        }
+        if rank {
+            bars(58..76);
+        }
+        (DynamicImage::ImageRgb8(rgb.clone()), rgb)
+    }
+
+    /// `reader = "new"` with end-title templates loaded and no end title on
+    /// the frame.
+    fn no_title() -> Titles {
+        Titles::Words(read_of(None, true))
+    }
+
+    /// One poll tick under `reader = "new"`, with no end title on the frame.
+    fn poll_new(
+        frame: &(DynamicImage, RgbImage),
+        st: &mut FrameStability,
+        words: &ResultWords,
+    ) -> Option<(MatchOutcome, OutcomeSource)> {
+        detect_outcome_signal_polled(&frame.0, &frame.1, st, NEW, &no_title(), words)
+    }
+
+    /// One poll tick under `reader = "ocr-v1"`.
+    fn poll_ocr(
+        frame: &(DynamicImage, RgbImage),
+        st: &mut FrameStability,
+    ) -> Option<(MatchOutcome, OutcomeSource)> {
+        detect_outcome_signal_polled(
+            &frame.0,
+            &frame.1,
+            st,
+            FinalScoreSource::Ocr,
+            &Titles::Ocr,
+            &ResultWords::ocr(),
+        )
+    }
+
+    /// A stability history that has seen `frame` once: the next tick on the
+    /// same frame is past the stability wait.
+    fn seen(frame: &(DynamicImage, RgbImage)) -> FrameStability {
+        let mut st = FrameStability::default();
+        assert_eq!(poll_new(frame, &mut st, &unread_words()), None);
+        st
+    }
+
+    const WORDS: [(Outcome, MatchOutcome); 3] = [
+        (Outcome::Victory, MatchOutcome::Victory),
+        (Outcome::Defeat, MatchOutcome::Defeat),
+        (Outcome::Draw, MatchOutcome::Draw),
+    ];
+
+    /// `reader = "new"`: on a lit title crop that held still, a sure
+    /// words-v1 read found on that screen is the signal, with the source
+    /// ocr-v1 gives that screen. Tesseract is not called, on frames where
+    /// ocr-v1 calls it. The read is kept for the caller.
+    #[test]
+    fn a_sure_words_read_is_the_result_word_signal() {
+        for (frame, layout, source) in [
+            (
+                result_frame(true, false, 0),
+                ACCOLADE,
+                OutcomeSource::ResultWord,
+            ),
+            (
+                result_frame(false, true, 0),
+                RANK_SCREEN,
+                OutcomeSource::RankScreen,
+            ),
+        ] {
+            // ocr-v1 on this frame: one Tesseract call once the crop held still
+            let mut st = FrameStability::default();
+            let before = ocr_calls();
+            assert_eq!(poll_ocr(&frame, &mut st), None);
+            assert_eq!(ocr_calls(), before, "a first sighting is deferred");
+            assert_eq!(poll_ocr(&frame, &mut st), None, "bars spell no word");
+            assert_eq!(ocr_calls() - before, 1, "{layout}");
+
+            for (word, want) in WORDS {
+                let mut st = seen(&frame);
+                let words = pack_words(BOTH, sure(word, layout));
+                let (ocr_before, reads_before) = (ocr_calls(), pack_reads());
+                assert_eq!(poll_new(&frame, &mut st, &words), Some((want, source)));
+                assert_eq!(ocr_calls(), ocr_before, "no OCR under the new reader");
+                assert_eq!(pack_reads() - reads_before, 1);
+                let read = screen_read(Some(word), layout, false).read;
+                assert_eq!(words.taken(), read.as_ref());
+                assert_eq!(words.into_taken(), read);
+            }
+        }
+    }
+
+    /// A flagged read and a frame with no word are no signal, and nothing
+    /// falls back to OCR. A read that was made is still kept: it is the
+    /// frame's read.
+    #[test]
+    fn a_flagged_or_absent_words_read_is_no_signal_and_no_ocr() {
+        let frame = result_frame(true, true, 0);
+        for read in [
+            screen_read(Some(Outcome::Victory), ACCOLADE, true),
+            screen_read(Some(Outcome::Defeat), ACCOLADE, true),
+            screen_read(Some(Outcome::Victory), RANK_SCREEN, true),
+            screen_read(Some(Outcome::Defeat), RANK_SCREEN, true),
+            screen_read(None, ACCOLADE, true),
+            unread_frame(),
+            // not a state the reader produces: a word with no layout
+            ScreenRead {
+                read: Some(ResultRead {
+                    source: None,
+                    ..screen_read(Some(Outcome::Victory), ACCOLADE, false)
+                        .read
+                        .unwrap()
+                }),
+                screens: BOTH,
+            },
+        ] {
+            let mut st = seen(&frame);
+            let words = pack_words(BOTH, Some(read.clone()));
+            let before = ocr_calls();
+            assert_eq!(poll_new(&frame, &mut st, &words), None, "{read:?}");
+            assert_eq!(words.taken(), read.read.as_ref());
+            // the Tab frame's read: no stability wait, the same answer
+            let words = pack_words(BOTH, Some(read.clone()));
+            assert_eq!(
+                detect_outcome_with(&frame.0, NEW, &no_title(), &words),
+                MatchOutcome::Unknown,
+                "{read:?}"
+            );
+            assert_eq!(ocr_calls(), before, "no OCR under the new reader");
+        }
+    }
+
+    /// A DRAW is a signal only when the read is sure. (The reader itself
+    /// names an unsure DRAW nothing at all, `shadow::result`.)
+    #[test]
+    fn a_draw_is_a_signal_only_when_sure() {
+        let frame = result_frame(true, true, 0);
+        for layout in [ACCOLADE, RANK_SCREEN] {
+            let mut st = seen(&frame);
+            let words = pack_words(BOTH, sure(Outcome::Draw, layout));
+            assert_eq!(
+                poll_new(&frame, &mut st, &words).map(|s| s.0),
+                Some(MatchOutcome::Draw)
+            );
+            let mut st = seen(&frame);
+            let flagged = Some(screen_read(Some(Outcome::Draw), layout, true));
+            assert_eq!(poll_new(&frame, &mut st, &pack_words(BOTH, flagged)), None);
+        }
+    }
+
+    /// A screen's word is a sure word found on that screen's layout (the id
+    /// or a variant of it). A word found on the other screen, on the end
+    /// title or on any other layout is not this screen's word.
+    #[test]
+    fn a_word_found_on_another_layout_is_not_this_screens_word() {
+        let accolade = result_frame(true, false, 0);
+        let rank = result_frame(false, true, 0);
+        let both = result_frame(true, true, 0);
+        let signal = |frame: &(DynamicImage, RgbImage), layout: &str| {
+            let mut st = seen(frame);
+            let words = pack_words(BOTH, sure(Outcome::Defeat, layout));
+            poll_new(frame, &mut st, &words).map(|s| s.1)
+        };
+        // only the accolade crop is lit
+        assert_eq!(signal(&accolade, ACCOLADE), Some(OutcomeSource::ResultWord));
+        assert_eq!(
+            signal(&accolade, "accolade_wide"),
+            Some(OutcomeSource::ResultWord)
+        );
+        for other in [
+            RANK_SCREEN,
+            END_TITLE,
+            "end_title_plain",
+            "tab_header",
+            "accolades",
+        ] {
+            assert_eq!(signal(&accolade, other), None, "{other}");
+        }
+        // only the rank crop is lit
+        assert_eq!(signal(&rank, RANK_SCREEN), Some(OutcomeSource::RankScreen));
+        assert_eq!(
+            signal(&rank, "rank_screen_wide"),
+            Some(OutcomeSource::RankScreen)
+        );
+        for other in [
+            ACCOLADE,
+            END_TITLE,
+            "tab_header",
+            "rank_screens",
+            "rank_title",
+        ] {
+            assert_eq!(signal(&rank, other), None, "{other}");
+        }
+        // both lit: the word's own screen names the source
+        assert_eq!(signal(&both, ACCOLADE), Some(OutcomeSource::ResultWord));
+        assert_eq!(signal(&both, RANK_SCREEN), Some(OutcomeSource::RankScreen));
+        assert_eq!(signal(&both, END_TITLE), None);
+    }
+
+    /// The lit-crop gate and the stability wait still come before the read
+    /// under `reader = "new"`: behind them the words pack is not read, even
+    /// when it would name a sure word.
+    #[test]
+    fn the_gates_still_come_before_the_words_read() {
+        let victory = || pack_words(BOTH, sure(Outcome::Victory, ACCOLADE));
+        let reads_before = pack_reads();
+        // a dark crop: never read, on the poll tick and on the Tab frame
+        let dark = dark_frame();
+        let mut st = FrameStability::default();
+        for _ in 0..3 {
+            assert_eq!(poll_new(&dark, &mut st, &victory()), None);
+        }
+        assert_eq!(
+            detect_outcome_with(&dark.0, NEW, &no_title(), &victory()),
+            MatchOutcome::Unknown
+        );
+        assert_eq!(pack_reads(), reads_before, "read behind the lit gate");
+
+        // a lit crop: not on its first sighting, then on the next tick
+        let lit = result_frame(true, false, 0);
+        let mut st = FrameStability::default();
+        let words = victory();
+        assert_eq!(poll_new(&lit, &mut st, &words), None, "first sighting");
+        assert_eq!(words.taken(), None);
+        assert_eq!(
+            pack_reads(),
+            reads_before,
+            "read before the crop held still"
+        );
+        assert_eq!(
+            poll_new(&lit, &mut st, &victory()),
+            Some((MatchOutcome::Victory, OutcomeSource::ResultWord))
+        );
+        assert_eq!(pack_reads() - reads_before, 1);
+        // the crop moved: deferred again
+        let moved = result_frame(true, false, 24);
+        assert_eq!(poll_new(&moved, &mut st, &victory()), None, "crop changed");
+        assert_eq!(pack_reads() - reads_before, 1);
+        // the Tab frame has no stability wait: a lit crop is read at once
+        assert_eq!(
+            detect_outcome_with(&lit.0, NEW, &no_title(), &victory()),
+            MatchOutcome::Victory
+        );
+        assert_eq!(pack_reads() - reads_before, 2);
+    }
+
+    /// One words-v1 read per frame: both screens' gates pass, and the frame
+    /// is read once for the two of them.
+    #[test]
+    fn the_frame_is_read_once_for_both_screens() {
+        let both = result_frame(true, true, 0);
+        for read in [
+            unread_frame(),
+            screen_read(None, ACCOLADE, true),
+            screen_read(Some(Outcome::Victory), ACCOLADE, true),
+            screen_read(Some(Outcome::Victory), ACCOLADE, false),
+            screen_read(Some(Outcome::Defeat), RANK_SCREEN, false),
+        ] {
+            let mut st = seen(&both);
+            let words = pack_words(BOTH, Some(read.clone()));
+            let reads_before = pack_reads();
+            let _ = poll_new(&both, &mut st, &words);
+            assert_eq!(pack_reads() - reads_before, 1, "{read:?}");
+            assert_eq!(words.taken(), read.read.as_ref());
+        }
+    }
+
+    /// Without the templates of a screen its word is read with OCR, exactly
+    /// as ocr-v1 reads it: the same Tesseract calls and the same answer.
+    #[test]
+    fn without_the_templates_a_result_word_is_read_with_ocr() {
+        let both = result_frame(true, true, 0);
+        let mut st = seen(&both);
+        let before = ocr_calls();
+        let ocr_v1 = poll_ocr(&both, &mut st);
+        assert_eq!(ocr_calls() - before, 2, "ocr-v1 reads both crops");
+
+        let accolade_only = ResultScreens {
+            accolade: true,
+            rank_screen: false,
+        };
+        let absent = Some(unread_frame());
+        for (what, screens, read, ocr_reads, pack_read) in [
+            // no result templates at all
+            ("no pack", NO_SCREENS, None, 2, 0),
+            // the pack names the accolade screen only: the rank crop is OCR's
+            ("no rank templates", accolade_only, absent.clone(), 1, 1),
+            // the pack went away between the two looks
+            ("pack unloaded", BOTH, None, 2, 1),
+            (
+                "pack swapped",
+                BOTH,
+                Some(ScreenRead {
+                    screens: NO_SCREENS,
+                    ..screen_read(Some(Outcome::Victory), ACCOLADE, false)
+                }),
+                2,
+                1,
+            ),
+        ] {
+            let mut st = seen(&both);
+            let words = pack_words(screens, read);
+            let (ocr_before, reads_before) = (ocr_calls(), pack_reads());
+            assert_eq!(poll_new(&both, &mut st, &words), ocr_v1, "{what}");
+            assert_eq!(ocr_calls() - ocr_before, ocr_reads, "{what}");
+            assert_eq!(pack_reads() - reads_before, pack_read, "{what}");
+        }
+        // with no pack nothing is kept for the caller
+        let mut st = seen(&both);
+        let words = pack_words(NO_SCREENS, None);
+        let _ = poll_new(&both, &mut st, &words);
+        assert_eq!(words.taken(), None);
+        assert_eq!(words.into_taken(), None);
+    }
+
+    /// `reader = "ocr-v1"` has no words reader at all: every ocr-v1 entry
+    /// point reads the two words with Tesseract, and keeps no read.
+    #[test]
+    fn ocr_v1_never_reads_the_words_pack() {
+        for words in [
+            ResultWords::ocr(),
+            ResultWords::default(),
+            ResultWords::for_reader(false),
+        ] {
+            assert!(!words.from_words());
+            assert!(words.reader.is_none());
+        }
+        assert!(ResultWords::for_reader(true).from_words());
+
+        let both = result_frame(true, true, 0);
+        let words = ResultWords::ocr();
+        assert_eq!(words.word_on(&ACCOLADE_WORD, &both.1), None);
+        assert_eq!(words.word_on(&RANK_WORD, &both.1), None);
+        assert_eq!(words.taken(), None);
+
+        let reads_before = pack_reads();
+        let before = ocr_calls();
+        assert_eq!(detect_outcome(&both.0), MatchOutcome::Unknown);
+        assert_eq!(detect_outcome_signal(&both.0), None);
+        assert_eq!(detect_outcome_signal_with_rgb(&both.0, &both.1), None);
+        assert_eq!(ocr_calls() - before, 6, "two Tesseract calls per frame");
+        assert_eq!(pack_reads(), reads_before);
+    }
+
+    /// The Tab frame's outcome read under `reader = "new"`: a sure word on
+    /// the accolade or the rank screen, with no OCR.
+    #[test]
+    fn the_tab_frame_takes_its_result_word_from_the_words_pack() {
+        for (frame, layout) in [
+            (result_frame(true, false, 0), ACCOLADE),
+            (result_frame(false, true, 0), RANK_SCREEN),
+        ] {
+            let before = ocr_calls();
+            assert_eq!(detect_outcome(&frame.0), MatchOutcome::Unknown);
+            assert_eq!(ocr_calls() - before, 1, "ocr-v1 reads the crop");
+            let before = ocr_calls();
+            for (word, want) in WORDS {
+                let words = pack_words(BOTH, sure(word, layout));
+                assert_eq!(
+                    detect_outcome_with(&frame.0, NEW, &no_title(), &words),
+                    want
+                );
+            }
+            assert_eq!(ocr_calls(), before, "no OCR under the new reader");
+        }
+    }
+
+    /// Under `reader = "new"`, a result word that falls back to OCR (no
+    /// templates for its screen) is logged once per screen and process.
+    /// Once this test's fallbacks have run, both log lines are spent.
+    #[test]
+    fn a_result_word_ocr_fallback_is_logged() {
+        let both = result_frame(true, true, 0);
+        let mut st = seen(&both);
+        let _ = poll_new(&both, &mut st, &pack_words(NO_SCREENS, None));
+        for screen in ResultScreen::ALL {
+            assert!(
+                !warn_result_word_ocr_fallback(screen),
+                "the {screen:?} fallback logged already"
+            );
+        }
     }
 }
