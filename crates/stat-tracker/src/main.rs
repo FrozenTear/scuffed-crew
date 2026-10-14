@@ -535,7 +535,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Startup synced heroes-v1 only; the other packs are still to come. When
     // off is asked for and they are what is missing, give them a bounded
     // moment first, or a first start would refuse off for the whole run.
-    // The download goes on in the background either way.
+    // Only when the pack job starts with downloads: after a refused or
+    // failed startup sync its first move is a wait, and so would ours be.
+    // The job goes on in the background either way.
     //
     // The run loop's SIGTERM handler does not exist yet. So the handler is
     // registered here, before the wait, and handed to the run loop: a stop
@@ -543,23 +545,33 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // offered on the next start), and a stop between the wait and the run
     // loop is still waiting in the handler when the loop first looks.
     let mut early_sigterm = None;
-    if extra_packs.is_some() && stat_tracker::ocr_switch::needs_pack_wait(&config) {
+    let wait_for_packs = extra_packs
+        .as_ref()
+        .is_some_and(|job| job.starts_with_downloads())
+        && stat_tracker::ocr_switch::needs_pack_wait(&config);
+    if wait_for_packs {
         tracing::info!(
             wait_secs = stat_tracker::ocr_switch::PACK_WAIT.as_secs(),
             "ocr = \"off\" needs reader packs that are still downloading; waiting for them before deciding"
         );
-        if let Some(extras) = extra_packs.take() {
+        if let Some(mut extras) = extra_packs.take() {
             let mut sigterm =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            let mut download = tokio::spawn(extras.run());
-            let stopped =
-                stopped_while_waiting(stat_tracker::ocr_switch::PACK_WAIT, &mut download, async {
+            // The job's `run` returns only when every pack is settled, which
+            // can be hours: the wait is on its first try, not on the task.
+            let first = extras.first_try_done();
+            tokio::spawn(extras.run());
+            let stopped = stopped_while_waiting(
+                stat_tracker::ocr_switch::PACK_WAIT,
+                reader_packs_arrive(stat_tracker::ocr_switch::PACK_WAIT, first, &config),
+                async {
                     tokio::select! {
                         _ = sigterm.recv() => {}
                         _ = tokio::signal::ctrl_c() => {}
                     }
-                })
-                .await;
+                },
+            )
+            .await;
             if stopped {
                 tracing::info!("stop asked while waiting for the reader packs, shutting down");
                 if let Some(guard) = run_marker {
@@ -648,16 +660,85 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
 }
 
 /// Wait for `work`, at most `limit`. True when `stop` (SIGTERM or Ctrl+C at
-/// startup) came first: the caller then stops. `work` keeps running either
-/// way.
-async fn stopped_while_waiting<T>(
+/// startup) came first: the caller then stops.
+async fn stopped_while_waiting(
     limit: std::time::Duration,
-    work: &mut tokio::task::JoinHandle<T>,
+    work: impl std::future::Future<Output = ()>,
     stop: impl std::future::Future<Output = ()>,
 ) -> bool {
     tokio::select! {
         _ = tokio::time::timeout(limit, work) => false,
         () = stop => true,
+    }
+}
+
+/// How often startup looks at the packs again while it waits for them.
+const PACK_WAIT_LOOK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether startup goes on waiting after the pack job's first try, with
+/// `left` of its wait remaining.
+///
+/// * Nothing missing: no, the packs are there.
+/// * The job's next try comes soon (a 429, a busy lock, the paced gap) and
+///   inside what is left: yes, packs can still arrive in time.
+/// * The next try is a minute or more away, or after the wait is over, or
+///   the job has ended: no. Classic OCR stays on for this run. The tracker
+///   says which packs are missing, and when they do arrive, that a restart
+///   turns classic OCR off (`ocr_switch::RESTART_TO_APPLY`).
+fn keep_waiting_for_packs(
+    first: &stat_tracker::packs::FirstTry,
+    left: std::time::Duration,
+) -> bool {
+    !first.missing.is_empty()
+        && first
+            .next_try_in
+            .is_some_and(|next| next < std::time::Duration::from_secs(60) && next < left)
+}
+
+/// Ends when the reader packs `ocr = "off"` needs are on disk, or when
+/// waiting longer cannot bring them inside `limit`
+/// ([`keep_waiting_for_packs`]). The caller bounds it with the same `limit`.
+///
+/// After a 429 the packs come one per paced gap, which for a whole set is
+/// longer than the wait: then this runs to the limit, off is refused for
+/// the run, and the member is told to restart once the packs are there.
+async fn reader_packs_arrive(
+    limit: std::time::Duration,
+    first: tokio::sync::oneshot::Receiver<stat_tracker::packs::FirstTry>,
+    config: &config::Config,
+) {
+    let started = Instant::now();
+    // The job was dropped without a first try: nothing to wait for.
+    let Ok(first) = first.await else {
+        return;
+    };
+    let left = limit.saturating_sub(started.elapsed());
+    if !keep_waiting_for_packs(&first, left) {
+        if !first.missing.is_empty() {
+            tracing::info!(
+                missing = ?first.missing,
+                next_try_secs = ?first.next_try_in.map(|d| d.as_secs()),
+                "reader packs are still missing and will not arrive in time; deciding without them"
+            );
+        }
+        return;
+    }
+    tracing::info!(
+        missing = ?first.missing,
+        next_try_secs = ?first.next_try_in.map(|d| d.as_secs()),
+        "reader packs are still arriving; waiting for them a little longer"
+    );
+    loop {
+        tokio::time::sleep(PACK_WAIT_LOOK).await;
+        // The look loads the pack folders: off the async workers.
+        let config = config.clone();
+        let still_missing =
+            tokio::task::spawn_blocking(move || stat_tracker::ocr_switch::needs_pack_wait(&config))
+                .await
+                .unwrap_or(false);
+        if !still_missing {
+            return;
+        }
     }
 }
 
@@ -10661,23 +10742,64 @@ mod tests {
     #[tokio::test]
     async fn a_stop_during_the_startup_pack_wait_ends_it_cleanly() {
         let never = std::future::pending::<()>;
-        let mut slow = tokio::spawn(std::future::pending::<()>());
         assert!(
-            !stopped_while_waiting(Duration::from_millis(30), &mut slow, never()).await,
+            !stopped_while_waiting(Duration::from_millis(30), never(), never()).await,
             "the limit ends the wait"
         );
-        let mut done = tokio::spawn(async {});
         assert!(
-            !stopped_while_waiting(Duration::from_secs(30), &mut done, never()).await,
-            "the download finishing ends the wait"
+            !stopped_while_waiting(Duration::from_secs(30), async {}, never()).await,
+            "the packs arriving ends the wait"
         );
         let started = Instant::now();
         assert!(
-            stopped_while_waiting(Duration::from_secs(30), &mut slow, async {}).await,
+            stopped_while_waiting(Duration::from_secs(30), never(), async {}).await,
             "a stop ends the wait"
         );
         assert!(started.elapsed() < Duration::from_secs(5));
-        slow.abort();
+
+        // The wait is on the pack job's first try, not on the job: `run`
+        // returns only when every pack is settled.
+        let config = config::Config {
+            data_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+            ..config::Config::default()
+        };
+        let first_try = |missing: Vec<&'static str>, next_try_in: Option<Duration>| {
+            stat_tracker::packs::FirstTry {
+                missing,
+                next_try_in,
+            }
+        };
+        let limit = Duration::from_secs(45);
+        // Every pack arrived, or the job ended, or its next try is far off
+        // or past the limit: go on at once.
+        for first in [
+            first_try(vec![], None),
+            first_try(vec![], Some(Duration::from_secs(5))),
+            first_try(vec!["maps-v1"], None),
+            first_try(vec!["maps-v1"], Some(Duration::from_secs(60))),
+            first_try(vec!["maps-v1"], Some(Duration::from_secs(3600))),
+        ] {
+            assert!(!keep_waiting_for_packs(&first, limit), "{first:?}");
+            let (send, recv) = tokio::sync::oneshot::channel();
+            send.send(first.clone()).unwrap();
+            let started = Instant::now();
+            reader_packs_arrive(limit, recv, &config).await;
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{first:?} does not hold startup"
+            );
+        }
+        // A next try soon and inside what is left: packs can still arrive.
+        let soon = first_try(vec!["maps-v1"], Some(Duration::from_secs(10)));
+        assert!(keep_waiting_for_packs(&soon, limit));
+        assert!(
+            !keep_waiting_for_packs(&soon, Duration::from_secs(10)),
+            "the next try is not before the wait ends"
+        );
+        // The job dropped before its first try: nothing to wait for.
+        let (send, recv) = tokio::sync::oneshot::channel::<stat_tracker::packs::FirstTry>();
+        drop(send);
+        reader_packs_arrive(limit, recv, &config).await;
 
         // The order in `run`, by its source.
         let src = include_str!("main.rs");
@@ -10694,6 +10816,16 @@ mod tests {
         assert!(
             handler < wait && wait < decide,
             "the handler is registered before the wait, and the wait is before the decision"
+        );
+        let first = body.find("extras.first_try_done()").expect("the first try");
+        let spawn = body.find("tokio::spawn(extras.run());").expect("the job");
+        assert!(
+            first < spawn && spawn < wait,
+            "the first-try channel is taken before the job starts, and the wait follows"
+        );
+        assert!(
+            body.contains(".is_some_and(|job| job.starts_with_downloads())"),
+            "no wait when the pack job's first move is a wait"
         );
         let stop_branch =
             &body[body[wait..].find("if stopped {").expect("the stop branch") + wait..];
