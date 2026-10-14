@@ -368,10 +368,11 @@ pub const OWN_ROW_FIELDS: [&str; 7] = ["hero", "e", "a", "d", "dmg", "h", "mit"]
 
 /// Mark every own-row field suspect.
 ///
-/// `reader = "new"` finds the own row from the own-name seeds and the
-/// highlight ([`crate::detect::own_row`]). When only one of the two named
-/// the row where both could have, the row is still used, but the values on
-/// it may be another player's: each of them is marked. The upload allowlist
+/// `reader = "new"` finds the own row from the own-name seeds, the
+/// highlight and the career hero's row ([`crate::detect::own_row`]). When
+/// only one of them named the row where two could have, or the career hero
+/// alone did, the row is still used, but the values on it may be another
+/// player's: each of them is marked. The upload allowlist
 /// has no name for the row itself, so the row's fields carry the mark.
 pub fn mark_own_row_suspect(fields: &mut Vec<String>) {
     for name in OWN_ROW_FIELDS {
