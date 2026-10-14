@@ -260,10 +260,14 @@ impl GateState {
             .collect()
     }
 
-    /// The game has no row yet, and every read of it so far was low-trust
-    /// (a suspect own row): no column was ever confirmed by a trusted read.
-    /// A trusted board then starts the game over
-    /// ([`apply_gate_seeded`]).
+    /// The game has no row yet (a column is still unread) and no read column
+    /// is confirmed by a trusted read as it stands now. That is a game read
+    /// only on suspect own rows, and also a game whose trusted board had
+    /// every one of its read columns moved by a later suspect board (a moved
+    /// column is unconfirmed again). A trusted board then starts the game
+    /// over ([`apply_gate_seeded`]): it is taken as a first capture, with no
+    /// check against the boards before it. No row of the game is stored at
+    /// that point, so no stored number changes.
     pub fn only_low_trust_reads(&self) -> bool {
         self.unread.iter().any(|&unread| unread)
             && (0..GATE_COLS).all(|col| self.unread[col] || self.unconfirmed[col])
