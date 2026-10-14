@@ -227,7 +227,18 @@ pub struct ShadowWorker {
 impl ShadowWorker {
     /// Spawn the worker only when the config flag is on.
     pub fn start_if_enabled(config: &crate::config::Config) -> Option<Self> {
-        if !config.shadow_log_enabled() {
+        Self::start_for_reader(config, config.reader)
+    }
+
+    /// [`Self::start_if_enabled`] for the reader the daemon runs with
+    /// (`ocr = "off"` implies the new reader, whatever `reader` says:
+    /// [`crate::ocr_switch::Decision::reader`]). The log runs when its own
+    /// flag is on or saved stats use the new reader.
+    pub fn start_for_reader(
+        config: &crate::config::Config,
+        reader: crate::config::ReaderSetting,
+    ) -> Option<Self> {
+        if !(config.shadow_recognizer_enabled() || reader.is_new()) {
             return None;
         }
         let log = ShadowLog::new(&config.data_dir);
@@ -482,6 +493,27 @@ mod tests {
         assert!(!config.shadow_recognizer);
         assert!(config.shadow_log_enabled());
         assert!(ShadowWorker::start_if_enabled(&config).is_some());
+    }
+
+    #[test]
+    fn the_log_follows_the_reader_in_use_not_only_the_reader_key() {
+        use crate::config::{OcrSetting, ReaderSetting};
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            ocr: OcrSetting::Off,
+            ..crate::config::Config::default()
+        };
+        // `reader` is still ocr-v1 in the file, as the Settings switch leaves it.
+        assert!(config.reader.is_ocr_v1() && !config.shadow_recognizer);
+        assert!(ShadowWorker::start_if_enabled(&config).is_none());
+        // OCR off granted: the new reader is in use, so the log runs.
+        let granted = crate::ocr_switch::effective_reader(OcrSetting::Off, config.reader);
+        assert_eq!(granted, ReaderSetting::New);
+        assert!(ShadowWorker::start_for_reader(&config, granted).is_some());
+        // OCR off refused: the file's reader, so no log.
+        let refused = crate::ocr_switch::effective_reader(OcrSetting::On, config.reader);
+        assert!(ShadowWorker::start_for_reader(&config, refused).is_none());
     }
 
     #[test]

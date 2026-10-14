@@ -104,7 +104,17 @@ pub fn detect_phase_polled(
         stability,
         source,
         crate::shadow::read_phrase,
-        |crop: &DynamicImage| crate::ocr::recognize_sparse_region(crop).ok(),
+        // A screen without a mask keeps the OCR check, while OCR is on.
+        // With OCR off there is no check to fall back to: that screen is
+        // not confirmed, and the read is not asked for. The missing mask is
+        // what the switch reports (`ocr_switch::PackGroup::PhaseTitles`).
+        |crop: &DynamicImage| {
+            if crate::ocr::gate::is_off() {
+                None
+            } else {
+                crate::ocr::recognize_sparse_region(crop).ok()
+            }
+        },
     )
 }
 

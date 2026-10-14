@@ -213,16 +213,19 @@ if ! groups 2>/dev/null | grep -qw input; then
 fi
 
 # eng.traineddata locations across distros (daemon probes these at runtime too).
+# TESSDATA_SYSTEM_ROOT (empty by default) is put in front of the system
+# paths, so a test can run this on a machine that has the model installed.
 find_eng_traineddata() {
+    local sys="${TESSDATA_SYSTEM_ROOT:-}"
     local candidates=(
         "${TESSDATA_PREFIX:-}/eng.traineddata"
         "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata"
-        /usr/share/tessdata/eng.traineddata
-        /usr/local/share/tessdata/eng.traineddata
-        /usr/share/tesseract/tessdata/eng.traineddata
+        "$sys/usr/share/tessdata/eng.traineddata"
+        "$sys/usr/local/share/tessdata/eng.traineddata"
+        "$sys/usr/share/tesseract/tessdata/eng.traineddata"
     )
     local d
-    for d in /usr/share/tesseract-ocr/*/tessdata; do
+    for d in "$sys"/usr/share/tesseract-ocr/*/tessdata; do
         candidates+=("${d}/eng.traineddata")
     done
     local f
@@ -232,7 +235,20 @@ find_eng_traineddata() {
     return 1
 }
 
-if ! find_eng_traineddata; then
+# Only classic OCR needs eng.traineddata. The check always runs: with
+# `ocr = "off"` in config.toml the tracker may still keep classic OCR on (a
+# tracker version that cannot turn it off yet, or a missing reader pack), and
+# the member may turn it back on. Asked off, a missing model is a note, not a
+# warning, and it still says what to install.
+if find_eng_traineddata; then
+    :
+elif config_ocr_is_off "$HOME"; then
+    info "eng.traineddata not found. config.toml asks for classic OCR off, so the tracker may not need it."
+    info "It does need it whenever it keeps classic OCR on: a tracker version that cannot turn it off yet, a missing reader pack, or you turn classic OCR back on."
+    info "  Arch:    sudo pacman -S tesseract-data-eng"
+    info "  Debian:  sudo apt install tesseract-ocr-eng"
+    info "  Fedora:  sudo dnf install tesseract-langpack-eng"
+else
     warn "eng.traineddata not found — install your distro's eng tessdata package."
     warn "  Arch:    sudo pacman -S tesseract-data-eng"
     warn "  Debian:  sudo apt install tesseract-ocr-eng"

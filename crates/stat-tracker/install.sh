@@ -147,6 +147,16 @@ fi
 
 # ── OCR dependencies ──────────────────────────────────────────────────────────
 
+# The build below links the Tesseract library whatever `ocr` says, so the
+# tesseract check always runs. Only classic OCR needs the model: with
+# `ocr = "off"` in config.toml a missing eng.traineddata is a note, not a
+# warning. The tracker may still keep classic OCR on (a tracker version that
+# cannot turn it off yet, or a missing reader pack), and the member may turn
+# it back on, so the note says what to install.
+OCR_OFF=0
+if config_ocr_is_off "$HOME"; then
+    OCR_OFF=1
+fi
 if ! command -v tesseract &>/dev/null; then
     warn "tesseract not found — OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
@@ -157,9 +167,15 @@ elif ! { ls /usr/share/tessdata/eng.traineddata \
              /usr/share/tesseract-ocr/*/tessdata/eng.traineddata \
              "${TESSDATA_PREFIX:-}/eng.traineddata" \
              "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata" 2>/dev/null | grep -q .; }; then
-    warn "eng.traineddata not found — install your distro's eng tessdata package."
-    warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
-    echo >&2
+    if [[ "$OCR_OFF" -eq 1 ]]; then
+        info "eng.traineddata not found. config.toml asks for classic OCR off, so the tracker may not need it."
+        info "It does need it whenever it keeps classic OCR on: a tracker version that cannot turn it off yet, a missing reader pack, or you turn classic OCR back on."
+        info "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
+    else
+        warn "eng.traineddata not found — install your distro's eng tessdata package."
+        warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
+        echo >&2
+    fi
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -186,7 +202,9 @@ info "Installed binaries → $BIN_DIR"
 # Run after install so we use the freshly built binary (which has --generate-tessdata).
 # Also avoids the PID-conflict problem if a daemon is already running.
 
-info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated later from the GUI → Settings → Install Koverwatch Tessdata"
+if [[ "$OCR_OFF" -eq 0 ]]; then
+    info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated later from the GUI → Settings → Install Koverwatch Tessdata"
+fi
 
 # Ensure ~/.local/bin is on PATH (terminals). Launchers often omit it.
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then

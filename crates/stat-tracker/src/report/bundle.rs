@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::marker::{self, LastExit};
 use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
-use crate::config::{Config, ReaderSetting};
+use crate::config::{Config, OcrSetting, ReaderSetting};
 
 /// `bundle_version` this build writes.
 pub const BUNDLE_VERSION: u64 = 2;
@@ -115,7 +115,7 @@ pub const fn capture_backend_label(backend: CaptureBackend) -> &'static str {
 }
 
 /// The manifest `system` object. Describes the setup, not the person.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SystemInfo {
     pub session_type: SessionType,
     pub capture_backend: CaptureBackend,
@@ -123,7 +123,18 @@ pub struct SystemInfo {
     pub cpu_threads: u32,
     /// OCR worker count in use, at least 1.
     pub ocr_threads: u32,
+    /// The reader that supplied saved stats: `new` when the daemon ran
+    /// with OCR off, whatever the `reader` key says
+    /// ([`crate::ocr_switch::effective_reader`]).
     pub reader: ReaderSetting,
+    /// What the daemon ran with, from the status file it wrote
+    /// ([`crate::ocr_switch::Status`]). On when no daemon wrote one: the
+    /// config value alone never says off.
+    pub ocr: OcrSetting,
+    /// OCR calls the daemon's gate blocked, per call site
+    /// ([`crate::ocr::gate::Site::key`]): at most
+    /// [`OCR_BLOCKED_SITES_MAX`], the busiest first. Empty with OCR on.
+    pub ocr_blocked_calls: Vec<(String, u32)>,
     pub shadow_recognizer: bool,
     /// True for the prerelease channel.
     pub prerelease: bool,
@@ -139,6 +150,21 @@ impl SystemInfo {
         let cpu_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
+        // The gate and its counters live in the daemon, which writes them
+        // to the status file. Only a status this tracker's daemon wrote is
+        // used: while a daemon runs, the file has to carry its pid, or it
+        // is another run's (or an older daemon never wrote one).
+        let running_pid = daemon_running
+            .then(|| std::fs::read_to_string(config.data_dir.join("daemon.pid")).ok())
+            .flatten()
+            .and_then(|text| crate::proc_id::parse_pid_record(&text))
+            .map(|record| record.pid);
+        let switch = switch_for_report(
+            crate::ocr_switch::read_status(&config.data_dir),
+            daemon_running,
+            running_pid,
+        );
+        let ocr = switch.as_ref().map_or(OcrSetting::On, |s| s.effective);
         Self {
             session_type: SessionType::from_env(),
             capture_backend,
@@ -146,13 +172,61 @@ impl SystemInfo {
             ocr_threads: u32::try_from(config.ocr_threads_resolved())
                 .unwrap_or(1)
                 .max(1),
-            reader: config.reader,
+            reader: crate::ocr_switch::effective_reader(ocr, config.reader),
+            ocr,
+            ocr_blocked_calls: switch.map_or_else(Vec::new, |s| blocked_sites(&s)),
             shadow_recognizer: config.shadow_recognizer_enabled(),
             prerelease: config.wants_prerelease_updates(),
             daemon_running,
             last_exit: marker::last_exit(&config.data_dir),
         }
     }
+}
+
+/// Most call sites `system.ocr_blocked_calls` carries: the validator's cap.
+pub const OCR_BLOCKED_SITES_MAX: usize = scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX;
+
+/// The status the report may use. With a daemon running, only the file that
+/// daemon wrote (its pid). With none running, the last run's file.
+pub(super) fn switch_for_report(
+    status: Option<crate::ocr_switch::Status>,
+    daemon_running: bool,
+    running_pid: Option<u32>,
+) -> Option<crate::ocr_switch::Status> {
+    status.filter(|s| !daemon_running || running_pid == Some(s.pid))
+}
+
+/// The blocked call sites of a run with OCR off, as the report sends them.
+/// Empty when the run had OCR on.
+///
+/// The status is a file read from disk, so nothing in it is trusted to fit
+/// what the site takes (`docs/report-bundle.md`, section 2):
+/// - a key that is not a call site
+///   ([`scuffed_types::stat_report::is_ocr_call_site`]: an absolute path,
+///   free text, over 96 bytes) is left out, so one key can not make the
+///   site refuse the whole report;
+/// - the same key twice is one site, counts added;
+/// - a count above `u32::MAX` is sent as `u32::MAX`;
+/// - only the [`OCR_BLOCKED_SITES_MAX`] sites with the largest counts go,
+///   the busiest first.
+pub(super) fn blocked_sites(status: &crate::ocr_switch::Status) -> Vec<(String, u32)> {
+    if status.effective.is_on() {
+        return Vec::new();
+    }
+    let mut by_key: std::collections::BTreeMap<&str, u64> = Default::default();
+    for s in &status.blocked {
+        if scuffed_types::stat_report::is_ocr_call_site(&s.site) {
+            let count = by_key.entry(s.site.as_str()).or_default();
+            *count = count.saturating_add(s.count);
+        }
+    }
+    let mut sites: Vec<(String, u32)> = by_key
+        .into_iter()
+        .map(|(site, count)| (site.to_string(), u32::try_from(count).unwrap_or(u32::MAX)))
+        .collect();
+    sites.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sites.truncate(OCR_BLOCKED_SITES_MAX);
+    sites
 }
 
 /// Capture size in pixels. Both edges must be positive.
@@ -331,6 +405,14 @@ struct SystemJson {
     cpu_threads: u32,
     ocr_threads: u32,
     reader: &'static str,
+    /// `off`, and only then. A tracker with classic OCR on writes the
+    /// `system` object it always wrote, so a site from before the switch
+    /// still takes its reports; the site reads a missing key as `on`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr: Option<&'static str>,
+    /// Written with `ocr`: call site to blocked calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr_blocked_calls: Option<std::collections::BTreeMap<String, u32>>,
     shadow_recognizer: bool,
     update_channel: &'static str,
     daemon_running: bool,
@@ -387,6 +469,11 @@ impl From<&SystemInfo> for SystemJson {
             cpu_threads: s.cpu_threads.max(1),
             ocr_threads: s.ocr_threads.max(1),
             reader: s.reader.as_str(),
+            ocr: s.ocr.is_off().then_some(OcrSetting::OFF),
+            ocr_blocked_calls: s
+                .ocr
+                .is_off()
+                .then(|| s.ocr_blocked_calls.iter().cloned().collect()),
             shadow_recognizer: s.shadow_recognizer,
             update_channel: if s.prerelease { "prerelease" } else { "stable" },
             daemon_running: s.daemon_running,
