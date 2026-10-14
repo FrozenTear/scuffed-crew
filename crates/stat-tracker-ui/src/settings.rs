@@ -151,12 +151,15 @@ pub(crate) const CLASSIC_OCR_LABEL: &str = "Use classic OCR (Tesseract)";
 /// what the member gives up: the map on the scoreboard has no second reader.
 /// That has two effects, and both are named: the map is missing more often,
 /// and a co-op event board is told apart only when its map name is read
-/// sure.
+/// sure. And the names are not read, so one kind of scoreboard has no way
+/// left to find the member's row.
 pub(crate) const CLASSIC_OCR_HINT: &str = "\
 Tesseract is the classic text reader. Off: the tracker reads the game with its own reader \
 and does not start Tesseract. With classic OCR off the map can be missing more often, \
 mostly at 1080p, and a co-op event scoreboard (Junkenstein) can be saved as a game when \
-its map name is not read.";
+its map name is not read. A scoreboard is not saved when your row has never been \
+highlighted, your hero icon is dead or covered, and the tracker has not learned your name \
+yet.";
 
 /// The hint while this tracker version still needs classic OCR for a read:
 /// no build of it turns the switch off, so nothing is promised.
@@ -2907,6 +2910,13 @@ token = \"not-a-real-token\"
             CLASSIC_OCR_HINT.contains(
                 "a co-op event scoreboard (Junkenstein) can be saved as a game when its map \
                  name is not read"
+            ),
+            "{CLASSIC_OCR_HINT}"
+        );
+        assert!(
+            CLASSIC_OCR_HINT.contains(
+                "A scoreboard is not saved when your row has never been highlighted, your \
+                 hero icon is dead or covered, and the tracker has not learned your name yet."
             ),
             "{CLASSIC_OCR_HINT}"
         );

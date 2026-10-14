@@ -114,14 +114,24 @@ impl Read {
             // full-board text are never run, and a board the reader refuses
             // is not handed to OCR.
             Read::StatCells => true,
-            // #262 (O9) is in: the row comes from the highlight and the
-            // own-name seeds, and the name read is its last fallback, not
-            // asked for with OCR off. Not flipped: without that fallback a
-            // member with no highlight and no seed gets no row, and in the
-            // bench 3 boards that are read correctly with OCR are lost. It
-            // waits for a reader for that case (a seed without a highlight)
-            // or for the USER to accept it as a limit of the opt-in.
-            Read::OwnRow => false,
+            // #262 (O9) and #273 (O9b): the row comes from the highlight,
+            // the own-name seeds and, where both are silent, the row the
+            // career panel's hero is read on. The name read was the last
+            // fallback and is not asked for with OCR off.
+            //
+            // The condition: the career hero's row exists only with a hero
+            // pack that reads the board. Off is refused without one
+            // ([`PackGroup::HeroIcons`], a set for boards of every size), so
+            // OCR and its name read stay in that case.
+            //
+            // The limit, written where the member decides: a Tab is held
+            // when the member has never had the highlight, the own hero
+            // icon is dead or covered, and no seed is trusted yet. With OCR
+            // on, the name read finds that row.
+            //
+            // To take this back: this line, and the list in the test
+            // `this_build_reads_everything_without_ocr`.
+            Read::OwnRow => true,
             // #270 (O11): the words-v1 result templates name the word on
             // the accolade screen and the rank screen, for the poll tick's
             // signal and for the Tab frame's outcome. Without them and with
@@ -179,7 +189,10 @@ impl Read {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackGroup {
     /// A hero pack for boards of every size: heroes-v2 or heroes-v1.
-    /// heroes-v2-1080 alone reads no 1440p board.
+    /// heroes-v2-1080 alone reads no 1440p board. Two reads stand on it:
+    /// the hero ([`Read::Hero`]) and, on a board with no highlight and no
+    /// seed match, the own row ([`Read::OwnRow`]: the row the career
+    /// panel's hero is read on).
     HeroIcons,
     /// maps-v1 (the hand-installed `templates/maps` folder does not count).
     MapNames,
@@ -1079,21 +1092,58 @@ mod tests {
         );
     }
 
-    /// What this build can do. Each line moves when its lane merges; the
-    /// refusal follows from it.
+    /// What this build can do, and the one place that pins it. Each line
+    /// of [`Read::without_ocr`] moved when its lane merged; the decision
+    /// follows from the list. Taking a read back is its line there and its
+    /// name in `STILL_NEEDS_OCR` here: every other test follows the flags.
     #[test]
-    fn this_build_refuses_off_for_the_reads_that_still_need_ocr() {
-        assert_eq!(Read::needing_ocr(), [Read::OwnRow]);
+    fn this_build_reads_everything_without_ocr() {
+        const STILL_NEEDS_OCR: &[Read] = &[];
+        assert_eq!(Read::needing_ocr(), STILL_NEEDS_OCR);
         let decision = decide(OcrSetting::Off, &READY, &Read::needing_ocr());
-        assert_eq!(decision.effective, OcrSetting::On);
-        assert_eq!(
-            decision.refusal.unwrap().reads,
-            Read::needing_ocr(),
-            "with every pack installed, off is still refused on this build"
-        );
+        if STILL_NEEDS_OCR.is_empty() {
+            assert_eq!(
+                decision.effective,
+                OcrSetting::Off,
+                "with every pack installed, this build turns OCR off"
+            );
+            assert_eq!(decision.refusal, None);
+        } else {
+            assert_eq!(decision.effective, OcrSetting::On);
+            assert_eq!(
+                decision.refusal.unwrap().reads,
+                Read::needing_ocr(),
+                "with every pack installed, off is still refused on this build"
+            );
+        }
         for read in Read::ALL {
             assert!(!read.plain().is_empty());
         }
+    }
+
+    /// The condition of [`Read::OwnRow`]. Without OCR the own row of a
+    /// board with no highlight and no seed match is the row the career
+    /// panel's hero is read on, and that needs a hero pack that reads the
+    /// board. Without one, off is refused whatever the build can do, so OCR
+    /// stays on and the name read is still there for that board.
+    #[test]
+    fn without_a_hero_pack_off_is_refused_so_the_own_row_keeps_its_name_read() {
+        let no_heroes = PackReadiness {
+            heroes: false,
+            ..READY
+        };
+        // even for a build with no read left on OCR
+        for needing in [&[][..], &Read::needing_ocr()[..]] {
+            let refused = decide(OcrSetting::Off, &no_heroes, needing);
+            assert_eq!(refused.effective, OcrSetting::On);
+            let refusal = refused.refusal.expect("the reason");
+            assert_eq!(refusal.packs, [PackProblem::HeroesMissing]);
+        }
+        assert!(!no_heroes.has(PackGroup::HeroIcons));
+        // with the pack, the own row is no reason to keep OCR on
+        let with_heroes = decide(OcrSetting::Off, &READY, &[]);
+        assert_eq!(with_heroes.effective, OcrSetting::Off);
+        assert!(READY.has(PackGroup::HeroIcons));
     }
 
     #[test]

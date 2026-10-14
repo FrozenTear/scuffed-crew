@@ -4770,7 +4770,9 @@ struct OwnRowChoice {
 ///
 /// With classic OCR off there is no such read: it returns `None` before
 /// anything of OCR is touched (no crop, no OCR pool, no call at the gate).
-/// A board with no seed match and no highlight is then held, with a WARN.
+/// A board with no seed match, no highlight and no row for the career
+/// panel's hero is then held, with a WARN. That is the limit of
+/// [`stat_tracker::ocr_switch::Read::OwnRow`].
 fn own_row_name_fallback(
     player_name: Option<&str>,
     scoreboard: &image::DynamicImage,
@@ -11612,6 +11614,33 @@ mod tests {
         image::DynamicImage::ImageRgb8(img)
     }
 
+    /// [`s1_tab_frame`] with the background of one team 1 row lighter, as
+    /// the game draws the member's own row. Still nothing on it can be read.
+    fn s1_tab_frame_lit(row: usize) -> image::DynamicImage {
+        let frame = s1_tab_frame();
+        let (w, h) = (frame.width(), frame.height());
+        let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
+        // Where the row is in the crop: `crop_player_row` on an image whose
+        // pixels carry their own y.
+        let probe = image::RgbImage::from_fn(bw, bh, |_, y| {
+            image::Rgb([(y % 256) as u8, (y / 256) as u8, 0])
+        });
+        let slot = ocr::preprocess::crop_player_row(&image::DynamicImage::ImageRgb8(probe), row, 5)
+            .expect("the row is on the board")
+            .to_rgb8();
+        let [lo, hi, _] = slot.get_pixel(0, 0).0;
+        let top = u32::from(lo) + 256 * u32::from(hi);
+        let mut img = frame.to_rgb8();
+        for py in by + top..by + top + slot.height() {
+            for px in bx..bx + bw {
+                // The background, three times as bright. The saturation is
+                // the same, so the preflight's row scan sees no new row.
+                img.put_pixel(px, py, image::Rgb([36, 42, 66]));
+            }
+        }
+        image::DynamicImage::ImageRgb8(img)
+    }
+
     /// With OCR off the vision pass still runs to its end on a Tab frame.
     /// Every OCR read is stopped at the gate and comes back empty, and the
     /// missing board text is not an error (an error would fail the capture).
@@ -11769,11 +11798,10 @@ mod tests {
     ///    this build, off has to be refused, and the refusal names them.
     /// 2. The Tab pass with OCR off, alone in a process
     ///    ([`own_process_tab_pass_with_ocr_off`]): the real `analyze_frame`
-    ///    on a synthetic Tab, with the process-wide mode off, so a read on
+    ///    on synthetic Tabs, with the process-wide mode off, so a read on
     ///    any thread is seen. No read may reach the gate from a read this
-    ///    build says it does without OCR, and once the stat cells and the
-    ///    own row are such reads, the board has to be stored with its
-    ///    stats, the own row found by `analyze_frame` itself.
+    ///    build says it does without OCR. A Tab with a lit row is stored
+    ///    with its stats, the own row found by `analyze_frame` itself.
     #[test]
     fn with_ocr_off_a_board_the_new_reader_reads_is_stored_with_its_stats() {
         use stat_tracker::config::OcrSetting;
@@ -11943,32 +11971,62 @@ mod tests {
         assert!(!ocr::pool_started(), "no OCR pool");
         assert!(!ocr::tessdata_lang_probed(), "no tessdata lookup");
 
+        // The plain synthetic Tab has no lit row, no seed and no hero icon:
+        // no own row, and the name read was not asked for (nothing above
+        // went to the gate, so not the name cells either).
+        assert_eq!(analysis.player_row_idx, None);
+        assert_eq!(
+            blocked_for(Read::OwnRow),
+            0,
+            "{:?}",
+            ocr::gate::blocked_calls()
+        );
+
         // 3. A board the new reader read is stored, with its stats, and
         //    nothing of it goes to OCR.
         //
-        //    The analysis is the real pass's. Two things are given, because
-        //    a synthetic frame cannot carry them: the digits (the reader's
-        //    board, with 10 / 4 / 2 / 3000 / 800 / 400 on row 0), and, while
-        //    this build does not claim to find the own row without OCR
-        //    (`Read::OwnRow` false: no highlight and no seed on this frame,
-        //    and no name read with OCR off), the own row. Once that flag is
-        //    true the row has to be the one `analyze_frame` found.
-        let mut analysis = *analysis;
-        if Read::OwnRow.without_ocr() {
-            assert!(
-                analysis.player_row_idx.is_some(),
-                "the own row is marked as read without OCR, and the Tab pass did not find it \
-                 on the synthetic Tab (it needs the own-row highlight the reader looks for)"
-            );
-        } else {
-            assert_eq!(
-                analysis.player_row_idx, None,
-                "no highlight, no seed and no name read: no own row"
-            );
-            analysis.player_row_idx = Some(0);
-        }
+        //    The Tab has a lit row, and the own row is the one the real
+        //    pass finds on it, with OCR off. One thing is given, because a
+        //    synthetic frame cannot carry it: the digits (the reader's
+        //    board, with 10 / 4 / 2 / 3000 / 800 / 400 on the lit row).
+        const LIT: usize = 1;
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(dir.path()));
+        let analysed = analyze_frame(
+            s1_tab_frame_lit(LIT),
+            matcher,
+            Some("PLAYER".into()),
+            detect::MatchOutcome::Unknown,
+            FrameFlags {
+                allow_banner_recovery: true,
+                session_map_known: false,
+                shadow_on: false,
+                use_new_reader: true,
+            },
+            Vec::new(),
+        );
+        let FrameAnalysisOutcome::Analyzed(analysis) = analysed else {
+            panic!("the lit synthetic Tab was rejected before the reads");
+        };
+        let analysis = *analysis;
+        check_blocked("the Tab pass on the lit Tab");
+        assert_eq!(
+            analysis.player_row_idx,
+            Some(LIT),
+            "the own row is the pass's own: {:?}",
+            analysis.own_row
+        );
+        assert_eq!(
+            analysis.own_row.map(|own| own.source),
+            Some(detect::own_row::Source::HighlightOnly)
+        );
+        assert_eq!(analysis.name_match, None, "no name was read for it");
         let mut board = o8_board(Some("zenyatta"));
         board.team_size = Some(analysis.team_size);
+        for field in &mut board.fields {
+            if let Some(rest) = field.name.strip_prefix("r0.") {
+                field.name = format!("r{LIT}.{rest}");
+            }
+        }
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let store_dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(store_dir.path(), true).await;
@@ -11982,10 +12040,11 @@ mod tests {
         assert_eq!(
             ocr::gate::blocked_total(),
             0,
-            "storing asked nothing of OCR"
+            "nothing of the two passes or of storing was asked of OCR"
         );
         assert_eq!(ocr::gate::leptess_created(), 0);
         assert_eq!(ocr::gate::tesseract_calls(), 0);
+        assert!(!ocr::pool_started(), "no OCR pool");
         assert_eq!(rows.len(), 1);
         assert_eq!(
             o10_stats(&rows[0]),
@@ -12780,6 +12839,129 @@ mod tests {
             assert_eq!(own_row_name_fallback(Some("PLAYER"), &board, 5), None);
             assert_eq!(off.blocked(), [], "the fallback returns before any OCR");
         }
+    }
+
+    /// [`stat_tracker::ocr_switch::Read::OwnRow`] with classic OCR off, and
+    /// both sides of its one condition (a hero pack that reads the board),
+    /// through the real seed read and the real name fallback.
+    ///
+    /// * The icons are read: no highlight and no seed, and the career
+    ///   panel's hero on one row of the member's team. That row is the own
+    ///   row, marked, and no name is read.
+    /// * No icon read to go by (no hero pack for the board, or the own icon
+    ///   dead or covered): no row. With OCR off the Tab is held and nothing
+    ///   goes to the gate: the stated limit. With OCR on the name read is
+    ///   asked, which is why off is refused without a hero pack.
+    #[test]
+    fn with_ocr_off_the_career_hero_names_the_own_row_and_without_it_the_tab_is_held() {
+        use detect::own_row::{Source, Trust};
+        const OWN: usize = 3;
+        let hero_read = |row: usize, hero: Option<&str>| shadow::heroes::HeroRead {
+            row,
+            class: if hero.is_some() {
+                shadow::heroes::RowClass::Hero
+            } else {
+                shadow::heroes::RowClass::Unknown
+            },
+            hero: hero.map(str::to_string),
+            best: hero.unwrap_or("ana").to_string(),
+            score: if hero.is_some() { 0.95 } else { 0.5 },
+            lead: 0.4,
+            second: "kiriko".into(),
+            suspect: hero.is_none(),
+        };
+        // The career panel shows Ana. `own_icon`: what is read on the
+        // member's row (`None`: a skull or an ult ring over the icon).
+        let icons = |own_icon: Option<&str>| shadow::TabHeroes {
+            team_size: 5,
+            read: Some(shadow::heroes::HeroFrameRead {
+                board: shadow::heroes::HeroBoard {
+                    rows: (0..10)
+                        .map(|row| {
+                            if row == OWN {
+                                hero_read(row, own_icon)
+                            } else {
+                                hero_read(row, Some("mercy"))
+                            }
+                        })
+                        .collect(),
+                    elapsed_us: 1,
+                },
+                pack: shadow::heroes::HeroPack::V2,
+                pad_px: None,
+            }),
+            panel: Some(shadow::heroes::PanelRead {
+                read: hero_read(0, Some("ana")),
+                pack: shadow::heroes::HeroPack::V2,
+                box_px: (0, 0, 1, 1),
+                rel: (0.03, -0.03, 0.16),
+            }),
+        };
+        // What `shadow::read_heroes` returns with no hero pack for the board.
+        let no_pack = shadow::TabHeroes {
+            team_size: 5,
+            read: None,
+            panel: None,
+        };
+        let board = o9_board(OWN);
+        let find = |heroes: &shadow::TabHeroes,
+                    name_fallback: &dyn Fn() -> Option<parse::NameMatch>| {
+            find_own_row(
+                true,
+                || -> Option<parse::NameMatch> { panic!("ocr-v1's name match") },
+                // no highlight on the board, and no seed learned yet
+                || detect::own_row::read_own_row(None, &board, 5, None, Some(heroes), &[]),
+                name_fallback,
+                None,
+                detect::own_row::career_hero_row(heroes),
+                false,
+            )
+        };
+
+        {
+            let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
+            let the_fallback = || own_row_name_fallback(Some("PLAYER"), &board, 5);
+
+            let by_hero = find(&icons(Some("ana")), &the_fallback);
+            assert_eq!((by_hero.row_idx, by_hero.name_match), (Some(OWN), None));
+            assert_eq!(
+                by_hero.own_row.map(|own| (own.source, own.trust)),
+                Some((Source::CareerHero, Trust::Suspect)),
+                "the row is marked until a seed agrees"
+            );
+
+            // The limit: never the highlight, no seed, the own icon unread.
+            for heroes in [icons(None), no_pack.clone()] {
+                let held = find(&heroes, &the_fallback);
+                assert_eq!((held.row_idx, held.name_match), (None, None));
+                assert_eq!(held.own_row.map(|own| own.source), Some(Source::Neither));
+            }
+            assert_eq!(off.blocked(), [], "none of it asked anything of OCR");
+        }
+
+        // OCR on (the run of a daemon that was refused off for the hero
+        // pack): with no icon read the name read is asked, once, and its
+        // row is the own row.
+        assert!(!ocr::gate::is_off());
+        let asked = std::cell::Cell::new(0);
+        let name_read = || {
+            asked.set(asked.get() + 1);
+            Some(parse::NameMatch {
+                row: 6,
+                window: 0,
+                sole_window: true,
+            })
+        };
+        let named = find(&no_pack, &name_read);
+        assert_eq!(asked.get(), 1);
+        assert_eq!(named.row_idx, Some(6));
+        assert_eq!(
+            named.own_row.map(|own| own.source),
+            Some(Source::NameFallback)
+        );
+        // and where the career hero names the row, no name is read
+        let by_hero = find(&icons(Some("ana")), &name_read);
+        assert_eq!((by_hero.row_idx, asked.get()), (Some(OWN), 1));
     }
 
     #[test]
