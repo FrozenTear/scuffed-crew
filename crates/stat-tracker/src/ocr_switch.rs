@@ -9,7 +9,7 @@
 //!   switch can never leave a member with a tracker that stores nothing.
 //! * [`PackReadiness`] is what the readers that have no OCR fallback need
 //!   loaded: a main hero pack, the map pack, and from the word pack the
-//!   result words, the match-start titles and the FINAL SCORE line.
+//!   result words, the match-start titles and the end-of-match titles.
 //! * [`decide`] turns the requested setting into the one the daemon runs
 //!   with. A refusal carries its reasons ([`Refusal`]) and the daemon keeps
 //!   OCR on.
