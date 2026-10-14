@@ -466,7 +466,9 @@ fn detect_outcome_signal_inner(
 /// Not covered: Push, Flashpoint and Clash end-of-match Tab frames, quick
 /// play, arcade, custom games, Stadium, and a DRAW. The full-board OCR's
 /// header line (`parse::outcome_from_board_header`, ET-2) is untouched and
-/// remains the only reader of a result word on the board itself.
+/// remains the only reader of a result word on the board itself. It runs
+/// under ocr-v1 only: the new reader never runs the full-board OCR (alpha.7
+/// O10), so a result word on the board itself is not read there at all.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
     detect_outcome_text_with(img, FinalScoreSource::Ocr, &Titles::Ocr)
 }

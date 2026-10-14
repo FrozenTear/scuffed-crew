@@ -434,8 +434,13 @@ daemon logs `keyboard is exclusively grabbed by another process` at WARN and
 picks up the grabber's virtual pass-through keyboard automatically when it
 appears (hotplug). If the WARN says *every* keyboard is grabbed, switch the
 hotkey tool to its no-grab / virtual-devices mode or restart the tracker after
-it. Games the poller saw but never got a Tab for are listed in
-`debug/unrecorded_games.jsonl`.
+it. Games that were closed without a stored row are listed in
+`debug/unrecorded_games.jsonl`, with the reason: no Tab was captured for the
+game, or (with `reader = "new"`) its Tabs never gave a number for every stat.
+In the second case the line names the stats: `never_read` had no sure read on
+any Tab, `read_not_taken` had a read that was not taken because other stats
+had dropped on that Tab. Such a game is stored nowhere and is not uploaded;
+today it shows only in this file and in the journal, not in the app.
 
 ## Dev tools
 

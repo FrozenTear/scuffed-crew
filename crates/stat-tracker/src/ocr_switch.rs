@@ -72,8 +72,8 @@ pub enum Read {
     /// Adlersbrunn, stats on one team only) instead of storing it as an
     /// Eichenwalde game. It has no OCR call of its own. It needs two inputs:
     /// the word "Adlersbrunn", which a sure banner read supplies without
-    /// OCR (#271), and "both teams have stats", which is still counted on
-    /// the OCR cell rows.
+    /// OCR (#271), and "both teams have stats", which the new reader counts
+    /// on its own board (#266).
     PveBoard,
 }
 
@@ -109,9 +109,11 @@ impl Read {
             Read::FinalScore => true,
             // #260: the words-v1 phrase masks.
             Read::MatchStart => true,
-            // Lane O10: the board is still accepted and parsed from the OCR
-            // cell rows.
-            Read::StatCells => false,
+            // #266 (O10): under the new reader the digit reader's board is
+            // the trust gate and the six stats. The per-cell OCR and the
+            // full-board text are never run, and a board the reader refuses
+            // is not handed to OCR.
+            Read::StatCells => true,
             // #262 (O9) is in: the row comes from the highlight and the
             // own-name seeds, and the name read is its last fallback, not
             // asked for with OCR off. Not flipped: without that fallback a
@@ -136,12 +138,13 @@ impl Read {
             // (`choose_accolade_map` in the daemon), and the pack check
             // asks for the map pack ([`PackGroup::MapNames`]).
             Read::AccoladeMap => true,
-            // Two lanes, and both have to be in. M1 (#271) is: ADLERSBRUNN
-            // from the Tab banner under the new reader. O10 (#266) is not:
-            // both teams counted on the new reader's cells. Until then, with
-            // OCR off the count runs on no rows at all, so every Adlersbrunn
-            // board would be dropped, a real two-team game too.
-            Read::PveBoard => false,
+            // Both halves are in: ADLERSBRUNN from a sure banner read
+            // (#271), and both teams counted on the new reader's board
+            // (#266). One limit stays, and is written where the member
+            // decides: the word exists only on a sure banner read. A co-op
+            // board whose banner is not read sure is not dropped (with OCR
+            // on, the label OCR is a second chance to read the word).
+            Read::PveBoard => true,
         }
     }
 
@@ -1080,10 +1083,7 @@ mod tests {
     /// refusal follows from it.
     #[test]
     fn this_build_refuses_off_for_the_reads_that_still_need_ocr() {
-        assert_eq!(
-            Read::needing_ocr(),
-            [Read::StatCells, Read::OwnRow, Read::PveBoard]
-        );
+        assert_eq!(Read::needing_ocr(), [Read::OwnRow]);
         let decision = decide(OcrSetting::Off, &READY, &Read::needing_ocr());
         assert_eq!(decision.effective, OcrSetting::On);
         assert_eq!(

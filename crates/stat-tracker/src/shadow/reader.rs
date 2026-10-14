@@ -1264,7 +1264,7 @@ mod tests {
     /// mark.
     #[test]
     fn only_a_sure_result_from_the_words_pack_is_saved() {
-        use crate::reader_apply::{OcrSnapshot, OwnRow, merge_saved};
+        use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
         use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, WORDS_SUBDIR};
         let data = tempfile::tempdir().unwrap();
@@ -1299,7 +1299,7 @@ mod tests {
         );
         let rank_victory = DynamicImage::ImageRgb8(rank_victory);
         let nothing = DynamicImage::ImageRgb8(blank());
-        let ocr = OcrSnapshot {
+        let ocr = PolicyRow {
             map: "Ilios".into(),
             mode: "Control".into(),
             result: "defeat".into(),

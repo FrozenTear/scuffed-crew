@@ -3272,6 +3272,187 @@ mod tests {
         }
     }
 
+    // ------------------------------------------- the kernel's exact bits (V1)
+
+    /// A dot product one element at a time, in a chosen order: products go
+    /// to `lanes` sums by index modulo `lanes` over the whole chunks, the
+    /// lane sums fold in pairs (`(0 + 1) + (2 + 3)`, and so on up) or one
+    /// after the other, and the leftover elements are added one by one.
+    /// `fused` rounds each product and its addition once, as a fused
+    /// multiply-add instruction does.
+    fn dot_in_order(a: &[f32], b: &[f32], lanes: usize, pairs: bool, fused: bool) -> f32 {
+        let step = |s: f32, x: f32, y: f32| if fused { x.mul_add(y, s) } else { s + x * y };
+        let whole = a.len() / lanes * lanes;
+        let mut lane = vec![0.0f32; lanes];
+        for i in 0..whole {
+            lane[i % lanes] = step(lane[i % lanes], a[i], b[i]);
+        }
+        if pairs {
+            while lane.len() > 1 {
+                lane = lane.chunks(2).map(|c| c[0] + c[1]).collect();
+            }
+        }
+        let mut s = lane.iter().skip(1).fold(lane[0], |s, v| s + v);
+        for i in whole..a.len() {
+            s = step(s, a[i], b[i]);
+        }
+        s
+    }
+
+    /// [`dot`]'s order: 8 lanes, folded in pairs, no fused multiply-add.
+    fn dot_reference(a: &[f32], b: &[f32]) -> f32 {
+        dot_in_order(a, b, 8, true, false)
+    }
+
+    /// [`ncc_at`]'s score from [`dot_reference`]: the rows' sums added in
+    /// f64, top row first, over the root of the window's variance sum times
+    /// the kernel's norm.
+    fn ncc_reference(p: &Level, k: &Kernel, x: usize, y: usize) -> f64 {
+        let n = (k.w * k.h) as f64;
+        let sum = p.rect(&p.s1, x, y, k.w, k.h);
+        let var = p.rect(&p.s2, x, y, k.w, k.h) - sum * sum / n;
+        let mut num = 0.0f64;
+        for ty in 0..k.h {
+            let row = &p.px[(y + ty) * p.w + x..][..k.w];
+            num += dot_reference(row, &k.z[ty * k.w..][..k.w]) as f64;
+        }
+        num / (var.sqrt() * k.norm)
+    }
+
+    /// A score is a sum of floats, so the order of the additions is part
+    /// of it, and thresholds are compared with the last bit. This pins the
+    /// order: [`dot`] returns the bits of the plain loop of
+    /// [`dot_reference`] on every length up to 100, with values that
+    /// cancel, overflow to infinity or underflow. A faster `dot` (wider
+    /// registers, several rows at a time) has to pass this unchanged, so
+    /// that no read can move.
+    ///
+    /// The inputs tell the orders apart: the same sum in 4 or 16 lanes,
+    /// folded one lane after the other, added left to right, or with fused
+    /// multiply-adds gives other bits on many of them, and the test checks
+    /// that it does.
+    #[test]
+    fn dot_is_the_sum_in_one_fixed_order() {
+        let mut rng = Rng(0x0d07_0d07);
+        let mut value = |kind: u64| -> f32 {
+            let u = rng.next(1 << 24) as f32 / (1 << 24) as f32;
+            match kind {
+                // a pixel, a zero-mean template value
+                0 => u,
+                1 => u - 0.5,
+                // 8-bit values
+                2 => (rng.next(256) as f32) / 255.0,
+                // big and small magnitudes, both signs
+                3 => (u - 0.5) * [1e-20, 1e-6, 1.0, 1e6, 1e20][rng.next(5) as usize],
+                // the largest values: sums overflow to infinity
+                4 => [f32::MAX, -f32::MAX, 1.0, 0.0][rng.next(4) as usize],
+                // the smallest: products underflow
+                _ => [f32::MIN_POSITIVE, 1e-30, -1e-30, 1.0][rng.next(4) as usize],
+            }
+        };
+        let same = |x: f32, y: f32| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+        // other orders: 4 lanes, 16 lanes, lanes folded one after the
+        // other, left to right (1 lane), fused multiply-adds
+        let others = [
+            (4, true, false),
+            (16, true, false),
+            (8, false, false),
+            (1, true, false),
+            (8, true, true),
+        ];
+        let mut differ = [0usize; 5];
+        let mut checked = 0;
+        for len in 0..=100 {
+            for kind in 0..36u64 {
+                let a: Vec<f32> = (0..len).map(|_| value(kind / 6)).collect();
+                let b: Vec<f32> = (0..len).map(|_| value(kind % 6)).collect();
+                let (got, want) = (dot(&a, &b), dot_reference(&a, &b));
+                assert!(
+                    same(got, want),
+                    "len {len} kind {kind}: {got:e} is not {want:e}"
+                );
+                checked += 1;
+                for (n, &(lanes, pairs, fused)) in differ.iter_mut().zip(&others) {
+                    *n += usize::from(!same(dot_in_order(&a, &b, lanes, pairs, fused), want));
+                }
+            }
+        }
+        assert_eq!(checked, 101 * 36);
+        // measured: 1140, 1001, 728, 1486 and 603 of the 3636 inputs
+        assert!(differ.iter().all(|&n| n > 300), "{differ:?}");
+    }
+
+    /// [`ncc_at`] is [`ncc_reference`] to the last bit wherever it gives a
+    /// score: templates 1 pixel wide and 1 pixel high, widths around the
+    /// chunk of 8, the pack shapes, on noise, on planes of the largest
+    /// value and on low-contrast planes.
+    #[test]
+    fn ncc_at_is_the_reference_kernel_bit_for_bit() {
+        let mut rng = Rng(0x5eed_0b17);
+        let shapes = [
+            (1, 1),
+            (1, 24),
+            (24, 1),
+            (7, 5),
+            (8, 8),
+            (9, 3),
+            (15, 4),
+            (16, 6),
+            (17, 9),
+            (31, 12),
+            (33, 2),
+            (64, 20),
+            (86, 25),
+            (149, 32),
+        ];
+        let mut scored = 0;
+        for &(tw, th) in &shapes {
+            let mut t = Gray::new(tw, th);
+            for v in t.px.iter_mut() {
+                *v = rng.next(256) as f32 / 255.0;
+            }
+            // a 1 x 1 template is flat: no kernel
+            let Some(k) = Kernel::new(tw, th, &t.px) else {
+                assert_eq!((tw, th), (1, 1));
+                continue;
+            };
+            let (rw, rh) = (tw + 9, th + 7);
+            for kind in 0..6 {
+                let mut g = Gray::new(rw, rh);
+                for v in g.px.iter_mut() {
+                    *v = match kind {
+                        0 => rng.next(256) as f32 / 255.0,
+                        1 => rng.next(1 << 24) as f32 / (1 << 24) as f32,
+                        // the largest value, with a few black pixels
+                        2 => f32::from(rng.next(50) != 0),
+                        // two neighbouring bright grey levels
+                        3 => (242 + rng.next(2)) as f32 / 255.0,
+                        // dark, a few bright pixels
+                        4 => f32::from(rng.next(40) == 0),
+                        // sub-grey-level noise on a bright plane
+                        _ => 0.9 + 1e-3 * rng.next(256) as f32 / 255.0,
+                    };
+                }
+                let p = Level::new(rw, rh, g.px);
+                for y in 0..=rh - th {
+                    for x in 0..=rw - tw {
+                        if let Some(v) = ncc_at(&p, &k, x, y) {
+                            let want = ncc_reference(&p, &k, x, y);
+                            assert_eq!(
+                                v.to_bits(),
+                                want.to_bits(),
+                                "{tw}x{th} kind {kind} ({x},{y}): {v} is not {want}"
+                            );
+                            scored += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // measured: 5691
+        assert!(scored > 5_000, "{scored}");
+    }
+
     // ------------------------------------------- certification (F253-3)
 
     /// The projection bound is never below the exact score, at every

@@ -605,6 +605,11 @@ pub enum Names {
     /// the whole board when the cell path could not supply everything, and
     /// a board with neither a seed match nor a highlight has its name
     /// windows read by [`recognize_scoreboard_names_pre_cropped`].
+    ///
+    /// Since alpha.7 O10 the new reader does not run the per-cell pass at
+    /// all (its stats are the digit reader's; the daemon hands over
+    /// [`unread_rows`]), so the daemon has no caller of `Skip` left. It
+    /// stays for tools and tests.
     Skip,
 }
 
@@ -849,6 +854,22 @@ pub fn recognize_scoreboard_names_pre_cropped(
             })
             .collect()
     })
+}
+
+/// The rows of a board nothing was read on: `2 * team_size` rows in board
+/// order with no name and no stat cell. `reader = "new"` hands these to the
+/// capture path in place of the per-cell pass: its stats are the digit
+/// reader's and its own row comes from [`crate::detect::own_row`], so no
+/// OCR runs for them, and this starts no OCR worker.
+pub fn unread_rows(team_size: usize) -> Vec<RowOcrResult> {
+    (0..team_size * 2)
+        .map(|_| RowOcrResult {
+            name: None,
+            name_alternates: Vec::new(),
+            stats: Vec::new(),
+            mean_confidence: 0,
+        })
+        .collect()
 }
 
 /// Column calibration (CG-4 revision). Preferred path: anchor each stat
@@ -1539,6 +1560,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// alpha.7 O10: the rows the new reader hands over carry nothing that
+    /// was read, one per board row.
+    #[test]
+    fn unread_rows_carry_no_name_and_no_stat_cell() {
+        for team_size in [5usize, 6] {
+            let rows = unread_rows(team_size);
+            assert_eq!(rows.len(), 2 * team_size);
+            for row in &rows {
+                assert!(row.name.is_none() && row.name_alternates.is_empty());
+                assert!(row.stats.is_empty());
+                assert_eq!(row.mean_confidence, 0);
+            }
+        }
+        assert!(unread_rows(0).is_empty());
     }
 
     #[test]

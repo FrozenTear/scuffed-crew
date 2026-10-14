@@ -10,10 +10,37 @@
 //!
 //! This cannot be scored on single screenshots. It is unit-tested on
 //! synthetic sequences and needs validation on live shadow logs.
+//!
+//! The saved path (`reader = "new"`) uses the same rule from the one side it
+//! has. [`confirmed`] needs the frame after, and a Tab is stored before the
+//! next one exists, so an unsure cell there is [`CellTrust::Held`]: it is
+//! never stored, and no other reader's number takes its place. The capture
+//! gate keeps the column's last accepted value (`HoldKind::Unread`), which is
+//! the frame-before half of this rule, since a stat only grows; the next
+//! sure read of the cell replaces it.
 
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::digits::BoardRead;
+
+/// What the saved path does with one stat cell of the member's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellTrust {
+    /// The digit reader vouches for this number: it is stored.
+    Sure(u32),
+    /// The read is suspect or empty. Nothing is stored for the cell from
+    /// this frame: the last accepted value of the game stays.
+    Held,
+}
+
+/// Trust in one digit read. Only a value the reader did not flag is sure:
+/// a suspect read is never a number to store, however plausible it looks.
+pub fn cell_trust(value: Option<u32>, suspect: bool) -> CellTrust {
+    match value {
+        Some(v) if !suspect => CellTrust::Sure(v),
+        _ => CellTrust::Held,
+    }
+}
 
 /// Neighbouring frames further apart than this confirm nothing.
 pub const MAX_SPAN: TimeDelta = TimeDelta::seconds(120);
@@ -95,6 +122,16 @@ mod tests {
                 elapsed_ms: 10,
             },
         }
+    }
+
+    #[test]
+    fn only_a_value_the_reader_did_not_flag_is_sure() {
+        assert_eq!(cell_trust(Some(0), false), CellTrust::Sure(0));
+        assert_eq!(cell_trust(Some(3511), false), CellTrust::Sure(3511));
+        // a suspect read is held whatever it says, and so is an empty cell
+        assert_eq!(cell_trust(Some(3511), true), CellTrust::Held);
+        assert_eq!(cell_trust(None, true), CellTrust::Held);
+        assert_eq!(cell_trust(None, false), CellTrust::Held);
     }
 
     #[test]

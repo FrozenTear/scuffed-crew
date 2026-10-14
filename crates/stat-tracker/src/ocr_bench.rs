@@ -129,6 +129,53 @@ fn tab(
         "ocr_err": ocr_err,
         "looks_like_scoreboard": parse::looks_like_scoreboard(&a.rows),
     });
+    let portrait = a
+        .portrait_hero
+        .as_ref()
+        .map(|(name, score)| (name.as_str(), *score));
+    let state = HeroAuthState::default();
+    if new {
+        // The new reader: the board `analyze_frame` read decides, as in
+        // `handle_capture`. No OCR text is parsed.
+        let Some(board) = a.board.as_ref() else {
+            rec["read"] = json!("held:noboard");
+            return rec;
+        };
+        rec["board_status"] = json!(format!("{:?}", board.status));
+        if let Some(why) = reader_apply::board_refusal(board, a.team_size) {
+            rec["read"] = json!(format!("held:refused:{why}"));
+            return rec;
+        }
+        rec["both_teams"] = json!(reader_apply::both_teams_have_stats(board, a.team_size));
+        let own = reader_apply::own_row(None, None, a.player_row_idx, a.team_size);
+        let read = match reader_apply::read_own_row_stats(board, own, "unknown") {
+            Ok(read) => read,
+            Err(miss) => {
+                rec["read"] = json!(format!("held:{miss:?}"));
+                return rec;
+            }
+        };
+        let m = &read.matched;
+        let (hero, source, _) = hero_auth::resolve_hero_new_reader(
+            a.pack_hero.as_deref(),
+            portrait,
+            &state,
+            parse::canonical_hero,
+        );
+        rec["read"] = json!("read");
+        rec["row"] = json!([
+            m.elims,
+            m.assists,
+            m.deaths,
+            m.damage,
+            m.healing,
+            m.mitigation
+        ]);
+        rec["held_cells"] = json!(read.held);
+        rec["hero"] = json!(hero);
+        rec["hero_source"] = json!(source.label());
+        return rec;
+    }
     if !parse::looks_like_scoreboard(&a.rows) {
         rec["read"] = json!("held:noscoreboard");
         return rec;
@@ -141,27 +188,13 @@ fn tab(
         }
     };
     let m = &read.matched;
-    let portrait = a
-        .portrait_hero
-        .as_ref()
-        .map(|(name, score)| (name.as_str(), *score));
-    let state = HeroAuthState::default();
-    let (hero, source, _) = if new {
-        hero_auth::resolve_hero_new_reader(
-            a.pack_hero.as_deref(),
-            portrait,
-            &state,
-            parse::canonical_hero,
-        )
-    } else {
-        hero_auth::resolve_hero(
-            a.career_hero.as_deref(),
-            portrait,
-            &m.hero,
-            &state,
-            parse::canonical_hero,
-        )
-    };
+    let (hero, source, _) = hero_auth::resolve_hero(
+        a.career_hero.as_deref(),
+        portrait,
+        &m.hero,
+        &state,
+        parse::canonical_hero,
+    );
     rec["read"] = json!("parsed");
     rec["trusted_cells"] = json!(read.trusted_cells);
     rec["ocr_row"] = json!([
@@ -175,40 +208,6 @@ fn tab(
     rec["ocr_map"] = json!(m.map_name);
     rec["hero"] = json!(hero);
     rec["hero_source"] = json!(source.label());
-    if new {
-        let board = shadow::read_board_with(&a.frame, a.banner.clone(), a.tab_heroes.clone());
-        let own = reader_apply::own_row(None, None, a.player_row_idx, a.team_size);
-        let snap = reader_apply::OcrSnapshot {
-            map: m.map_name.clone(),
-            mode: m.game_mode.clone(),
-            result: m.outcome.clone(),
-            hero: hero.clone(),
-            elims: m.elims,
-            assists: m.assists,
-            deaths: m.deaths,
-            damage: m.damage,
-            healing: m.healing,
-            mitigation: m.mitigation,
-        };
-        let saved = reader_apply::merge_saved(&snap, own, Some(&board));
-        rec["board_status"] = json!(format!("{:?}", board.status));
-        rec["saved"] = json!({
-            "map": saved.map,
-            "mode": saved.mode,
-            "result": saved.result,
-            "hero": saved.hero,
-            "row": [
-                saved.elims,
-                saved.assists,
-                saved.deaths,
-                saved.damage,
-                saved.healing,
-                saved.mitigation
-            ],
-            "recognizer": saved.recognizer,
-            "suspect": saved.suspect_fields,
-        });
-    }
     rec
 }
 
