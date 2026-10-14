@@ -310,7 +310,7 @@ impl Reader {
     /// * maps: maps-v1, not the hand-installed folder.
     /// * words: words-v1, not the old result folder, and from it VICTORY and
     ///   DEFEAT for the accolade screen and the rank screen, every
-    ///   match-start title, and the FINAL SCORE line.
+    ///   match-start title, and the end-title templates.
     ///
     /// Like every read, this starts a background re-load of a pack whose
     /// folder changed, so a later call sees a pack that arrived or went away.
