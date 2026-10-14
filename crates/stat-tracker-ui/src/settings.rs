@@ -2230,7 +2230,7 @@ mod tests {
     fn shadow_toggle_round_trip_preserves_the_rest_of_the_file() {
         let raw = r#"
 data_dir = "/tmp/sst-ui-settings-test"
-player_name = "the streamer"
+player_name = "FrozenTear"
 session_window_secs = 900
 finished_game_close_secs = 240
 debug_ocr = true
@@ -2260,7 +2260,7 @@ cooldown_secs = 60
         );
         let saved = toml::to_string_pretty(&form.to_config(&base)).unwrap();
         assert!(saved.contains("shadow_recognizer = true"), "{saved}");
-        assert!(saved.contains("the streamer"), "{saved}");
+        assert!(saved.contains("FrozenTear"), "{saved}");
         assert!(saved.contains("finished_game_close_secs = 240"), "{saved}");
         assert!(saved.contains("ocr_threads = 2"), "{saved}");
         assert!(saved.contains("session_window_secs = 900"), "{saved}");
@@ -2272,7 +2272,7 @@ cooldown_secs = 60
         );
         let back = again.to_config(&loaded);
         assert!(back.shadow_recognizer);
-        assert_eq!(back.player_name.as_deref(), Some("the streamer"));
+        assert_eq!(back.player_name.as_deref(), Some("FrozenTear"));
         assert_eq!(back.finished_game_close_secs, 240);
         assert_eq!(back.ocr_threads, Some(2));
         assert_eq!(back.session_window_secs, 900);
@@ -2282,7 +2282,7 @@ cooldown_secs = 60
         again.set_scoreboard_reader(ScoreboardReader::OcrV1);
         let off = toml::to_string_pretty(&again.to_config(&loaded)).unwrap();
         assert!(!off.contains("shadow_recognizer"), "{off}");
-        assert!(off.contains("the streamer"), "{off}");
+        assert!(off.contains("FrozenTear"), "{off}");
         assert!(off.contains("finished_game_close_secs = 240"), "{off}");
     }
 
@@ -2307,10 +2307,10 @@ cooldown_secs = 60
             assert_eq!(form.persisted_reader(), ScoreboardReader::OcrV1);
             assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
 
-            form.player_name = "the streamer".into();
+            form.player_name = "FrozenTear".into();
             let out = form.to_config(&base);
             assert!(!out.shadow_recognizer, "{env:?} must not be saved");
-            assert_eq!(out.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(out.player_name.as_deref(), Some("FrozenTear"));
             assert_eq!(out.ocr_threads, Some(2));
             assert_eq!(out.data_dir, base.data_dir);
             let raw = toml::to_string_pretty(&out).unwrap();
@@ -2343,7 +2343,7 @@ cooldown_secs = 60
 data_dir = \"/tmp/sst-keep-comments\"
 
 # scoreboard name
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 session_window_secs = 900
 
@@ -2404,7 +2404,7 @@ token = \"not-a-real-token\"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 shadow_recognizer = false  # keep this comment
@@ -2446,7 +2446,7 @@ custom_note = \"leave this line alone\"
         assert!(saved.contains("# hand-edited tracker config"));
         assert!(saved.contains("# scoreboard name"));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(
             !saved.contains("game_process_names"),
             "the toggle must not add default keys: {saved}"
@@ -2458,7 +2458,7 @@ custom_note = \"leave this line alone\"
         let original = "\
 data_dir = \"/tmp/sst-settings-shape\"
 capture_output = \"DP-1\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 1800
 finished_game_close_secs = 180
 game_process_names = [\"Overwatch.exe\"]
@@ -2549,7 +2549,7 @@ token = \"not-a-real-token\"
         let raw = "\
 # hand-edited tracker config
 data_dir = \"/tmp/sst-alpha-toggle\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 900
 finished_game_close_secs = 240
 debug_ocr = true
@@ -2602,7 +2602,7 @@ token = \"not-a-real-token\"
             assert!(read.reader.is_new());
             assert!(read.setup_completed);
             assert!(!read.auto_detect.enabled);
-            assert_eq!(read.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(read.player_name.as_deref(), Some("FrozenTear"));
             assert_eq!(
                 read.sync.as_ref().map(|s| s.token.as_str()),
                 Some("not-a-real-token")

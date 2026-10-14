@@ -931,10 +931,14 @@ fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
 
 fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![
-        text(if d.sent() { "Sent" } else { "What will be sent" })
-            .size(SIZE_BODY)
-            .font(FONT_BOLD)
-            .color(TEXT)
+        text(if d.sent() {
+            "Sent"
+        } else {
+            "What will be sent"
+        })
+        .size(SIZE_BODY)
+        .font(FONT_BOLD)
+        .color(TEXT)
     ]
     .spacing(6)
     .width(Fill);

@@ -355,8 +355,12 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
         map_block(game, SIZE_FEATURED, FONT_EXTRABOLD),
         with_unsure(
             text(format!(
-                "{}  ·  {}",
+                "{} ({})  ·  {} {}",
                 game.display_hero(),
+                game.role.label(),
+                game.played_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d"),
                 local_hm(game.played_at)
             ))
             .size(SIZE_BODY)
@@ -711,8 +715,12 @@ pub fn expanded_game_card<'a>(
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(format!(
-                "{}  ·  {}",
+                "{} ({})  ·  {} {}",
                 game.display_hero(),
+                game.role.label(),
+                game.played_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d"),
                 local_hm(game.played_at)
             ))
             .size(SIZE_BODY)
@@ -723,7 +731,7 @@ pub fn expanded_game_card<'a>(
         ),
         result,
         stat_line(game),
-        action_row(game, editing, confirm_delete, has_kit),
+        action_row(game, editing, confirm_delete, has_kit || !in_progress),
     ]
     .spacing(10);
 
@@ -826,7 +834,6 @@ fn action_row(
                 outcome: Outcome::Draw,
             },
         ),
-        space().width(Fill),
         button(
             text(if editing { "Cancel edit" } else { "Edit stats" })
                 .size(SIZE_META)
@@ -856,6 +863,9 @@ fn action_row(
     ]
     .spacing(8)
     .align_y(Alignment::Center)
+    // Wrap onto a second line on a narrow window so Delete session is never
+    // cut off at the right edge.
+    .wrap()
     .into()
 }
 
@@ -1030,9 +1040,9 @@ fn review_panel(game: &Game) -> Element<'static, Message> {
 }
 
 fn role_and_edited(game: &Game) -> Element<'static, Message> {
-    let mut r = row![label_text(game.role.label())]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    // The role sits next to the hero name below; here it read like a
+    // label for the map.
+    let mut r = row![].spacing(8).align_y(Alignment::Center);
     if game.held_locally() {
         r = r.push(status_chip("needs review", theme::WARN));
     }

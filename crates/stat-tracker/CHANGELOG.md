@@ -15,6 +15,18 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.8
+
+Install this update between games, not during one. Report this game works again for every game in your history, and the report now says which game it is about.
+
+### Highlights
+
+- A game whose scoreboard picture could not be kept safely can still be reported. The report then carries the saved values and no picture.
+- The report log now has the tracker's own lines from that game, taken from the system journal and scrubbed of player names and home folders.
+- Game cards show the date as well as the time, the hero's role sits next to the hero name, and Delete session no longer gets cut off on a narrow window.
+
+Technical detail. Report pictures stay in `report-kit/<session_id>/` in the data folder, outside `debug/`, written whether or not debug OCR is on, and pruned to the newest kits. When the board blanks to nothing, `reads.json` is still saved with an empty `scoreboard_sha256`, so the report links its `session_id`. A game with no kit at all is reported from its stored row. The manifest resolution is always landscape. After a report is sent, its heading reads Sent and the delete date is shown in local time with its UTC offset. The New reader (alpha) text now says what happens with classic OCR on and with it off.
+
 ## 0.5.0-alpha.7
 
 This alpha adds a switch in Settings that turns classic OCR (Tesseract) off, so the tracker reads the game with its own reader. The switch is opt-in: if you leave it alone, OCR stays on and the tracker reads as before.

@@ -2864,7 +2864,7 @@ mod tests {
         let raw = "\
 # keep this comment
 data_dir = \"/tmp/sst-alpha-save\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 ";
         std::fs::write(&path, raw).expect("seed");
         let snapshot = Config::parse_file_contents(raw).expect("parse");
@@ -2941,7 +2941,7 @@ token = \"secret-token-must-stay\"
         let fixed = "\
 # scoreboard name
 data_dir = \"/tmp/sst-fixed-on-disk\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 1800
 finished_game_close_secs = 180
 game_process_names = [\"Overwatch.exe\"]
@@ -2978,7 +2978,7 @@ token = \"secret-token-must-stay\"
         );
         snapshot = fresh;
         form_built_unreadable = false;
-        assert_eq!(form.player_name, "the streamer");
+        assert_eq!(form.player_name, "FrozenTear");
         assert_eq!(form.sync_token, "secret-token-must-stay");
         assert_eq!(form.sync_url, "https://crew.example");
         assert!(!snapshot.shadow_recognizer);
@@ -2997,7 +2997,7 @@ token = \"secret-token-must-stay\"
         assert!(loaded.shadow_recognizer);
         assert_eq!(
             loaded.player_name.as_deref(),
-            Some("the streamer"),
+            Some("FrozenTear"),
             "the reloaded name must survive the toggle write"
         );
         assert_eq!(
@@ -3012,11 +3012,11 @@ token = \"secret-token-must-stay\"
         assert_eq!(text[..header].matches("shadow_recognizer").count(), 1);
         assert!(text[..header].contains("shadow_recognizer = true"));
         assert!(text.contains("# scoreboard name"));
-        assert!(text.contains("player_name = \"the streamer\""));
+        assert!(text.contains("player_name = \"FrozenTear\""));
 
         // (b) A hand edit while the form is open is reloaded, not overwritten.
         let hand_edited = fixed.replace(
-            "player_name = \"the streamer\"",
+            "player_name = \"FrozenTear\"",
             "player_name = \"the other account\"",
         );
         let hand_edited = hand_edited.replace(

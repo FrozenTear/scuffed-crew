@@ -1,6 +1,6 @@
 # Scuffed Vision baseline fixtures (PR 158)
 
-Cut from the streamer's own 2026-10-07/08 captures (6v6, 2560x1440). `native`
+Cut from FrozenTear's own 2026-10-07/08 captures (6v6, 2560x1440). `native`
 files are at the saved 1664x1007 scoreboard-crop scale. `s075` files come from
 the same crop resized 0.75x with Lanczos, which is the 1248x756 crop a
 1920x1080 frame gives. No player names: single stat cells, or boards whose

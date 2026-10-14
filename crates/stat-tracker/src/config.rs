@@ -1661,7 +1661,7 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name, not a default key dump
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 {shadow_line}
@@ -1719,7 +1719,7 @@ session_window_secs = 1200
             assert!(saved.contains("# scoreboard name, not a default key dump"));
             assert!(saved.contains("# extra number reader (private log only)"));
             assert!(saved.contains("custom_note = \"leave this line alone\""));
-            assert!(saved.contains("player_name = \"the streamer\""));
+            assert!(saved.contains("player_name = \"FrozenTear\""));
             assert!(
                 !saved.contains("game_process_names"),
                 "a shadow toggle must not add default keys: {saved}"
@@ -1826,7 +1826,7 @@ token = \"secret-token-must-stay\"
         "\
 data_dir = \"/tmp/sst-settings-shape\"
 capture_output = \"DP-1\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 1800
 finished_game_close_secs = 180
 game_process_names = [\"Overwatch.exe\"]
@@ -1908,7 +1908,7 @@ token = \"not-a-real-token\"
     fn nested_shadow_recognizer_is_left_alone_and_root_is_inserted_once() {
         let original = "\
 data_dir = \"/tmp/sst-nested-shadow\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 [sync]
 server_url = \"https://crew.example\"
@@ -1937,7 +1937,7 @@ shadow_recognizer = true
     fn missing_shadow_recognizer_without_tables_is_appended_at_the_end() {
         let original = "\
 data_dir = \"/tmp/sst-no-tables\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 ";
         let mut next = Config::parse_file_contents(original).expect("parse");
         next.shadow_recognizer = true;
@@ -1968,7 +1968,7 @@ player_name = \"the streamer\"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name, not a default key dump
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 shadow_recognizer = true
@@ -1993,7 +1993,7 @@ token = \"old-token\"
         assert!(saved.contains("# hand-edited tracker config. keep this comment."));
         assert!(saved.contains("shadow_recognizer = true"));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(saved.contains("setup_completed = true"));
         assert!(saved.contains("https://crew.example"));
         assert!(saved.contains("pasted-token"));
@@ -2115,7 +2115,7 @@ token = \"old-token\"
         let raw = "\
 # hand-edited tracker config. keep this comment.
 data_dir = \"/tmp/sst-hand-edited\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 reader = \"ocr-v1\"
 custom_note = \"leave this line alone\"
 ";
@@ -2124,7 +2124,7 @@ custom_note = \"leave this line alone\"
         let saved = Config::text_for_save(Some(raw), &next).expect("reader-only save");
         assert!(saved.contains("# hand-edited tracker config. keep this comment."));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(saved.contains("reader = \"new\""));
         assert!(!saved.contains("reader = \"ocr-v1\""));
         assert!(
@@ -2197,7 +2197,7 @@ custom_note = \"leave this line alone\"
         let raw = "\
 # hand-edited tracker config. keep this comment.
 data_dir = \"/tmp/sst-hand-edited\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 reader = \"ocr-v1\"
 
 [auto_detect]
