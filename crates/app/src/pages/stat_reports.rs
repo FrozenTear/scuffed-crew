@@ -280,27 +280,40 @@ const REPORT_MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// Short stamp in a fixed offset from UTC: `Nov 8, 15:30`.
+/// Short stamp in a fixed offset from UTC.
 ///
-/// `minutes_east` is local time minus UTC (`-300` is five hours behind).
-/// My reports passes the browser offset. Native tests pass `0`.
-pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32) -> String {
+/// Same year as `now_year` is `Nov 8, 15:30`. Any other year is
+/// `Nov 8, 2025, 15:30`. `minutes_east` is local time minus UTC (`-300` is
+/// five hours behind). My reports passes the browser offset and the viewer
+/// year. Native tests pass `0` and an explicit year.
+pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32, now_year: i32) -> String {
     let local = at + chrono::Duration::minutes(i64::from(minutes_east));
     let month = REPORT_MONTHS[local.month0() as usize];
-    format!(
-        "{month} {}, {:02}:{:02}",
-        local.day(),
-        local.hour(),
-        local.minute()
-    )
+    let clock = format!("{:02}:{:02}", local.hour(), local.minute());
+    if local.year() == now_year {
+        format!("{month} {}, {clock}", local.day())
+    } else {
+        format!("{month} {}, {}, {clock}", local.day(), local.year())
+    }
 }
 
 /// Sent and delete dates on `/reports`, in the viewer zone.
 ///
-/// Wasm reads the offset for this instant from the browser. Native builds
+/// Wasm reads the offset and the current year from the browser. Native builds
 /// (unit tests) use UTC with the same short layout, and do not append `UTC`.
 pub(crate) fn format_report_when_local(at: DateTime<Utc>) -> String {
-    format_report_local(at, viewer_minutes_east(at))
+    format_report_local(at, viewer_minutes_east(at), viewer_now_year())
+}
+
+fn viewer_now_year() -> i32 {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        let year = js_sys::Date::new_0().get_full_year();
+        if let Ok(year) = i32::try_from(year) {
+            return year;
+        }
+    }
+    Utc::now().year()
 }
 
 fn viewer_minutes_east(at: DateTime<Utc>) -> i32 {
@@ -1344,22 +1357,32 @@ mod tests {
     }
 
     #[test]
-    fn format_report_local_uses_the_viewer_offset() {
+    fn format_report_local_uses_the_viewer_offset_and_year() {
         let noon = at(2026, 11, 8, 15, 30);
-        assert_eq!(format_report_local(noon, 0), "Nov 8, 15:30");
-        assert_eq!(format_report_local(noon, -300), "Nov 8, 10:30");
-        assert_eq!(format_report_local(noon, 330), "Nov 8, 21:00");
+        assert_eq!(format_report_local(noon, 0, 2026), "Nov 8, 15:30");
+        assert_eq!(format_report_local(noon, -300, 2026), "Nov 8, 10:30");
+        assert_eq!(format_report_local(noon, 330, 2026), "Nov 8, 21:00");
         assert_eq!(
-            format_report_local(at(2026, 11, 8, 2, 15), -300),
+            format_report_local(at(2026, 11, 8, 2, 15), -300, 2026),
             "Nov 7, 21:15"
         );
         assert_eq!(
-            format_report_local(at(2026, 1, 1, 0, 30), -120),
-            "Dec 31, 22:30"
+            format_report_local(at(2026, 1, 1, 0, 30), -120, 2026),
+            "Dec 31, 2025, 22:30"
         );
-        let shown = format_report_local(noon, -300);
+        assert_eq!(
+            format_report_local(at(2025, 11, 8, 15, 30), 0, 2026),
+            "Nov 8, 2025, 15:30"
+        );
+        assert_eq!(
+            format_report_local(at(2027, 1, 2, 3, 4), 0, 2026),
+            "Jan 2, 2027, 03:04"
+        );
+        let shown = format_report_local(noon, -300, 2026);
         assert!(!shown.contains("UTC"), "{shown}");
+        assert!(!shown.contains("2026"), "{shown}");
         assert_plain(&shown);
+        assert_plain("Nov 8, 2025, 15:30");
         assert!(
             REPORTS_CSS.contains(".report-when { white-space: nowrap;"),
             "narrow screens keep the date on one line"
@@ -1370,7 +1393,15 @@ mod tests {
     fn expiry_text_names_a_deletion_date_only_without_training_consent() {
         let when = at(2026, 11, 8, 15, 30);
         let scheduled = expiry_text(false, Some(when));
-        assert_eq!(scheduled, "Deleted on Nov 8, 15:30");
+        assert_eq!(
+            scheduled,
+            format!("Deleted on {}", format_report_when_local(when))
+        );
+        if Utc::now().year() == 2026 {
+            assert_eq!(scheduled, "Deleted on Nov 8, 15:30");
+        } else {
+            assert!(scheduled.contains("2026"), "{scheduled}");
+        }
         assert_plain(&scheduled);
         let kept = expiry_text(true, Some(when));
         assert_eq!(kept, "No deletion date");
@@ -1489,9 +1520,10 @@ mod tests {
         .unwrap();
         assert!(parsed.reports[0].member_id.is_none());
         assert!(parsed.reports[0].reason_text.is_none());
+        let expires = parsed.reports[0].expires_at.unwrap();
         assert_eq!(
-            expiry_text(false, parsed.reports[0].expires_at),
-            "Deleted on Nov 8, 12:00"
+            expiry_text(false, Some(expires)),
+            format!("Deleted on {}", format_report_when_local(expires))
         );
     }
 
@@ -1537,8 +1569,13 @@ mod tests {
             }
         }
         let html = html_of(closed);
-        assert!(html.contains("Deleted on Nov 8, 15:30"), "{html}");
-        assert!(html.contains("Oct 9, 12:00"), "{html}");
+        let sent = format_report_when_local(at(2026, 10, 9, 12, 0));
+        let deleted = format!(
+            "Deleted on {}",
+            format_report_when_local(at(2026, 11, 8, 15, 30))
+        );
+        assert!(html.contains(&deleted), "{html}");
+        assert!(html.contains(&sent), "{html}");
         assert!(html.contains("class=\"report-when\""), "{html}");
         assert!(!html.contains(" UTC"), "my reports dates are local: {html}");
         assert!(html.contains("Scheduled for deletion"), "{html}");

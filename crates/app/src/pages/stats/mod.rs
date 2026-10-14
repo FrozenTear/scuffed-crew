@@ -147,8 +147,8 @@ pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
 const TRACKER_PLATFORM_COPY: &str =
     "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
-/// Release-week install note on `/stats`. Remove this const, [`tracker_release_notice`],
-/// and its one call site when the week is over.
+/// Release-week note inside the tracker install and reinstall blocks on `/stats`.
+/// Remove this const, [`tracker_release_notice`], and those call sites when the week is over.
 const TRACKER_RELEASE_NOTICE: &str = "Install alpha.8 between games, not during one.";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
@@ -671,7 +671,8 @@ const STATS_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .tracker-release-notice {
-        margin: 0 0 1rem;
+        flex: 1 0 100%;
+        margin: 0 0 0.65rem;
         padding: 0.55rem 0.85rem;
         border-radius: 8px;
         border: 1px solid var(--warn);
@@ -1010,7 +1011,7 @@ const STATS_CSS: &str = r#"
     }
 "#;
 
-/// Release-week banner. Delete with [`TRACKER_RELEASE_NOTICE`].
+/// Release-week note. Delete with [`TRACKER_RELEASE_NOTICE`].
 fn tracker_release_notice() -> Element {
     rsx! {
         p { class: "tracker-release-notice", "{TRACKER_RELEASE_NOTICE}" }
@@ -1167,10 +1168,9 @@ pub fn Stats() -> Element {
                 }
             }
 
-            {tracker_release_notice()}
-
             if slim_tracker {
                 div { class: "tracker-slim",
+                    {tracker_release_notice()}
                     span { class: "tracker-slim-label", "Tracker" }
                     span { class: "tracker-slim-sep", "·" }
                     span { class: "tracker-slim-note", "Linux only" }
@@ -1210,8 +1210,12 @@ pub fn Stats() -> Element {
                     }
                 }
 
-                // Tracker download / install
+                // Tracker download / install. The slim row already shows the
+                // notice, so this copy is only for members who have no matches.
                 div { class: "tracker-download",
+                    if !slim_tracker {
+                        {tracker_release_notice()}
+                    }
                     div { class: "tracker-download-head",
                         h3 { "Get the Stat Tracker" }
                         span { class: "tracker-badge", "Linux only" }
@@ -1573,7 +1577,7 @@ mod tracker_platform_copy_tests {
     }
 
     #[test]
-    fn release_notice_is_one_const_above_the_tracker_block() {
+    fn release_notice_stays_inside_the_tracker_blocks() {
         assert_eq!(
             TRACKER_RELEASE_NOTICE,
             "Install alpha.8 between games, not during one."
@@ -1581,11 +1585,27 @@ mod tracker_platform_copy_tests {
         assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2014}'));
         assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2013}'));
         let src = include_str!("mod.rs");
-        let notice = src.find("{tracker_release_notice()}").expect("notice call");
         let slim = src.find("if slim_tracker {").expect("slim tracker");
         assert!(
-            notice < slim,
-            "the notice stays up when reinstall steps are collapsed"
+            !src[..slim].contains("{tracker_release_notice()}"),
+            "the notice is not a page-wide banner"
+        );
+        let full = src[slim..].find("if show_full_setup").expect("full setup");
+        let slim_body = &src[slim..slim + full];
+        assert!(
+            slim_body.contains("{tracker_release_notice()}"),
+            "the collapsed reinstall row still shows the notice"
+        );
+        let download = src
+            .find("class: \"tracker-download\"")
+            .expect("install block");
+        let download_body = &src[download..];
+        let guard = download_body
+            .find("if !slim_tracker {")
+            .expect("install notice is skipped while the slim row is up");
+        assert!(
+            download_body[guard..].contains("{tracker_release_notice()}"),
+            "members with no matches still see the notice in the install block"
         );
         assert_eq!(
             src.matches(TRACKER_RELEASE_NOTICE).count(),
