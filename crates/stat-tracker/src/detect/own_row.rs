@@ -993,12 +993,10 @@ pub fn career_hero_row(heroes: &TabHeroes) -> Option<usize> {
 /// ([`seed_gate`]), and the proof a strike against trusted seeds needs
 /// ([`read_own_row`]).
 fn career_hero_on(heroes: Option<&TabHeroes>, row: usize) -> bool {
-    heroes.is_some_and(
-        |heroes| match (heroes.panel_hero(), heroes.own_hero(row)) {
-            (Some(panel), Some(own)) => panel == own,
-            _ => false,
-        },
-    )
+    heroes.is_some_and(|heroes| match (heroes.panel_hero(), heroes.own_hero(row)) {
+        (Some(panel), Some(own)) => panel == own,
+        _ => false,
+    })
 }
 
 /// What one board says about the trusted seeds of its scale, for

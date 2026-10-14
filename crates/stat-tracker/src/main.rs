@@ -770,13 +770,7 @@ async fn offer_own_name_seed(
     })
     .await;
     if let Ok((offer, trusted, pending)) = offered {
-        tracing::info!(
-            ?offer,
-            proof,
-            trusted,
-            pending,
-            "own-row seed crop offered"
-        );
+        tracing::info!(?offer, proof, trusted, pending, "own-row seed crop offered");
     }
 }
 
@@ -10444,7 +10438,15 @@ mod tests {
             true,
         );
         assert_eq!((v1.row_idx, v1.name_match), (Some(1), None));
-        let v1 = find_own_row(false, || None, || panic!("seeds"), no_name, None, Some(3), true);
+        let v1 = find_own_row(
+            false,
+            || None,
+            || panic!("seeds"),
+            no_name,
+            None,
+            Some(3),
+            true,
+        );
         assert_eq!(v1.row_idx, None, "ocr-v1 never takes the career hero's row");
         // new reader: the seeds and the highlight. With a row from them no
         // name is read at all.
@@ -10491,10 +10493,21 @@ mod tests {
             ..OwnRowRead::unread(None, Some(3), seeded)
         };
         for seeded in [false, true] {
-            let by_hero = find_own_row(true, no_name, || hero(seeded), no_name, None, Some(3), seeded);
+            let by_hero = find_own_row(
+                true,
+                no_name,
+                || hero(seeded),
+                no_name,
+                None,
+                Some(3),
+                seeded,
+            );
             assert_eq!((by_hero.row_idx, by_hero.name_match), (Some(3), None));
             let own = by_hero.own_row.expect("own row");
-            assert_eq!((own.source, own.trust), (Source::CareerHero, Trust::Suspect));
+            assert_eq!(
+                (own.source, own.trust),
+                (Source::CareerHero, Trust::Suspect)
+            );
             assert!(own.suspect());
         }
         // nothing names a row: main's name read is asked, for this board.
@@ -10503,7 +10516,15 @@ mod tests {
             own: combine(None, None, seeded),
             ..OwnRowRead::unread(None, None, seeded)
         };
-        let named = find_own_row(true, no_name, || silent(false), || found(6), None, None, false);
+        let named = find_own_row(
+            true,
+            no_name,
+            || silent(false),
+            || found(6),
+            None,
+            None,
+            false,
+        );
         assert_eq!(named.row_idx, Some(6));
         assert_eq!(named.name_match.map(|m| m.row), Some(6));
         let own = named.own_row.expect("own row");
@@ -10515,12 +10536,28 @@ mod tests {
         // With a seed for the board that matched no row, the name's row is
         // marked: one voice where two could have spoken (F262-18). The
         // board's own answer decides, not the caller's "any seed exists".
-        let named = find_own_row(true, no_name, || silent(true), || found(6), None, None, false);
+        let named = find_own_row(
+            true,
+            no_name,
+            || silent(true),
+            || found(6),
+            None,
+            None,
+            false,
+        );
         let own = named.own_row.expect("own row");
         assert_eq!((named.row_idx, own.source), (Some(6), Source::NameFallback));
         assert_eq!(own.trust, Trust::Suspect);
         assert!(own.suspect());
-        let named = find_own_row(true, no_name, || silent(false), || found(6), None, None, true);
+        let named = find_own_row(
+            true,
+            no_name,
+            || silent(false),
+            || found(6),
+            None,
+            None,
+            true,
+        );
         assert!(!named.own_row.expect("own row").suspect());
         // ...and when that finds no row either (or OCR is off): held
         let none = find_own_row(true, no_name, || silent(true), || None, None, None, true);

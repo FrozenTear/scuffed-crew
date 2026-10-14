@@ -1370,10 +1370,7 @@ fn the_career_hero_names_the_one_row_of_the_members_team_that_shows_it() {
     // is taken in its place
     let mut unread = TEAM;
     unread[2] = None;
-    assert_eq!(
-        career_hero_row(&icons(&unread, &ENEMY, Some("juno"))),
-        None
-    );
+    assert_eq!(career_hero_row(&icons(&unread, &ENEMY, Some("juno"))), None);
     // a panel read under the panel gate is not a read
     let mut weak = icons(&TEAM, &ENEMY, Some("juno"));
     weak.panel.as_mut().unwrap().read.score = PANEL_MIN_SCORE - 0.01;
@@ -1474,7 +1471,13 @@ fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it()
     assert_eq!((c.row, c.candidate.proof()), (2, Proof::CareerHero));
     assert_eq!(c.candidate.hero.as_deref(), Some("juno"));
     assert!(c.row_bottom > row_top(5, 88, 2));
-    assert!(seed_gate(c.row, c.row_bottom, 1007, Chat::None, Some(&live)));
+    assert!(seed_gate(
+        c.row,
+        c.row_bottom,
+        1007,
+        Chat::None,
+        Some(&live)
+    ));
     assert!(!seed_gate(
         c.row,
         c.row_bottom,
@@ -1661,7 +1664,12 @@ fn career_hero_crops_need_four_boards_three_games_and_a_hero_swap() {
     // what is enough for highlighted rows (three boards, two games) is not
     waiting(&[("g1", "juno"), ("g1", "juno"), ("g2", "ana")]);
     // four boards, three games, one hero: no hero swap
-    waiting(&[("g1", "juno"), ("g2", "juno"), ("g3", "juno"), ("g3", "juno")]);
+    waiting(&[
+        ("g1", "juno"),
+        ("g2", "juno"),
+        ("g3", "juno"),
+        ("g3", "juno"),
+    ]);
     // ...however long a one-hero member plays
     waiting(&[
         ("g1", "juno"),
@@ -1678,8 +1686,12 @@ fn career_hero_crops_need_four_boards_three_games_and_a_hero_swap() {
     // three boards, three games, two heroes
     waiting(&[("g1", "juno"), ("g2", "ana"), ("g3", "juno")]);
     // four boards, three games, two heroes: trusted on the fourth
-    let (offers, store) =
-        offer_hero_crops(&[("g1", "juno"), ("g2", "juno"), ("g3", "juno"), ("g3", "ana")]);
+    let (offers, store) = offer_hero_crops(&[
+        ("g1", "juno"),
+        ("g2", "juno"),
+        ("g3", "juno"),
+        ("g3", "ana"),
+    ]);
     assert_eq!(
         offers,
         [
@@ -1692,16 +1704,17 @@ fn career_hero_crops_need_four_boards_three_games_and_a_hero_swap() {
     assert_eq!(store.trusted().len(), PROMOTE);
     assert_eq!(store.pending_len(), 0);
     // the swap and the third game may come in any order
-    let (offers, store) =
-        offer_hero_crops(&[("g1", "ana"), ("g1", "juno"), ("g2", "juno"), ("g3", "juno")]);
+    let (offers, store) = offer_hero_crops(&[
+        ("g1", "ana"),
+        ("g1", "juno"),
+        ("g2", "juno"),
+        ("g3", "juno"),
+    ]);
     assert_eq!(offers.last(), Some(&Offer::Promoted));
     assert_eq!(store.trusted().len(), PROMOTE);
     // the trusted seeds find the member on a new board
     let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 7));
-    assert_eq!(
-        seed_row(&measure(&img, 5).scores(store.trusted())),
-        Some(7)
-    );
+    assert_eq!(seed_row(&measure(&img, 5).scores(store.trusted())), Some(7));
     // a split session is not a third game (the map and the minutes say so)
     let tag = |session: &str, map: &str, at: u64| GameTag {
         session: session.into(),
@@ -1781,12 +1794,8 @@ fn highlighted_and_career_hero_crops_share_one_waiting_list() {
     // Another player's name line on the career hero's row (a misread icon)
     // joins no group: the member's three crops keep waiting, and so does it.
     let (_, mut store) = offer_hero_crops(&[("g1", "juno"), ("g2", "juno"), ("g3", "ana")]);
-    let other = candidate(
-        &named_board(5, 88, [TEAL, PURPLE], &other_names(10)),
-        5,
-        3,
-    )
-    .proved(Proof::CareerHero, Some("ana"));
+    let other = candidate(&named_board(5, 88, [TEAL, PURPLE], &other_names(10)), 5, 3)
+        .proved(Proof::CareerHero, Some("ana"));
     assert_eq!(store.offer(other, &game("g4")), Offer::Pending);
     assert!(store.trusted().is_empty());
     assert_eq!(store.pending_len(), 4);
