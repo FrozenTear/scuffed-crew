@@ -2,6 +2,8 @@
 *
 !.gitignore
 !README.md
+# Every committed image is named here. A new image fails the check.
+!image-allowlist.txt
 # Name-free single stat cells. The child gitignore narrows this to the PNGs.
 !real-cells/
 !real-cells/**

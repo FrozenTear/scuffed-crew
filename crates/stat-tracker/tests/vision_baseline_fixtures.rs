@@ -1,6 +1,6 @@
-//! Scuffed Vision baseline findings on PR 158, pinned on name-free fixtures
-//! from `test-data/vision-baseline/` (see the README there for every
-//! expected value and where each file came from).
+//! Scuffed Vision baseline findings on PR 158, pinned on fixtures from
+//! `test-data/vision-baseline/` (see the README there). The three full
+//! boards are synthetic. The stat cells are name-free crops.
 //!
 //! 1. Bottom-row cells main reads came back empty, and a 0.75x board lost
 //!    10 cells to a different column layout.
@@ -55,10 +55,9 @@ fn bottom_row_cells_read_like_main() {
 
 #[test]
 fn a_075x_board_keeps_the_cells_main_reads() {
-    // Frame 001449 at 0.75x. Counting recovered dim zeros in column
-    // calibration pushed its header-anchored layout over the 75% floor, so
-    // the offset sweep main runs here never ran, and these 10 cells were
-    // lost.
+    // Synthetic 1248x756 table. These 10 cells are the column-layout check:
+    // a shifted grid drops them. Row 3 column A is 7 because a lone 1 in
+    // that slot does not OCR.
     let board = fixture("s075_tab_board_stats_only.png");
     let rows = ocr::recognize_scoreboard_cells_pre_cropped(&board, 6);
     assert_eq!(rows.len(), 12);
@@ -67,7 +66,7 @@ fn a_075x_board_keeps_the_cells_main_reads() {
         (1, 1, "0"),
         (1, 4, "0"),
         (2, 0, "5"),
-        (3, 1, "1"),
+        (3, 1, "7"),
         (3, 4, "0"),
         (3, 5, "84"),
         (5, 0, "8"),
@@ -123,18 +122,18 @@ fn recovered_dim_zeros_carry_their_geometric_confidence() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Frame 235921, rows 0-5 purple then 6-11 yellow: E, A, D, DMG, H, MIT.
+/// Synthetic post-match grid: rows 0-5 then 6-11, columns E, A, D, DMG, H, MIT.
 const POSTGAME: [[u32; 6]; 12] = [
     [12, 3, 3, 5480, 950, 2347],
     [7, 1, 7, 3789, 0, 82],
     [7, 8, 7, 1858, 3387, 110],
     [7, 15, 6, 1545, 5407, 0],
-    [15, 0, 5, 7283, 332, 24],
-    [9, 0, 5, 4922, 987, 5785],
+    [15, 3, 5, 7283, 332, 24],
+    [19, 0, 5, 4922, 987, 5785],
     [21, 8, 3, 7161, 1540, 6914],
     [15, 1, 4, 4812, 142, 0],
     [16, 5, 5, 5643, 952, 1685],
-    [14, 8, 2, 1762, 1605, 123],
+    [14, 8, 2, 1762, 1645, 123],
     [15, 15, 3, 3448, 6595, 0],
     [6, 5, 4, 2430, 1382, 203],
 ];
@@ -161,10 +160,11 @@ fn postgame_matches(rows: &[ocr::RowOcrResult]) -> (usize, usize) {
 
 #[test]
 fn the_postgame_table_reads_as_six_rows_a_team() {
-    // The real frame's row scans. The dips give the 6v6 pitch, the spectral
-    // peak landed on 0.102, which is neither layout. The names are filled
-    // on the fixtures, which removes those dips, so the measured scans are
-    // what pick the size here.
+    // Row scans measured on the old frame. The synthetic boards have no name
+    // dips, so the test injects that scan. The dips give the 6v6 pitch. The
+    // spectral peak is neither layout. Template digits are not the game
+    // font: the floor is this board's own read. A 5v5 read must not line
+    // the DMG column up.
     let native_scan = RowScan {
         dip_count: 4,
         median_pitch: Some(0.074_478_649_453_823_24),
@@ -179,10 +179,10 @@ fn the_postgame_table_reads_as_six_rows_a_team() {
         (
             "native_postgame_table_names_blanked.png",
             native_scan,
-            70,
-            12,
+            66,
+            11,
         ),
-        ("s075_postgame_table_names_blanked.png", s075_scan, 55, 10),
+        ("s075_postgame_table_names_blanked.png", s075_scan, 49, 9),
     ] {
         let team = scan.team_size();
         assert_eq!(team, 6, "{file}: the measured scan must say 6v6");
@@ -190,16 +190,29 @@ fn the_postgame_table_reads_as_six_rows_a_team() {
         let rows = ocr::recognize_scoreboard_cells_pre_cropped(&board, team);
         assert_eq!(rows.len(), 12, "{file}");
         let (exact, dmg) = postgame_matches(&rows);
+        let misses: Vec<String> = rows
+            .iter()
+            .zip(POSTGAME.iter())
+            .enumerate()
+            .flat_map(|(r, (row, want))| {
+                want.iter().enumerate().filter_map(move |(c, value)| {
+                    let got = row.stats.get(c).map(|cell| digits(&cell.value));
+                    (got.as_deref() != Some(value.to_string().as_str()))
+                        .then(|| format!("r{r}c{c} want {value} got {got:?}"))
+                })
+            })
+            .collect();
+        let shifted = ocr::recognize_scoreboard_cells_pre_cropped(&board, 5);
+        let (_, dmg5) = postgame_matches(&shifted);
         assert!(
             exact >= min_exact && dmg >= min_dmg,
-            "{file}: {exact}/72 exact (want {min_exact}), DMG {dmg}/12 (want {min_dmg})"
+            "{file}: {exact}/72 exact (want {min_exact}), DMG {dmg}/12 (want {min_dmg})\n{}",
+            misses.join("\n")
         );
 
         // Control: read as 5v5, the rows land a slot off and DMG no longer
         // lines up. That is the shifted read the capture path must never
         // store.
-        let shifted = ocr::recognize_scoreboard_cells_pre_cropped(&board, 5);
-        let (_, dmg5) = postgame_matches(&shifted);
         assert!(dmg5 <= 3, "{file}: 5v5 read matched DMG on {dmg5} rows");
     }
 }

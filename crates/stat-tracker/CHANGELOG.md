@@ -26,6 +26,8 @@ The daily report limit is now 10.
 
 Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
 
+The tracker no longer ships hero portraits in the binary. The portrait matcher reads the installed hero pack (`heroes-v1`, `heroes-v2`, `heroes-v2-1080`). With no pack installed it names no hero. The portrait matcher has no recognizer id. With a pack installed it compares those pack pngs instead of the old bundled 32x32 art, so a portrait-only hero confirmation can differ. `hero-v1.2` is not bumped: that id is the template recognizer, which already read the same pack files, and its scores do not move. The digit recognizer stays `cv-v6`.
+
 ## 0.5.0-alpha.9
 
 Install this update between games, not during one. A Tab press that caught the scoreboard while it was still drawing no longer loses the game: the tracker now looks again a moment later.
