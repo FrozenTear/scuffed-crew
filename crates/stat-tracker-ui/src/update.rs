@@ -37,7 +37,10 @@ pub fn bootstrap_raw_url(git_ref: &str) -> String {
     format!("https://raw.githubusercontent.com/{REPO}/{git_ref}/{BOOTSTRAP_REPO_PATH}")
 }
 
-const REQUIRED_TOOLS: &[&str] = &["curl", "tar", "bash", "mktemp"];
+/// Tools `bootstrap.sh` needs. python3 reads the GitHub release JSON and
+/// does the safe tar extract; sha256sum checks the download (a missing one
+/// refuses the install).
+const REQUIRED_TOOLS: &[&str] = &["curl", "tar", "bash", "mktemp", "python3", "sha256sum"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
@@ -180,6 +183,24 @@ enum PreId {
 impl SemVer {
     pub fn is_prerelease(&self) -> bool {
         !self.pre.is_empty()
+    }
+
+    /// A prerelease the prerelease channel may offer: its first identifier
+    /// is `alpha` or `rc` (also `rc1`, `alpha2`). Anything else, such as a
+    /// `-test.1` build for a test session, is never offered. A version with
+    /// no prerelease part is a release and passes.
+    pub fn is_offered_prerelease(&self) -> bool {
+        match self.pre.first() {
+            None => true,
+            Some(PreId::Num(_)) => false,
+            Some(PreId::Text(text)) => {
+                let text = text.to_ascii_lowercase();
+                ["alpha", "rc"].iter().any(|kind| {
+                    text.strip_prefix(kind)
+                        .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))
+                })
+            }
+        }
     }
 }
 
@@ -385,10 +406,46 @@ pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)>
     ]
 }
 
-/// Stop before install. Start again only when install succeeded, so a failed
-/// or partial install is not launched.
-pub fn should_restart_daemon(stop_daemon: bool, install_ok: bool) -> bool {
-    stop_daemon && install_ok
+/// Stop before install. Start again when the install succeeded, or when it
+/// failed and the previous binaries were put back, so a failed update never
+/// leaves the tracker stopped. A failed install with no working rollback is
+/// not started.
+pub fn should_restart_daemon(stop_daemon: bool, install_ok: bool, rolled_back: bool) -> bool {
+    stop_daemon && (install_ok || rolled_back)
+}
+
+/// Binaries the installer replaces under `PREFIX/bin`, saved before an
+/// in-app update so a failed one can put them back.
+const ROLLBACK_BINARIES: &[&str] = &["scuffed-stat-tracker", "stat-tracker-gui"];
+
+/// Copy the installed binaries into `backup`. Returns the names saved. The
+/// daemon binary has to be saved for a rollback to restart anything.
+pub fn backup_binaries(prefix: &Path, backup: &Path) -> std::io::Result<Vec<&'static str>> {
+    std::fs::create_dir_all(backup)?;
+    let mut saved = Vec::new();
+    for name in ROLLBACK_BINARIES {
+        let live = prefix.join("bin").join(name);
+        if live.is_file() {
+            std::fs::copy(&live, backup.join(name))?;
+            saved.push(*name);
+        }
+    }
+    Ok(saved)
+}
+
+/// Put the saved binaries back, each through a temp file and a rename in
+/// `PREFIX/bin`, so a half-written binary is never at the live path.
+pub fn restore_binaries(prefix: &Path, backup: &Path, saved: &[&str]) -> std::io::Result<()> {
+    let bin = prefix.join("bin");
+    for name in saved {
+        let tmp = bin.join(format!(".{name}.rollback"));
+        std::fs::copy(backup.join(name), &tmp)?;
+        if let Err(e) = std::fs::rename(&tmp, bin.join(name)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 pub fn default_install_prefix() -> PathBuf {
@@ -595,6 +652,11 @@ pub fn select_newer_release_on(
         if channel == UpdateChannel::Stable && (flagged || ver.is_prerelease()) {
             continue;
         }
+        // Only alpha and rc builds go out on the prerelease channel. A test
+        // build (`stat-tracker-v0.5.0-test.1`) is never offered to anyone.
+        if !ver.is_offered_prerelease() {
+            continue;
+        }
         parsed.push(Parsed {
             ver,
             ver_str: ver_str.to_string(),
@@ -791,13 +853,54 @@ async fn run_planned_update(
             Err(format!("Could not create a temp dir for the update: {e}")),
         );
     }
+    let backup = work.join("previous");
+    let saved = match backup_binaries(&prefix, &backup) {
+        Ok(saved) => saved,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&work);
+            if req.stop_daemon {
+                io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
+                    .await;
+            }
+            return Err(format!(
+                "Could not save the current version before updating, so nothing was changed: {e}"
+            ));
+        }
+    };
     let script = work.join("bootstrap.sh");
     let url = bootstrap_raw_url(&tag);
     let install = io.install(&url, &script, &req.latest, &prefix, &tag).await;
+    let mut rolled_back = false;
+    let install = match install {
+        Ok(msg) => Ok(msg),
+        Err(msg) if saved.contains(&"scuffed-stat-tracker") => {
+            match restore_binaries(&prefix, &backup, &saved) {
+                Ok(()) => {
+                    rolled_back = true;
+                    tracing::warn!(error = %msg, "update failed: previous binaries restored");
+                    Err(format!(
+                        "{msg} The previous version was put back{}.",
+                        if req.stop_daemon {
+                            " and the tracker was started again"
+                        } else {
+                            ""
+                        }
+                    ))
+                }
+                Err(e) => Err(format!(
+                    "{msg} Putting the previous version back failed too: {e}."
+                )),
+            }
+        }
+        Err(msg) => Err(msg),
+    };
     let _ = std::fs::remove_dir_all(&work);
-    if should_restart_daemon(req.stop_daemon, install.is_ok()) {
+    if should_restart_daemon(req.stop_daemon, install.is_ok(), rolled_back) {
         io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
             .await;
+    }
+    if rolled_back {
+        return install;
     }
     note_daemon_left_stopped(req.stop_daemon, install)
 }
@@ -1512,11 +1615,68 @@ mod tests {
     }
 
     #[test]
-    fn failed_install_does_not_restart() {
-        assert!(!should_restart_daemon(true, false));
-        assert!(should_restart_daemon(true, true));
-        assert!(!should_restart_daemon(false, true));
-        assert!(!should_restart_daemon(false, false));
+    fn prerelease_channel_offers_only_alpha_and_rc() {
+        for (ver, offered) in [
+            ("0.5.0", true),
+            ("0.5.0-alpha.10", true),
+            ("0.5.0-rc.1", true),
+            ("0.3.0-rc1", true),
+            ("0.5.0-ALPHA.2", true),
+            ("0.5.0-test.1", false),
+            ("0.5.0-beta.1", false),
+            ("0.5.0-1", false),
+            ("0.5.0-alphatest", false),
+            ("0.5.0-rcx.1", false),
+        ] {
+            assert_eq!(
+                parse_semver(ver).unwrap().is_offered_prerelease(),
+                offered,
+                "{ver}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_test_build_is_never_offered_on_any_channel() {
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-test.1", false, "test build"),
+            gh_release("stat-tracker-v0.5.0-alpha.10", true, "alpha.10"),
+            gh_release("stat-tracker-v0.5.0-alpha.9", true, "alpha.9"),
+        ];
+        let pre = select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-alpha.9", &releases)
+            .expect("alpha.10 is offered");
+        assert_eq!(pre.latest, "0.5.0-alpha.10");
+        assert!(
+            pre.release_bodies
+                .iter()
+                .all(|b| b.version != "0.5.0-test.1")
+        );
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-alpha.10", &releases)
+                .is_none()
+        );
+        assert!(select_newer_release("0.5.0-alpha.9", &releases).is_none());
+        // Flagged as a prerelease on GitHub does not matter either.
+        let flagged = vec![gh_release("stat-tracker-v0.5.0-test.1", true, "test")];
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-alpha.9", &flagged).is_none()
+        );
+    }
+
+    #[test]
+    fn required_tools_include_python3_and_sha256sum() {
+        let missing = missing_tools(|name| !matches!(name, "python3" | "sha256sum"));
+        assert_eq!(missing, vec!["python3", "sha256sum"]);
+        assert!(missing_tools(|_| true).is_empty());
+    }
+
+    #[test]
+    fn failed_install_restarts_only_after_a_rollback() {
+        assert!(!should_restart_daemon(true, false, false));
+        assert!(should_restart_daemon(true, false, true));
+        assert!(should_restart_daemon(true, true, false));
+        assert!(!should_restart_daemon(false, true, false));
+        assert!(!should_restart_daemon(false, false, true));
     }
 
     #[test]
@@ -1721,10 +1881,17 @@ mod tests {
             url: &str,
             _script: &Path,
             _latest: &str,
-            _prefix: &Path,
+            prefix: &Path,
             _tag: &str,
         ) -> Result<String, String> {
             self.urls.lock().expect("urls").push(url.to_string());
+            // The installer got as far as replacing the binaries.
+            for name in ROLLBACK_BINARIES {
+                let live = prefix.join("bin").join(name);
+                if live.is_file() {
+                    std::fs::write(&live, b"new").unwrap();
+                }
+            }
             self.install_result.clone()
         }
     }
@@ -1850,5 +2017,84 @@ mod tests {
             .expect_err("install failed");
         assert!(!err.contains("left stopped"), "{err}");
         assert!(io.verbs.lock().expect("verbs").is_empty());
+    }
+
+    fn prefix_with_binaries() -> tempfile::TempDir {
+        let prefix = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(prefix.path().join("bin")).unwrap();
+        for name in ROLLBACK_BINARIES {
+            std::fs::write(prefix.path().join("bin").join(name), b"old").unwrap();
+        }
+        prefix
+    }
+
+    #[tokio::test]
+    async fn a_failed_update_puts_the_previous_version_back_and_restarts() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: None,
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Err("tessdata download failed".into()),
+        };
+        let err = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
+            .await
+            .expect_err("install failed");
+        assert!(err.contains("tessdata download failed"), "{err}");
+        assert!(err.contains("previous version was put back"), "{err}");
+        assert!(!err.contains("left stopped"), "{err}");
+        for name in ROLLBACK_BINARIES {
+            assert_eq!(
+                std::fs::read(prefix.path().join("bin").join(name)).unwrap(),
+                b"old",
+                "{name} restored"
+            );
+        }
+        assert_eq!(
+            io.verbs.lock().expect("verbs").as_slice(),
+            &[DaemonVerb::Stop, DaemonVerb::Start],
+            "the tracker is not left stopped"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(prefix.path().join("bin"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), ROLLBACK_BINARIES.len(), "{leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_update_keeps_the_new_binaries() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            pauses: Default::default(),
+            game_dir: None,
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Ok("installed".into()),
+        };
+        run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
+            .await
+            .expect("install ok");
+        for name in ROLLBACK_BINARIES {
+            assert_eq!(
+                std::fs::read(prefix.path().join("bin").join(name)).unwrap(),
+                b"new"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_binaries_replaces_the_live_files() {
+        let prefix = prefix_with_binaries();
+        let backup = tempfile::tempdir().expect("tempdir");
+        let saved = backup_binaries(prefix.path(), backup.path()).unwrap();
+        assert_eq!(saved, ROLLBACK_BINARIES.to_vec());
+        std::fs::write(prefix.path().join("bin/scuffed-stat-tracker"), b"broken").unwrap();
+        restore_binaries(prefix.path(), backup.path(), &saved).unwrap();
+        assert_eq!(
+            std::fs::read(prefix.path().join("bin/scuffed-stat-tracker")).unwrap(),
+            b"old"
+        );
     }
 }

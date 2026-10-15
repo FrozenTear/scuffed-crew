@@ -165,6 +165,17 @@ def newer(left, right):
             return x>y
     return len(lp)>len(rp)
 
+def offered_pre(pre_ids):
+    kind, first = pre_ids[0]
+    if kind != 1:
+        return False
+    first = first.lower()
+    for word in ("alpha", "rc"):
+        if first.startswith(word):
+            rest = first[len(word):]
+            return rest == "" or (rest.isascii() and rest.isdigit())
+    return False
+
 stable=None
 pre=None
 for r in releases:
@@ -177,6 +188,10 @@ for r in releases:
     if ver is None:
         continue
     flagged=bool(r.get("prerelease")) or bool(ver[3])
+    # Only alpha and rc builds go out on the prerelease channel. A test
+    # build (stat-tracker-v0.5.0-test.1) is never installed without a pin.
+    if ver[3] and not offered_pre(ver[3]):
+        continue
     if flagged:
         if pre is None or newer(ver, pre[0]):
             pre=(ver, tag)
@@ -375,8 +390,8 @@ minisign_key_configured() {
 }
 
 # sha256 of the tarball. A missing .sha256 asset stops the install.
-# A missing sha256sum is a hard failure when a minisign public key is
-# configured, and a warning otherwise.
+# A missing sha256sum is always a hard failure: the install never skips the
+# integrity check.
 verify_release_checksum() {
     local asset="$1"
     local sha_url="${SHA_URL:-}"
@@ -389,12 +404,8 @@ verify_release_checksum() {
         exit 1
     fi
     if ! command -v sha256sum >/dev/null 2>&1; then
-        if minisign_key_configured; then
-            error "A minisign public key is configured, but sha256sum is not installed. Refusing to install."
-            exit 1
-        fi
-        warn "sha256sum is not installed, skipping the integrity check."
-        return 0
+        error "sha256sum is not installed, so the download cannot be checked. Refusing to install. Install coreutils (it provides sha256sum) and run this again."
+        exit 1
     fi
     info "Verifying sha256…"
     if ! fetch_to "$sha_url" "$sumfile"; then

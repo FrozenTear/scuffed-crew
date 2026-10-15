@@ -40,6 +40,18 @@ Nice=10
 CPUWeight=30
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+# Memory cap so the tracker cannot pile onto a system out-of-memory (Soot,
+# 2026-10-15: the kernel killed the whole desktop session). The daemon
+# peaks at about 1 GB RSS today. Above MemoryHigh (1.2G) the kernel
+# reclaims and slows the daemon instead of letting it grow; MemoryMax
+# (1.5G) is the hard limit, where only the daemon is killed and
+# Restart=on-failure brings it back (crash resume keeps the open game).
+# 1.5G leaves headroom over the 1 GB peak for a long session. MemorySwapMax
+# keeps it from moving the overflow into swap. Raise these in a drop-in
+# (systemctl --user edit) if a bigger setup needs more.
+MemoryHigh=1200M
+MemoryMax=1500M
+MemorySwapMax=256M
 # Sandbox. ProtectSystem=full is a no-op on user services, so this unit
 # uses strict. When the user manager applies that mount namespace, the
 # tree is read-only except ReadWritePaths (a leading '-' ignores a path
