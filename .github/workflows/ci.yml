@@ -168,3 +168,19 @@ jobs:
 
       - name: Favicon is in the dx bundle
         run: test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg
+
+  # Cheap guard for relay/Containerfile stage 1. The full strfry image also
+  # release-builds relay-policy (SurrealDB) and is not run here.
+  relay-strfry29:
+    name: Relay strfry29
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build strfry29 stage
+        run: |
+          docker build --target strfry29-builder -f relay/Containerfile -t strfry29-builder .
+          docker run --rm --entrypoint go strfry29-builder version
+          docker run --rm --entrypoint git strfry29-builder -C /src/relay29 rev-parse HEAD
+          docker run --rm --entrypoint /bin/ls strfry29-builder -l /usr/local/bin/strfry29
