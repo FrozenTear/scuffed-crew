@@ -2372,6 +2372,66 @@ mod pack_parity_tests {
         }
     }
 
+    /// Every pack portrait, composited into hero slots on the committed
+    /// made-up boards at the size the app crops, must come back as itself at
+    /// or above [`crate::hero_auth::PORTRAIT_SWITCH_MIN_CONF`]. Skips when
+    /// `SCUFFED_HERO_PACK_DIR` is unset (CI has no pack). Nothing is written.
+    #[test]
+    fn pack_portraits_read_back_from_board_slots() {
+        let Ok(pack) = std::env::var("SCUFFED_HERO_PACK_DIR") else {
+            eprintln!("SCUFFED_HERO_PACK_DIR not set; skipping pack slot check");
+            return;
+        };
+        let matcher = installed_matcher();
+        let mut heroes: Vec<(String, DynamicImage)> = std::fs::read_dir(&pack)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
+            .filter_map(|p| {
+                let stem = p.file_stem()?.to_str()?.to_string();
+                if stem.starts_with('.') || scuffed_types::is_placeholder_hero(&stem) {
+                    return None;
+                }
+                Some((stem, image::open(&p).unwrap()))
+            })
+            .collect();
+        heroes.sort_by(|a, b| a.0.cmp(&b.0));
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/vision-baseline");
+        let boards = [
+            ("1440", "native_postgame_table_names_blanked.png"),
+            ("1080", "s075_postgame_table_names_blanked.png"),
+            ("1080", "s075_tab_board_stats_only.png"),
+        ];
+        let mut failures = Vec::new();
+        for (res, file) in boards {
+            let board = image::open(base.join(file)).unwrap();
+            let team_size = detect_team_size(&board);
+            let rows = [0, team_size];
+            let (mut pass, mut total, mut min_conf) = (0, 0, f64::MAX);
+            for (stem, art) in &heroes {
+                for &row in &rows {
+                    let r = portrait_rect((board.width(), board.height()), row, team_size)
+                        .expect("slot fits the board");
+                    let mut composed = board.to_rgba8();
+                    let icon = art.resize_exact(r.w, r.h, FilterType::Lanczos3).to_rgba8();
+                    image::imageops::overlay(&mut composed, &icon, r.x as i64, r.y as i64);
+                    let crop = DynamicImage::ImageRgba8(composed).crop_imm(r.x, r.y, r.w, r.h);
+                    total += 1;
+                    match matcher.match_portrait(&crop) {
+                        Some((got, conf)) if norm(&got) == norm(stem) => {
+                            pass += 1;
+                            min_conf = min_conf.min(conf);
+                        }
+                        other => failures.push(format!("{res} {file} row {row} {stem}: {other:?}")),
+                    }
+                }
+            }
+            println!("{res} {file} team {team_size}: {pass}/{total} pass, min conf {min_conf:.4}");
+        }
+        assert!(failures.is_empty(), "failures: {failures:#?}");
+    }
+
     #[test]
     #[ignore = "needs the hero pack and old portraits on disk"]
     fn pack_parity_every_moved_portrait_loads_from_the_pack() {
