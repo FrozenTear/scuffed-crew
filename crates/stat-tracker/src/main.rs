@@ -8035,6 +8035,8 @@ mod ocr_bench;
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
     #[test]
     fn tab_retry_predicate_retries_only_not_a_scoreboard() {
         let scan = detect::hero_portrait::RowScan {
@@ -8057,7 +8059,6 @@ mod tests {
         assert!(!tab_capture_should_retry(&unsure));
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
     }
-    use std::time::Duration;
 
     struct ScriptedWaiter {
         events: Vec<KeyboardWait>,

@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.9
+
+Install this update between games, not during one. A Tab press that caught the scoreboard while it was still drawing no longer loses the game: the tracker now looks again a moment later.
+
+### Highlights
+
+- When a Tab scoreboard is turned down because the game had not finished drawing it, the tracker captures it again about 300 ms and about 700 ms later before giving up (#286).
+- Report pictures now work for 5v5 games, with player names blanked (#285).
+
+Technical detail. A Tab capture that the scoreboard preflight rejects as not a scoreboard is retried twice, at about 300 ms and 700 ms after the first rejection, and each retry is logged. Only that rejection is retried, and the best outcome of the attempts is kept, so a later rejected grab never replaces a useful one. The report blanker measures 5v5 boards with their own row geometry; the blank-table version is now 12 (#285).
+
 ## 0.5.0-alpha.8
 
 Install this update between games, not during one. Report this game works again for every game in your history, and the report now says which game it is about.
