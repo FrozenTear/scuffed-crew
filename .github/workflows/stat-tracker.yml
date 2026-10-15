@@ -58,6 +58,7 @@ jobs:
           bash dist/test-systemd-unit.sh
           bash dist/test-release-notes.sh
           bash dist/test-stage-assets.sh
+          bash tests/check-no-game-art.sh
           bash dist/test-tag-version.sh
 
       - name: Install system dependencies

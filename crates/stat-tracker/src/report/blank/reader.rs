@@ -1570,19 +1570,19 @@ pub(super) fn read_board_detail(board: &DynamicImage, team_size: usize) -> Optio
 pub(super) mod tests {
     use super::*;
 
-    /// `test-data/vision-baseline/README.md`, "Post-game table": rows 0-5
-    /// purple, 6-11 yellow, columns E A D DMG H MIT.
+    /// Synthetic post-match boards. Rows 0-5 then 6-11, columns E A D DMG H MIT.
+    /// Same grid as `synth::POSTGAME_VALUES`.
     const POSTGAME: [[u32; 6]; 12] = [
         [12, 3, 3, 5480, 950, 2347],
         [7, 1, 7, 3789, 0, 82],
         [7, 8, 7, 1858, 3387, 110],
         [7, 15, 6, 1545, 5407, 0],
-        [15, 0, 5, 7283, 332, 24],
-        [9, 0, 5, 4922, 987, 5785],
+        [15, 3, 5, 7283, 332, 24],
+        [19, 0, 5, 4922, 987, 5785],
         [21, 8, 3, 7161, 1540, 6914],
         [15, 1, 4, 4812, 142, 0],
         [16, 5, 5, 5643, 952, 1685],
-        [14, 8, 2, 1762, 1605, 123],
+        [14, 8, 2, 1762, 1645, 123],
         [15, 15, 3, 3448, 6595, 0],
         [6, 5, 4, 2430, 1382, 203],
     ];

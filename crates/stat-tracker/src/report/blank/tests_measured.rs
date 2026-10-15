@@ -1,5 +1,5 @@
-//! Tests of the measured blanker on synthetic boards (`synth.rs`) and on the
-//! in-repo post-match fixtures. No member frames.
+//! Tests of the measured blanker on synthetic boards (`synth.rs`), including
+//! the committed vision-baseline boards. No member frames.
 
 use super::synth::{self, Layout};
 use super::{board, portrait};
@@ -106,8 +106,35 @@ fn blank_still(img: &RgbImage) -> super::BlankedBoard {
     blank_after(&live(img), img, super::Chat::None)
 }
 
-/// The in-repo post-match fixtures (real 1440p and 1080p boards, names
-/// pre-filled): every row keeps all six numbers, read back exactly.
+/// The generator's post-match boards, before they are written to test-data:
+/// every row keeps all six numbers.
+#[test]
+fn generated_post_match_boards_keep_every_number() {
+    for (name, img) in [
+        ("1440", synth::baseline_postgame_1440()),
+        ("1080", synth::baseline_postgame_1080()),
+    ] {
+        let detail =
+            super::reader::read_board_detail(&image::DynamicImage::ImageRgb8(img.clone()), 6)
+                .unwrap_or_else(|| panic!("{name}: no board"));
+        for (r, row) in detail.rows.iter().enumerate() {
+            for (k, cell) in row.iter().enumerate() {
+                assert_eq!(
+                    cell.reading.value,
+                    Some(synth::POSTGAME_VALUES[r][k]),
+                    "{name} row {r} col {k}"
+                );
+                assert!(!cell.suspect, "{name} row {r} col {k} suspect");
+            }
+        }
+        let b = super::blank_crop(&img, Some(6), super::Chat::None);
+        assert_eq!(b.board, Ok(()), "{name}");
+        assert_eq!(b.digit_rows(), 12, "{name}:\n{}", verdicts(&b));
+    }
+}
+
+/// The committed post-match boards (synthetic 1440p and 1080p): every row
+/// keeps all six numbers, read back exactly.
 #[test]
 fn real_post_match_fixtures_keep_every_number() {
     for name in [
@@ -150,7 +177,7 @@ fn synthetic_boards_keep_portraits_and_no_name() {
     }
 }
 
-// ---- attacks on a real board (the in-repo post-match fixture) -------------
+// ---- attacks on the synthetic post-match board ----------------------------
 //
 // The native fixture measures L 367, R 1297, rows at 29 + 75 i and
 // 566 + 75 i. Each test draws one attack, blanks the board, and checks that
@@ -836,6 +863,59 @@ fn a_6v6_frame_still_passes_with_the_5v5_geometry_in() {
                 assert_eq!(*out.image.get_pixel(x, y), super::FILL, "({x}, {y})");
             }
         }
+    }
+}
+
+fn baseline_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test-data/vision-baseline")
+        .join(name)
+}
+
+/// The committed boards are the generator's pixels. A real capture in their
+/// place fails here.
+#[test]
+fn committed_baseline_boards_match_the_generator() {
+    for (name, want) in [
+        (
+            "native_postgame_table_names_blanked.png",
+            synth::baseline_postgame_1440(),
+        ),
+        (
+            "s075_postgame_table_names_blanked.png",
+            synth::baseline_postgame_1080(),
+        ),
+        ("s075_tab_board_stats_only.png", synth::baseline_tab_1080()),
+    ] {
+        let path = baseline_path(name);
+        let got = image::open(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .to_rgb8();
+        assert_eq!(got.dimensions(), want.dimensions(), "{name}");
+        assert_eq!(
+            got.as_raw(),
+            want.as_raw(),
+            "{name} is not the synthetic board"
+        );
+    }
+}
+
+/// Rewrite the three baseline boards from the generator. Not part of `cargo test`.
+#[test]
+#[ignore = "writes test-data/vision-baseline boards"]
+fn write_synthetic_baseline_boards() {
+    for (name, img) in [
+        (
+            "native_postgame_table_names_blanked.png",
+            synth::baseline_postgame_1440(),
+        ),
+        (
+            "s075_postgame_table_names_blanked.png",
+            synth::baseline_postgame_1080(),
+        ),
+        ("s075_tab_board_stats_only.png", synth::baseline_tab_1080()),
+    ] {
+        img.save(baseline_path(name)).unwrap();
     }
 }
 

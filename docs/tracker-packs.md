@@ -596,9 +596,9 @@ inside `PACKS_DIR`.
 
 | Pack | Folder | What may be inside (besides `manifest.json`) | Read by |
 | --- | --- | --- | --- |
-| `heroes-v1.tar` | `templates/heroes/` | `<hero>.png`, `special/<name>.png` | shadow hero log; new reader's fallback |
-| `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | new reader, 1440p-scale boards (when complete) |
-| `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete) |
+| `heroes-v1.tar` | `templates/heroes/` | `<hero>.png`, `special/<name>.png` | shadow hero log; new reader's fallback; portrait matcher |
+| `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | new reader, 1440p-scale boards (when complete); portrait matcher |
+| `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete); portrait matcher fills stems the main pack lacks |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |

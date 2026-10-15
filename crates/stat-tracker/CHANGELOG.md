@@ -34,6 +34,8 @@ Technical detail.
 - A game report opens with no category selected, so no zip is built and Send and Save stay off until one is picked. The prompt after Edit stats still opens on Wrong stats. Each accepted capture appends the names read on its rows to `report-kit/<session>/names.json` (mode 0600, at most 64 names) only when that kit folder already exists. The file is pruned with the kit and passed to the scrubber. With the new reader no names are read, so the list stays empty (#290).
 - A game report reads the journal from 120 seconds before the first capture through the end of that game's window, still capped at the newest 20,000 lines. When the game has no end time the read stops at now. A log-only report stays newest-lines only. No report zip contains `names.json` (#292).
 
+The tracker no longer ships hero portraits in the binary. The portrait matcher reads the installed hero pack (`heroes-v1`, `heroes-v2`, `heroes-v2-1080`). With no pack installed it names no hero. The portrait matcher has no recognizer id. With a pack installed it compares those pack pngs instead of the old bundled 32x32 art, so a portrait-only hero confirmation can differ. `hero-v1.2` is not bumped: that id is the template recognizer, which already read the same pack files, and its scores do not move. The digit recognizer stays `cv-v6`.
+
 ## 0.5.0-alpha.9
 
 Install this update between games, not during one. A Tab press that caught the scoreboard while it was still drawing no longer loses the game: the tracker now looks again a moment later.

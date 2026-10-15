@@ -146,11 +146,19 @@ fn glyphs(digit_h: f64) -> Vec<(Vec<f32>, usize, usize, usize, usize)> {
 /// Draw `text` (digits and commas) centred at `cx`, glyph tops at `top`,
 /// blended over what is there in `colour`.
 pub(crate) fn draw_number(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64) {
-    draw_number_h(img, text, cx, top, colour, DIGIT_H);
+    draw_number_h(img, text, cx, top, colour, DIGIT_H, false);
 }
 
 /// [`draw_number`] at digit height `digit_h`.
-fn draw_number_h(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64, digit_h: f64) {
+fn draw_number_h(
+    img: &mut RgbImage,
+    text: &str,
+    cx: f64,
+    top: u32,
+    colour: f64,
+    digit_h: f64,
+    crisp: bool,
+) {
     let gl = glyphs(digit_h);
     let idx: Vec<usize> = text
         .chars()
@@ -163,23 +171,44 @@ fn draw_number_h(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64,
         })
         .collect();
     // 2 px between digit inks, 1 px around a comma (real centre distances
-    // 9.5-12 px between digits, 6.5-8.5 px digit to comma)
+    // 9.5-12 px between digits, 6.5-8.5 px digit to comma). Crisp boards use
+    // those centre distances instead, so the blanker's advance gate accepts
+    // the row, and they drop grey that does not touch the glyph core.
     let gap = |a: usize, b: usize| if a == 10 || b == 10 { 1 } else { 2 };
-    let mut total = 0usize;
-    for (i, &c) in idx.iter().enumerate() {
-        total += gl[c].4 - gl[c].3;
-        if i + 1 < idx.len() {
-            total += gap(c, idx[i + 1]);
+    let scale = digit_h / DIGIT_H;
+    let centre_gap = |a: usize, b: usize| {
+        if a == 10 || b == 10 {
+            7.5 * scale
+        } else {
+            11.0 * scale
         }
-    }
-    let mut x = (cx - total as f64 / 2.0).round_ties_even() as i64;
+    };
+    let spans: Vec<i64> = idx.iter().map(|&c| (gl[c].4 - gl[c].3) as i64).collect();
+    let mut x = if crisp {
+        let advance: f64 = idx.windows(2).map(|w| centre_gap(w[0], w[1])).sum();
+        (cx - advance / 2.0 - spans.first().copied().unwrap_or(0) as f64 / 2.0).round_ties_even()
+            as i64
+    } else {
+        let mut total = 0i64;
+        for (i, span) in spans.iter().enumerate() {
+            total += span;
+            if i + 1 < idx.len() {
+                total += gap(idx[i], idx[i + 1]) as i64;
+            }
+        }
+        (cx - total as f64 / 2.0).round_ties_even() as i64
+    };
     for (i, &c) in idx.iter().enumerate() {
         let (cov, gw, gh, a, b) = &gl[c];
         for gy in 0..*gh {
             for gx in *a..*b {
                 let v = cov[gy * gw + gx];
+                if crisp && !crisp_ink(cov, *gw, *gh, gx, gy, v) {
+                    continue;
+                }
+                let paint = if crisp && v >= 0.85 { 1.0 } else { v };
                 let (px, py) = (x + (gx - a) as i64, i64::from(top) + gy as i64);
-                if v <= 0.0
+                if paint <= 0.0
                     || px < 0
                     || py < 0
                     || px >= img.width() as i64
@@ -190,17 +219,44 @@ fn draw_number_h(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64,
                 let p = img.get_pixel_mut(px as u32, py as u32);
                 for ch in 0..3 {
                     let bg = f64::from(p.0[ch]);
-                    p.0[ch] = (bg + f64::from(v) * (colour - bg))
+                    p.0[ch] = (bg + f64::from(paint) * (colour - bg))
                         .round()
                         .clamp(0.0, 255.0) as u8;
                 }
             }
         }
-        x += (b - a) as i64;
+        x += spans[i];
         if i + 1 < idx.len() {
-            x += gap(c, idx[i + 1]) as i64;
+            if crisp {
+                let hole =
+                    centre_gap(c, idx[i + 1]) - spans[i] as f64 / 2.0 - spans[i + 1] as f64 / 2.0;
+                x += hole.round_ties_even() as i64;
+            } else {
+                x += gap(c, idx[i + 1]) as i64;
+            }
         }
     }
+}
+
+/// Core ink, or grey that touches a core pixel. Grey farther out is a halo
+/// the blanker reads as a second ink layer.
+fn crisp_ink(cov: &[f32], gw: usize, gh: usize, gx: usize, gy: usize, v: f32) -> bool {
+    if v >= 0.85 {
+        return true;
+    }
+    if !(0.35..0.85).contains(&v) {
+        return false;
+    }
+    let y0 = gy.saturating_sub(1);
+    let x0 = gx.saturating_sub(1);
+    for yy in y0..(gy + 2).min(gh) {
+        for xx in x0..(gx + 2).min(gw) {
+            if cov[yy * gw + xx] >= 0.85 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Text of value `v` in column `k` (thousands commas in DMG H MIT).
@@ -224,8 +280,76 @@ pub(crate) fn board(layout: Layout) -> RgbImage {
     board_with(layout, &VALUES)
 }
 
+/// Stat grid of the committed post-match baseline boards. Flat colours and
+/// template digits only: no hero icon, no name, no timer. Three cells differ
+/// from the capture this grid was copied from, so the resized templates clear
+/// the blanker's glyph floors: row 5 column E is 19 (a lone 9 reads too close
+/// to 0), row 4 column A is 3, and row 9 column H is 1645 (those zeros fail
+/// the 1080 margin after the downscale).
+pub(crate) const POSTGAME_VALUES: [[u32; 6]; 12] = [
+    [12, 3, 3, 5480, 950, 2347],
+    [7, 1, 7, 3789, 0, 82],
+    [7, 8, 7, 1858, 3387, 110],
+    [7, 15, 6, 1545, 5407, 0],
+    [15, 3, 5, 7283, 332, 24],
+    [19, 0, 5, 4922, 987, 5785],
+    [21, 8, 3, 7161, 1540, 6914],
+    [15, 1, 4, 4812, 142, 0],
+    [16, 5, 5, 5643, 952, 1685],
+    [14, 8, 2, 1762, 1645, 123],
+    [15, 15, 3, 3448, 6595, 0],
+    [6, 5, 4, 2430, 1382, 203],
+];
+
+/// Cells the 1080p tab baseline checks, plus other plain numbers so a
+/// shifted column does not land on the same digits.
+pub(crate) const TAB_VALUES: [[u32; 6]; 12] = [
+    [6, 2, 1, 100, 10, 20],
+    [3, 0, 4, 200, 0, 30],
+    [5, 2, 1, 300, 11, 40],
+    [4, 7, 2, 400, 0, 84],
+    [7, 2, 1, 500, 12, 50],
+    [8, 2, 1, 600, 13, 60],
+    [9, 2, 1, 700, 14, 70],
+    [5, 2, 1, 800, 15, 80],
+    [6, 1, 1, 900, 16, 90],
+    [2, 2, 1, 110, 17, 21],
+    [3, 2, 1, 120, 18, 22],
+    [4, 2, 1, 130, 19, 23],
+];
+
+/// 1664x1007 centred table. This is `native_postgame_table_names_blanked.png`.
+pub(crate) fn baseline_postgame_1440() -> RgbImage {
+    board_drawn(Layout::PostMatch, &POSTGAME_VALUES, true)
+}
+
+/// 1248x756 Lanczos copy of [`baseline_postgame_1440`].
+/// This is `s075_postgame_table_names_blanked.png`.
+pub(crate) fn baseline_postgame_1080() -> RgbImage {
+    downscale_1080(&baseline_postgame_1440())
+}
+
+/// 1248x756 in-match table. This is `s075_tab_board_stats_only.png`.
+pub(crate) fn baseline_tab_1080() -> RgbImage {
+    downscale_1080(&board_drawn(Layout::L1, &TAB_VALUES, true))
+}
+
+fn downscale_1080(img: &RgbImage) -> RgbImage {
+    downscale_1080_with(img, image::imageops::FilterType::Lanczos3)
+}
+
+fn downscale_1080_with(img: &RgbImage, filter: image::imageops::FilterType) -> RgbImage {
+    image::imageops::resize(img, 1248, 756, filter)
+}
+
 /// [`board`] with other stat values.
 pub(crate) fn board_with(layout: Layout, values: &[[u32; 6]; 12]) -> RgbImage {
+    board_drawn(layout, values, false)
+}
+
+/// [`board_with`]. `crisp` uses centre spacing and no grey halo, so the
+/// committed baseline boards can pass the same digit gates as a real table.
+fn board_drawn(layout: Layout, values: &[[u32; 6]; 12], crisp: bool) -> RgbImage {
     let (l, r) = layout.edges();
     let mut img = RgbImage::from_fn(W, H, |x, y| {
         // the game world: a smooth gradient
@@ -302,7 +426,19 @@ pub(crate) fn board_with(layout: Layout, values: &[[u32; 6]; 12]) -> RgbImage {
         for (k, &v) in row_values.iter().enumerate() {
             let cx = f64::from(r) - OFF[k];
             let colour = if v == 0 { DIM_ZERO } else { WHITE };
-            draw_number(&mut img, &text_for(v, k), cx, top + DIGIT_TOP, colour);
+            if crisp {
+                draw_number_h(
+                    &mut img,
+                    &text_for(v, k),
+                    cx,
+                    top + DIGIT_TOP,
+                    colour,
+                    DIGIT_H,
+                    true,
+                );
+            } else {
+                draw_number(&mut img, &text_for(v, k), cx, top + DIGIT_TOP, colour);
+            }
         }
     }
     img
@@ -440,7 +576,15 @@ pub(crate) fn board_5v5(drawn: usize) -> RgbImage {
             let cx = f64::from(r) - OFF[k] * K5;
             let colour = if v == 0 { DIM_ZERO } else { WHITE };
             let dtop = top + (f64::from(DIGIT_TOP) * K5).round() as u32;
-            draw_number_h(&mut img, &text_for(v, k), cx, dtop, colour, DIGIT_H * K5);
+            draw_number_h(
+                &mut img,
+                &text_for(v, k),
+                cx,
+                dtop,
+                colour,
+                DIGIT_H * K5,
+                false,
+            );
         }
     }
     img
