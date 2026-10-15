@@ -53,6 +53,16 @@ services:
       # container. Host 127.0.0.1:7777 is the gate, not raw strfry.
       RELAY_GATE_LISTEN: 0.0.0.0:7779
       RELAY_GATE_UPSTREAM: ws://127.0.0.1:7777
+      # strfry sees the gate as 127.0.0.1, so its per-IP limits do not see
+      # browsers. The gate limits connections and messages per client IP.
+      # X-Forwarded-For is honored only when the TCP peer is loopback or listed
+      # here. Default to TRUSTED_PROXIES (the compose gateway from
+      # scripts/ensure-trusted-proxies.sh). Caddy on the host is that peer.
+      RELAY_GATE_TRUSTED_PROXIES: ${RELAY_GATE_TRUSTED_PROXIES:-${TRUSTED_PROXIES:-}}
+      RELAY_GATE_MAX_CONN_PER_IP: ${RELAY_GATE_MAX_CONN_PER_IP:-32}
+      RELAY_GATE_CONN_RATE: ${RELAY_GATE_CONN_RATE:-60}
+      RELAY_GATE_MSG_RATE: ${RELAY_GATE_MSG_RATE:-240}
+      RELAY_GATE_RATE_WINDOW_SECS: ${RELAY_GATE_RATE_WINDOW_SECS:-60}
     volumes:
       - strfry-data:/app/strfry-db
     networks:

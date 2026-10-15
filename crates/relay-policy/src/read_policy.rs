@@ -7,7 +7,12 @@
 //!
 //! Direct messages are NIP-59 gift wraps (kind 1059), not kind 4. See
 //! `EncryptionService::build_gift_wraps` and `POST /api/nostr/dm/send`. A kind
-//! 4 event is therefore not a member inbox and is not delivered.
+//! 4 event is therefore not a member inbox and is not delivered. The write
+//! plugin rejects kind 4 as well.
+//!
+//! NIP-29 group metadata (kinds 39000 through 39003) is addressable by a `d`
+//! tag, not an `h` tag. `GroupManager::create_group` publishes kind 39000 that
+//! way. Those events follow the same team and officer scope as group chat.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,6 +22,11 @@ pub const GIFT_WRAP_KIND: u64 = 1059;
 
 /// NIP-04 style plaintext-to-the-relay DM. This codebase does not send these.
 pub const PLAIN_DM_KIND: u64 = 4;
+
+/// NIP-29 replaceable group metadata, admins, members, and roles.
+/// The group id is the `d` tag.
+pub const GROUP_METADATA_KIND_MIN: u64 = 39000;
+pub const GROUP_METADATA_KIND_MAX: u64 = 39003;
 
 /// One active member the gate will serve after NIP-42 AUTH.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,9 +128,20 @@ impl EventView {
         })
     }
 
-    /// First `h` tag (NIP-29 group id).
+    /// First non-empty `h` tag (NIP-29 group chat id).
     pub fn group_id(&self) -> Option<&str> {
-        self.tag_values("h").next()
+        self.first_tag("h")
+    }
+
+    /// First non-empty `d` tag (NIP-29 addressable group id).
+    pub fn address_id(&self) -> Option<&str> {
+        self.first_tag("d")
+    }
+
+    fn first_tag<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        self.tag_values(name)
+            .map(str::trim)
+            .find(|value| !value.is_empty())
     }
 
     fn p_tag_matches(&self, pubkey: &str) -> bool {
@@ -165,10 +186,13 @@ impl std::fmt::Display for ReadDeny {
 /// 1. No AUTH: no event of any kind.
 /// 2. AUTH pubkey must be an active member in the directory.
 /// 3. Kind 1059: deliver only when a `p` tag is that member's key.
-/// 4. An `h` tag for a public team channel: deliver only to members of that team.
-/// 5. An `h` tag for an officer channel: deliver only to officers (admin or
+/// 4. Kinds 39000 through 39003: the `d` tag is the group id. Public groups go
+///    to members of that team. Officer groups go to officers on that team.
+///    A missing or unknown `d` tag is dropped.
+/// 5. An `h` tag for a public team channel: deliver only to members of that team.
+/// 6. An `h` tag for an officer channel: deliver only to officers (admin or
 ///    officer) who are on that team.
-/// 6. Anything else, including kind 4, is dropped.
+/// 7. Anything else, including kind 4, is dropped.
 pub fn allow_event(
     authed_pubkey: Option<&str>,
     event: &EventView,
@@ -189,26 +213,41 @@ pub fn allow_event(
         };
     }
 
-    if let Some(group_id) = event.group_id() {
-        let Some(group) = dir.groups.get(group_id) else {
+    if is_group_metadata(event.kind) {
+        let Some(group_id) = event.address_id() else {
             return Err(ReadDeny::NotShared);
         };
-        let on_team = reader.teams.contains(&group.team_id);
-        if group.officer_only {
-            return if reader.officer && on_team {
-                Ok(())
-            } else {
-                Err(ReadDeny::OfficerChat)
-            };
-        }
-        return if on_team {
-            Ok(())
-        } else {
-            Err(ReadDeny::TeamChat)
-        };
+        return allow_group(reader, group_id, dir);
+    }
+
+    if let Some(group_id) = event.group_id() {
+        return allow_group(reader, group_id, dir);
     }
 
     Err(ReadDeny::NotShared)
+}
+
+fn is_group_metadata(kind: u64) -> bool {
+    (GROUP_METADATA_KIND_MIN..=GROUP_METADATA_KIND_MAX).contains(&kind)
+}
+
+fn allow_group(reader: &MemberAcl, group_id: &str, dir: &ReadDirectory) -> Result<(), ReadDeny> {
+    let Some(group) = dir.groups.get(group_id) else {
+        return Err(ReadDeny::NotShared);
+    };
+    let on_team = reader.teams.contains(&group.team_id);
+    if group.officer_only {
+        return if reader.officer && on_team {
+            Ok(())
+        } else {
+            Err(ReadDeny::OfficerChat)
+        };
+    }
+    if on_team {
+        Ok(())
+    } else {
+        Err(ReadDeny::TeamChat)
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +473,49 @@ mod tests {
             allow_event(Some(&bystander), &plain, &dir),
             Err(ReadDeny::NotShared)
         );
+    }
+
+    #[test]
+    fn group_metadata_d_tag_is_scoped_like_the_group() {
+        let dir = directory();
+        let member = pk(0x11);
+        let officer = pk(0x22);
+        let other = pk(0x33);
+        for kind in GROUP_METADATA_KIND_MIN..=GROUP_METADATA_KIND_MAX {
+            let public = event(
+                &pk(0x99),
+                kind,
+                vec![vec!["d", "team-a"], vec!["name", "Alpha"]],
+            );
+            assert_eq!(allow_event(Some(&member), &public, &dir), Ok(()), "{kind}");
+            assert_eq!(
+                allow_event(Some(&other), &public, &dir),
+                Err(ReadDeny::TeamChat),
+                "{kind}"
+            );
+            let officers = event(&pk(0x99), kind, vec![vec!["d", "team-a-officers"]]);
+            assert_eq!(
+                allow_event(Some(&officer), &officers, &dir),
+                Ok(()),
+                "{kind}"
+            );
+            assert_eq!(
+                allow_event(Some(&member), &officers, &dir),
+                Err(ReadDeny::OfficerChat),
+                "{kind}"
+            );
+            let missing = event(&pk(0x99), kind, vec![vec!["h", "team-a"]]);
+            assert_eq!(
+                allow_event(Some(&member), &missing, &dir),
+                Err(ReadDeny::NotShared),
+                "metadata without a d tag is not group chat"
+            );
+            let unknown = event(&pk(0x99), kind, vec![vec!["d", "no-such-group"]]);
+            assert_eq!(
+                allow_event(Some(&member), &unknown, &dir),
+                Err(ReadDeny::NotShared)
+            );
+        }
     }
 
     #[test]

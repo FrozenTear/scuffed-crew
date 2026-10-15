@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use relay_policy::creds::{self, namespace_from_env};
 use relay_policy::directory::load_read_directory;
+use relay_policy::limits::GateLimits;
 use relay_policy::nip42::NostrAuthVerifier;
 use relay_policy::proxy;
 use relay_policy::read_policy::ReadDirectory;
@@ -81,7 +82,8 @@ fn main() {
         let upstream =
             std::env::var("RELAY_GATE_UPSTREAM").unwrap_or_else(|_| "ws://127.0.0.1:7777".into());
         let verifier: Arc<dyn AuthVerifier> = Arc::new(NostrAuthVerifier);
-        if let Err(err) = proxy::serve(listen, upstream, directory, verifier).await {
+        let limits = GateLimits::from_env();
+        if let Err(err) = proxy::serve(listen, upstream, directory, verifier, limits).await {
             tracing::error!(error = %err, "read gate stopped");
             std::process::exit(1);
         }

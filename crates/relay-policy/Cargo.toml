@@ -19,6 +19,8 @@ path = "src/bin/read_gate.rs"
 
 [dependencies]
 scuffed-db = { path = "../db" }
+httparse = "1"
+ipnet = "2"
 # Same floor as scuffed-chat. Signature checks for NIP-42 only; no NIP-44.
 nostr = { version = "0.44.8", default-features = false, features = ["std"] }
 serde = { workspace = true }

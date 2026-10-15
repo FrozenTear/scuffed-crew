@@ -84,10 +84,23 @@ impl GateSession {
                 to_client: vec![closed(sub_id, NEG_DISABLED)],
                 to_relay: vec![],
             },
-            "EVENT" => ClientOutcome {
-                to_client: vec![],
-                to_relay: vec![text.to_string()],
-            },
+            "EVENT" => {
+                if published_kind(&value) == Some(crate::read_policy::PLAIN_DM_KIND) {
+                    let event_id = published_id(&value);
+                    return ClientOutcome {
+                        to_client: vec![ok(
+                            event_id,
+                            false,
+                            "blocked: kind 4 plain DMs are not accepted",
+                        )],
+                        to_relay: vec![],
+                    };
+                }
+                ClientOutcome {
+                    to_client: vec![],
+                    to_relay: vec![text.to_string()],
+                }
+            }
             "CLOSE" => ClientOutcome {
                 to_client: vec![],
                 to_relay: vec![text.to_string()],
@@ -171,6 +184,19 @@ impl GateSession {
             }
         }
     }
+}
+
+fn published_kind(value: &Value) -> Option<u64> {
+    value.as_array()?.get(1)?.get("kind")?.as_u64()
+}
+
+fn published_id(value: &Value) -> &str {
+    value
+        .as_array()
+        .and_then(|items| items.get(1))
+        .and_then(|event| event.get("id"))
+        .and_then(|id| id.as_str())
+        .unwrap_or("")
 }
 
 fn closed(sub_id: &str, reason: &str) -> String {
@@ -369,6 +395,25 @@ mod tests {
             let closed: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
             assert_eq!(closed[2], reason);
         }
+    }
+
+    #[test]
+    fn kind4_publish_is_rejected_and_not_forwarded() {
+        let mut session = GateSession::new("chal");
+        let text = r#"["EVENT",{"id":"plain","kind":4,"tags":[["p","aa"]],"content":"secret"}]"#;
+        let outcome = session.on_client_text(
+            text,
+            &FixedVerifier {
+                pubkey: pk(0x11),
+                fail: false,
+            },
+        );
+        assert!(outcome.to_relay.is_empty());
+        let reply: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
+        assert_eq!(reply[0], "OK");
+        assert_eq!(reply[1], "plain");
+        assert_eq!(reply[2], false);
+        assert!(reply[3].as_str().unwrap().contains("kind 4"));
     }
 
     #[test]

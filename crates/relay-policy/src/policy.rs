@@ -143,6 +143,12 @@ impl PolicyEngine {
 
     /// Evaluate an event and return an accept/reject decision.
     pub fn evaluate(&mut self, event: &EventInfo) -> Decision {
+        // Kind 4 is a plain DM. This relay only stores NIP-59 gift wraps
+        // (kind 1059). Reject it even if a config adds kind 4 to the whitelist.
+        if event.kind == 4 {
+            return Decision::Reject("blocked: kind 4 plain DMs are not accepted".into());
+        }
+
         // 1. Pubkey allowlist check
         if !self.pubkey_allowlist.contains(&event.pubkey) {
             return Decision::Reject("blocked: pubkey not in member allowlist".into());
@@ -275,6 +281,19 @@ mod tests {
         assert!(
             matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("allowlist"))
         );
+    }
+
+    #[test]
+    fn kind4_plain_dm_rejected_on_write() {
+        let mut config = PolicyConfig::default();
+        config.allowed_kinds.insert(4);
+        let mut engine = PolicyEngine::new(config);
+        let pubkey = "aabbccdd".repeat(8);
+        let mut allowlist = HashSet::new();
+        allowlist.insert(pubkey.clone());
+        engine.update_allowlist(allowlist);
+        let event = make_event(&pubkey, 4);
+        assert!(matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("kind 4")));
     }
 
     #[test]

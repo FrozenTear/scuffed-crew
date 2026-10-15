@@ -8,6 +8,8 @@
 
 pub mod creds;
 pub mod directory;
+pub mod http_gate;
+pub mod limits;
 pub mod nip42;
 pub mod proxy;
 pub mod read_policy;
