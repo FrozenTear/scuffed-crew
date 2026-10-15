@@ -217,6 +217,9 @@ const STATS_CSS: &str = r#"
         max-width: 1100px;
         margin: 0 auto;
         padding: 2rem 1.5rem;
+        /* One horizontal inset for history headers and cards. Density overrides it. */
+        --history-pad-x: 0.85rem;
+        --history-border: 1px;
     }
     .stats-page h1 {
         font-family: var(--font-head);
@@ -308,10 +311,14 @@ const STATS_CSS: &str = r#"
     /* W5b history layout: outcome | identity | E D A | dmg heal | date.
        Header + cards share the outer grid; numeric cols live in .match-stats
        with fixed tracks so values column-scan. Tighter than free scoreline. */
-    .match-list { display: flex; flex-direction: column; gap: 0.15rem; }
+    .match-list { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
     .match-list-head,
     .match-card {
         display: grid;
+        box-sizing: border-box;
+        border: var(--history-border) solid transparent;
+        padding-left: var(--history-pad-x);
+        padding-right: var(--history-pad-x);
         grid-template-columns:
             minmax(4.5rem, 5.5rem)
             minmax(7rem, 1.4fr)
@@ -319,6 +326,11 @@ const STATS_CSS: &str = r#"
             minmax(4.25rem, auto);
         gap: 0.35rem 0.65rem;
         align-items: center;
+    }
+    .match-list-head .match-stats,
+    .match-card .match-stats {
+        box-sizing: border-box;
+        padding: 0;
     }
     .match-stats {
         display: grid;
@@ -328,19 +340,38 @@ const STATS_CSS: &str = r#"
         justify-self: end;
     }
     .match-list-head {
-        padding: 0 0.85rem 0.15rem;
+        padding-top: 0;
+        padding-bottom: 0.15rem;
+        border-color: transparent;
         font-size: 0.65rem;
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
         color: var(--text-3);
     }
-    .match-h-stat, .match-h-date { text-align: right; }
+    /* Header and value cells in a column share padding, box model, and alignment. */
+    .match-h-outcome,
+    .match-card .match-outcome,
+    .match-h-id,
+    .match-card .match-identity {
+        box-sizing: border-box;
+        padding: 0;
+        text-align: left;
+    }
+    .match-h-stat,
+    .match-card .match-stat,
+    .match-h-date,
+    .match-card .match-date {
+        box-sizing: border-box;
+        padding: 0;
+        text-align: right;
+    }
     .match-card {
         background: var(--surface);
-        border: 1px solid var(--border);
+        border-color: var(--border);
         border-radius: 8px;
-        padding: 0.5rem 0.85rem;
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
         font-size: 0.85rem;
         transition: background 0.15s;
     }
@@ -439,13 +470,11 @@ const STATS_CSS: &str = r#"
     .match-stat {
         color: var(--text-2);
         font-size: 0.8rem;
-        text-align: right;
         font-variant-numeric: tabular-nums;
     }
     .match-card .match-date {
         color: var(--text-3);
         font-size: 0.75rem;
-        text-align: right;
         white-space: nowrap;
     }
     .stats-pagination {
@@ -864,8 +893,16 @@ const STATS_CSS: &str = r#"
     }
     .density-toggle:hover { color: var(--text); border-color: var(--accent-soft); }
     .stats-page[data-density="comfortable"] .overview-grid { gap: 1.75rem; }
-    .stats-page[data-density="comfortable"] .match-card { padding: 0.75rem 1.1rem; }
-    .stats-page[data-density="compact"] .match-card { padding: 0.4rem 0.75rem; }
+    .stats-page[data-density="comfortable"] { --history-pad-x: 1.1rem; }
+    .stats-page[data-density="comfortable"] .match-card {
+        padding-top: 0.75rem;
+        padding-bottom: 0.75rem;
+    }
+    .stats-page[data-density="compact"] { --history-pad-x: 0.75rem; }
+    .stats-page[data-density="compact"] .match-card {
+        padding-top: 0.4rem;
+        padding-bottom: 0.4rem;
+    }
     .stats-page[data-density="compact"] .match-cards { gap: 0.2rem; }
     .stats-page[data-density="compact"] .overview-grid { gap: 1rem; }
     .overview-form { margin-top: 1rem; }
@@ -961,7 +998,6 @@ const STATS_CSS: &str = r#"
         .match-list-head {
             display: grid;
             grid-template-columns: minmax(0, 1fr);
-            padding: 0 calc(0.85rem + 1px) 0.15rem;
         }
         .match-list-head .match-h-outcome,
         .match-list-head .match-h-id,
@@ -992,7 +1028,7 @@ const STATS_CSS: &str = r#"
             justify-self: stretch;
             grid-template-columns: repeat(5, minmax(0, 1fr));
         }
-        .match-card .match-date { grid-area: date; text-align: right; }
+        .match-card .match-date { grid-area: date; }
         .reader-badge-full {
             display: none;
         }
@@ -1522,6 +1558,92 @@ mod header_layout_tests {
         assert!(
             !phone.contains(".stat-unsure-mark { display: none"),
             "the unsure mark stays visible at phone width"
+        );
+    }
+
+    #[test]
+    fn history_header_and_values_share_column_box() {
+        assert!(
+            !STATS_CSS.contains("0.85rem + 1px"),
+            "header inset must use the same pad as the cards"
+        );
+        let page = block_after(STATS_CSS, ".stats-page {");
+        let page_block = page.split('}').next().unwrap();
+        assert!(
+            has_declaration(page_block, "--history-pad-x: 0.85rem"),
+            "{page_block}"
+        );
+        assert!(
+            has_declaration(page_block, "--history-border: 1px"),
+            "{page_block}"
+        );
+        assert!(
+            STATS_CSS
+                .contains(".stats-page[data-density=\"comfortable\"] { --history-pad-x: 1.1rem; }")
+        );
+        assert!(
+            STATS_CSS
+                .contains(".stats-page[data-density=\"compact\"] { --history-pad-x: 0.75rem; }")
+        );
+
+        let shell = block_after(STATS_CSS, ".match-list-head,\n    .match-card {");
+        let shell_block = shell.split('}').next().unwrap();
+        assert!(
+            has_declaration(shell_block, "box-sizing: border-box"),
+            "{shell_block}"
+        );
+        assert!(
+            has_declaration(shell_block, "padding-left: var(--history-pad-x)"),
+            "{shell_block}"
+        );
+        assert!(
+            has_declaration(shell_block, "padding-right: var(--history-pad-x)"),
+            "{shell_block}"
+        );
+        assert!(
+            shell_block.contains("border: var(--history-border) solid transparent"),
+            "{shell_block}"
+        );
+
+        let text_cols = block_after(
+            STATS_CSS,
+            ".match-h-outcome,\n    .match-card .match-outcome,",
+        );
+        let text_block = text_cols.split('}').next().unwrap();
+        assert!(text_block.contains(".match-h-id"), "{text_block}");
+        assert!(
+            text_block.contains(".match-card .match-identity"),
+            "{text_block}"
+        );
+        assert_shared_cell(text_block, "left");
+
+        let num_cols = block_after(STATS_CSS, ".match-h-stat,\n    .match-card .match-stat,");
+        let num_block = num_cols.split('}').next().unwrap();
+        assert!(num_block.contains(".match-h-date"), "{num_block}");
+        assert!(num_block.contains(".match-card .match-date"), "{num_block}");
+        assert_shared_cell(num_block, "right");
+
+        let tracks = block_after(
+            STATS_CSS,
+            ".match-list-head .match-stats,\n    .match-card .match-stats {",
+        );
+        let tracks_block = tracks.split('}').next().unwrap();
+        assert!(
+            has_declaration(tracks_block, "box-sizing: border-box"),
+            "{tracks_block}"
+        );
+        assert!(
+            has_declaration(tracks_block, "padding: 0"),
+            "{tracks_block}"
+        );
+    }
+
+    fn assert_shared_cell(block: &str, align: &str) {
+        assert!(has_declaration(block, "box-sizing: border-box"), "{block}");
+        assert!(has_declaration(block, "padding: 0"), "{block}");
+        assert!(
+            has_declaration(block, &format!("text-align: {align}")),
+            "{block}"
         );
     }
 }
