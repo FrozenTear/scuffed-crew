@@ -296,6 +296,31 @@ pub fn forget_portraits(data_dir: &Path, session_id: &str) {
     }
 }
 
+/// Report pictures switch. Off for alpha.8: no scoreboard or rank picture
+/// is saved or attached, so a report carries the saved stats only. The
+/// blanker drops whole real 6v6 boards (header check), and the picture
+/// comes back in alpha.9 once it is fixed and measured.
+pub const REPORT_PICTURES: bool = false;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests run with pictures on unless they turn them off, so the
+    /// picture paths stay tested for alpha.9.
+    pub(crate) static PICTURES_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// True when report pictures are saved and attached.
+pub fn pictures_on() -> bool {
+    #[cfg(test)]
+    {
+        PICTURES_IN_TEST.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        REPORT_PICTURES
+    }
+}
+
 /// Blank `frame` against the session's earlier captures and remember it.
 fn blank_seen(
     dir: &Path,
@@ -352,6 +377,9 @@ pub fn record_scoreboard_at(
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };
+    if !pictures_on() {
+        return record_reads_only(data_dir, &dir, reads);
+    }
     let board = blank_seen(&dir, frame, team_size, grabbed);
     if !board.has_picture() {
         // No picture is safe to keep, but the reads still link a report to
@@ -452,6 +480,9 @@ pub fn rank_outcome_png(
 
 /// Store the bytes from [`rank_outcome_png`] as the session's `outcome.png`.
 pub fn record_outcome_png(data_dir: &Path, session_id: &str, png: &[u8]) -> io::Result<()> {
+    if !pictures_on() {
+        return Ok(());
+    }
     let Some(dir) = session_dir(data_dir, session_id) else {
         return Ok(());
     };

@@ -1088,6 +1088,27 @@ mod game {
     }
 
     #[test]
+    fn with_pictures_off_a_report_is_stats_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        kit::PICTURES_IN_TEST.with(|c| c.set(false));
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        kit::record_outcome_png(tmp.path(), "sess-1", b"png").unwrap();
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats));
+        kit::PICTURES_IN_TEST.with(|c| c.set(true));
+        let zip = zip.unwrap();
+        assert!(!kit::has_kit(tmp.path(), "sess-1"));
+        assert!(kit::has_reads(tmp.path(), "sess-1"));
+        assert!(zip.images.is_empty());
+        assert!(!zip.manifest_json.contains("crops/"));
+        assert!(zip.manifest_json.contains("\"session_id\": \"sess-1\""));
+    }
+
+    #[test]
+    fn report_pictures_are_off_for_alpha_8() {
+        const { assert!(!kit::REPORT_PICTURES) };
+    }
+
+    #[test]
     fn a_report_stays_within_the_site_file_and_picture_limits() {
         let tmp = tempfile::tempdir().unwrap();
         seed_logs(tmp.path());

@@ -827,6 +827,9 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         ("crops/scoreboard.png", input.kit.scoreboard_png.as_ref()),
         ("crops/outcome.png", input.kit.outcome_png.as_ref()),
     ] {
+        if !super::kit::pictures_on() {
+            continue;
+        }
         if let (Some(png), Some(_)) = (png, reads) {
             let (width, height) = png_size(png)?;
             if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {

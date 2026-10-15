@@ -1538,6 +1538,14 @@ mod tests {
         let game_zip = stat_tracker::report::build_game_report(&game_input).unwrap();
         assert!(manifest_has_game(&game_zip.manifest_json));
         let preview = kit_images_from_zip(&game_zip);
+        if !stat_tracker::report::kit::REPORT_PICTURES {
+            // alpha.8: reports are stats only, no picture is attached.
+            assert!(preview.is_empty());
+            assert!(game_zip.images.is_empty());
+            dialog.built = Some(Ok(Arc::new(game_zip)));
+            assert!(dialog.can_send() && dialog.can_save());
+            return;
+        }
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].path, "crops/scoreboard.png");
         assert_eq!((preview[0].width, preview[0].height), (1, 1));
