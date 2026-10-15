@@ -23,8 +23,12 @@ The daily report limit is now 10.
 
 - You can send 10 reports in one UTC day. The next one waits until the next UTC day.
 - Reports you sent yesterday do not count toward today.
+- If an in-app update fails, the tracker puts the previous version back and starts again, instead of staying stopped.
+- The tracker now has a memory limit, so it can no longer help push your PC into running out of memory.
 
 Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
+
+Updates and install: a failed in-app update restores the saved `scuffed-stat-tracker` and `stat-tracker-gui` binaries and starts the service again. The updater now also requires `python3` and `sha256sum`, and the install script refuses to install when `sha256sum` is missing instead of skipping the check. The prerelease channel only offers alpha and rc builds, so a test build such as `-test.1` is never offered or installed without a pinned tag. The systemd user unit sets `MemoryHigh=1200M`, `MemoryMax=1500M` and `MemorySwapMax=256M`; the daemon peaks at about 1 GB today, and over the limit only the tracker restarts.
 
 ## 0.5.0-alpha.9
 

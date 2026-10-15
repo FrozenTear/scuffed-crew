@@ -58,6 +58,13 @@ grep -q '^PrivateTmp=yes$' "$SESSION_UNIT" \
     || fail "session unit missing PrivateTmp=yes"
 pass "unit templates carry the sandbox"
 
+# Memory cap (2026-10-15 OOM on Soot): soft limit under the hard one, both
+# above the ~1 GB daemon peak.
+grep -qx 'MemoryHigh=1200M' "$UNIT" || fail "daemon unit missing MemoryHigh=1200M"
+grep -qx 'MemoryMax=1500M' "$UNIT" || fail "daemon unit missing MemoryMax=1500M"
+grep -qx 'MemorySwapMax=256M' "$UNIT" || fail "daemon unit missing MemorySwapMax=256M"
+pass "daemon unit caps its memory"
+
 # OCR runs with one OpenMP thread (alpha.7 C1). libgomp reads the variable
 # when the binary loads, so for a systemd start the unit is the only place
 # that can set it. It must be one live [Service] directive, with no second

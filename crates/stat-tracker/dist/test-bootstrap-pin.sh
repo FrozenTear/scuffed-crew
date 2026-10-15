@@ -251,9 +251,11 @@ warn_tool="$(
 )"
 warn_tool_code=$?
 set -e
-[[ "$warn_tool_code" -eq 0 ]] || fail "no-key missing sha256sum failed closed: $warn_tool"
-[[ "$warn_tool" == *skipping* ]] || fail "no-key missing sha256sum did not warn: $warn_tool"
-pass "no key and missing sha256sum stays a warning"
+[[ "$warn_tool_code" -ne 0 ]] || fail "no-key missing sha256sum was accepted: $warn_tool"
+[[ "$warn_tool" == *"sha256sum is not installed"* ]] || fail "no-key missing sha256sum error was: $warn_tool"
+[[ "$warn_tool" == *"Refusing to install"* ]] || fail "no-key missing sha256sum did not refuse: $warn_tool"
+[[ "$warn_tool" != *skipping* ]] || fail "missing sha256sum still skips the check: $warn_tool"
+pass "missing sha256sum refuses to install, with or without a key"
 
 # Stable channel keeps 0.4.24 when a newer alpha is published. The alpha is
 # the prerelease line, including when GitHub left the prerelease flag off.
@@ -325,6 +327,21 @@ JSON
 mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
 [[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.6" ]] || fail "alpha.6 was not newer than alpha.5.1: ${picked[1]}"
 pass "alpha.5 < alpha.5.1 < alpha.6"
+
+# A test build (-test.N) is never picked, flagged or not, on any channel.
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-test.1","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-test.2","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.10","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-rc1","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable beside a test build was ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-rc1" ]] || fail "prerelease beside a test build was ${picked[1]}"
+pass "a -test.N build is never picked; alpha and rc still are"
 
 stable_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 "")"
 [[ "$stable_pick" == "stat-tracker-v0.4.24" ]] || fail "default channel picked $stable_pick"
