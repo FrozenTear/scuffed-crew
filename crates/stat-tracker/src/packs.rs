@@ -1319,10 +1319,10 @@ fn sync_lock_path(data_dir: &Path) -> PathBuf {
 /// Exclusive `flock` on [`sync_lock_path`]. Released when dropped, or when
 /// the process dies.
 ///
-/// Drop unlocks with `LOCK_UN` before the descriptor is closed. `close`
-/// alone does not release the lock while a child forked during the sync
-/// still has the inherited descriptor, so the next sync would see
-/// [`PackSync::Busy`] until that child execs or exits.
+/// Drop unlocks with `LOCK_UN` before the descriptor is closed. `open`
+/// already sets `O_CLOEXEC`, so a child drops the inherited descriptor at
+/// exec. `close` alone still leaves the lock held until that exec, and a
+/// keeper that tries again in that window sees [`PackSync::Busy`].
 struct SyncLock {
     _file: std::fs::File,
 }
@@ -1365,6 +1365,15 @@ impl SyncLock {
         } else {
             Err(err)
         }
+    }
+
+    /// `true` when this descriptor will be closed in a child at exec.
+    #[cfg(test)]
+    fn is_cloexec(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fd` is the descriptor `try_acquire` opened, still open.
+        let flags = unsafe { libc::fcntl(self._file.as_raw_fd(), libc::F_GETFD) };
+        flags >= 0 && (flags & libc::FD_CLOEXEC) != 0
     }
 }
 
@@ -5882,6 +5891,10 @@ mod tests {
         let n = unsafe { libc::read(ready[0], saw.as_mut_ptr() as *mut libc::c_void, 1) };
         unsafe { libc::close(ready[0]) };
         assert_eq!(n, 1, "the child never signalled that it was alive");
+        assert!(
+            held.is_cloexec(),
+            "the pack lock descriptor is inherited across exec"
+        );
         drop(held);
         SyncLock::try_acquire(data_dir)
             .expect("lock file")
