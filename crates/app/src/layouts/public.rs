@@ -138,8 +138,12 @@ struct NavLink {
 }
 
 /// `strategy` follows `GET /api/settings`.strategies_enabled (default ON).
+/// `chat` follows relay health: hidden only after health says the relay is off.
 /// Patch Notes, Stats, and Leaderboards are not gated here.
-fn nav_id_visible(id: &str, strategies_enabled: bool) -> bool {
+fn nav_id_visible(id: &str, strategies_enabled: bool, relay_on: bool) -> bool {
+    if id == "chat" && !relay_on {
+        return false;
+    }
     strategies_enabled || id != "strategy"
 }
 
@@ -163,10 +167,15 @@ fn nav_for_resolved(resolved: Option<&Result<SiteSettings, String>>) -> NavConfi
     }
 }
 
-fn resolve_nav(cfg: &NavConfig, placement: NavPlacement, strategies_enabled: bool) -> Vec<NavLink> {
+fn resolve_nav(
+    cfg: &NavConfig,
+    placement: NavPlacement,
+    strategies_enabled: bool,
+    relay_on: bool,
+) -> Vec<NavLink> {
     cfg.items_in(placement)
         .into_iter()
-        .filter(|item| nav_id_visible(&item.id, strategies_enabled))
+        .filter(|item| nav_id_visible(&item.id, strategies_enabled, relay_on))
         .filter_map(|item| {
             let route = nav_route(&item.id)?;
             Some(NavLink {
@@ -538,6 +547,8 @@ pub fn PublicLayout() -> Element {
     });
 
     let site_settings = use_site_settings();
+    let relay = crate::state::provide_relay_availability();
+    let show_relay_links = relay.current().shows_chat_links();
     let resolved = site_settings.resolved.read();
     let loaded_settings = loaded_site_settings(resolved.as_ref());
     let bg_css = loaded_settings
@@ -547,8 +558,18 @@ pub fn PublicLayout() -> Element {
 
     let nav_cfg = nav_for_resolved(resolved.as_ref());
     let strategies_enabled = strategies_enabled_or_default(loaded_settings);
-    let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
-    let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
+    let primary_links = resolve_nav(
+        &nav_cfg,
+        NavPlacement::Primary,
+        strategies_enabled,
+        show_relay_links,
+    );
+    let more_links = resolve_nav(
+        &nav_cfg,
+        NavPlacement::More,
+        strategies_enabled,
+        show_relay_links,
+    );
 
     let is_logged_in = auth().is_logged_in();
     let is_officer = auth().is_officer_or_above();
@@ -722,15 +743,19 @@ pub fn PublicLayout() -> Element {
                                 onclick: move |_| account_open.set(false),
                                 "My reports"
                             }
-                            Link {
-                                to: Route::DmInbox {},
-                                onclick: move |_| account_open.set(false),
-                                "DMs"
+                            if show_relay_links {
+                                Link {
+                                    to: Route::DmInbox {},
+                                    onclick: move |_| account_open.set(false),
+                                    "DMs"
+                                }
                             }
-                            Link {
-                                to: Route::TeamChat {},
-                                onclick: move |_| account_open.set(false),
-                                "Chat"
+                            if show_relay_links {
+                                Link {
+                                    to: Route::TeamChat {},
+                                    onclick: move |_| account_open.set(false),
+                                    "Chat"
+                                }
                             }
                             div { class: "nav-drop-sep" }
                             button {
@@ -863,15 +888,19 @@ pub fn PublicLayout() -> Element {
                     onclick: move |_| close_mobile_nav(mobile_open),
                     "My reports"
                 }
-                Link {
-                    to: Route::DmInbox {},
-                    onclick: move |_| close_mobile_nav(mobile_open),
-                    "DMs"
+                if show_relay_links {
+                    Link {
+                        to: Route::DmInbox {},
+                        onclick: move |_| close_mobile_nav(mobile_open),
+                        "DMs"
+                    }
                 }
-                Link {
-                    to: Route::TeamChat {},
-                    onclick: move |_| close_mobile_nav(mobile_open),
-                    "Chat"
+                if show_relay_links {
+                    Link {
+                        to: Route::TeamChat {},
+                        onclick: move |_| close_mobile_nav(mobile_open),
+                        "Chat"
+                    }
                 }
                 button {
                     onclick: move |_| {
@@ -919,7 +948,9 @@ pub fn PublicLayout() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scuffed_types::NAV_CATALOG;
+    use scuffed_types::{NAV_CATALOG, OrgRole, UserInfo};
+
+    use crate::state::{RelayAvailability, set_test_embedded_json, set_test_relay_availability};
 
     #[test]
     fn pending_nav_is_empty_and_the_default_contains_members() {
@@ -1004,7 +1035,7 @@ mod tests {
     #[test]
     fn strategy_nav_follows_feature_flag_patch_notes_does_not() {
         let cfg = NavConfig::default();
-        let more_off = resolve_nav(&cfg, NavPlacement::More, false);
+        let more_off = resolve_nav(&cfg, NavPlacement::More, false, true);
         assert!(
             more_off.iter().all(|l| l.id != "strategy"),
             "Strategies must leave Primary/More when the flag is off"
@@ -1013,20 +1044,61 @@ mod tests {
             more_off.iter().any(|l| l.id == "patch_notes"),
             "Patch Notes must stay in nav when Strategies is off"
         );
-        let more_on = resolve_nav(&cfg, NavPlacement::More, true);
+        let more_on = resolve_nav(&cfg, NavPlacement::More, true, true);
         assert!(more_on.iter().any(|l| l.id == "strategy"));
         assert!(more_on.iter().any(|l| l.id == "patch_notes"));
-        assert!(nav_id_visible("strategy", true));
-        assert!(!nav_id_visible("strategy", false));
-        assert!(nav_id_visible("patch_notes", false));
-        assert!(nav_id_visible("stats", false));
-        assert!(nav_id_visible("leaderboards", false));
+        assert!(nav_id_visible("strategy", true, true));
+        assert!(!nav_id_visible("strategy", false, true));
+        assert!(nav_id_visible("patch_notes", false, true));
+        assert!(nav_id_visible("stats", false, true));
+        assert!(nav_id_visible("leaderboards", false, true));
         assert!(
             more_off.iter().any(|l| l.id == "leaderboards"),
             "Leaderboards follows Stats: the strategies flag does not hide it"
         );
-        let primary_off = resolve_nav(&cfg, NavPlacement::Primary, false);
+        let primary_off = resolve_nav(&cfg, NavPlacement::Primary, false, true);
         assert!(primary_off.iter().any(|l| l.id == "stats"));
+    }
+
+    #[test]
+    fn chat_nav_hides_when_the_relay_is_off_and_stays_when_it_is_on() {
+        let mut cfg = NavConfig::default();
+        for item in &mut cfg.items {
+            if item.id == "chat" {
+                item.placement = NavPlacement::Primary;
+            }
+        }
+        let primary_off = resolve_nav(&cfg, NavPlacement::Primary, true, false);
+        assert!(
+            primary_off.iter().all(|link| link.id != "chat"),
+            "Chat leaves the bar when the relay is off"
+        );
+        assert!(primary_off.iter().any(|link| link.id == "members"));
+        let primary_on = resolve_nav(&cfg, NavPlacement::Primary, true, true);
+        assert!(primary_on.iter().any(|link| link.id == "chat"));
+        let strategies_off = resolve_nav(&cfg, NavPlacement::Primary, false, true);
+        assert!(
+            strategies_off.iter().any(|link| link.id == "chat"),
+            "the strategies flag does not hide Chat"
+        );
+        assert!(strategies_off.iter().all(|link| link.id != "strategy"));
+
+        for item in &mut cfg.items {
+            if item.id == "chat" {
+                item.placement = NavPlacement::More;
+            }
+        }
+        let more_off = resolve_nav(&cfg, NavPlacement::More, true, false);
+        assert!(more_off.iter().all(|link| link.id != "chat"));
+        assert!(
+            more_off.iter().any(|link| link.id == "patch_notes"),
+            "More still lists the rest of the catalog"
+        );
+        let more_on = resolve_nav(&cfg, NavPlacement::More, true, true);
+        assert!(more_on.iter().any(|link| link.id == "chat"));
+        assert!(!nav_id_visible("chat", true, false));
+        assert!(nav_id_visible("chat", true, true));
+        assert!(nav_id_visible("chat", false, true));
     }
 
     #[test]
@@ -1264,5 +1336,83 @@ mod tests {
                 "Bool(false) is what the web renderer turns into inert=\"false\""
             );
         }
+    }
+
+    fn settings_with_chat_in_more() -> String {
+        r#"{"id":"site","org_name":"Org","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","updated_at":"2026-10-06T00:00:00Z","nav":{"items":[{"id":"members","placement":"primary","order":0},{"id":"chat","placement":"more","order":0}]}}"#.to_string()
+    }
+
+    struct ClearNavRelay;
+
+    impl Drop for ClearNavRelay {
+        fn drop(&mut self) {
+            set_test_relay_availability(None);
+            set_test_embedded_json(None);
+        }
+    }
+
+    fn logged_in_shell() -> Element {
+        let history =
+            use_hook(|| std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path("/")));
+        let auth = use_signal(|| AuthState {
+            user: Some(UserInfo {
+                id: "member-1".into(),
+                username: "member".into(),
+                avatar_url: None,
+                role: Some(OrgRole::Member),
+            }),
+            loading: false,
+        });
+        use_context_provider(|| auth);
+        crate::state::provide_site_settings();
+        rsx! {
+            crate::theme::ThemeProvider {
+                dioxus::router::components::HistoryProvider {
+                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                    Router::<crate::routes::Route> {}
+                }
+            }
+        }
+    }
+
+    fn render_logged_in_nav() -> String {
+        let mut dom = VirtualDom::new(logged_in_shell);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn logged_in_shell_hides_chat_and_dm_links_when_the_relay_is_off() {
+        let _clear = ClearNavRelay;
+        set_test_embedded_json(Some(settings_with_chat_in_more()));
+        set_test_relay_availability(Some(RelayAvailability::Off));
+        let off = render_logged_in_nav();
+        assert_eq!(
+            off.matches("href=\"/chat\"").count(),
+            0,
+            "desktop, mobile, and More must drop Chat: {off}"
+        );
+        assert_eq!(
+            off.matches("href=\"/dm\"").count(),
+            0,
+            "desktop and mobile account menus must drop DMs: {off}"
+        );
+        assert!(
+            off.contains("href=\"/members\""),
+            "other nav links stay: {off}"
+        );
+        assert!(off.contains("My reports"), "{off}");
+
+        set_test_relay_availability(Some(RelayAvailability::On));
+        let on = render_logged_in_nav();
+        assert!(
+            on.matches("href=\"/chat\"").count() >= 2,
+            "Chat returns on desktop and mobile when the relay is on: {on}"
+        );
+        assert!(
+            on.matches("href=\"/dm\"").count() >= 2,
+            "DMs return on desktop and mobile when the relay is on: {on}"
+        );
+        assert!(on.contains("My reports"), "{on}");
     }
 }
