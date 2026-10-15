@@ -111,7 +111,7 @@ if run_pair "stat-tracker-v0.5.0-alpha.1" "0.5.0-alpha.10" "0.1.0" >/dev/null 2>
 fi
 pass "tag alpha.1 does not match Cargo.toml alpha.10"
 
-if bash "$CHECK" >/dev/null 2>&1; then
+if env -u GITHUB_REF_NAME bash "$CHECK" >/dev/null 2>&1; then
     fail "missing tag was accepted"
 fi
 pass "missing tag is rejected"
