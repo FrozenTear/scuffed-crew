@@ -21,6 +21,7 @@ The daily report limit is now 10 (#284). A restart continues the game you were i
 
 ### Highlights
 
+- Fixed a Wayland screen capture leak that made the compositor hold more and more memory while the tracker ran, causing frame drops and possible crashes (#306).
 - If an in-app update fails, the tracker puts the previous version back and starts again, instead of staying stopped (#298).
 - The tracker now has a memory limit, so it can no longer help push your PC into running out of memory (#298).
 - Hero portraits now come from the downloaded hero pack instead of being built into the app (#299).
