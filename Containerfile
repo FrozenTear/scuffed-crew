@@ -1,7 +1,8 @@
 # ── Stage 1: Builder ───────────────────────────────────────
 # Prefer prebuilt images from GHCR (see .github/workflows/publish-image.yml)
 # rather than compiling this on a small VPS.
-FROM rust:1.92-bookworm AS builder
+# Fully qualified so podman build does not prompt for a short-name registry.
+FROM docker.io/library/rust:1.92-bookworm AS builder
 
 # Toolchain layers stay cached across app code changes (Buildx / GHA cache).
 RUN rustup target add wasm32-unknown-unknown
@@ -25,7 +26,7 @@ RUN cp -r target/dx/scuffed-app/release/web/public dist \
 RUN cargo build --release -p scuffed-server
 
 # ── Stage 2: Runtime ───────────────────────────────────────
-FROM debian:bookworm-slim
+FROM docker.io/library/debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

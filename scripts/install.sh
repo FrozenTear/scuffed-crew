@@ -132,6 +132,18 @@ if [[ -f "$SECRETS" ]]; then
     ensure_secret_key ALLOWED_ORIGINS "${REDIRECT_BASE_URL:-http://127.0.0.1:${HOST_PORT:-3000}}"
 fi
 
+# Reload so a password just appended is in the shell, then fill blanks.
+# A blank SURREALDB_APP_PASSWORD copies SURREALDB_PASSWORD. A blank
+# ALLOWED_ORIGINS copies REDIRECT_BASE_URL. See scripts/lib/compose-env.sh.
+# shellcheck disable=SC1090
+set -a
+# shellcheck source=/dev/null
+source "$SECRETS"
+set +a
+# shellcheck source=lib/compose-env.sh
+source "$ROOT/scripts/lib/compose-env.sh"
+export_compose_fallbacks
+
 if podman compose version >/dev/null 2>&1; then
     COMPOSE=(podman compose)
 elif command -v podman-compose >/dev/null 2>&1; then
@@ -177,6 +189,7 @@ if printf '%s\n' "$tp_out" | grep -q '(wrote)'; then
     # shellcheck disable=SC1090
     source "$SECRETS"
     set +a
+    export_compose_fallbacks
     echo "Recreating site-server so TRUSTED_PROXIES is applied..."
     "${COMPOSE[@]}" --env-file "$SECRETS" up -d --force-recreate --no-deps site-server
 fi
@@ -189,4 +202,6 @@ echo "  1. If public: point Caddy at 127.0.0.1:${HOST_PORT} (see docs/deploy.md)
 echo "  2. Open ${REDIRECT_BASE_URL} and create the admin account (first boot)"
 echo "  3. Later updates: ./scripts/update.sh  (git pull + image pull, no compile)"
 echo "  4. Infra secrets file: ${SECRETS}"
-echo "Optional relay: ${COMPOSE[*]} --env-file ${SECRETS} --profile relay up -d"
+echo "Optional relay (after Surreal is Up): ./scripts/relay-up.sh"
+echo "  That is --profile relay up --build -d --no-deps strfry."
+echo "  Do not drop --no-deps. See docs/deploy.md (duplicate Surreal _ vs -)."

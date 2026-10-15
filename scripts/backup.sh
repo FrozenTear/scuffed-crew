@@ -157,7 +157,7 @@ export_via_podman=0
 if ! curl -fsS --max-time 2 "${SURREAL_URL}/health" >/dev/null 2>&1 \
     && ! curl -fsS --max-time 2 "${SURREAL_URL}/status" >/dev/null 2>&1; then
     # Surreal not published on host — try podman exec
-    CID="$(podman ps --filter ancestor=surrealdb/surrealdb --format '{{.ID}}' 2>/dev/null | head -1 || true)"
+    CID="$(podman ps --filter ancestor=docker.io/surrealdb/surrealdb --format '{{.ID}}' 2>/dev/null | head -1 || true)"
     if [[ -z "${CID}" ]]; then
         CID="$(podman ps --format '{{.Names}}' 2>/dev/null | grep -i surreal | head -1 || true)"
     fi

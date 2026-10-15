@@ -69,6 +69,8 @@ cd /path/to/scuffed-crew
 
 `update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
+Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS` from `REDIRECT_BASE_URL` and a blank `SURREALDB_APP_PASSWORD` from `SURREALDB_PASSWORD`. `compose.yml` uses one substitution level for those. podman-compose 1.5 turns a nested default into the outer value plus a stray `}`, or into literal text when the outer name is unset. A missing app-password key is still generated distinct from the root password. Production still refuses to boot when the two passwords match.
+
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
 Override image pin in `data/secrets.env` if needed:
@@ -113,6 +115,10 @@ This is **name-skew**, not a `SURREALDB_URL` typo. The compose service remains `
 **Never `podman volume rm` the Surreal data volume for this symptom.** The twins share `scuffed-crew_surrealdb-data`; removing it destroys production data.
 
 `scripts/update.sh` detects a running project Surreal (`${PROJECT_NAME}-surrealdb*`, `${PROJECT_NAME}_surrealdb*`) and starts site-server with `up -d --no-deps` so the existing DB is left alone. Prefer the hyphen name (`…-surrealdb-1`) when both exist. After the app is healthy, the script stops extras and tries `rm -f`; if compose blocks the rm, the duplicate is left `Exited`.
+
+The same twin starts from a relay bring-up. `podman compose --profile relay up --build -d strfry` follows `depends_on` and podman-compose creates `scuffed-crew_surrealdb_1` on the volume already held by `scuffed-crew-surrealdb-1`. RocksDB's `LOCK` file is what stopped both processes from writing. That is not a guarantee: if the live process is down, the twin can open the database. `strfry` has no `depends_on`, and `scripts/relay-up.sh` always passes `--no-deps`. It refuses to run unless a project Surreal container is already Up, and it does not create one.
+
+Do not pin `container_name` or the compose project `name` to force one container name. A hyphen `container_name` makes `podman create` fail when `scuffed-crew-surrealdb-1` already exists, so that host does not get a second writer. On a host whose only database is `scuffed-crew_surrealdb_1`, the same pin starts a new hyphen container on the same volume. `x-podman.name_separator_compat` makes podman-compose use hyphens for containers and also for networks (`scuffed-crew-internal` instead of the existing `scuffed-crew_internal`), so the relay would not see the running database. Volume names are already `${project}_surrealdb-data` in both tools. That shared name is why a second container is dangerous. `scripts/update.sh` keeps using `--no-deps` for site-server when a project Surreal is Up.
 
 Manual recovery if an older `update.sh` already created the twin:
 
@@ -406,14 +412,21 @@ container.
 
 `relay/Containerfile` pins strfry29 to fiatjaf/relay29 commit
 `3276594e9d85670af13ba5cf0aad235f9692acd9`. That commit's `go.mod` requires
-Go 1.24.1 or newer. The builder image is `golang:1.24.13-alpine` because it
-sets `GOTOOLCHAIN=local` and will not download a newer toolchain. Change the
-`RELAY29_COMMIT` build arg in that file to move the pin. `relay-policy` and
-`relay-read-gate` are compiled from this repository as static musl binaries.
-The runtime base is `dockurr/strfry` pinned by digest (Alpine 3.18, musl). A
-glibc build of those plugins does not load there. `strfry29` is a static Go
-binary. CI builds the Go stage on every pull request. The full image also
-release-builds those Rust plugins, so that step stays out of CI.
+Go 1.24.1 or newer. The builder image is
+`docker.io/library/golang:1.24.13-alpine` because it sets `GOTOOLCHAIN=local`
+and will not download a newer toolchain. Change the `RELAY29_COMMIT` build
+arg in that file to move the pin. `relay-policy` and `relay-read-gate` are
+compiled from this repository as static musl binaries. The runtime base is
+`docker.io/dockurr/strfry` pinned by digest
+`sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d`
+(Alpine 3.18, musl). A short name (`dockurr/strfry@sha256:...`) makes
+`podman build` wait for a registry prompt, so the Containerfiles and
+`compose.yml` use a registry host on every image (`docker.io/library/...`
+for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
+`ghcr.io/...` for the site image). A glibc build of those plugins does not
+load there. `strfry29` is a static Go binary. CI builds the Go stage on
+every pull request. The full image also release-builds those Rust plugins,
+so that step stays out of CI.
 
 Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
 Compose network only, so site-server still uses `ws://strfry:7777` for publish
@@ -438,11 +451,22 @@ strfry does not apply to browsers. The gate limits concurrent connections
 (default 32), new connections (default 60 per 60 seconds), and client messages
 (default 240 per 60 seconds) per client IP. It trusts `X-Forwarded-For` only
 when the TCP peer is loopback or listed in `RELAY_GATE_TRUSTED_PROXIES`.
-Compose sets that from `TRUSTED_PROXIES`, which
-`scripts/ensure-trusted-proxies.sh` fills with the compose-network gateway
-(the address the container sees for host Caddy). A direct client cannot pick
-its own IP by sending the header. If `TRUSTED_PROXIES` is empty, every browser
-shares the port-forwarder's bucket.
+
+Compose sets that variable with one substitution, `${TRUSTED_PROXIES:-}`.
+`podman-compose` before 1.6.0 (the `/bin/podman-compose` builds on some VPS
+images) does not expand a nested default such as
+`${RELAY_GATE_TRUSTED_PROXIES:-${TRUSTED_PROXIES:-}}`. With the outer name
+unset, those builds pass the literal `${TRUSTED_PROXIES:-}` into the
+container. The gate logs `ignoring unparseable entry` for that value and
+ignores it, so host Caddy is not a trusted proxy and every browser shares
+the port-forwarder's bucket. Docker Compose and podman-compose both expand
+the single-level form, so both pass the gateway list through.
+`scripts/ensure-trusted-proxies.sh` fills `TRUSTED_PROXIES` with the
+compose-network gateway (the address the container sees for host Caddy). A
+direct client cannot pick its own IP by sending the header. If
+`TRUSTED_PROXIES` is empty, every browser shares the port-forwarder's
+bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
+`data/secrets.env` is not read.
 
 ### Enable
 
@@ -456,11 +480,24 @@ shares the port-forwarder's bucket.
    to start when that flag is set and the SurrealDB password is missing,
    the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
 
-2. Build and start strfry (the image also starts the read gate):
+2. Build and start strfry (the image also starts the read gate). The main
+   stack must already be up, so Surreal is the existing container and not a
+   new one:
 
    ```bash
-   podman compose --env-file data/secrets.env --profile relay up --build -d strfry
+   ./scripts/relay-up.sh
    ```
+
+   That runs `podman compose --env-file data/secrets.env --profile relay up --build -d --no-deps strfry`
+   (or `podman-compose` when that is the provider) with `COMPOSE_PROJECT_NAME` set.
+   If that up fails, the script prints the project name and exits 1.
+   `--no-deps` is required.
+   Without it, podman-compose also starts Surreal and can create
+   `scuffed-crew_surrealdb_1` on the same volume as `scuffed-crew-surrealdb-1`.
+   `strfry` has no `depends_on` for the same reason. Do not run
+   `up --profile relay` with no service name on a day-2 host: that starts
+   the default services, including Surreal, and can create the twin. See
+   Troubleshooting: duplicate Surreal `_` vs `-`.
 
 3. Recreate site-server so it picks up `NOSTR_RELAY_URL`:
 

@@ -16,13 +16,23 @@ SECRETS="$ROOT/data/secrets.env"
 cd "$ROOT"
 
 : "${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD to the new password}"
-export BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
-export BOOTSTRAP_ADMIN_RESET=1
 
 if [[ ! -f "$SECRETS" ]]; then
     echo "error: missing $SECRETS — run scripts/install.sh first" >&2
     exit 1
 fi
+
+# shellcheck disable=SC1090
+set -a
+# shellcheck source=/dev/null
+source "$SECRETS"
+set +a
+# Re-assert after source so a blank line in secrets.env cannot clear the reset.
+export BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
+export BOOTSTRAP_ADMIN_RESET=1
+# shellcheck source=lib/compose-env.sh
+source "$ROOT/scripts/lib/compose-env.sh"
+export_compose_fallbacks
 
 if podman compose version >/dev/null 2>&1; then
     COMPOSE=(podman compose)
