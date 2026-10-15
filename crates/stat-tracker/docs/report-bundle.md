@@ -4,7 +4,7 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
-Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4). Revision 7 (2026-10-13) adds two optional keys to `system`, `ocr` and `ocr_blocked_calls` (section 2).
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4). Revision 7 (2026-10-13) adds two optional keys to `system`, `ocr` and `ocr_blocked_calls` (section 2). Blank table 12 (2026-10-15) also blanks 5v5 boards (section 4); 6v6 output is unchanged.
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
@@ -337,7 +337,7 @@ Known limits:
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 11 for this revision), and a kit from another version is never reported.
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 12 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
@@ -430,7 +430,7 @@ If the window has no lines, `log.txt` still exists and contains the single line 
 
 The GUI has two ways in:
 
-- **Report** on a game card (in the Games tab and the game detail view). It builds a game report for that session. The category list starts at `wrong_stats` and leaves out `crash` and `performance`.
+- **Report** on a game card (in the Games tab and the game detail view). It builds a game report for that session. No category is picked when it opens: the member picks one before Send or Save. The list leaves out `crash` and `performance`.
 - **Report a problem** in the app menu and in Settings. It builds a `crash` or `performance` report (the member picks one), or `other`. It has no game and no crops.
 
 Crash marker: when the daemon starts, it writes `{data_dir}/run.marker` with its pid, its start time, and `last_seen`, the last time it was known to be alive. While running it rewrites `last_seen` once a minute (an atomic replace of the file, so a crash mid-write leaves the previous copy). A clean shutdown (SIGTERM, a normal exit, or an update restart) removes it. When the daemon starts and finds an old marker whose pid is not running, or is running but is not a `scuffed-stat-tracker` process (pids are reused), the last run did not exit cleanly. It moves the marker to `{data_dir}/last_crash.marker` (one file, overwritten) and logs one WARN line. The next time the app opens, if `last_crash.marker` exists and is newer than the last report or dismissal, the app asks once: "The tracker stopped unexpectedly. Send a report?" Yes opens Report a problem with `crash` picked. No or Send removes the marker. The marker holds only the pid, the start time, and `last_seen`. It is never uploaded as a file. `last_seen` sets the crash log window (section 6). The app shows the stop as "around `last_seen`", which is at most a minute before the real stop.

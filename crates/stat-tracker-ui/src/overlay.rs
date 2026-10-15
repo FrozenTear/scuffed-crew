@@ -105,7 +105,7 @@ pub fn toggle_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
 /// Identity of the live game, if any.
 ///
 /// **Process-first:** `active_game.json` never opens the gate — the daemon
-/// leaves that file on disk after a match (Robert's last-night Defeat). Empty
+/// leaves that file on disk after a match (FrozenTear's last-night Defeat). Empty
 /// process names are not running. While the process is live the file may
 /// supply a `session_id` only for an *unfinished* game inside `window_secs`;
 /// otherwise the key is `process` (hide-before-first-Tab).
@@ -933,7 +933,7 @@ impl OverlayApp {
 }
 
 /// Layer-shell runner. Needs a Wayland compositor; this Cloud Agent VM does not
-/// have one. Robert accepts the overlay on niri.
+/// have one. FrozenTear accepts the overlay on niri.
 #[cfg(feature = "companion")]
 pub fn run_companion(cli: Cli) -> anyhow::Result<()> {
     crate::overlay_shell::run(cli)

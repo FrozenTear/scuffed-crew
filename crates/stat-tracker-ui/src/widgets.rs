@@ -802,7 +802,7 @@ fn action_row(
     if has_kit {
         report = report.on_press(Message::Report(crate::report::ReportMessage::OpenGame {
             session_id: Some(sid.clone()),
-            category: crate::report::GameCategory::WrongStats,
+            category: None,
             training: false,
             choices: Vec::new(),
         }));

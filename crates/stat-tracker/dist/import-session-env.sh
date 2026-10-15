@@ -29,7 +29,7 @@
 # Nothing is written into the unit file.
 #
 # Exit 0 when there is nothing safe to import or when systemctl cannot
-# reach the user bus — the daemon must still start. The EnvironmentFile
+# reach the user bus - the daemon must still start. The EnvironmentFile
 # is written first; import-environment is best-effort and timed out so a
 # stuck user bus cannot wedge the oneshot the daemon is ordered After=.
 #

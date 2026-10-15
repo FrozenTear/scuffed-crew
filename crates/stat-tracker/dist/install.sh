@@ -6,9 +6,9 @@
 #   bin/stat-tracker-gui   (Iced UI from scuffed-stat-tracker-ui)
 #   lib/scuffed-stat-tracker/ocr/*  (daemon OCR closure; RPATH …/ocr)
 #   lib/scuffed-stat-tracker/gui/*  (GUI libxdo; RPATH …/gui)
-#   (v0.4.0 used a flat lib/* on $ORIGIN/../lib — that shadowed system OpenSSL)
-#   tessdata/eng.traineddata        (optional — runtime OCR model, since v0.3.0)
-#   tessdata/koverwatch.traineddata (optional — CI-trained game-font model, since v0.3.0)
+#   (v0.4.0 used a flat lib/* on $ORIGIN/../lib - that shadowed system OpenSSL)
+#   tessdata/eng.traineddata        (optional - runtime OCR model, since v0.3.0)
+#   tessdata/koverwatch.traineddata (optional - CI-trained game-font model, since v0.3.0)
 #   assets/scuffed-stat-tracker.desktop
 #   assets/scuffed-stat-tracker.service
 #   assets/scuffed-stat-tracker-session.service
@@ -41,7 +41,7 @@ NC='\033[0m'
 # All logging goes to stderr; stdout is reserved for any machine-parseable
 # output. Mirrors the bootstrap.sh fix (3cd2c0c): a log line on stdout there
 # shifted a mapfile parse and broke the release fetch. error() was already on
-# stderr — info()/warn() now match it.
+# stderr - info()/warn() now match it.
 info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
@@ -148,7 +148,7 @@ refresh_desktop_database() {
 }
 
 # SKIP_INTEGRATION=<non-empty> installs binaries/libs only and skips the
-# desktop entry + systemd user unit — so throwaway-PREFIX installs (clean-room
+# desktop entry + systemd user unit - so throwaway-PREFIX installs (clean-room
 # tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
 # install (default, unchanged). bootstrap.sh passes this through.
 SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
@@ -282,7 +282,7 @@ fi
 
 # Bundled native libs (portable releases). Never dump into $PREFIX/lib itself:
 # v0.4.0 put Ubuntu 22.04 libcrypto.so.3 there, and both binaries' RUNPATH
-# ($ORIGIN/../lib) made that copy win over /usr/lib — OPENSSL_3.2.0 not found
+# ($ORIGIN/../lib) made that copy win over /usr/lib - OPENSSL_3.2.0 not found
 # when the GUI loaded system libcryptsetup.
 #
 # v0.4.1+ layout (matches the stamped RUNPATHs):
@@ -349,7 +349,7 @@ if [[ -f "$MANIFEST" ]]; then
     while IFS= read -r line; do
         [[ "$line" == /* ]] || continue
         rel="${line#"$LIB_DIR"/}"
-        # Only flat files we previously dumped into $PREFIX/lib — not the
+        # Only flat files we previously dumped into $PREFIX/lib - not the
         # new private tree ($LIB_DIR/scuffed-stat-tracker/…).
         if [[ "$rel" == "$line" || "$rel" == */* ]]; then
             continue
@@ -382,8 +382,8 @@ if [[ -f "$BUNDLED_ENG" ]]; then
 fi
 
 # Bundled game-font model (koverwatch). Unlike eng, the release bundle is the
-# canonical source for this file — most machines cannot regenerate it locally
-# (text2image hangs/segfaults on pango >= 1.56) — so a differing existing copy
+# canonical source for this file - most machines cannot regenerate it locally
+# (text2image hangs/segfaults on pango >= 1.56) - so a differing existing copy
 # is replaced, with a .bak kept for anyone who genuinely self-trained one.
 BUNDLED_KOV="$PKG_ROOT/tessdata/koverwatch.traineddata"
 USER_KOV="$USER_TESSDATA_DIR/koverwatch.traineddata"
@@ -494,7 +494,7 @@ else
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
 
-# Optional tray (Hide-to-tray). Missing is fine — the Iced window still starts.
+# Optional tray (Hide-to-tray). Missing is fine - the Iced window still starts.
 appindicator_found=0
 if ldconfig -p 2>/dev/null | grep -qE 'libayatana-appindicator3|libappindicator3'; then
     appindicator_found=1
@@ -521,7 +521,7 @@ if [[ "$appindicator_found" -eq 0 ]]; then
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
-# Human-facing summary to stderr too — stdout stays reserved for machine output
+# Human-facing summary to stderr too - stdout stays reserved for machine output
 # (there is none), so an output-parsing caller never sees install chatter.
 
 {

@@ -40,6 +40,11 @@ pub const MAX_TOTAL_BYTES: u64 = 40 * 1024 * 1024;
 pub const SCOREBOARD_PNG: &str = "scoreboard.png";
 pub const OUTCOME_PNG: &str = "outcome.png";
 pub const READS_JSON: &str = "reads.json";
+/// Player names read on this session's boards. Local only: never put in a
+/// report zip, only handed to the log scrubber so those names are removed.
+pub const NAMES_JSON: &str = "names.json";
+/// Most names kept per session (two full 6v6 boards plus misreads).
+const NAMES_MAX: usize = 64;
 
 /// One read in `reads.json`, the same shape as a manifest read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,6 +477,67 @@ fn modified(path: &Path) -> std::time::SystemTime {
         .unwrap_or(std::time::UNIX_EPOCH)
 }
 
+/// Add `names` (player names read on a stored board) to the session's
+/// local [`NAMES_JSON`]. Only when the session already has a kit folder,
+/// so names never outlive their kit. Blank and duplicate names are dropped.
+pub fn record_names(data_dir: &Path, session_id: &str, names: &[String]) -> io::Result<()> {
+    let Some(dir) = session_dir(data_dir, session_id) else {
+        return Ok(());
+    };
+    let _guard = write_lock();
+    if !dir.is_dir() || was_removed(&dir) {
+        return Ok(());
+    }
+    let mut all = read_names(&dir);
+    for name in names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if all.len() >= NAMES_MAX {
+            break;
+        }
+        if !all.iter().any(|have| have == name) {
+            all.push(name.to_string());
+        }
+    }
+    let json = serde_json::to_vec(&all).map_err(io::Error::other)?;
+    write_private(&dir, NAMES_JSON, &json)
+}
+
+fn read_names(dir: &Path) -> Vec<String> {
+    fs::read(dir.join(NAMES_JSON))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// The player names stored for one session (the scrub list of its report).
+pub fn names(data_dir: &Path, session_id: &str) -> Vec<String> {
+    session_dir(data_dir, session_id)
+        .map(|dir| read_names(&dir))
+        .unwrap_or_default()
+}
+
+/// The stored names of every session with a kit folder, without
+/// duplicates. A log report's window can cover any recent game.
+pub fn all_names(data_dir: &Path) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(kit_root(data_dir)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for e in rd.filter_map(Result::ok) {
+        let Some(name) = e.file_name().into_string().ok() else {
+            continue;
+        };
+        if safe_session(&name).is_none() {
+            continue;
+        }
+        for n in read_names(&e.path()) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
 /// Sessions with a kit, newest first.
 pub fn sessions(data_dir: &Path) -> Vec<String> {
     let Ok(rd) = fs::read_dir(kit_root(data_dir)) else {
@@ -620,6 +686,30 @@ fn dir_bytes(dir: &Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod names_tests {
+    use super::*;
+
+    #[test]
+    fn board_names_are_kept_per_session_and_only_with_a_kit_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        record_names(data, "s1", &["QXOther".into()]).unwrap();
+        assert!(names(data, "s1").is_empty(), "no kit folder, no names");
+        let dir = session_dir(data, "s1").unwrap();
+        private_dir(&dir).unwrap();
+        record_names(data, "s1", &["QXOther".into(), " ".into(), "Jo".into()]).unwrap();
+        record_names(data, "s1", &["Jo".into(), "QX0ther".into()]).unwrap();
+        assert_eq!(names(data, "s1"), vec!["QXOther", "Jo", "QX0ther"]);
+        private_dir(&session_dir(data, "s2").unwrap()).unwrap();
+        record_names(data, "s2", &["Zed".into(), "Jo".into()]).unwrap();
+        let mut all = all_names(data);
+        all.sort();
+        assert_eq!(all, vec!["Jo", "QX0ther", "QXOther", "Zed"]);
+        assert!(names(data, "../s1").is_empty());
+    }
 }
 
 #[cfg(test)]

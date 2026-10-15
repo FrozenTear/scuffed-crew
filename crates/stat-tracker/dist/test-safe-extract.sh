@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tar xzf follows a symlink already in the destination and will happily write
 # outside the extract dir. safe_extract must refuse absolute paths, '..', and
-# any symlink that leaves the extract dir — and must not create the escaped file.
+# any symlink that leaves the extract dir - and must not create the escaped file.
 set -euo pipefail
 
 DIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

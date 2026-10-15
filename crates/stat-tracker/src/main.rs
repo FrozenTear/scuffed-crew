@@ -1183,6 +1183,10 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 /// session. `outcome` is filled in when the poller reads the post-match screens
 /// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
+    /// Restored after a restart with a result screen already seen for it.
+    /// Memory only. The first Tab after [`POST_MATCH_GRACE`] from that
+    /// result starts a new game ([`should_start_fresh_session`]).
+    restored_with_result: bool,
     session_id: String,
     /// alpha.8: the newest pending board's row with the reader's best guess
     /// in each unread stat column, those columns in `suspect_fields`. Stored
@@ -1324,6 +1328,7 @@ impl ActiveGame {
             text_fallback_locked: false,
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
+            restored_with_result: false,
         }
     }
 
@@ -2110,6 +2115,15 @@ fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
 fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     let to_instant =
         |w: chrono::DateTime<Utc>| Instant::now().checked_sub((Utc::now() - w).to_std().ok()?);
+    if let Some(reason) = restart_resume_refusal(&p, Utc::now()) {
+        tracing::info!(
+            session_id = %p.session_id,
+            map = p.map.as_deref().unwrap_or(""),
+            reason,
+            "previous game not resumed after restart: the next Tab starts a new game"
+        );
+        return None;
+    }
     let last_activity = to_instant(p.last_activity)?;
     if last_activity.elapsed() > UNFINISHED_SESSION_IDLE {
         return None;
@@ -2160,7 +2174,46 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
         text_fallback_locked: p.text_fallback_locked,
         replaced_text_fallback_map: p.replaced_text_fallback_map,
         result_evidence: shadow::result::ResultEvidence::default(),
+        restored_with_result: hint_recovered,
     })
+}
+
+/// Longest gap since the previous run's last capture for which a restart
+/// resumes that game. A crash and restart mid-game takes well under a
+/// minute; the next game's first Tab usually comes after a result screen,
+/// a queue and hero select. Past this, the next Tab starts a new game.
+const RESUME_AFTER_RESTART_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Why the game in `active_game.json` is not resumed after a restart, or
+/// `None` when it is clearly the same game. An unfinished game with a
+/// stored board resumes only when it has a known map and its last capture
+/// is at most [`RESUME_AFTER_RESTART_MAX_GAP`] old. A Tab after the restart
+/// that names another map still splits on the boundary's different-map
+/// rule.
+///
+/// A game with a result already seen is restored so its result and its
+/// post-match scoreboard stay on it. It is marked
+/// [`ActiveGame::restored_with_result`], so the first Tab after
+/// [`POST_MATCH_GRACE`] from that result starts a new game. A game whose
+/// outcome is recorded starts a new game on that Tab anyway.
+fn restart_resume_refusal(p: &PersistedGame, now: chrono::DateTime<Utc>) -> Option<&'static str> {
+    if p.outcome.is_decided() {
+        return None;
+    }
+    // A session with no stored board (opened by a start screen, or holding
+    // the next game's board after a shutdown) cannot become a duplicate
+    // game, so it keeps the [`UNFINISHED_SESSION_IDLE`] bound alone.
+    if !p.session_created {
+        return None;
+    }
+    if known_label(p.map.as_deref()).is_none() {
+        return Some("no map recorded, so it cannot be matched");
+    }
+    match (now - p.last_activity).to_std() {
+        Ok(gap) if gap <= RESUME_AFTER_RESTART_MAX_GAP => None,
+        Ok(_) => Some("last capture too long ago"),
+        Err(_) => Some("last capture is later than now (clock moved back)"),
+    }
 }
 
 /// Test double for a stale start. Production uses [`begin_daemon_session`]
@@ -2293,6 +2346,15 @@ const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_se
 /// meaningful sleep.
 const SUSPEND_RESET_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A game restored after a restart with a result screen already seen is a
+/// finished game once [`POST_MATCH_GRACE`] has passed since that result:
+/// the next Tab is the next game, even on the same map.
+fn restored_result_is_past_grace(g: &ActiveGame, now: Instant) -> bool {
+    g.restored_with_result
+        && g.result_mark
+            .is_some_and(|m| now.saturating_duration_since(m.seen_at) > POST_MATCH_GRACE)
+}
+
 /// Whether a Tab capture should open a fresh session instead of reusing the
 /// active one.
 fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
@@ -2301,7 +2363,10 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
         None => true,
         // Mid-game capture — unless the session has been idle so long it
         // can't plausibly be the same game.
-        Some(g) if !g.finished() => now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE,
+        Some(g) if !g.finished() => {
+            now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE
+                || restored_result_is_past_grace(g, now)
+        }
         // Finished: reuse within the grace window (post-match scoreboard of the
         // same match), start fresh after it. An unstamped outcome is treated as
         // stale so a finished result can never leak forward.
@@ -5630,6 +5695,7 @@ fn apply_new_reader(
     own: reader_apply::OwnRow,
     own_row_suspect: bool,
     mut board: shadow::BoardRead,
+    authority: Option<&str>,
 ) {
     board.set_result(shadow::result_field(evidence));
     let policy = reader_apply::PolicyRow {
@@ -5644,7 +5710,10 @@ fn apply_new_reader(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let saved = reader_apply::merge_saved(&policy, own, Some(&board));
+    // The own row's hero is stored only when the Tab's hero authority (own
+    // row and career panel portrait) names it too.
+    let saved =
+        reader_apply::merge_saved_with_authority(&policy, own, Some(&board), Some(authority));
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
@@ -5864,6 +5933,23 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
+/// The Tab retry predicate: retry only when the scoreboard preflight
+/// rejected the frame as not a scoreboard (a board still drawing). A team
+/// size the pitch does not settle and an analysed frame are not retried.
+fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
+    matches!(outcome, FrameAnalysisOutcome::NotAScoreboard { .. })
+}
+
+/// How useful a Tab outcome is, so a later rejected grab never replaces a
+/// better one: analysed over team size unsure over not a scoreboard.
+fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
+    match outcome {
+        FrameAnalysisOutcome::NotAScoreboard { .. } => 0,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 1,
+        FrameAnalysisOutcome::Analyzed(_) => 2,
+    }
+}
+
 async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Result<CaptureReport> {
     if ctx.use_new_reader {
         req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await;
@@ -5886,38 +5972,55 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         injected
     } else {
         tracing::info!("Tab detected: capturing screen (hold Tab to keep scoreboard visible)");
-        let img = capture::capture_screen_output(backend, capture_output)
-            .await
-            .map_err(anyhow::Error::from_boxed)
-            .context("screen capture failed")?;
-
-        let matcher = Arc::clone(&ctx.portrait_matcher);
-        // Clone player_name so the blocking closure can own it.
-        let player_name_owned = player_name.map(|s| s.to_string());
-        let flags = FrameFlags {
-            allow_banner_recovery,
-            session_map_known: session_map.is_some(),
-            shadow_on: ctx.shadow.is_some(),
-            use_new_reader: ctx.use_new_reader,
-        };
+        // A board still drawing fails the preflight, so a rejected Tab frame
+        // is captured again after a short wait (`stat_tracker::tab_retry`).
         let own_seeds = own_name_seeds(ctx.own_name.as_ref());
-        let analysis = tokio::task::spawn_blocking(move || {
-            let started = Instant::now();
-            let analysis = analyze_frame(
-                img,
-                matcher,
-                player_name_owned,
-                game_outcome,
-                flags,
-                own_seeds,
-            );
-            stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
-            // With classic OCR off there was no OCR, and no OCR workers.
-            if !ocr::gate::is_off() {
-                stat_tracker::omp::log_threads_after_first_ocr();
-            }
-            analysis
-        })
+        let (analysis, _retries) = stat_tracker::tab_retry::with_retries(
+            &stat_tracker::tab_retry::TAB_RETRY_WAITS,
+            tab_capture_should_retry,
+            tab_outcome_rank,
+            |_| {
+                let matcher = Arc::clone(&ctx.portrait_matcher);
+                // Clone player_name so the blocking closure can own it.
+                let player_name_owned = player_name.map(|s| s.to_string());
+                let flags = FrameFlags {
+                    allow_banner_recovery,
+                    session_map_known: session_map.is_some(),
+                    shadow_on: ctx.shadow.is_some(),
+                    use_new_reader: ctx.use_new_reader,
+                };
+                let own_seeds = own_seeds.clone();
+                async move {
+                    let img = capture::capture_screen_output(backend, capture_output)
+                        .await
+                        .map_err(anyhow::Error::from_boxed)
+                        .context("screen capture failed")?;
+                    let analysis = tokio::task::spawn_blocking(move || {
+                        let started = Instant::now();
+                        let analysis = analyze_frame(
+                            img,
+                            matcher,
+                            player_name_owned,
+                            game_outcome,
+                            flags,
+                            own_seeds,
+                        );
+                        stat_tracker::perf::record(
+                            stat_tracker::perf::Stage::TabAnalyze,
+                            started.elapsed(),
+                        );
+                        // With classic OCR off there was no OCR, and no OCR workers.
+                        if !ocr::gate::is_off() {
+                            stat_tracker::omp::log_threads_after_first_ocr();
+                        }
+                        analysis
+                    })
+                    .await?;
+                    anyhow::Ok(analysis)
+                }
+            },
+            tokio::time::sleep,
+        )
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
@@ -6545,6 +6648,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     board_row,
                     own_row_suspect,
                     board,
+                    pack_hero.as_deref(),
                 );
                 // The reader's number for each cell, sure or not; a cell with
                 // none keeps what the row holds.
@@ -6682,6 +6786,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 &parsed,
                 captured_at,
                 req.tab_at,
+                board_names(&rows),
             );
 
             // Re-derive the session's hero timeline from its RAW snapshots after
@@ -6913,6 +7018,16 @@ fn save_rejected_frame(
 /// recorded evidence (a capture, an outcome) this recently.
 const RANK_OUTCOME_MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// Every name read on a board's rows (each name window), for the report
+/// scrub list. Empty under the new reader, which reads no names.
+fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.name.iter().chain(row.name_alternates.iter().flatten()))
+        .map(|cell| cell.value.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
 /// accepted capture. Written off the capture path; a failure is logged and
 /// never touches the stored match.
@@ -6926,6 +7041,7 @@ fn record_report_kit(
     stored: &storage::PersonalMatch,
     captured_at: chrono::DateTime<Utc>,
     tab_at: stat_tracker::report::blank::CaptureTime,
+    board_names: Vec<String>,
 ) {
     let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
     else {
@@ -6954,6 +7070,14 @@ fn record_report_kit(
             tab_at,
         ) {
             tracing::debug!(error = %e, "report kit: scoreboard not written");
+        }
+        // The board's names stay on this PC; a report hands them to the
+        // log scrubber.
+        if !board_names.is_empty()
+            && let Err(e) =
+                stat_tracker::report::kit::record_names(&data_dir, &session_id, &board_names)
+        {
+            tracing::debug!(error = %e, "report kit: names not written");
         }
     });
 }
@@ -8000,7 +8124,55 @@ mod ocr_bench;
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::time::Duration;
+
+    #[test]
+    fn board_names_takes_every_name_window_and_skips_blanks() {
+        let cell = |v: &str| ocr::CellOcrResult {
+            value: v.into(),
+            confidence: 90,
+            suspect: false,
+        };
+        let rows = vec![
+            ocr::RowOcrResult {
+                name: Some(cell("QXOther")),
+                name_alternates: vec![None, Some(cell(" QX0ther "))],
+                stats: Vec::new(),
+                mean_confidence: 90,
+            },
+            ocr::RowOcrResult {
+                name: Some(cell("  ")),
+                name_alternates: Vec::new(),
+                stats: Vec::new(),
+                mean_confidence: 0,
+            },
+        ];
+        assert_eq!(board_names(&rows), vec!["QXOther", "QX0ther"]);
+    }
+
+    #[test]
+    fn tab_retry_predicate_retries_only_not_a_scoreboard() {
+        let scan = detect::hero_portrait::RowScan {
+            dip_count: 2,
+            median_pitch: None,
+            spectral_pitch: None,
+        };
+        let frame = || image::DynamicImage::new_rgb8(4, 4);
+        let rejected = FrameAnalysisOutcome::NotAScoreboard {
+            outcome: detect::MatchOutcome::Unknown,
+            frame: frame(),
+            scan,
+        };
+        let unsure = FrameAnalysisOutcome::TeamSizeUncertain {
+            outcome: detect::MatchOutcome::Unknown,
+            frame: frame(),
+            scan,
+        };
+        assert!(tab_capture_should_retry(&rejected));
+        assert!(!tab_capture_should_retry(&unsure));
+        assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
+    }
 
     struct ScriptedWaiter {
         events: Vec<KeyboardWait>,
@@ -8227,6 +8399,7 @@ mod tests {
             text_fallback_locked: false,
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
+            restored_with_result: false,
         }
     }
 
@@ -10572,7 +10745,7 @@ mod tests {
         assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
         assert!(
             hc_body
-                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, );")
+                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, pack_hero.as_deref(), );")
         );
         // the stored report carries the text-fallback replacement
         assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
@@ -12607,6 +12780,138 @@ mod tests {
     }
 
     async fn no_edit(_: &DaemonCtx, _: usize) {}
+
+    /// The own row's board hero with the hero authority as given: a 5v5
+    /// board whose own row names `row` while the authority (own row and
+    /// career panel portrait) names `authority`.
+    fn guard_tab(
+        row: Option<&str>,
+        authority: Option<&str>,
+    ) -> (FrameAnalysis, Option<shadow::BoardRead>) {
+        (o8_analysis(None, authority), Some(o8_board(row)))
+    }
+
+    async fn guard_game(
+        tabs: Vec<(FrameAnalysis, Option<shadow::BoardRead>)>,
+    ) -> (Vec<storage::PersonalMatch>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, _) = o8_tabs(&ctx, tabs, no_edit).await;
+        // The game-level hero is the derived timeline's primary, which is
+        // what the GUI shows and the upload sends (display_hero).
+        let snaps = ctx.store.get_session_snapshots("o8").await.unwrap();
+        let shown: Vec<String> = snaps.iter().map(|m| m.display_hero().to_string()).collect();
+        assert!(shown.windows(2).all(|w| w[0] == w[1]), "{shown:?}");
+        let session = shown.last().cloned();
+        (rows, session)
+    }
+
+    /// A confident hero on Tab 1, then a 5v5 Tab whose own-row read the
+    /// career panel contradicts (the authority abstains): the game keeps
+    /// Tab 1's hero and the second row flags `hero`.
+    #[tokio::test]
+    async fn a_disagreeing_5v5_tab_keeps_the_earlier_confident_hero() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let (rows, session) = guard_game(vec![
+            guard_tab(Some("zenyatta"), Some("zenyatta")),
+            guard_tab(Some("baptiste"), None),
+        ])
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.hero == "Zenyatta"), "{rows:?}");
+        assert!(!rows[0].suspect_fields.iter().any(|f| f == "hero"));
+        assert!(rows[1].suspect_fields.iter().any(|f| f == "hero"));
+        assert_eq!(session.as_deref(), Some("Zenyatta"));
+    }
+
+    /// The first Tab's own-row hero is rejected (the authority abstains, the
+    /// panel names nothing to confirm it): that row stores Unknown with
+    /// `hero` flagged, never the rejected read. A later agreeing Tab fills
+    /// the game's hero in.
+    #[tokio::test]
+    async fn a_rejected_first_tab_stores_unknown_and_a_later_agreeing_tab_fills_the_hero() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        for first in [Some("baptiste"), None] {
+            let (rows, session) = guard_game(vec![
+                guard_tab(first, None),
+                guard_tab(Some("zenyatta"), Some("zenyatta")),
+            ])
+            .await;
+            assert_eq!(rows.len(), 2, "{first:?}");
+            assert_eq!(rows[0].hero, "Unknown", "{first:?}");
+            assert!(
+                rows[0].suspect_fields.iter().any(|f| f == "hero"),
+                "{first:?}"
+            );
+            assert_eq!(rows[1].hero, "Zenyatta", "{first:?}");
+            assert!(
+                !rows[1].suspect_fields.iter().any(|f| f == "hero"),
+                "{first:?}"
+            );
+            assert_eq!(session.as_deref(), Some("Zenyatta"), "{first:?}");
+        }
+    }
+
+    /// #289 with #288: a confident 5v5 hero on Tab 1, then the tracker
+    /// restarts and resumes the game from `active_game.json`, then a Tab
+    /// whose own-row read the career panel contradicts (the authority
+    /// abstains). The resumed game goes through the same authority merge as
+    /// a live one: it keeps Tab 1's hero and the new row flags `hero`.
+    #[tokio::test]
+    async fn a_resumed_5v5_game_keeps_the_earlier_confident_hero_when_the_next_tab_disagrees() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut now = test_now();
+        // The local store is on disk and outlives the process, so one store
+        // stands in for both runs. The in-memory session state is what a
+        // restart loses: it is rebuilt from `active_game.json` below.
+        let ctx = o8_ctx(dir.path(), true).await;
+        {
+            let mut active = game(detect::MatchOutcome::Unknown, None, now);
+            active.session_id = "o8".into();
+            active.map = Some("Busan".into());
+            active.map_source = Some(boundary::MapSource::TopBar);
+            active.session_created = false;
+            let mut st = session(Some(active), now);
+            let (analysis, board) = guard_tab(Some("zenyatta"), Some("zenyatta"));
+            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
+            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+            let report = handle_capture(&ctx, req).await.unwrap();
+            assert!(report.recorded);
+            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "o8", Ok(report), now).await;
+            assert!(st.active_game.as_ref().unwrap().session_created);
+            persist_active_game(dir.path(), st.active_game.as_ref());
+        }
+
+        // Restart: the session state comes back from disk only.
+        let mut st = startup_session(dir.path());
+        let resumed = st
+            .active_game
+            .as_ref()
+            .expect("the same recent game resumes");
+        assert_eq!(resumed.session_id, "o8");
+        assert_eq!(
+            resumed.hero_auth.accepted_hero.as_deref(),
+            Some("Zenyatta"),
+            "the confident hero survives the restart"
+        );
+        now = now.max(Instant::now()) + Duration::from_secs(20);
+        let (analysis, board) = guard_tab(Some("baptiste"), None);
+        *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture { analysis, board });
+        let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+        let report = handle_capture(&ctx, req).await.unwrap();
+        assert!(report.recorded);
+        assert!(!report.split, "the resumed game must not split");
+        apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "o8", Ok(report), now).await;
+
+        let rows = ctx.store.get_session_snapshots("o8").await.unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r.hero == "Zenyatta"), "{rows:?}");
+        assert!(!rows[0].suspect_fields.iter().any(|f| f == "hero"));
+        assert!(rows[1].suspect_fields.iter().any(|f| f == "hero"));
+        let shown: Vec<String> = rows.iter().map(|m| m.display_hero().to_string()).collect();
+        assert!(shown.iter().all(|h| h == "Zenyatta"), "{shown:?}");
+    }
 
     // ---- alpha.7 O9: the own row without name OCR (OCR site T4)
 
@@ -18924,6 +19229,137 @@ mod tests {
             baseline_at: None,
             text_fallback_locked: false,
         }
+    }
+
+    /// A game on disk with a stored board, last captured `ago` before now.
+    fn restart_skeleton(map: Option<&str>, ago: chrono::Duration) -> PersistedGame {
+        let mut p = persisted_with_hold(
+            "before-crash",
+            detect::MatchOutcome::Unknown,
+            map,
+            false,
+            0,
+            Utc::now() - ago,
+        );
+        p.session_created = true;
+        p.deferred = None;
+        p.deferred_hero = None;
+        p.deferred_at = None;
+        p
+    }
+
+    /// Restart from `p`, then ask whether the first Tab opens a new game.
+    fn first_tab_after_restart_starts_new_game(p: &PersistedGame) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(active_game_path(dir.path()), serde_json::to_vec(p).unwrap()).unwrap();
+        let st = startup_session(dir.path());
+        should_start_fresh_session(st.active_game.as_ref(), Instant::now())
+    }
+
+    /// QA: same map, last capture recent, no result seen: the restart
+    /// resumes the game, so the next Tab stays on it.
+    #[test]
+    fn a_restart_resumes_the_same_recent_game_with_no_result() {
+        let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(40));
+        assert_eq!(restart_resume_refusal(&p, Utc::now()), None);
+        assert!(!first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: a long gap since the last capture starts a new game, even on the
+    /// same map, well inside the old 20 minute idle bound.
+    #[test]
+    fn a_restart_after_a_long_gap_starts_a_new_game() {
+        let gap = chrono::Duration::from_std(RESUME_AFTER_RESTART_MAX_GAP).unwrap()
+            + chrono::Duration::seconds(30);
+        assert!(gap.to_std().unwrap() < UNFINISHED_SESSION_IDLE);
+        let p = restart_skeleton(Some("Busan"), gap);
+        assert_eq!(
+            restart_resume_refusal(&p, Utc::now()),
+            Some("last capture too long ago")
+        );
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// A game with a board but no map cannot be matched, so it is not
+    /// resumed. A clock that moved back is not resumed either.
+    #[test]
+    fn a_restart_without_a_map_or_with_a_future_capture_starts_a_new_game() {
+        let p = restart_skeleton(None, chrono::Duration::seconds(40));
+        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(first_tab_after_restart_starts_new_game(&p));
+        let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(-120));
+        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: a result screen was seen before the crash. The restart keeps the
+    /// game so its result is not lost, and the first Tab past the
+    /// post-match grace starts a new game. Inside the grace the post-match
+    /// scoreboard still belongs to it.
+    #[test]
+    fn a_restart_after_a_result_screen_starts_a_new_game() {
+        let mut p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(30));
+        p.result_outcome = Some(detect::MatchOutcome::Victory);
+        p.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(100));
+        assert!(first_tab_after_restart_starts_new_game(&p));
+
+        p.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(10));
+        assert!(
+            !first_tab_after_restart_starts_new_game(&p),
+            "the post-match scoreboard inside the grace stays on the game"
+        );
+
+        let mut p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(100));
+        p.outcome = detect::MatchOutcome::Defeat;
+        p.outcome_recorded_at = Some(Utc::now() - chrono::Duration::seconds(100));
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: two real games in a row on the same map stay separate across a
+    /// crash. Game 1 on Busan saw its result, the tracker restarted, and
+    /// game 2 on Busan opens its own session; game 2's restart then resumes
+    /// game 2, not game 1.
+    #[test]
+    fn two_games_in_a_row_on_the_same_map_stay_separate_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut game1 = restart_skeleton(Some("Busan"), chrono::Duration::seconds(150));
+        game1.session_id = "game-1".into();
+        game1.result_outcome = Some(detect::MatchOutcome::Victory);
+        game1.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(150));
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&game1).unwrap(),
+        )
+        .unwrap();
+        let mut st = startup_session(dir.path());
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("game-1")
+        );
+        let now = Instant::now();
+        assert!(should_start_fresh_session(st.active_game.as_ref(), now));
+        let mut game2 = ActiveGame::open_at(
+            "game-2".into(),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            now,
+        );
+        game2.map = Some("Busan".into());
+        game2.session_created = true;
+        st.active_game = Some(game2);
+        assert!(!should_start_fresh_session(st.active_game.as_ref(), now));
+
+        persist_active_game(dir.path(), st.active_game.as_ref());
+        let st = startup_session(dir.path());
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("game-2"),
+            "a restart during game 2 resumes game 2"
+        );
+        assert!(!should_start_fresh_session(
+            st.active_game.as_ref(),
+            Instant::now()
+        ));
     }
 
     async fn begin_from_persisted(
