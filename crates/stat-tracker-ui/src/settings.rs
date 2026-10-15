@@ -418,11 +418,13 @@ impl SettingsForm {
             session_window_secs: config.session_window_secs.to_string(),
             game_process_names: config.game_process_names.join(", "),
             auto_detect_enabled: config.auto_detect.enabled,
-            // Empty means automatic (1.5 s new reader, 4 s classic OCR);
-            // 4 is also automatic (`AutoDetectConfig::poll_interval`).
+            // Empty means automatic (1.5 s new reader, 4 s classic OCR).
+            // 4 is how automatic is written to the file
+            // (`AutoDetectConfig::poll_interval`), so it shows as empty.
             poll_interval_secs: config
                 .auto_detect
                 .poll_interval_secs
+                .filter(|&s| s != stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
             cooldown_secs: config.auto_detect.cooldown_secs.to_string(),
@@ -515,7 +517,11 @@ impl SettingsForm {
                     .trim()
                     .parse::<u64>()
                     .ok()
-                    .filter(|&s| s > 0),
+                    .filter(|&s| s > 0)
+                    .or(base
+                        .auto_detect
+                        .poll_interval_secs
+                        .filter(|&s| s == stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)),
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
@@ -1091,7 +1097,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(compact_row(
             Some(field_input(
                 "Check every (seconds)",
-                "auto",
+                "auto (1.5 s with new reader)",
                 &app.settings.poll_interval_secs,
                 SettingsField::PollInterval,
                 false,
@@ -1303,7 +1309,7 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
-const POLL_INTERVAL_HELP: &str = "With the new reader, a saved 4 s poll interval now means auto (1.5 s); to keep 4 s on a low-power laptop, set 5 or any other value.";
+const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
 const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture — leave off unless diagnosing.";
 
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {

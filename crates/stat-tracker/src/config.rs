@@ -263,7 +263,15 @@ pub struct AutoDetectConfig {
     /// ([`AutoDetectConfig::poll_interval`]): 1.5 s with the new reader,
     /// 4 s with classic OCR. 4, the value older Settings always wrote, also
     /// counts as automatic so existing configs get the faster rate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Automatic is written as 4, not left out: alpha.7 and older need the
+    /// key, and read 4 as their own default, so a downgrade keeps working.
+    /// Read back, 4 is `None` again, so automatic has one value in memory.
+    #[serde(
+        default,
+        serialize_with = "write_auto_poll_as_legacy",
+        deserialize_with = "read_legacy_poll_as_auto"
+    )]
     pub poll_interval_secs: Option<u64>,
     pub cooldown_secs: u64,
 }
@@ -291,6 +299,20 @@ pub const CLASSIC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from
 pub const NEW_READER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 /// The value older Settings wrote on every save; treated as automatic.
 pub const LEGACY_DEFAULT_POLL_SECS: u64 = 4;
+
+fn read_legacy_poll_as_auto<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Option<u64>, D::Error> {
+    let v = Option::<u64>::deserialize(de)?;
+    Ok(v.filter(|&s| s != LEGACY_DEFAULT_POLL_SECS))
+}
+
+fn write_auto_poll_as_legacy<S: serde::Serializer>(
+    v: &Option<u64>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    ser.serialize_u64(v.unwrap_or(LEGACY_DEFAULT_POLL_SECS))
+}
 
 impl AutoDetectConfig {
     /// The poll interval in effect: an explicit `poll_interval_secs` (at
@@ -2291,5 +2313,24 @@ cooldown_secs = 120
             toml::from_str("enabled = true\ncooldown_secs = 120\n").unwrap();
         assert_eq!(parsed.poll_interval_secs, None);
         assert_eq!(parsed.poll_interval(true), Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn automatic_poll_interval_is_written_as_4_for_older_versions() {
+        let auto = AutoDetectConfig::default();
+        assert_eq!(auto.poll_interval_secs, None);
+        let raw = toml::to_string(&auto).unwrap();
+        assert!(raw.contains("poll_interval_secs = 4"), "{raw}");
+        let back: AutoDetectConfig = toml::from_str(&raw).unwrap();
+        assert_eq!(back, auto);
+        let fixed = AutoDetectConfig {
+            poll_interval_secs: Some(5),
+            ..auto
+        };
+        assert!(
+            toml::to_string(&fixed)
+                .unwrap()
+                .contains("poll_interval_secs = 5")
+        );
     }
 }
