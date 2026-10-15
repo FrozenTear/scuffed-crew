@@ -447,11 +447,19 @@ pub fn player_row_suspect_mask(
 }
 
 /// Elims past this are a damage or timer digit in the elims column.
-pub(crate) const MAX_ELIMS: u32 = 99;
+///
+/// The number is `scuffed_types::PLAUSIBLE_ELIMS_MAX`. Server hero and role
+/// averages use that same ceiling.
+pub(crate) const MAX_ELIMS: u32 = scuffed_types::PLAUSIBLE_ELIMS_MAX;
 /// Assists past this are a damage or timer digit in the assists column.
-pub(crate) const MAX_ASSISTS: u32 = 99;
+///
+/// The number is `scuffed_types::PLAUSIBLE_ASSISTS_MAX`.
+pub(crate) const MAX_ASSISTS: u32 = scuffed_types::PLAUSIBLE_ASSISTS_MAX;
 /// Deaths past this are a damage or timer digit in the deaths column.
-pub(crate) const MAX_DEATHS: u32 = 50;
+///
+/// The number is `scuffed_types::PLAUSIBLE_DEATHS_MAX`. Server hero and role
+/// averages use that same ceiling.
+pub(crate) const MAX_DEATHS: u32 = scuffed_types::PLAUSIBLE_DEATHS_MAX;
 
 /// E/A above [`MAX_ELIMS`] / [`MAX_ASSISTS`] or D above [`MAX_DEATHS`] is a
 /// column bleed, not a real scoreboard. Shared with the text fallback and
