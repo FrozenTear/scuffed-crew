@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap SurrealDB namespace, database, and application user.
+# Bootstrap SurrealDB namespace and database.
 # Run once after starting SurrealDB for the first time.
 #
 # Prerequisites:
@@ -31,4 +31,4 @@ SURREAL_PASS="${ROOT_PASS}" surreal sql \
     --hide-welcome \
     < "${SCRIPT_DIR}/bootstrap-db.surql"
 
-echo "Done. Remember to change the app user password in bootstrap-db.surql for production."
+echo "Done."
