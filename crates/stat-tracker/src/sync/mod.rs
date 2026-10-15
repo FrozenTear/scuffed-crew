@@ -10,7 +10,7 @@ use scuffed_types::api::{
 
 /// Overview health copy when the server refused the bearer token.
 /// The GUI shows this string; the hint is the Settings path.
-pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected — update the token in Settings";
+pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the token in Settings";
 
 const AUTH_PAUSE_FILE: &str = "sync_auth.json";
 
@@ -937,19 +937,19 @@ mod tests {
         }
         assert_eq!(matches[0]["recognizer"], "ocr-v1");
         assert!(matches[0].get("suspect_fields").is_none());
-        assert_eq!(matches[1]["recognizer"], "cv-v5");
+        assert_eq!(matches[1]["recognizer"], "cv-v6");
         assert_eq!(matches[1]["suspect_fields"], serde_json::json!(["map"]));
         assert_eq!(matches[1]["hero"], "Wrecking Ball");
-        assert_eq!(matches[2]["recognizer"], "cv-v5");
+        assert_eq!(matches[2]["recognizer"], "cv-v6");
         assert!(matches[2].get("suspect_fields").is_none());
         let raw = serde_json::to_string(&request).unwrap();
         assert!(!raw.contains("\"recognizer\":null"));
         assert!(raw.contains("\"recognizer\":\"ocr-v1\""));
-        assert!(raw.contains("\"recognizer\":\"cv-v5\""));
+        assert!(raw.contains("\"recognizer\":\"cv-v6\""));
     }
 
     #[test]
-    fn mixed_row_uploads_cv_v5_when_any_stat_came_from_the_new_reader() {
+    fn mixed_row_uploads_cv_v6_when_any_stat_came_from_the_new_reader() {
         use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
         use crate::shadow::digits::RECOGNIZER_ID;
         use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
@@ -1054,7 +1054,7 @@ mod tests {
         let json = serde_json::to_value(&request).unwrap();
         let matches = json["matches"].as_array().expect("matches array");
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0]["recognizer"], "cv-v5");
+        assert_eq!(matches[0]["recognizer"], "cv-v6");
         assert_eq!(matches[0]["elims"], 21);
         assert_eq!(matches[0]["deaths"], policy.deaths);
         assert_eq!(matches[0]["hero"], "Ana");

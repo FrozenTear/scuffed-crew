@@ -527,7 +527,8 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         bundle_version: BUNDLE_VERSION,
         app_version: APP_VERSION,
         recognizers: Recognizers {
-            matcher: crate::shadow::digits::RECOGNIZER_ID,
+            // OCR on or off is also in `system.ocr`; `ocr` stays ocr-v1.
+            matcher: crate::shadow::digits::recognizer_id(input.system.ocr != OcrSetting::Off),
             ocr: OCR_ID,
         },
         resolution: input.resolution,
@@ -921,7 +922,8 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         bundle_version: BUNDLE_VERSION,
         app_version: APP_VERSION,
         recognizers: Recognizers {
-            matcher: crate::shadow::digits::RECOGNIZER_ID,
+            // OCR on or off is also in `system.ocr`; `ocr` stays ocr-v1.
+            matcher: crate::shadow::digits::recognizer_id(input.system.ocr != OcrSetting::Off),
             ocr: OCR_ID,
         },
         resolution: input.resolution,

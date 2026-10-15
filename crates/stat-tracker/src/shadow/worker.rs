@@ -384,7 +384,7 @@ pub fn compare(
 ) -> ShadowRecord {
     let mut record = ShadowRecord {
         ts: job.captured_at.to_rfc3339_opts(SecondsFormat::Millis, true),
-        recognizer: digits::RECOGNIZER_ID,
+        recognizer: digits::live_recognizer_id(),
         session: job.session.clone(),
         resolution: job.frame_height,
         team_size: job.team_size,

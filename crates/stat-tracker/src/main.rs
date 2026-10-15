@@ -1492,6 +1492,10 @@ struct PersistedGame {
     /// skeletons, which had no banner rename.
     #[serde(default)]
     replaced_text_fallback_map: Option<String>,
+    /// See [`ActiveGame::best_guess`]. Kept so a restart mid-game still
+    /// stores the guess when the game closes. Missing on older skeletons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    best_guess: Option<storage::PersonalMatch>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -2015,6 +2019,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         baseline_at: g.baseline_at.map(to_wall),
         text_fallback_locked: g.text_fallback_locked,
         replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
+        best_guess: g.best_guess.clone(),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -2117,7 +2122,7 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     );
     let hint_recovered = result_mark.is_some();
     Some(ActiveGame {
-        best_guess: None,
+        best_guess: p.best_guess,
         session_id: p.session_id,
         outcome: p.outcome,
         map: p.map.clone(),
@@ -5651,7 +5656,11 @@ fn apply_new_reader(
     parsed.damage = saved.damage;
     parsed.healing = saved.healing;
     parsed.mitigation = saved.mitigation;
-    parsed.recognizer = saved.recognizer.to_string();
+    parsed.recognizer = if saved.recognizer == shadow::digits::RECOGNIZER_ID {
+        shadow::digits::live_recognizer_id().to_string()
+    } else {
+        saved.recognizer.to_string()
+    };
     parsed.suspect_fields = saved.suspect_fields;
     if own_row_suspect {
         reader_apply::mark_own_row_suspect(&mut parsed.suspect_fields);
@@ -9054,6 +9063,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -9239,6 +9249,18 @@ mod tests {
             recovered.map_source.is_none(),
             "a skeleton with no map stays unsourced"
         );
+    }
+
+    #[test]
+    fn a_restart_mid_game_keeps_the_best_guess() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now("guess".into(), detect::MatchOutcome::Unknown, Vec::new());
+        let mut row = test_match("guess", "victory");
+        row.suspect_fields = vec!["h".into()];
+        g.best_guess = Some(row.clone());
+        persist_active_game(dir.path(), Some(&g));
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert_eq!(recovered.best_guess, Some(row));
     }
 
     #[test]
@@ -18190,6 +18212,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "stale-unfinished".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: Some("Busan".into()),
@@ -18352,6 +18375,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "colosseo-defeat".into(),
             outcome: detect::MatchOutcome::Defeat,
             map: Some("Colosseo".into()),
@@ -18776,6 +18800,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "next-game".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -18870,6 +18895,7 @@ mod tests {
     ) -> PersistedGame {
         PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: session_id.into(),
             outcome,
             map: map.map(str::to_string),

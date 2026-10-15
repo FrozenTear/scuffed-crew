@@ -67,7 +67,26 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 /// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
 ///   ink) joins digit groups instead of splitting them; any ink left of the
 ///   picked group inside the cell forces suspect.
-pub const RECOGNIZER_ID: &str = "cv-v5";
+/// * `cv-v6`: alpha.8 reader. Written as [`RECOGNIZER_ID_NO_OCR`] when the
+///   tracker runs with OCR off, so those rows and reports can be told apart.
+pub const RECOGNIZER_ID: &str = "cv-v6";
+
+/// [`RECOGNIZER_ID`] for a run with OCR off.
+pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v6-noocr";
+
+/// The reader id for a run with OCR on or off.
+pub fn recognizer_id(ocr_on: bool) -> &'static str {
+    if ocr_on {
+        RECOGNIZER_ID
+    } else {
+        RECOGNIZER_ID_NO_OCR
+    }
+}
+
+/// The reader id for this process, from the OCR gate.
+pub fn live_recognizer_id() -> &'static str {
+    recognizer_id(!crate::ocr::gate::is_off())
+}
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
@@ -2523,12 +2542,22 @@ mod tests {
     /// `cv-v1` was computed by running the 0.4.23 matcher on these same
     /// fixtures with its one calibration constant (raw suspect margin 0.06)
     /// as `params`.
+    #[test]
+    fn the_reader_id_says_when_ocr_was_off() {
+        assert_eq!(recognizer_id(true), "cv-v6");
+        assert_eq!(recognizer_id(false), "cv-v6-noocr");
+        for id in [RECOGNIZER_ID, RECOGNIZER_ID_NO_OCR] {
+            assert!(scuffed_types::api::stats::is_recognizer_id(id), "{id}");
+        }
+    }
+
     const RECOGNIZER_HISTORY: &[(&str, u64)] = &[
         ("cv-v1", 0xa20c_600c_992e_6cd5),
         ("cv-v2", 0xd1ab_3e7f_05d3_aa5e),
         ("cv-v3", 0xac0e_b782_9e66_c19a),
         ("cv-v4", 0xb51b_4c1f_19e1_1c65),
         ("cv-v5", 0xa751_b3dc_413b_764a),
+        ("cv-v6", 0x3533_9fdc_9a40_b16f),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,

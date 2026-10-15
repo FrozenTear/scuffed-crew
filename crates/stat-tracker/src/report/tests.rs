@@ -467,6 +467,9 @@ fn system_reports_the_ocr_switch_only_when_classic_ocr_is_off() {
     with_switch.extend(["ocr", "ocr_blocked_calls"]);
     assert_eq!(keys(&off["system"]), sorted(&with_switch));
     assert_eq!(off["system"]["ocr"], "off");
+    // the reader id says OCR was off; the OCR recognizer id does not change
+    assert_eq!(off["recognizers"]["matcher"], "cv-v6-noocr");
+    assert_eq!(off["recognizers"]["ocr"], "ocr-v1");
     assert_eq!(
         off["system"]["ocr_blocked_calls"],
         serde_json::json!({
