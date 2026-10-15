@@ -2397,6 +2397,13 @@ mod pack_parity_tests {
             })
             .collect();
         heroes.sort_by(|a, b| a.0.cmp(&b.0));
+        // heroes-v1 carries 54 heroes. A short pack is a broken install.
+        assert_eq!(
+            heroes.len(),
+            54,
+            "pack at {pack} has {} heroes, want 54",
+            heroes.len()
+        );
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/vision-baseline");
         let load = |f: &str| image::open(base.join(f)).unwrap();
         // 5v5: the synthetic board from `report/blank/synth`, generated here
@@ -2461,6 +2468,12 @@ mod pack_parity_tests {
             println!(
                 "{res} {file} team {team_size} (detected {detected}, forced {forced}) rows {rows:?}: {pass}/{total} pass, min conf {min_conf:.4}"
             );
+            if pass > 0 {
+                assert!(
+                    min_conf >= crate::hero_auth::PORTRAIT_SWITCH_MIN_CONF,
+                    "{res} {file}: min conf {min_conf} below the switch floor"
+                );
+            }
         }
         assert!(failures.is_empty(), "failures: {failures:#?}");
     }
