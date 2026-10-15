@@ -69,6 +69,8 @@ cd /path/to/scuffed-crew
 
 `update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
+Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS` from `REDIRECT_BASE_URL` and a blank `SURREALDB_APP_PASSWORD` from `SURREALDB_PASSWORD`. `compose.yml` uses one substitution level for those. podman-compose 1.5 turns a nested default into the outer value plus a stray `}`, or into literal text when the outer name is unset. A missing app-password key is still generated distinct from the root password. Production still refuses to boot when the two passwords match.
+
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
 Override image pin in `data/secrets.env` if needed:

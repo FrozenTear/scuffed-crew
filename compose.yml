@@ -68,14 +68,14 @@ services:
       # strfry sees the gate as 127.0.0.1, so its per-IP limits do not see
       # browsers. The gate limits connections and messages per client IP.
       # X-Forwarded-For is honored only when the TCP peer is loopback or listed
-      # here. One substitution only: podman-compose before 1.6.0 does not
-      # expand a nested default (${RELAY_GATE_TRUSTED_PROXIES:-${TRUSTED_PROXIES:-}}).
-      # That build passes a literal into the container, and the gate logs it
-      # as an unparseable entry and ignores it. ${TRUSTED_PROXIES:-} expands
-      # in both podman-compose and docker compose. The value is the compose
-      # gateway written by scripts/ensure-trusted-proxies.sh. Caddy on the
-      # host is that peer. A RELAY_GATE_TRUSTED_PROXIES key in the env file
-      # is not read.
+      # here. One substitution only. podman-compose 1.5 does not expand a
+      # nested default: if the outer name is set it appends a stray brace,
+      # and if it is unset the inner text is passed through. The gate then
+      # logs an unparseable entry and ignores it. ${TRUSTED_PROXIES:-}
+      # expands in both podman-compose and docker compose. The value is the
+      # compose gateway written by scripts/ensure-trusted-proxies.sh. Caddy
+      # on the host is that peer. A RELAY_GATE_TRUSTED_PROXIES key in the
+      # env file is not read.
       RELAY_GATE_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       RELAY_GATE_MAX_CONN_PER_IP: ${RELAY_GATE_MAX_CONN_PER_IP:-32}
       RELAY_GATE_CONN_RATE: ${RELAY_GATE_CONN_RATE:-60}
@@ -113,16 +113,24 @@ services:
       # Production default: scoped app user (root only used at bootstrap to DEFINE USER).
       SURREALDB_AUTH_MODE: ${SURREALDB_AUTH_MODE:-scoped}
       SURREALDB_APP_USER: ${SURREALDB_APP_USER:-scuffed_app}
-      SURREALDB_APP_PASSWORD: ${SURREALDB_APP_PASSWORD:-${SURREALDB_PASSWORD}}
+      # Single level. podman-compose 1.5 mangles a nested fallback. When this
+      # is blank, scripts/lib/compose-env.sh copies SURREALDB_PASSWORD before
+      # compose runs. install.sh and update.sh still write a distinct app
+      # password into secrets.env when the key is missing. Production rejects
+      # an app password equal to the root password.
+      SURREALDB_APP_PASSWORD: ${SURREALDB_APP_PASSWORD:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       REDIRECT_BASE_URL: ${REDIRECT_BASE_URL:-http://127.0.0.1:3000}
-      # Blank/unset falls back to REDIRECT_BASE_URL (F-API-004). Do not default
-      # to empty — that used to become ALLOWED_ORIGINS="" inside the container
-      # and 403 browser strategy WS / CORS.
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-${REDIRECT_BASE_URL:-http://127.0.0.1:3000}}
+      # Single level. A nested fallback to REDIRECT_BASE_URL is what
+      # podman-compose 1.5 turns into a stray brace or a literal. When
+      # ALLOWED_ORIGINS is blank, scripts/lib/compose-env.sh sets it from
+      # REDIRECT_BASE_URL before compose runs (F-API-004). Do not pass an
+      # empty value: that used to 403 browser strategy WS / CORS. This
+      # static default applies only when that export did not run.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:3000}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
       NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-}

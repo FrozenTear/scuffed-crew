@@ -24,6 +24,9 @@ set -a
 # shellcheck source=/dev/null
 source "$SECRETS"
 set +a
+# shellcheck source=lib/compose-env.sh
+source "$ROOT/scripts/lib/compose-env.sh"
+export_compose_fallbacks
 
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}"
 

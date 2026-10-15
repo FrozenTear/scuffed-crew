@@ -21,6 +21,8 @@ jobs:
         run: bash scripts/check-frontend-deps.sh
       - name: Check design tokens (no raw colors / legacy vars in app CSS)
         run: bash scripts/check-design-tokens.sh
+      - name: Check compose files for nested interpolation
+        run: bash scripts/check-compose-interpolation.sh
       - name: Backup secret restore checks
         run: |
           bash scripts/test-backup-secrets.sh

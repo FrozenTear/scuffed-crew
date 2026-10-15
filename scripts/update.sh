@@ -74,8 +74,12 @@ SITE_SERVER_IMAGE="${SITE_SERVER_IMAGE:-ghcr.io/frozentear/scuffed-crew:main}"
 export SITE_SERVER_IMAGE
 HOST_PORT="${HOST_PORT:-3000}"
 # Older installs may lack ALLOWED_ORIGINS. Blank existing values are left
-# alone — the server treats blank as unset and falls back to REDIRECT_BASE_URL.
+# alone in the file. compose-env.sh fills a blank from REDIRECT_BASE_URL
+# in the shell before compose runs (podman-compose 1.5 cannot nest defaults).
 ensure_secret_key ALLOWED_ORIGINS "${REDIRECT_BASE_URL:-http://127.0.0.1:${HOST_PORT}}"
+# shellcheck source=lib/compose-env.sh
+source "$ROOT/scripts/lib/compose-env.sh"
+export_compose_fallbacks
 
 # Compose project name → container prefix (e.g. scuffed-crew-site-server-1).
 # Override with COMPOSE_PROJECT_NAME in secrets.env if your project is renamed.
@@ -337,6 +341,9 @@ set -a
 # shellcheck disable=SC1090
 source "$SECRETS"
 set +a
+# Re-source can clear a blank ALLOWED_ORIGINS / app password. Fill again
+# before compose. Shell values win over --env-file in podman-compose 1.5.
+export_compose_fallbacks
 
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
