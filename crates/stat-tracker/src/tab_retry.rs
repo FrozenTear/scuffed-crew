@@ -16,12 +16,15 @@ use std::time::Duration;
 pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration::from_millis(400)];
 
 /// Runs `attempt` once, and again after each wait in `waits` for as long as
-/// `rejected` says the last result was turned down by the scoreboard check.
-/// Returns the last result and how many retries ran. An error from
-/// `attempt` (a failed screen grab) ends the loop at once.
+/// `retry` says the best result so far was rejected by the scoreboard
+/// check. A later result replaces the kept one only when `rank` scores it
+/// higher, so a rejected grab never replaces a more useful one. Returns the
+/// best result and how many retries ran. An error from `attempt` (a failed
+/// screen grab) ends the loop at once.
 pub async fn with_retries<T, E, A, AF, S, SF>(
     waits: &[Duration],
-    rejected: impl Fn(&T) -> bool,
+    retry: impl Fn(&T) -> bool,
+    rank: impl Fn(&T) -> u8,
     mut attempt: A,
     mut sleep: S,
 ) -> Result<(T, usize), E>
@@ -31,10 +34,10 @@ where
     S: FnMut(Duration) -> SF,
     SF: Future<Output = ()>,
 {
-    let mut result = attempt(0).await?;
+    let mut best = attempt(0).await?;
     let mut retries = 0;
     for &wait in waits {
-        if !rejected(&result) {
+        if !retry(&best) {
             break;
         }
         retries += 1;
@@ -45,10 +48,13 @@ where
             "Tab capture rejected by the scoreboard check: capturing again (the board may still be drawing)"
         );
         sleep(wait).await;
-        result = attempt(retries).await?;
+        let next = attempt(retries).await?;
+        if rank(&next) > rank(&best) {
+            best = next;
+        }
     }
     if retries > 0 {
-        if rejected(&result) {
+        if retry(&best) {
             tracing::warn!(
                 retries,
                 "Tab capture still rejected after retries: giving up on this Tab press"
@@ -57,7 +63,7 @@ where
             tracing::info!(retries, "Tab capture accepted on retry");
         }
     }
-    Ok((result, retries))
+    Ok((best, retries))
 }
 
 #[cfg(test)]
@@ -78,6 +84,7 @@ mod tests {
     /// name strokes with five rows per team at the 5v5 pitch (six 75 px
     /// rows' height over five rows, 90 px). Stands in until Scuffed Vision's
     /// 5v5 board generator lands on main.
+    // TODO: switch to `synth::tab_frame(teams, width, drawn)` once PR #285 lands.
     fn full_5v5() -> RgbImage {
         let mut f = RgbImage::from_fn(2560, 1440, |x, y| {
             Rgb([(30 + x * 40 / 2560) as u8, (45 + y * 40 / 1440) as u8, 60])
@@ -153,7 +160,12 @@ mod tests {
         let slept = RefCell::new(Vec::new());
         let (verdict, retries) = block_on(with_retries(
             &TAB_RETRY_WAITS,
-            |p: &ScoreboardPreflight| !matches!(p, ScoreboardPreflight::Ready(_)),
+            |p: &ScoreboardPreflight| *p == ScoreboardPreflight::NotAScoreboard,
+            |p: &ScoreboardPreflight| match p {
+                ScoreboardPreflight::NotAScoreboard => 0,
+                ScoreboardPreflight::TeamSizeUncertain => 1,
+                ScoreboardPreflight::Ready(_) => 2,
+            },
             |_| {
                 *grabs.borrow_mut() += 1;
                 let f = frames.borrow_mut().next().expect("a frame per grab");
@@ -219,5 +231,38 @@ mod tests {
     #[test]
     fn half_drawn_5v5_board_is_rejected_then_accepted_on_retry() {
         check(full_5v5(), 90, 5);
+    }
+
+    #[test]
+    fn a_later_rejected_grab_never_replaces_a_better_result() {
+        // 0 = rejected (retry), 1 = useful but not retried, 2 = accepted.
+        let (best, retries) = block_on(with_retries(
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
+            |_| async {},
+        ))
+        .unwrap();
+        assert_eq!((best, retries), (1, 1), "stops at the useful result");
+
+        // Even if the predicate kept retrying, rank keeps the best result.
+        let seq = RefCell::new(vec![1u8, 0, 0].into_iter());
+        let (best, retries) = block_on(with_retries(
+            &TAB_RETRY_WAITS,
+            |_: &u8| true,
+            |v: &u8| *v,
+            |_| {
+                let v = seq.borrow_mut().next().unwrap();
+                async move { Ok::<_, ()>(v) }
+            },
+            |_| async {},
+        ))
+        .unwrap();
+        assert_eq!(
+            (best, retries),
+            (1, 2),
+            "a rejected grab never replaces the kept one"
+        );
     }
 }
