@@ -1054,6 +1054,40 @@ mod game {
     }
 
     #[test]
+    fn a_6v6_board_whose_header_is_not_found_saves_reads_and_no_picture() {
+        // Real 1664x1007 6v6 boards whose header strip the blanker cannot
+        // find blank to plain fill. That picture is never attached: the
+        // report carries the reads and no picture, the same as 5v5.
+        let tmp = tempfile::tempdir().unwrap();
+        let grey =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(1664, 1007, image::Rgb([90, 90, 100])));
+        let blanked = crate::report::blank::blanked_scoreboard(&grey, Some(6));
+        assert!(blanked.board.is_err());
+        assert!(!blanked.has_picture());
+        kit::record_scoreboard(tmp.path(), "sess-1", &grey, Some(6), &reads(Some(6))).unwrap();
+        assert!(!kit::has_kit(tmp.path(), "sess-1"));
+        assert!(kit::has_reads(tmp.path(), "sess-1"));
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
+        assert!(zip.images.is_empty());
+        assert!(!zip.manifest_json.contains("crops/"));
+        assert!(zip.manifest_json.contains("\"session_id\": \"sess-1\""));
+    }
+
+    #[test]
+    fn an_all_fill_board_is_no_picture_even_if_a_row_was_kept() {
+        use crate::report::blank::{BlankedBoard, FILL};
+        let b = BlankedBoard {
+            image: RgbImage::from_pixel(64, 32, FILL),
+            board: Ok(()),
+            rows: Vec::new(),
+            name_fill_rows: 3,
+        };
+        assert!(b.kept_anything());
+        assert!(b.all_fill());
+        assert!(!b.has_picture());
+    }
+
+    #[test]
     fn a_report_stays_within_the_site_file_and_picture_limits() {
         let tmp = tempfile::tempdir().unwrap();
         seed_logs(tmp.path());

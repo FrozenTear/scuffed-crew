@@ -353,13 +353,19 @@ pub fn record_scoreboard_at(
         return Ok(());
     };
     let board = blank_seen(&dir, frame, team_size, grabbed);
-    if !board.kept_anything() {
+    if !board.has_picture() {
         // No picture is safe to keep, but the reads still link a report to
         // this game. Written only when the session has no picture yet, so a
         // good picture is never dropped for a later board that blanked to
         // nothing.
         tracing::info!(
             session_id,
+            reason = board
+                .board
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or("all fill"),
             "report kit: board blanked to nothing, saving the reads without a picture"
         );
         return record_reads_only(data_dir, &dir, reads);

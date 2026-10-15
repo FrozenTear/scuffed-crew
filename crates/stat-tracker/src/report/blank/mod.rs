@@ -473,6 +473,19 @@ impl BlankedBoard {
     pub fn kept_anything(&self) -> bool {
         self.digit_rows() + self.portraits() + self.name_fill_rows > 0
     }
+
+    /// True when every pixel is fill: nothing of the board survived, even
+    /// if a row verdict says something was kept.
+    pub fn all_fill(&self) -> bool {
+        self.image.pixels().all(|p| *p == FILL)
+    }
+
+    /// A picture worth attaching to a report: something was kept and the
+    /// image is not plain fill. Otherwise the report says "no picture
+    /// saved", the same as a 5v5 board.
+    pub fn has_picture(&self) -> bool {
+        self.kept_anything() && !self.all_fill()
+    }
 }
 
 /// `crops/scoreboard.png` from a full frame with no earlier capture: no

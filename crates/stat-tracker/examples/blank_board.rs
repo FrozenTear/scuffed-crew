@@ -57,7 +57,11 @@ fn main() {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "board".into());
     let blanked_path = out_dir.join(format!("{stem}.blanked.png"));
-    blanked.image.save(&blanked_path).expect("write blanked");
+    if blanked.has_picture() {
+        blanked.image.save(&blanked_path).expect("write blanked");
+    } else {
+        println!("no picture saved: the tracker attaches no picture for this board");
+    }
     let mut boxes = src.clone();
     for (x, y, p) in boxes.enumerate_pixels_mut() {
         if *blanked.image.get_pixel(x, y) == FILL {
