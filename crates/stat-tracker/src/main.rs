@@ -1200,8 +1200,9 @@ struct ActiveGame {
     restart_recovered_at: Option<Instant>,
     /// Counters this game had before a rejoin reset its scoreboard. Added to
     /// every later board of this game, so stored rows stay cumulative for
-    /// the whole match. Memory only: after another restart the persisted
-    /// gate already holds the cumulative values and a new window opens.
+    /// the whole match. Persisted in `active_game.json`: a second restart in
+    /// the same game keeps adding it, and no new window opens on a game that
+    /// already has one, so post-rejoin stats are never counted twice.
     rejoin_carry: Option<Counters>,
     session_id: String,
     /// alpha.8: the newest pending board's row with the reader's best guess
@@ -1519,6 +1520,10 @@ struct PersistedGame {
     /// stores the guess when the game closes. Missing on older skeletons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     best_guess: Option<storage::PersonalMatch>,
+    /// See [`ActiveGame::rejoin_carry`]. Missing on older skeletons, which
+    /// had no rejoin carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejoin_carry: Option<Counters>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -2043,6 +2048,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         text_fallback_locked: g.text_fallback_locked,
         replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
         best_guess: g.best_guess.clone(),
+        rejoin_carry: g.rejoin_carry,
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -2198,7 +2204,7 @@ fn active_game_from_persisted(
         result_evidence: shadow::result::ResultEvidence::default(),
         restored_with_result: hint_recovered,
         restart_recovered_at: None,
-        rejoin_carry: None,
+        rejoin_carry: p.rejoin_carry,
     })
 }
 
@@ -2294,9 +2300,13 @@ fn note_rejoin(req: &CaptureRequest, rejoin: &RejoinRead, raw: Counters) {
 const REJOIN_CONTINUE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Open the rejoin window on a game this run restored unfinished from the
-/// previous run: no result seen, a stored board and a known map.
+/// previous run: no result seen, a stored board and a known map. A game
+/// that a rejoin already continued keeps its carry and gets no new window:
+/// its next board counts from the rejoin, below the stored total, and must
+/// not be read as a second rejoin.
 fn mark_restart_recovered(st: &mut SessionState, now: Instant) {
     if let Some(g) = st.active_game.as_mut()
+        && g.rejoin_carry.is_none()
         && !g.finished()
         && g.result_mark.is_none()
         && g.session_created
@@ -9445,6 +9455,7 @@ mod tests {
     fn stale_persisted_game_is_not_recovered() {
         let dir = tempfile::tempdir().expect("tempdir");
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "old".into(),
@@ -18746,6 +18757,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "stale-unfinished".into(),
@@ -18909,6 +18921,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "colosseo-defeat".into(),
@@ -19334,6 +19347,7 @@ mod tests {
         store.insert_match(decided).await.unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "next-game".into(),
@@ -19429,6 +19443,7 @@ mod tests {
         last_activity: chrono::DateTime<Utc>,
     ) -> PersistedGame {
         PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: session_id.into(),
@@ -19696,6 +19711,96 @@ mod tests {
                 .all(|r| r.outcome == "victory"),
             "the Victory is on the recovered game"
         );
+    }
+
+    /// QA on #293: a crash, a rejoin that continues the game, then a second
+    /// restart in the same game (an update, the OOM killer or a clean stop).
+    /// The carry comes back from `active_game.json`, no new rejoin window
+    /// opens, and the next board adds onto the stored total once, not twice.
+    #[tokio::test]
+    async fn a_second_restart_after_a_rejoin_keeps_the_carry_and_does_not_double_stats() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.crash_and_restart().await;
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(50));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 300, 900, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+        let carry = night.game().rejoin_carry;
+        assert!(carry.is_some(), "the rejoin set a carry");
+
+        night.crash_and_restart().await;
+        assert_eq!(night.id(), id, "the second restart resumes the game");
+        assert_eq!(
+            night.game().rejoin_carry,
+            carry,
+            "the carry survives the second restart"
+        );
+        assert!(
+            night.game().restart_recovered_at.is_none(),
+            "no new rejoin window on a game that already has a carry"
+        );
+
+        night.advance(Duration::from_secs(40));
+        night
+            .tab_once(
+                night_counters(3, 1, 0, 500, 1200, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id, "the next board stays on the game");
+        // The restart resets the harness wall clock, so rows are compared
+        // as a set: the values matter here, not their stored order.
+        let mut elims = night.elims(&id).await;
+        elims.sort_unstable();
+        assert_eq!(
+            elims,
+            vec![4, 9, 9, 11, 12],
+            "pre-crash plus post-rejoin, counted once"
+        );
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        let last = snaps.iter().max_by_key(|row| row.elims).unwrap();
+        assert_eq!((last.deaths, last.damage, last.healing), (5, 3500, 8200));
+    }
+
+    /// An `active_game.json` written before `rejoin_carry` existed still
+    /// loads: the game is resumed with no carry.
+    #[test]
+    fn an_old_active_game_json_without_rejoin_carry_still_loads() {
+        let p = restart_skeleton(Some("Rialto"), chrono::Duration::seconds(30));
+        let mut json = serde_json::to_value(&p).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("rejoin_carry");
+        assert!(!obj.contains_key("rejoin_carry"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        let g = recover_active_game(dir.path()).expect("the old file is resumed");
+        assert_eq!(g.session_id, "before-crash");
+        assert!(g.rejoin_carry.is_none());
     }
 
     /// QA (b): after the crash the next board is on a different map. That
