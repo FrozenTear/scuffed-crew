@@ -5695,6 +5695,7 @@ fn apply_new_reader(
     own: reader_apply::OwnRow,
     own_row_suspect: bool,
     mut board: shadow::BoardRead,
+    authority: Option<&str>,
 ) {
     board.set_result(shadow::result_field(evidence));
     let policy = reader_apply::PolicyRow {
@@ -5709,7 +5710,10 @@ fn apply_new_reader(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let saved = reader_apply::merge_saved(&policy, own, Some(&board));
+    // The own row's hero is stored only when the Tab's hero authority (own
+    // row and career panel portrait) names it too.
+    let saved =
+        reader_apply::merge_saved_with_authority(&policy, own, Some(&board), Some(authority));
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
@@ -6644,6 +6648,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     board_row,
                     own_row_suspect,
                     board,
+                    pack_hero.as_deref(),
                 );
                 // The reader's number for each cell, sure or not; a cell with
                 // none keeps what the row holds.
@@ -10696,7 +10701,7 @@ mod tests {
         assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
         assert!(
             hc_body
-                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, );")
+                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, pack_hero.as_deref(), );")
         );
         // the stored report carries the text-fallback replacement
         assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
@@ -12731,6 +12736,77 @@ mod tests {
     }
 
     async fn no_edit(_: &DaemonCtx, _: usize) {}
+
+    /// The own row's board hero with the hero authority as given: a 5v5
+    /// board whose own row names `row` while the authority (own row and
+    /// career panel portrait) names `authority`.
+    fn guard_tab(
+        row: Option<&str>,
+        authority: Option<&str>,
+    ) -> (FrameAnalysis, Option<shadow::BoardRead>) {
+        (o8_analysis(None, authority), Some(o8_board(row)))
+    }
+
+    async fn guard_game(
+        tabs: Vec<(FrameAnalysis, Option<shadow::BoardRead>)>,
+    ) -> (Vec<storage::PersonalMatch>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (rows, _) = o8_tabs(&ctx, tabs, no_edit).await;
+        // The game-level hero is the derived timeline's primary, which is
+        // what the GUI shows and the upload sends (display_hero).
+        let snaps = ctx.store.get_session_snapshots("o8").await.unwrap();
+        let shown: Vec<String> = snaps.iter().map(|m| m.display_hero().to_string()).collect();
+        assert!(shown.windows(2).all(|w| w[0] == w[1]), "{shown:?}");
+        let session = shown.last().cloned();
+        (rows, session)
+    }
+
+    /// A confident hero on Tab 1, then a 5v5 Tab whose own-row read the
+    /// career panel contradicts (the authority abstains): the game keeps
+    /// Tab 1's hero and the second row flags `hero`.
+    #[tokio::test]
+    async fn a_disagreeing_5v5_tab_keeps_the_earlier_confident_hero() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let (rows, session) = guard_game(vec![
+            guard_tab(Some("zenyatta"), Some("zenyatta")),
+            guard_tab(Some("baptiste"), None),
+        ])
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.hero == "Zenyatta"), "{rows:?}");
+        assert!(!rows[0].suspect_fields.iter().any(|f| f == "hero"));
+        assert!(rows[1].suspect_fields.iter().any(|f| f == "hero"));
+        assert_eq!(session.as_deref(), Some("Zenyatta"));
+    }
+
+    /// The first Tab's own-row hero is rejected (the authority abstains, the
+    /// panel names nothing to confirm it): that row stores Unknown with
+    /// `hero` flagged, never the rejected read. A later agreeing Tab fills
+    /// the game's hero in.
+    #[tokio::test]
+    async fn a_rejected_first_tab_stores_unknown_and_a_later_agreeing_tab_fills_the_hero() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        for first in [Some("baptiste"), None] {
+            let (rows, session) = guard_game(vec![
+                guard_tab(first, None),
+                guard_tab(Some("zenyatta"), Some("zenyatta")),
+            ])
+            .await;
+            assert_eq!(rows.len(), 2, "{first:?}");
+            assert_eq!(rows[0].hero, "Unknown", "{first:?}");
+            assert!(
+                rows[0].suspect_fields.iter().any(|f| f == "hero"),
+                "{first:?}"
+            );
+            assert_eq!(rows[1].hero, "Zenyatta", "{first:?}");
+            assert!(
+                !rows[1].suspect_fields.iter().any(|f| f == "hero"),
+                "{first:?}"
+            );
+            assert_eq!(session.as_deref(), Some("Zenyatta"), "{first:?}");
+        }
+    }
 
     // ---- alpha.7 O9: the own row without name OCR (OCR site T4)
 
