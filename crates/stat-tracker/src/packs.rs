@@ -1323,6 +1323,8 @@ fn sync_lock_path(data_dir: &Path) -> PathBuf {
 /// already sets `O_CLOEXEC`, so a child drops the inherited descriptor at
 /// exec. `close` alone still leaves the lock held until that exec, and a
 /// keeper that tries again in that window sees [`PackSync::Busy`].
+/// `F_OFD_SETLK` is the same kind of lock: the child shares it until exec
+/// or an explicit unlock.
 struct SyncLock {
     _file: std::fs::File,
 }
