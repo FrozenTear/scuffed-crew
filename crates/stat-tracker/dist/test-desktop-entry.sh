@@ -60,6 +60,12 @@ fi
 # Theme icon (not a broken file path).
 grep -q '^Icon=applications-games$' "$DESKTOP" || fail "Icon= line missing or rewritten"
 
+# Freedesktop allows one main category. Game and Utility are both main
+# categories, so the entry keeps Game only.
+grep -q '^Categories=Game;$' "$TEMPLATE" || fail "template Categories is not Game; only. got: $(grep -E '^Categories=' "$TEMPLATE" || echo '<missing>')"
+grep -q '^Categories=Game;$' "$DESKTOP" || fail "installed Categories is not Game; only. got: $(grep -E '^Categories=' "$DESKTOP" || echo '<missing>')"
+pass "Categories=Game;"
+
 pass "Exec=$want"
 pass "TryExec=$want"
 

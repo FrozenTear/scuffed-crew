@@ -13,7 +13,9 @@ use scuffed_types::{
 
 use crate::components::chat::encrypted_chat::{EncryptedChat, KeyMode};
 use crate::components::{Toast, use_toast};
+use crate::state::RelayAvailability;
 use crate::state::nostr::{NostrRelayEvent, NostrRelayManager, RelayConnectionState};
+use crate::state::use_relay_availability_state;
 
 use super::compose_box::ComposeBox;
 use super::message_list::MessageList;
@@ -239,18 +241,36 @@ fn auth_relay_url(channel_relay: &str) -> String {
         .unwrap_or_else(|| "/relay".into())
 }
 
-fn connect_relay(relay: &NostrRelayManager, channels: &[TeamChannel]) {
+/// Where the widget would open a socket. `None` means do not connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayDial {
+    Absolute(String),
+    SameOrigin(String),
+}
+
+/// No dial until health says the relay is configured. An active channel with
+/// an empty or relative URL used to become `wss://<host>/relay`.
+fn relay_dial(availability: RelayAvailability, channels: &[TeamChannel]) -> Option<RelayDial> {
+    if !availability.allows_connection() {
+        return None;
+    }
     let url = channels
         .iter()
-        .find(|c| c.is_active)
-        .map(|c| c.relay_url.as_str())
-        .unwrap_or("");
+        .find(|channel| channel.is_active)
+        .map(|channel| channel.relay_url.as_str())?;
     if url.starts_with("ws://") || url.starts_with("wss://") {
-        relay.connect(url);
+        Some(RelayDial::Absolute(url.to_string()))
     } else if url.starts_with('/') {
-        relay.connect_same_origin(url);
+        Some(RelayDial::SameOrigin(url.to_string()))
     } else {
-        relay.connect_same_origin("/relay");
+        Some(RelayDial::SameOrigin("/relay".to_string()))
+    }
+}
+
+fn connect_relay(relay: &NostrRelayManager, dial: &RelayDial) {
+    match dial {
+        RelayDial::Absolute(url) => relay.connect(url),
+        RelayDial::SameOrigin(path) => relay.connect_same_origin(path),
     }
 }
 
@@ -555,18 +575,19 @@ pub fn ChatWidget(
         relay_cleanup.disconnect();
     });
 
+    let relay_state = use_relay_availability_state();
     let relay_connect = relay.clone();
     let channels_for_connect = channels.clone();
     use_effect(move || {
-        if channels_for_connect.iter().any(|c| c.is_active) {
-            let hint = channels_for_connect
-                .iter()
-                .find(|c| c.is_active)
-                .map(|c| auth_relay_url(&c.relay_url))
-                .unwrap_or_else(|| auth_relay_url(""));
-            decrypt_relay.set(hint);
-            connect_relay(&relay_connect, &channels_for_connect);
-        }
+        let Some(dial) = relay_dial(relay_state.current(), &channels_for_connect) else {
+            return;
+        };
+        let hint = match &dial {
+            RelayDial::Absolute(url) => url.clone(),
+            RelayDial::SameOrigin(path) => auth_relay_url(path),
+        };
+        decrypt_relay.set(hint);
+        connect_relay(&relay_connect, &dial);
     });
 
     let me = use_resource(move || async move {
@@ -868,5 +889,91 @@ pub fn ChatWidget(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(active: bool, relay_url: &str) -> TeamChannel {
+        TeamChannel {
+            id: "c".into(),
+            team_id: "t".into(),
+            group_id: "g".into(),
+            group_type: GroupType::Public,
+            relay_url: relay_url.into(),
+            is_active: active,
+            created_at: chrono::Utc::now(),
+            synced_at: None,
+        }
+    }
+
+    #[test]
+    fn relay_off_does_not_dial_same_origin_relay() {
+        let empty = channel(true, "");
+        assert!(relay_dial(RelayAvailability::Off, std::slice::from_ref(&empty)).is_none());
+        assert!(relay_dial(RelayAvailability::Unknown, std::slice::from_ref(&empty)).is_none());
+        assert_eq!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&empty)),
+            Some(RelayDial::SameOrigin("/relay".into()))
+        );
+
+        let http = channel(true, "http://relay.example");
+        assert!(relay_dial(RelayAvailability::Off, std::slice::from_ref(&http)).is_none());
+        assert_eq!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&http)),
+            Some(RelayDial::SameOrigin("/relay".into()))
+        );
+
+        let absolute = channel(true, "wss://relay.example/path");
+        assert_eq!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&absolute)),
+            Some(RelayDial::Absolute("wss://relay.example/path".into()))
+        );
+        assert!(relay_dial(RelayAvailability::Off, std::slice::from_ref(&absolute)).is_none());
+
+        let rooted = channel(true, "/custom");
+        assert_eq!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&rooted)),
+            Some(RelayDial::SameOrigin("/custom".into()))
+        );
+
+        let ws = channel(true, "ws://127.0.0.1:7777");
+        assert_eq!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&ws)),
+            Some(RelayDial::Absolute("ws://127.0.0.1:7777".into()))
+        );
+
+        let inactive = channel(false, "wss://relay.example");
+        assert!(
+            relay_dial(RelayAvailability::On, std::slice::from_ref(&inactive)).is_none(),
+            "an inactive channel still does not open a socket"
+        );
+    }
+
+    #[test]
+    fn connect_effect_opens_a_socket_only_through_relay_dial() {
+        let src = include_str!("chat_widget.rs");
+        let start = src
+            .find("let relay_connect = relay.clone()")
+            .expect("connect effect");
+        let rest = &src[start..];
+        let end = rest.find("let me = use_resource").expect("me resource");
+        let effect = &rest[..end];
+        let dial_at = effect.find("relay_dial(").expect("dial");
+        let connect_at = effect.find("connect_relay(").expect("connect");
+        assert!(
+            dial_at < connect_at,
+            "the socket opens only after relay_dial returns a target: {effect}"
+        );
+        let prod = src.split("mod tests").next().expect("production source");
+        assert_eq!(
+            prod.matches("connect_relay(").count(),
+            2,
+            "definition plus the one effect call"
+        );
+        assert_eq!(prod.matches("relay.connect(").count(), 1);
+        assert_eq!(prod.matches("connect_same_origin(").count(), 1);
     }
 }

@@ -163,7 +163,7 @@ Day-to-day: password manager stores the password chosen at first boot.
 
 ### Bootstrap DB script
 
-Keep `scripts/bootstrap-db.*` for optional scoped user. Document that with compose, Surreal is **not** on host localhost — use `podman exec` into the DB container. App may continue using root credentials for v1.
+`scripts/bootstrap-db.*` creates the namespace and database only. The database user comes from the server (`SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD`), not from a password in that file. Document that with compose, Surreal is not on host localhost: use `podman exec` into the DB container. App may continue using root credentials for v1.
 
 ---
 
