@@ -99,7 +99,10 @@ if [[ -z "${canonical}" ]]; then
 fi
 
 echo "Building strfry with --no-deps (leaving ${canonical} running; not creating Surreal)..."
-if COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" --profile relay up --build -d --no-deps strfry; then
-    exit 0
+# Exit on failure. A second up without COMPOSE_PROJECT_NAME only builds again,
+# under whatever project name the shell already has.
+if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" --profile relay up --build -d --no-deps strfry; then
+    echo "error: strfry up failed for COMPOSE_PROJECT_NAME=${PROJECT_NAME}." >&2
+    echo "  Command: ${COMPOSE[*]} --env-file data/secrets.env --profile relay up --build -d --no-deps strfry" >&2
+    exit 1
 fi
-"${COMPOSE[@]}" --env-file "$SECRETS" --profile relay up --build -d --no-deps strfry

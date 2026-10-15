@@ -489,7 +489,9 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    ```
 
    That runs `podman compose --env-file data/secrets.env --profile relay up --build -d --no-deps strfry`
-   (or `podman-compose` when that is the provider). `--no-deps` is required.
+   (or `podman-compose` when that is the provider) with `COMPOSE_PROJECT_NAME` set.
+   If that up fails, the script prints the project name and exits 1.
+   `--no-deps` is required.
    Without it, podman-compose also starts Surreal and can create
    `scuffed-crew_surrealdb_1` on the same volume as `scuffed-crew-surrealdb-1`.
    `strfry` has no `depends_on` for the same reason. Do not run
