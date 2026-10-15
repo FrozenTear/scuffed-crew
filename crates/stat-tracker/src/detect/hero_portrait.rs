@@ -2325,3 +2325,135 @@ mod installed_pack_tests {
         assert_eq!(matcher.match_portrait(&main).unwrap().0, "ana");
     }
 }
+
+/// Pack parity check for the portrait move. Ignored in CI because the hero
+/// pack and real boards are not in the repo. Run locally with:
+///
+/// ```text
+/// SCUFFED_HERO_PACK_DIR=<extracted heroes-v1 pack>
+/// SCUFFED_OLD_PORTRAITS_DIR=<portraits/ from the commit before the move>
+/// SCUFFED_PROOF_BOARDS_DIR=<scoreboard PNGs>
+/// cargo test -p scuffed-stat-tracker pack_parity -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod pack_parity_tests {
+    use super::*;
+
+    /// Pack files use `soldier-76`, the old bundle used `soldier76`.
+    fn norm(stem: &str) -> String {
+        stem.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    }
+
+    fn env_dir(key: &str) -> PathBuf {
+        PathBuf::from(std::env::var(key).unwrap_or_else(|_| panic!("set {key}")))
+    }
+
+    fn installed_matcher() -> PortraitMatcher {
+        let pack = env_dir("SCUFFED_HERO_PACK_DIR");
+        let data = tempfile::tempdir().unwrap();
+        let dest = crate::shadow::heroes::HeroTemplates::dir_in(data.path());
+        std::fs::create_dir_all(&dest).unwrap();
+        copy_tree(&pack, &dest);
+        let matcher = PortraitMatcher::load_installed(data.path());
+        assert!(!matcher.is_empty(), "pack did not load");
+        matcher
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let p = e.path();
+            let t = to.join(e.file_name());
+            if p.is_dir() {
+                std::fs::create_dir_all(&t).unwrap();
+                copy_tree(&p, &t);
+            } else {
+                std::fs::copy(&p, &t).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the hero pack and old portraits on disk"]
+    fn pack_parity_every_moved_portrait_loads_from_the_pack() {
+        let old = PortraitMatcher::load(&env_dir("SCUFFED_OLD_PORTRAITS_DIR"));
+        let new = installed_matcher();
+        let have: std::collections::HashSet<String> =
+            new.references.keys().map(|k| norm(k)).collect();
+        let mut missing: Vec<_> = old
+            .references
+            .keys()
+            .map(|k| norm(k))
+            .filter(|k| !have.contains(k))
+            .collect();
+        missing.sort();
+        println!(
+            "old {} stems, pack {} stems",
+            old.references.len(),
+            have.len()
+        );
+        assert_eq!(old.references.len(), 52);
+        assert!(missing.is_empty(), "not in pack: {missing:?}");
+    }
+
+    /// Nearest reference per portrait slot, before the trust threshold, so
+    /// the comparison does not pass just because both sides return nothing.
+    fn nearest_per_slot(m: &PortraitMatcher, board: &DynamicImage) -> Vec<String> {
+        extract_portrait_crops(board)
+            .iter()
+            .map(|crop| {
+                let c = crop
+                    .resize_exact(PORTRAIT_SIZE, PORTRAIT_SIZE, FilterType::Lanczos3)
+                    .to_rgb8();
+                m.references
+                    .iter()
+                    .map(|(k, r)| (norm(k), mean_absolute_difference(&c, r)))
+                    .min_by(|x, y| x.1.total_cmp(&y.1))
+                    .map(|(k, _)| k)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs the hero pack, old portraits and proof boards on disk"]
+    fn pack_parity_proof_boards_read_the_same() {
+        let old = PortraitMatcher::load(&env_dir("SCUFFED_OLD_PORTRAITS_DIR"));
+        let new = installed_matcher();
+        let mut boards: Vec<_> = std::fs::read_dir(env_dir("SCUFFED_PROOF_BOARDS_DIR"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
+            .collect();
+        boards.sort();
+        assert!(!boards.is_empty());
+        let mut diffs = Vec::new();
+        for b in &boards {
+            let img = image::open(b).unwrap();
+            // What callers see: trusted matches and the player hero.
+            let trusted = |m: &PortraitMatcher| {
+                let all: Vec<String> = m
+                    .match_all_portraits(&img)
+                    .iter()
+                    .map(|(h, _)| norm(h))
+                    .collect();
+                let me = m.match_player_hero(&img).map(|(h, _, r)| (norm(&h), r));
+                (all, me)
+            };
+            let (a, n) = (trusted(&old), trusted(&new));
+            // Below the trust threshold, for information only.
+            let (na, nn) = (nearest_per_slot(&old, &img), nearest_per_slot(&new, &img));
+            let same_nearest = na.iter().zip(&nn).filter(|(x, y)| x == y).count();
+            println!(
+                "{}: trusted old {a:?} pack {n:?}; untrusted nearest agree {same_nearest}/{}",
+                b.file_name().unwrap().to_string_lossy(),
+                na.len()
+            );
+            if a != n {
+                diffs.push(b.clone());
+            }
+        }
+        println!("{} boards, {} differ", boards.len(), diffs.len());
+        assert!(diffs.is_empty(), "differ: {diffs:?}");
+    }
+}
