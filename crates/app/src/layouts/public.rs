@@ -483,16 +483,10 @@ const NAV_CSS: &str = r#"
         color: var(--text-3);
     }
     .site-main {
-        box-sizing: border-box;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr);
-        width: 100%;
-        max-width: 100%;
         min-width: 0;
         padding-top: 48px;
         min-height: 100vh;
     }
-    .site-main > * { min-width: 0; }
     .site-footer {
         border-top: 1px solid var(--border);
         padding: 2rem;
@@ -957,19 +951,19 @@ mod tests {
     }
 
     #[test]
-    fn site_main_shrinks_so_wide_pages_stay_in_the_viewport() {
+    fn site_main_is_a_block_that_can_shrink() {
         let main = css_rule(NAV_CSS, ".site-main {");
-        assert!(main.contains("display: grid"), "{main}");
-        assert!(
-            main.contains("grid-template-columns: minmax(0, 1fr)"),
-            "{main}"
-        );
         assert!(has_decl(&main, "min-width: 0"), "{main}");
-        assert!(has_decl(&main, "max-width: 100%"), "{main}");
-        assert!(has_decl(&main, "width: 100%"), "{main}");
-        assert!(has_decl(&main, "box-sizing: border-box"), "{main}");
-        let child = css_rule(NAV_CSS, ".site-main > * {");
-        assert!(has_decl(&child, "min-width: 0"), "{child}");
+        assert!(has_decl(&main, "padding-top: 48px"), "{main}");
+        assert!(has_decl(&main, "min-height: 100vh"), "{main}");
+        assert!(
+            !main.contains("display:"),
+            "site main stays a normal block: {main}"
+        );
+        assert!(
+            !NAV_CSS.contains(".site-main > *"),
+            "page roots keep their own widths"
+        );
     }
 
     fn css_rule(css: &str, marker: &str) -> String {
