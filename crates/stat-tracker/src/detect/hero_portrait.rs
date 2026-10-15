@@ -2398,16 +2398,47 @@ mod pack_parity_tests {
             .collect();
         heroes.sort_by(|a, b| a.0.cmp(&b.0));
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/vision-baseline");
-        let boards = [
-            ("1440", "native_postgame_table_names_blanked.png"),
-            ("1080", "s075_postgame_table_names_blanked.png"),
-            ("1080", "s075_tab_board_stats_only.png"),
+        let load = |f: &str| image::open(base.join(f)).unwrap();
+        // 5v5: the synthetic board from `report/blank/synth`, generated here
+        // (nothing committed), and its 0.75 downscale for 1080p.
+        let five_1440 = DynamicImage::ImageRgb8(crate::report::blank::synth::board_5v5(5));
+        let five_1080 = five_1440.resize_exact(1248, 756, FilterType::Lanczos3);
+        let boards: Vec<(&str, &str, DynamicImage, Option<usize>)> = vec![
+            (
+                "1440",
+                "native_postgame_table_names_blanked.png",
+                load("native_postgame_table_names_blanked.png"),
+                None,
+            ),
+            (
+                "1080",
+                "s075_postgame_table_names_blanked.png",
+                load("s075_postgame_table_names_blanked.png"),
+                None,
+            ),
+            (
+                "1080",
+                "s075_tab_board_stats_only.png",
+                load("s075_tab_board_stats_only.png"),
+                None,
+            ),
+            ("1440", "synth board_5v5", five_1440, Some(5)),
+            ("1080", "synth board_5v5 x0.75", five_1080, Some(5)),
         ];
         let mut failures = Vec::new();
-        for (res, file) in boards {
-            let board = image::open(base.join(file)).unwrap();
-            let team_size = detect_team_size(&board);
-            let rows = [0, team_size];
+        for (res, file, board, expect) in boards {
+            let detected = detect_team_size(&board);
+            // Use the app's detection; if it disagrees with the expected
+            // layout, force the expected one through the same slot code.
+            let team_size = expect.unwrap_or(detected);
+            let forced = team_size != detected;
+            let rows: Vec<usize> = if team_size == 5 {
+                // Row 9's square ends at y 1014 on a 1007-tall crop, so
+                // `portrait_rect` refuses it, as it does in the app.
+                vec![0, 4, 5, 8]
+            } else {
+                vec![0, team_size]
+            };
             let (mut pass, mut total, mut min_conf) = (0, 0, f64::MAX);
             for (stem, art) in &heroes {
                 for &row in &rows {
@@ -2427,7 +2458,9 @@ mod pack_parity_tests {
                     }
                 }
             }
-            println!("{res} {file} team {team_size}: {pass}/{total} pass, min conf {min_conf:.4}");
+            println!(
+                "{res} {file} team {team_size} (detected {detected}, forced {forced}) rows {rows:?}: {pass}/{total} pass, min conf {min_conf:.4}"
+            );
         }
         assert!(failures.is_empty(), "failures: {failures:#?}");
     }
