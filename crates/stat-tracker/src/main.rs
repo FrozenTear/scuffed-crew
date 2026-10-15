@@ -1183,6 +1183,10 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 /// session. `outcome` is filled in when the poller reads the post-match screens
 /// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
+    /// Restored after a restart with a result screen already seen for it.
+    /// Memory only. The first Tab after [`POST_MATCH_GRACE`] from that
+    /// result starts a new game ([`should_start_fresh_session`]).
+    restored_with_result: bool,
     session_id: String,
     /// alpha.8: the newest pending board's row with the reader's best guess
     /// in each unread stat column, those columns in `suspect_fields`. Stored
@@ -1324,6 +1328,7 @@ impl ActiveGame {
             text_fallback_locked: false,
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
+            restored_with_result: false,
         }
     }
 
@@ -2110,6 +2115,15 @@ fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
 fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     let to_instant =
         |w: chrono::DateTime<Utc>| Instant::now().checked_sub((Utc::now() - w).to_std().ok()?);
+    if let Some(reason) = restart_resume_refusal(&p, Utc::now()) {
+        tracing::info!(
+            session_id = %p.session_id,
+            map = p.map.as_deref().unwrap_or(""),
+            reason,
+            "previous game not resumed after restart: the next Tab starts a new game"
+        );
+        return None;
+    }
     let last_activity = to_instant(p.last_activity)?;
     if last_activity.elapsed() > UNFINISHED_SESSION_IDLE {
         return None;
@@ -2160,7 +2174,46 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
         text_fallback_locked: p.text_fallback_locked,
         replaced_text_fallback_map: p.replaced_text_fallback_map,
         result_evidence: shadow::result::ResultEvidence::default(),
+        restored_with_result: hint_recovered,
     })
+}
+
+/// Longest gap since the previous run's last capture for which a restart
+/// resumes that game. A crash and restart mid-game takes well under a
+/// minute; the next game's first Tab usually comes after a result screen,
+/// a queue and hero select. Past this, the next Tab starts a new game.
+const RESUME_AFTER_RESTART_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Why the game in `active_game.json` is not resumed after a restart, or
+/// `None` when it is clearly the same game. An unfinished game with a
+/// stored board resumes only when it has a known map and its last capture
+/// is at most [`RESUME_AFTER_RESTART_MAX_GAP`] old. A Tab after the restart
+/// that names another map still splits on the boundary's different-map
+/// rule.
+///
+/// A game with a result already seen is restored so its result and its
+/// post-match scoreboard stay on it. It is marked
+/// [`ActiveGame::restored_with_result`], so the first Tab after
+/// [`POST_MATCH_GRACE`] from that result starts a new game. A game whose
+/// outcome is recorded starts a new game on that Tab anyway.
+fn restart_resume_refusal(p: &PersistedGame, now: chrono::DateTime<Utc>) -> Option<&'static str> {
+    if p.outcome.is_decided() {
+        return None;
+    }
+    // A session with no stored board (opened by a start screen, or holding
+    // the next game's board after a shutdown) cannot become a duplicate
+    // game, so it keeps the [`UNFINISHED_SESSION_IDLE`] bound alone.
+    if !p.session_created {
+        return None;
+    }
+    if known_label(p.map.as_deref()).is_none() {
+        return Some("no map recorded, so it cannot be matched");
+    }
+    match (now - p.last_activity).to_std() {
+        Ok(gap) if gap <= RESUME_AFTER_RESTART_MAX_GAP => None,
+        Ok(_) => Some("last capture too long ago"),
+        Err(_) => Some("last capture is later than now (clock moved back)"),
+    }
 }
 
 /// Test double for a stale start. Production uses [`begin_daemon_session`]
@@ -2293,6 +2346,15 @@ const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_se
 /// meaningful sleep.
 const SUSPEND_RESET_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A game restored after a restart with a result screen already seen is a
+/// finished game once [`POST_MATCH_GRACE`] has passed since that result:
+/// the next Tab is the next game, even on the same map.
+fn restored_result_is_past_grace(g: &ActiveGame, now: Instant) -> bool {
+    g.restored_with_result
+        && g.result_mark
+            .is_some_and(|m| now.saturating_duration_since(m.seen_at) > POST_MATCH_GRACE)
+}
+
 /// Whether a Tab capture should open a fresh session instead of reusing the
 /// active one.
 fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
@@ -2301,7 +2363,10 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
         None => true,
         // Mid-game capture — unless the session has been idle so long it
         // can't plausibly be the same game.
-        Some(g) if !g.finished() => now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE,
+        Some(g) if !g.finished() => {
+            now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE
+                || restored_result_is_past_grace(g, now)
+        }
         // Finished: reuse within the grace window (post-match scoreboard of the
         // same match), start fresh after it. An unstamped outcome is treated as
         // stale so a finished result can never leak forward.
@@ -8285,6 +8350,7 @@ mod tests {
             text_fallback_locked: false,
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
+            restored_with_result: false,
         }
     }
 
@@ -18982,6 +19048,137 @@ mod tests {
             baseline_at: None,
             text_fallback_locked: false,
         }
+    }
+
+    /// A game on disk with a stored board, last captured `ago` before now.
+    fn restart_skeleton(map: Option<&str>, ago: chrono::Duration) -> PersistedGame {
+        let mut p = persisted_with_hold(
+            "before-crash",
+            detect::MatchOutcome::Unknown,
+            map,
+            false,
+            0,
+            Utc::now() - ago,
+        );
+        p.session_created = true;
+        p.deferred = None;
+        p.deferred_hero = None;
+        p.deferred_at = None;
+        p
+    }
+
+    /// Restart from `p`, then ask whether the first Tab opens a new game.
+    fn first_tab_after_restart_starts_new_game(p: &PersistedGame) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(active_game_path(dir.path()), serde_json::to_vec(p).unwrap()).unwrap();
+        let st = startup_session(dir.path());
+        should_start_fresh_session(st.active_game.as_ref(), Instant::now())
+    }
+
+    /// QA: same map, last capture recent, no result seen: the restart
+    /// resumes the game, so the next Tab stays on it.
+    #[test]
+    fn a_restart_resumes_the_same_recent_game_with_no_result() {
+        let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(40));
+        assert_eq!(restart_resume_refusal(&p, Utc::now()), None);
+        assert!(!first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: a long gap since the last capture starts a new game, even on the
+    /// same map, well inside the old 20 minute idle bound.
+    #[test]
+    fn a_restart_after_a_long_gap_starts_a_new_game() {
+        let gap = chrono::Duration::from_std(RESUME_AFTER_RESTART_MAX_GAP).unwrap()
+            + chrono::Duration::seconds(30);
+        assert!(gap.to_std().unwrap() < UNFINISHED_SESSION_IDLE);
+        let p = restart_skeleton(Some("Busan"), gap);
+        assert_eq!(
+            restart_resume_refusal(&p, Utc::now()),
+            Some("last capture too long ago")
+        );
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// A game with a board but no map cannot be matched, so it is not
+    /// resumed. A clock that moved back is not resumed either.
+    #[test]
+    fn a_restart_without_a_map_or_with_a_future_capture_starts_a_new_game() {
+        let p = restart_skeleton(None, chrono::Duration::seconds(40));
+        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(first_tab_after_restart_starts_new_game(&p));
+        let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(-120));
+        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: a result screen was seen before the crash. The restart keeps the
+    /// game so its result is not lost, and the first Tab past the
+    /// post-match grace starts a new game. Inside the grace the post-match
+    /// scoreboard still belongs to it.
+    #[test]
+    fn a_restart_after_a_result_screen_starts_a_new_game() {
+        let mut p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(30));
+        p.result_outcome = Some(detect::MatchOutcome::Victory);
+        p.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(100));
+        assert!(first_tab_after_restart_starts_new_game(&p));
+
+        p.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(10));
+        assert!(
+            !first_tab_after_restart_starts_new_game(&p),
+            "the post-match scoreboard inside the grace stays on the game"
+        );
+
+        let mut p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(100));
+        p.outcome = detect::MatchOutcome::Defeat;
+        p.outcome_recorded_at = Some(Utc::now() - chrono::Duration::seconds(100));
+        assert!(first_tab_after_restart_starts_new_game(&p));
+    }
+
+    /// QA: two real games in a row on the same map stay separate across a
+    /// crash. Game 1 on Busan saw its result, the tracker restarted, and
+    /// game 2 on Busan opens its own session; game 2's restart then resumes
+    /// game 2, not game 1.
+    #[test]
+    fn two_games_in_a_row_on_the_same_map_stay_separate_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut game1 = restart_skeleton(Some("Busan"), chrono::Duration::seconds(150));
+        game1.session_id = "game-1".into();
+        game1.result_outcome = Some(detect::MatchOutcome::Victory);
+        game1.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(150));
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&game1).unwrap(),
+        )
+        .unwrap();
+        let mut st = startup_session(dir.path());
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("game-1")
+        );
+        let now = Instant::now();
+        assert!(should_start_fresh_session(st.active_game.as_ref(), now));
+        let mut game2 = ActiveGame::open_at(
+            "game-2".into(),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            now,
+        );
+        game2.map = Some("Busan".into());
+        game2.session_created = true;
+        st.active_game = Some(game2);
+        assert!(!should_start_fresh_session(st.active_game.as_ref(), now));
+
+        persist_active_game(dir.path(), st.active_game.as_ref());
+        let st = startup_session(dir.path());
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("game-2"),
+            "a restart during game 2 resumes game 2"
+        );
+        assert!(!should_start_fresh_session(
+            st.active_game.as_ref(),
+            Instant::now()
+        ));
     }
 
     async fn begin_from_persisted(
