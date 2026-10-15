@@ -90,7 +90,7 @@ Release notes are `crates/stat-tracker/CHANGELOG.md` section `## 0.4.9`, then
 the usual git-log since the previous `stat-tracker-v*` tag (0.4.8), then
 install requirements.
 
-## 4. Laptop install test (AerynOS / Robert)
+## 4. Laptop install test (AerynOS / FrozenTear)
 
 After the GitHub Release has the tarball:
 
@@ -118,4 +118,4 @@ scuffed-stat-tracker --version   # expect: scuffed-stat-tracker 0.4.9
 ## If the tag was pushed by mistake
 
 Human-only (agent-protocol §5): delete a published tag / GitHub Release only
-with an explicit current instruction from Robert. Do not improvise.
+with an explicit current instruction from FrozenTear. Do not improvise.

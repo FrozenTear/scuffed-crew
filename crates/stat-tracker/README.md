@@ -44,7 +44,7 @@ install paths and the `.desktop` entry stay the same).
 |-----------|---------|--------|
 | **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/scuffed-stat-tracker/ocr` (soname splits across distros). Installer copies that tree so RUNPATH `$ORIGIN/../lib/scuffed-stat-tracker/ocr` works. OpenSSL is **not** bundled. |
 | **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`), binary name `stat-tracker-gui`. Tray (Hide-to-tray) needs **Ayatana AppIndicator** when the distro ships it; without it the window still starts. |
-| **Host still needed** | Wayland **or** X11 + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
+| **Host still needed** | Wayland **or** X11 + `input` group | Capture, compositor, and keyboard access stay host-provided. The release tarball bundles `eng.traineddata`. |
 
 ## Install (prebuilt Linux x86_64)
 
@@ -89,10 +89,11 @@ curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffe
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
 
-The tarball's `.sha256` is checked before extract when that asset is published.
-That digest comes from the same release. With no minisign public key configured,
-the script logs that and stops there. Once a public key is configured, a missing
-or bad `.minisig` refuses the install. It does not fall back to sha256.
+The tarball's `.sha256` is checked before extract. A missing `.sha256` asset
+stops the install. With no minisign public key configured, bootstrap warns and
+falls back to that sha256 from the same GitHub release. Once a public key is
+configured, a missing or bad `.minisig` refuses the install. It does not fall
+back to sha256.
 
 **Manual:** download the tarball (+ optional `.sha256`) from the release page,
 extract, then:
@@ -166,7 +167,7 @@ does not change; only the implementation does.
 First-run sync setup: `scuffed-stat-tracker --token <daemon-token> --server
 https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600:
 it holds the bearer token). Tokens are minted in the site under
-My Stats → Settings.
+My Stats → Daemon Tokens.
 
 Useful flags: `--list-outputs`, `--collect-portraits` (only fills missing
 portraits and the Doctrine stand-in; it never overwrites an existing
