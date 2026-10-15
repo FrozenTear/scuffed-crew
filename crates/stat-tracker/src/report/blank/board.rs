@@ -31,6 +31,10 @@ const WIDTHS: [f64; 4] = [930.0, 978.0, 994.0, 1044.0];
 const WIDTH_TOL: f64 = 3.0;
 /// Header strip bottom row (measured 29).
 const HDR_RANGE: (f64, f64) = (26.0, 32.0);
+/// Anti-aliased rows at the bottom of the header strip (1664 px wide crop).
+const EDGE_ROWS: f64 = 1.0;
+/// Widest dark speck inside a header row that is bridged (1664 px crop).
+const SPECK: f64 = 3.0;
 /// Role bar columns sampled for the separator profile, from `L`.
 const BAR: (f64, f64) = (5.0, 27.0);
 /// Role bar width.
@@ -153,6 +157,26 @@ fn header_light(p: [u8; 3]) -> bool {
     mn >= 150 && mx - mn <= 40
 }
 
+/// Fill interior gaps of at most `max` px between light pixels. Real
+/// captures can carry a few dark specks (cursor, compression) inside the
+/// strip; without this one 2 px speck splits the row's run below the minimum
+/// width. The run edges never move, so `L` and `R` stay exact.
+fn close_gaps(row: &[bool], max: usize) -> Vec<bool> {
+    let mut out = row.to_vec();
+    let mut last: Option<usize> = None;
+    for (x, &v) in row.iter().enumerate() {
+        if v {
+            if let Some(p) = last {
+                if x - p - 1 <= max {
+                    out[p + 1..x].iter_mut().for_each(|o| *o = true);
+                }
+            }
+            last = Some(x);
+        }
+    }
+    out
+}
+
 /// Longest run of `true`, as `[start, end)`; `(0, 0)` when there is none.
 fn longest_run(row: &[bool]) -> (usize, usize) {
     let mut best = (0, 0);
@@ -186,9 +210,10 @@ fn measure_header(img: &RgbImage, s: f64) -> Result<(u32, u32, u32), Fail> {
         })
         .collect();
     let first = (pyround(30.0 * s).max(0) as usize).min(lim);
+    let speck = pyround(SPECK * s).max(1) as usize;
     let clean: Vec<(usize, usize)> = light[..first]
         .iter()
-        .map(|row| longest_run(row))
+        .map(|row| longest_run(&close_gaps(row, speck)))
         .filter(|&(st, en)| (en - st) as f64 >= 850.0 * s)
         .collect();
     if (clean.len() as f64) < 8.0 * s {
@@ -210,7 +235,13 @@ fn measure_header(img: &RgbImage, s: f64) -> Result<(u32, u32, u32), Fail> {
     let hb = (0..lim)
         .find(|&y| share(y) < 0.5)
         .ok_or_else(|| Fail::new("header strip interrupted"))?;
-    if !(0..hb).all(|y| share(y) >= 0.85) {
+    // The strip's bottom edge is anti-aliased on real captures: the last
+    // light row blends with the team bar under it, so only part of it passes
+    // the grey test. Allow that many half-lit edge rows right above `hb`;
+    // every row above them must still be solid.
+    let edge = pyround(EDGE_ROWS * s).max(1) as usize;
+    let solid = hb.saturating_sub(edge);
+    if !(0..solid).all(|y| share(y) >= 0.85) {
         return Err(Fail::new("header strip interrupted"));
     }
     if !(HDR_RANGE.0 * s..=HDR_RANGE.1 * s).contains(&(hb as f64)) {
@@ -443,4 +474,60 @@ fn measure_rows(
         return Err(Fail::new("teams overlap"));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use image::Rgb;
+
+    use super::super::synth;
+    use super::*;
+
+    /// Real captures blend the header's last row with the team bar under it
+    /// and can carry small dark specks inside the strip. Both used to make
+    /// every real board fail with "header strip interrupted" or "header
+    /// strip not found". Synthetic pixels only.
+    #[test]
+    fn an_anti_aliased_header_edge_and_specks_still_measure() {
+        let mut img = synth::board(synth::Layout::L4);
+        let (l, r) = synth::Layout::L4.edges();
+        // the last header row is half grey, half a blend with the bar colour
+        for x in l..r {
+            if x % 5 < 2 {
+                img.put_pixel(x, 28, Rgb([20, 200, 230]));
+            }
+        }
+        // 2 px dark specks in every row of the lower header half
+        for y in 17..28 {
+            img.put_pixel(150 + y, y, Rgb([5, 5, 5]));
+            img.put_pixel(151 + y, y, Rgb([5, 5, 5]));
+        }
+        let b = measure(&img, 6).expect("the board measures");
+        assert_eq!((b.l, b.r, b.hb), (l, r, 29));
+    }
+
+    /// Only one edge row is forgiven: a strip broken higher up still fails.
+    #[test]
+    fn a_header_broken_above_its_edge_row_fails() {
+        let mut img = synth::board(synth::Layout::L4);
+        let (l, r) = synth::Layout::L4.edges();
+        for y in 26..28 {
+            for x in l..r {
+                if x % 5 < 2 {
+                    img.put_pixel(x, y, Rgb([20, 200, 230]));
+                }
+            }
+        }
+        assert!(measure(&img, 6).is_err());
+    }
+
+    #[test]
+    fn close_gaps_keeps_run_edges_and_skips_wide_gaps() {
+        let row = [false, true, false, false, true, false, false, false, false, true, false];
+        let out = close_gaps(&row, 2);
+        assert_eq!(
+            out,
+            [false, true, true, true, true, false, false, false, false, true, false]
+        );
+    }
 }
