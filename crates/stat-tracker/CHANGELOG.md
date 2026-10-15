@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.10
+
+The daily report limit is now 10.
+
+### Highlights
+
+- You can send 10 reports in one UTC day. The next one waits until the next UTC day.
+- Reports you sent yesterday do not count toward today.
+
+Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
+
 ## 0.5.0-alpha.8
 
 Install this update between games, not during one. Report this game works again for every game in your history, and the report now says which game it is about.
@@ -30,8 +41,6 @@ Install this update between games, not during one. Report this game works again 
 - Game cards show the date as well as the time, the hero's role sits next to the hero name, and Delete session no longer gets cut off on a narrow window.
 
 Technical detail. Report pictures stay in `report-kit/<session_id>/` in the data folder, outside `debug/`, written whether or not debug OCR is on, and pruned to the newest kits. When the board blanks to nothing or to plain fill (for example when its header strip is not found), no picture is saved and `reads.json` is still saved with an empty `scoreboard_sha256`, so the report links its `session_id`. A game with no kit at all is reported from its stored row. The manifest resolution is always landscape. After a report is sent, its heading reads Sent and the delete date is shown in local time with its UTC offset. The New reader (alpha) text now says what happens with classic OCR on and with it off. `auto_detect.poll_interval_secs` is now optional: missing, or 4 (the value older Settings always wrote), means automatic (1.5 s with the new reader, 4 s with classic OCR); any other value overrides both. The best guess is stored when the game closes, with the column in `suspect_fields`; mid-game no row is written while a column is unread. When the site's daily report limit is reached, the app shows the site's message and keeps the game's report pictures so it can be sent the next day. A report holds at most 30 files besides `manifest.json`, no picture over 7680 px on a side, and at most 10 MiB in total.
-
-The daily report limit is now 10.
 
 ## 0.5.0-alpha.7
 
