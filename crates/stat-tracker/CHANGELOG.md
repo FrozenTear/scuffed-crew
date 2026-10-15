@@ -31,6 +31,8 @@ Install this update between games, not during one. Report this game works again 
 
 Technical detail. Report pictures stay in `report-kit/<session_id>/` in the data folder, outside `debug/`, written whether or not debug OCR is on, and pruned to the newest kits. When the board blanks to nothing or to plain fill (for example when its header strip is not found), no picture is saved and `reads.json` is still saved with an empty `scoreboard_sha256`, so the report links its `session_id`. A game with no kit at all is reported from its stored row. The manifest resolution is always landscape. After a report is sent, its heading reads Sent and the delete date is shown in local time with its UTC offset. The New reader (alpha) text now says what happens with classic OCR on and with it off. `auto_detect.poll_interval_secs` is now optional: missing, or 4 (the value older Settings always wrote), means automatic (1.5 s with the new reader, 4 s with classic OCR); any other value overrides both. The best guess is stored when the game closes, with the column in `suspect_fields`; mid-game no row is written while a column is unread. When the site's daily report limit is reached, the app shows the site's message and keeps the game's report pictures so it can be sent the next day. A report holds at most 30 files besides `manifest.json`, no picture over 7680 px on a side, and at most 10 MiB in total.
 
+The daily report limit is now 10.
+
 ## 0.5.0-alpha.7
 
 This alpha adds a switch in Settings that turns classic OCR (Tesseract) off, so the tracker reads the game with its own reader. The switch is opt-in: if you leave it alone, OCR stays on and the tracker reads as before.
@@ -136,7 +138,7 @@ This alpha adds a Report a problem button that sends the tracker log to the site
 - Your own row on the scoreboard is found again when the hero portrait does not match, for example while the ult ring covers it. Before, every later Tab read failed with "player row not found" and the game kept its early stats.
 - Settings has a **Get alpha updates** toggle, so you no longer need to edit config.toml to get alphas.
 
-The report log covers the last 30 minutes. After a crash the app noticed, it also covers the 30 minutes before the stop and 2 minutes after. Your sync token, player name, account name, computer name, home folder path, and OCR text are taken out of the log before it is shown. Officers see who sent a report. A site allows 10 reports per member per day. Nothing is retried on its own (#230, #232).
+The report log covers the last 30 minutes. After a crash the app noticed, it also covers the 30 minutes before the stop and 2 minutes after. Your sync token, player name, account name, computer name, home folder path, and OCR text are taken out of the log before it is shown. Officers see who sent a report. A site allows 5 reports per member per day. Nothing is retried on its own (#230, #232).
 
 Stable installs are not offered this alpha. The desktop app skips it until Settings → Get alpha updates is on (or config.toml has `update_channel = "prerelease"`). bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
 
