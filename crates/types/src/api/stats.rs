@@ -122,6 +122,25 @@ pub const SUSPECT_FIELD_NAMES: &[&str] = &[
     "map", "mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit",
 ];
 
+/// Largest elims count the tracker accepts as a real scoreboard cell.
+///
+/// A larger value is a damage or timer digit in the elims column. The tracker
+/// gate (`parse::MAX_ELIMS`) is this constant, and hero/role averages use it
+/// so a row stored before that check existed does not move the mean. The
+/// value itself is included. Damage and healing have no ceiling here: a clean
+/// wide column is not capped on upload.
+pub const PLAUSIBLE_ELIMS_MAX: u32 = 99;
+/// Largest assists count the tracker accepts as a real scoreboard cell.
+///
+/// Same rule as [`PLAUSIBLE_ELIMS_MAX`]. Assists are not part of the hero or
+/// role averages.
+pub const PLAUSIBLE_ASSISTS_MAX: u32 = 99;
+/// Largest deaths count the tracker accepts as a real scoreboard cell.
+///
+/// Same rule as [`PLAUSIBLE_ELIMS_MAX`]. Deaths above this are left out of
+/// hero and role averages. The value itself is included.
+pub const PLAUSIBLE_DEATHS_MAX: u32 = 50;
+
 /// Max entries accepted in one match's `suspect_fields` array.
 pub const SUSPECT_FIELDS_MAX_LEN: usize = 10;
 
@@ -312,6 +331,11 @@ pub struct TokenCheckResponse {
 /// `GET /api/stats/member/{id}/roles`.
 ///
 /// Same counters as the hero aggregate, with `role` instead of `hero`.
+/// Match and win/loss/draw counts include every stored game. The averages
+/// leave out a counter past [`PLAUSIBLE_ELIMS_MAX`] / [`PLAUSIBLE_DEATHS_MAX`],
+/// or named in that row's `suspect_fields` (`e`, `d`, `dmg`, `h`). Damage and
+/// healing have no numeric ceiling. A group with no included value for a
+/// counter averages to 0.
 /// Rows are grouped by the role the tracker uploaded: its manual correction
 /// if made, else the detected role.
 /// `""` is its own row. Order is matches descending, then role ascending.
