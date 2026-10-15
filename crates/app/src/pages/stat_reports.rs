@@ -110,7 +110,10 @@ const REPORTS_CSS: &str = r#"
 }
 .reports-sub { display: block; color: var(--text-2); font-size: 0.8rem; margin-top: 0.2rem; }
 .report-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.reports-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+/* The control label is position:absolute. Without a positioned parent its
+   containing block is the viewport, so a label sitting in the wide table
+   widens the page. This keeps that label inside the scroll box. */
+.reports-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; position: relative; }
 .report-btn {
     font-family: var(--font-body); font-weight: 600; font-size: 0.85rem;
     border-radius: var(--radius-md); padding: 0.4rem 0.75rem; cursor: pointer;
@@ -700,6 +703,13 @@ fn static_copy() -> &'static [&'static str] {
     ]
 }
 
+/// Web `inert` is a boolean attribute. Dioxus 0.7.9 writes `inert: false` as
+/// the string `"false"`, which still makes the table inert, so a swipe misses
+/// the scroll box and hits the page. `None` removes the attribute.
+fn reports_scroll_inert(dialog_open: bool) -> Option<&'static str> {
+    if dialog_open { Some("true") } else { None }
+}
+
 fn labeled_control(id: &str, label: &str, button: Element) -> Element {
     rsx! {
         span { class: "reports-actions",
@@ -756,7 +766,7 @@ pub(crate) fn MyReportsBody(
                 MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
                 MemberScreen::Disabled => rsx! { p { class: "reports-status", "{COPY_DISABLED}" } },
                 MemberScreen::Ready => rsx! {
-                    div { class: "reports-scroll", inert: show_dialog,
+                    div { class: "reports-scroll", inert: reports_scroll_inert(show_dialog),
                         table { class: "reports-table",
                             thead {
                                 tr {
@@ -1423,6 +1433,28 @@ mod tests {
         let table = css_block(REPORTS_CSS, ".reports-table {");
         assert!(has_css_decl(&table, "min-width: 100%"), "{table}");
         assert!(table.contains("width: max-content"), "{table}");
+
+        let actions = css_block(REPORTS_CSS, ".reports-actions {");
+        assert!(
+            has_css_decl(&actions, "position: relative"),
+            "absolute control labels need a containing block inside the scroll box: {actions}"
+        );
+    }
+
+    #[test]
+    fn reports_scroll_inert_is_absent_unless_the_dialog_is_open() {
+        assert_eq!(reports_scroll_inert(false), None);
+        assert_eq!(reports_scroll_inert(true), Some("true"));
+        let src = include_str!("stat_reports.rs");
+        let prod = src.split("mod tests").next().unwrap();
+        assert!(
+            prod.contains("inert: reports_scroll_inert(show_dialog)"),
+            "the web renderer must omit inert when the dialog is closed"
+        );
+        assert!(
+            !prod.contains("inert: show_dialog"),
+            "inert: false stays on the element and blocks the table"
+        );
     }
 
     fn css_block(css: &str, marker: &str) -> String {
