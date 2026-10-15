@@ -10,8 +10,15 @@
 //! Measured on the 34 real scoreboards of 2026-10-11/12 (four in-match Tab
 //! layouts and the centred post-match table) at 1664 px and on their
 //! 1248 px LANCZOS copies, see `docs/report-bundle.md` section 4.
+//!
+//! 5v5 Tab boards draw the same table `K5` larger, so every 6v6 length holds
+//! at `s * K5`. The crop cuts the table's left edge off, so the 5v5 checks
+//! anchor on the header strip's right edge instead (measured on 20 real
+//! 1440p 5v5 boards of 2026-10-15, two games, four perk layouts).
 
 use image::RgbImage;
+
+use super::NAME_COL;
 
 pub(super) const REF_W: f64 = 1664.0;
 const REF_H: f64 = 1007.0;
@@ -54,6 +61,23 @@ const SEP_TRUST: usize = 3;
 /// Crop aspect tolerance, and the scale range (1080p crops are 0.75, 2160p 1.5).
 const ASPECT_TOL: f64 = 0.01;
 const SCALE: (f64, f64) = (0.70, 1.60);
+
+/// 5v5 table scale vs 6v6: row pitch 88 against 75 (labels, digits and the
+/// header height agree within 1%).
+const K5: f64 = 88.0 / 75.0;
+/// 5v5 header strip right edge `R` in crop units (the strip starts at x 0,
+/// cut by the crop), one per perk layout.
+const R5: [f64; 4] = [1068.0, 1096.0, 1105.0, 1134.0];
+/// 5v5 header label centres `R - LAB5 * s` (crop units; H measured 231.5
+/// to 239.5, MIT 114 to 119).
+const LAB5: [f64; 6] = [599.0, 532.0, 464.5, 357.5, 235.5, 116.5];
+/// Team 2's first row top in a 5v5 crop (measured 577).
+const T2_RANGE_5: (f64, f64) = (567.0, 587.0);
+/// `L + R` of a 5v5 table in crop units. The table is centred like 6v6, so
+/// its left edge `L` (outside the crop) moves opposite to `R`: the role bar
+/// ends at `L + 32 s`, measured at x 13 with `R` 1068. The name column is
+/// [`NAME_COL`] from that `L`.
+const LR5: f64 = 1043.5;
 
 /// Why a board, or part of it, keeps nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,10 +123,12 @@ pub(super) struct Board {
     pub(super) wins: [(usize, usize); 6],
     /// Rows of both teams that the crop holds, verified or not.
     pub(super) rows: Vec<Row>,
+    /// Name column `[x0, x1)` that the name-column fallback fills.
+    pub(super) name: (u32, u32),
 }
 
-/// Measure a scoreboard crop. Only 6v6 has measured geometry; other team
-/// sizes fail.
+/// Measure a scoreboard crop. 6v6 and 5v5 have measured geometry; other
+/// team sizes fail.
 pub(super) fn measure(img: &RgbImage, team: usize) -> Result<Board, Fail> {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
@@ -115,13 +141,25 @@ pub(super) fn measure(img: &RgbImage, team: usize) -> Result<Board, Fail> {
     if !(SCALE.0..=SCALE.1).contains(&s) {
         return Err(Fail(format!("crop size {w}x{h} out of range")));
     }
-    if team != 6 {
-        // No 5v5 board has been measured (row pitch, team 2 offset).
-        return Err(Fail(format!("team size {team} has no measured geometry")));
-    }
-    let (l, r, hb) = measure_header(img, s)?;
-    check_labels(img, l, r, s)?;
-    let rows = measure_rows(img, l, r, hb, s, team)?;
+    let crop_s = s;
+    let (s, labels, lab_tol) = match team {
+        6 => (s, LAB_OFF.map(|o| o * s), LAB_TOL * s),
+        5 => (s * K5, LAB5.map(|o| o * s), LAB_TOL * s),
+        _ => return Err(Fail(format!("team size {team} has no measured geometry"))),
+    };
+    let (l, r, hb) = measure_header(img, s, team, crop_s)?;
+    check_labels(img, l, r, &labels, lab_tol)?;
+    let rows = measure_rows(img, l, r, hb, s, team, crop_s)?;
+    let left = if team == 5 {
+        LR5 * crop_s - f64::from(r)
+    } else {
+        f64::from(l)
+    };
+    let name = (left + NAME_COL.0 * s, left + NAME_COL.1 * s);
+    let name = (
+        name.0.floor().max(0.0) as u32,
+        (name.1.ceil() as u32).min(w),
+    );
     let cols: [f64; 6] = std::array::from_fn(|k| f64::from(r) - OFF[k] * s);
     let wins = std::array::from_fn(|k| {
         let lo = if k > 0 {
@@ -147,6 +185,7 @@ pub(super) fn measure(img: &RgbImage, team: usize) -> Result<Board, Fail> {
         cols,
         wins,
         rows,
+        name,
     })
 }
 
@@ -197,9 +236,15 @@ fn longest_run(row: &[bool]) -> (usize, usize) {
 }
 
 /// Table edges `L`, `R` and the header strip bottom from the light header
-/// strip. Only the known layouts pass: the in-match table centred at 522 s or
-/// the post-match table centred in the crop, in one of [`WIDTHS`].
-fn measure_header(img: &RgbImage, s: f64) -> Result<(u32, u32, u32), Fail> {
+/// strip. Only the known layouts pass: for 6v6 the in-match table centred at
+/// 522 s or the post-match table centred in the crop, in one of [`WIDTHS`];
+/// for 5v5 a strip from x 0 to one of [`R5`] (`crop_s` scale).
+fn measure_header(
+    img: &RgbImage,
+    s: f64,
+    team: usize,
+    crop_s: f64,
+) -> Result<(u32, u32, u32), Fail> {
     let (w, h) = img.dimensions();
     let lim = (h as usize).min(pyround(36.0 * s).max(0) as usize);
     let light: Vec<Vec<bool>> = (0..lim)
@@ -247,6 +292,18 @@ fn measure_header(img: &RgbImage, s: f64) -> Result<(u32, u32, u32), Fail> {
     if !(HDR_RANGE.0 * s..=HDR_RANGE.1 * s).contains(&(hb as f64)) {
         return Err(Fail(format!("header height {hb}")));
     }
+    if r + 1 > w as usize {
+        return Err(Fail::new("table right edge outside the crop"));
+    }
+    if team == 5 {
+        let wtol = (WIDTH_TOL * crop_s).max(2.0);
+        if l != 0 || !R5.iter().any(|fr| (r as f64 - fr * crop_s).abs() <= wtol) {
+            return Err(Fail(format!(
+                "5v5 header {l} to {r} matches no known layout"
+            )));
+        }
+        return Ok((l as u32, r as u32, hb as u32));
+    }
     let ctr = (l + r) as f64 / 2.0;
     let tol = (CENTRE_TOL * s).max(2.0);
     if (ctr - CENTRE * s).abs() > tol && (ctr - f64::from(w) / 2.0).abs() > tol {
@@ -264,9 +321,6 @@ fn measure_header(img: &RgbImage, s: f64) -> Result<(u32, u32, u32), Fail> {
             r - l
         )));
     }
-    if r + 1 > w as usize {
-        return Err(Fail::new("table right edge outside the crop"));
-    }
     Ok((l as u32, r as u32, hb as u32))
 }
 
@@ -282,27 +336,24 @@ fn header_label_centres(img: &RgbImage) -> Vec<f64> {
         .collect()
 }
 
-/// The six stat labels sit at their offsets from `R`: 5 of 6 must be found
-/// (the one-letter H can drop out of the label scan at some scales) and no
-/// other label may sit between E and MIT.
-fn check_labels(img: &RgbImage, l: u32, r: u32, s: f64) -> Result<(), Fail> {
+/// The six stat labels sit at their offsets `lab` (px) from `R`, each within
+/// `tol` px: 5 of 6 must be found (the one-letter H can drop out of the
+/// label scan at some scales) and no other label may sit between E and MIT.
+fn check_labels(img: &RgbImage, l: u32, r: u32, lab: &[f64; 6], tol: f64) -> Result<(), Fail> {
+    let s = tol / LAB_TOL;
     let (l, r) = (f64::from(l), f64::from(r));
     let mut hit = [false; 6];
     for x in header_label_centres(img)
         .into_iter()
         .filter(|&x| l <= x && x < r)
     {
-        let (k, d) = LAB_OFF
-            .iter()
-            .map(|o| ((r - x) - o * s).abs())
-            .enumerate()
-            .fold(
-                (0, f64::INFINITY),
-                |b, (k, d)| if d < b.1 { (k, d) } else { b },
-            );
-        if d <= LAB_TOL * s {
+        let (k, d) = lab.iter().map(|o| ((r - x) - o).abs()).enumerate().fold(
+            (0, f64::INFINITY),
+            |b, (k, d)| if d < b.1 { (k, d) } else { b },
+        );
+        if d <= tol {
             hit[k] = true;
-        } else if r - LAB_OFF[0] * s - 30.0 * s < x && x < r - LAB_OFF[5] * s + 30.0 * s {
+        } else if r - lab[0] - 30.0 * s < x && x < r - lab[5] + 30.0 * s {
             return Err(Fail(format!("unexpected header label at {x:.0}")));
         }
     }
@@ -393,7 +444,9 @@ fn fit_team(pb: &[f64], ps: &[f64], s: f64, t_lo: f64, t_hi: f64, n: usize) -> O
 /// A team's grid is trusted when at least [`SEP_TRUST`] of its internal
 /// separators show. A row is verified only when the separators on both of
 /// its sides show (team edges count once the grid is trusted); a row the
-/// crop clips to under 60% of the pitch is left out.
+/// crop clips to under 60% of the pitch is left out. A 5v5 crop holds no
+/// role bar (the table's left edge is cut off), so its bar profile is the
+/// stat area's.
 fn measure_rows(
     img: &RgbImage,
     l: u32,
@@ -401,6 +454,7 @@ fn measure_rows(
     hb: u32,
     s: f64,
     team: usize,
+    crop_s: f64,
 ) -> Result<Vec<Row>, Fail> {
     let (w, h) = img.dimensions();
     let mx = |x: u32, y: u32| {
@@ -418,7 +472,7 @@ fn measure_rows(
         .filter(|&x| x >= 0 && x < i64::from(w))
         .map(|x| x as u32)
         .collect();
-    if xb.is_empty() || xs.is_empty() {
+    if (xb.is_empty() && team != 5) || xs.is_empty() {
         return Err(Fail::new("no profile columns"));
     }
     let profile = |cols: &[u32]| -> Vec<f64> {
@@ -426,17 +480,17 @@ fn measure_rows(
             .map(|y| median(&mut cols.iter().map(|&x| mx(x, y)).collect::<Vec<_>>()))
             .collect()
     };
-    let (pb, ps) = (profile(&xb), profile(&xs));
+    let ps = profile(&xs);
+    let pb = if team == 5 { ps.clone() } else { profile(&xb) };
+    let t2 = if team == 5 {
+        (T2_RANGE_5.0 * crop_s, T2_RANGE_5.1 * crop_s)
+    } else {
+        (T2_RANGE_6.0 * s, T2_RANGE_6.1 * s)
+    };
     let hb = f64::from(hb);
     let mut rows = Vec::new();
     let mut trusted = [false; 2];
-    for (ti, (lo, hi)) in [
-        (hb - 2.0 * s, hb + 2.0 * s),
-        (T2_RANGE_6.0 * s, T2_RANGE_6.1 * s),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (ti, (lo, hi)) in [(hb - 2.0 * s, hb + 2.0 * s), t2].into_iter().enumerate() {
         let Some(Grid { t, p, seps: sc }) = fit_team(&pb, &ps, s, lo, hi, team) else {
             continue;
         };

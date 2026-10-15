@@ -424,11 +424,22 @@ fn a_crop_without_its_frame_drops_the_chat_reach_portraits() {
 
 #[test]
 fn unmeasured_layouts_keep_nothing() {
-    // 5v5 has no measured geometry yet; a board the header strip does not
-    // match (here: the header removed) fails as a whole
+    // a 6v6 board read as 5v5 matches no 5v5 layout, and a board the
+    // header strip does not match (here: the header removed) fails as a
+    // whole
     let img = post_match();
     assert!(
         super::blank_crop(&img, Some(5), super::Chat::None)
+            .board
+            .is_err()
+    );
+    assert!(
+        super::blank_crop(&synth::board(Layout::L4), Some(5), super::Chat::None)
+            .board
+            .is_err()
+    );
+    assert!(
+        super::blank_crop(&synth::board_5v5(5), Some(7), super::Chat::None)
             .board
             .is_err()
     );
@@ -751,4 +762,102 @@ fn text_left_of_a_bar_at_the_crop_edge_drops_the_portrait() {
         verdicts(&b)
     );
     assert_not_copied(&b, &img, &drawn, "left text");
+}
+
+// ---- 5v5 boards (measured 2026-10-15) ---------------------------------------
+
+#[test]
+fn a_synthetic_5v5_board_measures_like_real_ones() {
+    let img = synth::board_5v5(5);
+    let b = board::measure(&img, 5).unwrap_or_else(|e| panic!("{}", e.0));
+    assert_eq!((b.l, b.r, b.hb), (0, synth::R5, synth::T1_5));
+    assert_eq!(b.rows.len(), 10);
+    for (i, row) in b.rows.iter().enumerate() {
+        let (top, _) = synth::row_span_5(i);
+        assert!(row.verified, "row {i}");
+        // the grid is fitted to +-1 px (2 px separators at 88/75 scale)
+        assert!(row.top.abs_diff(top) <= 2, "row {i}: {} vs {top}", row.top);
+    }
+    // the name column starts after the portrait art, ends before the perks
+    assert_eq!(b.name, (57, 385));
+}
+
+/// FrozenTear's 5v5 boards were dropped whole ("team size 5 has no measured
+/// geometry"). A 5v5 frame now keeps every row with its name filled.
+#[test]
+fn a_5v5_frame_gets_a_picture_with_every_name_filled() {
+    for width in [2560, 1920] {
+        let frame = synth::tab_frame(synth::Teams::Five, width, 5);
+        let out = super::blanked_scoreboard(&frame, Some(5));
+        assert_eq!(out.board, Ok(()), "{width}");
+        assert!(out.has_picture(), "{width}");
+        assert_eq!(out.name_fill_rows, 10, "{width}");
+        let k = f64::from(out.image.width()) / f64::from(synth::W);
+        for (x0, y0, x1, y1) in synth::name_boxes_5v5() {
+            let sc = |v: u32| (f64::from(v) * k).round() as u32;
+            for y in sc(y0)..sc(y1) {
+                for x in sc(x0)..sc(x1) {
+                    assert_eq!(
+                        *out.image.get_pixel(x, y),
+                        super::FILL,
+                        "{width} ({x}, {y})"
+                    );
+                }
+            }
+        }
+        if width == 2560 {
+            // the stats are kept as captured: E to MIT of every row
+            let src = synth::board_5v5(5);
+            for i in 0..10 {
+                let (top, bot) = synth::row_span_5(i);
+                for y in top + 3..bot - 3 {
+                    for x in 560..1040 {
+                        assert_eq!(out.image.get_pixel(x, y), src.get_pixel(x, y), "({x}, {y})");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_6v6_frame_still_passes_with_the_5v5_geometry_in() {
+    for width in [2560, 1920] {
+        let frame = synth::tab_frame(synth::Teams::Six, width, 6);
+        let out = super::blanked_scoreboard(&frame, Some(6));
+        assert_eq!(out.board, Ok(()), "{width}");
+        assert!(out.has_picture(), "{width}");
+    }
+    let frame = synth::tab_frame(synth::Teams::Six, 2560, 6);
+    let out = super::blanked_scoreboard(&frame, Some(6));
+    for (x0, y0, x1, y1) in synth::name_boxes(Layout::L4) {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                assert_eq!(*out.image.get_pixel(x, y), super::FILL, "({x}, {y})");
+            }
+        }
+    }
+}
+
+/// A half-drawn 5v5 board never shows a name, whatever it keeps.
+#[test]
+fn a_half_drawn_5v5_board_shows_no_name() {
+    for drawn in 0..5 {
+        let frame = synth::tab_frame(synth::Teams::Five, 2560, drawn);
+        let out = super::blanked_scoreboard(&frame, Some(5));
+        for (row, (x0, y0, x1, y1)) in synth::name_boxes_5v5().into_iter().enumerate() {
+            if row % 5 >= drawn {
+                continue;
+            }
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(
+                        *out.image.get_pixel(x, y),
+                        super::FILL,
+                        "{drawn} ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
 }
