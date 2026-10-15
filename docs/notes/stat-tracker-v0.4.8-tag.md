@@ -1,6 +1,6 @@
-# Tag `stat-tracker-v0.4.8` (Robert authorized 2026-09-04)
+# Tag `stat-tracker-v0.4.8` (FrozenTear authorized 2026-09-04)
 
-Operator runbook; it is not the GitHub Release body. Robert authorized
+Operator runbook; it is not the GitHub Release body. FrozenTear authorized
 **merge + tag only if CI is fully green**: bump PR, merge when CI is green,
 annotated tag, and `git push origin stat-tracker-v0.4.8`. Do not merge or
 tag if this bump PR is not fully green.
@@ -28,8 +28,8 @@ pattern as v0.4.7 (`docs/notes/stat-tracker-v0.4.7-tag.md`).
 
 ## 0. Confirm
 
-- [x] Robert has said **yes** to tagging `stat-tracker-v0.4.8`
-- [x] Robert has said **yes** to merging the release PR into `main`
+- [x] FrozenTear has said **yes** to tagging `stat-tracker-v0.4.8`
+- [x] FrozenTear has said **yes** to merging the release PR into `main`
 - [ ] Release PR is against `main` and CI is green
 - [ ] `git ls-remote --tags origin 'stat-tracker-v0.4.8'` is empty
 
@@ -86,7 +86,7 @@ Release notes are `crates/stat-tracker/CHANGELOG.md` section `## 0.4.8`, then
 the usual git-log since the previous `stat-tracker-v*` tag (0.4.7), then
 install requirements.
 
-## 4. Laptop install test (AerynOS / Robert)
+## 4. Laptop install test (AerynOS / FrozenTear)
 
 After the GitHub Release has the tarball:
 
@@ -113,4 +113,4 @@ scuffed-stat-tracker --version   # expect: scuffed-stat-tracker 0.4.8
 ## If the tag was pushed by mistake
 
 Human-only (agent-protocol §5): delete a published tag / GitHub Release only
-with an explicit current instruction from Robert. Do not improvise.
+with an explicit current instruction from FrozenTear. Do not improvise.

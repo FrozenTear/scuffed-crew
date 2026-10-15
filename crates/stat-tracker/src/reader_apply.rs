@@ -819,7 +819,7 @@ mod tests {
         assert!(!player_name_is_set(None));
         assert!(!player_name_is_set(Some("")));
         assert!(!player_name_is_set(Some("  \t")));
-        assert!(player_name_is_set(Some("Soot")));
+        assert!(player_name_is_set(Some("FrozenTear")));
         // and it does not pick a row either: the highlight row stands
         assert_eq!(
             own_row(Some(" "), Some(7), Some(2), 5),

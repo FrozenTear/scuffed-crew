@@ -2,6 +2,7 @@ mod apply;
 mod blog;
 mod blog_post;
 mod chat;
+mod chat_gate;
 mod community;
 mod dm;
 mod events;

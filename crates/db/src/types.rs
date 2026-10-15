@@ -565,6 +565,11 @@ pub struct PersonalStats {
 }
 
 /// Aggregated stats per hero.
+///
+/// `matches`, `wins`, `losses`, and `draws` count every stored game. Each
+/// average leaves out a counter that is past the upload plausibility ceiling
+/// or named in that row's `suspect_fields`. A group with no included value
+/// for a counter averages to 0. Stored rows are not rewritten.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeroStats {
     pub hero: String,
