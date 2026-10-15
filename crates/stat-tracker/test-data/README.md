@@ -1,7 +1,7 @@
 # Stat-tracker test fixtures (local only)
 
 Drop native-resolution scoreboard screenshots here to validate the capture
-pipeline. Files are gitignored (copyrighted game captures — do not commit).
+pipeline. Files are gitignored (copyrighted game captures, do not commit).
 
 `real-cells/` is the exception: name-free single stat cells, tracked, and
 read by `tests/real_dim_zero_cells.rs`. Full scoreboard frames stay gitignored.
@@ -19,12 +19,12 @@ forces team size to isolate detection bugs from OCR bugs.
 
 Optional end-reel / POTG nameplate replay (not committed):
 
-- `end-reel/known-potg-003708.png` — 2560×1440 Play of the Game title card
+- `end-reel/known-potg-003708.png`: 2560×1440 Play of the Game title card
   that misses the letterbox and cinematic-title-band gates. Local copy of
   the frame used to add the nameplate wake path. The skip-if-missing test
   is `tests/end_reel_fixtures.rs`.
 
 Most useful frames to capture:
 - A native-res (1080p+) **post-match scoreboard** in default blue/red colors.
-- One in **custom team colors** (e.g. purple/gold) — exercises the color paths.
-- A **6v6** board with empty "WAITING FOR PLAYER" rows — exercises team-size detection.
+- One in **custom team colors** (e.g. purple/gold): exercises the color paths.
+- A **6v6** board with empty "WAITING FOR PLAYER" rows: exercises team-size detection.

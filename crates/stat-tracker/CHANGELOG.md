@@ -1211,12 +1211,12 @@ First Iced-only desktop release. Latest published before this cut was
 
 - **Iced 0.14 redesign** (`scuffed-stat-tracker-ui`): Overview, Games, Heroes,
   Maps, Seasons, and Settings. Same snapshot + `StoreCommand` contract as before.
-- **Companion overlay** — layer-shell panel (`stat-tracker-gui --companion`)
+- **Companion overlay**: layer-shell panel (`stat-tracker-gui --companion`)
   that sits above fullscreen Overwatch while the game process is running.
 - **Dioxus GUI removed** (P5 / #61). The daemon crate is daemon-only; Iced is
   the sole desktop UI.
 - **Reinstall keeps the `stat-tracker-gui` binary name.** Desktop entry, PATH,
-  and tarball layout are unchanged — run `./install.sh` (or the bootstrap
+  and tarball layout are unchanged. Run `./install.sh` (or the bootstrap
   one-liner) to replace a Dioxus binary in place.
 
 ### Requirements

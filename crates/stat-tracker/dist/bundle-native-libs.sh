@@ -21,7 +21,7 @@
 #   libs    $ORIGIN
 # so OCR deps never sit on the GUI RUNPATH (v0.4.0 shipped a flat
 # $ORIGIN/../lib that included Ubuntu 22.04 libcrypto.so.3 and shadowed
-# system OpenSSL — OPENSSL_3.2.0 not found on Aerynos).
+# system OpenSSL - OPENSSL_3.2.0 not found on Aerynos).
 set -euo pipefail
 
 # Host-provided libs (never bundle): glibc family, loader, toolchain runtimes,
@@ -83,7 +83,7 @@ fi
 
 for lib in "${out_lib}"/*; do
   [ -e "$lib" ] || continue
-  # $ORIGIN must stay literal — the dynamic loader expands it at runtime.
+  # $ORIGIN must stay literal - the dynamic loader expands it at runtime.
   # shellcheck disable=SC2016
   patchelf --set-rpath '$ORIGIN' "$lib" || true
 done

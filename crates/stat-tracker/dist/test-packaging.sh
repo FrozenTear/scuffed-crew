@@ -78,7 +78,7 @@ printf 'gui-xdo\n' > "$PKG/lib/scuffed-stat-tracker/gui/libxdo.so.3"
 printf 'OLD-crypto\n' > "$PREFIX/lib/libcrypto.so.3"
 printf 'OLD-ssl\n' > "$PREFIX/lib/libssl.so.3"
 printf 'OLD-lept\n' > "$PREFIX/lib/liblept.so.5"
-# A file the user owns in $PREFIX/lib — not in our manifest, must survive.
+# A file the user owns in $PREFIX/lib - not in our manifest, must survive.
 printf 'keep-me\n' > "$PREFIX/lib/libsomething-else.so.1"
 {
     echo "$PREFIX/bin/scuffed-stat-tracker"

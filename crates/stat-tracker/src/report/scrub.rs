@@ -187,6 +187,11 @@ impl LogWindow {
     pub fn ranges(&self) -> &[(DateTime<Utc>, DateTime<Utc>)] {
         &self.ranges
     }
+
+    /// Earliest instant the window keeps, or `None` for an empty window.
+    pub fn start(&self) -> Option<DateTime<Utc>> {
+        self.ranges.iter().map(|(a, _)| *a).min()
+    }
 }
 
 static ANSI_RE: LazyLock<Regex> =
@@ -537,6 +542,13 @@ pub fn scrub_log(ctx: &ScrubContext, window: &LogWindow, raw: &str) -> String {
 /// `daemon.log.1` then `daemon.log` from `data_dir`, oldest first. A missing
 /// file is skipped. Bytes that are not UTF-8 are replaced.
 pub fn read_daemon_logs(data_dir: &Path) -> String {
+    read_daemon_logs_since(data_dir, None)
+}
+
+/// [`read_daemon_logs`] with the journal read from `since` (a game
+/// report's window start), so a long session's lines are not cut by the
+/// newest-lines cap alone. `None` reads the newest lines only.
+pub fn read_daemon_logs_since(data_dir: &Path, since: Option<DateTime<Utc>>) -> String {
     let mut out = String::new();
     for name in ["daemon.log.1", "daemon.log"] {
         if let Ok(bytes) = std::fs::read(data_dir.join(name)) {
@@ -549,7 +561,7 @@ pub fn read_daemon_logs(data_dir: &Path) -> String {
     // The service logs to journald; daemon.log may be old or missing. The
     // window filter in [`scrub_log`] keeps only the game's own lines.
     if !cfg!(test) {
-        out = merge_journal(out, &read_journal_lines());
+        out = merge_journal(out, &read_journal_lines(since));
     }
     out
 }
@@ -575,19 +587,12 @@ pub const TRACKER_UNIT: &str = "scuffed-stat-tracker.service";
 /// `daemon.log` (the service logs to journald). Only this unit is read
 /// (`-u`), message text only (`-o cat`), so each line starts with the
 /// tracker's own RFC 3339 timestamp and the window filter applies as for
-/// the file. Bounded to the newest lines. No journal, no lines.
-pub fn read_journal_lines() -> String {
+/// the file. Read from `since` when given (the game's own start), and
+/// always bounded to the newest [`JOURNAL_MAX_LINES`] lines as a fallback.
+/// No journal, no lines.
+pub fn read_journal_lines(since: Option<DateTime<Utc>>) -> String {
     let out = std::process::Command::new("journalctl")
-        .args([
-            "--user",
-            "-u",
-            TRACKER_UNIT,
-            "-o",
-            "cat",
-            "--no-pager",
-            "-n",
-            "20000",
-        ])
+        .args(journal_args(since))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();
@@ -597,9 +602,51 @@ pub fn read_journal_lines() -> String {
     }
 }
 
+/// Newest journal lines a report reads at most.
+pub const JOURNAL_MAX_LINES: u32 = 20_000;
+
+/// `journalctl` arguments for [`read_journal_lines`]. `since` is passed as a
+/// Unix timestamp (`@<seconds>`), which every systemd reads the same way
+/// whatever the local time zone.
+pub fn journal_args(since: Option<DateTime<Utc>>) -> Vec<String> {
+    let mut args: Vec<String> = ["--user", "-u", TRACKER_UNIT, "-o", "cat", "--no-pager"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    if let Some(since) = since {
+        args.push("--since".into());
+        args.push(format!("@{}", since.timestamp()));
+    }
+    args.push("-n".into());
+    args.push(JOURNAL_MAX_LINES.to_string());
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// alpha.10: a game report reads the journal from the game's own start,
+    /// and keeps the newest-lines cap as the fallback.
+    #[test]
+    fn the_journal_is_read_from_the_game_start_with_the_line_cap_kept() {
+        let start = DateTime::parse_from_rfc3339("2026-10-15T08:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let args = journal_args(Some(start));
+        let since = args.iter().position(|a| a == "--since").expect("--since");
+        assert_eq!(args[since + 1], format!("@{}", start.timestamp()));
+        assert!(args.windows(2).any(|w| w[0] == "-n" && w[1] == "20000"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-u" && w[1] == TRACKER_UNIT)
+        );
+        let newest = journal_args(None);
+        assert!(!newest.iter().any(|a| a == "--since"));
+        assert!(newest.windows(2).any(|w| w[0] == "-n" && w[1] == "20000"));
+        let w = LogWindow::session(start, start + Duration::minutes(12));
+        assert_eq!(w.start(), Some(start - Duration::seconds(120)));
+    }
 
     #[test]
     fn a_line_in_both_daemon_log_and_the_journal_is_kept_once() {

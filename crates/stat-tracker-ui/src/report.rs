@@ -3,8 +3,9 @@
 //! Log-only reports: the member picks `crash`, `performance`, or `other`,
 //! types a short note, and reads a preview built from the exact zip that
 //! would leave the PC. A game report (Games tab and the game card) is the
-//! same dialog for one session: the category list starts at `wrong_stats`
-//! and leaves out `crash` and `performance`. **Send** posts that zip to the
+//! same dialog for one session: no category is picked when it opens, the
+//! member picks one before Send or Save, and the list leaves out `crash`
+//! and `performance`. **Send** posts that zip to the
 //! linked site with the tracker sync token (create only). **Save report**
 //! writes the same zip to the Downloads folder after a private-file warning.
 //! The daemon library builds the zip (`stat_tracker::report`). A game report
@@ -122,7 +123,8 @@ pub enum ReportMessage {
     /// Open on a game. Training is visible and already ticked when `training` is set.
     OpenGame {
         session_id: Option<String>,
-        category: GameCategory,
+        /// `None` opens with no category picked; Send and Save wait for one.
+        category: Option<GameCategory>,
         training: bool,
         choices: Vec<GameChoice>,
     },
@@ -169,7 +171,10 @@ pub enum SendState {
 #[derive(Debug, Clone)]
 pub struct ReportDialog {
     pub category: LogOnlyCategory,
-    /// Set when the report is about a game. Log chips are then unselected.
+    /// The report is about a game. Log chips are then unselected.
+    pub game_report: bool,
+    /// The game category the member picked. `None` on a game report until
+    /// one is picked, and always on a log report.
     pub game_category: Option<GameCategory>,
     pub game_session: Option<String>,
     pub game_choices: Vec<GameChoice>,
@@ -202,6 +207,7 @@ impl ReportDialog {
     pub fn new(category: LogOnlyCategory, linked: bool) -> Self {
         Self {
             category,
+            game_report: false,
             game_category: None,
             game_session: None,
             game_choices: Vec::new(),
@@ -236,14 +242,28 @@ impl ReportDialog {
         }
     }
 
+    /// A dialog about one game, opened with `category` picked or none.
+    pub fn for_game(category: Option<GameCategory>, linked: bool) -> Self {
+        let mut dialog = Self::new(LogOnlyCategory::Other, linked);
+        dialog.game_report = true;
+        dialog.game_category = category;
+        dialog
+    }
+
     pub fn is_game(&self) -> bool {
-        self.game_category.is_some()
+        self.game_report
+    }
+
+    /// A game report needs a picked category before it is built or sent.
+    pub fn needs_game_category(&self) -> bool {
+        self.game_report && self.game_category.is_none()
     }
 
     /// Send posts the preview zip. A log zip is never sent from a game
     /// dialog, and a game zip is never sent from a log dialog.
     pub fn can_send(&self) -> bool {
         self.linked
+            && !self.needs_game_category()
             && self.preview_current()
             && self.preview_matches_kind()
             && !matches!(self.send, SendState::Sending)
@@ -255,7 +275,11 @@ impl ReportDialog {
     }
 
     pub fn can_save(&self) -> bool {
-        self.preview_current() && self.preview_matches_kind() && !self.saving && !self.sent()
+        !self.needs_game_category()
+            && self.preview_current()
+            && self.preview_matches_kind()
+            && !self.saving
+            && !self.sent()
     }
 
     /// The preview zip is a game report exactly when the dialog is one.
@@ -335,7 +359,7 @@ pub async fn build(req: BuildRequest) -> Result<Arc<ReportZip>, String> {
             req.resolution,
             req.capture_backend,
             daemon_running,
-            Vec::new(),
+            log_scrub_names(&req.config.data_dir),
             Utc::now(),
         );
         input.training = req.training;
@@ -370,7 +394,7 @@ pub async fn build_game(req: GameBuildRequest) -> Result<Arc<ReportZip>, String>
             req.text,
             req.capture_backend,
             daemon_running,
-            Vec::new(),
+            game_scrub_names(&req.config.data_dir, &req.session_id),
             Utc::now(),
         )
         .map_err(|e| format!("Could not build the report: {e}"))?;
@@ -381,6 +405,18 @@ pub async fn build_game(req: GameBuildRequest) -> Result<Arc<ReportZip>, String>
     })
     .await
     .map_err(|_| "Could not build the report.".to_string())?
+}
+
+/// Scrub list for a log report: the player names stored with every recent
+/// game's kit, since the log window can cover any of them.
+pub fn log_scrub_names(data_dir: &Path) -> Vec<String> {
+    stat_tracker::report::kit::all_names(data_dir)
+}
+
+/// Scrub list for a game report: the player names read on that game's
+/// stored boards.
+pub fn game_scrub_names(data_dir: &Path, session_id: &str) -> Vec<String> {
+    stat_tracker::report::kit::names(data_dir, session_id)
 }
 
 /// `POST {base}/api/stat-reports` with the sync token.
@@ -758,6 +794,8 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     body = body.push(
         text(if let Some(category) = d.game_category {
             game_hint(category)
+        } else if d.is_game() {
+            "Pick what was wrong with this game before you send the report."
         } else {
             category_hint(d.category)
         })
@@ -838,9 +876,7 @@ fn game_row(d: &ReportDialog) -> Element<'_, Message> {
         }
         col = col.push(chips);
     }
-    if d.game_category
-        .is_some_and(|category| !category.allows_missing_kit())
-    {
+    if d.is_game() && !d.game_category.is_some_and(|c| c.allows_missing_kit()) {
         col = col.push(game_picker(d));
     }
     if !d.kit_images.is_empty() {
@@ -1503,6 +1539,7 @@ mod tests {
         let mut dialog = ReportDialog::new(LogOnlyCategory::Other, true);
         dialog.built = Some(Ok(Arc::new(log_zip)));
         assert!(dialog.can_send() && dialog.can_save());
+        dialog.game_report = true;
         dialog.game_category = Some(GameCategory::WrongStats);
         assert!(!dialog.can_send() && !dialog.can_save());
 
@@ -1560,6 +1597,47 @@ mod tests {
         dialog.built = Some(Ok(Arc::new(game_zip)));
         assert!(dialog.can_send() && dialog.can_save());
         dialog.game_category = None;
-        assert!(!dialog.can_send() && !dialog.can_save());
+        assert!(
+            !dialog.can_send() && !dialog.can_save(),
+            "a game report with no category picked cannot be sent or saved"
+        );
+    }
+
+    /// alpha.10: the stored board's names reach the scrubber of both report
+    /// kinds.
+    #[test]
+    fn report_builds_pass_the_stored_board_names_to_the_scrubber() {
+        let tmp = tempfile::tempdir().unwrap();
+        let png = one_pixel_png();
+        for (sid, names) in [
+            ("g1", vec!["QXOther".to_string()]),
+            ("g2", vec!["Zed".to_string()]),
+        ] {
+            let dir = stat_tracker::report::kit::session_dir(tmp.path(), sid).unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            write_checked_kit(&dir, &png);
+            stat_tracker::report::kit::record_names(tmp.path(), sid, &names).unwrap();
+        }
+        assert_eq!(
+            game_scrub_names(tmp.path(), "g1"),
+            vec!["QXOther".to_string()]
+        );
+        let mut all = log_scrub_names(tmp.path());
+        all.sort();
+        assert_eq!(all, vec!["QXOther".to_string(), "Zed".to_string()]);
+    }
+
+    /// alpha.10: a game report opens with no category picked, and Send and
+    /// Save stay off until the member picks one.
+    #[test]
+    fn a_game_report_opens_with_no_category_and_waits_for_one() {
+        let d = ReportDialog::for_game(None, true);
+        assert!(d.is_game());
+        assert_eq!(d.game_category, None);
+        assert!(d.needs_game_category());
+        assert!(!d.can_send() && !d.can_save());
+        let picked = ReportDialog::for_game(Some(GameCategory::WrongHero), true);
+        assert!(!picked.needs_game_category());
+        assert!(!ReportDialog::new(LogOnlyCategory::Other, true).needs_game_category());
     }
 }

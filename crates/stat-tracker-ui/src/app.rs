@@ -1731,7 +1731,7 @@ impl TrackerApp {
         }
         self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
             session_id: Some(session_id.to_string()),
-            category,
+            category: Some(category),
             training: true,
             choices: Vec::new(),
         }));
@@ -1751,6 +1751,12 @@ impl TrackerApp {
         dialog.text_edited_at = None;
         dialog.kit_images.clear();
         let generation = dialog.bump();
+        if dialog.needs_game_category() {
+            // Nothing to build until the member picks a category.
+            dialog.built = None;
+            dialog.building = None;
+            return Task::none();
+        }
         dialog.building = Some(generation);
         if let Some(category) = dialog.game_category {
             let req = crate::report::GameBuildRequest {
@@ -1812,8 +1818,7 @@ impl TrackerApp {
                 }
                 self.refresh_kit_sessions();
                 let linked = self.saved_config.sync.is_some();
-                let mut dialog = ReportDialog::new(LogOnlyCategory::Other, linked);
-                dialog.game_category = Some(category);
+                let mut dialog = ReportDialog::for_game(category, linked);
                 dialog.game_session = session_id;
                 dialog.training = training;
                 dialog.game_choices = if choices.is_empty() {
@@ -1851,10 +1856,11 @@ impl TrackerApp {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.category == category && d.game_category.is_none() {
+                if d.category == category && !d.is_game() {
                     return Task::none();
                 }
                 d.category = category;
+                d.game_report = false;
                 d.game_category = None;
                 d.game_session = None;
                 d.kit_images.clear();
@@ -1868,6 +1874,7 @@ impl TrackerApp {
                 if dialog.busy() || dialog.sent() {
                     return Task::none();
                 }
+                dialog.game_report = true;
                 dialog.game_category = Some(category);
                 if dialog.game_choices.is_empty() {
                     dialog.game_choices = choices;

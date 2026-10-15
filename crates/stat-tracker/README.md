@@ -20,7 +20,7 @@ install paths and the `.desktop` entry stay the same).
   The user must be in the `input` group, or have seat `uaccess` on those
   nodes. No X11 key grab.
 
-  Add the group, then log out and back in. A new terminal is not enough —
+  Add the group, then log out and back in. A new terminal is not enough, since
   existing sessions keep the old group list until the next login:
 
   ```sh
@@ -60,8 +60,8 @@ runtime OCR model); `install.sh` drops it into
 already have), so no distro tessdata package is required. The tarball also
 carries a CI-trained `koverwatch.traineddata` (game-font model) installed the
 same way; the bundled copy is canonical and replaces an older one (a `.bak` is
-kept), since most hosts cannot regenerate it locally — `text2image`
-hangs/segfaults with pango ≥ 1.56.
+kept), since most hosts cannot regenerate it locally (`text2image`
+hangs/segfaults with pango ≥ 1.56).
 
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
@@ -155,7 +155,7 @@ says to remove them manually.
 # daemon (foreground; logs to stderr)
 cargo run -p scuffed-stat-tracker
 
-# desktop GUI (Iced — crate scuffed-stat-tracker-ui, binary stat-tracker-gui)
+# desktop GUI (Iced, crate scuffed-stat-tracker-ui, binary stat-tracker-gui)
 cargo run -p scuffed-stat-tracker-ui
 ```
 
@@ -164,7 +164,7 @@ or `crates/stat-tracker/install.sh` from a source checkout). The binary name
 does not change; only the implementation does.
 
 First-run sync setup: `scuffed-stat-tracker --token <daemon-token> --server
-https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600 —
+https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600:
 it holds the bearer token). Tokens are minted in the site under
 My Stats → Settings.
 
@@ -202,7 +202,7 @@ Example low-RAM:
 ocr_threads = 1
 ```
 
-The daemon reads config once at startup — restart it after changes.
+The daemon reads config once at startup. Restart it after changes.
 
 ### OCR CPU use (`OMP_THREAD_LIMIT`)
 
@@ -273,8 +273,8 @@ only these paths are writable:
 `{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
 `daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `active_game.json`,
 `daemon.log`, and vacuum backups. The default directory is already in the
-table above. An absolute `data_dir` anywhere else — including another
-folder under `$HOME` — is read-only under the sandbox. `install.sh` writes
+table above. An absolute `data_dir` anywhere else, including another
+folder under `$HOME`, is read-only under the sandbox. `install.sh` writes
 `~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
 that path. Reinstall after you change `data_dir`. If the directory is
 still not writable, the daemon exits and prints the same drop-in. A
@@ -456,7 +456,7 @@ today it shows only in this file and in the journal, not in the app.
 
 ## Dev tools
 
-`examples/` contains the diagnosis workflow — each file documents its usage:
+`examples/` contains the diagnosis workflow, each file documents its usage:
 `extract` (full pipeline against a still image), `polltick` (poll-tick CPU
 cost), `probe_outcome`, `accolade`, `profile`, `dumpdb`. Fixture replay tests
 (`tests/`, `#[ignore]`d) validate outcome detection against real frames in
