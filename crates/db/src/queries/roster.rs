@@ -192,6 +192,39 @@ impl Database {
         .await
     }
 
+    /// Active roster edges as `(member_id, team_id)`.
+    ///
+    /// Same active-member and active-ban filter as [`Self::get_team_roster`].
+    /// The relay read gate builds its team map from this instead of one query
+    /// per team.
+    pub async fn list_active_roster_pairs(&self) -> DbResult<Vec<(String, String)>> {
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct Pair {
+            member_id: String,
+            team_id: String,
+        }
+
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(roster_select!(
+                    "SELECT <string>in AS member_id, <string>out AS team_id FROM plays_on WHERE true"
+                ))
+                .await?;
+            let rows: Vec<Pair> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        extract_record_id(&row.member_id),
+                        extract_record_id(&row.team_id),
+                    )
+                })
+                .collect())
+        })
+        .await
+    }
+
     /// Get all teams a member is on.
     pub async fn get_member_teams(&self, member_id: &str) -> DbResult<Vec<RosterEntry>> {
         with_timeout(async {

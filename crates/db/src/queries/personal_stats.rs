@@ -159,6 +159,71 @@ fn season_filter(season: Option<SeasonWindow>) -> &'static str {
     }
 }
 
+/// Elims stay in an aggregate at or under `$max_elims`
+/// ([`scuffed_types::PLAUSIBLE_ELIMS_MAX`]) when `e` is not in
+/// `suspect_fields`. `NONE` is a row from before that column existed.
+///
+/// Fixed literals, not request data. Hero and role means use this on its
+/// own. Leaderboard K/D requires it together with [`DEATHS_PLAUSIBLE_SQL`].
+const ELIMS_PLAUSIBLE_SQL: &str =
+    "elims <= $max_elims AND (suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'e'))";
+
+/// Deaths stay in an aggregate at or under `$max_deaths`
+/// ([`scuffed_types::PLAUSIBLE_DEATHS_MAX`]) when `d` is not in
+/// `suspect_fields`. `NONE` is a row from before that column existed.
+///
+/// Fixed literals, not request data. See [`ELIMS_PLAUSIBLE_SQL`].
+const DEATHS_PLAUSIBLE_SQL: &str =
+    "deaths <= $max_deaths AND (suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'd'))";
+
+/// Both counters of one game. Leaderboard K/D adds the game's elims and its
+/// deaths only when this is true, so one bad side drops both sums.
+fn kd_pair_plausible_sql() -> String {
+    format!("({ELIMS_PLAUSIBLE_SQL}) AND ({DEATHS_PLAUSIBLE_SQL})")
+}
+
+/// Per-field means shared by hero and role aggregates.
+///
+/// A counter is left out when it is past the tracker upload ceiling
+/// (`$max_elims` = [`scuffed_types::PLAUSIBLE_ELIMS_MAX`], `$max_deaths` =
+/// [`scuffed_types::PLAUSIBLE_DEATHS_MAX`]) or its flat name is in
+/// `suspect_fields`. Damage and healing have no ceiling on upload, so only
+/// `dmg` / `h` in `suspect_fields` drops them. `NONE` `suspect_fields` is a
+/// row from before that column existed: it is not a suspect list, and an
+/// absurd number on it is still dropped by the ceiling. The value at the
+/// ceiling is included. An empty included set averages to 0 (`math::mean` of
+/// no numbers is NaN, so this is a sum divided by a count). Match and
+/// win/loss/draw counts are not filtered, and this expression does not write.
+///
+/// Column names and suspect names are fixed literals, not request data.
+fn stat_averages_sql() -> String {
+    fn one(alias: &str, column: &str, predicate: &str) -> String {
+        format!(
+            "(IF math::sum(IF {predicate} THEN 1 ELSE 0 END) = 0 THEN 0.0 ELSE (<float>math::sum(IF {predicate} THEN {column} ELSE 0 END)) / (<float>math::sum(IF {predicate} THEN 1 ELSE 0 END)) END) AS {alias}"
+        )
+    }
+    [
+        one("avg_elims", "elims", ELIMS_PLAUSIBLE_SQL),
+        one("avg_deaths", "deaths", DEATHS_PLAUSIBLE_SQL),
+        one(
+            "avg_damage",
+            "damage",
+            "suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'dmg')",
+        ),
+        one(
+            "avg_healing",
+            "healing",
+            "suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'h')",
+        ),
+    ]
+    .join(", ")
+}
+
+fn bind_stat_caps(q: surrealdb::method::Query<'_, Any>) -> surrealdb::method::Query<'_, Any> {
+    q.bind(("max_elims", scuffed_types::PLAUSIBLE_ELIMS_MAX))
+        .bind(("max_deaths", scuffed_types::PLAUSIBLE_DEATHS_MAX))
+}
+
 const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     member_id = $mid, session_id = $sid,
     hero = $hero, map_name = $map, game_mode = $mode,
@@ -432,6 +497,12 @@ impl Database {
     }
 
     /// Per-hero aggregates, optionally restricted to a season window.
+    ///
+    /// Match and win/loss/draw counts include every row in the window. The
+    /// averages use [`stat_averages_sql`]: elims above
+    /// [`scuffed_types::PLAUSIBLE_ELIMS_MAX`] and deaths above
+    /// [`scuffed_types::PLAUSIBLE_DEATHS_MAX`] are left out, and so is any
+    /// counter named in `suspect_fields`. Stored rows are not updated.
     pub async fn get_hero_stats_in(
         &self,
         member_id: &str,
@@ -453,6 +524,7 @@ impl Database {
                 count: u32,
             }
 
+            let averages = stat_averages_sql();
             let mut q = self
                 .client
                 .query(format!(
@@ -461,10 +533,7 @@ impl Database {
                         hero,
                         count() AS matches,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
-                        math::mean(elims) AS avg_elims,
-                        math::mean(deaths) AS avg_deaths,
-                        math::mean(damage) AS avg_damage,
-                        math::mean(healing) AS avg_healing
+                        {averages}
                     FROM personal_match
                     WHERE member_id = $mid{}
                     GROUP BY hero
@@ -473,6 +542,7 @@ impl Database {
                     season_filter(season)
                 ))
                 .bind(("mid", member_id.to_string()));
+            q = bind_stat_caps(q);
             if let Some((start, end)) = season {
                 q = q
                     .bind(("season_start", SurrealDatetime::from(start)))
@@ -552,6 +622,7 @@ impl Database {
                 avg_healing: f64,
             }
 
+            let averages = stat_averages_sql();
             let mut q = self
                 .client
                 .query(format!(
@@ -562,10 +633,7 @@ impl Database {
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
                         math::sum(IF outcome = 'defeat' THEN 1 ELSE 0 END) AS losses,
                         math::sum(IF outcome = 'draw' THEN 1 ELSE 0 END) AS draws,
-                        math::mean(elims) AS avg_elims,
-                        math::mean(deaths) AS avg_deaths,
-                        math::mean(damage) AS avg_damage,
-                        math::mean(healing) AS avg_healing
+                        {averages}
                     FROM personal_match
                     WHERE member_id = $mid{}
                     GROUP BY role
@@ -574,6 +642,7 @@ impl Database {
                     season_filter(season)
                 ))
                 .bind(("mid", member_id.to_string()));
+            q = bind_stat_caps(q);
             if let Some((start, end)) = season {
                 q = q
                     .bind(("season_start", SurrealDatetime::from(start)))
@@ -625,6 +694,8 @@ impl Database {
     /// - inactive / missing members are omitted (banned stay off public boards)
     /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches (per-hero games
     ///   when `hero` is set)
+    /// - `games` and `wins` count every row. K/D sums a game's elims and
+    ///   deaths only when both are plausible (see [`leaderboard_snapshot`])
     pub async fn member_leaderboard(
         &self,
         metric: &str,
@@ -640,6 +711,15 @@ impl Database {
     ///
     /// Metric, limit, and hero are not part of the query. Callers sort and
     /// truncate with [`LeaderboardSnapshot::project`].
+    ///
+    /// `games` and `wins` count every row with a victory, defeat, or draw.
+    /// The elims and deaths sums that feed K/D include a game only when both
+    /// counters pass [`kd_pair_plausible_sql`]: elims at or under
+    /// [`scuffed_types::PLAUSIBLE_ELIMS_MAX`], deaths at or under
+    /// [`scuffed_types::PLAUSIBLE_DEATHS_MAX`], and neither `e` nor `d` is in
+    /// `suspect_fields`. A missing `suspect_fields` column counts as none.
+    /// If either counter fails, that game is left out of both sums. Stored
+    /// rows are not updated.
     pub async fn leaderboard_snapshot(
         &self,
         season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
@@ -660,6 +740,7 @@ impl Database {
             } else {
                 ""
             };
+            let kd_pair = kd_pair_plausible_sql();
             let sql = format!(
                 r#"
                     SELECT
@@ -667,15 +748,15 @@ impl Database {
                         hero,
                         count() AS games,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
-                        math::sum(elims) AS elims,
-                        math::sum(deaths) AS deaths
+                        math::sum(IF {kd_pair} THEN elims ELSE 0 END) AS elims,
+                        math::sum(IF {kd_pair} THEN deaths ELSE 0 END) AS deaths
                     FROM personal_match
                     WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}
                     GROUP BY member_id, hero
                     "#
             );
 
-            let mut q = self.client.query(sql);
+            let mut q = bind_stat_caps(self.client.query(sql));
             if let Some((start, end)) = season_window {
                 q = q
                     .bind(("season_start", SurrealDatetime::from(start)))
@@ -798,6 +879,10 @@ impl Database {
     }
 
     /// Per-map aggregates, optionally restricted to a season window.
+    ///
+    /// Maps have no stat averages. Every row counts toward matches and
+    /// win/loss/draw, including a row whose elims or deaths are past the
+    /// upload ceiling or marked in `suspect_fields`.
     pub async fn get_map_stats_in(
         &self,
         member_id: &str,
@@ -2741,5 +2826,471 @@ mod tests {
         assert_eq!(roles.len(), 1);
         assert_eq!(roles[0].role, "");
         assert_eq!(roles[0].matches, 1);
+    }
+
+    /// Absurd counters and suspect fields stay out of the averages. The same
+    /// rows still count toward hero, role, and map win/loss, and the stored
+    /// numbers are left as uploaded.
+    #[tokio::test]
+    async fn averages_skip_implausible_and_suspect_counters() {
+        let db = test_db().await;
+        let played = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap();
+
+        let game = |sid: &str,
+                    hero: &str,
+                    role: &str,
+                    map_name: &str,
+                    outcome: &str,
+                    elims: u32,
+                    deaths: u32,
+                    damage: u32,
+                    healing: u32,
+                    suspect: &[&str]| {
+            let mut m = entry(sid, outcome, elims);
+            m.member_id = "avg-m".into();
+            m.hero = hero.into();
+            m.role = role.into();
+            m.map_name = map_name.into();
+            m.deaths = deaths;
+            m.damage = damage;
+            m.healing = healing;
+            m.played_at = played;
+            m.suspect_fields = suspect.iter().map(|s| (*s).to_string()).collect();
+            m
+        };
+
+        db.upsert_personal_matches(
+            "avg-m",
+            &[
+                game(
+                    "s-ok-1",
+                    "Sierra",
+                    "Damage",
+                    "Oasis",
+                    "victory",
+                    10,
+                    2,
+                    1000,
+                    4000,
+                    &[],
+                ),
+                game(
+                    "s-ok-2",
+                    "Sierra",
+                    "Damage",
+                    "Oasis",
+                    "defeat",
+                    30,
+                    6,
+                    3000,
+                    8000,
+                    &[],
+                ),
+                // Uploaded before the ceilings and suspect_fields existed.
+                game(
+                    "s-absurd",
+                    "Sierra",
+                    "Damage",
+                    "Oasis",
+                    "draw",
+                    3503,
+                    3179,
+                    5000,
+                    1000,
+                    &[],
+                ),
+                game(
+                    "s-suspect",
+                    "Sierra",
+                    "Damage",
+                    "Oasis",
+                    "victory",
+                    8,
+                    5,
+                    9000,
+                    2000,
+                    &["d", "dmg"],
+                ),
+                game(
+                    "s-elim-suspect",
+                    "Sierra",
+                    "Damage",
+                    "Oasis",
+                    "draw",
+                    12,
+                    3,
+                    1500,
+                    500,
+                    &["e"],
+                ),
+                game(
+                    "edge-in",
+                    "Edge",
+                    "Tank",
+                    "Busan",
+                    "victory",
+                    99,
+                    50,
+                    10,
+                    10,
+                    &[],
+                ),
+                game(
+                    "edge-out",
+                    "Edge",
+                    "Tank",
+                    "Busan",
+                    "defeat",
+                    100,
+                    51,
+                    30,
+                    30,
+                    &["h"],
+                ),
+                game(
+                    "ghost",
+                    "Ghost",
+                    "Support",
+                    "Ilios",
+                    "defeat",
+                    3503,
+                    3179,
+                    1,
+                    1,
+                    &[],
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // A row with the column missing entirely, the way a pre-column write
+        // stored it. Plausible elims stay in. Absurd deaths stay out.
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS suspect_fields ON personal_match;
+                   CREATE personal_match SET
+                       member_id = 'avg-m',
+                       session_id = 'legacy-absurd-d',
+                       hero = 'Legacy',
+                       map_name = 'Junkertown',
+                       game_mode = 'escort',
+                       role = '',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 3179,
+                       assists = 0,
+                       damage = 100,
+                       healing = 200,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   CREATE personal_match SET
+                       member_id = 'avg-m',
+                       session_id = 'legacy-ok',
+                       hero = 'Legacy',
+                       map_name = 'Junkertown',
+                       game_mode = 'escort',
+                       role = '',
+                       outcome = 'defeat',
+                       elims = 9,
+                       deaths = 4,
+                       assists = 0,
+                       damage = 300,
+                       healing = 600,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:05:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut other = entry("other-sierra", "victory", 1);
+        other.member_id = "avg-other".into();
+        other.hero = "Sierra".into();
+        other.role = "Damage".into();
+        other.deaths = 1;
+        db.upsert_personal_matches("avg-other", &[other])
+            .await
+            .unwrap();
+
+        let heroes = db.get_hero_stats("avg-m").await.unwrap();
+        let sierra = heroes.iter().find(|h| h.hero == "Sierra").unwrap();
+        assert_eq!(
+            (sierra.matches, sierra.wins, sierra.losses, sierra.draws),
+            (5, 2, 1, 2),
+            "implausible and suspect rows still count as games"
+        );
+        // elims 10, 30, 8. 3503 is past the ceiling. 12 is suspect `e`.
+        close(sierra.avg_elims, 16.0);
+        // deaths 2, 6, 3. 3179 is past the ceiling. 5 is suspect `d`.
+        close(sierra.avg_deaths, 11.0 / 3.0);
+        // damage 1000, 3000, 5000, 1500. 9000 is suspect `dmg`.
+        close(sierra.avg_damage, 2625.0);
+        close(sierra.avg_healing, 3100.0);
+
+        let edge = heroes.iter().find(|h| h.hero == "Edge").unwrap();
+        assert_eq!(
+            (edge.matches, edge.wins, edge.losses, edge.draws),
+            (2, 1, 1, 0)
+        );
+        // 99 and 50 are the ceilings and stay in. 100 and 51 do not.
+        close(edge.avg_elims, 99.0);
+        close(edge.avg_deaths, 50.0);
+        close(edge.avg_damage, 20.0);
+        // healing 30 is suspect `h`.
+        close(edge.avg_healing, 10.0);
+
+        let ghost = heroes.iter().find(|h| h.hero == "Ghost").unwrap();
+        assert_eq!(
+            (ghost.matches, ghost.wins, ghost.losses, ghost.draws),
+            (1, 0, 1, 0)
+        );
+        close(ghost.avg_elims, 0.0);
+        close(ghost.avg_deaths, 0.0);
+        close(ghost.avg_damage, 1.0);
+        close(ghost.avg_healing, 1.0);
+
+        let legacy = heroes.iter().find(|h| h.hero == "Legacy").unwrap();
+        assert_eq!(
+            (legacy.matches, legacy.wins, legacy.losses, legacy.draws),
+            (2, 1, 1, 0)
+        );
+        close(legacy.avg_elims, 8.0);
+        close(legacy.avg_deaths, 4.0);
+        close(legacy.avg_damage, 200.0);
+        close(legacy.avg_healing, 400.0);
+
+        let roles = db.get_role_stats("avg-m").await.unwrap();
+        let damage = roles.iter().find(|r| r.role == "Damage").unwrap();
+        assert_eq!(
+            (damage.matches, damage.wins, damage.losses, damage.draws),
+            (sierra.matches, sierra.wins, sierra.losses, sierra.draws)
+        );
+        close(damage.avg_elims, sierra.avg_elims);
+        close(damage.avg_deaths, sierra.avg_deaths);
+        close(damage.avg_damage, sierra.avg_damage);
+        close(damage.avg_healing, sierra.avg_healing);
+        let tank = roles.iter().find(|r| r.role == "Tank").unwrap();
+        close(tank.avg_elims, edge.avg_elims);
+        close(tank.avg_deaths, edge.avg_deaths);
+        close(tank.avg_healing, edge.avg_healing);
+        assert_eq!((tank.matches, tank.wins, tank.losses), (2, 1, 1));
+
+        let maps = db.get_map_stats("avg-m").await.unwrap();
+        let oasis = maps.iter().find(|m| m.map_name == "Oasis").unwrap();
+        assert_eq!(
+            (oasis.matches, oasis.wins, oasis.losses, oasis.draws),
+            (5, 2, 1, 2),
+            "map win/loss keeps the game whose stats were left out of the hero averages"
+        );
+        let junkertown = maps.iter().find(|m| m.map_name == "Junkertown").unwrap();
+        assert_eq!(
+            (
+                junkertown.matches,
+                junkertown.wins,
+                junkertown.losses,
+                junkertown.draws
+            ),
+            (2, 1, 1, 0)
+        );
+
+        let stored = db.list_personal_matches("avg-m", 20, 0).await.unwrap();
+        let absurd = stored.iter().find(|m| m.session_id == "s-absurd").unwrap();
+        assert_eq!(absurd.elims, 3503);
+        assert_eq!(absurd.deaths, 3179);
+        let legacy_row = stored
+            .iter()
+            .find(|m| m.session_id == "legacy-absurd-d")
+            .unwrap();
+        assert_eq!(legacy_row.deaths, 3179);
+        assert_eq!(legacy_row.elims, 7);
+
+        let other_heroes = db.get_hero_stats("avg-other").await.unwrap();
+        assert_eq!(other_heroes.len(), 1);
+        close(other_heroes[0].avg_elims, 1.0);
+        assert_eq!(other_heroes[0].matches, 1);
+    }
+
+    /// Public K/D drops a game from both sums when either counter is past the
+    /// shared ceilings or named in `suspect_fields`. Games and wins still
+    /// count every row. Stored numbers stay as uploaded. Same Sierra shape
+    /// as [`averages_skip_implausible_and_suspect_counters`].
+    #[tokio::test]
+    async fn leaderboard_kd_skips_implausible_games() {
+        use crate::types::OrgRole;
+
+        let db = test_db().await;
+        let member = db
+            .create_member("u-sierra", "Sierra", OrgRole::Member)
+            .await
+            .unwrap();
+        let mid = member.id.clone();
+        let played = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap();
+
+        let game =
+            |sid: &str, hero: &str, outcome: &str, elims: u32, deaths: u32, suspect: &[&str]| {
+                let mut m = entry(sid, outcome, elims);
+                m.member_id = mid.clone();
+                m.hero = hero.into();
+                m.role = "Damage".into();
+                m.map_name = "Oasis".into();
+                m.deaths = deaths;
+                m.played_at = played;
+                m.suspect_fields = suspect.iter().map(|s| (*s).to_string()).collect();
+                m
+            };
+
+        db.upsert_personal_matches(
+            &mid,
+            &[
+                game("s-ok-1", "Sierra", "victory", 10, 2, &[]),
+                game("s-ok-2", "Sierra", "defeat", 30, 6, &[]),
+                // Good elims, absurd deaths: both sums drop this game.
+                game("s-absurd-d", "Sierra", "victory", 20, 3179, &[]),
+                // Absurd elims, good deaths: both sums drop this game.
+                game("s-absurd-e", "Sierra", "victory", 3503, 4, &[]),
+                game("s-suspect-d", "Sierra", "victory", 8, 5, &["d", "dmg"]),
+                game("s-suspect-e", "Sierra", "draw", 12, 3, &["e"]),
+                // `h` is not a K/D field. Plausible numbers stay in both sums.
+                game("s-suspect-h", "Sierra", "victory", 11, 7, &["h"]),
+                // 99 and 50 are the ceilings and stay in.
+                game("edge-in", "Edge", "victory", 99, 50, &[]),
+                // One past each ceiling. Both sums drop this game.
+                game("edge-out", "Edge", "defeat", 100, 51, &["h"]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // A row with the column missing entirely. Plausible numbers stay in.
+        // Absurd deaths drop both sums even though elims are in range.
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS suspect_fields ON personal_match;
+                   CREATE personal_match SET
+                       member_id = $mid,
+                       session_id = 'legacy-ok',
+                       hero = 'Sierra',
+                       map_name = 'Junkertown',
+                       game_mode = 'escort',
+                       role = 'Damage',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 1,
+                       assists = 0,
+                       damage = 100,
+                       healing = 200,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   CREATE personal_match SET
+                       member_id = $mid,
+                       session_id = 'legacy-absurd-d',
+                       hero = 'Sierra',
+                       map_name = 'Junkertown',
+                       game_mode = 'escort',
+                       role = 'Damage',
+                       outcome = 'victory',
+                       elims = 6,
+                       deaths = 3179,
+                       assists = 0,
+                       damage = 100,
+                       healing = 200,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:05:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];"#,
+            )
+            .bind(("mid", mid.clone()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let snap = db.leaderboard_snapshot(None).await.unwrap();
+        let sierra = snap
+            .by_hero
+            .get("Sierra")
+            .and_then(|rows| rows.iter().find(|row| row.member_id == mid))
+            .expect("Sierra hero bucket");
+        // Included: 10+30+11+7 elims, 2+6+7+1 deaths.
+        // Dropped from both: 20/3179, 3503/4, 8/5 (`d`), 12/3 (`e`), 6/3179.
+        assert_eq!((sierra.elims, sierra.deaths), (58, 16));
+        assert_eq!(
+            (sierra.games, sierra.wins),
+            (9, 7),
+            "games and wins still count rows left out of the K/D sums"
+        );
+
+        let edge = snap
+            .by_hero
+            .get("Edge")
+            .and_then(|rows| rows.iter().find(|row| row.member_id == mid))
+            .expect("Edge hero bucket");
+        assert_eq!((edge.elims, edge.deaths), (99, 50));
+        assert_eq!((edge.games, edge.wins), (2, 1));
+
+        let all = snap
+            .all
+            .iter()
+            .find(|row| row.member_id == mid)
+            .expect("all-heroes rollup");
+        assert_eq!((all.elims, all.deaths), (157, 66));
+        assert_eq!((all.games, all.wins), (11, 8));
+
+        let board = db.member_leaderboard("kd", 50, None, None).await.unwrap();
+        let row = board.iter().find(|row| row.member_id == mid).unwrap();
+        assert_eq!(row.games, 11);
+        close(row.kd, 157.0 / 66.0);
+        assert!(
+            (f64::from(row.winrate) - (8.0 / 11.0)).abs() < 1e-5,
+            "winrate uses every row, including games dropped from K/D: {}",
+            row.winrate
+        );
+
+        let sierra_kd = db
+            .member_leaderboard("kd", 50, None, Some("Sierra"))
+            .await
+            .unwrap();
+        assert_eq!(sierra_kd.len(), 1);
+        assert_eq!(sierra_kd[0].games, 9);
+        close(sierra_kd[0].kd, 58.0 / 16.0);
+
+        let edge_games = db
+            .member_leaderboard("games", 50, None, Some("Edge"))
+            .await
+            .unwrap();
+        assert_eq!(edge_games.len(), 1);
+        assert_eq!(edge_games[0].games, 2);
+        assert!(
+            (f64::from(edge_games[0].winrate) - 0.5).abs() < 1e-5,
+            "Edge winrate keeps the game past both ceilings: {}",
+            edge_games[0].winrate
+        );
+
+        let stored = db.list_personal_matches(&mid, 20, 0).await.unwrap();
+        let absurd_e = stored
+            .iter()
+            .find(|m| m.session_id == "s-absurd-e")
+            .unwrap();
+        assert_eq!((absurd_e.elims, absurd_e.deaths), (3503, 4));
+        let absurd_d = stored
+            .iter()
+            .find(|m| m.session_id == "s-absurd-d")
+            .unwrap();
+        assert_eq!((absurd_d.elims, absurd_d.deaths), (20, 3179));
+        let legacy = stored
+            .iter()
+            .find(|m| m.session_id == "legacy-absurd-d")
+            .unwrap();
+        assert_eq!((legacy.elims, legacy.deaths), (6, 3179));
     }
 }

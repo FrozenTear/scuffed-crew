@@ -40,6 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Tag matches Cargo.toml versions
+        if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
+        run: bash crates/stat-tracker/dist/check-tag-version.sh
+
       - name: Install system dependencies
         run: |
           set -euo pipefail
@@ -150,6 +154,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - name: Tag matches Cargo.toml versions
+        if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
+        run: bash crates/stat-tracker/dist/check-tag-version.sh
 
       - name: Install system dependencies
         run: |
@@ -268,6 +276,10 @@ jobs:
           # stat-tracker-v* tag, which a depth-1 clone doesn't have.
           fetch-depth: 0
 
+      - name: Tag matches Cargo.toml versions
+        if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
+        run: bash crates/stat-tracker/dist/check-tag-version.sh
+
       - uses: actions/download-artifact@v4
         with:
           name: daemon
@@ -285,7 +297,8 @@ jobs:
         run: |
           set -euo pipefail
           for t in test-packaging test-uninstall-paths test-desktop-entry \
-                   test-systemd-unit test-release-notes test-stage-assets; do
+                   test-systemd-unit test-release-notes test-stage-assets \
+                   test-tag-version; do
             echo "::group::${t}.sh"
             echo "running ${t}.sh"
             rc=0

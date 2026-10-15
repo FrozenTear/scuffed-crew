@@ -2217,6 +2217,86 @@ mod tests {
         named_files: BTreeMap<String, (u16, Vec<u8>)>,
     }
 
+    /// Headers of one request. Blocks until the blank line. `None` when the
+    /// peer closes before that, the next bytes do not arrive within 30
+    /// seconds, or the head grows past 64 KiB.
+    ///
+    /// A shorter timeout already on `sock` is replaced with that 30 second
+    /// wait. The fakes used to stop after 2 seconds and answer from whatever
+    /// bytes had arrived. When the client was scheduled later than that, the
+    /// fake answered 401, the keeper counted a failure, and a test that
+    /// should have finished on the next try gave up instead. Thirty seconds
+    /// is long enough for a loaded runner to send the header, and a client
+    /// that connects and never writes fails instead of hanging the suite.
+    fn read_http_head(sock: &mut std::net::TcpStream) -> Option<String> {
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .expect("header wait");
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        loop {
+            match std::io::Read::read(sock, &mut tmp) {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                    if buf.len() > 64 * 1024 {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    #[test]
+    fn a_split_request_header_is_not_refused_for_arriving_late() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (reading_tx, reading_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let _ = reading_tx.send(());
+            // A caller that still had the old 2s budget, shrunk here so the
+            // gap below is past it. `read_http_head` replaces this with 30s.
+            sock.set_read_timeout(Some(std::time::Duration::from_millis(1)))
+                .expect("timeout");
+            let head = read_http_head(&mut sock).expect("full head");
+            let authed = head
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: bearer pack-token"));
+            let (status, body): (u16, &[u8]) = if authed { (200, b"ok") } else { (401, b"no") };
+            let response = http_bytes(status, body, None, false);
+            std::io::Write::write_all(&mut sock, &response).expect("write");
+        });
+        let mut client = std::net::TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("read timeout");
+        client
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("write timeout");
+        std::io::Write::write_all(&mut client, b"GET /api/tracker/packs HTTP/1.1\r\n")
+            .expect("half");
+        reading_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server is in read");
+        // Past the 1ms timeout set above. A helper that keeps that timeout
+        // returns before this write, and the response is not 200.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        std::io::Write::write_all(&mut client, b"authorization: bearer pack-token\r\n\r\n")
+            .expect("rest");
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut client, &mut buf).expect("response");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.starts_with("HTTP/1.1 200 "),
+            "a late header is the request, not a 401: {text}"
+        );
+        server.join().expect("server");
+    }
+
     fn spawn_fake(fake: Arc<Fake>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -2225,22 +2305,9 @@ mod tests {
                 let Ok((mut sock, _)) = listener.accept() else {
                     break;
                 };
-                sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                    .expect("timeout");
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 2048];
-                loop {
-                    match std::io::Read::read(&mut sock, &mut tmp) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&tmp[..n]);
-                            if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf);
+                let Some(head) = read_http_head(&mut sock) else {
+                    continue;
+                };
                 let authed = head.lines().any(|line| {
                     line.eq_ignore_ascii_case(&format!("authorization: bearer {}", fake.token))
                 });
@@ -4112,17 +4179,9 @@ mod tests {
                 let Ok((mut sock, _)) = listener.accept() else {
                     break;
                 };
-                sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                    .expect("timeout");
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 2048];
-                while !buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match std::io::Read::read(&mut sock, &mut tmp) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf).into_owned();
+                let Some(head) = read_http_head(&mut sock) else {
+                    continue;
+                };
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                 let response = if path == "/api/tracker/packs" {
                     http_bytes(200, &list, None, false)
@@ -4381,17 +4440,9 @@ mod tests {
                 let Ok((mut sock, _)) = listener.accept() else {
                     break;
                 };
-                sock.set_read_timeout(Some(Duration::from_secs(2)))
-                    .expect("timeout");
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 2048];
-                while !buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match std::io::Read::read(&mut sock, &mut tmp) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf).into_owned();
+                let Some(head) = read_http_head(&mut sock) else {
+                    continue;
+                };
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                 let authed = head.lines().any(|line| {
                     line.eq_ignore_ascii_case(&format!("authorization: bearer {TOKEN}"))
@@ -5298,7 +5349,7 @@ mod tests {
             .run()
             .await;
         let logs = logs.text();
-        assert!(finished);
+        assert!(finished, "still waiting: {waits:?}\n{logs}");
         assert_eq!(waits, [secs(60), secs(300)]);
         assert_all_installed(dir.path(), &contents);
         let said = lines_with(&logs, SAID_MISSING);

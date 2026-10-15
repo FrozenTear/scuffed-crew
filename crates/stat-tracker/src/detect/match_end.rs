@@ -1039,7 +1039,7 @@ pub fn detect_end_reel_with(img: &DynamicImage, rgb: &RgbImage, titles: &Titles)
 /// discriminator. A fade-to-black frame fails the middle check.
 ///
 /// A flat mid slab (`ENTERING GAME` / other loading chrome) also looks
-/// letterboxed (Soot 2026-09-06 batch: top/bot dark ≥0.85, mid <0.5) but
+/// letterboxed (FrozenTear 2026-09-06 batch: top/bot dark ≥0.85, mid <0.5) but
 /// is one dominant color, not footage. Require the mid band to spread
 /// across coarse color bins.
 fn end_reel_letterbox(rgb: &RgbImage) -> bool {
@@ -1062,7 +1062,7 @@ fn end_reel_letterbox(rgb: &RgbImage) -> bool {
 }
 
 /// Cinematic 2.35:1 bars are ~12% of 16:9. `ENTERING GAME` keeps ~35–40%
-/// black above and below a thin navy strip (Soot 2026-09-06 recheck on
+/// black above and below a thin navy strip (FrozenTear 2026-09-06 recheck on
 /// rejected_preflight_013904 / poll_223050). The 7% edge bands are dark
 /// in both cases; the *shoulders* just inside those edges are gameplay
 /// on a real reel and still black on the loading slab.
@@ -1180,7 +1180,7 @@ fn end_reel_cinematic_crop(img: &DynamicImage) -> Option<DynamicImage> {
 
 /// Nameplate POTG title card: gold battletag + white title glyphs.
 /// Cadence wake only — same class as [`end_reel_letterbox`], no OCR. Phrase
-/// OCR must not gate this wake (Soot 2026-09-06: known-potg-003708 passed
+/// OCR must not gate this wake (FrozenTear 2026-09-06: known-potg-003708 passed
 /// the cheap gate, then Tesseract returned `PIAN AF TIIF AR` because the
 /// endorsement toast sits on the title), and a read whose result was
 /// discarded only cost two Tesseract calls per wake (#240).
@@ -1228,7 +1228,7 @@ fn ocr_end_reel_phrase(prepared: GrayImage, context: &'static str) -> bool {
 /// Cheap nameplate gate: large gold battletag in the lower-left plus
 /// bright white title glyphs just above it. Does not require a dark field.
 ///
-/// ROI + hue calibrated on known-potg-003708 (Soot, 2026-09-06): the
+/// ROI + hue calibrated on known-potg-003708 (FrozenTear, 2026-09-06): the
 /// first #83 gate used a mid-frame orange band (y 34–58%) and
 /// `hue_near(30, 12)`. On the real 2560×1440 card the battletag sits at
 /// y ≈ 990–1080 (≈69–75%) with sample `rgb(255, 221, 0)` ≈ hue 52, so
@@ -1240,7 +1240,7 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
         return false;
     }
-    // Tab scoreboard crop (Soot accepted_020455): mustard team *slab*
+    // Tab scoreboard crop (FrozenTear accepted_020455): mustard team *slab*
     // (often muted — fails is_potg_orange) plus a burgundy team above.
     // Group-count of 3+ and neon-gold hot strips miss that; a battletag
     // is a short left-aligned run, not a full-width slab.
@@ -1293,7 +1293,7 @@ fn nameplate_looks_like_scoreboard(rgb: &RgbImage) -> bool {
     if upper_magenta > 0.06 && left_lower_gold > 0.04 {
         return true;
     }
-    // Soot accepted_020455 on 486219f: mustard team is human-bright but
+    // FrozenTear accepted_020455 on 486219f: mustard team is human-bright but
     // most pixels fail is_potg_orange (val≤160 / dirtier sat). The wake
     // still sees enough neon specks + white names in the nameplate ROIs.
     // A left-aligned battletag does not paint the *right* lower half.
@@ -2270,7 +2270,7 @@ mod tests {
     }
 
     fn entering_game_frame() -> RgbImage {
-        // Soot 013904 / 223050: ~38% black bars + a ~24% navy strip.
+        // FrozenTear 013904 / 223050: ~38% black bars + a ~24% navy strip.
         // A vertical navy gradient splits 16-wide bins (old footage
         // check) but the shoulders at y 15–23% / 77–85% stay black.
         let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
@@ -2298,7 +2298,7 @@ mod tests {
 
     fn tab_scoreboard_frame() -> RgbImage {
         let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
-        // Soot accepted_020455: one magenta team *slab* over one mustard
+        // FrozenTear accepted_020455: one magenta team *slab* over one mustard
         // slab (no dark row gaps). Group-count of 3+ misses this.
         for y in 12..165 {
             for x in 24..620 {
@@ -2519,7 +2519,7 @@ mod tests {
         );
     }
 
-    /// Soot accepted_020455: tight Tab crop — burgundy team over a *muted*
+    /// FrozenTear accepted_020455: tight Tab crop, burgundy team over a *muted*
     /// mustard slab (human-bright, but most pixels fail `is_potg_orange`
     /// val>160 / sat>140). White names sit on the gold. 486219f slab
     /// vetoes used the strict orange predicate and missed this.

@@ -14,7 +14,9 @@ TryExec=stat-tracker-gui
 # gtk-update-icon-cache is not required for a theme name.
 Icon=applications-games
 Type=Application
-Categories=Game;Utility;
+# One main category. Game and Utility are both main categories,
+# so only Game is listed.
+Categories=Game;
 Keywords=overwatch;stats;gaming;tracker;
 StartupNotify=true
 Terminal=false

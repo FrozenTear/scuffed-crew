@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! OCR_BENCH_OUT=out.jsonl        where the JSON lines go
-//! OCR_BENCH_DATA=<data dir>      reader packs and portraits (templates/…)
+//! OCR_BENCH_DATA=<data dir>      reader packs (templates/…)
 //! OCR_BENCH_OCR=on|off           off sets the gate, as the switch does
 //! OCR_BENCH_READER=ocr-v1|new    off implies new
 //! OCR_BENCH_TSVS=a.tsv:b.tsv     frame lists: a `frame` column of paths
@@ -337,8 +337,8 @@ fn run() {
         shadow::init(&shadow::ReaderConfig::from_data_dir(&data));
         format!("{:?}", shadow::pack_readiness())
     });
-    let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
-        &detect::hero_portrait::portraits_dir(&data),
+    let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load_installed(
+        &data,
     ));
 
     let singles = listed_frames(&std::env::var("OCR_BENCH_TSVS").unwrap_or_default(), limit);

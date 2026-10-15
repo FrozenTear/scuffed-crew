@@ -333,6 +333,37 @@ impl Database {
         })
     }
 
+    /// Root connection that does not load `ENCRYPTION_KEY`.
+    ///
+    /// The relay reads membership and channel rows only. It does not decrypt
+    /// secrets, so the relay container does not need the app encryption key.
+    /// `check_credentials` still rejects root/root when `PRODUCTION` is set.
+    pub async fn connect_plaintext(
+        url: &str,
+        username: &str,
+        password: &str,
+        config: DbConfig,
+    ) -> DbResult<Self> {
+        check_credentials(username, password)?;
+
+        let client = any::connect(url).await?;
+        client
+            .signin(Root {
+                username: username.to_string(),
+                password: password.to_string(),
+            })
+            .await?;
+        client
+            .use_ns(&config.namespace)
+            .use_db(&config.database)
+            .await?;
+
+        Ok(Self {
+            client,
+            crypto: None,
+        })
+    }
+
     /// Connect to a remote SurrealDB instance with database-scoped credentials.
     pub async fn connect_scoped(
         url: &str,

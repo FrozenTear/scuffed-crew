@@ -8,8 +8,11 @@ use crate::components::dm::{
     DmLoadFailure, MessageThread, SyncResponse, classify_dm_client_error,
 };
 use crate::components::{Toast, use_toast};
+use crate::pages::chat_gate::{CHAT_CHECKING, CHAT_UNAVAILABLE, ChatUnavailable};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use crate::state::relay::dm_may_sync;
+use crate::state::{RelayAvailability, use_relay_availability_state};
 
 const PAGE_CSS: &str = r#"
 .dm-page {
@@ -109,6 +112,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     // Hooks must run unconditionally. Auth boots as loading → logged-out, then
     // `/api/auth/me` lands; an early return before these hooks changes the
     // hook count and panics (same pattern as AdminLayout).
+    let relay = use_relay_availability_state();
+    let availability = relay.current();
     let auth = use_auth();
     let mut toast = use_toast();
     let mut refresh = use_signal(|| 0u64);
@@ -120,7 +125,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
     let me = use_resource(move || async move {
         // Read auth so this resource re-runs when the session resolves.
-        if !auth().is_logged_in() {
+        if !dm_may_sync(relay.current(), auth().is_logged_in()) {
             return None;
         }
         ApiClient::web().get_me().await.ok()
@@ -128,8 +133,12 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
     let _load_conversations = use_resource(move || async move {
         let _ = refresh();
-        if !auth().is_logged_in() {
-            load_state.set(LoadState::Loading);
+        // Health unknown or relay off: do not sync or list. A sync against a
+        // missing relay is the 503 the page used to show.
+        if !dm_may_sync(relay.current(), auth().is_logged_in()) {
+            if !auth().is_logged_in() {
+                load_state.set(LoadState::Loading);
+            }
             return;
         }
         load_state.set(LoadState::Loading);
@@ -156,6 +165,17 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         }
     });
 
+    if !availability.allows_connection() {
+        let message = if availability == RelayAvailability::Off {
+            CHAT_UNAVAILABLE
+        } else {
+            CHAT_CHECKING
+        };
+        return rsx! {
+            ChatUnavailable { message }
+        };
+    }
+
     if auth().loading {
         return rsx! {
             style { {PAGE_CSS} }
@@ -179,6 +199,9 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     }
 
     let on_refresh = move |_| {
+        if !dm_may_sync(relay.current(), auth().is_logged_in()) {
+            return;
+        }
         if syncing() {
             return;
         }
@@ -342,6 +365,34 @@ mod tests {
         assert_eq!(
             inbox_pane_message(&LoadState::Ready, 2),
             Some("Select a conversation from the left.")
+        );
+    }
+
+    #[test]
+    fn dm_sync_stays_closed_until_the_relay_is_configured() {
+        use crate::state::RelayAvailability;
+        use crate::state::relay::dm_may_sync;
+
+        assert!(!dm_may_sync(RelayAvailability::Off, true));
+        assert!(!dm_may_sync(RelayAvailability::Unknown, true));
+        assert!(!dm_may_sync(RelayAvailability::On, false));
+        assert!(dm_may_sync(RelayAvailability::On, true));
+
+        let src = include_str!("dm.rs");
+        let start = src
+            .find("let _load_conversations")
+            .expect("conversation resource");
+        let end = src.find("if auth().loading").expect("auth loading return");
+        let body = &src[start..end];
+        let gate = body.find("dm_may_sync").expect("relay gate");
+        let sync = body.find("/api/nostr/dm/sync").expect("sync request");
+        assert!(gate < sync, "sync must not run before the relay gate");
+        let conversations = body
+            .find("/api/nostr/dm/conversations")
+            .expect("conversation list");
+        assert!(
+            gate < conversations,
+            "the inbox list must not load before the relay gate"
         );
     }
 
