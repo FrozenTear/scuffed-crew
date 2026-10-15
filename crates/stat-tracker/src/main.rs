@@ -365,6 +365,11 @@ struct CaptureRequest {
     /// Not persisted. A restart drops them, and the next capture keeps the
     /// ocr-v1 result for that field.
     result_evidence: shadow::result::ResultEvidence,
+    /// [`REJOIN_CONTINUE_WINDOW`] is open on this game and no rejoin has
+    /// continued it yet ([`rejoin_board`]).
+    rejoin_window_open: bool,
+    /// See [`ActiveGame::rejoin_carry`].
+    rejoin_carry: Option<Counters>,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -1186,6 +1191,18 @@ struct ActiveGame {
     /// Memory only. The first Tab after [`POST_MATCH_GRACE`] from that
     /// result starts a new game ([`should_start_fresh_session`]).
     restored_with_result: bool,
+    /// When this daemon run restored the game from a previous run that did
+    /// not finish it (a crash or restart mid-game). Memory only. Opens the
+    /// [`REJOIN_CONTINUE_WINDOW`]: a same-map board whose stats dropped
+    /// (the player rejoined and the game reset their scoreboard) continues
+    /// this game instead of splitting it ([`rejoin_board`]).
+    restart_recovered_at: Option<Instant>,
+    /// Counters this game had before a rejoin reset its scoreboard. Added to
+    /// every later board of this game, so stored rows stay cumulative for
+    /// the whole match. Persisted in `active_game.json`: a second restart in
+    /// the same game keeps adding it, and no new window opens on a game that
+    /// already has one, so post-rejoin stats are never counted twice.
+    rejoin_carry: Option<Counters>,
     session_id: String,
     /// alpha.8: the newest pending board's row with the reader's best guess
     /// in each unread stat column, those columns in `suspect_fields`. Stored
@@ -1328,6 +1345,8 @@ impl ActiveGame {
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
             restored_with_result: false,
+            restart_recovered_at: None,
+            rejoin_carry: None,
         }
     }
 
@@ -1500,6 +1519,10 @@ struct PersistedGame {
     /// stores the guess when the game closes. Missing on older skeletons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     best_guess: Option<storage::PersonalMatch>,
+    /// See [`ActiveGame::rejoin_carry`]. Missing on older skeletons, which
+    /// had no rejoin carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejoin_carry: Option<Counters>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -2024,6 +2047,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         text_fallback_locked: g.text_fallback_locked,
         replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
         best_guess: g.best_guess.clone(),
+        rejoin_carry: g.rejoin_carry,
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -2105,16 +2129,20 @@ fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
         outcome: persisted.outcome,
         imported: persisted.deferred_imported,
     });
-    match active_game_from_persisted(persisted) {
+    let crash_seen = stat_tracker::report::marker::last_crash_seen(data_dir);
+    match active_game_from_persisted(persisted, crash_seen) {
         Some(game) => ActiveAdmission::Open(Box::new(game)),
         None => ActiveAdmission::Stale { session_id, hold },
     }
 }
 
-fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
+fn active_game_from_persisted(
+    p: PersistedGame,
+    crash_seen: Option<chrono::DateTime<Utc>>,
+) -> Option<ActiveGame> {
     let to_instant =
         |w: chrono::DateTime<Utc>| Instant::now().checked_sub((Utc::now() - w).to_std().ok()?);
-    if let Some(reason) = restart_resume_refusal(&p, Utc::now()) {
+    if let Some(reason) = restart_resume_refusal(&p, crash_seen, Utc::now()) {
         tracing::info!(
             session_id = %p.session_id,
             map = p.map.as_deref().unwrap_or(""),
@@ -2174,19 +2202,26 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
         replaced_text_fallback_map: p.replaced_text_fallback_map,
         result_evidence: shadow::result::ResultEvidence::default(),
         restored_with_result: hint_recovered,
+        restart_recovered_at: None,
+        rejoin_carry: p.rejoin_carry,
     })
 }
 
-/// Longest gap since the previous run's last capture for which a restart
-/// resumes that game. A crash and restart mid-game takes well under a
-/// minute; the next game's first Tab usually comes after a result screen,
-/// a queue and hero select. Past this, the next Tab starts a new game.
+/// Longest gap between the previous run stopping and this restart for
+/// which the restart resumes that game. A crash and restart mid-game takes
+/// well under a minute; the next game's first Tab usually comes after a
+/// result screen, a queue and hero select. Past this, the next Tab starts a
+/// new game. The gap is measured from when the previous run was last seen
+/// alive ([`restart_stop_time`]), not from its last Tab: a player who did
+/// not press Tab for a few minutes before a crash is still in that game.
 const RESUME_AFTER_RESTART_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Why the game in `active_game.json` is not resumed after a restart, or
 /// `None` when it is clearly the same game. An unfinished game with a
-/// stored board resumes only when it has a known map and its last capture
-/// is at most [`RESUME_AFTER_RESTART_MAX_GAP`] old. A Tab after the restart
+/// stored board resumes only when it has a known map and the previous run
+/// stopped at most [`RESUME_AFTER_RESTART_MAX_GAP`] ago
+/// ([`restart_stop_time`]). The 20 minute [`UNFINISHED_SESSION_IDLE`]
+/// bound on its last capture still applies. A Tab after the restart
 /// that names another map still splits on the boundary's different-map
 /// rule.
 ///
@@ -2195,7 +2230,11 @@ const RESUME_AFTER_RESTART_MAX_GAP: std::time::Duration = std::time::Duration::f
 /// [`ActiveGame::restored_with_result`], so the first Tab after
 /// [`POST_MATCH_GRACE`] from that result starts a new game. A game whose
 /// outcome is recorded starts a new game on that Tab anyway.
-fn restart_resume_refusal(p: &PersistedGame, now: chrono::DateTime<Utc>) -> Option<&'static str> {
+fn restart_resume_refusal(
+    p: &PersistedGame,
+    crash_seen: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> Option<&'static str> {
     if p.outcome.is_decided() {
         return None;
     }
@@ -2208,10 +2247,164 @@ fn restart_resume_refusal(p: &PersistedGame, now: chrono::DateTime<Utc>) -> Opti
     if known_label(p.map.as_deref()).is_none() {
         return Some("no map recorded, so it cannot be matched");
     }
-    match (now - p.last_activity).to_std() {
+    if p.last_activity > now {
+        return Some("last capture is later than now (clock moved back)");
+    }
+    match (now - restart_stop_time(p, crash_seen, now)).to_std() {
         Ok(gap) if gap <= RESUME_AFTER_RESTART_MAX_GAP => None,
-        Ok(_) => Some("last capture too long ago"),
+        Ok(_) => Some("previous run stopped too long ago"),
         Err(_) => Some("last capture is later than now (clock moved back)"),
+    }
+}
+
+/// When the previous run stopped, as far as the tracker can tell. The crash
+/// marker's `last_seen` heartbeat (at most a minute before the crash) when
+/// it is later than the game's last capture, else that last capture. An
+/// old crash marker from an earlier run is older than the game's last
+/// capture and changes nothing; a clean shutdown leaves no marker, so it
+/// falls back to the last capture as before. A heartbeat in the future
+/// (clock moved back) is ignored.
+fn restart_stop_time(
+    p: &PersistedGame,
+    crash_seen: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
+    match crash_seen {
+        Some(seen) if seen > p.last_activity && seen <= now => seen,
+        _ => p.last_activity,
+    }
+}
+
+/// Log the board that continued a game after a rejoin.
+fn note_rejoin(req: &CaptureRequest, rejoin: &RejoinRead, raw: Counters) {
+    if rejoin.continued {
+        tracing::info!(
+            session_id = %req.session_id,
+            raw_elims = raw.elims,
+            raw_deaths = raw.deaths,
+            raw_damage = raw.damage,
+            elims = rejoin.counters.elims,
+            deaths = rejoin.counters.deaths,
+            damage = rejoin.counters.damage,
+            "rejoin after restart: same map with reset stats continues the recovered game"
+        );
+    }
+}
+
+/// How long after a restart restored an unfinished game a rejoin can still
+/// continue it ([`rejoin_board`]). Measured from the restart, which comes
+/// right after the crash. Overwatch puts the player back in the match a
+/// minute or two after the client comes back; past this, a stat drop is
+/// handled by the normal stat-reset rule and splits as before.
+const REJOIN_CONTINUE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Open the rejoin window on a game this run restored unfinished from the
+/// previous run: no result seen, a stored board and a known map. A game
+/// that a rejoin already continued keeps its carry and gets no new window:
+/// its next board counts from the rejoin, below the stored total, and must
+/// not be read as a second rejoin.
+fn mark_restart_recovered(st: &mut SessionState, now: Instant) {
+    if let Some(g) = st.active_game.as_mut()
+        && g.rejoin_carry.is_none()
+        && !g.finished()
+        && g.result_mark.is_none()
+        && g.session_created
+        && known_label(g.map.as_deref()).is_some()
+    {
+        g.restart_recovered_at = Some(now);
+    }
+}
+
+/// What a rejoin does to one board's counters. See [`rejoin_board`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RejoinRead {
+    counters: Counters,
+    /// The carry to keep on the game after this board.
+    carry: Option<Counters>,
+    /// This board is the one that continued the game after a rejoin.
+    continued: bool,
+}
+
+fn add_carry(carry: Counters, cur: Counters, held: &[bool; capture_gate::GATE_COLS]) -> Counters {
+    // A held column already carries the game's last accepted value, which
+    // includes the carry. Adding it again would double it.
+    let add = |col: usize, c: u32, v: u32| if held[col] { v } else { c.saturating_add(v) };
+    Counters {
+        elims: add(0, carry.elims, cur.elims),
+        assists: add(1, carry.assists, cur.assists),
+        deaths: add(2, carry.deaths, cur.deaths),
+        damage: add(3, carry.damage, cur.damage),
+        healing: add(4, carry.healing, cur.healing),
+        mitigation: add(5, carry.mitigation, cur.mitigation),
+    }
+}
+
+/// Rejoin after a crash (2026-10-15 Rialto). Overwatch starts a rejoining
+/// player's scoreboard again from zero, so the first boards after the
+/// restart look like a fresh match and the stat-reset rule split the game.
+///
+/// Inside [`REJOIN_CONTINUE_WINDOW`] after [`mark_restart_recovered`], a
+/// board continues the restored game when all of these hold:
+/// * the board names the session's map (an actual read on this Tab, not
+///   the session map filled in), so a different map still starts a new game;
+/// * it is the identified own row with trusted cells and not a suspect row;
+/// * at least two of elims, deaths and damage fell below the last accepted
+///   board.
+///
+/// The pre-rejoin counters become the game's carry and are added to this
+/// and every later board of the game, so the stored rows stay cumulative
+/// (pre-crash plus post-rejoin) and never go down. Lower values never
+/// overwrite the higher pre-crash ones, and the capture gate sees normal
+/// growth. Only one continuation per window: once the carry is set, a later
+/// drop goes through the normal reset rule.
+fn rejoin_board(req: &CaptureRequest, facts: &BoardFacts<'_>) -> RejoinRead {
+    let raw = facts.counters;
+    if let Some(carry) = req.rejoin_carry {
+        return RejoinRead {
+            counters: add_carry(carry, raw, &facts.held),
+            carry: Some(carry),
+            continued: false,
+        };
+    }
+    let unchanged = RejoinRead {
+        counters: raw,
+        carry: None,
+        continued: false,
+    };
+    if !req.rejoin_window_open
+        || !facts.trusted_cells
+        || facts.suspect_row
+        || facts.row_id.is_none()
+    {
+        return unchanged;
+    }
+    let read_map = facts
+        .map_from_panel
+        .filter(|m| !m.trim().is_empty())
+        .or(Some(facts.parsed_map).filter(|m| !m.trim().is_empty()));
+    let same_map = matches!(
+        (known_label(req.session_map.as_deref()), known_label(read_map)),
+        (Some(session), Some(read)) if session.eq_ignore_ascii_case(read)
+    );
+    let Some((prev, _)) = req.prev_gate else {
+        return unchanged;
+    };
+    let before = prev.accepted;
+    let fell = [
+        (0, before.elims, raw.elims),
+        (2, before.deaths, raw.deaths),
+        (3, before.damage, raw.damage),
+    ]
+    .iter()
+    .filter(|(col, b, c)| !facts.held[*col] && c < b)
+    .count();
+    if !same_map || fell < 2 {
+        return unchanged;
+    }
+    RejoinRead {
+        counters: add_carry(before, raw, &facts.held),
+        carry: Some(before),
+        continued: true,
     }
 }
 
@@ -3097,6 +3290,9 @@ struct CaptureReport {
     /// `map` is a sure banner read that replaces the session's text-fallback
     /// map ([`banner_replaces_text_fallback`]).
     map_replaces_text_fallback: bool,
+    /// See [`ActiveGame::rejoin_carry`]. Set on a stored board of a game a
+    /// rejoin continued ([`rejoin_board`]).
+    rejoin_carry: Option<Counters>,
 }
 
 impl CaptureReport {
@@ -3250,6 +3446,12 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
         carried_deferred_hero: g.deferred_hero.clone(),
         carried_deferred_at: g.deferred_at,
         result_evidence: g.result_evidence.clone(),
+        rejoin_window_open: g.rejoin_carry.is_none()
+            && !g.finished()
+            && g.result_mark.is_none()
+            && g.restart_recovered_at
+                .is_some_and(|at| now.saturating_duration_since(at) <= REJOIN_CONTINUE_WINDOW),
+        rejoin_carry: g.rejoin_carry,
     }
 }
 
@@ -3585,6 +3787,9 @@ async fn apply_capture_report(
                     g.best_guess = report.best_guess.clone();
                 }
                 g.touch_at(now);
+                if report.rejoin_carry.is_some() {
+                    g.rejoin_carry = report.rejoin_carry;
+                }
                 if let Some(accepted) = report.gate_state {
                     let mut state = g.boundary_state();
                     boundary::note_accepted_capture(
@@ -5221,6 +5426,7 @@ fn skipped_capture_report(
         close_reason: None,
         held_at,
         map_replaces_text_fallback: false,
+        rejoin_carry: None,
     }
 }
 
@@ -5419,6 +5625,7 @@ fn blank_rejected_report(
         close_reason: None,
         held_at: None,
         map_replaces_text_fallback: false,
+        rejoin_carry: None,
     }
 }
 
@@ -6086,6 +6293,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     close_reason: None,
                     held_at: None,
                     map_replaces_text_fallback: false,
+                    rejoin_carry: None,
                 });
             }
         };
@@ -6231,6 +6439,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             close_reason: None,
             held_at: None,
             map_replaces_text_fallback: false,
+            rejoin_carry: None,
         });
     }
 
@@ -6414,7 +6623,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 healing: parsed.healing,
                 mitigation: parsed.mitigation,
             };
-            let facts = BoardFacts {
+            let mut facts = BoardFacts {
                 counters: raw_counters,
                 suspect,
                 // `trusted_cells` is `stats_from_row` on the identified row,
@@ -6429,6 +6638,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 parsed_map: &parsed.map_name,
                 frame_outcome,
             };
+            let rejoin = rejoin_board(&req, &facts);
+            note_rejoin(&req, &rejoin, raw_counters);
+            facts.counters = rejoin.counters;
             let plan = plan_from_board(&req, &facts);
             if plan.skip_store {
                 if plan.defer {
@@ -6730,6 +6942,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 close_reason: plan.close_reason,
                 held_at: None,
                 map_replaces_text_fallback: staged.replaced_text_fallback,
+                rejoin_carry: rejoin.carry,
             };
             // A stat column this game has never read is a placeholder, not
             // a number: no row is written while one is left (F266-1). The
@@ -6908,6 +7121,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 close_reason: None,
                 held_at: None,
                 map_replaces_text_fallback: false,
+                rejoin_carry: None,
             })
         }
     }
@@ -7690,7 +7904,11 @@ async fn begin_daemon_session(
     // The skeleton map is often empty, and writing it here would store the
     // board under that empty map. A stale start already archived the hold
     // above, with the persisted map and outcome.
-    startup_session(data_dir)
+    let mut st = startup_session(data_dir);
+    // A game restored unfinished opens the rejoin window: a crash usually
+    // drops the player out of the match, and the rejoin resets their stats.
+    mark_restart_recovered(&mut st, Instant::now());
+    st
 }
 
 /// Hero for a held board. Prefer the hero captured with the hold. Otherwise
@@ -8398,6 +8616,8 @@ mod tests {
             replaced_text_fallback_map: None,
             result_evidence: shadow::result::ResultEvidence::default(),
             restored_with_result: false,
+            restart_recovered_at: None,
+            rejoin_carry: None,
         }
     }
 
@@ -9233,6 +9453,7 @@ mod tests {
     fn stale_persisted_game_is_not_recovered() {
         let dir = tempfile::tempdir().expect("tempdir");
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "old".into(),
@@ -15136,7 +15357,7 @@ mod tests {
             );
             let career_panel = matches!(source, HeroSource::CareerPanel);
             let cells_trusted = self.cells_trusted.take().unwrap_or(row.is_some());
-            let facts = BoardFacts {
+            let mut facts = BoardFacts {
                 counters: cur,
                 suspect,
                 trusted_cells: cells_trusted,
@@ -15149,6 +15370,9 @@ mod tests {
                 parsed_map: text_map,
                 frame_outcome: frame,
             };
+            let rejoin = rejoin_board(&req, &facts);
+            note_rejoin(&req, &rejoin, cur);
+            facts.counters = rejoin.counters;
             let plan = plan_from_board(&req, &facts);
             let sid = req.session_id.clone();
             if plan.skip_store {
@@ -15207,6 +15431,7 @@ mod tests {
                     close_reason: None,
                     held_at: None,
                     map_replaces_text_fallback: false,
+                    rejoin_carry: None,
                 };
                 apply_capture_report(
                     &mut self.st,
@@ -15271,6 +15496,7 @@ mod tests {
                 close_reason: plan.close_reason,
                 held_at: None,
                 map_replaces_text_fallback: staged.replaced_text_fallback,
+                rejoin_carry: rejoin.carry,
             };
             apply_capture_report(
                 &mut self.st,
@@ -15322,6 +15548,19 @@ mod tests {
                     self.advance(night_tick());
                 }
             }
+        }
+
+        /// A crash and restart: the game goes to disk, a new run restores
+        /// it the way startup does, and the rejoin window opens on it.
+        async fn crash_and_restart(&mut self) {
+            persist_active_game(self.dir.path(), self.st.active_game.as_ref());
+            self.st.active_game = None;
+            let restored = self.restart_from_disk().await;
+            self.now = Instant::now();
+            self.wall = Utc::now();
+            self.st.active_game = restored;
+            self.st.last_game_open = self.st.active_game.as_ref().map(|g| g.opened_at);
+            mark_restart_recovered(&mut self.st, self.now);
         }
 
         async fn elims(&self, session: &str) -> Vec<u32> {
@@ -17317,6 +17556,7 @@ mod tests {
             close_reason: None,
             held_at: None,
             map_replaces_text_fallback: false,
+            rejoin_carry: None,
         };
         apply_capture_report(
             &mut night.st,
@@ -17925,6 +18165,7 @@ mod tests {
             close_reason: None,
             held_at: None,
             map_replaces_text_fallback: false,
+            rejoin_carry: None,
         }
     }
 
@@ -18514,6 +18755,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "stale-unfinished".into(),
@@ -18677,6 +18919,7 @@ mod tests {
             .unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "colosseo-defeat".into(),
@@ -19102,6 +19345,7 @@ mod tests {
         store.insert_match(decided).await.unwrap();
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: "next-game".into(),
@@ -19197,6 +19441,7 @@ mod tests {
         last_activity: chrono::DateTime<Utc>,
     ) -> PersistedGame {
         PersistedGame {
+            rejoin_carry: None,
             replaced_text_fallback_map: None,
             best_guess: None,
             session_id: session_id.into(),
@@ -19259,7 +19504,7 @@ mod tests {
     #[test]
     fn a_restart_resumes_the_same_recent_game_with_no_result() {
         let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(40));
-        assert_eq!(restart_resume_refusal(&p, Utc::now()), None);
+        assert_eq!(restart_resume_refusal(&p, None, Utc::now()), None);
         assert!(!first_tab_after_restart_starts_new_game(&p));
     }
 
@@ -19272,8 +19517,8 @@ mod tests {
         assert!(gap.to_std().unwrap() < UNFINISHED_SESSION_IDLE);
         let p = restart_skeleton(Some("Busan"), gap);
         assert_eq!(
-            restart_resume_refusal(&p, Utc::now()),
-            Some("last capture too long ago")
+            restart_resume_refusal(&p, None, Utc::now()),
+            Some("previous run stopped too long ago")
         );
         assert!(first_tab_after_restart_starts_new_game(&p));
     }
@@ -19283,10 +19528,10 @@ mod tests {
     #[test]
     fn a_restart_without_a_map_or_with_a_future_capture_starts_a_new_game() {
         let p = restart_skeleton(None, chrono::Duration::seconds(40));
-        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(restart_resume_refusal(&p, None, Utc::now()).is_some());
         assert!(first_tab_after_restart_starts_new_game(&p));
         let p = restart_skeleton(Some("Busan"), chrono::Duration::seconds(-120));
-        assert!(restart_resume_refusal(&p, Utc::now()).is_some());
+        assert!(restart_resume_refusal(&p, None, Utc::now()).is_some());
         assert!(first_tab_after_restart_starts_new_game(&p));
     }
 
@@ -19358,6 +19603,402 @@ mod tests {
             st.active_game.as_ref(),
             Instant::now()
         ));
+    }
+
+    /// The Rialto game before the crash: two boards, the second at 9 elims.
+    async fn rialto_before_crash(night: &mut Night) -> String {
+        night.begin_on("Rialto", "Ana");
+        night
+            .tab_once(
+                night_counters(4, 2, 2, 1500, 3000, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(90));
+        night
+            .tab_once(
+                night_counters(9, 6, 5, 3000, 7000, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.id()
+    }
+
+    /// QA (a), 2026-10-15 Rialto: a crash, a rejoin with the scoreboard back
+    /// at zero, then a few more elims and the Victory. All of it stays one
+    /// game, the stored stats never go down, and the result lands on it.
+    #[tokio::test]
+    async fn a_rejoin_with_reset_stats_on_the_same_map_continues_the_recovered_game() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.crash_and_restart().await;
+        assert_eq!(night.id(), id, "the restart resumes the Rialto game");
+
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            id,
+            "the zero board after the rejoin does not split"
+        );
+        night.advance(Duration::from_secs(50));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 300, 900, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            id,
+            "the next board after the rejoin does not split"
+        );
+        night.advance(Duration::from_secs(120));
+        night
+            .tab_once(
+                night_counters(5, 3, 1, 1200, 2500, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.id(), id);
+
+        assert_eq!(
+            night.elims(&id).await,
+            vec![4, 9, 9, 11, 14],
+            "pre-crash plus post-rejoin"
+        );
+        let rows = night.store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter().all(|row| row.session_id == id),
+            "one game: {rows:?}"
+        );
+        let last = night.store.get_session_snapshots(&id).await.unwrap();
+        let last = last.last().unwrap();
+        assert_eq!((last.deaths, last.damage, last.healing), (6, 4200, 9500));
+        assert!(
+            night
+                .store
+                .get_session_snapshots(&id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.outcome == "victory"),
+            "the Victory is on the recovered game"
+        );
+    }
+
+    /// QA on #293: a crash, a rejoin that continues the game, then a second
+    /// restart in the same game (an update, the OOM killer or a clean stop).
+    /// The carry comes back from `active_game.json`, no new rejoin window
+    /// opens, and the next board adds onto the stored total once, not twice.
+    #[tokio::test]
+    async fn a_second_restart_after_a_rejoin_keeps_the_carry_and_does_not_double_stats() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.crash_and_restart().await;
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(50));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 300, 900, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+        let carry = night.game().rejoin_carry;
+        assert!(carry.is_some(), "the rejoin set a carry");
+
+        night.crash_and_restart().await;
+        assert_eq!(night.id(), id, "the second restart resumes the game");
+        assert_eq!(
+            night.game().rejoin_carry,
+            carry,
+            "the carry survives the second restart"
+        );
+        assert!(
+            night.game().restart_recovered_at.is_none(),
+            "no new rejoin window on a game that already has a carry"
+        );
+
+        night.advance(Duration::from_secs(40));
+        night
+            .tab_once(
+                night_counters(3, 1, 0, 500, 1200, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id, "the next board stays on the game");
+        // The restart resets the harness wall clock, so rows are compared
+        // as a set: the values matter here, not their stored order.
+        let mut elims = night.elims(&id).await;
+        elims.sort_unstable();
+        assert_eq!(
+            elims,
+            vec![4, 9, 9, 11, 12],
+            "pre-crash plus post-rejoin, counted once"
+        );
+        let snaps = night.store.get_session_snapshots(&id).await.unwrap();
+        let last = snaps.iter().max_by_key(|row| row.elims).unwrap();
+        assert_eq!((last.deaths, last.damage, last.healing), (5, 3500, 8200));
+    }
+
+    /// An `active_game.json` written before `rejoin_carry` existed still
+    /// loads: the game is resumed with no carry.
+    #[test]
+    fn an_old_active_game_json_without_rejoin_carry_still_loads() {
+        let p = restart_skeleton(Some("Rialto"), chrono::Duration::seconds(30));
+        let mut json = serde_json::to_value(&p).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("rejoin_carry");
+        assert!(!obj.contains_key("rejoin_carry"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        let g = recover_active_game(dir.path()).expect("the old file is resumed");
+        assert_eq!(g.session_id, "before-crash");
+        assert!(g.rejoin_carry.is_none());
+    }
+
+    /// QA (b): after the crash the next board is on a different map. That
+    /// is a new game, and nothing is added onto the Rialto game.
+    #[tokio::test]
+    async fn a_board_on_a_different_map_after_a_crash_starts_a_new_game() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.crash_and_restart().await;
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(1, 1, 0, 200, 500, 0),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), id, "the Busan boards are a new game");
+        assert!(night.game().rejoin_carry.is_none());
+        assert_eq!(
+            night.elims(&id).await,
+            vec![4, 9],
+            "nothing added to Rialto"
+        );
+    }
+
+    /// QA (c), #289: a result was seen before the crash. The first Tab more
+    /// than 75 s after that result starts a new game, also on the same map
+    /// with stats back at zero: the rejoin window does not open for it.
+    #[tokio::test]
+    async fn a_restart_after_a_result_still_starts_a_new_game_on_the_first_tab_past_75_s() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.banner(detect::MatchOutcome::Victory).await;
+        night.crash_and_restart().await;
+        assert_eq!(
+            night.id(),
+            id,
+            "the result keeps the game for its post-match board"
+        );
+        assert!(
+            night.game().restart_recovered_at.is_none(),
+            "no rejoin window after a result"
+        );
+        night.advance(POST_MATCH_GRACE + Duration::from_secs(5));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), id, "the next game on Rialto is its own game");
+        assert!(night.game().rejoin_carry.is_none());
+        assert_eq!(night.elims(&id).await, vec![4, 9]);
+    }
+
+    /// QA (d): past the rejoin window, a stat reset on the same map splits
+    /// as before (#147).
+    #[tokio::test]
+    async fn outside_the_rejoin_window_a_stat_reset_still_splits() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.crash_and_restart().await;
+        night.advance(REJOIN_CONTINUE_WINDOW + Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(50));
+        night
+            .tab_once(
+                night_counters(1, 1, 0, 300, 900, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), id, "the stat reset splits outside the window");
+        assert!(night.game().rejoin_carry.is_none());
+        assert_eq!(night.elims(&id).await, vec![4, 9]);
+    }
+
+    /// Without a restart there is no rejoin window: a live stat reset keeps
+    /// the #147 split.
+    #[tokio::test]
+    async fn a_stat_reset_without_a_restart_still_splits() {
+        let mut night = Night::new().await;
+        let id = rialto_before_crash(&mut night).await;
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_once(
+                night_counters(0, 0, 0, 0, 0, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(50));
+        night
+            .tab_once(
+                night_counters(1, 1, 0, 300, 900, 0),
+                "Ana",
+                Some(0),
+                Some("Rialto"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), id);
+    }
+
+    /// The resume window counts from when the previous run stopped (its
+    /// crash heartbeat), not from its last Tab. An old crash marker or a
+    /// heartbeat in the future changes nothing.
+    #[test]
+    fn the_restart_resume_window_counts_from_the_crash_not_the_last_tab() {
+        let now = Utc::now();
+        let p = restart_skeleton(Some("Rialto"), chrono::Duration::minutes(8));
+        assert!(
+            restart_resume_refusal(&p, None, now).is_some(),
+            "no marker: last Tab"
+        );
+        let crash = now - chrono::Duration::seconds(50);
+        assert_eq!(
+            restart_resume_refusal(&p, Some(crash), now),
+            None,
+            "crash 50 s ago resumes"
+        );
+        let old = now - chrono::Duration::hours(3);
+        assert!(
+            restart_resume_refusal(&p, Some(old), now).is_some(),
+            "an old marker changes nothing"
+        );
+        let future = now + chrono::Duration::minutes(2);
+        assert!(
+            restart_resume_refusal(&p, Some(future), now).is_some(),
+            "a future heartbeat is ignored"
+        );
+        let late = now - chrono::Duration::minutes(6);
+        assert!(
+            restart_resume_refusal(&p, Some(late), now).is_some(),
+            "crash 6 min ago starts a new game"
+        );
+        let stale = restart_skeleton(Some("Rialto"), chrono::Duration::minutes(25));
+        assert!(
+            active_game_from_persisted(stale, Some(crash)).is_none(),
+            "the 20 minute idle bound on the last capture still holds"
+        );
+    }
+
+    /// Startup opens the rejoin window on a restored unfinished game, and
+    /// not on one with a result.
+    #[tokio::test]
+    async fn startup_opens_the_rejoin_window_only_on_an_unfinished_game() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let p = restart_skeleton(Some("Rialto"), chrono::Duration::seconds(30));
+        let st = begin_from_persisted(dir.path(), &store, p).await;
+        assert!(
+            st.active_game
+                .as_ref()
+                .unwrap()
+                .restart_recovered_at
+                .is_some()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut p = restart_skeleton(Some("Rialto"), chrono::Duration::seconds(30));
+        p.result_outcome = Some(detect::MatchOutcome::Victory);
+        p.result_seen_at = Some(Utc::now() - chrono::Duration::seconds(10));
+        let st = begin_from_persisted(dir.path(), &store, p).await;
+        assert!(
+            st.active_game
+                .as_ref()
+                .unwrap()
+                .restart_recovered_at
+                .is_none()
+        );
     }
 
     async fn begin_from_persisted(
