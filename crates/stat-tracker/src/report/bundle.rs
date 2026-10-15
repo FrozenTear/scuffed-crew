@@ -819,7 +819,8 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     }
 
     // The journal is read from the game's own window start (section 6).
-    let raw_log = scrub::read_daemon_logs_since(&input.log_dir, input.window.start());
+    let raw_log =
+        scrub::read_daemon_logs_since(&input.log_dir, input.window.start(), input.window.end());
     let log_text = scrub::scrub_log(&input.scrub, &input.window, &raw_log);
     let reason_text = scrub_reason_text(&input.scrub, &input.text);
 

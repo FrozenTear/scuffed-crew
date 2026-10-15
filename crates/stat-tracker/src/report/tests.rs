@@ -970,6 +970,35 @@ mod game {
         out
     }
 
+    /// QA note on #290: the per-game board names in the kit folder stay on
+    /// this machine. No game report category ever puts `names.json` (or
+    /// any of its names) in the zip.
+    #[test]
+    fn names_json_is_never_in_a_built_report_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let name = "QXNAMESJSONQX";
+        kit::record_names(tmp.path(), "sess-1", &[name.to_string()]).unwrap();
+        let dir = kit::session_dir(tmp.path(), "sess-1").expect("kit dir");
+        assert!(dir.join(kit::NAMES_JSON).is_file(), "names.json is written");
+        for category in GameCategory::ALL {
+            let zip = build_game_report(&input(tmp.path(), category)).unwrap();
+            let files = unzip(&zip.bytes);
+            for (entry, bytes) in &files {
+                assert!(
+                    !entry.ends_with(kit::NAMES_JSON),
+                    "{entry} in a {} zip",
+                    category.as_str()
+                );
+                assert!(
+                    !String::from_utf8_lossy(bytes).contains(name),
+                    "a board name leaked into {entry}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn game_report_passes_the_server_validator_with_both_crops() {
         let tmp = tempfile::tempdir().unwrap();
