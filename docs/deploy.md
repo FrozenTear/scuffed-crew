@@ -404,6 +404,15 @@ team, and officer chat only if they are an officer on that team. strfry and
 strfry29 only filter writes, so the gate is a separate process in the same
 container.
 
+`relay/Containerfile` pins strfry29 to fiatjaf/relay29 commit
+`3276594e9d85670af13ba5cf0aad235f9692acd9`. That commit's `go.mod` requires
+Go 1.24.1 or newer. The builder image is `golang:1.24.13-alpine` because it
+sets `GOTOOLCHAIN=local` and will not download a newer toolchain. Change the
+`RELAY29_COMMIT` build arg in that file to move the pin. `relay-policy` and
+`relay-read-gate` are compiled from this repository. CI builds the Go stage
+on every pull request. The full image also release-builds those Rust plugins,
+so that step stays out of CI.
+
 Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
 Compose network only, so site-server still uses `ws://strfry:7777` for publish
 and its own subscriptions. Do not publish `7777:7777`; that would skip the gate.
