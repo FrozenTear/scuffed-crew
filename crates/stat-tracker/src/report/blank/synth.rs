@@ -115,11 +115,11 @@ fn fill(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, c: Rgb<u8>) {
 
 /// Glyph coverage maps (0..1) of the 1440p templates, scaled to the real
 /// digit height: index 0-9 and 10 for the comma, with their ink columns.
-fn glyphs() -> Vec<(Vec<f32>, usize, usize, usize, usize)> {
+fn glyphs(digit_h: f64) -> Vec<(Vec<f32>, usize, usize, usize, usize)> {
     let png = include_bytes!("../../../assets/shadow-digits/digits_1440.png");
     let strip = image::load_from_memory(png).unwrap().to_luma8();
     // a template canvas spans 1.35 digit heights in 26 rows
-    let f = DIGIT_H / (26.0 / 1.35);
+    let f = digit_h / (26.0 / 1.35);
     let (gw, gh) = (
         (22.0 * f).round_ties_even() as u32,
         (26.0 * f).round_ties_even() as u32,
@@ -146,7 +146,12 @@ fn glyphs() -> Vec<(Vec<f32>, usize, usize, usize, usize)> {
 /// Draw `text` (digits and commas) centred at `cx`, glyph tops at `top`,
 /// blended over what is there in `colour`.
 pub(crate) fn draw_number(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64) {
-    let gl = glyphs();
+    draw_number_h(img, text, cx, top, colour, DIGIT_H);
+}
+
+/// [`draw_number`] at digit height `digit_h`.
+fn draw_number_h(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64, digit_h: f64) {
+    let gl = glyphs(digit_h);
     let idx: Vec<usize> = text
         .chars()
         .map(|c| {
@@ -327,5 +332,178 @@ pub(crate) fn frame(layout: Layout, values: &[[u32; 6]; 12]) -> image::DynamicIm
         i64::from(x),
         i64::from(y),
     );
+    image::DynamicImage::ImageRgb8(f)
+}
+
+// ---- 5v5 boards and full Tab frames ----------------------------------------
+//
+// The 5v5 Tab table is the 6v6 one drawn 88/75 larger (`board.rs`, measured
+// on real 1440p 5v5 boards of 2026-10-15): the header strip runs from x 0 to
+// `R5` and is 35 px tall, rows sit at `35 + 88 i` and `577 + 88 i` (86 px
+// tall, 2 px separators), team 2's last row is cut by the crop, and the
+// table's left edge with the role bar lies outside the crop.
+
+/// Team size of a synthetic Tab board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Teams {
+    Five,
+    Six,
+}
+
+/// 5v5 scale against 6v6.
+const K5: f64 = 88.0 / 75.0;
+pub(crate) const T1_5: u32 = 35;
+pub(crate) const T2_5: u32 = 577;
+pub(crate) const PITCH_5: u32 = 88;
+const ROW_H_5: u32 = 86;
+/// Header strip right edge of the one-perk 5v5 layout.
+pub(crate) const R5: u32 = 1105;
+/// Row backgrounds end this far left of the strip's right edge.
+const STRIP_OVER_5: u32 = 52;
+/// Header label centres `R5 - off` and half widths (E A D DMG H MIT).
+const LABELS_5: [(f64, u32); 6] = [
+    (599.0, 5),
+    (532.0, 5),
+    (464.5, 5),
+    (357.5, 16),
+    (235.5, 4),
+    (116.5, 15),
+];
+/// Portrait art ends here; the name strokes start at `NAME_X_5`.
+const PORTRAIT_END_5: u32 = 56;
+const NAME_X_5: u32 = 100;
+
+/// `(top, bottom)` of 5v5 row `r` (0-9), bottom exclusive and cut by the crop.
+pub(crate) fn row_span_5(r: usize) -> (u32, u32) {
+    let top = if r < 5 { T1_5 } else { T2_5 } + PITCH_5 * (r % 5) as u32;
+    (top, (top + ROW_H_5).min(H))
+}
+
+/// A synthetic 1664x1007 5v5 Tab crop (1440p scale) with the first `drawn`
+/// rows of each team drawn (5 for a whole board; fewer leaves the world
+/// showing where the rest would be, as on a board caught mid fade-in).
+pub(crate) fn board_5v5(drawn: usize) -> RgbImage {
+    let r = R5;
+    let row_r = r - STRIP_OVER_5;
+    let mut img = RgbImage::from_fn(W, H, |x, y| {
+        Rgb([
+            (40 + (x * 60 / W) as u8),
+            (55 + (y * 50 / H) as u8),
+            (70 + ((x + y) * 40 / (W + H)) as u8),
+        ])
+    });
+    fill(&mut img, 0, 0, r, T1_5, HEADER_RGB);
+    for &(off, half) in &LABELS_5 {
+        let c = (f64::from(r) - off).round_ties_even() as u32;
+        fill(&mut img, c - half, 9, c + half + 1, 25, LABEL_RGB);
+    }
+    for row in 0..10 {
+        if row % 5 >= drawn {
+            continue;
+        }
+        let (top, bot) = row_span_5(row);
+        let tint = if row >= 5 { TINT_T2 } else { TINT_T1 };
+        if row % 5 != 0 {
+            fill(&mut img, 0, top - 2, row_r, top, SEP_RGB);
+        }
+        fill(&mut img, PORTRAIT_END_5, top, row_r, bot, tint);
+        for y in top..bot {
+            for x in 0..PORTRAIT_END_5 {
+                let v = y - top;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([(120 + x) as u8, (90 + v) as u8, (150 + (x + v) / 2) as u8]),
+                );
+            }
+        }
+        for j in 0..7u32 {
+            let x = NAME_X_5 + j * 16;
+            fill(&mut img, x, top + 26, x + 4, top + 50, Rgb([238, 238, 238]));
+            fill(
+                &mut img,
+                x,
+                top + 26,
+                x + 12,
+                top + 30,
+                Rgb([238, 238, 238]),
+            );
+        }
+        for y in [top, bot - 1] {
+            for x in 0..row_r {
+                let p = img.get_pixel_mut(x, y);
+                p.0 = p.0.map(|c| (u16::from(c) * 7 / 10) as u8);
+            }
+        }
+        let vals = VALUES[if row < 5 { row } else { row + 1 }];
+        for (k, &v) in vals.iter().enumerate() {
+            let cx = f64::from(r) - OFF[k] * K5;
+            let colour = if v == 0 { DIM_ZERO } else { WHITE };
+            let dtop = top + (f64::from(DIGIT_TOP) * K5).round() as u32;
+            draw_number_h(&mut img, &text_for(v, k), cx, dtop, colour, DIGIT_H * K5);
+        }
+    }
+    img
+}
+
+/// The name strokes of every row of [`board_5v5`], `(x0, y0, x1, y1)` in
+/// 1440p crop pixels.
+pub(crate) fn name_boxes_5v5() -> Vec<(u32, u32, u32, u32)> {
+    (0..10)
+        .map(|row| {
+            let (top, _) = row_span_5(row);
+            (NAME_X_5, top + 26, NAME_X_5 + 6 * 16 + 12, top + 50)
+        })
+        .collect()
+}
+
+/// A synthetic 1440p scoreboard crop: [`board_5v5`] or the wide-perk 6v6
+/// board ([`Layout::L4`]) with its first `drawn` rows per team.
+pub(crate) fn tab_crop(teams: Teams, drawn: usize) -> RgbImage {
+    match teams {
+        Teams::Five => board_5v5(drawn),
+        Teams::Six => {
+            let mut img = board(Layout::L4);
+            let world = RgbImage::from_fn(W, H, |x, y| {
+                Rgb([
+                    (40 + (x * 60 / W) as u8),
+                    (55 + (y * 50 / H) as u8),
+                    (70 + ((x + y) * 40 / (W + H)) as u8),
+                ])
+            });
+            for row in (0..12).filter(|r| r % 6 >= drawn) {
+                let (top, bot) = row_span(row);
+                for y in top.saturating_sub(2)..bot {
+                    for x in 0..W {
+                        img.put_pixel(x, y, *world.get_pixel(x, y));
+                    }
+                }
+            }
+            img
+        }
+    }
+}
+
+/// A full synthetic Tab frame, `width` 2560 (1440p) or 1920 (1080p, the
+/// 1440p crop resized with Lanczos), holding [`tab_crop`] where the tracker
+/// cuts the scoreboard, over a smooth world with no chat on screen. For
+/// retry tests, `drawn` below the team size gives a half-drawn board.
+pub(crate) fn tab_frame(teams: Teams, width: u32, drawn: usize) -> image::DynamicImage {
+    let height = width * 9 / 16;
+    let mut f = RgbImage::from_fn(width, height, |x, y| {
+        Rgb([
+            (30 + x * 40 / width) as u8,
+            (45 + y * 40 / height) as u8,
+            60,
+        ])
+    });
+    let (x, y, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(width, height);
+    let crop = tab_crop(teams, drawn);
+    let crop = if (cw, ch) == (W, H) {
+        crop
+    } else {
+        image::imageops::resize(&crop, cw, ch, image::imageops::FilterType::Lanczos3)
+    };
+    image::imageops::replace(&mut f, &crop, i64::from(x), i64::from(y));
     image::DynamicImage::ImageRgb8(f)
 }

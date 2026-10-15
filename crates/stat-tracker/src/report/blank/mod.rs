@@ -801,11 +801,9 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
         return;
     }
     let (w, h) = src.dimensions();
-    let s = b.s;
     let x0 = b.l.min(w);
     let x1 = b.r.min(w);
-    let n0 = (f64::from(b.l) + NAME_COL.0 * s).floor().max(0.0) as u32;
-    let n1 = ((f64::from(b.l) + NAME_COL.1 * s).ceil() as u32).min(w);
+    let (n0, n1) = b.name;
     let mut kept = 0;
     for r in b
         .rows
