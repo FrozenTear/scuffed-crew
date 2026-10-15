@@ -1,7 +1,7 @@
-# Tag `stat-tracker-v0.4.3` (after Robert confirms)
+# Tag `stat-tracker-v0.4.3` (after FrozenTear confirms)
 
-**Do not create or push this tag until Robert confirms.** Never merge the
-release PR without Robert. This file is the operator runbook; it is not the
+**Do not create or push this tag until FrozenTear confirms.** Never merge the
+release PR without FrozenTear. This file is the operator runbook; it is not the
 GitHub Release body.
 
 Proposed tag: **`stat-tracker-v0.4.3`**
@@ -22,12 +22,12 @@ v0.4.2 (`docs/notes/stat-tracker-v0.4.2-tag.md`).
 
 ## 0. Confirm
 
-- [ ] Robert has said **yes** to tagging `stat-tracker-v0.4.3`
-- [ ] Robert has said **yes** to merging the release PR into `main`
+- [ ] FrozenTear has said **yes** to tagging `stat-tracker-v0.4.3`
+- [ ] FrozenTear has said **yes** to merging the release PR into `main`
 - [ ] Release PR is against `main` and CI is green
 - [ ] `git tag --list 'stat-tracker-v0.4.3'` is empty on `origin`
 
-## 1. Merge the release PR (Robert)
+## 1. Merge the release PR (FrozenTear)
 
 Merge via GitHub UI (or instruct an agent). Author / preparing agent does
 **not** merge.
@@ -77,7 +77,7 @@ Release notes are `crates/stat-tracker/CHANGELOG.md` section `## 0.4.3`, then
 the usual git-log since the previous `stat-tracker-v*` tag (0.4.2), then
 install requirements.
 
-## 4. Laptop install test (AerynOS / Robert)
+## 4. Laptop install test (AerynOS / FrozenTear)
 
 After the GitHub Release has the tarball, on the machine where the
 launcher did not start the GUI:
@@ -111,10 +111,10 @@ then log out/in. `gtk-update-icon-cache` is not required.
   sha256, and notes.
 - Do **not** push `stat-tracker-v0.4.3` onto a commit that is not on `main`
   after the merge.
-- Do **not** tag until Robert has confirmed the AerynOS launcher starts
+- Do **not** tag until FrozenTear has confirmed the AerynOS launcher starts
   the GUI (or explicitly waives the laptop retest).
 
 ## If the tag was pushed by mistake
 
 Human-only (agent-protocol §5): delete a published tag / GitHub Release only
-with an explicit current instruction from Robert. Do not improvise.
+with an explicit current instruction from FrozenTear. Do not improvise.

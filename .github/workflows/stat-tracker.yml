@@ -7,6 +7,8 @@ on:
       - "crates/stat-tracker/**"
       - "crates/stat-tracker-ui/**"
       - "crates/types/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/stat-tracker.yml"
       - ".github/workflows/stat-tracker-release.yml"
   pull_request:
@@ -15,6 +17,8 @@ on:
       - "crates/stat-tracker/**"
       - "crates/stat-tracker-ui/**"
       - "crates/types/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/stat-tracker.yml"
       - ".github/workflows/stat-tracker-release.yml"
 
@@ -54,6 +58,7 @@ jobs:
           bash dist/test-systemd-unit.sh
           bash dist/test-release-notes.sh
           bash dist/test-stage-assets.sh
+          bash dist/test-tag-version.sh
 
       - name: Install system dependencies
         run: |
