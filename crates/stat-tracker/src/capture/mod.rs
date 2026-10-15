@@ -146,15 +146,30 @@ pub async fn detect_backend() -> CaptureBackend {
     }
 }
 
+/// The name a backend's captures carry in the perf summary
+/// (`backend = ...`, with `capture_p50_ms`). Every backend that can capture
+/// has one, so X11, Wayland and the portal report the same timing line.
+pub fn perf_backend_label(backend: &CaptureBackend) -> Option<&'static str> {
+    match backend {
+        CaptureBackend::Wayshot => Some("wayshot"),
+        CaptureBackend::X11 => Some("x11"),
+        CaptureBackend::Portal => Some("portal"),
+        CaptureBackend::None => None,
+    }
+}
+
 pub async fn capture_screen_output(
     backend: &CaptureBackend,
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let started = std::time::Instant::now();
-    let (name, result) = match backend {
-        CaptureBackend::Wayshot => ("wayshot", wayshot::capture_with_output(output_name).await),
-        CaptureBackend::X11 => ("x11", x11::capture_with_output(output_name).await),
-        CaptureBackend::Portal => ("portal", portal::capture().await),
+    let Some(name) = perf_backend_label(backend) else {
+        return Err("no capture backend available".into());
+    };
+    let result = match backend {
+        CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
+        CaptureBackend::X11 => x11::capture_with_output(output_name).await,
+        CaptureBackend::Portal => portal::capture().await,
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -185,6 +200,19 @@ pub async fn list_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// alpha.10 check: the capture p50 in the perf summary is recorded for
+    /// X11 exactly as for Wayland, labelled by backend.
+    #[test]
+    fn every_capturing_backend_reports_capture_timing() {
+        assert_eq!(perf_backend_label(&CaptureBackend::X11), Some("x11"));
+        assert_eq!(
+            perf_backend_label(&CaptureBackend::Wayshot),
+            Some("wayshot")
+        );
+        assert_eq!(perf_backend_label(&CaptureBackend::Portal), Some("portal"));
+        assert_eq!(perf_backend_label(&CaptureBackend::None), None);
+    }
 
     // Pure selection-policy tests (R1-6). No `std::env::set_var` — process-global
     // env mutation races parallel test threads; we feed `select_backend` explicit

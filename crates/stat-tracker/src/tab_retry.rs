@@ -84,7 +84,10 @@ mod tests {
     /// name strokes with five rows per team at the 5v5 pitch (six 75 px
     /// rows' height over five rows, 90 px). Stands in until Scuffed Vision's
     /// 5v5 board generator lands on main.
-    // TODO: switch to `synth::tab_frame(teams, width, drawn)` once PR #285 lands.
+    // Kept instead of `synth::tab_frame(Teams::Five, w, drawn)` (#285): on
+    // that generator the preflight accepts most part-drawn boards (header
+    // only reads Ready(5), two rows Ready(6)), so it cannot stage the
+    // reject-then-accept case this test needs. See the alpha.10 cleanup PR.
     fn full_5v5() -> RgbImage {
         let mut f = RgbImage::from_fn(2560, 1440, |x, y| {
             Rgb([(30 + x * 40 / 2560) as u8, (45 + y * 40 / 1440) as u8, 60])

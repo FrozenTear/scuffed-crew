@@ -110,7 +110,7 @@ write_environ() {
 
 PROC="$TMP/proc"
 # pid 99 is a same-user shell that happens to have WAYLAND_DISPLAY. It must
-# not be treated as the session — only known compositor comm names count.
+# not be treated as the session - only known compositor comm names count.
 mkdir -p "$PROC/20" "$PROC/10" "$PROC/99"
 printf 'sway\n' > "$PROC/20/comm"
 printf 'Xwayland\n' > "$PROC/10/comm"

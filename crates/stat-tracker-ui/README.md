@@ -19,7 +19,7 @@ P0–P5 are on `main` (PRs #56–#61). **v0.4.0** is the first Iced-only tracker
 release (Overview / Games / Heroes / Maps / Seasons / Settings + companion
 overlay; Dioxus GUI removed). Binary name stays `stat-tracker-gui`.
 
-There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design** (empty + with-data cadence, overlay on/off).
+There is **no** software `--preview` path and no `preview.rs`. **FrozenTear will capture real niri window shots for Design** (empty + with-data cadence, overlay on/off).
 
 ## Run fixtures
 
@@ -51,7 +51,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 
 ### Seasons
 
-- **Screen:** sidebar **Seasons** lists each server season (name, UTC window, current marker) plus an **All time** row, each with games / W–L–D / win rate. Selecting a row sets the header season switch. Read-only — no admin CRUD in the desktop app (`/admin/seasons` on the website).
+- **Screen:** sidebar **Seasons** lists each server season (name, UTC window, current marker) plus an **All time** row, each with games / W–L–D / win rate. Selecting a row sets the header season switch. Read-only, no admin CRUD in the desktop app (`/admin/seasons` on the website).
 - **Fetch:** live mode GETs `/api/public/seasons` on launch and every 30 minutes. Written to `<data_dir>/seasons.json`. Offline uses that cache and shows **Last refreshed … · cached** on the Seasons screen.
 - **Selection:** default = the season marked `is_current`, else all time. Persisted in `<data_dir>/ui_state.json`. No seasons → picker hidden (same as the website).
 - **Window:** `starts_at <= played_at < ends_at` (UTC), matching `crates/db/src/queries/personal_stats.rs` (`played_at >= $season_start AND played_at < $season_end`).
@@ -60,8 +60,8 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 
 Acceptance: for a **synced** account, season totals on this screen equal My Stats on the site.
 
-1. Sync so daemon `live_snapshot.json` rows with `synced: true` match server `personal_match` for that member. The desktop aggregate also includes **unsynced** local games — subtract those (or sync first) before comparing.
-2. `GET /api/public/seasons` — same list the GUI caches. Pick a season id (or omit for all time).
+1. Sync so daemon `live_snapshot.json` rows with `synced: true` match server `personal_match` for that member. The desktop aggregate also includes **unsynced** local games, subtract those (or sync first) before comparing.
+2. `GET /api/public/seasons`: same list the GUI caches. Pick a season id (or omit for all time).
 3. Website: **My Stats** (or `/stats/member/:id`) → same season in the picker. Or:
 
    ```sh
@@ -77,7 +77,7 @@ Acceptance: for a **synced** account, season totals on this screen equal My Stat
    `/roles` returns a JSON array of `{ role, matches, wins, losses, draws, avg_elims, avg_deaths, avg_damage, avg_healing }`, ordered by matches descending, then role ascending. Each row is grouped by the role the tracker uploaded: its manual correction if made, else the detected role. `""` is its own row when that stored role is empty.
 
 4. Compare **games** (`total_matches`), **wins**, **losses**, **draws** to the Seasons-screen row. A game on `ends_at` belongs to the *next* season (half-open).
-5. **Win rate:** the site shows `wins / total_matches`. This GUI uses `wins / (wins + losses + draws)` (unknown outcomes do not dilute — P0/P1). They match when every counted game has a decided outcome. The Seasons row appends `· N undecided` when the counts differ so the percentage is readable. **Robert to decide** whether the site should switch to decided-only (recommended by the P2 review) before P5.
+5. **Win rate:** the site shows `wins / total_matches`. This GUI uses `wins / (wins + losses + draws)` (unknown outcomes do not dilute, P0/P1). They match when every counted game has a decided outcome. The Seasons row appends `· N undecided` when the counts differ so the percentage is readable. **FrozenTear to decide** whether the site should switch to decided-only (recommended by the P2 review) before P5.
 
 ### StoreCommand round-trip
 
@@ -127,14 +127,14 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 ```
 
 1. Sidebar **Settings**.
-2. **Tracker service** — Start / Stop / Restart. When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
-3. **Start on login** — `systemctl --user enable --now` / `disable --now` when the unit file is installed.
-4. **Capture** — pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
-5. **Save settings** writes today's fields: monitor, in-game name (`player_name` — no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. **Companion** shortcut is stored in `<data_dir>/ui_state.json` (not `config.toml` / not `StoreCommand`). Restart the service after a save if it is running.
-6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
-7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
-8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
-9. **Tray** — Show window / Hide window / Hide / show overlay / Quit (`tray-icon`) when Ayatana AppIndicator (or `libappindicator3`) is on the host. Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay session hold, etc.) is kept in the daemon. Overlay hide is session-scoped: it sticks until the game ends, then the next launch auto-shows. If the system lib is missing, the window still starts (warning + toast); Hide-to-tray does not work and closing the window quits. Optional packages: Debian/Ubuntu `libayatana-appindicator3-1`, Fedora `libayatana-appindicator-gtk3`, Arch `libayatana-appindicator`. AerynOS may not ship it.
+2. **Tracker service**: Start / Stop / Restart. When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
+3. **Start on login**: `systemctl --user enable --now` / `disable --now` when the unit file is installed.
+4. **Capture**: pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
+5. **Save settings** writes today's fields: monitor, in-game name (`player_name`, no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. **Companion** shortcut is stored in `<data_dir>/ui_state.json` (not `config.toml` / not `StoreCommand`). Restart the service after a save if it is running.
+6. **Scoreboard reading**: Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
+7. **Stored data**: Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
+8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon, never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
+9. **Tray**: Show window / Hide window / Hide / show overlay / Quit (`tray-icon`) when Ayatana AppIndicator (or `libappindicator3`) is on the host. Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface, `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay session hold, etc.) is kept in the daemon. Overlay hide is session-scoped: it sticks until the game ends, then the next launch auto-shows. If the system lib is missing, the window still starts (warning + toast); Hide-to-tray does not work and closing the window quits. Optional packages: Debian/Ubuntu `libayatana-appindicator3-1`, Fedora `libayatana-appindicator-gtk3`, Arch `libayatana-appindicator`. AerynOS may not ship it.
 
 ```sh
 systemctl --user status scuffed-stat-tracker.service
@@ -154,15 +154,15 @@ Reinstall if the unit on disk still says `ExecStart=%h/.local/bin/scuffed-stat-t
 
 Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.
 
-**Visibility:** auto-show while the **game process** is running (configured `game_process_names` in `/proc`). A leftover `active_game.json` does **not** count as live — the daemon keeps that file after a match. While the process is up, the file may supply a `session_id` only for an unfinished game inside `session_window_secs`; decided outcomes and stale `last_activity` are ignored. Empty process names → not running. Header / Overview health / tray **Hide / show overlay** hides it until the **process ends** — it does not reopen mid-session (new match ids keep the hold). Next launch auto-shows. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json`. Esc is N/A (`KeyboardInteractivity::None`).
+**Visibility:** auto-show while the **game process** is running (configured `game_process_names` in `/proc`). A leftover `active_game.json` does **not** count as live, the daemon keeps that file after a match. While the process is up, the file may supply a `session_id` only for an unfinished game inside `session_window_secs`; decided outcomes and stale `last_activity` are ignored. Empty process names → not running. Header / Overview health / tray **Hide / show overlay** hides it until the **process ends**: it does not reopen mid-session (new match ids keep the hold). Next launch auto-shows. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json`. Esc is N/A (`KeyboardInteractivity::None`).
 
-**Show / hide shortcut:** Settings → **Companion**. Default **Super+Shift+C**, on. The overlay cannot receive keys (`KeyboardInteractivity::None`), so the main GUI process reads `/dev/input` (same evdev path as Tab capture — not X11 `XGrabKey`). Same `input` group / seat `uaccess` as the daemon. Add it with `sudo usermod -aG input "$USER"`, then log out and back in — a new terminal does not pick up the group. The shortcut is an explicit user action: it toggles visibility **now** through the same OverlayHold as the tray button. Hide sticks until the game ends; pressing it again mid-session shows the overlay. The current bind is a one-line footer on the overlay when the shortcut is on. Bind is stored in `<data_dir>/ui_state.json` (`overlay_hotkey`, `overlay_hotkey_enabled`).
+**Show / hide shortcut:** Settings → **Companion**. Default **Super+Shift+C**, on. The overlay cannot receive keys (`KeyboardInteractivity::None`), so the main GUI process reads `/dev/input` (same evdev path as Tab capture, not X11 `XGrabKey`). Same `input` group / seat `uaccess` as the daemon. Add it with `sudo usermod -aG input "$USER"`, then log out and back in, a new terminal does not pick up the group. The shortcut is an explicit user action: it toggles visibility **now** through the same OverlayHold as the tray button. Hide sticks until the game ends; pressing it again mid-session shows the overlay. The current bind is a one-line footer on the overlay when the shortcut is on. Bind is stored in `<data_dir>/ui_state.json` (`overlay_hotkey`, `overlay_hotkey_enabled`).
 
 Bind format: `Super+Shift+C` (modifiers joined with `+`, then one key). Super aliases: `Meta`, `Win`. Also `Ctrl`, `Alt`, `Shift`. Key: `A`–`Z`, `0`–`9`, `F1`–`F12`, `Tab`, `Space`, `Esc`, `Enter`. At least one modifier is required. Empty field saves as Super+Shift+C.
 
-**Why not the GlobalShortcuts portal?** niri (Robert’s CachyOS / AerynOS) has no xdg-desktop-portal GlobalShortcuts backend. A portal bind would not fire there. This path does not prompt for a portal permission.
+**Why not the GlobalShortcuts portal?** niri (FrozenTear’s CachyOS / AerynOS) has no xdg-desktop-portal GlobalShortcuts backend. A portal bind would not fire there. This path does not prompt for a portal permission.
 
-**Optional niri bind** (only if the in-app shortcut does not fire — do not use both or one press will hide then show):
+**Optional niri bind** (only if the in-app shortcut does not fire; do not use both or one press will hide then show):
 
 ```kdl
 binds {
@@ -196,10 +196,10 @@ KDE blur (`org_kde_kwin_blur`) is a follow-up, not v1. The panel is translucent 
 
 `iced_layershell` is the default `companion` feature. If it cannot build on a host: `--no-default-features` keeps the main window; `--companion` then prints a rebuild hint.
 
-**Robert:** live niri acceptance — overlay sits above fullscreen Overwatch; the game keeps keyboard and pointer. Design shots: empty + with-data.
+**FrozenTear:** live niri acceptance: overlay sits above fullscreen Overwatch; the game keeps keyboard and pointer. Design shots: empty + with-data.
 
 ## Out of scope (later)
 
 Compositor blur on the overlay (`org_kde_kwin_blur`).
 
-Urbanist (OFL) is bundled as the labelled tracker product face — see `fonts/OFL.txt`.
+Urbanist (OFL) is bundled as the labelled tracker product face, see `fonts/OFL.txt`.

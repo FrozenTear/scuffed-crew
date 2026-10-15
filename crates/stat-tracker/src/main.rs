@@ -6786,6 +6786,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 &parsed,
                 captured_at,
                 req.tab_at,
+                board_names(&rows),
             );
 
             // Re-derive the session's hero timeline from its RAW snapshots after
@@ -7017,6 +7018,16 @@ fn save_rejected_frame(
 /// recorded evidence (a capture, an outcome) this recently.
 const RANK_OUTCOME_MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// Every name read on a board's rows (each name window), for the report
+/// scrub list. Empty under the new reader, which reads no names.
+fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.name.iter().chain(row.name_alternates.iter().flatten()))
+        .map(|cell| cell.value.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
 /// accepted capture. Written off the capture path; a failure is logged and
 /// never touches the stored match.
@@ -7030,6 +7041,7 @@ fn record_report_kit(
     stored: &storage::PersonalMatch,
     captured_at: chrono::DateTime<Utc>,
     tab_at: stat_tracker::report::blank::CaptureTime,
+    board_names: Vec<String>,
 ) {
     let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
     else {
@@ -7058,6 +7070,14 @@ fn record_report_kit(
             tab_at,
         ) {
             tracing::debug!(error = %e, "report kit: scoreboard not written");
+        }
+        // The board's names stay on this PC; a report hands them to the
+        // log scrubber.
+        if !board_names.is_empty()
+            && let Err(e) =
+                stat_tracker::report::kit::record_names(&data_dir, &session_id, &board_names)
+        {
+            tracing::debug!(error = %e, "report kit: names not written");
         }
     });
 }
@@ -8106,6 +8126,30 @@ mod tests {
     use super::*;
 
     use std::time::Duration;
+
+    #[test]
+    fn board_names_takes_every_name_window_and_skips_blanks() {
+        let cell = |v: &str| ocr::CellOcrResult {
+            value: v.into(),
+            confidence: 90,
+            suspect: false,
+        };
+        let rows = vec![
+            ocr::RowOcrResult {
+                name: Some(cell("QXOther")),
+                name_alternates: vec![None, Some(cell(" QX0ther "))],
+                stats: Vec::new(),
+                mean_confidence: 90,
+            },
+            ocr::RowOcrResult {
+                name: Some(cell("  ")),
+                name_alternates: Vec::new(),
+                stats: Vec::new(),
+                mean_confidence: 0,
+            },
+        ];
+        assert_eq!(board_names(&rows), vec!["QXOther", "QX0ther"]);
+    }
 
     #[test]
     fn tab_retry_predicate_retries_only_not_a_scoreboard() {
