@@ -708,9 +708,26 @@ impl UpdateIo for LiveUpdateIo {
 }
 
 /// The tracker has a game open: `active_game.json` exists in the data dir
-/// from the game's start until it is closed and saved.
+/// from the game's start until it is closed and saved. A file not written
+/// for [`GAME_FILE_STALE`] is left over (a crash or a game the tracker gave
+/// up on) and does not count.
 pub fn game_in_progress(data_dir: &Path) -> bool {
-    data_dir.join("active_game.json").exists()
+    std::fs::metadata(data_dir.join("active_game.json"))
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().map_or(true, |age| age < GAME_FILE_STALE))
+}
+
+/// An `active_game.json` older than this is not a game in progress.
+pub const GAME_FILE_STALE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Shown on the update button while the update waits for the open game.
+pub const WAITING_FOR_GAME: &str = "Waiting for your game to finish before updating";
+
+static WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while an update is waiting for the open game to be saved.
+pub fn waiting_for_game() -> bool {
+    WAITING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// How often the update checks whether the open game was saved.
@@ -726,9 +743,11 @@ async fn wait_for_game_saved(data_dir: &Path, io: &impl UpdateIo) -> bool {
     let mut any = false;
     while game_in_progress(data_dir) && waited < GAME_WAIT_MAX {
         any = true;
+        WAITING.store(true, std::sync::atomic::Ordering::Relaxed);
         io.pause(GAME_WAIT_STEP).await;
         waited += GAME_WAIT_STEP;
     }
+    WAITING.store(false, std::sync::atomic::Ordering::Relaxed);
     any
 }
 
@@ -952,6 +971,7 @@ pub fn primary_action(
     need: RestartNeed,
 ) -> (&'static str, Option<Message>) {
     match progress {
+        UpdateProgress::Running if waiting_for_game() => (WAITING_FOR_GAME, None),
         UpdateProgress::Running => ("Installing…", None),
         UpdateProgress::Succeeded(_) if need == RestartNeed::NotNeeded => (NO_RESTART_LABEL, None),
         UpdateProgress::Succeeded(_) => ("Restart now", Some(Message::RestartGui)),
@@ -1723,6 +1743,23 @@ mod tests {
             stop_daemon,
             service_installed: false,
         }
+    }
+
+    #[test]
+    fn a_left_over_game_file_does_not_hold_the_update() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let path = data.path().join("active_game.json");
+        std::fs::write(&path, "{}").unwrap();
+        assert!(game_in_progress(data.path()));
+        let old =
+            std::time::SystemTime::now() - GAME_FILE_STALE - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(!game_in_progress(data.path()));
     }
 
     #[tokio::test]
