@@ -22,17 +22,40 @@ RUN git init relay29 \
 
 # ── Stage 2: Build relay-policy (Rust) ────────────────────
 # Full workspace copy so Cargo member paths resolve.
-FROM rust:1.92-bookworm AS relay-policy-builder
+# The runtime image is Alpine musl. A bookworm (glibc) binary exits 127
+# there because ld-linux-x86-64.so.2 is absent. Build on musl and link
+# statically (crt-static) so both plugins exec on that image.
+FROM rust:1.92-alpine AS relay-policy-builder
+
+RUN apk add --no-cache build-base cmake perl pkgconfig git
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# Do not set RUSTFLAGS=+crt-static. On this musl host that flag is also
+# applied to proc-macro crates, which cannot be dylibs. The musl target
+# still emits static PIE executables (no PT_INTERP, no NEEDED). Alpine ldd
+# mis-reports those, so the check uses readelf.
 RUN cargo build --release -p relay-policy \
     && cp target/release/relay-policy /usr/local/bin/relay-policy \
-    && cp target/release/relay-read-gate /usr/local/bin/relay-read-gate
+    && cp target/release/relay-read-gate /usr/local/bin/relay-read-gate \
+    && for bin in /usr/local/bin/relay-policy /usr/local/bin/relay-read-gate; do \
+         if readelf -l "$bin" | grep -q 'Requesting program interpreter'; then \
+           echo "$bin needs a dynamic linker"; \
+           readelf -l "$bin" | grep interpreter; \
+           exit 1; \
+         fi; \
+         if readelf -d "$bin" | grep -q '(NEEDED)'; then \
+           echo "$bin needs shared libraries"; \
+           readelf -d "$bin" | grep NEEDED; \
+           exit 1; \
+         fi; \
+       done
 
 # ── Stage 3: Runtime (strfry + plugins) ───────────────────
-FROM dockurr/strfry:latest
+# dockurr/strfry:latest on 2026-10-15. OCI index (linux/amd64 and
+# linux/arm64), Alpine 3.18.3. Do not float the tag.
+FROM dockurr/strfry@sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d
 
 COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
 COPY --from=relay-policy-builder /usr/local/bin/relay-policy /usr/local/bin/relay-policy

@@ -409,9 +409,11 @@ container.
 Go 1.24.1 or newer. The builder image is `golang:1.24.13-alpine` because it
 sets `GOTOOLCHAIN=local` and will not download a newer toolchain. Change the
 `RELAY29_COMMIT` build arg in that file to move the pin. `relay-policy` and
-`relay-read-gate` are compiled from this repository. CI builds the Go stage
-on every pull request. The full image also release-builds those Rust plugins,
-so that step stays out of CI.
+`relay-read-gate` are compiled from this repository as static musl binaries.
+The runtime base is `dockurr/strfry` pinned by digest (Alpine 3.18, musl). A
+glibc build of those plugins does not load there. `strfry29` is a static Go
+binary. CI builds the Go stage on every pull request. The full image also
+release-builds those Rust plugins, so that step stays out of CI.
 
 Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
 Compose network only, so site-server still uses `ws://strfry:7777` for publish

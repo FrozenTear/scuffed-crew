@@ -3,7 +3,8 @@
 # Compose publishes as host 127.0.0.1:7777 for Caddy /relay.
 set -eu
 cd /app
-strfry relay &
+# The base image keeps the binary at /app/strfry and does not put it on PATH.
+/app/strfry relay &
 strfry_pid=$!
 relay-read-gate &
 gate_pid=$!
