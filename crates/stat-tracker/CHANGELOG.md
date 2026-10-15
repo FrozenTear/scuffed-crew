@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.10
+
+The daily report limit is now 10.
+
+### Highlights
+
+- You can send 10 reports in one UTC day. The next one waits until the next UTC day.
+- Reports you sent yesterday do not count toward today.
+
+Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
+
 ## 0.5.0-alpha.9
 
 Install this update between games, not during one. A Tab press that caught the scoreboard while it was still drawing no longer loses the game: the tracker now looks again a moment later.
