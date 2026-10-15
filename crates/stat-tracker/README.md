@@ -95,8 +95,9 @@ falls back to that sha256 from the same GitHub release. Once a public key is
 configured, a missing or bad `.minisig` refuses the install. It does not fall
 back to sha256.
 
-**Manual:** download the tarball (+ optional `.sha256`) from the release page,
-extract, then:
+**Manual:** download the tarball and its `.sha256` from the release page.
+With no minisign public key, the check warns and falls back to that sha256.
+A configured key refuses a missing or bad signature. Extract, then:
 
 ```sh
 cd scuffed-stat-tracker-linux-x86_64

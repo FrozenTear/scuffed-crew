@@ -96,6 +96,21 @@ if run_pair "stat-tracker-v1.2.3" "9.9.9" "0.1.0" >/dev/null 2>&1; then
 fi
 pass "daemon Cargo.toml mismatch is rejected"
 
+if ! run_pair "stat-tracker-v0.5.0-alpha.10" "0.5.0-alpha.10" "0.1.0" >/dev/null; then
+    fail "tag stat-tracker-v0.5.0-alpha.10 was rejected when Cargo.toml is 0.5.0-alpha.10"
+fi
+pass "tag stat-tracker-v0.5.0-alpha.10 matches Cargo.toml 0.5.0-alpha.10"
+
+if run_pair "stat-tracker-v0.5.0-alpha.10" "0.5.0-alpha.1" "0.1.0" >/dev/null 2>&1; then
+    fail "tag alpha.10 was accepted for Cargo.toml alpha.1"
+fi
+pass "tag alpha.10 does not match Cargo.toml alpha.1"
+
+if run_pair "stat-tracker-v0.5.0-alpha.1" "0.5.0-alpha.10" "0.1.0" >/dev/null 2>&1; then
+    fail "tag alpha.1 was accepted for Cargo.toml alpha.10"
+fi
+pass "tag alpha.1 does not match Cargo.toml alpha.10"
+
 if bash "$CHECK" >/dev/null 2>&1; then
     fail "missing tag was accepted"
 fi
