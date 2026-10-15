@@ -549,9 +549,23 @@ pub fn read_daemon_logs(data_dir: &Path) -> String {
     // The service logs to journald; daemon.log may be old or missing. The
     // window filter in [`scrub_log`] keeps only the game's own lines.
     if !cfg!(test) {
-        out.push_str(&read_journal_lines());
+        out = merge_journal(out, &read_journal_lines());
     }
     out
+}
+
+/// `file` (the `daemon.log` lines) followed by the `journal` lines that
+/// `file` does not already hold. While the daemon writes both, every line
+/// shows up in each; it is kept once.
+pub fn merge_journal(mut file: String, journal: &str) -> String {
+    let seen: std::collections::HashSet<&str> = file.lines().collect();
+    let extra: String = journal
+        .lines()
+        .filter(|l| !seen.contains(l))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    file.push_str(&extra);
+    file
 }
 
 /// The systemd user unit the tracker runs under.
@@ -586,6 +600,17 @@ pub fn read_journal_lines() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_in_both_daemon_log_and_the_journal_is_kept_once() {
+        let file = "2026-10-14T21:00:00Z a\n2026-10-14T21:00:01Z b\n".to_string();
+        let journal = "2026-10-14T21:00:01Z b\n2026-10-14T21:00:02Z c\n";
+        assert_eq!(
+            merge_journal(file, journal),
+            "2026-10-14T21:00:00Z a\n2026-10-14T21:00:01Z b\n2026-10-14T21:00:02Z c\n"
+        );
+        assert_eq!(merge_journal(String::new(), "x\n"), "x\n");
+    }
 
     fn ctx() -> ScrubContext {
         ScrubContext {
