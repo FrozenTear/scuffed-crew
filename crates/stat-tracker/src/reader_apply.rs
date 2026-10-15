@@ -233,6 +233,22 @@ fn sure_cells(cells: &[CellTrust; 6]) -> usize {
 /// `board == None` is the switch off: the policy row is returned unchanged,
 /// tagged `ocr-v1`, with no suspect list.
 pub fn merge_saved(policy: &PolicyRow, own: OwnRow, board: Option<&BoardRead>) -> SavedRead {
+    merge_saved_with_authority(policy, own, board, None)
+}
+
+/// [`merge_saved`] with the Tab's hero authority
+/// ([`crate::shadow::TabHeroes::authority`] for the own row, `Some(None)`
+/// when it abstained). The own row's hero is taken only when the authority
+/// names that same hero: the authority is the own row's read checked against
+/// the career panel's, so a row read the panel contradicts keeps the earlier
+/// hero and marks `hero` suspect. `None` (no authority known) behaves as
+/// [`merge_saved`].
+pub fn merge_saved_with_authority(
+    policy: &PolicyRow,
+    own: OwnRow,
+    board: Option<&BoardRead>,
+    authority: Option<Option<&str>>,
+) -> SavedRead {
     let keep = || SavedRead {
         map: policy.map.clone(),
         mode: policy.mode.clone(),
@@ -283,6 +299,14 @@ pub fn merge_saved(policy: &PolicyRow, own: OwnRow, board: Option<&BoardRead>) -
         // read, so the career panel or portrait hero already on the snapshot
         // stays.
         Some(value) if scuffed_types::is_placeholder_hero(&value) => {
+            canonical_board_hero(&policy.hero)
+        }
+        Some(value)
+            if authority.is_some_and(|a| {
+                a.is_none_or(|a| canonical_board_hero(a) != canonical_board_hero(&value))
+            }) =>
+        {
+            push_suspect(&mut suspect, "hero");
             canonical_board_hero(&policy.hero)
         }
         Some(value) => {
@@ -875,6 +899,39 @@ mod tests {
         assert_eq!(saved.mitigation, 50);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
         assert!(!saved.recognizer.contains(' '), "{:?}", saved.recognizer);
+    }
+
+    /// The own row's hero is stored only when the Tab's hero authority
+    /// names it too: a row read the career panel contradicts, or an
+    /// abstaining authority, keeps the earlier hero and flags `hero`.
+    #[test]
+    fn the_own_row_hero_needs_the_hero_authority() {
+        let board = confident_board(5, 2);
+        let with = |a: Option<Option<&str>>| {
+            merge_saved_with_authority(&ocr(), identified(2, 5), Some(&board), a)
+        };
+        for agree in [Some(Some("Kiriko")), Some(Some("kiriko")), None] {
+            let saved = with(agree);
+            assert_eq!(saved.hero, "Kiriko", "{agree:?}");
+            assert!(
+                !saved.suspect_fields.contains(&"hero".to_string()),
+                "{agree:?}"
+            );
+        }
+        for disagree in [Some(Some("zenyatta")), Some(None)] {
+            let saved = with(disagree);
+            assert_eq!(
+                saved.hero,
+                canonical_board_hero(&ocr().hero),
+                "{disagree:?}"
+            );
+            assert!(
+                saved.suspect_fields.contains(&"hero".to_string()),
+                "{disagree:?}"
+            );
+            // the stats still come from the row
+            assert_eq!(saved.elims, 21, "{disagree:?}");
+        }
     }
 
     #[test]

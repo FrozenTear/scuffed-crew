@@ -45,7 +45,9 @@ use serde::Serialize;
 
 /// Identifies this recognizer's output in the log. Bump on any change that
 /// can move a read, score or suspect flag. `hero-v1.1`: [`MIN_SCORE`] 0.65.
-pub const HERO_RECOGNIZER_ID: &str = "hero-v1.1";
+/// `hero-v1.2`: a clipped 5v5 board read without the wider re-crop is
+/// flagged ([`clipped_5v5`]).
+pub const HERO_RECOGNIZER_ID: &str = "hero-v1.2";
 /// Minimum correlation for an accepted read. 0.65 since alpha.7: half-portrait
 /// patches from a clipped 5v5 board scored 0.60 to 0.64 with a 0.14 to 0.17
 /// lead and passed the old 0.55 gate as the wrong hero.
@@ -848,19 +850,36 @@ impl HeroTemplates {
         if bands.len() != 2 * team_size {
             return Err(HeroError::NoRows);
         }
+        let clipped = clipped_5v5(team_size, hdr.0);
         let mut rows = Vec::with_capacity(bands.len());
         for (i, band) in bands.into_iter().enumerate() {
             if t0.elapsed() > budget {
                 return Err(HeroError::OverBudget);
             }
             let q = prep_view(view, portrait_box(hdr, band)).ok_or(HeroError::NoRows)?;
-            rows.push(self.read_patch(i, &q));
+            let mut read = self.read_patch(i, &q);
+            if clipped {
+                read.class = RowClass::Unknown;
+                read.hero = None;
+                read.suspect = true;
+            }
+            rows.push(read);
         }
         Ok(HeroBoard {
             rows,
             elapsed_us: t0.elapsed().as_micros() as u64,
         })
     }
+}
+
+/// A 5v5 header bar that starts at the image's left edge: the table runs
+/// past it, so the role-icon column and the portraits' left edge are cut off
+/// and rows and portrait boxes cannot be placed. On 20 real 1440p 5v5 crops
+/// read this way (no re-crop), 9 of 200 rows passed the gate, all 9 as the
+/// wrong hero. Every row of such a read is flagged; [`HeroSet::read_frame`]
+/// re-crops wider first, so only a read that still sees a clipped header is.
+fn clipped_5v5(team_size: usize, header_x0: usize) -> bool {
+    team_size == 5 && header_x0 == 0
 }
 
 /// Borrow `img` as a [`View`], converting into `owned` only when it is not
@@ -1900,7 +1919,7 @@ mod tests {
             }],
         };
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
-        assert_eq!(v["recognizer"], "hero-v1.1");
+        assert_eq!(v["recognizer"], "hero-v1.2");
         assert_eq!(v["hero_pack"], "heroes-v2");
         assert_eq!(v["recropped"], true);
         assert_eq!(v["rows"][0]["hero"], "ana");
@@ -2093,6 +2112,30 @@ mod tests {
                 "{left}: same as the fixed crop"
             );
         }
+    }
+
+    /// A 5v5 crop whose header starts at its left edge, read with no
+    /// re-crop, accepts no row: on real crops those reads named the wrong
+    /// hero. Synthetic board, no game art.
+    #[test]
+    fn a_clipped_5v5_crop_read_alone_accepts_no_row() {
+        use crate::report::blank::synth::{Teams, tab_crop};
+        let data = data_dir(true, None, None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        let crop = DynamicImage::ImageRgb8(tab_crop(Teams::Five, 5));
+        if let Ok(r) = set.read_board(&crop, 5, Duration::from_secs(5)) {
+            assert!(r.board.rows.iter().all(|h| h.accepted().is_none()), "{r:?}");
+            assert!(r.board.rows.iter().all(|h| h.suspect), "{r:?}");
+        }
+        // the clipped synthetic 5v5 frame read alone: every row flagged
+        let ids = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
+        let frame = frame_with_board(&ids, 60);
+        let sb = crate::ocr::preprocess::crop_scoreboard(&frame);
+        let fixed = set.read_board(&sb, 5, Duration::from_secs(5)).unwrap();
+        assert!(fixed.board.rows.iter().all(|h| h.accepted().is_none()));
+        // a 6v6 header at x 0 is a measured layout and is not flagged
+        assert!(!clipped_5v5(6, 0));
+        assert!(!clipped_5v5(5, 1));
     }
 
     /// O8: the hero authority's own-row read goes through the new reader's
@@ -2313,7 +2356,15 @@ mod tests {
             .read_frame(&frame, &sb, 5, Duration::from_secs(5))
             .expect("fixed crop read");
         assert_eq!(r.pad_px, None);
-        assert_eq!(five_v_five_right(&r.board.rows), 10, "{r:?}");
+        // the fixed crop still shows a header at its left edge: a 5v5 read
+        // that cannot be placed is flagged, not guessed (hero-v1.2)
+        assert!(
+            r.board
+                .rows
+                .iter()
+                .all(|h| h.suspect && h.accepted().is_none()),
+            "{r:?}"
+        );
     }
 
     #[test]
