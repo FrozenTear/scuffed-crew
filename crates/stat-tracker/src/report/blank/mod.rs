@@ -769,10 +769,13 @@ fn blank_crop_inner(
 }
 
 /// Name column of a row, from the table's left edge `L`, in 1664 px crop
-/// units: portrait ends at 104, names run from 101 to 370 and perks start
-/// at about 375 (measured on 1664x1007 6v6 boards, 2026-10-14). Filled
-/// with a margin on each side.
-pub(crate) const NAME_COL: (f64, f64) = (99.0, 380.0);
+/// units, measured on 1664x1007 6v6 boards (2026-10-14): the hero
+/// portrait art runs from 30 to 100, names from 101 to 370 and perks from
+/// about 375. The fill starts at 101, right after the portrait art, and
+/// ends with a margin before the perks. (`portrait::PORTRAIT_END`, 104, is
+/// where the portrait check's cell ends; it overlaps the first name pixels
+/// and is not used here.)
+pub(crate) const NAME_COL: (f64, f64) = (101.0, 380.0);
 
 /// Fallback when the allowlist kept nothing on a measured board (strict
 /// digit gates reject the row, portraits are off): copy each verified row
@@ -840,6 +843,18 @@ mod tests {
                 for x in x0..x1 {
                     assert_eq!(*out.image.get_pixel(x, y), FILL, "name pixel ({x},{y})");
                 }
+            }
+        }
+        // the fill starts right after the portrait art (x 30 to 100)
+        let r0 = b.rows.iter().find(|r| r.verified).unwrap();
+        let y = r0.top + 20;
+        assert_eq!(out.image.get_pixel(100, y), crop.get_pixel(100, y));
+        assert_eq!(*out.image.get_pixel(101, y), FILL);
+        // the cut-off bottom enemy row (from y 566 + 5 * 74) is filled
+        // down to the frame edge
+        for y in 566 + 5 * 74..1007 {
+            for x in 101..370 {
+                assert_eq!(*out.image.get_pixel(x, y), FILL, "cut row ({x},{y})");
             }
         }
         // the hero card beside the table stays fill
