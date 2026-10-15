@@ -2218,16 +2218,19 @@ mod tests {
     }
 
     /// Headers of one request. Blocks until the blank line. `None` when the
-    /// peer closes before that, or the head grows past 64 KiB.
+    /// peer closes before that, the next bytes do not arrive within 30
+    /// seconds, or the head grows past 64 KiB.
     ///
-    /// Any read timeout already on `sock` is cleared. The fakes used to stop
-    /// after 2 seconds and answer from whatever bytes had arrived. When the
-    /// client was scheduled later than that, the fake answered 401, the
-    /// keeper counted a failure, and a test that should have finished on
-    /// the next try gave up instead. Waiting for the header does not depend
-    /// on how long the client takes to write it.
+    /// A shorter timeout already on `sock` is replaced with that 30 second
+    /// wait. The fakes used to stop after 2 seconds and answer from whatever
+    /// bytes had arrived. When the client was scheduled later than that, the
+    /// fake answered 401, the keeper counted a failure, and a test that
+    /// should have finished on the next try gave up instead. Thirty seconds
+    /// is long enough for a loaded runner to send the header, and a client
+    /// that connects and never writes fails instead of hanging the suite.
     fn read_http_head(sock: &mut std::net::TcpStream) -> Option<String> {
-        sock.set_read_timeout(None).expect("clear read timeout");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .expect("header wait");
         let mut buf = Vec::new();
         let mut tmp = [0u8; 2048];
         loop {
@@ -2256,7 +2259,7 @@ mod tests {
             let (mut sock, _) = listener.accept().expect("accept");
             let _ = reading_tx.send(());
             // A caller that still had the old 2s budget, shrunk here so the
-            // gap below is past it. `read_http_head` has to clear this.
+            // gap below is past it. `read_http_head` replaces this with 30s.
             sock.set_read_timeout(Some(std::time::Duration::from_millis(1)))
                 .expect("timeout");
             let head = read_http_head(&mut sock).expect("full head");
