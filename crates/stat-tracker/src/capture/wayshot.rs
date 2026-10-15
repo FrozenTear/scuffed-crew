@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 
 use image::DynamicImage;
 use libwayshot::WayshotConnection;
@@ -35,47 +34,26 @@ pub fn list_outputs() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     .map_err(|e| -> Box<dyn std::error::Error> { e })
 }
 
-// Thread-local Wayshot connection. Capture runs on `spawn_blocking` pool
-// threads; reusing the connection avoids compositor handshake + output
-// enumeration on every 4s poll tick / Tab.
-thread_local! {
-    static WAYSHOT: RefCell<Option<WayshotConnection>> = const { RefCell::new(None) };
-}
-
-fn ensure_conn(
-    slot: &mut Option<WayshotConnection>,
-) -> Result<&WayshotConnection, Box<dyn std::error::Error + Send + Sync>> {
-    if slot.is_none() {
-        *slot = Some(
-            WayshotConnection::new()
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?,
-        );
-    }
-    Ok(slot.as_ref().expect("just inserted"))
-}
-
+// One Wayshot connection per call, dropped when the call returns.
+//
+// libwayshot 0.7 creates a wl_shm pool and buffer (backed by a memfd) for
+// every screenshot. On a long-lived connection the compositor kept those
+// mappings alive: on niri a 2 hour session held about 8.7 GB of
+// /memfd:libwayshot shmem across roughly 1,850 memfds owned by the tracker.
+// Closing the connection makes the compositor free every object the client
+// created, so a fresh connection per capture keeps compositor memory flat.
+// The extra handshake costs a few milliseconds per capture.
 fn with_wayshot<T>(
     f: impl FnOnce(&WayshotConnection) -> Result<T, Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
-    WAYSHOT.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let first = {
-            let conn = ensure_conn(&mut slot)?;
-            f(conn)
-        };
-        match first {
-            Ok(v) => Ok(v),
-            Err(first_err) => {
-                // Drop the stale connection; the next call reconnects lazily via
-                // ensure_conn. Always surface the original capture/list error —
-                // do not reconnect here (wasted work) or replace first_err with
-                // a reconnect failure.
-                tracing::warn!(error = %first_err, "wayshot call failed: dropping connection");
-                *slot = None;
-                Err(first_err)
-            }
-        }
-    })
+    let conn = WayshotConnection::new()
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    let result = f(&conn);
+    if let Err(ref err) = result {
+        tracing::warn!(error = %err, "wayshot call failed");
+    }
+    drop(conn);
+    result
 }
 
 pub async fn capture_with_output(
