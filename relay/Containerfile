@@ -4,7 +4,8 @@
 # `go: ../go.mod requires go >= 1.24.1`. Pin that commit (do not clone
 # HEAD) and a 1.24 patch that satisfies the go line. This stage has no
 # other git clones. Module versions come from that commit's go.sum.
-FROM golang:1.24.13-alpine AS strfry29-builder
+# Fully qualified so podman build does not prompt for a short-name registry.
+FROM docker.io/library/golang:1.24.13-alpine AS strfry29-builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -25,7 +26,7 @@ RUN git init relay29 \
 # The runtime image is Alpine musl. A bookworm (glibc) binary exits 127
 # there because ld-linux-x86-64.so.2 is absent. Build on musl and link
 # statically (crt-static) so both plugins exec on that image.
-FROM rust:1.92-alpine AS relay-policy-builder
+FROM docker.io/library/rust:1.92-alpine AS relay-policy-builder
 
 RUN apk add --no-cache build-base cmake perl pkgconfig git
 
@@ -53,9 +54,10 @@ RUN cargo build --release -p relay-policy \
        done
 
 # ── Stage 3: Runtime (strfry + plugins) ───────────────────
-# dockurr/strfry:latest on 2026-10-15. OCI index (linux/amd64 and
-# linux/arm64), Alpine 3.18.3. Do not float the tag.
-FROM dockurr/strfry@sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d
+# docker.io/dockurr/strfry:latest on 2026-10-15. OCI index (linux/amd64 and
+# linux/arm64), Alpine 3.18.3. Do not float the tag. The registry host is
+# required: a short name makes podman build wait on an interactive prompt.
+FROM docker.io/dockurr/strfry@sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d
 
 COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
 COPY --from=relay-policy-builder /usr/local/bin/relay-policy /usr/local/bin/relay-policy

@@ -173,7 +173,7 @@ if [[ -n "${EXPORT_FILE}" ]]; then
                 # Same fallback as backup.sh: no surreal on the host, so import
                 # inside the running container (binary at /surreal, no shell).
                 # Same pick as backup.sh: by image first, then by name.
-                CID="$(podman ps --filter ancestor=surrealdb/surrealdb --format '{{.ID}}' 2>/dev/null | head -1 || true)"
+                CID="$(podman ps --filter ancestor=docker.io/surrealdb/surrealdb --format '{{.ID}}' 2>/dev/null | head -1 || true)"
                 if [[ -z "${CID}" ]]; then
                     CID="$(podman ps --format '{{.Names}}' 2>/dev/null | grep -i surreal | head -1 || true)"
                 fi

@@ -3,7 +3,8 @@ services:
     # Contabo day-2 / podman-compose: `up site-server` may spawn an underscore
     # twin on this same volume. scripts/update.sh uses `--no-deps` when a
     # project Surreal is already Up. Do not rename this service or volume key.
-    image: surrealdb/surrealdb:v3.0
+    # Fully qualified so podman does not stop on a short-name registry prompt.
+    image: docker.io/surrealdb/surrealdb:v3.0
     # Image runs as non-root by default; Podman named volumes are root-owned,
     # which causes: Failed to create RocksDB directory: Permission denied.
     # Run as root in the container for single-tenant VPS deploys.
@@ -56,9 +57,15 @@ services:
       # strfry sees the gate as 127.0.0.1, so its per-IP limits do not see
       # browsers. The gate limits connections and messages per client IP.
       # X-Forwarded-For is honored only when the TCP peer is loopback or listed
-      # here. Default to TRUSTED_PROXIES (the compose gateway from
-      # scripts/ensure-trusted-proxies.sh). Caddy on the host is that peer.
-      RELAY_GATE_TRUSTED_PROXIES: ${RELAY_GATE_TRUSTED_PROXIES:-${TRUSTED_PROXIES:-}}
+      # here. One substitution only: podman-compose before 1.6.0 does not
+      # expand a nested default (${RELAY_GATE_TRUSTED_PROXIES:-${TRUSTED_PROXIES:-}}).
+      # That build passes a literal into the container, and the gate logs it
+      # as an unparseable entry and ignores it. ${TRUSTED_PROXIES:-} expands
+      # in both podman-compose and docker compose. The value is the compose
+      # gateway written by scripts/ensure-trusted-proxies.sh. Caddy on the
+      # host is that peer. A RELAY_GATE_TRUSTED_PROXIES key in the env file
+      # is not read.
+      RELAY_GATE_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       RELAY_GATE_MAX_CONN_PER_IP: ${RELAY_GATE_MAX_CONN_PER_IP:-32}
       RELAY_GATE_CONN_RATE: ${RELAY_GATE_CONN_RATE:-60}
       RELAY_GATE_MSG_RATE: ${RELAY_GATE_MSG_RATE:-240}
