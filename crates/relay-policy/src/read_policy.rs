@@ -12,7 +12,9 @@
 //!
 //! NIP-29 group metadata (kinds 39000 through 39003) is addressable by a `d`
 //! tag, not an `h` tag. `GroupManager::create_group` publishes kind 39000 that
-//! way. Those events follow the same team and officer scope as group chat.
+//! way. Only an authenticated member of the group named by that `d` tag
+//! receives it. Officer group metadata goes only to officers or admins on
+//! that team. A signed-in member of another group does not.
 
 use std::collections::{HashMap, HashSet};
 
@@ -186,9 +188,11 @@ impl std::fmt::Display for ReadDeny {
 /// 1. No AUTH: no event of any kind.
 /// 2. AUTH pubkey must be an active member in the directory.
 /// 3. Kind 1059: deliver only when a `p` tag is that member's key.
-/// 4. Kinds 39000 through 39003: the `d` tag is the group id. Public groups go
-///    to members of that team. Officer groups go to officers on that team.
-///    A missing or unknown `d` tag is dropped.
+/// 4. Kinds 39000 through 39003: deliver only to an authenticated member of the
+///    group named by the `d` tag. Public group metadata goes to members of
+///    that team. Officer group metadata goes only to officers or admins on
+///    that team. Another team's member, and a member of no team, do not
+///    receive it. A missing or unknown `d` tag is dropped.
 /// 5. An `h` tag for a public team channel: deliver only to members of that team.
 /// 6. An `h` tag for an officer channel: deliver only to officers (admin or
 ///    officer) who are on that team.
@@ -514,6 +518,39 @@ mod tests {
             assert_eq!(
                 allow_event(Some(&member), &unknown, &dir),
                 Err(ReadDeny::NotShared)
+            );
+        }
+    }
+
+    #[test]
+    fn non_member_does_not_receive_another_groups_metadata() {
+        let dir = directory();
+        // Signed in, on team-b, org officer. Not a member of team-a.
+        let outsider = pk(0x33);
+        // Signed in, on no team.
+        let no_team = pk(0x44);
+        for kind in GROUP_METADATA_KIND_MIN..=GROUP_METADATA_KIND_MAX {
+            let public = event(&pk(0x99), kind, vec![vec!["d", "team-a"]]);
+            let officers = event(&pk(0x99), kind, vec![vec!["d", "team-a-officers"]]);
+            assert_eq!(
+                allow_event(Some(&outsider), &public, &dir),
+                Err(ReadDeny::TeamChat),
+                "kind {kind} public metadata"
+            );
+            assert_eq!(
+                allow_event(Some(&outsider), &officers, &dir),
+                Err(ReadDeny::OfficerChat),
+                "kind {kind} officer metadata"
+            );
+            assert_eq!(
+                allow_event(Some(&no_team), &public, &dir),
+                Err(ReadDeny::TeamChat),
+                "kind {kind} public metadata"
+            );
+            assert_eq!(
+                allow_event(Some(&no_team), &officers, &dir),
+                Err(ReadDeny::OfficerChat),
+                "kind {kind} officer metadata"
             );
         }
     }

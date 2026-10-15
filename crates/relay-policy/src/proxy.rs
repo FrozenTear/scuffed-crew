@@ -849,6 +849,104 @@ Sec-WebSocket-Version: 13\r\n\
         );
     }
 
+    #[tokio::test]
+    async fn non_member_does_not_receive_other_group_or_officer_metadata() {
+        // Broad REQ of kinds 39000-39003, with no `#d` filter. A gate that
+        // handed metadata to every signed-in member would deliver team-a and
+        // the officer group. This client is a member of team-b only.
+        let outsider = pk(0x33);
+        let directory = ReadDirectory::from_parts(
+            [MemberAcl {
+                pubkey: outsider.clone(),
+                member_id: "outsider".into(),
+                officer: true,
+                teams: HashSet::from(["team-b".into()]),
+            }],
+            [
+                (
+                    "team-a".into(),
+                    GroupAcl {
+                        team_id: "team-a".into(),
+                        officer_only: false,
+                    },
+                ),
+                (
+                    "team-a-officers".into(),
+                    GroupAcl {
+                        team_id: "team-a".into(),
+                        officer_only: true,
+                    },
+                ),
+                (
+                    "team-b".into(),
+                    GroupAcl {
+                        team_id: "team-b".into(),
+                        officer_only: false,
+                    },
+                ),
+            ],
+        );
+        let frames = vec![
+            meta_event(39000, "team-a", "alpha-meta"),
+            meta_event(39001, "team-a", "alpha-admins"),
+            meta_event(39002, "team-a", "alpha-members"),
+            meta_event(39003, "team-a", "alpha-roles"),
+            meta_event(39000, "team-a-officers", "officer-meta"),
+            meta_event(39001, "team-a-officers", "officer-admins"),
+            meta_event(39002, "team-a-officers", "officer-roster"),
+            meta_event(39003, "team-a-officers", "officer-roles"),
+            meta_event(39000, "team-b", "bravo-meta"),
+        ];
+        let (upstream, _) = spawn_upstream(frames).await;
+        let gate = spawn_gate(upstream, directory).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{gate}"))
+            .await
+            .unwrap();
+        let challenge_frame: Value =
+            serde_json::from_str(&text_of(&read_text(&mut ws).await)).unwrap();
+        let challenge = challenge_frame[1].as_str().unwrap();
+        ws.send(Message::Text(
+            json!([
+                "AUTH",
+                {"id":"auth1","pubkey": outsider, "kind": 22242, "tags":[["challenge", challenge]]}
+            ])
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let ok: Value = serde_json::from_str(&text_of(&read_text(&mut ws).await)).unwrap();
+        assert_eq!(ok[2], true, "{ok}");
+
+        ws.send(Message::Text(
+            json!(["REQ", "meta", {"kinds": [39000, 39001, 39002, 39003]}])
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut saw = Vec::new();
+        let mut saw_eose = false;
+        while !saw_eose {
+            let frame: Value = serde_json::from_str(&text_of(&read_text(&mut ws).await)).unwrap();
+            match frame[0].as_str() {
+                Some("EVENT") => {
+                    let text = frame.to_string();
+                    assert!(!text.contains("alpha-"), "{text}");
+                    assert!(!text.contains("officer-"), "{text}");
+                    assert!(!text.contains("team-a"), "{text}");
+                    saw.push(text);
+                }
+                Some("EOSE") => saw_eose = true,
+                other => panic!("unexpected {other:?} in {frame}"),
+            }
+        }
+        assert_eq!(saw.len(), 1, "{saw:?}");
+        assert!(saw[0].contains("bravo-meta"), "{saw:?}");
+        assert!(saw[0].contains("team-b"), "{saw:?}");
+    }
+
     fn meta_event(kind: u64, group: &str, marker: &str) -> Value {
         json!([
             "EVENT",

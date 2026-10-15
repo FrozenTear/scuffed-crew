@@ -416,9 +416,11 @@ whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`.
 
 Kind 4 plain DMs are rejected on write (the relay-policy plugin and the gate)
 as well as on read. DMs are NIP-59 kind 1059 gift wraps. NIP-29 group metadata
-(kinds 39000 through 39003) uses a `d` tag. Authenticated members of that team
-can read it. Officer groups stay limited to officers on that team. That is the
-shape `GroupManager` publishes and `NostrFilter::group_metadata` lists.
+(kinds 39000 through 39003) uses a `d` tag. Only an authenticated member of
+the group named by that tag can read it. A signed-in member of another group
+does not. Officer group metadata stays limited to officers or admins on that
+team. That is the shape `GroupManager` publishes and `NostrFilter::group_metadata`
+lists.
 
 strfry only sees the gate's address (`127.0.0.1`), so a per-IP limit in
 strfry does not apply to browsers. The gate limits concurrent connections
