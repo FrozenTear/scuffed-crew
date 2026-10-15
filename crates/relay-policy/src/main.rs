@@ -9,16 +9,21 @@
 //!
 //! ## Environment Variables
 //!
-//! - `SURREALDB_URL` — SurrealDB connection URL (default: `ws://127.0.0.1:8000`)
-//! - `SURREALDB_USER` — SurrealDB username (default: `root`)
-//! - `SURREALDB_PASS` — SurrealDB password (default: `root`)
-//! - `RELAY_POLICY_RATE_LIMIT` — Max events per pubkey per window (default: 30)
-//! - `RELAY_POLICY_RATE_WINDOW` — Rate limit window in seconds (default: 60)
-//! - `RELAY_POLICY_REFRESH_SECS` — Allowlist refresh interval (default: 60)
-//! - `RELAY_POLICY_ENFORCE_GROUPS` — Set to "true" to enforce NIP-29 group membership
-//! - `RUST_LOG` — Tracing filter (default: `relay_policy=info`)
+//! - `SURREALDB_URL` SurrealDB connection URL (default outside production: `ws://127.0.0.1:8000`)
+//! - `SURREALDB_USER` SurrealDB username (default: `root`)
+//! - `SURREALDB_PASSWORD` SurrealDB password. `SURREALDB_PASS` is a fallback alias.
+//!   When `PRODUCTION` is set, a missing password, root/root, or a loopback URL
+//!   refuses startup. There is no root/root fallback in production.
+//! - `SURREALDB_NS` / `SURREALDB_DB` namespace and database (default `scuffed_crew` / `main`)
+//! - `RELAY_POLICY_RATE_LIMIT` Max events per pubkey per window (default: 30)
+//! - `RELAY_POLICY_RATE_WINDOW` Rate limit window in seconds (default: 60)
+//! - `RELAY_POLICY_REFRESH_SECS` Allowlist refresh interval (default: 60)
+//! - `RELAY_POLICY_ENFORCE_GROUPS` Set to "true" to enforce NIP-29 group membership
+//! - `RUST_LOG` Tracing filter (default: `relay_policy=info`)
 
 mod policy;
+
+use relay_policy::creds;
 
 use policy::{Decision, EventInfo, PolicyConfig, PolicyEngine};
 
@@ -64,7 +69,7 @@ struct StrfryEvent {
     /// Event tags (array of string arrays).
     #[serde(default)]
     tags: Vec<Vec<String>>,
-    /// Event content — we never inspect this for encrypted events.
+    /// Event content. We never inspect this for encrypted events.
     #[allow(dead_code)]
     content: Option<String>,
 }
@@ -144,22 +149,32 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    // Attempt initial DB connection and allowlist load.
-    let db_url = env_or("SURREALDB_URL", "ws://127.0.0.1:8000");
-    let db_user = env_or("SURREALDB_USER", "root");
-    let db_pass = env_or("SURREALDB_PASS", "root");
+    // Refuse production boot on missing password, root/root, or a loopback URL
+    // before any default credential is applied.
+    let db_cfg = creds::enforce_or_exit();
+    let surreal_cfg = creds::namespace_from_env();
 
     let db: Option<Arc<scuffed_db::Database>> = rt.block_on(async {
-        match scuffed_db::Database::connect(&db_url, &db_user, &db_pass, Default::default()).await {
+        match scuffed_db::Database::connect_plaintext(
+            &db_cfg.url,
+            &db_cfg.username,
+            &db_cfg.password,
+            surreal_cfg,
+        )
+        .await
+        {
             Ok(database) => {
                 let db = Arc::new(database);
                 let allowlist = load_pubkey_allowlist(&db).await;
                 engine.lock().unwrap().update_allowlist(allowlist);
-                tracing::info!("connected to SurrealDB at {db_url}");
+                tracing::info!(url = %db_cfg.url, "connected to SurrealDB");
                 Some(db)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to connect to SurrealDB — running without allowlist (rejecting all)");
+                tracing::warn!(
+                    error = %e,
+                    "failed to connect to SurrealDB; running without allowlist (rejecting all)"
+                );
                 None
             }
         }
@@ -213,7 +228,7 @@ fn main() {
             }
         };
 
-        // Skip lookback events — only evaluate new incoming events.
+        // Skip lookback events. Only evaluate new incoming events.
         if input.msg_type == "lookback" {
             let output = StrfryOutput {
                 id: input.event.id,
@@ -363,7 +378,7 @@ mod tests {
     fn end_to_end_reject_unknown_pubkey() {
         let config = PolicyConfig::default();
         let mut engine = PolicyEngine::new(config);
-        // Empty allowlist — all pubkeys should be rejected
+        // Empty allowlist. All pubkeys should be rejected.
         engine.update_allowlist(HashSet::new());
 
         let input_json = r#"{"type":"new","event":{"id":"eventid","pubkey":"ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00","kind":9,"tags":[],"content":"","sig":"sig","created_at":0}}"#;

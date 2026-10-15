@@ -16,7 +16,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 RUN cargo build --release -p relay-policy \
-    && cp target/release/relay-policy /usr/local/bin/relay-policy
+    && cp target/release/relay-policy /usr/local/bin/relay-policy \
+    && cp target/release/relay-read-gate /usr/local/bin/relay-read-gate
 
 # ── Stage 3: Runtime (strfry + plugins) ───────────────────
 FROM dockurr/strfry:latest
@@ -25,7 +26,10 @@ COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
 COPY --from=relay-policy-builder /usr/local/bin/relay-policy /usr/local/bin/relay-policy
 
 COPY relay/strfry.conf /etc/strfry.conf
+COPY relay/entrypoint.sh /usr/local/bin/relay-entrypoint.sh
 
-EXPOSE 7777
+# 7777 is strfry (Compose network only). 7779 is the read gate, published
+# on the host as 127.0.0.1:7777. See compose.yml.
+EXPOSE 7777 7779
 
-ENTRYPOINT ["strfry", "relay"]
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/relay-entrypoint.sh"]

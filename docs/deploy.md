@@ -200,7 +200,14 @@ ow.scuffedcrew.no {
 	encode zstd gzip
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
-	reverse_proxy 127.0.0.1:HOST_PORT   # from data/secrets.env on the VPS
+	# Same-origin Nostr relay. See "Optional Nostr relay" below and deploy/Caddyfile.
+	handle /relay* {
+		uri strip_prefix /relay
+		reverse_proxy 127.0.0.1:7777
+	}
+	handle {
+		reverse_proxy 127.0.0.1:HOST_PORT   # from data/secrets.env on the VPS
+	}
 }
 ```
 
@@ -390,10 +397,96 @@ podman compose --env-file data/secrets.env up --build -d
 
 ## Optional Nostr relay
 
-```bash
-# also set NOSTR_RELAY_URL=ws://strfry:7777 in secrets
-podman compose --env-file data/secrets.env --profile relay up --build -d
-```
+The relay is off until you opt in. Browsers use same-origin `/relay`. That path
+is a read gate: no NIP-42 AUTH means no events, a member only receives kind
+1059 gift wraps `p`-tagged to their own key, team chat only if they are on that
+team, and officer chat only if they are an officer on that team. strfry and
+strfry29 only filter writes, so the gate is a separate process in the same
+container.
+
+Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
+Compose network only, so site-server still uses `ws://strfry:7777` for publish
+and its own subscriptions. Do not publish `7777:7777`; that would skip the gate.
+
+The gate does not pipe HTTP through to strfry. A NIP-11 request
+(`Accept: application/nostr+json`) is answered by the gate, then the connection
+is closed. Any other non-upgrade request is `400` with `Connection: close`.
+Only a WebSocket upgrade (`Upgrade` and `Connection` tokens, optional
+whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`.
+
+Kind 4 plain DMs are rejected on write (the relay-policy plugin and the gate)
+as well as on read. DMs are NIP-59 kind 1059 gift wraps. NIP-29 group metadata
+(kinds 39000 through 39003) uses a `d` tag. Only an authenticated member of
+the group named by that tag can read it. A signed-in member of another group
+does not. Officer group metadata stays limited to officers or admins on that
+team. That is the shape `GroupManager` publishes and `NostrFilter::group_metadata`
+lists.
+
+strfry only sees the gate's address (`127.0.0.1`), so a per-IP limit in
+strfry does not apply to browsers. The gate limits concurrent connections
+(default 32), new connections (default 60 per 60 seconds), and client messages
+(default 240 per 60 seconds) per client IP. It trusts `X-Forwarded-For` only
+when the TCP peer is loopback or listed in `RELAY_GATE_TRUSTED_PROXIES`.
+Compose sets that from `TRUSTED_PROXIES`, which
+`scripts/ensure-trusted-proxies.sh` fills with the compose-network gateway
+(the address the container sees for host Caddy). A direct client cannot pick
+its own IP by sending the header. If `TRUSTED_PROXIES` is empty, every browser
+shares the port-forwarder's bucket.
+
+### Enable
+
+1. In `data/secrets.env` set:
+
+   ```bash
+   NOSTR_RELAY_URL=ws://strfry:7777
+   ```
+
+   `PRODUCTION=1` must already be set (install.sh writes it). The relay refuses
+   to start when that flag is set and the SurrealDB password is missing,
+   the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
+
+2. Build and start strfry (the image also starts the read gate):
+
+   ```bash
+   podman compose --env-file data/secrets.env --profile relay up --build -d strfry
+   ```
+
+3. Recreate site-server so it picks up `NOSTR_RELAY_URL`:
+
+   ```bash
+   ./scripts/update.sh
+   ```
+
+4. Caddy: copy the `handle /relay*` block from `deploy/Caddyfile` into the live
+   site block, before the catch-all. It is `uri strip_prefix /relay` and
+   `reverse_proxy 127.0.0.1:7777`. Put the site `reverse_proxy` in its own
+   `handle` so `/relay` is not also sent to site-server. Reload Caddy
+   (`caddy validate` then `systemctl reload caddy`).
+
+5. Check the relay from the server:
+
+   ```bash
+   curl -sS http://127.0.0.1:HOST_PORT/api/nostr/health
+   ```
+
+   `configured` must be true and `reachable` must be true. `configured` follows
+   `NOSTR_RELAY_URL`. `reachable` means site-server got a NIP-11 response from
+   `ws://strfry:7777`.
+
+### Roll back
+
+1. Set `NOSTR_RELAY_URL=` (empty) in `data/secrets.env`.
+2. Stop strfry. Leave the volume in place:
+
+   ```bash
+   podman compose --env-file data/secrets.env --profile relay stop strfry
+   ```
+
+   Do not run `podman volume rm` on `strfry-data`.
+3. Recreate site-server so it drops the relay URL: `./scripts/update.sh`.
+
+Removing the Caddy `handle /relay*` block is optional. With strfry stopped,
+that path stops answering; the rest of the site is unchanged.
 
 ## NIP-05 domain
 
