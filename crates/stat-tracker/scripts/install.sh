@@ -4,7 +4,7 @@
 # ~/.config/systemd/user, then restart the service if it is running.
 # Run from anywhere.
 #
-# A stale installed binary is invisible — the 2026-07-14 session-merge ran
+# A stale installed binary is invisible: the 2026-07-14 session-merge ran
 # for days on a build that predated committed fixes. Re-run this after
 # every stat-tracker change you want live.
 set -euo pipefail
@@ -44,7 +44,7 @@ if "$SYSTEMCTL_BIN" --user is-active --quiet "$UNIT"; then
     echo "==> restarting running daemon"
     "$SYSTEMCTL_BIN" --user restart "$UNIT"
 else
-    echo "==> daemon not running — start it with: systemctl --user start $UNIT"
+    echo "==> daemon not running: start it with: systemctl --user start $UNIT"
 fi
 
 echo "==> installed:"
