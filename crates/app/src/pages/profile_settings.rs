@@ -354,7 +354,7 @@ pub fn ProfileSettings() -> Element {
                             onchange: move |e| main_role.set(e.value()),
                             for r in ROLE_OPTIONS.iter() {
                                 option { value: "{r}", selected: main_role() == *r,
-                                    if r.is_empty() { "—" } else { "{r}" }
+                                    if r.is_empty() { "-" } else { "{r}" }
                                 }
                             }
                         }
@@ -368,7 +368,7 @@ pub fn ProfileSettings() -> Element {
                             placeholder: "handle, not URL",
                             oninput: move |e| twitch.set(e.value()),
                         }
-                        p { class: "profile-edit-hint", "Just the handle — no https://, no @." }
+                        p { class: "profile-edit-hint", "Just the handle. No https://, no @." }
                     }
                     div { class: "profile-edit-field",
                         label { "Twitter / X" }
@@ -427,7 +427,7 @@ pub fn ProfileSettings() -> Element {
                                             }),
                                             for r in ROLE_OPTIONS.iter() {
                                                 option { value: "{r}", selected: acc.role == *r,
-                                                    if r.is_empty() { "—" } else { "{r}" }
+                                                    if r.is_empty() { "-" } else { "{r}" }
                                                 }
                                             }
                                         }

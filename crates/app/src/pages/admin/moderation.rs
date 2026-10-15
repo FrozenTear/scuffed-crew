@@ -197,7 +197,7 @@ pub fn AdminModeration() -> Element {
                                                     .issued_by_name
                                                     .clone()
                                                     .or_else(|| action.issued_by.clone())
-                                                    .unwrap_or_else(|| "—".into());
+                                                    .unwrap_or_else(|| "-".into());
                                                 rsx! { "{label}" }
                                             }
                                         }

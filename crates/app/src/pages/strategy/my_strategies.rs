@@ -356,7 +356,7 @@ pub fn StrategyMy() -> Element {
                         },
                         Some(resp) if resp.data.is_empty() => rsx! {
                             div { class: "my-strategies-empty",
-                                p { "No strategies yet \u{2014} create your first!" }
+                                p { "No strategies yet. Create your first!" }
                                 div { style: "margin-top:1rem;",
                                     Link { to: Route::StrategyEditorNew {}, class: "btn-create",
                                         "+ Create Strategy"

@@ -128,12 +128,12 @@ fn relay_chip(h: &RelayHealth) -> Option<(&'static str, &'static str)> {
     if !h.configured || (forum_local && !h.reachable) {
         Some((
             "dash-chip soft",
-            "Relay optional — forum runs locally. Wire Nostr when ready.",
+            "Relay optional. Forum runs locally. Wire Nostr when ready.",
         ))
     } else if h.configured && !h.reachable {
         Some((
             "dash-chip warn",
-            "Relay configured but offline — check Admin → Relay.",
+            "Relay configured but offline. Check Admin → Relay.",
         ))
     } else if h.reachable {
         Some(("dash-chip ok", "Relay online"))

@@ -43,6 +43,14 @@ pub(crate) const COPY_MEMBERSHIP: &str = "You need to be an org member to view y
 pub(crate) const COPY_INACTIVE: &str =
     "Your membership is not active, so your reports are not available.";
 pub(crate) const COPY_INTRO_MINE: &str = "Reports you sent from the stat tracker. Training consent keeps a report until you delete it. Without that consent, the report is deleted 30 days after it was received. The stored file is not shown here.";
+
+/// One line for `/reports`. The number is the server cap, not a second copy of it.
+pub(crate) fn copy_daily_cap() -> String {
+    format!(
+        "You can send {} reports a day.",
+        scuffed_types::DAILY_REPORT_CAP
+    )
+}
 pub(crate) const COPY_CHECKING: &str = "Checking session.";
 pub(crate) const COPY_FORBIDDEN: &str = "You need officer permissions to access the admin panel.";
 pub(crate) const COPY_LOADING_ALL: &str = "Loading reports.";
@@ -138,6 +146,48 @@ const REPORTS_CSS: &str = r#"
 .report-dialog h2 { font-family: var(--font-head); color: var(--text); font-size: 1.2rem; margin: 0 0 0.75rem; }
 .report-dialog p { color: var(--text-2); line-height: 1.5; margin: 0 0 1rem; }
 .report-dialog-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
+.report-card-label { display: none; }
+/* Wide pages: fit the table to the page so Delete and Withdraw stay on screen. */
+@media (min-width: 761px) {
+    .reports-table { width: 100%; table-layout: fixed; }
+    .reports-table th:last-child,
+    .reports-table td:last-child { width: 12.5rem; }
+    .reports-table td, .reports-table th { overflow-wrap: anywhere; }
+    .report-when { white-space: normal; }
+    .reports-table td > .reports-actions {
+        flex-direction: column; align-items: stretch; position: relative;
+    }
+    .report-btn { justify-content: center; text-align: center; white-space: normal; }
+}
+/* Narrow pages: one card per report, actions in the card, no sideways scroll. */
+@media (max-width: 760px) {
+    .reports-scroll { overflow-x: visible; }
+    .reports-table,
+    .reports-table tbody,
+    .reports-table tr,
+    .reports-table td {
+        display: block; width: auto; min-width: 0;
+    }
+    .reports-table { width: 100%; }
+    .reports-table thead {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    .reports-table tr {
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 0.75rem 0.85rem; margin: 0 0 0.75rem;
+    }
+    .reports-table td { border-bottom: none; padding: 0.35rem 0; white-space: normal; }
+    .report-when { white-space: normal; }
+    .report-card-label {
+        display: block; font-size: 0.7rem; letter-spacing: 0.04em;
+        text-transform: uppercase; color: var(--text-3); font-weight: 600;
+        margin-bottom: 0.15rem;
+    }
+    .reports-table td > .reports-actions {
+        flex-direction: row; flex-wrap: wrap; position: relative;
+    }
+}
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -741,7 +791,11 @@ pub(crate) fn MyReportsBody(
         main { class: "reports-page",
             h1 { id: MY_REPORTS_HEADING_ID, tabindex: "-1", "My reports" }
             if screen != MemberScreen::Disabled {
-                p { class: "reports-intro", "{COPY_INTRO_MINE}" }
+                p { class: "reports-intro",
+                    "{COPY_INTRO_MINE}"
+                    br {}
+                    "{copy_daily_cap()}"
+                }
             }
             match screen {
                 MemberScreen::Loading => rsx! { p { class: "reports-status", "{COPY_LOADING_MINE}" } },
@@ -821,15 +875,29 @@ fn member_row(
     let training = row.training_consent;
     rsx! {
         tr {
-            td { class: "report-when", "{when}" }
-            td { "{size}" }
-            td { "{status}" }
+            td { class: "report-when",
+                span { class: "report-card-label", "Date" }
+                "{when}"
+            }
             td {
+                span { class: "report-card-label", "Size" }
+                "{size}"
+            }
+            td {
+                span { class: "report-card-label", "Status" }
+                "{status}"
+            }
+            td {
+                span { class: "report-card-label", "Training consent" }
                 "{consent}"
                 span { class: "reports-sub", "{extra}" }
             }
-            td { class: "report-when", "{expiry}" }
+            td { class: "report-when",
+                span { class: "report-card-label", "Expiry" }
+                "{expiry}"
+            }
             td {
+                span { class: "report-card-label", "Actions" }
                 if usable {
                     div { class: "reports-actions",
                         {labeled_control(&delete_id, &delete_label, rsx! {
@@ -1149,14 +1217,25 @@ fn officer_row(row: &StatReportListItem) -> Element {
     let download_label = format!("Download report {}", row.id);
     rsx! {
         tr {
-            td { code { class: "report-member-id", "{member}" } }
-            td { "{when}" }
-            td { "{size}" }
             td {
+                span { class: "report-card-label", "Member id" }
+                code { class: "report-member-id", "{member}" }
+            }
+            td {
+                span { class: "report-card-label", "Date" }
+                "{when}"
+            }
+            td {
+                span { class: "report-card-label", "Size" }
+                "{size}"
+            }
+            td {
+                span { class: "report-card-label", "Training consent" }
                 "{consent}"
                 span { class: "reports-sub", "{extra}" }
             }
             td {
+                span { class: "report-card-label", "Download" }
                 if let Some(action) = download {
                     ReportDownload {
                         path: action,
@@ -1255,6 +1334,16 @@ mod tests {
         for line in static_copy() {
             assert_plain(line);
         }
+        let cap = copy_daily_cap();
+        assert_eq!(
+            cap,
+            format!(
+                "You can send {} reports a day.",
+                scuffed_types::DAILY_REPORT_CAP
+            )
+        );
+        assert!(cap.contains("10"), "{cap}");
+        assert_plain(&cap);
         let (title, body, button) = confirm_copy(ReportIntent::Delete);
         assert_plain(title);
         assert_plain(body);
@@ -1438,6 +1527,42 @@ mod tests {
         assert!(
             has_css_decl(&actions, "position: relative"),
             "absolute control labels need a containing block inside the scroll box: {actions}"
+        );
+        assert!(
+            REPORTS_CSS.contains("@media (min-width: 761px)"),
+            "wide pages fit the actions column"
+        );
+        assert!(
+            REPORTS_CSS.contains("table-layout: fixed"),
+            "the wide table must use the page width"
+        );
+        assert!(
+            REPORTS_CSS.contains("@media (max-width: 760px)"),
+            "narrow pages stack each report"
+        );
+        assert!(
+            REPORTS_CSS.contains(".report-card-label"),
+            "card labels name each field when the header is hidden"
+        );
+        let wide = REPORTS_CSS
+            .split("@media (min-width: 761px)")
+            .nth(1)
+            .unwrap();
+        assert!(
+            wide.contains("position: relative"),
+            "wide layout must keep the reports-actions containing block"
+        );
+        let narrow = REPORTS_CSS
+            .split("@media (max-width: 760px)")
+            .nth(1)
+            .unwrap();
+        assert!(
+            narrow.contains("position: relative"),
+            "narrow layout must keep the reports-actions containing block"
+        );
+        assert!(
+            narrow.contains("overflow-x: visible"),
+            "narrow cards must not hide actions in a sideways scroll"
         );
     }
 
@@ -1630,6 +1755,8 @@ mod tests {
         assert!(html.contains("No deletion date"), "{html}");
         assert!(!html.contains("Deleted on"), "{html}");
         assert!(html.contains("Withdraw consent"), "{html}");
+        assert!(html.contains(&copy_daily_cap()), "{html}");
+        assert!(html.contains("report-card-label"), "{html}");
         assert_plain(&html);
         assert_labeled(
             &html,

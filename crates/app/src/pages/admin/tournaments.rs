@@ -647,7 +647,7 @@ pub fn AdminTournaments() -> Element {
                                                         div { style: "margin-bottom:1.5rem;",
                                                             h3 {
                                                                 style: "font-family:var(--font-head),sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-2);text-transform:uppercase;margin-bottom:0.5rem;",
-                                                                "Round {round.round_number} \u{2014} {round.stage}"
+                                                                "Round {round.round_number} - {round.stage}"
                                                             }
                                                             DataTable { headers: vec!["#", "Player A", "Score", "Player B", "Status", "Actions"],
                                                                 for bm in round_matches.iter() {
@@ -662,7 +662,7 @@ pub fn AdminTournaments() -> Element {
                                                                             .unwrap_or_else(|| "TBD".into());
                                                                         let score_display = match (bm.score_a, bm.score_b) {
                                                                             (Some(a), Some(b)) => format!("{a} - {b}"),
-                                                                            _ => "\u{2014}".to_string(),
+                                                                            _ => "-".to_string(),
                                                                         };
                                                                         let bm_report = bm.clone();
                                                                         rsx! {
@@ -753,9 +753,9 @@ pub fn AdminTournaments() -> Element {
                                             let t_edit = (*t).clone();
                                             let t_del = (*t).clone();
                                             let t_view_id = t.id.clone();
-                                            let game_display = t.game_name.clone().unwrap_or_else(|| "\u{2014}".into());
-                                            let max_display = t.max_participants.map(|n| n.to_string()).unwrap_or_else(|| "\u{2014}".into());
-                                            let starts_display = t.starts_at.clone().unwrap_or_else(|| "\u{2014}".into());
+                                            let game_display = t.game_name.clone().unwrap_or_else(|| "-".into());
+                                            let max_display = t.max_participants.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+                                            let starts_display = t.starts_at.clone().unwrap_or_else(|| "-".into());
                                             let tid_reg = t.id.clone();
                                             let tid_active = t.id.clone();
                                             let tid_complete = t.id.clone();
@@ -867,7 +867,7 @@ pub fn AdminTournaments() -> Element {
                             let v = e.value();
                             form_game_id.set(if v.is_empty() { None } else { Some(v) });
                         },
-                        option { value: "", "\u{2014} None \u{2014}" }
+                        option { value: "", "- None -" }
                         {
                             let g = games.data.read();
                             let g = g.as_ref().and_then(|d| d.as_ref());

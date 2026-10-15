@@ -432,7 +432,7 @@ pub fn StrategyMeta() -> Element {
 
                             // Footer attribution
                             p { class: "meta-footer",
-                                "Data from {source} \u{2014} Updated {updated}"
+                                "Data from {source}. Updated {updated}"
                             }
                         }
                     }

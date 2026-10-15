@@ -512,7 +512,7 @@ pub fn IdentitySettings() -> Element {
             if member.is_some() && is_server_managed {
                 div { class: "identity-section",
                     h2 { "Key Backup (NIP-49)" }
-                    p { "Export your key as an encrypted ncryptsec backup. Keep this password — you will need it to import the key later (which links it as an external identity)." }
+                    p { "Export your key as an encrypted ncryptsec backup. Keep this password. You will need it to import the key later (which links it as an external identity)." }
                     div { class: "identity-field",
                         label { class: "identity-label", "Backup Password (min 12 chars)" }
                         input {
@@ -548,7 +548,7 @@ pub fn IdentitySettings() -> Element {
                     h2 { "Import External Key (NIP-49)" }
                     p { class: "identity-warning",
                         "You currently have a server-managed key. Importing an external key is \
-                         disabled to protect it — to switch to an external key, first Unlink your \
+                         disabled to protect it. To switch to an external key, first Unlink your \
                          identity above, then import. Importing does not restore a key into \
                          server-managed mode."
                     }
@@ -558,8 +558,8 @@ pub fn IdentitySettings() -> Element {
                     h2 { "Import External Key (NIP-49)" }
                     p {
                         "Link an external Nostr key from an ncryptsec backup. This sets your \
-                         identity to external mode — the server will not manage a key for you — \
-                         and replaces any currently linked external key. The nsec is decrypted \
+                         identity to external mode. The server will not manage a key for you. \
+                         It replaces any currently linked external key. The nsec is decrypted \
                          only to derive your public key."
                     }
                     div { class: "identity-field",

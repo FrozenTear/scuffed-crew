@@ -805,7 +805,7 @@ pub fn ChatWidget(
                     if !has_nip07() {
                         div { class: "chat-widget__hint",
                             "Public messages are NIP-29 kind 9 on the discovered group. \
-                            Sending needs a NIP-07 extension — server-managed keys can listen here \
+                            Sending needs a NIP-07 extension. Server-managed keys can listen here \
                             and send on officer channels via the API."
                         }
                     }

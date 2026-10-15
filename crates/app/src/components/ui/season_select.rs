@@ -1778,9 +1778,13 @@ mod tests {
         ] {
             let fetches = text.matches("use_api_with::<").count();
             let filtered = text.matches("season.fetch_path").count();
+            // Member settings are not a season window, so that fetch is not filtered.
+            let settings = text
+                .matches("member_stats_url(&auth(), \"/api/stats/settings\"")
+                .count();
             assert!(
-                fetches > 0 && filtered >= fetches,
-                "{rel} has {fetches} use_api_with and {filtered} season.fetch_path"
+                fetches > 0 && filtered + settings >= fetches,
+                "{rel} has {fetches} use_api_with, {filtered} season.fetch_path, {settings} settings"
             );
         }
         assert!(

@@ -98,7 +98,7 @@ pub fn RoundRobinTable(
                                     for col_id in sorted_ids.iter() {
                                         {
                                             if row_id == col_id {
-                                                rsx! { td { class: "rr-self", "\u{2014}" } }
+                                                rsx! { td { class: "rr-self", "-" } }
                                             } else if let Some((my_score, their_score, winner, codes)) = results.get(&(row_id.clone(), col_id.clone())) {
                                                 let class = if winner.as_ref() == Some(row_id) {
                                                     "rr-win"
@@ -109,7 +109,7 @@ pub fn RoundRobinTable(
                                                 };
                                                 let text = match (my_score, their_score) {
                                                     (Some(a), Some(b)) => format!("{a}-{b}"),
-                                                    _ => "\u{2014}".to_string(),
+                                                    _ => "-".to_string(),
                                                 };
                                                 if codes.is_empty() {
                                                     rsx! { td { class: "{class}", "{text}" } }
@@ -122,7 +122,7 @@ pub fn RoundRobinTable(
                                                     }
                                                 }
                                             } else {
-                                                rsx! { td { class: "rr-pending", "\u{2014}" } }
+                                                rsx! { td { class: "rr-pending", "-" } }
                                             }
                                         }
                                     }

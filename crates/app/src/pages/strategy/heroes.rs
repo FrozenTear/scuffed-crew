@@ -392,7 +392,7 @@ fn render_hero_detail(hero: &Hero) -> Element {
 
         // HP breakdown
         div { class: "hero-hp-section",
-            div { class: "hero-hp-label", "Hit Points — {total}" }
+            div { class: "hero-hp-label", "Hit Points - {total}" }
             div { class: "hero-hp-bar",
                 if hero.health > 0 {
                     div {

@@ -446,9 +446,9 @@ pub fn AdminTeams() -> Element {
                                                     .map(|g| g.name.clone())
                                             })
                                     })
-                                    .unwrap_or_else(|| "\u{2014}".into());
-                                let div_display = team.division.clone().unwrap_or_else(|| "\u{2014}".into());
-                                let color_display = team.color.clone().unwrap_or_else(|| "\u{2014}".into());
+                                    .unwrap_or_else(|| "-".into());
+                                let div_display = team.division.clone().unwrap_or_else(|| "-".into());
+                                let color_display = team.color.clone().unwrap_or_else(|| "-".into());
                                 rsx! {
                                     tr { key: "{team.id}",
                                         td { "{team.name}" }

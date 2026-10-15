@@ -107,6 +107,6 @@ pub fn day_name(d: u8) -> &'static str {
         4 => "Fri",
         5 => "Sat",
         6 => "Sun",
-        _ => "—",
+        _ => "-",
     }
 }

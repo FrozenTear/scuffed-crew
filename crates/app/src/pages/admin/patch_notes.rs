@@ -292,7 +292,7 @@ fn display_title(note: &PatchNote) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .unwrap_or("—")
+        .unwrap_or("-")
         .to_string()
 }
 
@@ -438,7 +438,7 @@ pub fn AdminPatchNotes() -> Element {
         }
         p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
             "Published notes appear on the public Strategy Patch Notes page. "
-            "Version cannot be changed after create — duplicate versions return 409."
+            "Version cannot be changed after create. Duplicate versions return 409."
         }
 
         {
@@ -557,7 +557,7 @@ pub fn AdminPatchNotes() -> Element {
                     "changes is a JSON array of {{ability?, description, change_type}}."
                 }
                 if form_heroes().is_empty() {
-                    p { class: "form-hint", "None yet — public cards still render without hero blocks." }
+                    p { class: "form-hint", "None yet. Public cards still render without hero blocks." }
                 } else {
                     div { class: "nested-stack",
                         for (i, hero) in form_heroes().into_iter().enumerate() {
@@ -942,7 +942,7 @@ mod tests {
             hero_updates: vec![],
             sections: vec![],
         };
-        assert_eq!(display_title(&note), "—");
+        assert_eq!(display_title(&note), "-");
         note.title = Some("  Mid-season  ".into());
         assert_eq!(display_title(&note), "Mid-season");
     }

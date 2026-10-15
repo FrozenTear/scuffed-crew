@@ -111,7 +111,7 @@ pub fn AdminGames() -> Element {
                         for game in list.iter() {
                             {
                                 let g = game.clone();
-                                let abbr_display = game.abbreviation.clone().unwrap_or_else(|| "—".into());
+                                let abbr_display = game.abbreviation.clone().unwrap_or_else(|| "-".into());
                                 rsx! {
                                     tr { key: "{game.id}",
                                         td { "{game.name}" }

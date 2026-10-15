@@ -73,6 +73,18 @@ struct CreateThreadBody {
     board: String,
 }
 
+fn count_label(count: u64, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+fn thread_count_label(count: u64) -> String {
+    count_label(count, "thread", "threads")
+}
+
 const PAGE_CSS: &str = r#"
     .forum-page { padding: 2rem; max-width: 960px; margin: 0 auto; }
     .forum-page-title {
@@ -165,7 +177,7 @@ pub fn Forum() -> Element {
         style { {PAGE_CSS} }
         div { class: "forum-page",
             h1 { class: "forum-page-title", "Forum" }
-            p { class: "forum-lead", "Old-school boards — pick a section, then a board (or sub-board)." }
+            p { class: "forum-lead", "Old-school boards. Pick a section, then a board (or sub-board)." }
 
             {
                 let data = tree.read();
@@ -209,7 +221,7 @@ pub fn Forum() -> Element {
                                                 div { class: "forum-board-desc", "{d}" }
                                             }
                                         }
-                                        div { class: "forum-board-meta", "{node.thread_count} threads" }
+                                        div { class: "forum-board-meta", "{thread_count_label(node.thread_count)}" }
                                     }
                                     for sub in node.sub_boards.iter() {
                                         Link {
@@ -384,7 +396,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
                                                     "{t.title}"
                                                 }
                                                 div { class: "forum-thread-meta",
-                                                    "{t.reply_count} replies · "
+                                                    "{count_label(t.reply_count, \"reply\", \"replies\")} · "
                                                     {local_time_node(&created)}
                                                 }
                                             }
@@ -398,5 +410,19 @@ pub fn ForumBoardPage(slug: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{count_label, thread_count_label};
+
+    #[test]
+    fn one_thread_is_singular_and_other_counts_are_plural() {
+        assert_eq!(thread_count_label(0), "0 threads");
+        assert_eq!(thread_count_label(1), "1 thread");
+        assert_eq!(thread_count_label(2), "2 threads");
+        assert_eq!(count_label(1, "reply", "replies"), "1 reply");
+        assert_eq!(count_label(3, "reply", "replies"), "3 replies");
     }
 }

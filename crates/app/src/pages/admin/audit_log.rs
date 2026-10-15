@@ -96,7 +96,7 @@ pub fn AdminAuditLog() -> Element {
                                     } else {
                                         format!("{}:{}", entry.target_type, entry.target_id)
                                     };
-                                    let details = entry.details.clone().unwrap_or_else(|| "—".into());
+                                    let details = entry.details.clone().unwrap_or_else(|| "-".into());
                                     rsx! {
                                         tr { key: "{entry.id}",
                                             td { "{timestamp}" }
