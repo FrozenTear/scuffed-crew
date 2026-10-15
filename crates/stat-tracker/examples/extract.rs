@@ -26,12 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let img = image::open(&path)?;
     println!("image: {}x{}", img.width(), img.height());
 
-    // Portraits: unpack bundled refs into the standard data dir.
+    // Portraits come from the installed hero pack, same as the daemon.
     let data_dir = dirs::data_dir()
         .map(|d| d.join("scuffed-stat-tracker"))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
-        &detect::hero_portrait::portraits_dir(&data_dir),
+    let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load_installed(
+        &data_dir,
     ));
 
     // --- mirror handle_capture's blocking section ---

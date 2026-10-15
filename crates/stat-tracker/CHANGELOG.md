@@ -37,6 +37,8 @@ Technical detail.
 
 Rejoin after a crash: within 5 minutes of a restart that resumed an unfinished game, a board on the same map (read on that Tab) from your own trusted row, where at least two of elims, deaths and damage fell, continues the resumed game. The stats from before the crash are added to every later board of that game, so stored stats never go down. It applies once per restart. A different map, a game that already had a result, or a drop more than 5 minutes after the restart splits as before. The restart resume window (5 minutes) now counts from when the crashed run was last seen alive (its heartbeat, at most a minute before the crash) instead of from your last Tab. The 20 minute limit since the last Tab still applies.
 
+The tracker no longer ships hero portraits in the binary. The portrait matcher reads the installed hero pack (`heroes-v1`, `heroes-v2`, `heroes-v2-1080`). With no pack installed it names no hero. The portrait matcher has no recognizer id. With a pack installed it compares those pack pngs instead of the old bundled 32x32 art, so a portrait-only hero confirmation can differ. `hero-v1.2` is not bumped: that id is the template recognizer, which already read the same pack files, and its scores do not move. The digit recognizer stays `cv-v6`.
+
 ## 0.5.0-alpha.9
 
 Install this update between games, not during one. A Tab press that caught the scoreboard while it was still drawing no longer loses the game: the tracker now looks again a moment later.

@@ -12,6 +12,6 @@ USE NS scuffed_crew;
 DEFINE DATABASE IF NOT EXISTS main;
 USE DB main;
 
--- Create a database-scoped editor user for the application.
--- Replace the password with a strong, unique secret in production.
-DEFINE USER IF NOT EXISTS app ON DATABASE PASSWORD 'CHANGE_ME' ROLES EDITOR;
+-- Namespace and database only. The server creates the database user at
+-- boot from SURREALDB_APP_USER and SURREALDB_APP_PASSWORD. This file
+-- does not define a user or a password.

@@ -620,9 +620,8 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         tracing::info!("new scoreboard reader on for saved stats");
     }
 
-    let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
-    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
-        &portraits_path,
+    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load_installed(
+        &config.data_dir,
     ));
 
     let data_dir = config.data_dir.clone();
@@ -6547,19 +6546,18 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // Auto-collect a portrait reference when the hero is identified and
             // collection is enabled, or, always, when the career panel (the
             // authoritative OCR read) names a hero whose reference is missing.
-            // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
-            // artwork sourced via the Overwatch wiki, for Doctrine) counts as
-            // missing, so the first career-panel crop replaces it. A file with
-            // any other bytes is a real crop or a user file and is never
-            // overwritten. The player's row must be known: cropping row 0 when
-            // the row was not identified would store someone else's hero and
-            // then stick. New heroes ship faster than bundled portraits
-            // (D.Mon, WL-5): the first game on one seeds its reference here, and
-            // the matcher picks it up on the next daemon start. Only the
-            // career-panel source may seed (a portrait/held/text guess must not
-            // template itself). The heroes-v2 icon reads (`reader = "new"`)
-            // do not force a seed either: the reference library is the
-            // ocr-v1 portrait matcher's, and a wrong seed sticks. Only the
+            // The historical Doctrine stand-in digest (PROVISIONAL_PORTRAITS)
+            // still counts as missing, so a capture replaces that old file.
+            // A file with any other bytes is a real crop or a user file and
+            // is never overwritten. The player's row must be known: cropping
+            // row 0 when the row was not identified would store someone
+            // else's hero and then stick. The portrait matcher reads the
+            // installed hero pack. A local crop is used only for a stem that
+            // pack does not have, and only when a pack is installed. With no
+            // pack the matcher names no hero. Only the career-panel source
+            // may seed (a portrait/held/text guess must not template itself).
+            // The heroes-v2 icon reads (`reader = "new"`) do not force a
+            // seed either: a wrong seed sticks. Only the
             // `collect_portraits` opt-in seeds under the new reader.
             let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
             let reference_path =

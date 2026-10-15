@@ -142,7 +142,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn set_test_embedded_json(json: Option<String>) {
+pub fn set_test_embedded_json(json: Option<String>) {
     TEST_EMBEDDED_JSON.with(|slot| *slot.borrow_mut() = json);
 }
 

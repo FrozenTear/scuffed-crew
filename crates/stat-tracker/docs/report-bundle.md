@@ -504,9 +504,9 @@ Contabo has no backups. A report stored on that disk is for testing this flow on
 
 ## 9. Tests required
 
-Tests use synthetic images drawn for the test, and the two post-match fixtures in `test-data/vision-baseline/`, which are real boards whose names were filled before they were committed. They do not read or commit member frames.
+Tests use synthetic images drawn for the test, including the post-match boards in `test-data/vision-baseline/`. They do not read or commit member frames.
 
-Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates; plus the two post-match fixtures. After blanking:
+Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates, including the committed post-match boards. After blanking:
 
 - Every name stroke is the solid colour, and the header and the world are filled.
 - This revision copies no portrait pixel: on every synthetic layout, after a matching earlier capture, every portrait cell is fill and no portrait cell is held in memory. With `COPY_PORTRAITS` on (the tests switch it on for the rest of this list), every portrait passes on a clean synthetic board blanked after an earlier live capture, except the bottom row whose separator the crop cuts off, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
