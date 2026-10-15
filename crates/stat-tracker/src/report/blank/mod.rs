@@ -54,7 +54,9 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 ///   earlier capture of the game; a role icon and the separators over the
 ///   portrait must show; portraits only at the 1440p and 1080p scales.
 /// * 11: no portrait is copied ([`COPY_PORTRAITS`] off).
-pub const BLANK_TABLE_VERSION: u32 = 11;
+/// * 12: 5v5 boards are measured and blanked (header at x 0 on one of the
+///   four measured 5v5 layouts); 6v6 output unchanged.
+pub const BLANK_TABLE_VERSION: u32 = 12;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -936,7 +938,7 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 11 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 12 for this revision)",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
@@ -946,7 +948,7 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 11);
+        assert_eq!(BLANK_TABLE_VERSION, 12);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 

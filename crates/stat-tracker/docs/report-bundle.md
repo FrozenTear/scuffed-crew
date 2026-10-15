@@ -4,7 +4,7 @@ This document is the contract. The tracker app, the API, and the site all build 
 
 Revision 2 (2026-10-11) adds in-app sending with the tracker's sync token (section 8), the `crash` and `performance` categories with log-only bundles (sections 2 and 7), an optional `system` object (section 2), and `bundle_version` 2. It also fixes four places where revision 1 and the validator in `crates/types/src/stat_report.rs` disagreed (`team_size: null`, extra crop paths, the reports-off status codes, and the matcher id example). The server endpoints (#189) and the My reports pages (#192) are on main. The app's Report button builds against this revision.
 
-Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4). Revision 7 (2026-10-13) adds two optional keys to `system`, `ocr` and `ocr_blocked_calls` (section 2).
+Revision 3 (2026-10-12) adds `crops/outcome.png` and the first scoreboard allowlist. Revision 4 (2026-10-12) blanks the scoreboard with geometry measured on each board instead of fixed columns, and reads chat from the full frame (section 4). Revision 5 (2026-10-12, blank table 10) copies a portrait only when it matches the same row on an earlier capture of the game, and keeps portraits only at the 1440p and 1080p scales (section 4). Revision 6 (2026-10-13, blank table 11) keeps no portrait: every portrait cell is filled (section 4). Revision 7 (2026-10-13) adds two optional keys to `system`, `ocr` and `ocr_blocked_calls` (section 2). Blank table 12 (2026-10-15) also blanks 5v5 boards (section 4); 6v6 output is unchanged.
 
 The desktop GUI is `scuffed-stat-tracker-ui` (the binary is still `stat-tracker-gui`). The daemon is `scuffed-stat-tracker`. Blanking, the zip, and the preview live on the member's PC, in that app, before anything is saved or uploaded.
 
@@ -337,7 +337,7 @@ Known limits:
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 11 for this revision), and a kit from another version is never reported.
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 12 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
