@@ -29,7 +29,7 @@ pub const MAX_FILES_BESIDES_MANIFEST: usize = 30;
 pub const MAX_IMAGE_EDGE: u32 = 7680;
 
 /// Successful stores per member per UTC day. A rejected upload does not count.
-pub const DAILY_REPORT_CAP: u64 = 5;
+pub const DAILY_REPORT_CAP: u64 = 10;
 
 /// How long a report without training consent is kept.
 pub const RETENTION_DAYS: i64 = 30;

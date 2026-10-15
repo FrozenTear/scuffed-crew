@@ -136,7 +136,7 @@ This alpha adds a Report a problem button that sends the tracker log to the site
 - Your own row on the scoreboard is found again when the hero portrait does not match, for example while the ult ring covers it. Before, every later Tab read failed with "player row not found" and the game kept its early stats.
 - Settings has a **Get alpha updates** toggle, so you no longer need to edit config.toml to get alphas.
 
-The report log covers the last 30 minutes. After a crash the app noticed, it also covers the 30 minutes before the stop and 2 minutes after. Your sync token, player name, account name, computer name, home folder path, and OCR text are taken out of the log before it is shown. Officers see who sent a report. A site allows 5 reports per member per day. Nothing is retried on its own (#230, #232).
+The report log covers the last 30 minutes. After a crash the app noticed, it also covers the 30 minutes before the stop and 2 minutes after. Your sync token, player name, account name, computer name, home folder path, and OCR text are taken out of the log before it is shown. Officers see who sent a report. A site allows 10 reports per member per day. Nothing is retried on its own (#230, #232).
 
 Stable installs are not offered this alpha. The desktop app skips it until Settings → Get alpha updates is on (or config.toml has `update_channel = "prerelease"`). bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
 

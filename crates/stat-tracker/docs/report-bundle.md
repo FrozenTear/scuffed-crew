@@ -486,7 +486,7 @@ Routes:
 
 Officer means `OfficerUser` (officer or admin). A member who is not an officer gets 403 on the zip bytes and on the manifest route. Ids are unguessable. A create response returns the id, the training flag, and `expires_at`. It does not echo the zip. The manifest route returns the stored manifest, after the hash recompute below.
 
-Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncompressed files together are also at most 10 MB. Either one over that size is 413. At most 30 files besides the manifest. No image edge is longer than 7680 pixels. A member may store 5 successful reports per UTC day. A rejected upload does not count. Over the daily cap, respond 429.
+Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncompressed files together are also at most 10 MB. Either one over that size is 413. At most 30 files besides the manifest. No image edge is longer than 7680 pixels. A member may store 10 successful reports per UTC day. A rejected upload does not count. Over the daily cap, respond 429.
 
 The server checks the zip again. It does not trust the client. It responds 400 for a bad manifest, a path that escapes the zip, a repeated JSON key, JPEG magic (`FF D8 FF`), a file named as JPEG, or a PNG that is not a real 8-bit image (bad magic, bad CRC, interlace, or a critical chunk other than `IHDR`, `IDAT`, `IEND`, or `PLTE`). On that failure it stores nothing. It does not keep the last value of a repeated key. If a manifest lists a path under `debug/mapcrops/`, the server responds 400 with `file missing` and stores nothing.
 

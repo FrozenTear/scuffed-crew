@@ -924,10 +924,11 @@ async fn rejects_duplicate_json_keys() {
 }
 
 #[tokio::test]
-async fn daily_cap_is_five_successful_stores() {
+async fn daily_cap_is_ten_successful_stores() {
     let h = harness().await;
-    for _ in 0..DAILY_REPORT_CAP {
-        let (status, _) = send(
+    assert_eq!(DAILY_REPORT_CAP, 10);
+    for n in 1..=10 {
+        let (status, body) = send(
             &h.app,
             Method::POST,
             "/api/stat-reports",
@@ -935,9 +936,9 @@ async fn daily_cap_is_five_successful_stores() {
             Some(valid_bundle(false).bytes),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::CREATED, "report {n}: {body}");
     }
-    let (status, _) = send(
+    let (status, body) = send(
         &h.app,
         Method::POST,
         "/api/stat-reports",
@@ -946,6 +947,7 @@ async fn daily_cap_is_five_successful_stores() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"], "Daily report limit reached");
     let (status, body) = send(
         &h.app,
         Method::GET,
@@ -2021,7 +2023,7 @@ async fn sync_token_create_stores_under_its_member_and_shares_the_daily_cap() {
     .await;
     assert!(theirs["reports"].as_array().unwrap().is_empty());
 
-    // One cap per member: mix session and sync-token uploads up to five.
+    // One cap per member: mix session and sync-token uploads up to ten.
     for n in 1..DAILY_REPORT_CAP {
         let token = if n % 2 == 0 {
             MEMBER_SYNC
