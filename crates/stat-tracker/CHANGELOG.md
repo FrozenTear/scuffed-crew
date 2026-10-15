@@ -17,14 +17,18 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.5.0-alpha.10
 
-The daily report limit is now 10.
+The daily report limit is now 10. If your PC or the game crashes mid-match and you rejoin, the tracker now keeps it as one game instead of splitting it in two.
 
 ### Highlights
 
 - You can send 10 reports in one UTC day. The next one waits until the next UTC day.
 - Reports you sent yesterday do not count toward today.
+- After a crash and rejoin, your scoreboard starts again from zero. The tracker now adds those new stats on top of what you had before the crash, keeps it as the same game, and puts the Victory or Defeat on it.
+- A crash where you had not pressed Tab for a few minutes before it no longer starts a new game by mistake.
 
 Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
+
+Rejoin after a crash: within 5 minutes of a restart that resumed an unfinished game, a board on the same map (read on that Tab) from your own trusted row, where at least two of elims, deaths and damage fell, continues the resumed game. The stats from before the crash are added to every later board of that game, so stored stats never go down. It applies once per restart. A different map, a game that already had a result, or a drop more than 5 minutes after the restart splits as before. The restart resume window (5 minutes) now counts from when the crashed run was last seen alive (its heartbeat, at most a minute before the crash) instead of from your last Tab. The 20 minute limit since the last Tab still applies.
 
 ## 0.5.0-alpha.9
 
