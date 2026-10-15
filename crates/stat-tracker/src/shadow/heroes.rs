@@ -2123,9 +2123,15 @@ mod tests {
         let data = data_dir(true, None, None);
         let set = HeroSet::load_data_dir(data.path()).unwrap();
         let crop = DynamicImage::ImageRgb8(tab_crop(Teams::Five, 5));
-        if let Ok(r) = set.read_board(&crop, 5, Duration::from_secs(5)) {
-            assert!(r.board.rows.iter().all(|h| h.accepted().is_none()), "{r:?}");
-            assert!(r.board.rows.iter().all(|h| h.suspect), "{r:?}");
+        // The clipped crop finds no rows today (NoRows). A read that does
+        // find rows must accept none of them. Any other result fails.
+        match set.read_board(&crop, 5, Duration::from_secs(5)) {
+            Err(HeroError::NoRows) => {}
+            Ok(r) => {
+                assert!(r.board.rows.iter().all(|h| h.accepted().is_none()), "{r:?}");
+                assert!(r.board.rows.iter().all(|h| h.suspect), "{r:?}");
+            }
+            Err(e) => panic!("unexpected read error on the clipped crop: {e:?}"),
         }
         // the clipped synthetic 5v5 frame read alone: every row flagged
         let ids = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
