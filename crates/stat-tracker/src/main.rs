@@ -5630,6 +5630,7 @@ fn apply_new_reader(
     own: reader_apply::OwnRow,
     own_row_suspect: bool,
     mut board: shadow::BoardRead,
+    authority: Option<&str>,
 ) {
     board.set_result(shadow::result_field(evidence));
     let policy = reader_apply::PolicyRow {
@@ -5644,7 +5645,10 @@ fn apply_new_reader(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let saved = reader_apply::merge_saved(&policy, own, Some(&board));
+    // The own row's hero is stored only when the Tab's hero authority (own
+    // row and career panel portrait) names it too.
+    let saved =
+        reader_apply::merge_saved_with_authority(&policy, own, Some(&board), Some(authority));
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
@@ -6579,6 +6583,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     board_row,
                     own_row_suspect,
                     board,
+                    pack_hero.as_deref(),
                 );
                 // The reader's number for each cell, sure or not; a cell with
                 // none keeps what the row holds.
@@ -10630,7 +10635,7 @@ mod tests {
         assert!(hc_body.contains("panel_from_banner: map_from_banner,"));
         assert!(
             hc_body
-                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, );")
+                .contains("apply_new_reader( &mut parsed, &req.result_evidence, board_row, own_row_suspect, board, pack_hero.as_deref(), );")
         );
         // the stored report carries the text-fallback replacement
         assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
