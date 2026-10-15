@@ -434,7 +434,7 @@ pub fn detect_ban_screen(_img: &DynamicImage, rgb: &RgbImage) -> bool {
 pub(crate) fn ban_screen_layout(rgb: &RgbImage) -> bool {
     let (red, dark) = ban_ratios(rgb);
     let banner = center_red_banner_ratio(rgb);
-    // Strong full-width vote bar is enough (Soot batch: Ban Heroes looks
+    // Strong full-width vote bar is enough (FrozenTear batch: Ban Heroes looks
     // letterboxed). Header red+dark is the existing hero-ban pixel gate;
     // require a weaker banner so a red-title-only header does not veto
     // unrelated screens.

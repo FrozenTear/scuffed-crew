@@ -1,7 +1,7 @@
-# Tag `stat-tracker-v0.4.0` (after Robert confirms)
+# Tag `stat-tracker-v0.4.0` (after FrozenTear confirms)
 
-**Do not create or push this tag until Robert confirms.** Never merge the
-release PR without Robert. This file is the operator runbook; it is not the
+**Do not create or push this tag until FrozenTear confirms.** Never merge the
+release PR without FrozenTear. This file is the operator runbook; it is not the
 GitHub Release body.
 
 Proposed tag: **`stat-tracker-v0.4.0`**
@@ -16,12 +16,12 @@ repeat that.
 
 ## 0. Confirm
 
-- [ ] Robert has said **yes** to tagging `stat-tracker-v0.4.0`
-- [ ] Robert has said **yes** to merging the release PR into `main`
+- [ ] FrozenTear has said **yes** to tagging `stat-tracker-v0.4.0`
+- [ ] FrozenTear has said **yes** to merging the release PR into `main`
 - [ ] Release PR is against `main` and CI is green
 - [ ] `git tag --list 'stat-tracker-v0.4.0'` is empty on `origin`
 
-## 1. Merge the release PR (Robert)
+## 1. Merge the release PR (FrozenTear)
 
 Merge via GitHub UI (or instruct an agent). Author / preparing agent does
 **not** merge.
@@ -98,4 +98,4 @@ Reinstall replaces Dioxus `stat-tracker-gui` in place (same binary name).
 ## If the tag was pushed by mistake
 
 Human-only (agent-protocol §5): delete a published tag / GitHub Release only
-with an explicit current instruction from Robert. Do not improvise.
+with an explicit current instruction from FrozenTear. Do not improvise.

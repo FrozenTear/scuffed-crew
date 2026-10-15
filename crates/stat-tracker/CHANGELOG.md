@@ -17,16 +17,22 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.5.0-alpha.10
 
-The daily report limit is now 10. If your PC or the game crashes mid-match and you rejoin, the tracker now keeps it as one game instead of splitting it in two.
+The daily report limit is now 10 (#284). A restart continues the game you were in only when it is clearly that same game, and a clipped 5v5 scoreboard no longer stores a hero the tracker is not sure of. A game report waits until you pick what was wrong. A game report's log now covers only that game. If you crash mid-match and rejoin, it stays one game with your stats added up (#293).
 
 ### Highlights
 
-- You can send 10 reports in one UTC day. The next one waits until the next UTC day.
-- Reports you sent yesterday do not count toward today.
-- After a crash and rejoin, your scoreboard starts again from zero. The tracker now adds those new stats on top of what you had before the crash, keeps it as the same game, and puts the Victory or Defeat on it.
-- A crash where you had not pressed Tab for a few minutes before it no longer starts a new game by mistake.
+- You can send 10 reports in one UTC day. The next one waits until the next UTC day, and reports from yesterday do not count (#284).
+- The open game resumes only when it has a map and the last scoreboard is at most 5 minutes old. After a result, the next game starts once the post-match wait has passed, even on the same map.
+- Your own hero on a later scoreboard is stored when it matches the hero panel. A panel that names a different hero, or names none, keeps the earlier hero and marks it unsure.
+- Names read on a scoreboard stay on this PC and are used to blank those names in a report. They are never included in the report file.
 
-Technical detail. The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429.
+Technical detail.
+
+- The cap counts successful stores for one member since midnight UTC. A rejected upload does not count. Over the cap, the site responds 429 (#284).
+- A 5v5 read whose header still starts at the left edge flags every row unknown and suspect. The hero log id is `hero-v1.2`. The own row's hero is stored only when the hero authority names that same hero. No authority known keeps the previous behaviour. A contradicting or abstaining authority keeps the earlier hero and adds `hero` to `suspect_fields`. Uploads still send `cv-v6` (#288).
+- After a restart, an unfinished game with a stored board resumes only with a known map and a last capture at most 5 minutes old. Otherwise that game is retired and the next Tab starts a new game. A clock that moved back also starts a new game. A game that already saw a result is restored so the result and the post-match scoreboard stay on it, and the first Tab more than 75 seconds after that result starts a new game. A session with no stored board still uses the 20 minute bound (#289).
+- A game report opens with no category selected, so no zip is built and Send and Save stay off until one is picked. The prompt after Edit stats still opens on Wrong stats. Each accepted capture appends the names read on its rows to `report-kit/<session>/names.json` (mode 0600, at most 64 names) only when that kit folder already exists. The file is pruned with the kit and passed to the scrubber. With the new reader no names are read, so the list stays empty (#290).
+- A game report reads the journal from 120 seconds before the first capture through the end of that game's window, still capped at the newest 20,000 lines. When the game has no end time the read stops at now. A log-only report stays newest-lines only. No report zip contains `names.json` (#292).
 
 Rejoin after a crash: within 5 minutes of a restart that resumed an unfinished game, a board on the same map (read on that Tab) from your own trusted row, where at least two of elims, deaths and damage fell, continues the resumed game. The stats from before the crash are added to every later board of that game, so stored stats never go down. It applies once per restart. A different map, a game that already had a result, or a drop more than 5 minutes after the restart splits as before. The restart resume window (5 minutes) now counts from when the crashed run was last seen alive (its heartbeat, at most a minute before the crash) instead of from your last Tab. The 20 minute limit since the last Tab still applies.
 

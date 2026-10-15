@@ -125,10 +125,10 @@ impl Cli {
         "stat-tracker-gui, Scuffed Crew tracker (Iced 0.14)
 
 USAGE:
-  cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]
-  cargo run -p scuffed-stat-tracker-ui -- --fixture sample
-  cargo run -p scuffed-stat-tracker-ui -- --fixture empty
-  cargo run -p scuffed-stat-tracker-ui -- --companion --fixture sample
+  stat-tracker-gui [OPTIONS]
+  stat-tracker-gui --fixture sample
+  stat-tracker-gui --fixture empty
+  stat-tracker-gui --companion --fixture sample
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
@@ -162,6 +162,8 @@ mod tests {
         assert!(short.version);
         let help = Cli::help_text();
         assert!(help.contains("--version"));
+        assert!(help.contains("stat-tracker-gui [OPTIONS]"));
+        assert!(!help.contains("cargo run"));
         assert!(!help.contains('\u{2014}'));
         assert!(!help.contains('\u{2013}'));
     }
