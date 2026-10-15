@@ -166,10 +166,10 @@ fn close_gaps(row: &[bool], max: usize) -> Vec<bool> {
     let mut last: Option<usize> = None;
     for (x, &v) in row.iter().enumerate() {
         if v {
-            if let Some(p) = last {
-                if x - p - 1 <= max {
-                    out[p + 1..x].iter_mut().for_each(|o| *o = true);
-                }
+            if let Some(p) = last
+                && x - p - 1 <= max
+            {
+                out[p + 1..x].iter_mut().for_each(|o| *o = true);
             }
             last = Some(x);
         }
@@ -523,11 +523,15 @@ mod tests {
 
     #[test]
     fn close_gaps_keeps_run_edges_and_skips_wide_gaps() {
-        let row = [false, true, false, false, true, false, false, false, false, true, false];
+        let row = [
+            false, true, false, false, true, false, false, false, false, true, false,
+        ];
         let out = close_gaps(&row, 2);
         assert_eq!(
             out,
-            [false, true, true, true, true, false, false, false, false, true, false]
+            [
+                false, true, true, true, true, false, false, false, false, true, false
+            ]
         );
     }
 }
