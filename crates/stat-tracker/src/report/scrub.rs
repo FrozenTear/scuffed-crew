@@ -192,6 +192,11 @@ impl LogWindow {
     pub fn start(&self) -> Option<DateTime<Utc>> {
         self.ranges.iter().map(|(a, _)| *a).min()
     }
+
+    /// Latest instant the window keeps, or `None` for an empty window.
+    pub fn end(&self) -> Option<DateTime<Utc>> {
+        self.ranges.iter().map(|(_, b)| *b).max()
+    }
 }
 
 static ANSI_RE: LazyLock<Regex> =
@@ -542,13 +547,19 @@ pub fn scrub_log(ctx: &ScrubContext, window: &LogWindow, raw: &str) -> String {
 /// `daemon.log.1` then `daemon.log` from `data_dir`, oldest first. A missing
 /// file is skipped. Bytes that are not UTF-8 are replaced.
 pub fn read_daemon_logs(data_dir: &Path) -> String {
-    read_daemon_logs_since(data_dir, None)
+    read_daemon_logs_since(data_dir, None, None)
 }
 
 /// [`read_daemon_logs`] with the journal read from `since` (a game
 /// report's window start), so a long session's lines are not cut by the
-/// newest-lines cap alone. `None` reads the newest lines only.
-pub fn read_daemon_logs_since(data_dir: &Path, since: Option<DateTime<Utc>>) -> String {
+/// newest-lines cap alone. `until` (the window end) bounds the read so an
+/// older game keeps its own lines after a long evening; with no end the
+/// read runs to now. `None` for `since` reads the newest lines only.
+pub fn read_daemon_logs_since(
+    data_dir: &Path,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> String {
     let mut out = String::new();
     for name in ["daemon.log.1", "daemon.log"] {
         if let Ok(bytes) = std::fs::read(data_dir.join(name)) {
@@ -561,7 +572,7 @@ pub fn read_daemon_logs_since(data_dir: &Path, since: Option<DateTime<Utc>>) -> 
     // The service logs to journald; daemon.log may be old or missing. The
     // window filter in [`scrub_log`] keeps only the game's own lines.
     if !cfg!(test) {
-        out = merge_journal(out, &read_journal_lines(since));
+        out = merge_journal(out, &read_journal_lines(since, until));
     }
     out
 }
@@ -590,9 +601,9 @@ pub const TRACKER_UNIT: &str = "scuffed-stat-tracker.service";
 /// the file. Read from `since` when given (the game's own start), and
 /// always bounded to the newest [`JOURNAL_MAX_LINES`] lines as a fallback.
 /// No journal, no lines.
-pub fn read_journal_lines(since: Option<DateTime<Utc>>) -> String {
+pub fn read_journal_lines(since: Option<DateTime<Utc>>, until: Option<DateTime<Utc>>) -> String {
     let out = std::process::Command::new("journalctl")
-        .args(journal_args(since))
+        .args(journal_args(since, until, Utc::now()))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();
@@ -607,8 +618,15 @@ pub const JOURNAL_MAX_LINES: u32 = 20_000;
 
 /// `journalctl` arguments for [`read_journal_lines`]. `since` is passed as a
 /// Unix timestamp (`@<seconds>`), which every systemd reads the same way
-/// whatever the local time zone.
-pub fn journal_args(since: Option<DateTime<Utc>>) -> Vec<String> {
+/// whatever the local time zone. With `since`, the read is also bounded by
+/// `--until` at `until` (the game window end), or at `now` when the game
+/// has no end time, so the line cap keeps the game's own lines rather than
+/// the newest ones of the evening.
+pub fn journal_args(
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     let mut args: Vec<String> = ["--user", "-u", TRACKER_UNIT, "-o", "cat", "--no-pager"]
         .into_iter()
         .map(String::from)
@@ -616,6 +634,8 @@ pub fn journal_args(since: Option<DateTime<Utc>>) -> Vec<String> {
     if let Some(since) = since {
         args.push("--since".into());
         args.push(format!("@{}", since.timestamp()));
+        args.push("--until".into());
+        args.push(format!("@{}", until.unwrap_or(now).timestamp()));
     }
     args.push("-n".into());
     args.push(JOURNAL_MAX_LINES.to_string());
@@ -633,7 +653,7 @@ mod tests {
         let start = DateTime::parse_from_rfc3339("2026-10-15T08:20:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let args = journal_args(Some(start));
+        let args = journal_args(Some(start), None, start);
         let since = args.iter().position(|a| a == "--since").expect("--since");
         assert_eq!(args[since + 1], format!("@{}", start.timestamp()));
         assert!(args.windows(2).any(|w| w[0] == "-n" && w[1] == "20000"));
@@ -641,11 +661,42 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "-u" && w[1] == TRACKER_UNIT)
         );
-        let newest = journal_args(None);
+        let newest = journal_args(None, None, start);
         assert!(!newest.iter().any(|a| a == "--since"));
+        assert!(!newest.iter().any(|a| a == "--until"));
         assert!(newest.windows(2).any(|w| w[0] == "-n" && w[1] == "20000"));
         let w = LogWindow::session(start, start + Duration::minutes(12));
         assert_eq!(w.start(), Some(start - Duration::seconds(120)));
+    }
+
+    /// QA note on #290: an older game's read stops at its own window end,
+    /// so a long evening after it cannot push its lines out of the cap.
+    #[test]
+    fn the_journal_read_stops_at_the_game_window_end_or_now() {
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let w = LogWindow::session(t("2026-10-15T08:20:00Z"), t("2026-10-15T08:32:00Z"));
+        let now = t("2026-10-15T23:00:00Z");
+        let args = journal_args(w.start(), w.end(), now);
+        let since = args.iter().position(|a| a == "--since").expect("--since");
+        let until = args.iter().position(|a| a == "--until").expect("--until");
+        assert_eq!(
+            args[since + 1],
+            format!("@{}", t("2026-10-15T08:18:00Z").timestamp())
+        );
+        assert_eq!(
+            args[until + 1],
+            format!("@{}", t("2026-10-15T08:34:00Z").timestamp())
+        );
+        assert!(since < until);
+        assert_eq!(&args[args.len() - 2..], ["-n", "20000"]);
+        assert_eq!(
+            &args[..6],
+            ["--user", "-u", TRACKER_UNIT, "-o", "cat", "--no-pager"]
+        );
+
+        let open = journal_args(w.start(), None, now);
+        let until = open.iter().position(|a| a == "--until").expect("--until");
+        assert_eq!(open[until + 1], format!("@{}", now.timestamp()));
     }
 
     #[test]
