@@ -114,6 +114,10 @@ This is **name-skew**, not a `SURREALDB_URL` typo. The compose service remains `
 
 `scripts/update.sh` detects a running project Surreal (`${PROJECT_NAME}-surrealdb*`, `${PROJECT_NAME}_surrealdb*`) and starts site-server with `up -d --no-deps` so the existing DB is left alone. Prefer the hyphen name (`…-surrealdb-1`) when both exist. After the app is healthy, the script stops extras and tries `rm -f`; if compose blocks the rm, the duplicate is left `Exited`.
 
+The same twin starts from a relay bring-up. `podman compose --profile relay up --build -d strfry` follows `depends_on` and podman-compose creates `scuffed-crew_surrealdb_1` on the volume already held by `scuffed-crew-surrealdb-1`. RocksDB's `LOCK` file is what stopped both processes from writing. That is not a guarantee: if the live process is down, the twin can open the database. `strfry` has no `depends_on`, and `scripts/relay-up.sh` always passes `--no-deps`. It refuses to run unless a project Surreal container is already Up, and it does not create one.
+
+Do not pin `container_name` or the compose project `name` to force one container name. A hyphen `container_name` makes `podman create` fail when `scuffed-crew-surrealdb-1` already exists, so that host does not get a second writer. On a host whose only database is `scuffed-crew_surrealdb_1`, the same pin starts a new hyphen container on the same volume. `x-podman.name_separator_compat` makes podman-compose use hyphens for containers and also for networks (`scuffed-crew-internal` instead of the existing `scuffed-crew_internal`), so the relay would not see the running database. Volume names are already `${project}_surrealdb-data` in both tools. That shared name is why a second container is dangerous. `scripts/update.sh` keeps using `--no-deps` for site-server when a project Surreal is Up.
+
 Manual recovery if an older `update.sh` already created the twin:
 
 ```bash
@@ -474,11 +478,22 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    to start when that flag is set and the SurrealDB password is missing,
    the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
 
-2. Build and start strfry (the image also starts the read gate):
+2. Build and start strfry (the image also starts the read gate). The main
+   stack must already be up, so Surreal is the existing container and not a
+   new one:
 
    ```bash
-   podman compose --env-file data/secrets.env --profile relay up --build -d strfry
+   ./scripts/relay-up.sh
    ```
+
+   That runs `podman compose --env-file data/secrets.env --profile relay up --build -d --no-deps strfry`
+   (or `podman-compose` when that is the provider). `--no-deps` is required.
+   Without it, podman-compose also starts Surreal and can create
+   `scuffed-crew_surrealdb_1` on the same volume as `scuffed-crew-surrealdb-1`.
+   `strfry` has no `depends_on` for the same reason. Do not run
+   `up --profile relay` with no service name on a day-2 host: that starts
+   the default services, including Surreal, and can create the twin. See
+   Troubleshooting: duplicate Surreal `_` vs `-`.
 
 3. Recreate site-server so it picks up `NOSTR_RELAY_URL`:
 

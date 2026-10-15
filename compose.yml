@@ -1,8 +1,14 @@
 services:
   surrealdb:
-    # Contabo day-2 / podman-compose: `up site-server` may spawn an underscore
-    # twin on this same volume. scripts/update.sh uses `--no-deps` when a
-    # project Surreal is already Up. Do not rename this service or volume key.
+    # Contabo day-2 / podman-compose: `up site-server` or `up strfry` may
+    # spawn an underscore twin on this same volume. scripts/update.sh and
+    # scripts/relay-up.sh use `--no-deps` when a project Surreal is already
+    # Up. Do not rename this service or volume key. Do not pin
+    # container_name or the compose project name: a hyphen pin collides
+    # with the existing hyphen DB, but on a host whose only DB is the
+    # underscore name it starts a second container on this volume.
+    # x-podman.name_separator_compat would match container names and also
+    # rename networks (hyphen vs the existing underscore networks).
     # Fully qualified so podman does not stop on a short-name registry prompt.
     image: docker.io/surrealdb/surrealdb:v3.0
     # Image runs as non-root by default; Podman named volumes are root-owned,
@@ -38,8 +44,13 @@ services:
     build:
       context: .
       dockerfile: relay/Containerfile
-    depends_on:
-      - surrealdb
+    # No depends_on. `up strfry` must not create surrealdb. podman-compose
+    # names that container with underscores (scuffed-crew_surrealdb_1).
+    # Compose v2 uses hyphens (scuffed-crew-surrealdb-1). Both mount
+    # ${project}_surrealdb-data. A relay up that honors depends_on started
+    # the underscore twin on the live volume; RocksDB's LOCK was the only
+    # thing that kept both from writing. scripts/relay-up.sh still passes
+    # --no-deps. Start Surreal from the main stack (scripts/update.sh).
     environment:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_USER: ${SURREALDB_USER:-root}

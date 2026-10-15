@@ -189,4 +189,6 @@ echo "  1. If public: point Caddy at 127.0.0.1:${HOST_PORT} (see docs/deploy.md)
 echo "  2. Open ${REDIRECT_BASE_URL} and create the admin account (first boot)"
 echo "  3. Later updates: ./scripts/update.sh  (git pull + image pull, no compile)"
 echo "  4. Infra secrets file: ${SECRETS}"
-echo "Optional relay: ${COMPOSE[*]} --env-file ${SECRETS} --profile relay up -d"
+echo "Optional relay (after Surreal is Up): ./scripts/relay-up.sh"
+echo "  That is --profile relay up --build -d --no-deps strfry."
+echo "  Do not drop --no-deps. See docs/deploy.md (duplicate Surreal _ vs -)."
