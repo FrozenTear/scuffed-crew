@@ -21,3 +21,4 @@ pub mod shadow;
 pub mod stats;
 pub mod storage;
 pub mod sync;
+pub mod tab_retry;

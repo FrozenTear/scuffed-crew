@@ -5886,38 +5886,54 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         injected
     } else {
         tracing::info!("Tab detected: capturing screen (hold Tab to keep scoreboard visible)");
-        let img = capture::capture_screen_output(backend, capture_output)
-            .await
-            .map_err(anyhow::Error::from_boxed)
-            .context("screen capture failed")?;
-
-        let matcher = Arc::clone(&ctx.portrait_matcher);
-        // Clone player_name so the blocking closure can own it.
-        let player_name_owned = player_name.map(|s| s.to_string());
-        let flags = FrameFlags {
-            allow_banner_recovery,
-            session_map_known: session_map.is_some(),
-            shadow_on: ctx.shadow.is_some(),
-            use_new_reader: ctx.use_new_reader,
-        };
+        // A board still drawing fails the preflight, so a rejected Tab frame
+        // is captured again after a short wait (`stat_tracker::tab_retry`).
         let own_seeds = own_name_seeds(ctx.own_name.as_ref());
-        let analysis = tokio::task::spawn_blocking(move || {
-            let started = Instant::now();
-            let analysis = analyze_frame(
-                img,
-                matcher,
-                player_name_owned,
-                game_outcome,
-                flags,
-                own_seeds,
-            );
-            stat_tracker::perf::record(stat_tracker::perf::Stage::TabAnalyze, started.elapsed());
-            // With classic OCR off there was no OCR, and no OCR workers.
-            if !ocr::gate::is_off() {
-                stat_tracker::omp::log_threads_after_first_ocr();
-            }
-            analysis
-        })
+        let (analysis, _retries) = stat_tracker::tab_retry::with_retries(
+            &stat_tracker::tab_retry::TAB_RETRY_WAITS,
+            |a: &FrameAnalysisOutcome| !matches!(a, FrameAnalysisOutcome::Analyzed(_)),
+            |_| {
+                let matcher = Arc::clone(&ctx.portrait_matcher);
+                // Clone player_name so the blocking closure can own it.
+                let player_name_owned = player_name.map(|s| s.to_string());
+                let flags = FrameFlags {
+                    allow_banner_recovery,
+                    session_map_known: session_map.is_some(),
+                    shadow_on: ctx.shadow.is_some(),
+                    use_new_reader: ctx.use_new_reader,
+                };
+                let own_seeds = own_seeds.clone();
+                async move {
+                    let img = capture::capture_screen_output(backend, capture_output)
+                        .await
+                        .map_err(anyhow::Error::from_boxed)
+                        .context("screen capture failed")?;
+                    let analysis = tokio::task::spawn_blocking(move || {
+                        let started = Instant::now();
+                        let analysis = analyze_frame(
+                            img,
+                            matcher,
+                            player_name_owned,
+                            game_outcome,
+                            flags,
+                            own_seeds,
+                        );
+                        stat_tracker::perf::record(
+                            stat_tracker::perf::Stage::TabAnalyze,
+                            started.elapsed(),
+                        );
+                        // With classic OCR off there was no OCR, and no OCR workers.
+                        if !ocr::gate::is_off() {
+                            stat_tracker::omp::log_threads_after_first_ocr();
+                        }
+                        analysis
+                    })
+                    .await?;
+                    anyhow::Ok(analysis)
+                }
+            },
+            tokio::time::sleep,
+        )
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
