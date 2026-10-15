@@ -482,6 +482,11 @@ const NAV_CSS: &str = r#"
         text-transform: uppercase;
         color: var(--text-3);
     }
+    .site-main {
+        min-width: 0;
+        padding-top: 48px;
+        min-height: 100vh;
+    }
     .site-footer {
         border-top: 1px solid var(--border);
         padding: 2rem;
@@ -896,7 +901,7 @@ pub fn PublicLayout() -> Element {
             }
         }
 
-        main { style: "padding-top: 48px; min-height: 100vh;",
+        main { class: "site-main",
             Outlet::<Route> {}
         }
 
@@ -943,6 +948,39 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[test]
+    fn site_main_is_a_block_that_can_shrink() {
+        let main = css_rule(NAV_CSS, ".site-main {");
+        assert!(has_decl(&main, "min-width: 0"), "{main}");
+        assert!(has_decl(&main, "padding-top: 48px"), "{main}");
+        assert!(has_decl(&main, "min-height: 100vh"), "{main}");
+        assert!(
+            !main.contains("display:"),
+            "site main stays a normal block: {main}"
+        );
+        assert!(
+            !NAV_CSS.contains(".site-main > *"),
+            "page roots keep their own widths"
+        );
+    }
+
+    fn css_rule(css: &str, marker: &str) -> String {
+        let start = css
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        css[start + marker.len()..]
+            .split('}')
+            .next()
+            .unwrap_or_else(|| panic!("unclosed {marker}"))
+            .to_string()
+    }
+
+    fn has_decl(block: &str, decl: &str) -> bool {
+        block
+            .split(';')
+            .any(|part| part.lines().any(|line| line.trim() == decl))
     }
 
     #[test]

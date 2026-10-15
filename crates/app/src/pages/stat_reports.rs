@@ -81,7 +81,11 @@ pub(crate) const CONFIRM_CANCEL_ID: &str = "report-confirm-cancel";
 pub(crate) const CONFIRM_SUBMIT_ID: &str = "report-confirm-submit";
 
 const REPORTS_CSS: &str = r#"
-.reports-page { max-width: 960px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+.reports-page {
+    display: flex; flex-direction: column; box-sizing: border-box;
+    width: 100%; max-width: 960px; min-width: 0;
+    margin: 0 auto; padding: 2rem 1.25rem 3rem;
+}
 .reports-page h1 {
     font-family: var(--font-head); font-size: 1.8rem; color: var(--text);
     letter-spacing: 0.04em; margin: 0 0 0.75rem;
@@ -89,8 +93,13 @@ const REPORTS_CSS: &str = r#"
 .reports-intro { color: var(--text-2); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
 .reports-status { color: var(--text-3); padding: 1.5rem 0; }
 .reports-error { color: var(--danger); }
-.reports-scroll { overflow-x: auto; }
-.reports-table { width: 100%; border-collapse: collapse; }
+/* The table scrolls here. max-width and min-width keep that scroll off the page. */
+.reports-scroll {
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0;
+    overflow-x: auto;
+}
+.reports-table { width: max-content; min-width: 100%; border-collapse: collapse; }
 .reports-table th, .reports-table td {
     text-align: left; padding: 0.65rem 0.5rem; border-bottom: 1px solid var(--border);
     vertical-align: top; font-size: 0.9rem; color: var(--text);
@@ -1387,6 +1396,50 @@ mod tests {
             REPORTS_CSS.contains(".report-when { white-space: nowrap;"),
             "narrow screens keep the date on one line"
         );
+    }
+
+    #[test]
+    fn reports_table_scrolls_inside_the_page() {
+        let page = css_block(REPORTS_CSS, ".reports-page {");
+        assert!(
+            page.contains("display: flex") && page.contains("flex-direction: column"),
+            "{page}"
+        );
+        assert!(page.contains("min-width: 0"), "{page}");
+        assert!(page.contains("box-sizing: border-box"), "{page}");
+        assert!(has_css_decl(&page, "width: 100%"), "{page}");
+        assert!(has_css_decl(&page, "max-width: 960px"), "{page}");
+
+        let scroll = css_block(REPORTS_CSS, ".reports-scroll {");
+        assert!(has_css_decl(&scroll, "overflow-x: auto"), "{scroll}");
+        assert!(has_css_decl(&scroll, "max-width: 100%"), "{scroll}");
+        assert!(has_css_decl(&scroll, "min-width: 0"), "{scroll}");
+        assert!(has_css_decl(&scroll, "width: 100%"), "{scroll}");
+        assert!(
+            scroll.contains("grid-template-columns: minmax(0, 1fr)"),
+            "{scroll}"
+        );
+
+        let table = css_block(REPORTS_CSS, ".reports-table {");
+        assert!(has_css_decl(&table, "min-width: 100%"), "{table}");
+        assert!(table.contains("width: max-content"), "{table}");
+    }
+
+    fn css_block(css: &str, marker: &str) -> String {
+        let start = css
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        let rest = &css[start + marker.len()..];
+        rest.split('}')
+            .next()
+            .unwrap_or_else(|| panic!("unclosed {marker}"))
+            .to_string()
+    }
+
+    fn has_css_decl(block: &str, decl: &str) -> bool {
+        block
+            .split(';')
+            .any(|part| part.lines().any(|line| line.trim() == decl))
     }
 
     #[test]
