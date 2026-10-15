@@ -184,7 +184,7 @@ async fn start_daemon_checked(data_dir: &Path) -> Result<u32, String> {
     match child.try_wait() {
         Ok(Some(status)) => Err(last_log_error(data_dir).unwrap_or_else(|| {
             format!(
-                "Tracker exited immediately ({status}) — see {}",
+                "Tracker exited immediately ({status}). See {}",
                 daemon_log_path(data_dir).display()
             )
         })),
@@ -250,7 +250,7 @@ async fn stop_daemon_result(data_dir: &Path) -> Result<(), StopError> {
     }
     if !pid_is_live_tracker(pid) {
         return Err(StopError::Refused(
-            "Saved process id is not the tracker — not stopping it",
+            "Saved process id is not the tracker, not stopping it",
         ));
     }
     signal_term(pid)?;
@@ -300,13 +300,13 @@ async fn wait_while(
         }
         if started.elapsed() >= timeout {
             return Err(StopError::Failed(
-                "Tracker is still shutting down — not starting another copy".into(),
+                "Tracker is still shutting down, not starting another copy".into(),
             ));
         }
         let slice = poll.min(timeout.saturating_sub(started.elapsed()));
         if slice.is_zero() {
             return Err(StopError::Failed(
-                "Tracker is still shutting down — not starting another copy".into(),
+                "Tracker is still shutting down, not starting another copy".into(),
             ));
         }
         tokio::time::sleep(slice).await;
@@ -538,11 +538,11 @@ mod tests {
     fn restart_proceeds_only_when_nothing_live_was_signalled() {
         assert!(StopError::NotRunning.allows_restart());
         assert!(
-            StopError::Refused("Saved process id is not the tracker — not stopping it")
+            StopError::Refused("Saved process id is not the tracker, not stopping it")
                 .allows_restart()
         );
         assert!(
-            !StopError::Failed("Tracker is still shutting down — not starting another copy".into())
+            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
                 .allows_restart()
         );
     }

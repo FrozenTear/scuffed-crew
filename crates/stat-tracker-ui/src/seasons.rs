@@ -337,7 +337,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 
     if app.seasons.seasons.is_empty() {
         col = col.push(widgets::empty_surface(
-            "No seasons on the server — stats are all time.",
+            "No seasons on the server, so stats are all time.",
         ));
     }
 

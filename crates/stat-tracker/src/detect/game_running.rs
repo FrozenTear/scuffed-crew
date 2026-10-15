@@ -53,11 +53,11 @@ impl GameProcessGate {
         let prev = self.cached.map(|(_, r)| r);
         if prev != Some(running) {
             if running {
-                tracing::info!("game process detected — captures active");
+                tracing::info!("game process detected: captures active");
             } else {
                 tracing::info!(
                     looking_for = ?self.targets,
-                    "game process not found — captures paused until it starts"
+                    "game process not found: captures paused until it starts"
                 );
             }
         }
@@ -70,7 +70,7 @@ impl GameProcessGate {
 /// Fails open: if /proc can't be read at all, captures stay enabled.
 fn scan_proc(targets: &[String]) -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        tracing::warn!("cannot read /proc — game-process gate disabled for this check");
+        tracing::warn!("cannot read /proc: game-process gate disabled for this check");
         return true;
     };
     for entry in entries.flatten() {

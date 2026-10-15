@@ -10,7 +10,7 @@ use crate::theme::{self, FONT_SEMIBOLD, GRID_GAP};
 use crate::widgets;
 
 pub const TONIGHT_EMPTY: &str =
-    "No games yet tonight — press Tab in-game to capture the scoreboard.";
+    "No games yet tonight. Press Tab in-game to capture the scoreboard.";
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let filter = app.header_filter();

@@ -750,7 +750,7 @@ impl LocalStore {
             if !all_ok {
                 tracing::info!(
                     session_id = %claims[idxs[0]].session_id,
-                    "sync left session unsynced — a snapshot changed during upload"
+                    "sync left session unsynced: a snapshot changed during upload"
                 );
                 for i in marked {
                     self.cas_set_synced(&claims[i].id, claims[i].sync_rev, false)

@@ -156,7 +156,7 @@ fn detect_phase_polled_with(
             vote_gate,
             ban_gate,
             select_gate,
-            "phase pixel gate passed but top region not stable — deferring confirm"
+            "phase pixel gate passed but top region not stable: deferring confirm"
         );
         return GamePhase::Unknown;
     }

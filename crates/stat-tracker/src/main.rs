@@ -128,7 +128,7 @@ impl KeyboardWaiter for SignalKeyboardWaiter<'_> {
                 Ok(KeyboardWait::Shutdown)
             }
             _ = self.sigterm.recv() => {
-                tracing::info!("SIGTERM received — shutting down");
+                tracing::info!("SIGTERM received: shutting down");
                 Ok(KeyboardWait::Shutdown)
             }
             _ = tokio::time::sleep(KEYBOARD_OPEN_RETRY) => Ok(KeyboardWait::Retry),
@@ -159,11 +159,11 @@ where
                     error = %e,
                     attempt,
                     max_attempts,
-                    "evdev init failed — no keyboard detected"
+                    "evdev init failed: no keyboard detected"
                 );
                 if attempt >= max_attempts {
                     anyhow::bail!(
-                        "no keyboard available after {attempt} attempts ({e}) — \
+                        "no keyboard available after {attempt} attempts ({e}): \
                          exiting so systemd can restart once an input device is readable"
                     );
                 }
@@ -459,7 +459,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
             tracing::error!(
-                "sync paused — the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
+                "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
@@ -525,7 +525,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Log rotate, prune old pre-vacuum backups, auto-vacuum if store is bloated.
     // Must run before open_store (single-writer SurrealKV).
     if let Err(e) = storage::maintain::startup_maintenance(&config.data_dir).await {
-        tracing::warn!(error = %e, "startup maintenance failed — continuing with live store");
+        tracing::warn!(error = %e, "startup maintenance failed: continuing with live store");
     }
 
     // The OCR on/off switch (`ocr` in config.toml), decided once for this
@@ -760,7 +760,7 @@ fn handle_preinit_flags() -> bool {
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!(
-            "scuffed-stat-tracker {} — Overwatch 2 scoreboard OCR daemon\n\n\
+            "scuffed-stat-tracker {}: Overwatch 2 scoreboard OCR daemon\n\n\
              USAGE: scuffed-stat-tracker [FLAGS]\n\n\
              FLAGS:\n\
              \x20 --version, -V         print version and exit\n\
@@ -804,7 +804,7 @@ async fn handle_info_flags() -> bool {
         let backend = capture::detect_backend().await;
         match backend {
             capture::CaptureBackend::None => {
-                eprintln!("no capture backend available — cannot list outputs");
+                eprintln!("no capture backend available: cannot list outputs");
                 std::process::exit(1);
             }
             capture::CaptureBackend::Portal => {
@@ -840,7 +840,7 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
             tracing::error!(
                 server_url = %sync_cfg.server_url,
                 error = %e,
-                "sync disabled — refusing to send the bearer token over an unsafe server URL"
+                "sync disabled: refusing to send the bearer token over an unsafe server URL"
             );
             None
         }
@@ -1001,7 +1001,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
             }
             Ok(_) => {
                 tracing::info!(
-                    "server has no player_name configured — set it in the web UI under My Stats → Settings"
+                    "server has no player_name configured: set it in the web UI under My Stats → Settings"
                 );
             }
             Err(e) if matches!(e.attempt(), sync::SyncAttempt::AuthRejected) => {
@@ -1013,7 +1013,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
                 }
                 tracing::error!(
                     error = %e,
-                    "sync token rejected by daemon-config — pausing sync until the URL or token changes in Settings"
+                    "sync token rejected by daemon-config: pausing sync until the URL or token changes in Settings"
                 );
             }
             Err(e) => {
@@ -1033,7 +1033,7 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     {
         tracing::error!(
             pid = existing.pid,
-            "another daemon is already running — stop it first"
+            "another daemon is already running: stop it first"
         );
         anyhow::bail!("another daemon is already running (PID {})", existing.pid);
     }
@@ -1140,7 +1140,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
         tracing::info!(
             poll_secs = ?config.auto_detect.poll_interval_secs,
             cooldown_secs = config.auto_detect.cooldown_secs,
-            "auto-detect mode enabled — polling for match end screens"
+            "auto-detect mode enabled: polling for match end screens"
         );
     }
     if config.game_process_names.is_empty() {
@@ -1148,7 +1148,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
     } else {
         tracing::info!(
             processes = ?config.game_process_names,
-            "captures gated on game process — set game_process_names in config.toml if yours differs"
+            "captures gated on game process: set game_process_names in config.toml if yours differs"
         );
     }
     if dump_poll_frames {
@@ -1168,11 +1168,11 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
             "this debug folder is no longer written while debug_ocr is off (it shows other players' names); existing files are left as they are"
         );
     }
-    tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
+    tracing::info!("daemon ready: press Tab in-game to capture scoreboard");
 
     if collect_portraits {
         tracing::info!(
-            "portrait collection mode enabled — only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
+            "portrait collection mode enabled: only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
         );
     }
 }
@@ -1669,7 +1669,7 @@ fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str
             map = g.map.as_deref().unwrap_or("?"),
             age_secs = g.opened_at.elapsed().as_secs(),
             reason,
-            "game closed with NO Tab captures — it was not recorded (no scoreboard seen: Tab not pressed, keyboard grabbed, or capture rejected)"
+            "game closed with NO Tab captures: it was not recorded (no scoreboard seen: Tab not pressed, keyboard grabbed, or capture rejected)"
         );
     } else {
         tracing::warn!(
@@ -1833,7 +1833,7 @@ async fn apply_poll_decision(
             kept = %kept,
             ignored = %ignored,
             session_id = st.active_game.as_ref().map(|g| g.session_id.as_str()),
-            "result word ignored — it does not override the open session"
+            "result word ignored: it does not override the open session"
         );
     }
     let Some(current) = st.active_game.as_ref() else {
@@ -1862,13 +1862,13 @@ async fn apply_poll_decision(
                 tracing::info!(
                     ?candidates,
                     session_id = %new_id,
-                    "auto-detect: map vote — new game"
+                    "auto-detect: map vote: new game"
                 );
             }
             boundary::CloseReason::HeroSelectOrBan => {
                 tracing::info!(
                     session_id = %new_id,
-                    "auto-detect: hero select/ban — new game (map vote missed)"
+                    "auto-detect: hero select/ban: new game (map vote missed)"
                 );
             }
             boundary::CloseReason::EndScreenMap => {
@@ -2457,11 +2457,11 @@ fn open_detected_game(
     };
     let sid = format!("{:016x}", rand_id());
     if log_vote {
-        tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
+        tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote: new game");
     } else {
         tracing::info!(
             session_id = %sid,
-            "auto-detect: hero select/ban — new game (map vote missed)"
+            "auto-detect: hero select/ban: new game (map vote missed)"
         );
     }
     let mut g = ActiveGame::open_at(sid, detect::MatchOutcome::Unknown, candidates, now);
@@ -2619,7 +2619,7 @@ fn resolved_map(
             tracing::debug!(
                 read = %m,
                 ?candidates,
-                "map read is not a vote candidate — dropping as misread"
+                "map read is not a vote candidate: dropping as misread"
             );
         }
     };
@@ -3447,7 +3447,7 @@ async fn apply_capture_report(
                 tracing::info!(
                     outcome = ?report.outcome,
                     session_id = %g.session_id,
-                    "outcome recovered from rejected capture frame — adopting"
+                    "outcome recovered from rejected capture frame: adopting"
                 );
                 if g.session_created {
                     if let Err(e) = store
@@ -3600,7 +3600,7 @@ async fn apply_capture_report(
                     tracing::info!(
                         outcome = ?report.outcome,
                         session_id = %g.session_id,
-                        "outcome recovered from captured frame — back-filling session"
+                        "outcome recovered from captured frame: back-filling session"
                     );
                     if g.session_created
                         && let Err(e) = store
@@ -3708,7 +3708,7 @@ fn resolve_word_tick(
                 tracing::debug!(
                     ?outcome,
                     ?source,
-                    "result word read — awaiting agreeing read"
+                    "result word read: awaiting agreeing read"
                 );
             }
             ResolvedWordTick {
@@ -3963,7 +3963,7 @@ async fn run_loop(
             .unwrap_or_else(|e| e.into_inner())
             .record_auth_rejected();
         tracing::error!(
-            "sync paused — token rejected. Update the token in Settings; sync resumes when the URL or token changes."
+            "sync paused: token rejected. Update the token in Settings; sync resumes when the URL or token changes."
         );
     }
 
@@ -4004,20 +4004,20 @@ async fn run_loop(
                 match result {
                     Ok(()) => {
                         if !game_gate.is_running() {
-                            tracing::debug!("Tab ignored — game process not running");
+                            tracing::debug!("Tab ignored: game process not running");
                             continue;
                         }
 
                         if let Some(last) = st.last_tab_capture
                             && last.elapsed() < tab_debounce {
-                                tracing::debug!("Tab debounced — ignoring rapid press");
+                                tracing::debug!("Tab debounced: ignoring rapid press");
                                 continue;
                             }
 
                         // Single-flight: OCR of the previous Tab may still be
                         // running (it takes seconds) — don't stack captures.
                         if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
-                            tracing::debug!("Tab ignored — a capture is already in progress");
+                            tracing::debug!("Tab ignored: a capture is already in progress");
                             continue;
                         }
                         st.last_tab_capture = Some(Instant::now());
@@ -4049,14 +4049,14 @@ async fn run_loop(
                         }));
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "keyboard devices lost — attempting to reopen");
+                        tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
                         match detect::MultiKeyboardStream::open() {
                             Ok(new_kbd) => {
                                 kbd = new_kbd;
                                 tracing::info!("keyboard monitoring reopened");
                             }
                             Err(e2) => {
-                                tracing::error!(error = %e2, "failed to reopen keyboard — exiting");
+                                tracing::error!(error = %e2, "failed to reopen keyboard: exiting");
                                 drain_capture(capture_task.take()).await;
                                 let task = sync_task.take();
                                 if let Some(client) = sync_client {
@@ -4101,13 +4101,13 @@ async fn run_loop(
                 let tab_in_flight = capture_task.as_ref().is_some_and(|t| !t.is_finished());
                 let now = Instant::now();
                 if skip_poll_for_tab_in_flight(tab_in_flight, &st, now) {
-                    tracing::debug!("poll tick skipped — Tab capture in flight");
+                    tracing::debug!("poll tick skipped: Tab capture in flight");
                     continue;
                 }
                 let outcome_only = poll_outcome_only_while_tab_busy(tab_in_flight, &st, now);
                 if outcome_only {
                     tracing::debug!(
-                        "cheap outcome poll — Tab capture in flight during end-reel wake"
+                        "cheap outcome poll: Tab capture in flight during end-reel wake"
                     );
                 }
                 if !game_gate.is_running() {
@@ -4123,7 +4123,7 @@ async fn run_loop(
                 if poll_slow_mode(&st, Instant::now()) {
                     st.poll_ticks_skipped += 1;
                     if st.poll_ticks_skipped < SLOW_POLL_DIVISOR {
-                        tracing::trace!("poll tick skipped — adaptive slow cadence mid-match");
+                        tracing::trace!("poll tick skipped: adaptive slow cadence mid-match");
                         continue;
                     }
                 }
@@ -4277,7 +4277,7 @@ async fn run_loop(
                             if !already_awake {
                                 tracing::info!(
                                     hold_secs = END_REEL_WAKE.as_secs(),
-                                    "end-reel / POTG — holding full poll cadence"
+                                    "end-reel / POTG: holding full poll cadence"
                                 );
                             }
                         }
@@ -4377,7 +4377,7 @@ async fn run_loop(
                 if wall > mono + SUSPEND_RESET_GAP {
                     tracing::info!(
                         gap_secs = (wall - mono).as_secs(),
-                        "suspend/clock-jump detected — resetting session windows"
+                        "suspend/clock-jump detected: resetting session windows"
                     );
                     // Schedule the upload, including a stale skeleton. Then
                     // `resume_after_suspend` re-admits through `startup_session`,
@@ -4756,7 +4756,7 @@ fn full_board_text(
         return ocr();
     }
     if !use_new_reader {
-        tracing::debug!("skipping full-board OCR — cell path supplied everything");
+        tracing::debug!("skipping full-board OCR: cell path supplied everything");
     }
     Ok(ocr::OcrResult {
         raw_text: String::new(),
@@ -5885,7 +5885,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     let (analysis, board_override) = if let Some(injected) = injected {
         injected
     } else {
-        tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
+        tracing::info!("Tab detected: capturing screen (hold Tab to keep scoreboard visible)");
         let img = capture::capture_screen_output(backend, capture_output)
             .await
             .map_err(anyhow::Error::from_boxed)
@@ -6094,7 +6094,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         tracing::warn!(
             rows = rows.len(),
             board_refusal,
-            "capture rejected — frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
+            "capture rejected: frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
         );
         archive_rejected_map_label_crop(
             ctx.debug_ocr,
@@ -7200,7 +7200,7 @@ fn maybe_spawn_periodic_sync(
         .should_attempt(Instant::now());
     if !periodic_sync_due(capture_count, in_flight, allow) {
         if capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !in_flight && !allow {
-            tracing::debug!("sync skipped — backing off before the next attempt");
+            tracing::debug!("sync skipped: backing off before the next attempt");
         }
         return;
     }
@@ -7223,18 +7223,18 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
             tracing::warn!(
                 failures = clock.failures(),
                 retry_in_secs = clock.retry_after(now).as_secs(),
-                "sync upload failed — backing off so a down server is not hammered"
+                "sync upload failed: backing off so a down server is not hammered"
             );
         }
         sync::SyncAttempt::RateLimited { .. } => {
             tracing::warn!(
                 retry_in_secs = clock.retry_after(now).as_secs(),
-                "sync rate-limited — backing off before the next upload"
+                "sync rate-limited: backing off before the next upload"
             );
         }
         sync::SyncAttempt::AuthRejected => {
             tracing::error!(
-                "sync token rejected — pausing until the server URL or token changes in Settings"
+                "sync token rejected: pausing until the server URL or token changes in Settings"
             );
         }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
@@ -7287,12 +7287,12 @@ fn maybe_resume_sync_after_settings_change(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear_auth_rejected();
-            tracing::info!("sync resumed — server URL or token changed");
+            tracing::info!("sync resumed: server URL or token changed");
         }
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "sync stays paused — the saved server URL is not safe for the token"
+                "sync stays paused: the saved server URL is not safe for the token"
             );
         }
     }
@@ -8039,7 +8039,7 @@ mod tests {
             events: vec![KeyboardWait::Retry; retries],
         };
         let err = acquire_keyboard(
-            || Err::<(), _>("no keyboard device found — ensure user is in the 'input' group"),
+            || Err::<(), _>("no keyboard device found: ensure user is in the 'input' group"),
             &mut waiter,
             KEYBOARD_OPEN_ATTEMPTS,
         )
@@ -10850,7 +10850,7 @@ mod tests {
         );
         assert!(
             !stats_regressed(prev, prev, cur, (true, false, true), CLEAN3),
-            "suspect E + DMG drops must not vote — no mid-game split"
+            "suspect E + DMG drops must not vote: no mid-game split"
         );
     }
 

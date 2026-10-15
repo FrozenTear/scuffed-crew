@@ -931,7 +931,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         tracing::debug!(
             anchored_score,
             floor = anchored_floor,
-            "header-anchored columns scored low — trying offset sweep"
+            "header-anchored columns scored low: trying offset sweep"
         );
     }
 
@@ -963,7 +963,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         tracing::debug!(
             valid_cells = cached_score,
             floor = reuse_floor,
-            "cached column offset degraded — recalibrating"
+            "cached column offset degraded: recalibrating"
         );
     }
 

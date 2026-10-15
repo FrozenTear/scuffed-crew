@@ -596,7 +596,7 @@ fn status_dot<'a>(live: bool) -> Element<'a, OverlayViewMessage> {
 fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMessage> {
     let Some(game) = game else {
         return container(
-            text("No games yet tonight — press Tab in-game to capture the scoreboard.")
+            text("No games yet tonight. Press Tab in-game to capture the scoreboard.")
                 .size(SIZE_BODY)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3)

@@ -358,7 +358,7 @@ fn select_output<'a>(
         return outputs.iter().find(|o| o.name == name).ok_or_else(|| {
             let available: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
             format!(
-                "output '{name}' not found — available: {}",
+                "output '{name}' not found: available: {}",
                 available.join(", ")
             )
             .into()

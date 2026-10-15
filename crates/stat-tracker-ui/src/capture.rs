@@ -22,7 +22,7 @@ pub fn thumbnail_rgba(img: &DynamicImage) -> (u32, u32, Vec<u8>) {
 
 pub fn backend_ready(backend: Option<CaptureBackend>) -> Result<CaptureBackend, String> {
     match backend {
-        None => Err("Still looking for a capture method — try again in a moment".into()),
+        None => Err("Still looking for a capture method. Try again in a moment".into()),
         Some(CaptureBackend::None) => Err("No capture method is available on this computer".into()),
         Some(b) => Ok(b),
     }
@@ -95,7 +95,7 @@ pub async fn vacuum_store(data_dir: std::path::PathBuf) -> Result<String, String
 
 pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String> {
     if crate::daemon::is_daemon_running(&data_dir) {
-        return Err("Tracker started while confirming — stop it first".into());
+        return Err("Tracker started while confirming. Stop it first".into());
     }
     let result = async {
         match stat_tracker::storage::LocalStore::open(&data_dir).await {

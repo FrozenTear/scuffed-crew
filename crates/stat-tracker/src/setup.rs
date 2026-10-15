@@ -248,7 +248,7 @@ pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Se
         return Ok(());
     }
 
-    tracing::info!("koverwatch.traineddata not found — generating via LSTM fine-tuning");
+    tracing::info!("koverwatch.traineddata not found: generating via LSTM fine-tuning");
 
     let tmp = tempfile::tempdir()?;
     let tmp_path = tmp.path();
@@ -335,7 +335,7 @@ fn download_best_eng_traineddata(
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     if size < 1_000_000 {
         return Err(format!(
-            "downloaded eng.traineddata is too small ({size} bytes) — expected ~15MB float 'best' model; download likely failed"
+            "downloaded eng.traineddata is too small ({size} bytes), expected ~15MB float 'best' model; download likely failed"
         )
         .into());
     }

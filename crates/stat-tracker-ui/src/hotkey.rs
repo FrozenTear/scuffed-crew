@@ -169,7 +169,7 @@ pub fn parse_bind(raw: &str) -> Result<Keybind, String> {
 }
 
 fn invalid_bind_copy() -> String {
-    "Use a shortcut like Super+Shift+C — Super is the Windows key, join keys with +.".into()
+    "Use a shortcut like Super+Shift+C. Super is the Windows key, join keys with +.".into()
 }
 
 fn norm_token(tok: &str) -> String {

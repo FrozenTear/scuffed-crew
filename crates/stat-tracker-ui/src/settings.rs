@@ -731,7 +731,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 
     if demo {
         col = col.push(widgets::empty_surface(
-            "Demo mode — settings, the tracker service, and stored data are not changed.",
+            "Demo mode: settings, the tracker service, and stored data are not changed.",
         ));
     }
 
@@ -873,10 +873,10 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             if d.autostart {
                 "Starts with this computer"
             } else {
-                "Installed — will not start on login"
+                "Installed, will not start on login"
             }
         } else {
-            "No login service installed — Start launches the tracker directly"
+            "No login service installed. Start launches the tracker directly"
         })
         .size(SIZE_META)
         .font(FONT_MEDIUM)
@@ -985,7 +985,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 
     if let Some((handle, when)) = &app.preview {
         body = body.push(
-            text(format!("Preview — {when}"))
+            text(format!("Preview: {when}"))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -996,7 +996,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 .height(iced::Length::Fixed(280.0)),
         );
         body = body.push(
-            text("What the tracker sees — scoreboard should be visible.")
+            text("What the tracker sees. The scoreboard should be visible.")
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -1047,7 +1047,7 @@ fn player_fields_row<'a>(
             SettingsField::PlayerName,
             false,
             demo,
-            Some("Scoreboard name as shown in-game — no #1234."),
+            Some("Scoreboard name as shown in-game, without #1234."),
         )),
         Some(field_input(
             "Session window (seconds)",
@@ -1209,7 +1209,7 @@ fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let installed = if app.tessdata_installed {
         "Reading model is installed"
     } else {
-        "Reading model is missing — install it to read the scoreboard"
+        "Reading model is missing. Install it to read the scoreboard"
     };
     let mut actions = row![].spacing(8);
     if !demo && !app.tessdata_busy {
@@ -1306,11 +1306,13 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
     !locked
 }
 
+/// Help under the poll interval field. Empty or 4 is auto, which polls every
+/// 1.5 s with the new reader and every 4 s with classic OCR.
+const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
-const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
-const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture — leave off unless diagnosing.";
+const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
@@ -1329,7 +1331,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
     let mut copy = column![hint(
-        "Compact rewrites the store and keeps one backup. Delete removes local matches only — not the website."
+        "Compact rewrites the store and keeps one backup. Delete removes local matches only, not the website."
     ),]
     .spacing(6);
 

@@ -512,7 +512,7 @@ pub fn evaluate_plan_with(latest: &str, probes: UpdateProbes<'_>) -> UpdatePlan 
         && let Some(reason) = prefix_write_error(&probes.prefix)
     {
         return UpdatePlan::Blocked {
-            hint: "The Copy button still works — paste the command into a terminal that can write the prefix.".into(),
+            hint: "The Copy button still works. Paste the command into a terminal that can write the prefix.".into(),
             reason,
         };
     }
