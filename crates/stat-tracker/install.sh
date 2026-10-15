@@ -172,7 +172,7 @@ elif ! { ls /usr/share/tessdata/eng.traineddata \
         info "It does need it whenever it keeps classic OCR on: a tracker version that cannot turn it off yet, a missing reader pack, or you turn classic OCR back on."
         info "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
     else
-        warn "eng.traineddata not found: install your distro's eng tessdata package."
+        warn "eng.traineddata not found. Install your distro's eng tessdata package."
         warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
         echo >&2
     fi
