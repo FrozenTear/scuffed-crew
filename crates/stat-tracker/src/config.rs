@@ -259,7 +259,20 @@ fn default_game_process_names() -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct AutoDetectConfig {
     pub enabled: bool,
-    pub poll_interval_secs: u64,
+    /// Seconds between end-screen polls. Missing means automatic
+    /// ([`AutoDetectConfig::poll_interval`]): 1.5 s with the new reader,
+    /// 4 s with classic OCR. 4, the value older Settings always wrote, also
+    /// counts as automatic so existing configs get the faster rate.
+    ///
+    /// Automatic is written as 4, not left out: alpha.7 and older need the
+    /// key, and read 4 as their own default, so a downgrade keeps working.
+    /// Read back, 4 is `None` again, so automatic has one value in memory.
+    #[serde(
+        default,
+        serialize_with = "write_auto_poll_as_legacy",
+        deserialize_with = "read_legacy_poll_as_auto"
+    )]
+    pub poll_interval_secs: Option<u64>,
     pub cooldown_secs: u64,
 }
 
@@ -270,11 +283,48 @@ impl Default for AutoDetectConfig {
             // accolade (win/loss) screens — required for automatic win/loss
             // detection — at ~25-35ms of CPU per tick. Enabled by default.
             enabled: true,
-            poll_interval_secs: 4,
+            poll_interval_secs: None,
             // Debounce between opening new games: long enough that a map-vote
             // screen lingering across several ticks only opens one game, far
             // shorter than a real match so back-to-back games are still caught.
             cooldown_secs: 120,
+        }
+    }
+}
+
+/// Automatic poll interval with classic OCR (Tesseract reads the boards).
+pub const CLASSIC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+/// Automatic poll interval with the new reader. Its end-screen checks are
+/// cheap, and a 4 s tick missed short Victory or Defeat screens.
+pub const NEW_READER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+/// The value older Settings wrote on every save; treated as automatic.
+pub const LEGACY_DEFAULT_POLL_SECS: u64 = 4;
+
+fn read_legacy_poll_as_auto<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Option<u64>, D::Error> {
+    let v = Option::<u64>::deserialize(de)?;
+    Ok(v.filter(|&s| s != LEGACY_DEFAULT_POLL_SECS))
+}
+
+fn write_auto_poll_as_legacy<S: serde::Serializer>(
+    v: &Option<u64>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    ser.serialize_u64(v.unwrap_or(LEGACY_DEFAULT_POLL_SECS))
+}
+
+impl AutoDetectConfig {
+    /// The poll interval in effect: an explicit `poll_interval_secs` (at
+    /// least 1 s) other than [`LEGACY_DEFAULT_POLL_SECS`], else the
+    /// automatic rate for the reader in use.
+    pub fn poll_interval(&self, new_reader: bool) -> std::time::Duration {
+        match self.poll_interval_secs {
+            Some(secs) if secs != LEGACY_DEFAULT_POLL_SECS => {
+                std::time::Duration::from_secs(secs.max(1))
+            }
+            _ if new_reader => NEW_READER_POLL_INTERVAL,
+            _ => CLASSIC_POLL_INTERVAL,
         }
     }
 }
@@ -1583,7 +1633,7 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
             }),
             auto_detect: AutoDetectConfig {
                 enabled: false,
-                poll_interval_secs: 8,
+                poll_interval_secs: Some(8),
                 cooldown_secs: 30,
             },
             session_window_secs: 900,
@@ -1661,7 +1711,7 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name, not a default key dump
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 {shadow_line}
@@ -1719,7 +1769,7 @@ session_window_secs = 1200
             assert!(saved.contains("# scoreboard name, not a default key dump"));
             assert!(saved.contains("# extra number reader (private log only)"));
             assert!(saved.contains("custom_note = \"leave this line alone\""));
-            assert!(saved.contains("player_name = \"the streamer\""));
+            assert!(saved.contains("player_name = \"FrozenTear\""));
             assert!(
                 !saved.contains("game_process_names"),
                 "a shadow toggle must not add default keys: {saved}"
@@ -1826,7 +1876,7 @@ token = \"secret-token-must-stay\"
         "\
 data_dir = \"/tmp/sst-settings-shape\"
 capture_output = \"DP-1\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 1800
 finished_game_close_secs = 180
 game_process_names = [\"Overwatch.exe\"]
@@ -1908,7 +1958,7 @@ token = \"not-a-real-token\"
     fn nested_shadow_recognizer_is_left_alone_and_root_is_inserted_once() {
         let original = "\
 data_dir = \"/tmp/sst-nested-shadow\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 [sync]
 server_url = \"https://crew.example\"
@@ -1937,7 +1987,7 @@ shadow_recognizer = true
     fn missing_shadow_recognizer_without_tables_is_appended_at_the_end() {
         let original = "\
 data_dir = \"/tmp/sst-no-tables\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 ";
         let mut next = Config::parse_file_contents(original).expect("parse");
         next.shadow_recognizer = true;
@@ -1968,7 +2018,7 @@ player_name = \"the streamer\"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name, not a default key dump
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 shadow_recognizer = true
@@ -1993,7 +2043,7 @@ token = \"old-token\"
         assert!(saved.contains("# hand-edited tracker config. keep this comment."));
         assert!(saved.contains("shadow_recognizer = true"));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(saved.contains("setup_completed = true"));
         assert!(saved.contains("https://crew.example"));
         assert!(saved.contains("pasted-token"));
@@ -2115,7 +2165,7 @@ token = \"old-token\"
         let raw = "\
 # hand-edited tracker config. keep this comment.
 data_dir = \"/tmp/sst-hand-edited\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 reader = \"ocr-v1\"
 custom_note = \"leave this line alone\"
 ";
@@ -2124,7 +2174,7 @@ custom_note = \"leave this line alone\"
         let saved = Config::text_for_save(Some(raw), &next).expect("reader-only save");
         assert!(saved.contains("# hand-edited tracker config. keep this comment."));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(saved.contains("reader = \"new\""));
         assert!(!saved.contains("reader = \"ocr-v1\""));
         assert!(
@@ -2197,7 +2247,7 @@ custom_note = \"leave this line alone\"
         let raw = "\
 # hand-edited tracker config. keep this comment.
 data_dir = \"/tmp/sst-hand-edited\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 reader = \"ocr-v1\"
 
 [auto_detect]
@@ -2230,6 +2280,57 @@ cooldown_secs = 120
         assert_eq!(
             Config::parse_file_contents(&on).unwrap().ocr,
             OcrSetting::On
+        );
+    }
+
+    #[test]
+    fn poll_interval_is_faster_by_default_only_with_the_new_reader() {
+        use std::time::Duration;
+        let auto = AutoDetectConfig::default();
+        assert_eq!(auto.poll_interval(true), Duration::from_millis(1500));
+        assert_eq!(auto.poll_interval(false), Duration::from_secs(4));
+        // 4 is what older Settings wrote: still automatic.
+        let legacy = AutoDetectConfig {
+            poll_interval_secs: Some(4),
+            ..auto
+        };
+        assert_eq!(legacy.poll_interval(true), Duration::from_millis(1500));
+        assert_eq!(legacy.poll_interval(false), Duration::from_secs(4));
+        // Any other value overrides both readers.
+        let set = AutoDetectConfig {
+            poll_interval_secs: Some(2),
+            ..auto
+        };
+        assert_eq!(set.poll_interval(true), Duration::from_secs(2));
+        assert_eq!(set.poll_interval(false), Duration::from_secs(2));
+        let zero = AutoDetectConfig {
+            poll_interval_secs: Some(0),
+            ..auto
+        };
+        assert_eq!(zero.poll_interval(false), Duration::from_secs(1));
+        // A config without the key parses as automatic.
+        let parsed: AutoDetectConfig =
+            toml::from_str("enabled = true\ncooldown_secs = 120\n").unwrap();
+        assert_eq!(parsed.poll_interval_secs, None);
+        assert_eq!(parsed.poll_interval(true), Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn automatic_poll_interval_is_written_as_4_for_older_versions() {
+        let auto = AutoDetectConfig::default();
+        assert_eq!(auto.poll_interval_secs, None);
+        let raw = toml::to_string(&auto).unwrap();
+        assert!(raw.contains("poll_interval_secs = 4"), "{raw}");
+        let back: AutoDetectConfig = toml::from_str(&raw).unwrap();
+        assert_eq!(back, auto);
+        let fixed = AutoDetectConfig {
+            poll_interval_secs: Some(5),
+            ..auto
+        };
+        assert!(
+            toml::to_string(&fixed)
+                .unwrap()
+                .contains("poll_interval_secs = 5")
         );
     }
 }

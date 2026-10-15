@@ -355,8 +355,12 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
         map_block(game, SIZE_FEATURED, FONT_EXTRABOLD),
         with_unsure(
             text(format!(
-                "{}  ·  {}",
+                "{} ({})  ·  {} {}",
                 game.display_hero(),
+                game.role.label(),
+                game.played_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d"),
                 local_hm(game.played_at)
             ))
             .size(SIZE_BODY)
@@ -711,8 +715,12 @@ pub fn expanded_game_card<'a>(
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(format!(
-                "{}  ·  {}",
+                "{} ({})  ·  {} {}",
                 game.display_hero(),
+                game.role.label(),
+                game.played_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d"),
                 local_hm(game.played_at)
             ))
             .size(SIZE_BODY)
@@ -722,8 +730,8 @@ pub fn expanded_game_card<'a>(
             game.field_unsure("hero"),
         ),
         result,
-        stat_line(game),
-        action_row(game, editing, confirm_delete, has_kit),
+        stat_line_with(game, (!editing).then_some(Message::ToggleEdit)),
+        action_row(game, editing, confirm_delete, has_kit || !in_progress),
     ]
     .spacing(10);
 
@@ -826,7 +834,6 @@ fn action_row(
                 outcome: Outcome::Draw,
             },
         ),
-        space().width(Fill),
         button(
             text(if editing { "Cancel edit" } else { "Edit stats" })
                 .size(SIZE_META)
@@ -856,6 +863,9 @@ fn action_row(
     ]
     .spacing(8)
     .align_y(Alignment::Center)
+    // Wrap onto a second line on a narrow window so Delete session is never
+    // cut off at the right edge.
+    .wrap()
     .into()
 }
 
@@ -1030,9 +1040,9 @@ fn review_panel(game: &Game) -> Element<'static, Message> {
 }
 
 fn role_and_edited(game: &Game) -> Element<'static, Message> {
-    let mut r = row![label_text(game.role.label())]
-        .spacing(8)
-        .align_y(Alignment::Center);
+    // The role sits next to the hero name below; here it read like a
+    // label for the map.
+    let mut r = row![].spacing(8).align_y(Alignment::Center);
     if game.held_locally() {
         r = r.push(status_chip("needs review", theme::WARN));
     }
@@ -1115,16 +1125,16 @@ fn in_progress_note() -> Element<'static, Message> {
 fn in_progress_stats(game: &Game) -> Element<'static, Message> {
     column![
         row![
-            stat_box("E", game.elims, game.field_unsure("e")),
-            stat_box("D", game.deaths, game.field_unsure("d")),
-            stat_box("A", game.assists, game.field_unsure("a")),
+            stat_box("E", game.elims, game.field_unsure("e"), None),
+            stat_box("D", game.deaths, game.field_unsure("d"), None),
+            stat_box("A", game.assists, game.field_unsure("a"), None),
         ]
         .spacing(6)
         .width(Fill),
         row![
-            stat_box("DMG", game.damage, game.field_unsure("dmg")),
-            stat_box("HEAL", game.healing, game.field_unsure("h")),
-            stat_box("MIT", game.mitigation, game.field_unsure("mit")),
+            stat_box("DMG", game.damage, game.field_unsure("dmg"), None),
+            stat_box("HEAL", game.healing, game.field_unsure("h"), None),
+            stat_box("MIT", game.mitigation, game.field_unsure("mit"), None),
         ]
         .spacing(6)
         .width(Fill),
@@ -1178,19 +1188,33 @@ fn map_block(game: &Game, size: f32, font: iced::Font) -> Element<'static, Messa
 }
 
 fn stat_line(game: &Game) -> Element<'static, Message> {
+    stat_line_with(game, None)
+}
+
+/// The stat row. With `fix` set (the expanded card, not editing), an
+/// unsure stat is a button that opens Edit stats in one click.
+fn stat_line_with(game: &Game, fix: Option<Message>) -> Element<'static, Message> {
+    let b = |label: &'static str, value: u32, field: &str| {
+        stat_box(label, value, game.field_unsure(field), fix.clone())
+    };
     row![
-        stat_box("E", game.elims, game.field_unsure("e")),
-        stat_box("D", game.deaths, game.field_unsure("d")),
-        stat_box("A", game.assists, game.field_unsure("a")),
-        stat_box("DMG", game.damage, game.field_unsure("dmg")),
-        stat_box("HEAL", game.healing, game.field_unsure("h")),
-        stat_box("MIT", game.mitigation, game.field_unsure("mit")),
+        b("E", game.elims, "e"),
+        b("D", game.deaths, "d"),
+        b("A", game.assists, "a"),
+        b("DMG", game.damage, "dmg"),
+        b("HEAL", game.healing, "h"),
+        b("MIT", game.mitigation, "mit"),
     ]
     .spacing(8)
     .into()
 }
 
-fn stat_box(label: &'static str, value: u32, unsure: bool) -> Element<'static, Message> {
+fn stat_box(
+    label: &'static str,
+    value: u32,
+    unsure: bool,
+    fix: Option<Message>,
+) -> Element<'static, Message> {
     let mut body = column![
         text(label)
             .size(SIZE_LABEL)
@@ -1206,10 +1230,17 @@ fn stat_box(label: &'static str, value: u32, unsure: bool) -> Element<'static, M
     if unsure {
         body = body.push(unsure_label());
     }
-    container(body)
+    let boxed = container(body)
         .padding(Padding::from([8, 10]))
-        .style(theme::stat_box)
-        .into()
+        .style(theme::stat_box);
+    match fix.filter(|_| unsure) {
+        Some(msg) => button(boxed)
+            .padding(0)
+            .style(theme::ghost_btn())
+            .on_press(msg)
+            .into(),
+        None => boxed.into(),
+    }
 }
 
 fn format_stat(n: u32) -> String {

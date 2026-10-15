@@ -336,6 +336,22 @@ pub fn merge_saved(policy: &PolicyRow, own: OwnRow, board: Option<&BoardRead>) -
     }
 }
 
+/// The digit reader's number for each own-row stat (`e a d dmg h mit`),
+/// sure or not: the best guess for a column that never gets a sure read
+/// (alpha.8). `None` where the cell has no number or the row is unknown.
+pub fn own_row_guesses(board: &BoardRead, own: OwnRow) -> [Option<u32>; 6] {
+    let OwnRow::Identified { index, .. } = own else {
+        return [None; 6];
+    };
+    std::array::from_fn(|slot| {
+        let suffix = ["e", "a", "d", "dmg", "h", "mit"][slot];
+        match board.get(&format!("r{index}.{suffix}"))?.value {
+            Some(Value::Int(n)) => Some(n),
+            _ => None,
+        }
+    })
+}
+
 /// Flat suspect names safe to upload.
 ///
 /// Row names such as `r3.dmg` become `dmg`. Unknown names, duplicates, and

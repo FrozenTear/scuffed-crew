@@ -85,8 +85,24 @@ pub(crate) const VALUES: [[u32; 6]; 12] = [
 
 /// `(top, bottom)` of row `r` (0-11), bottom exclusive and cut by the crop.
 pub(crate) fn row_span(r: usize) -> (u32, u32) {
-    let top = if r < 6 { T1 } else { T2 } + PITCH * (r % 6) as u32;
-    (top, (top + ROW_H).min(H))
+    row_span_with(r, PITCH)
+}
+
+thread_local! {
+    /// Team 2's row pitch for the next synthetic board (75 unless a test
+    /// sets another; real boards measured 74 to 75.25).
+    pub(crate) static T2_PITCH: std::cell::Cell<u32> = const { std::cell::Cell::new(PITCH) };
+}
+
+/// [`row_span`] with team 2's pitch from [`T2_PITCH`].
+pub(crate) fn row_span_with(r: usize, pitch1: u32) -> (u32, u32) {
+    let pitch = if r < 6 {
+        pitch1
+    } else {
+        T2_PITCH.with(|p| p.get())
+    };
+    let top = if r < 6 { T1 } else { T2 } + pitch * (r % 6) as u32;
+    (top, (top + ROW_H.min(pitch - 2)).min(H))
 }
 
 fn fill(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, c: Rgb<u8>) {

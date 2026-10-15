@@ -538,7 +538,7 @@ fn read_end_title(
     if let Some(stability) = stability
         && !stability.check("end title", &crop)
     {
-        tracing::trace!("end title crop not stable — deferring OCR");
+        tracing::trace!("end title crop not stable: deferring OCR");
         return MatchOutcome::Unknown;
     }
 
@@ -832,7 +832,7 @@ fn scoreline_looks_present_with(
     if let Some(stability) = stability
         && !stability.check("scoreline", &crop)
     {
-        tracing::trace!("scoreline crop not stable — deferring OCR");
+        tracing::trace!("scoreline crop not stable: deferring OCR");
         return false;
     }
     if p4 == FinalScoreSource::Words {
@@ -1012,23 +1012,23 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
 /// on end titles). Paths 1 and 3 are the same under both readers.
 pub fn detect_end_reel_with(img: &DynamicImage, rgb: &RgbImage, titles: &Titles) -> bool {
     if titles.sure_end_title().is_some() {
-        tracing::info!("end title — end-of-match wake");
+        tracing::info!("end title: end-of-match wake");
         return true;
     }
     if super::match_start::detect_ban_screen(img, rgb) {
-        tracing::debug!("ban screen — not an end-reel wake");
+        tracing::debug!("ban screen: not an end-reel wake");
         return false;
     }
     if end_reel_letterbox(rgb) {
-        tracing::info!("end-reel letterbox — POTG / highlight wake");
+        tracing::info!("end-reel letterbox: POTG / highlight wake");
         return true;
     }
     if matches!(titles, Titles::Ocr) && read_end_reel_title(img) {
-        tracing::info!("end-reel title — POTG / highlight wake");
+        tracing::info!("end-reel title: POTG / highlight wake");
         return true;
     }
     if read_end_reel_nameplate(rgb) {
-        tracing::info!("end-reel nameplate — POTG / highlight wake");
+        tracing::info!("end-reel nameplate: POTG / highlight wake");
         return true;
     }
     false
@@ -1632,7 +1632,7 @@ fn gated_title_crop(
         && !stability.check(at.context, &crop)
     {
         let context = at.context;
-        tracing::trace!(context, "title crop lit but not stable — deferring OCR");
+        tracing::trace!(context, "title crop lit but not stable: deferring OCR");
         return None;
     }
     Some(crop)
@@ -2692,7 +2692,7 @@ mod tests {
         let crop = end_reel_cinematic_crop(&img).expect("cinematic crop");
         assert!(
             !cinematic_title_band(&crop),
-            "toast + hero light the cinematic band — old gate must miss"
+            "toast + hero light the cinematic band: old gate must miss"
         );
         let old_orange = playfield_hit_ratio(
             &frame,

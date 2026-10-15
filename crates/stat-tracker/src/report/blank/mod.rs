@@ -443,6 +443,10 @@ pub struct BlankedBoard {
     /// Why the whole board is fill, when it is.
     pub board: Result<(), String>,
     pub rows: Vec<RowVerdict>,
+    /// Rows kept by the name-column fallback ([`name_column_fallback`]):
+    /// the row copied with its name column filled. 0 when the allowlist
+    /// kept anything.
+    pub name_fill_rows: usize,
 }
 
 impl BlankedBoard {
@@ -451,6 +455,7 @@ impl BlankedBoard {
             image,
             board: Err(why.into()),
             rows: Vec::new(),
+            name_fill_rows: 0,
         }
     }
 
@@ -466,7 +471,20 @@ impl BlankedBoard {
 
     /// Anything besides fill: a board worth sending.
     pub fn kept_anything(&self) -> bool {
-        self.digit_rows() + self.portraits() > 0
+        self.digit_rows() + self.portraits() + self.name_fill_rows > 0
+    }
+
+    /// True when every pixel is fill: nothing of the board survived, even
+    /// if a row verdict says something was kept.
+    pub fn all_fill(&self) -> bool {
+        self.image.pixels().all(|p| *p == FILL)
+    }
+
+    /// A picture worth attaching to a report: something was kept and the
+    /// image is not plain fill. Otherwise the report says "no picture
+    /// saved", the same as a 5v5 board.
+    pub fn has_picture(&self) -> bool {
+        self.kept_anything() && !self.all_fill()
     }
 }
 
@@ -751,15 +769,138 @@ fn blank_crop_inner(
         }
     }
     memory.remember(seen);
-    BlankedBoard {
+    let mut blanked = BlankedBoard {
         image: out,
         board: Ok(()),
         rows,
+        name_fill_rows: 0,
+    };
+    if !blanked.kept_anything() {
+        name_column_fallback(src, &b, chat, &mut blanked);
     }
+    blanked
+}
+
+/// Name column of a row, from the table's left edge `L`, in 1664 px crop
+/// units, measured on 1664x1007 6v6 boards (2026-10-14): the hero
+/// portrait art runs from 30 to 100, names from 101 to 370 and perks from
+/// about 375. The fill starts at 101, right after the portrait art, and
+/// ends with a margin before the perks. (`portrait::PORTRAIT_END`, 104, is
+/// where the portrait check's cell ends; it overlaps the first name pixels
+/// and is not used here.)
+pub(crate) const NAME_COL: (f64, f64) = (101.0, 380.0);
+
+/// Fallback when the allowlist kept nothing on a measured board (strict
+/// digit gates reject the row, portraits are off): copy each verified row
+/// of the table between `L` and `R`, then fill its name column. Everything
+/// else (outside the table, unverified rows, the header) stays fill.
+/// A row the chat box may cover is not copied (chat text carries names),
+/// and with chat unknown nothing is.
+fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut BlankedBoard) {
+    if chat == Chat::Unknown {
+        return;
+    }
+    let (w, h) = src.dimensions();
+    let s = b.s;
+    let x0 = b.l.min(w);
+    let x1 = b.r.min(w);
+    let n0 = (f64::from(b.l) + NAME_COL.0 * s).floor().max(0.0) as u32;
+    let n1 = ((f64::from(b.l) + NAME_COL.1 * s).ceil() as u32).min(w);
+    let mut kept = 0;
+    for r in b
+        .rows
+        .iter()
+        .filter(|r| r.verified && !chat.covers(r.bot, h))
+    {
+        for y in r.top..r.bot.min(h) {
+            for x in x0..x1 {
+                let px = if (n0..n1).contains(&x) {
+                    FILL
+                } else {
+                    *src.get_pixel(x, y)
+                };
+                out.image.put_pixel(x, y, px);
+            }
+        }
+        kept += 1;
+    }
+    out.name_fill_rows = kept;
 }
 
 #[cfg(test)]
 mod tests {
+    /// A 1664x1007 6v6 Tab board as measured on 2026-10-14 (wide perk
+    /// layout, role bar at x 0, names x 101 to 370, team 1 rows from y 29
+    /// 75 px apart, team 2 from y 566 74 px apart, bottom row cut). When
+    /// the strict digit gates keep no row, the name-column fallback copies
+    /// the verified rows and fills every name; outside the table stays fill.
+    #[test]
+    fn a_1664x1007_6v6_board_gets_a_picture_with_every_name_filled() {
+        synth::T2_PITCH.with(|p| p.set(74));
+        let crop = synth::board(synth::Layout::L4);
+        let boxes = synth::name_boxes(synth::Layout::L4);
+        synth::T2_PITCH.with(|p| p.set(synth::PITCH));
+        assert_eq!(crop.dimensions(), (1664, 1007));
+        let b = super::board::measure(&crop, 6).expect("the board measures");
+        assert!(b.rows.iter().filter(|r| r.verified).count() >= 6);
+        let mut out = BlankedBoard {
+            image: RgbImage::from_pixel(1664, 1007, FILL),
+            board: Ok(()),
+            rows: Vec::new(),
+            name_fill_rows: 0,
+        };
+        super::name_column_fallback(&crop, &b, Chat::None, &mut out);
+        assert!(out.kept_anything());
+        for &(x0, y0, x1, y1) in &boxes {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(*out.image.get_pixel(x, y), FILL, "name pixel ({x},{y})");
+                }
+            }
+        }
+        // the fill starts right after the portrait art (x 30 to 100)
+        let r0 = b.rows.iter().find(|r| r.verified).unwrap();
+        let y = r0.top + 20;
+        assert_eq!(out.image.get_pixel(100, y), crop.get_pixel(100, y));
+        assert_eq!(*out.image.get_pixel(101, y), FILL);
+        // the cut-off bottom enemy row (from y 566 + 5 * 74) is filled
+        // down to the frame edge
+        for y in 566 + 5 * 74..1007 {
+            for x in 101..370 {
+                assert_eq!(*out.image.get_pixel(x, y), FILL, "cut row ({x},{y})");
+            }
+        }
+        // the hero card beside the table stays fill
+        for y in (0..1007).step_by(50) {
+            assert_eq!(*out.image.get_pixel(1300, y), FILL);
+        }
+        // a stat cell of a verified row is copied
+        let r = b.rows.iter().find(|r| r.verified).unwrap();
+        let (x, y) = (b.r - 100, r.top + 36);
+        assert_eq!(out.image.get_pixel(x, y), crop.get_pixel(x, y));
+
+        // with chat possibly on screen, nothing is kept
+        let mut unsure = BlankedBoard {
+            image: RgbImage::from_pixel(1664, 1007, FILL),
+            board: Ok(()),
+            rows: Vec::new(),
+            name_fill_rows: 0,
+        };
+        super::name_column_fallback(&crop, &b, Chat::Unknown, &mut unsure);
+        assert!(!unsure.kept_anything());
+    }
+
+    /// A frame caught mid-transition shows no board: no picture.
+    #[test]
+    fn a_frame_with_no_board_gives_no_picture() {
+        let f = image::DynamicImage::ImageRgb8(RgbImage::from_fn(2560, 1440, |x, y| {
+            Rgb([(30 + x * 40 / 2560) as u8, (45 + y * 40 / 1440) as u8, 60])
+        }));
+        let b = blanked_scoreboard(&f, Some(6));
+        assert!(b.board.is_err());
+        assert!(!b.kept_anything());
+        assert!(b.image.pixels().all(|p| *p == FILL));
+    }
     use super::*;
 
     const SIZES: [(u32, u32); 5] = [

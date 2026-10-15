@@ -161,7 +161,7 @@ pub async fn startup_maintenance(
     tracing::info!(
         size_mb = format!("{:.1}", size as f64 / 1e6),
         threshold_mb = AUTO_VACUUM_THRESHOLD_BYTES / (1024 * 1024),
-        "auto-vacuum: live store over threshold — compacting"
+        "auto-vacuum: live store over threshold: compacting"
     );
     let before = size;
     let (matches, sessions, tombstones) = LocalStore::vacuum(data_dir).await?;

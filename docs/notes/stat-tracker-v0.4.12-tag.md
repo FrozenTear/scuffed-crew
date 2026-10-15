@@ -92,7 +92,7 @@ Release notes are `crates/stat-tracker/CHANGELOG.md` section `## 0.4.12`, then
 the usual git-log since the previous `stat-tracker-v*` tag (0.4.11), then
 install requirements.
 
-## 4. Laptop install test (AerynOS / the streamer)
+## 4. Laptop install test (AerynOS / FrozenTear)
 
 After the GitHub Release has the tarball:
 

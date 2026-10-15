@@ -482,8 +482,18 @@ pub fn outcome_for(
                 .filter(|secs| *secs > 0)
                 .map(|secs| format!(" Try again in {}.", wait_text(secs)))
                 .unwrap_or_default();
+            // The site's own words, e.g. "Daily report limit reached". The
+            // game's saved pictures are kept (only a sent report removes
+            // them), so it can be sent again tomorrow.
+            let said = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .map(|e| e.trim().chars().take(120).collect::<String>())
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| "You have reached the daily report limit".into());
+            let said = said.trim_end_matches('.');
             SendOutcome::Failed(format!(
-                "You have reached the daily report limit.{wait} Save report still works."
+                "{said}.{wait} This game stays saved, so you can send it tomorrow. Save report still works."
             ))
         }
         503 if body.contains("reports_disabled") => SendOutcome::Failed(
@@ -624,7 +634,12 @@ pub fn display_resolution() -> Resolution {
     if width == 0 || height == 0 {
         return FALLBACK_RESOLUTION;
     }
-    Resolution { width, height }
+    // A rotated or portrait monitor reports its edges the other way round.
+    // Overwatch runs landscape, so the long edge is the width.
+    Resolution {
+        width: width.max(height),
+        height: width.min(height),
+    }
 }
 
 pub fn category_label(category: LogOnlyCategory) -> &'static str {
@@ -926,10 +941,14 @@ fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
 
 fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
     let mut col = column![
-        text("What will be sent")
-            .size(SIZE_BODY)
-            .font(FONT_BOLD)
-            .color(TEXT)
+        text(if d.sent() {
+            "Sent"
+        } else {
+            "What will be sent"
+        })
+        .size(SIZE_BODY)
+        .font(FONT_BOLD)
+        .color(TEXT)
     ]
     .spacing(6)
     .width(Fill);
@@ -1069,8 +1088,9 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
         }) => {
             let expiry = match expires_at {
                 Some(t) => format!(
-                    "It is deleted on {}.",
-                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                    "It is deleted on {} (your local time, UTC{}).",
+                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    t.with_timezone(&Local).format("%:z")
                 ),
                 None => "It is kept for training until you withdraw it.".into(),
             };
@@ -1238,6 +1258,15 @@ mod tests {
         };
         assert!(
             m.contains("daily report limit") && m.contains("60 minutes"),
+            "{m}"
+        );
+        let SendOutcome::Failed(m) =
+            outcome_for(429, None, r#"{"error":"Daily report limit reached"}"#, None)
+        else {
+            panic!()
+        };
+        assert!(
+            m.starts_with("Daily report limit reached.") && m.contains("send it tomorrow"),
             "{m}"
         );
         let SendOutcome::Failed(m) = outcome_for(429, None, "", None) else {

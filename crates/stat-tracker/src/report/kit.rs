@@ -29,7 +29,13 @@ use super::blank::{self, TeamLayout};
 
 pub const KIT_DIR: &str = "report-kit";
 /// Sessions kept. Older kits are deleted when a new session writes one.
-pub const KEEP: usize = 20;
+pub const KEEP: usize = 10;
+
+/// A kit older than this is deleted on the next prune.
+pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// All kits together stay under this many bytes; oldest go first.
+pub const MAX_TOTAL_BYTES: u64 = 40 * 1024 * 1024;
 
 pub const SCOREBOARD_PNG: &str = "scoreboard.png";
 pub const OUTCOME_PNG: &str = "outcome.png";
@@ -347,8 +353,22 @@ pub fn record_scoreboard_at(
         return Ok(());
     };
     let board = blank_seen(&dir, frame, team_size, grabbed);
-    if !board.kept_anything() {
-        return Ok(());
+    if !board.has_picture() {
+        // No picture is safe to keep, but the reads still link a report to
+        // this game. Written only when the session has no picture yet, so a
+        // good picture is never dropped for a later board that blanked to
+        // nothing.
+        tracing::info!(
+            session_id,
+            reason = board
+                .board
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or("all fill"),
+            "report kit: board blanked to nothing, saving the reads without a picture"
+        );
+        return record_reads_only(data_dir, &dir, reads);
     }
     let png = encode_png(&board.image)?;
     let mut reads = reads.clone();
@@ -369,6 +389,29 @@ pub fn record_scoreboard_at(
     // match, and [`load`] reports nothing.
     write_private(&dir, SCOREBOARD_PNG, &png)?;
     write_private(&dir, READS_JSON, &json)?;
+    prune_locked(data_dir, KEEP);
+    Ok(())
+}
+
+/// Save `reads.json` with no `scoreboard.png` (empty `scoreboard_sha256`).
+/// [`load`] returns such a kit with reads and no scoreboard, so the game
+/// can still be reported and linked by session id.
+fn record_reads_only(data_dir: &Path, dir: &Path, reads: &KitReads) -> io::Result<()> {
+    let mut reads = reads.clone();
+    reads.scoreboard_sha256 = String::new();
+    let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
+    let _guard = write_lock();
+    if was_removed(dir) {
+        return Ok(());
+    }
+    if let Some(cur) = read_reads(dir)
+        && (!cur.scoreboard_sha256.is_empty() || cur.captured_at > reads.captured_at)
+    {
+        return Ok(());
+    }
+    private_dir(&kit_root(data_dir))?;
+    private_dir(dir)?;
+    write_private(dir, READS_JSON, &json)?;
     prune_locked(data_dir, KEEP);
     Ok(())
 }
@@ -471,6 +514,14 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
         if reads.blank_table != blank::BLANK_TABLE_VERSION {
             return Kit::default();
         }
+        if reads.scoreboard_sha256.is_empty() {
+            // Reads saved without a picture (the board blanked to nothing).
+            return Kit {
+                scoreboard_png: None,
+                outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
+                reads: Some(reads),
+            };
+        }
         let Ok(png) = fs::read(dir.join(SCOREBOARD_PNG)) else {
             return Kit::default();
         };
@@ -499,8 +550,17 @@ pub fn is_trusted(kit: &Kit) -> bool {
                 && !reads.scoreboard_sha256.is_empty()
                 && super::bundle::sha256_hex(png) == reads.scoreboard_sha256
         }
+        (Some(reads), None) => {
+            reads.blank_table == blank::BLANK_TABLE_VERSION && reads.scoreboard_sha256.is_empty()
+        }
         _ => false,
     }
+}
+
+/// True when the session can be reported as a game: it has saved reads,
+/// with or without a picture.
+pub fn has_reads(data_dir: &Path, session_id: &str) -> bool {
+    load(data_dir, session_id).reads.is_some()
 }
 
 /// Delete a session's kit (the member deleted the game), its portrait
@@ -535,9 +595,31 @@ fn prune_locked(data_dir: &Path, keep: usize) {
         .map(|p| (modified(&p), p))
         .collect();
     dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
-    for (_, p) in dirs.into_iter().skip(keep) {
-        let _ = fs::remove_dir_all(p);
+    let now = std::time::SystemTime::now();
+    let mut total: u64 = 0;
+    for (i, (at, p)) in dirs.into_iter().enumerate() {
+        let size = dir_bytes(&p);
+        let too_old = now.duration_since(at).is_ok_and(|age| age > MAX_AGE);
+        // The newest kit is always kept by the size cap.
+        let too_big = i > 0 && total + size > MAX_TOTAL_BYTES;
+        if i >= keep || too_old || too_big {
+            let _ = fs::remove_dir_all(p);
+        } else {
+            total += size;
+        }
     }
+}
+
+fn dir_bytes(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -589,6 +671,38 @@ mod tests {
     /// scoreboard", like the rank screen's dark background.
     fn rank_like_frame() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(1920, 1080, image::Rgb([24, 20, 18])))
+    }
+
+    #[test]
+    fn blanking_changes_only_name_boxes_of_the_report_copy() {
+        // The blackout is on the copy saved for the report only: the frame
+        // the reader uses is unchanged. The copy is an allowlist: every name
+        // box is filled, and pixels outside them (hero icons, stat cells)
+        // are still there from the original.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = frame();
+        let before = source.to_rgb8();
+        record_scoreboard(tmp.path(), "s-1", &source, Some(6), &reads()).unwrap();
+        assert_eq!(source.to_rgb8(), before, "reader frame was changed");
+        let png = load(tmp.path(), "s-1").scoreboard_png.expect("scoreboard");
+        let copy = image::load_from_memory(&png).unwrap().to_rgb8();
+        let (cx, cy, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+        let original = image::imageops::crop_imm(&before, cx, cy, cw, ch).to_image();
+        let boxes = synth::name_boxes(Layout::L1);
+        let in_box = |x: u32, y: u32| {
+            boxes
+                .iter()
+                .any(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1)
+        };
+        let mut kept = 0;
+        for (x, y, px) in copy.enumerate_pixels() {
+            if in_box(x, y) {
+                assert_eq!(*px, blank::FILL, "name pixel ({x},{y}) not blanked");
+            } else if *px != blank::FILL && *px == *original.get_pixel(x, y) {
+                kept += 1;
+            }
+        }
+        assert!(kept > 0, "no hero icon or stat pixel was kept");
     }
 
     #[test]

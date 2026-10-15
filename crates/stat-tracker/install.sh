@@ -31,7 +31,7 @@ NC='\033[0m'
 # All logging goes to stderr; stdout is reserved for any machine-parseable
 # output. Mirrors the bootstrap.sh fix (3cd2c0c): a log line on stdout there
 # shifted a mapfile parse and broke the release fetch. error() was already on
-# stderr — info()/warn() now match it.
+# stderr: info()/warn() now match it.
 info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
@@ -93,7 +93,7 @@ refresh_desktop_database() {
 }
 
 # SKIP_INTEGRATION=<non-empty> installs binaries/libs only and skips the
-# desktop entry + systemd user unit — so throwaway-PREFIX installs (clean-room
+# desktop entry + systemd user unit: so throwaway-PREFIX installs (clean-room
 # tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
 # install (default, unchanged).
 SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
@@ -102,7 +102,7 @@ INSTALLED_UNITS=0
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
 if ! command -v cargo &>/dev/null; then
-    error "cargo not found — install Rust from https://rustup.rs"
+    error "cargo not found: install Rust from https://rustup.rs"
     exit 1
 fi
 
@@ -113,12 +113,12 @@ if ! groups | grep -qw input; then
     warn "companion shortcut does the same. Add your user to the group:"
     warn "    sudo usermod -aG input \$USER"
     warn "Then log out of the desktop session and log back in."
-    warn "A new terminal is not enough — open sessions keep the old groups."
-    warn "Continuing anyway — you can fix this later."
+    warn "A new terminal is not enough: open sessions keep the old groups."
+    warn "Continuing anyway: you can fix this later."
     echo >&2
 fi
 
-# Optional tray (Hide-to-tray). Missing is fine — the Iced window still starts.
+# Optional tray (Hide-to-tray). Missing is fine: the Iced window still starts.
 appindicator_found=0
 if ldconfig -p 2>/dev/null | grep -qE 'libayatana-appindicator3|libappindicator3'; then
     appindicator_found=1
@@ -136,7 +136,7 @@ else
     done
 fi
 if [[ "$appindicator_found" -eq 0 ]]; then
-    warn "Ayatana AppIndicator not found — stat-tracker-gui will start without a tray."
+    warn "Ayatana AppIndicator not found: stat-tracker-gui will start without a tray."
     warn "Hide-to-tray needs libayatana-appindicator3 (or libappindicator3)."
     warn "  Debian/Ubuntu: sudo apt install libayatana-appindicator3-1"
     warn "  Fedora:        sudo dnf install libayatana-appindicator-gtk3"
@@ -158,7 +158,7 @@ if config_ocr_is_off "$HOME"; then
     OCR_OFF=1
 fi
 if ! command -v tesseract &>/dev/null; then
-    warn "tesseract not found — OCR will not work for source builds that link system OCR."
+    warn "tesseract not found: OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
     echo >&2
 elif ! { ls /usr/share/tessdata/eng.traineddata \
@@ -172,7 +172,7 @@ elif ! { ls /usr/share/tessdata/eng.traineddata \
         info "It does need it whenever it keeps classic OCR on: a tracker version that cannot turn it off yet, a missing reader pack, or you turn classic OCR back on."
         info "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
     else
-        warn "eng.traineddata not found — install your distro's eng tessdata package."
+        warn "eng.traineddata not found. Install your distro's eng tessdata package."
         warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
         echo >&2
     fi
@@ -212,12 +212,12 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     warn "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
     warn "    export PATH=\"$BIN_DIR:\$PATH\""
     warn "App launchers (AerynOS / Cosmic / GNOME) often omit this dir even"
-    warn "when a terminal has it — the .desktop Exec is an absolute path so"
+    warn "when a terminal has it: the .desktop Exec is an absolute path so"
     warn "the menu does not depend on session PATH."
 fi
 
 if [[ -n "$SKIP_INTEGRATION" ]]; then
-    info "SKIP_INTEGRATION set — skipping desktop entry and systemd unit (binaries only)"
+    info "SKIP_INTEGRATION set: skipping desktop entry and systemd unit (binaries only)"
 else
     # ── Desktop entry ─────────────────────────────────────────────────────────
     write_desktop_entry "$ASSETS/scuffed-stat-tracker.desktop" \
@@ -240,7 +240,7 @@ else
     )
     if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
         MANIFEST_ENTRIES+=("$DATA_DIR_DROPIN")
-        info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
+        info "Custom data_dir is outside the unit sandbox: wrote $DATA_DIR_DROPIN"
     fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
     if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
@@ -272,7 +272,7 @@ mv "$MANIFEST.tmp" "$MANIFEST"
 info "Wrote install manifest → $MANIFEST"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
-# Human-facing summary to stderr too — stdout stays reserved for machine output
+# Human-facing summary to stderr too: stdout stays reserved for machine output
 # (there is none), so an output-parsing caller never sees install chatter.
 
 {
@@ -290,7 +290,7 @@ info "Wrote install manifest → $MANIFEST"
         echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE)."
         echo "  On Sway/Hyprland those are read from the compositor each start."
         echo "  If you installed with no graphical session, start the daemon"
-        echo "  again after login — the oneshot retries."
+        echo "  again after login: the oneshot retries."
     fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"

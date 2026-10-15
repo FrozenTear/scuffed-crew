@@ -166,7 +166,7 @@ impl MultiKeyboardStream {
 
         let count = scan_and_open(&registry, &tx);
         if count == 0 {
-            return Err("no keyboard device found — ensure user is in the 'input' group".into());
+            return Err("no keyboard device found: ensure user is in the 'input' group".into());
         }
         tracing::info!(
             device_count = count,
@@ -248,7 +248,7 @@ fn log_grabbed(name: &str, path: &std::path::Path) {
     tracing::warn!(
         name = %name,
         path = %path.display(),
-        "keyboard is exclusively grabbed by another process (global-hotkey daemon such as gsr-ui?) — Tab presses on it cannot reach the tracker; its virtual pass-through keyboard will be used if one appears"
+        "keyboard is exclusively grabbed by another process (global-hotkey daemon such as gsr-ui?): Tab presses on it cannot reach the tracker; its virtual pass-through keyboard will be used if one appears"
     );
 }
 
@@ -263,10 +263,10 @@ fn log_all_grabbed(registry: &Registry, startup: bool) {
     if all && !was {
         tracing::warn!(
             devices = ?reg.values().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            "EVERY keyboard is grabbed by another process — Tab captures will not fire until the grabber's virtual keyboard appears or the grab is released (gsr-ui: set hotkeys to the no-grab/virtual-devices mode)"
+            "EVERY keyboard is grabbed by another process: Tab captures will not fire until the grabber's virtual keyboard appears or the grab is released (gsr-ui: set hotkeys to the no-grab/virtual-devices mode)"
         );
     } else if !all && was && !startup {
-        tracing::info!("an ungrabbed keyboard is available again — Tab captures can fire");
+        tracing::info!("an ungrabbed keyboard is available again: Tab captures can fire");
     }
 }
 
@@ -321,7 +321,7 @@ async fn run_device(
                     if grabbed {
                         log_grabbed(&name, &path);
                     } else {
-                        tracing::info!(device = %name, "keyboard grab released — Tab presses reach the tracker again");
+                        tracing::info!(device = %name, "keyboard grab released: Tab presses reach the tracker again");
                     }
                     log_all_grabbed(&registry, false);
                 }

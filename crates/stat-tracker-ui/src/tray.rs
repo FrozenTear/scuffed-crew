@@ -21,7 +21,7 @@ pub const APPINDICATOR_SONAMES: &[&str] = &[
 /// Logged when the tray cannot be created. Hide-to-tray needs this lib.
 pub const MISSING_TRAY_WARNING: &str = "system tray unavailable \
 (libayatana-appindicator3 / libappindicator3 not loaded). \
-Starting without a tray — Hide-to-tray will not work. \
+Starting without a tray. Hide-to-tray will not work. \
 Install the Ayatana AppIndicator package if your distro ships it (AerynOS may not).";
 
 /// Short GUI toast when the window starts without a tray.

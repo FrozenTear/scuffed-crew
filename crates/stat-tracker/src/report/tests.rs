@@ -467,6 +467,9 @@ fn system_reports_the_ocr_switch_only_when_classic_ocr_is_off() {
     with_switch.extend(["ocr", "ocr_blocked_calls"]);
     assert_eq!(keys(&off["system"]), sorted(&with_switch));
     assert_eq!(off["system"]["ocr"], "off");
+    // the reader id says OCR was off; the OCR recognizer id does not change
+    assert_eq!(off["recognizers"]["matcher"], "cv-v6-noocr");
+    assert_eq!(off["recognizers"]["ocr"], "ocr-v1");
     assert_eq!(
         off["system"]["ocr_blocked_calls"],
         serde_json::json!({
@@ -1029,15 +1032,85 @@ mod game {
     }
 
     #[test]
-    fn a_board_the_blanker_cannot_measure_writes_no_kit() {
-        // Unknown team size and 5v5 (no measured geometry yet) keep nothing,
-        // so no kit is written and only a missed-game report can be built.
+    fn a_board_the_blanker_cannot_measure_saves_reads_and_no_picture() {
+        // Unknown team size and 5v5 (no measured geometry yet) keep nothing
+        // of the board. The reads are still saved, so the report links its
+        // game, and it carries no picture at all: a picture whose player
+        // names were not blanked never goes into a report.
         for team in [None, Some(5)] {
             let tmp = tempfile::tempdir().unwrap();
             kit::record_scoreboard(tmp.path(), "sess-1", &frame(), team, &reads(None)).unwrap();
             assert!(!kit::has_kit(tmp.path(), "sess-1"), "{team:?}");
-            assert!(build_game_report(&input(tmp.path(), GameCategory::WrongStats)).is_err());
+            assert!(kit::has_reads(tmp.path(), "sess-1"), "{team:?}");
+            let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
+            assert!(zip.images.is_empty(), "{team:?}");
+            assert!(
+                zip.manifest_json.contains("\"session_id\": \"sess-1\""),
+                "{}",
+                zip.manifest_json
+            );
+            assert!(!zip.manifest_json.contains("crops/"), "{team:?}");
         }
+    }
+
+    #[test]
+    fn a_6v6_board_whose_header_is_not_found_saves_reads_and_no_picture() {
+        // Real 1664x1007 6v6 boards whose header strip the blanker cannot
+        // find blank to plain fill. That picture is never attached: the
+        // report carries the reads and no picture, the same as 5v5.
+        let tmp = tempfile::tempdir().unwrap();
+        let grey =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(1664, 1007, image::Rgb([90, 90, 100])));
+        let blanked = crate::report::blank::blanked_scoreboard(&grey, Some(6));
+        assert!(blanked.board.is_err());
+        assert!(!blanked.has_picture());
+        kit::record_scoreboard(tmp.path(), "sess-1", &grey, Some(6), &reads(Some(6))).unwrap();
+        assert!(!kit::has_kit(tmp.path(), "sess-1"));
+        assert!(kit::has_reads(tmp.path(), "sess-1"));
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongStats)).unwrap();
+        assert!(zip.images.is_empty());
+        assert!(!zip.manifest_json.contains("crops/"));
+        assert!(zip.manifest_json.contains("\"session_id\": \"sess-1\""));
+    }
+
+    #[test]
+    fn an_all_fill_board_is_no_picture_even_if_a_row_was_kept() {
+        use crate::report::blank::{BlankedBoard, FILL};
+        let b = BlankedBoard {
+            image: RgbImage::from_pixel(64, 32, FILL),
+            board: Ok(()),
+            rows: Vec::new(),
+            name_fill_rows: 3,
+        };
+        assert!(b.kept_anything());
+        assert!(b.all_fill());
+        assert!(!b.has_picture());
+    }
+
+    #[test]
+    fn a_report_stays_within_the_site_file_and_picture_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let good = input(tmp.path(), GameCategory::WrongStats);
+        let zip = build_game_report(&good).unwrap();
+        let listed = zip.manifest_json.matches("\"path\"").count();
+        assert!(listed <= crate::report::bundle::MAX_FILES, "{listed}");
+        for img in &zip.images {
+            assert!(img.width <= crate::report::bundle::MAX_IMAGE_SIDE);
+            assert!(img.height <= crate::report::bundle::MAX_IMAGE_SIDE);
+        }
+        // A picture wider than 7680 px is refused, never sent.
+        let wide = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(RgbImage::new(7681, 1))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let mut big = good.clone();
+        big.kit.outcome_png = Some(wide);
+        assert!(build_game_report(&big).is_err());
     }
 
     #[test]

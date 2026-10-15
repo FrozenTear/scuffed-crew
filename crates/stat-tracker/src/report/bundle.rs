@@ -527,7 +527,8 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         bundle_version: BUNDLE_VERSION,
         app_version: APP_VERSION,
         recognizers: Recognizers {
-            matcher: crate::shadow::digits::RECOGNIZER_ID,
+            // OCR on or off is also in `system.ocr`; `ocr` stays ocr-v1.
+            matcher: crate::shadow::digits::recognizer_id(input.system.ocr != OcrSetting::Off),
             ocr: OCR_ID,
         },
         resolution: input.resolution,
@@ -700,13 +701,37 @@ impl GameReportInput {
         names: Vec<String>,
         built_at: DateTime<Utc>,
     ) -> Result<Self, ReportError> {
-        let kit = super::kit::load(&config.data_dir, session_id);
-        if kit.scoreboard_png.is_none() && category != GameCategory::MissedGame {
+        let mut kit = super::kit::load(&config.data_dir, session_id);
+        let snapshot = crate::storage::read_snapshot(&config.data_dir);
+        // A game from before alpha.8 (or one whose kit was pruned) has no
+        // saved reads. Its stored row still names the game, so the report
+        // carries those values and the session id, with no pictures.
+        if kit.reads.is_none()
+            && let Some(m) = snapshot
+                .as_ref()
+                .and_then(|s| s.matches.iter().find(|m| m.session_id == session_id))
+        {
+            let at: DateTime<Utc> = m.played_at.into();
+            let mut reads = super::kit::KitReads::from_capture(
+                m,
+                m,
+                0,
+                0,
+                super::blank::TeamLayout::Unknown,
+                at,
+            );
+            reads.map = Some(m.display_map_name().to_string()).filter(|s| !s.trim().is_empty());
+            kit = super::kit::Kit {
+                scoreboard_png: None,
+                outcome_png: None,
+                reads: Some(reads),
+            };
+        }
+        if kit.reads.is_none() && category != GameCategory::MissedGame {
             return Err(ReportError::InvalidInput(
-                "this game has no saved scoreboard to report",
+                "this game is not in the tracker's history",
             ));
         }
-        let snapshot = crate::storage::read_snapshot(&config.data_dir);
         let corrections = snapshot
             .as_ref()
             .map(|s| session_corrections(s, session_id))
@@ -722,9 +747,10 @@ impl GameReportInput {
         let resolution = kit
             .reads
             .as_ref()
+            .filter(|r| r.width > 0 && r.height > 0)
             .map(|r| Resolution {
-                width: r.width,
-                height: r.height,
+                width: r.width.max(r.height),
+                height: r.width.min(r.height),
             })
             .unwrap_or(Resolution {
                 width: 1920,
@@ -752,6 +778,12 @@ impl GameReportInput {
 
 /// The zip may not be bigger than this (section 8).
 pub const MAX_ZIP_BYTES: usize = 10 * 1024 * 1024;
+
+/// Files in the zip besides `manifest.json` (the site's limit).
+pub const MAX_FILES: usize = 30;
+
+/// Widest and tallest picture the site accepts, in pixels.
+pub const MAX_IMAGE_SIDE: u32 = 7680;
 
 fn png_size(png: &[u8]) -> Result<(u32, u32), ReportError> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
@@ -797,6 +829,11 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     ] {
         if let (Some(png), Some(_)) = (png, reads) {
             let (width, height) = png_size(png)?;
+            if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
+                return Err(ReportError::InvalidInput(
+                    "a picture is larger than 7680 px on a side",
+                ));
+            }
             images.push(ReportImage {
                 path: path.to_string(),
                 png: png.clone(),
@@ -825,6 +862,10 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
                 "scoreboard"
             }),
         });
+    }
+
+    if files.len() > MAX_FILES {
+        return Err(ReportError::InvalidInput("a report holds at most 30 files"));
     }
 
     // Every game category carries a game object. A missed game with no kit
@@ -881,7 +922,8 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         bundle_version: BUNDLE_VERSION,
         app_version: APP_VERSION,
         recognizers: Recognizers {
-            matcher: crate::shadow::digits::RECOGNIZER_ID,
+            // OCR on or off is also in `system.ocr`; `ocr` stays ocr-v1.
+            matcher: crate::shadow::digits::recognizer_id(input.system.ocr != OcrSetting::Off),
             ocr: OCR_ID,
         },
         resolution: input.resolution,

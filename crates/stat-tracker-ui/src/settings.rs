@@ -140,7 +140,8 @@ pub(crate) const NEW_READER_LABEL: &str = "New reader (alpha)";
 
 pub(crate) const NEW_READER_HINT: &str = "\
 Saved games and uploads use the new scoreboard reader. \
-A field it is not sure about keeps the old read and is marked unsure.";
+With classic OCR on, a field it is not sure about keeps the classic read and is marked unsure. \
+With classic OCR off, a stat it is not sure about waits for a later Tab that reads it clearly. If none does, the game is saved with its best guess and that stat is marked unsure.";
 
 pub(crate) const NEW_READER_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
@@ -417,7 +418,15 @@ impl SettingsForm {
             session_window_secs: config.session_window_secs.to_string(),
             game_process_names: config.game_process_names.join(", "),
             auto_detect_enabled: config.auto_detect.enabled,
-            poll_interval_secs: config.auto_detect.poll_interval_secs.to_string(),
+            // Empty means automatic (1.5 s new reader, 4 s classic OCR).
+            // 4 is how automatic is written to the file
+            // (`AutoDetectConfig::poll_interval`), so it shows as empty.
+            poll_interval_secs: config
+                .auto_detect
+                .poll_interval_secs
+                .filter(|&s| s != stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             cooldown_secs: config.auto_detect.cooldown_secs.to_string(),
             sync_url: config
                 .sync
@@ -503,7 +512,16 @@ impl SettingsForm {
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
                 enabled: self.auto_detect_enabled,
-                poll_interval_secs: parse_u64(&self.poll_interval_secs, 4),
+                poll_interval_secs: self
+                    .poll_interval_secs
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&s| s > 0)
+                    .or(base
+                        .auto_detect
+                        .poll_interval_secs
+                        .filter(|&s| s == stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)),
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
@@ -713,7 +731,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 
     if demo {
         col = col.push(widgets::empty_surface(
-            "Demo mode — settings, the tracker service, and stored data are not changed.",
+            "Demo mode: settings, the tracker service, and stored data are not changed.",
         ));
     }
 
@@ -855,10 +873,10 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             if d.autostart {
                 "Starts with this computer"
             } else {
-                "Installed — will not start on login"
+                "Installed, will not start on login"
             }
         } else {
-            "No login service installed — Start launches the tracker directly"
+            "No login service installed. Start launches the tracker directly"
         })
         .size(SIZE_META)
         .font(FONT_MEDIUM)
@@ -967,7 +985,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 
     if let Some((handle, when)) = &app.preview {
         body = body.push(
-            text(format!("Preview — {when}"))
+            text(format!("Preview: {when}"))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -978,7 +996,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 .height(iced::Length::Fixed(280.0)),
         );
         body = body.push(
-            text("What the tracker sees — scoreboard should be visible.")
+            text("What the tracker sees. The scoreboard should be visible.")
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -1029,7 +1047,7 @@ fn player_fields_row<'a>(
             SettingsField::PlayerName,
             false,
             demo,
-            Some("Scoreboard name as shown in-game — no #1234."),
+            Some("Scoreboard name as shown in-game, without #1234."),
         )),
         Some(field_input(
             "Session window (seconds)",
@@ -1079,7 +1097,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(compact_row(
             Some(field_input(
                 "Check every (seconds)",
-                "4",
+                "auto (1.5 s with new reader)",
                 &app.settings.poll_interval_secs,
                 SettingsField::PollInterval,
                 false,
@@ -1096,6 +1114,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 None,
             )),
         ));
+        body = body.push(hint(POLL_INTERVAL_HELP));
     }
 
     settings_card("Auto-detect", body.into())
@@ -1190,7 +1209,7 @@ fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let installed = if app.tessdata_installed {
         "Reading model is installed"
     } else {
-        "Reading model is missing — install it to read the scoreboard"
+        "Reading model is missing. Install it to read the scoreboard"
     };
     let mut actions = row![].spacing(8);
     if !demo && !app.tessdata_busy {
@@ -1287,10 +1306,13 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
     !locked
 }
 
+/// Help under the poll interval field. Empty or 4 is auto, which polls every
+/// 1.5 s with the new reader and every 4 s with classic OCR.
+const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
-const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture — leave off unless diagnosing.";
+const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
@@ -1309,7 +1331,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
     let mut copy = column![hint(
-        "Compact rewrites the store and keeps one backup. Delete removes local matches only — not the website."
+        "Compact rewrites the store and keeps one backup. Delete removes local matches only, not the website."
     ),]
     .spacing(6);
 
@@ -1634,7 +1656,7 @@ mod tests {
             session_window_secs: "1800".into(),
             game_process_names: String::new(),
             auto_detect_enabled: true,
-            poll_interval_secs: "4".into(),
+            poll_interval_secs: String::new(),
             cooldown_secs: "120".into(),
             sync_url: String::new(),
             sync_token: "tok".into(),
@@ -1710,7 +1732,7 @@ mod tests {
         form.cooldown_secs = "".into();
         form.session_window_secs = "oops".into();
         let c = form.to_config(&base());
-        assert_eq!(c.auto_detect.poll_interval_secs, 4);
+        assert_eq!(c.auto_detect.poll_interval_secs, None);
         assert_eq!(c.auto_detect.cooldown_secs, 120);
         assert_eq!(c.session_window_secs, 1800);
     }
@@ -1726,7 +1748,7 @@ mod tests {
         });
         base.auto_detect = AutoDetectConfig {
             enabled: false,
-            poll_interval_secs: 8,
+            poll_interval_secs: Some(8),
             cooldown_secs: 60,
         };
         base.session_window_secs = 900;
@@ -1746,7 +1768,7 @@ mod tests {
             out.sync.as_ref().map(|s| s.server_url.as_str()),
             Some("https://crew.example")
         );
-        assert_eq!(out.auto_detect.poll_interval_secs, 8);
+        assert_eq!(out.auto_detect.poll_interval_secs, Some(8));
         assert_eq!(out.session_window_secs, 900);
         assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);
@@ -2229,7 +2251,7 @@ mod tests {
     fn shadow_toggle_round_trip_preserves_the_rest_of_the_file() {
         let raw = r#"
 data_dir = "/tmp/sst-ui-settings-test"
-player_name = "the streamer"
+player_name = "FrozenTear"
 session_window_secs = 900
 finished_game_close_secs = 240
 debug_ocr = true
@@ -2259,7 +2281,7 @@ cooldown_secs = 60
         );
         let saved = toml::to_string_pretty(&form.to_config(&base)).unwrap();
         assert!(saved.contains("shadow_recognizer = true"), "{saved}");
-        assert!(saved.contains("the streamer"), "{saved}");
+        assert!(saved.contains("FrozenTear"), "{saved}");
         assert!(saved.contains("finished_game_close_secs = 240"), "{saved}");
         assert!(saved.contains("ocr_threads = 2"), "{saved}");
         assert!(saved.contains("session_window_secs = 900"), "{saved}");
@@ -2271,7 +2293,7 @@ cooldown_secs = 60
         );
         let back = again.to_config(&loaded);
         assert!(back.shadow_recognizer);
-        assert_eq!(back.player_name.as_deref(), Some("the streamer"));
+        assert_eq!(back.player_name.as_deref(), Some("FrozenTear"));
         assert_eq!(back.finished_game_close_secs, 240);
         assert_eq!(back.ocr_threads, Some(2));
         assert_eq!(back.session_window_secs, 900);
@@ -2281,7 +2303,7 @@ cooldown_secs = 60
         again.set_scoreboard_reader(ScoreboardReader::OcrV1);
         let off = toml::to_string_pretty(&again.to_config(&loaded)).unwrap();
         assert!(!off.contains("shadow_recognizer"), "{off}");
-        assert!(off.contains("the streamer"), "{off}");
+        assert!(off.contains("FrozenTear"), "{off}");
         assert!(off.contains("finished_game_close_secs = 240"), "{off}");
     }
 
@@ -2306,10 +2328,10 @@ cooldown_secs = 60
             assert_eq!(form.persisted_reader(), ScoreboardReader::OcrV1);
             assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
 
-            form.player_name = "the streamer".into();
+            form.player_name = "FrozenTear".into();
             let out = form.to_config(&base);
             assert!(!out.shadow_recognizer, "{env:?} must not be saved");
-            assert_eq!(out.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(out.player_name.as_deref(), Some("FrozenTear"));
             assert_eq!(out.ocr_threads, Some(2));
             assert_eq!(out.data_dir, base.data_dir);
             let raw = toml::to_string_pretty(&out).unwrap();
@@ -2342,7 +2364,7 @@ cooldown_secs = 60
 data_dir = \"/tmp/sst-keep-comments\"
 
 # scoreboard name
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 session_window_secs = 900
 
@@ -2403,7 +2425,7 @@ token = \"not-a-real-token\"
 data_dir = \"/tmp/sst-hand-edited\"
 
 # scoreboard name
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 
 # extra number reader (private log only)
 shadow_recognizer = false  # keep this comment
@@ -2445,7 +2467,7 @@ custom_note = \"leave this line alone\"
         assert!(saved.contains("# hand-edited tracker config"));
         assert!(saved.contains("# scoreboard name"));
         assert!(saved.contains("custom_note = \"leave this line alone\""));
-        assert!(saved.contains("player_name = \"the streamer\""));
+        assert!(saved.contains("player_name = \"FrozenTear\""));
         assert!(
             !saved.contains("game_process_names"),
             "the toggle must not add default keys: {saved}"
@@ -2457,7 +2479,7 @@ custom_note = \"leave this line alone\"
         let original = "\
 data_dir = \"/tmp/sst-settings-shape\"
 capture_output = \"DP-1\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 1800
 finished_game_close_secs = 180
 game_process_names = [\"Overwatch.exe\"]
@@ -2548,7 +2570,7 @@ token = \"not-a-real-token\"
         let raw = "\
 # hand-edited tracker config
 data_dir = \"/tmp/sst-alpha-toggle\"
-player_name = \"the streamer\"
+player_name = \"FrozenTear\"
 session_window_secs = 900
 finished_game_close_secs = 240
 debug_ocr = true
@@ -2601,7 +2623,7 @@ token = \"not-a-real-token\"
             assert!(read.reader.is_new());
             assert!(read.setup_completed);
             assert!(!read.auto_detect.enabled);
-            assert_eq!(read.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(read.player_name.as_deref(), Some("FrozenTear"));
             assert_eq!(
                 read.sync.as_ref().map(|s| s.token.as_str()),
                 Some("not-a-real-token")

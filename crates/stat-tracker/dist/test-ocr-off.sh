@@ -147,7 +147,7 @@ run_install() {
     } 2>&1
 }
 
-WARN_LINE="install your distro's eng tessdata package"
+WARN_LINE="Install your distro's eng tessdata package"
 NOTE_LINE='eng.traineddata not found. config.toml asks for classic OCR off, so the tracker may not need it.'
 
 # check_out <yes|no> <output> <line> <label>: the line is (or is not) in the output.

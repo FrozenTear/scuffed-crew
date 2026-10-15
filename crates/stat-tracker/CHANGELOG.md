@@ -15,6 +15,22 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.8
+
+Install this update between games, not during one. Report this game works again for every game in your history, and the report now says which game it is about.
+
+### Highlights
+
+- With the new reader, the tracker looks for Victory and Defeat screens every 1.5 seconds instead of every 4, so short end screens are no longer missed.
+- A saved check interval of 4 seconds now means auto (1.5 s with the new reader). For slower checks on a low-power laptop, enter 5 or more in Settings.
+- With classic OCR off, a game where one stat was never read clearly is saved with its best guess instead of being dropped. That stat is marked unsure, and clicking it opens Edit stats.
+- An update waits until the game you are in is saved before it restarts the tracker.
+- A game whose scoreboard picture could not be kept safely can still be reported. The report then carries the saved values and no picture.
+- The report log now has the tracker's own lines from that game, taken from the system journal and scrubbed of player names and home folders.
+- Game cards show the date as well as the time, the hero's role sits next to the hero name, and Delete session no longer gets cut off on a narrow window.
+
+Technical detail. Report pictures stay in `report-kit/<session_id>/` in the data folder, outside `debug/`, written whether or not debug OCR is on, and pruned to the newest kits. When the board blanks to nothing or to plain fill (for example when its header strip is not found), no picture is saved and `reads.json` is still saved with an empty `scoreboard_sha256`, so the report links its `session_id`. A game with no kit at all is reported from its stored row. The manifest resolution is always landscape. After a report is sent, its heading reads Sent and the delete date is shown in local time with its UTC offset. The New reader (alpha) text now says what happens with classic OCR on and with it off. `auto_detect.poll_interval_secs` is now optional: missing, or 4 (the value older Settings always wrote), means automatic (1.5 s with the new reader, 4 s with classic OCR); any other value overrides both. The best guess is stored when the game closes, with the column in `suspect_fields`; mid-game no row is written while a column is unread. When the site's daily report limit is reached, the app shows the site's message and keeps the game's report pictures so it can be sent the next day. A report holds at most 30 files besides `manifest.json`, no picture over 7680 px on a side, and at most 10 MiB in total.
+
 ## 0.5.0-alpha.7
 
 This alpha adds a switch in Settings that turns classic OCR (Tesseract) off, so the tracker reads the game with its own reader. The switch is opt-in: if you leave it alone, OCR stays on and the tracker reads as before.

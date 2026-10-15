@@ -128,7 +128,7 @@ impl KeyboardWaiter for SignalKeyboardWaiter<'_> {
                 Ok(KeyboardWait::Shutdown)
             }
             _ = self.sigterm.recv() => {
-                tracing::info!("SIGTERM received — shutting down");
+                tracing::info!("SIGTERM received: shutting down");
                 Ok(KeyboardWait::Shutdown)
             }
             _ = tokio::time::sleep(KEYBOARD_OPEN_RETRY) => Ok(KeyboardWait::Retry),
@@ -159,11 +159,11 @@ where
                     error = %e,
                     attempt,
                     max_attempts,
-                    "evdev init failed — no keyboard detected"
+                    "evdev init failed: no keyboard detected"
                 );
                 if attempt >= max_attempts {
                     anyhow::bail!(
-                        "no keyboard available after {attempt} attempts ({e}) — \
+                        "no keyboard available after {attempt} attempts ({e}): \
                          exiting so systemd can restart once an input device is readable"
                     );
                 }
@@ -459,7 +459,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
             tracing::error!(
-                "sync paused — the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
+                "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
@@ -525,7 +525,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Log rotate, prune old pre-vacuum backups, auto-vacuum if store is bloated.
     // Must run before open_store (single-writer SurrealKV).
     if let Err(e) = storage::maintain::startup_maintenance(&config.data_dir).await {
-        tracing::warn!(error = %e, "startup maintenance failed — continuing with live store");
+        tracing::warn!(error = %e, "startup maintenance failed: continuing with live store");
     }
 
     // The OCR on/off switch (`ocr` in config.toml), decided once for this
@@ -760,7 +760,7 @@ fn handle_preinit_flags() -> bool {
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!(
-            "scuffed-stat-tracker {} — Overwatch 2 scoreboard OCR daemon\n\n\
+            "scuffed-stat-tracker {}: Overwatch 2 scoreboard OCR daemon\n\n\
              USAGE: scuffed-stat-tracker [FLAGS]\n\n\
              FLAGS:\n\
              \x20 --version, -V         print version and exit\n\
@@ -804,7 +804,7 @@ async fn handle_info_flags() -> bool {
         let backend = capture::detect_backend().await;
         match backend {
             capture::CaptureBackend::None => {
-                eprintln!("no capture backend available — cannot list outputs");
+                eprintln!("no capture backend available: cannot list outputs");
                 std::process::exit(1);
             }
             capture::CaptureBackend::Portal => {
@@ -840,7 +840,7 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
             tracing::error!(
                 server_url = %sync_cfg.server_url,
                 error = %e,
-                "sync disabled — refusing to send the bearer token over an unsafe server URL"
+                "sync disabled: refusing to send the bearer token over an unsafe server URL"
             );
             None
         }
@@ -1001,7 +1001,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
             }
             Ok(_) => {
                 tracing::info!(
-                    "server has no player_name configured — set it in the web UI under My Stats → Settings"
+                    "server has no player_name configured: set it in the web UI under My Stats → Settings"
                 );
             }
             Err(e) if matches!(e.attempt(), sync::SyncAttempt::AuthRejected) => {
@@ -1013,7 +1013,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
                 }
                 tracing::error!(
                     error = %e,
-                    "sync token rejected by daemon-config — pausing sync until the URL or token changes in Settings"
+                    "sync token rejected by daemon-config: pausing sync until the URL or token changes in Settings"
                 );
             }
             Err(e) => {
@@ -1033,7 +1033,7 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     {
         tracing::error!(
             pid = existing.pid,
-            "another daemon is already running — stop it first"
+            "another daemon is already running: stop it first"
         );
         anyhow::bail!("another daemon is already running (PID {})", existing.pid);
     }
@@ -1138,9 +1138,9 @@ async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::Local
 fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collect_portraits: bool) {
     if config.auto_detect.enabled {
         tracing::info!(
-            poll_secs = config.auto_detect.poll_interval_secs,
+            poll_secs = ?config.auto_detect.poll_interval_secs,
             cooldown_secs = config.auto_detect.cooldown_secs,
-            "auto-detect mode enabled — polling for match end screens"
+            "auto-detect mode enabled: polling for match end screens"
         );
     }
     if config.game_process_names.is_empty() {
@@ -1148,7 +1148,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
     } else {
         tracing::info!(
             processes = ?config.game_process_names,
-            "captures gated on game process — set game_process_names in config.toml if yours differs"
+            "captures gated on game process: set game_process_names in config.toml if yours differs"
         );
     }
     if dump_poll_frames {
@@ -1168,11 +1168,11 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
             "this debug folder is no longer written while debug_ocr is off (it shows other players' names); existing files are left as they are"
         );
     }
-    tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
+    tracing::info!("daemon ready: press Tab in-game to capture scoreboard");
 
     if collect_portraits {
         tracing::info!(
-            "portrait collection mode enabled — only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
+            "portrait collection mode enabled: only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
         );
     }
 }
@@ -1184,6 +1184,11 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 /// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
     session_id: String,
+    /// alpha.8: the newest pending board's row with the reader's best guess
+    /// in each unread stat column, those columns in `suspect_fields`. Stored
+    /// when the game closes with no row ([`retire_active_game`]); a board
+    /// that stores a row makes it moot.
+    best_guess: Option<storage::PersonalMatch>,
     outcome: detect::MatchOutcome,
     /// The map actually being played, once a read names it. Never set from
     /// the map vote. [`Self::map_source`] says which read stored it. A
@@ -1291,6 +1296,7 @@ impl ActiveGame {
         now: Instant,
     ) -> Self {
         ActiveGame {
+            best_guess: None,
             session_id,
             outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
             outcome,
@@ -1486,6 +1492,10 @@ struct PersistedGame {
     /// skeletons, which had no banner rename.
     #[serde(default)]
     replaced_text_fallback_map: Option<String>,
+    /// See [`ActiveGame::best_guess`]. Kept so a restart mid-game still
+    /// stores the guess when the game closes. Missing on older skeletons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    best_guess: Option<storage::PersonalMatch>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1659,7 +1669,7 @@ fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str
             map = g.map.as_deref().unwrap_or("?"),
             age_secs = g.opened_at.elapsed().as_secs(),
             reason,
-            "game closed with NO Tab captures — it was not recorded (no scoreboard seen: Tab not pressed, keyboard grabbed, or capture rejected)"
+            "game closed with NO Tab captures: it was not recorded (no scoreboard seen: Tab not pressed, keyboard grabbed, or capture rejected)"
         );
     } else {
         tracing::warn!(
@@ -1722,6 +1732,7 @@ async fn retire_active_game(
             );
         }
     }
+    store_best_guess_on_close(store, data_dir, &mut g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
             .set_session_outcome(&g.session_id, &g.outcome.to_string())
@@ -1822,7 +1833,7 @@ async fn apply_poll_decision(
             kept = %kept,
             ignored = %ignored,
             session_id = st.active_game.as_ref().map(|g| g.session_id.as_str()),
-            "result word ignored — it does not override the open session"
+            "result word ignored: it does not override the open session"
         );
     }
     let Some(current) = st.active_game.as_ref() else {
@@ -1851,13 +1862,13 @@ async fn apply_poll_decision(
                 tracing::info!(
                     ?candidates,
                     session_id = %new_id,
-                    "auto-detect: map vote — new game"
+                    "auto-detect: map vote: new game"
                 );
             }
             boundary::CloseReason::HeroSelectOrBan => {
                 tracing::info!(
                     session_id = %new_id,
-                    "auto-detect: hero select/ban — new game (map vote missed)"
+                    "auto-detect: hero select/ban: new game (map vote missed)"
                 );
             }
             boundary::CloseReason::EndScreenMap => {
@@ -2008,6 +2019,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         baseline_at: g.baseline_at.map(to_wall),
         text_fallback_locked: g.text_fallback_locked,
         replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
+        best_guess: g.best_guess.clone(),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -2110,6 +2122,7 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     );
     let hint_recovered = result_mark.is_some();
     Some(ActiveGame {
+        best_guess: p.best_guess,
         session_id: p.session_id,
         outcome: p.outcome,
         map: p.map.clone(),
@@ -2444,11 +2457,11 @@ fn open_detected_game(
     };
     let sid = format!("{:016x}", rand_id());
     if log_vote {
-        tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
+        tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote: new game");
     } else {
         tracing::info!(
             session_id = %sid,
-            "auto-detect: hero select/ban — new game (map vote missed)"
+            "auto-detect: hero select/ban: new game (map vote missed)"
         );
     }
     let mut g = ActiveGame::open_at(sid, detect::MatchOutcome::Unknown, candidates, now);
@@ -2606,7 +2619,7 @@ fn resolved_map(
             tracing::debug!(
                 read = %m,
                 ?candidates,
-                "map read is not a vote candidate — dropping as misread"
+                "map read is not a vote candidate: dropping as misread"
             );
         }
     };
@@ -2953,6 +2966,9 @@ enum FrameAnalysisOutcome {
 
 /// What a Tab capture actually did, reported back to the session state machine.
 struct CaptureReport {
+    /// A pending board's row with the best guess in its unread columns
+    /// ([`apply_best_guess`]). `None` for every other report.
+    best_guess: Option<storage::PersonalMatch>,
     /// A snapshot row was written (and the session row created if this was the
     /// session's first capture). False = rejected by a trust gate.
     recorded: bool,
@@ -3431,7 +3447,7 @@ async fn apply_capture_report(
                 tracing::info!(
                     outcome = ?report.outcome,
                     session_id = %g.session_id,
-                    "outcome recovered from rejected capture frame — adopting"
+                    "outcome recovered from rejected capture frame: adopting"
                 );
                 if g.session_created {
                     if let Err(e) = store
@@ -3468,6 +3484,9 @@ async fn apply_capture_report(
                 // opened the game without a row: the session row is made by
                 // the first capture that stores one.
                 g.session_created = report.recorded;
+                if !report.recorded {
+                    g.best_guess = report.best_guess.clone();
+                }
                 tracing::info!(
                     old_session = %sid,
                     session_id = %g.session_id,
@@ -3490,6 +3509,16 @@ async fn apply_capture_report(
             if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
                 if recorded {
                     g.session_created = true;
+                    g.best_guess = None;
+                } else if report.best_guess.is_some()
+                    && report
+                        .gate_state
+                        .is_none_or(|state| state.refused_cols().is_empty())
+                {
+                    // A Tab whose first read of a column was not taken
+                    // (other columns dropped: likely the next game's board)
+                    // does not replace the guess.
+                    g.best_guess = report.best_guess.clone();
                 }
                 g.touch_at(now);
                 if let Some(accepted) = report.gate_state {
@@ -3571,7 +3600,7 @@ async fn apply_capture_report(
                     tracing::info!(
                         outcome = ?report.outcome,
                         session_id = %g.session_id,
-                        "outcome recovered from captured frame — back-filling session"
+                        "outcome recovered from captured frame: back-filling session"
                     );
                     if g.session_created
                         && let Err(e) = store
@@ -3679,7 +3708,7 @@ fn resolve_word_tick(
                 tracing::debug!(
                     ?outcome,
                     ?source,
-                    "result word read — awaiting agreeing read"
+                    "result word read: awaiting agreeing read"
                 );
             }
             ResolvedWordTick {
@@ -3904,7 +3933,12 @@ async fn run_loop(
         None => return Ok(()),
     };
 
-    let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
+    let poll_interval = auto_detect.poll_interval(ctx.use_new_reader);
+    tracing::info!(
+        poll_ms = poll_interval.as_millis() as u64,
+        new_reader = ctx.use_new_reader,
+        "end-screen poll interval"
+    );
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
     let tab_debounce = std::time::Duration::from_secs(3);
     let finished_close = ctx.finished_game_close;
@@ -3929,7 +3963,7 @@ async fn run_loop(
             .unwrap_or_else(|e| e.into_inner())
             .record_auth_rejected();
         tracing::error!(
-            "sync paused — token rejected. Update the token in Settings; sync resumes when the URL or token changes."
+            "sync paused: token rejected. Update the token in Settings; sync resumes when the URL or token changes."
         );
     }
 
@@ -3970,20 +4004,20 @@ async fn run_loop(
                 match result {
                     Ok(()) => {
                         if !game_gate.is_running() {
-                            tracing::debug!("Tab ignored — game process not running");
+                            tracing::debug!("Tab ignored: game process not running");
                             continue;
                         }
 
                         if let Some(last) = st.last_tab_capture
                             && last.elapsed() < tab_debounce {
-                                tracing::debug!("Tab debounced — ignoring rapid press");
+                                tracing::debug!("Tab debounced: ignoring rapid press");
                                 continue;
                             }
 
                         // Single-flight: OCR of the previous Tab may still be
                         // running (it takes seconds) — don't stack captures.
                         if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
-                            tracing::debug!("Tab ignored — a capture is already in progress");
+                            tracing::debug!("Tab ignored: a capture is already in progress");
                             continue;
                         }
                         st.last_tab_capture = Some(Instant::now());
@@ -4015,14 +4049,14 @@ async fn run_loop(
                         }));
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "keyboard devices lost — attempting to reopen");
+                        tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
                         match detect::MultiKeyboardStream::open() {
                             Ok(new_kbd) => {
                                 kbd = new_kbd;
                                 tracing::info!("keyboard monitoring reopened");
                             }
                             Err(e2) => {
-                                tracing::error!(error = %e2, "failed to reopen keyboard — exiting");
+                                tracing::error!(error = %e2, "failed to reopen keyboard: exiting");
                                 drain_capture(capture_task.take()).await;
                                 let task = sync_task.take();
                                 if let Some(client) = sync_client {
@@ -4067,13 +4101,13 @@ async fn run_loop(
                 let tab_in_flight = capture_task.as_ref().is_some_and(|t| !t.is_finished());
                 let now = Instant::now();
                 if skip_poll_for_tab_in_flight(tab_in_flight, &st, now) {
-                    tracing::debug!("poll tick skipped — Tab capture in flight");
+                    tracing::debug!("poll tick skipped: Tab capture in flight");
                     continue;
                 }
                 let outcome_only = poll_outcome_only_while_tab_busy(tab_in_flight, &st, now);
                 if outcome_only {
                     tracing::debug!(
-                        "cheap outcome poll — Tab capture in flight during end-reel wake"
+                        "cheap outcome poll: Tab capture in flight during end-reel wake"
                     );
                 }
                 if !game_gate.is_running() {
@@ -4089,7 +4123,7 @@ async fn run_loop(
                 if poll_slow_mode(&st, Instant::now()) {
                     st.poll_ticks_skipped += 1;
                     if st.poll_ticks_skipped < SLOW_POLL_DIVISOR {
-                        tracing::trace!("poll tick skipped — adaptive slow cadence mid-match");
+                        tracing::trace!("poll tick skipped: adaptive slow cadence mid-match");
                         continue;
                     }
                 }
@@ -4243,7 +4277,7 @@ async fn run_loop(
                             if !already_awake {
                                 tracing::info!(
                                     hold_secs = END_REEL_WAKE.as_secs(),
-                                    "end-reel / POTG — holding full poll cadence"
+                                    "end-reel / POTG: holding full poll cadence"
                                 );
                             }
                         }
@@ -4343,7 +4377,7 @@ async fn run_loop(
                 if wall > mono + SUSPEND_RESET_GAP {
                     tracing::info!(
                         gap_secs = (wall - mono).as_secs(),
-                        "suspend/clock-jump detected — resetting session windows"
+                        "suspend/clock-jump detected: resetting session windows"
                     );
                     // Schedule the upload, including a stale skeleton. Then
                     // `resume_after_suspend` re-admits through `startup_session`,
@@ -4722,7 +4756,7 @@ fn full_board_text(
         return ocr();
     }
     if !use_new_reader {
-        tracing::debug!("skipping full-board OCR — cell path supplied everything");
+        tracing::debug!("skipping full-board OCR: cell path supplied everything");
     }
     Ok(ocr::OcrResult {
         raw_text: String::new(),
@@ -5099,6 +5133,7 @@ fn skipped_capture_report(
     held_at: Option<chrono::DateTime<Utc>>,
 ) -> CaptureReport {
     CaptureReport {
+        best_guess: None,
         recorded: false,
         outcome: plan.stored_outcome,
         map: None,
@@ -5296,6 +5331,7 @@ fn blank_rejected_report(
     req: &CaptureRequest,
 ) -> CaptureReport {
     CaptureReport {
+        best_guess: None,
         recorded: false,
         outcome,
         map: None,
@@ -5324,6 +5360,70 @@ fn blank_rejected_report(
 
 /// Insert the current row, then the carried board. The carried write runs
 /// only after the insert succeeds.
+/// Put the reader's best guess in each unread column of `parsed` and list
+/// those columns in `suspect_fields` (upload names: `e`, `a`, `d`, `dmg`,
+/// `h`, `mit`), so the app marks them for a one-click edit.
+fn apply_best_guess(
+    parsed: &mut storage::PersonalMatch,
+    unread: &[&'static str],
+    guess: [u32; capture_gate::GATE_COLS],
+) {
+    let cells = [
+        &mut parsed.elims,
+        &mut parsed.assists,
+        &mut parsed.deaths,
+        &mut parsed.damage,
+        &mut parsed.healing,
+        &mut parsed.mitigation,
+    ];
+    for (col, cell) in cells.into_iter().enumerate() {
+        if unread.contains(&capture_gate::COL_FIELD[col]) {
+            *cell = guess[col];
+        }
+    }
+    for name in unread {
+        if !parsed.suspect_fields.iter().any(|f| f == name) {
+            parsed.suspect_fields.push((*name).to_string());
+        }
+    }
+}
+
+/// alpha.8: a game that closes with no stored row but a best guess stores
+/// the guess, with the game's outcome and map. Returns whether it stored.
+async fn store_best_guess_on_close(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    g: &mut ActiveGame,
+) -> bool {
+    if g.session_created {
+        return false;
+    }
+    let Some(mut row) = g.best_guess.take() else {
+        return false;
+    };
+    row.session_id = g.session_id.clone();
+    if g.finished() {
+        row.outcome = g.outcome.to_string();
+    }
+    storage::append_match_log(data_dir, &row);
+    match store.insert_match(row.clone()).await {
+        Ok(_) => {
+            tracing::info!(
+                session_id = %g.session_id,
+                suspect = ?row.suspect_fields,
+                "game closed with a stat never read for sure: stored the best guess, marked unsure"
+            );
+            g.session_created = true;
+            refresh_snapshot(store, data_dir).await;
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, session_id = %g.session_id, "best guess not stored");
+            false
+        }
+    }
+}
+
 async fn commit_capture_rows(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
@@ -5556,7 +5656,11 @@ fn apply_new_reader(
     parsed.damage = saved.damage;
     parsed.healing = saved.healing;
     parsed.mitigation = saved.mitigation;
-    parsed.recognizer = saved.recognizer.to_string();
+    parsed.recognizer = if saved.recognizer == shadow::digits::RECOGNIZER_ID {
+        shadow::digits::live_recognizer_id().to_string()
+    } else {
+        saved.recognizer.to_string()
+    };
     parsed.suspect_fields = saved.suspect_fields;
     if own_row_suspect {
         reader_apply::mark_own_row_suspect(&mut parsed.suspect_fields);
@@ -5781,7 +5885,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     let (analysis, board_override) = if let Some(injected) = injected {
         injected
     } else {
-        tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
+        tracing::info!("Tab detected: capturing screen (hold Tab to keep scoreboard visible)");
         let img = capture::capture_screen_output(backend, capture_output)
             .await
             .map_err(anyhow::Error::from_boxed)
@@ -5856,6 +5960,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 );
                 save_rejected_frame(ctx.debug_ocr, data_dir, frame, reason);
                 return Ok(CaptureReport {
+                    best_guess: None,
                     recorded: false,
                     outcome,
                     map: None,
@@ -5989,7 +6094,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         tracing::warn!(
             rows = rows.len(),
             board_refusal,
-            "capture rejected — frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
+            "capture rejected: frame does not look like a scoreboard (saved to debug/rejected when debug_ocr is on)"
         );
         archive_rejected_map_label_crop(
             ctx.debug_ocr,
@@ -6000,6 +6105,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         );
         save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, "noscoreboard");
         return Ok(CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome,
             map: None,
@@ -6421,7 +6527,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ocr_parsed.healing,
                 ocr_parsed.mitigation,
             ) = tesseract_stats;
+            // The new reader's own read of each stat before the gate held
+            // any: the best guess for a column that never gets a sure read.
+            let mut raw_guess: Option<[u32; capture_gate::GATE_COLS]> = None;
             if let Some(board) = new_board {
+                let guesses = reader_apply::own_row_guesses(&board, board_row);
                 offer_own_name_seed(
                     ctx.own_name.as_ref(),
                     own_name_candidate,
@@ -6436,6 +6546,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     own_row_suspect,
                     board,
                 );
+                // The reader's number for each cell, sure or not; a cell with
+                // none keeps what the row holds.
+                let held = [
+                    parsed.elims,
+                    parsed.assists,
+                    parsed.deaths,
+                    parsed.damage,
+                    parsed.healing,
+                    parsed.mitigation,
+                ];
+                raw_guess = Some(std::array::from_fn(|col| guesses[col].unwrap_or(held[col])));
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
                 staged.gate = hold_new_reader_stats(
                     &mut parsed,
@@ -6483,6 +6604,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 );
             }
             let report = CaptureReport {
+                best_guess: None,
                 recorded: true,
                 outcome,
                 map: staged.recorded_map.clone(),
@@ -6520,8 +6642,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     split,
                     "board read but not stored: a stat column of this game has no sure read yet"
                 );
+                // The best guess waits on the active game. A later Tab with
+                // a sure read stores the real row; if none comes, the game
+                // stores this guess when it closes (alpha.8).
+                let best_guess = raw_guess.map(|guess| {
+                    let mut row = parsed.clone();
+                    apply_best_guess(&mut row, &unread, guess);
+                    row
+                });
                 return Ok(CaptureReport {
                     recorded: false,
+                    best_guess,
                     ..report
                 });
             }
@@ -6650,6 +6781,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             );
             save_rejected_frame(ctx.debug_ocr, data_dir, frame_img, reason);
             Ok(CaptureReport {
+                best_guess: None,
                 recorded: false,
                 outcome,
                 map: None,
@@ -7068,7 +7200,7 @@ fn maybe_spawn_periodic_sync(
         .should_attempt(Instant::now());
     if !periodic_sync_due(capture_count, in_flight, allow) {
         if capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !in_flight && !allow {
-            tracing::debug!("sync skipped — backing off before the next attempt");
+            tracing::debug!("sync skipped: backing off before the next attempt");
         }
         return;
     }
@@ -7091,18 +7223,18 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
             tracing::warn!(
                 failures = clock.failures(),
                 retry_in_secs = clock.retry_after(now).as_secs(),
-                "sync upload failed — backing off so a down server is not hammered"
+                "sync upload failed: backing off so a down server is not hammered"
             );
         }
         sync::SyncAttempt::RateLimited { .. } => {
             tracing::warn!(
                 retry_in_secs = clock.retry_after(now).as_secs(),
-                "sync rate-limited — backing off before the next upload"
+                "sync rate-limited: backing off before the next upload"
             );
         }
         sync::SyncAttempt::AuthRejected => {
             tracing::error!(
-                "sync token rejected — pausing until the server URL or token changes in Settings"
+                "sync token rejected: pausing until the server URL or token changes in Settings"
             );
         }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
@@ -7155,12 +7287,12 @@ fn maybe_resume_sync_after_settings_change(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear_auth_rejected();
-            tracing::info!("sync resumed — server URL or token changed");
+            tracing::info!("sync resumed: server URL or token changed");
         }
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "sync stays paused — the saved server URL is not safe for the token"
+                "sync stays paused: the saved server URL is not safe for the token"
             );
         }
     }
@@ -7907,7 +8039,7 @@ mod tests {
             events: vec![KeyboardWait::Retry; retries],
         };
         let err = acquire_keyboard(
-            || Err::<(), _>("no keyboard device found — ensure user is in the 'input' group"),
+            || Err::<(), _>("no keyboard device found: ensure user is in the 'input' group"),
             &mut waiter,
             KEYBOARD_OPEN_ATTEMPTS,
         )
@@ -8067,6 +8199,7 @@ mod tests {
         now: Instant,
     ) -> ActiveGame {
         ActiveGame {
+            best_guess: None,
             session_id: "test".into(),
             outcome,
             map: None,
@@ -8930,6 +9063,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -9115,6 +9249,18 @@ mod tests {
             recovered.map_source.is_none(),
             "a skeleton with no map stays unsourced"
         );
+    }
+
+    #[test]
+    fn a_restart_mid_game_keeps_the_best_guess() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now("guess".into(), detect::MatchOutcome::Unknown, Vec::new());
+        let mut row = test_match("guess", "victory");
+        row.suspect_fields = vec!["h".into()];
+        g.best_guess = Some(row.clone());
+        persist_active_game(dir.path(), Some(&g));
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert_eq!(recovered.best_guess, Some(row));
     }
 
     #[test]
@@ -10704,7 +10850,7 @@ mod tests {
         );
         assert!(
             !stats_regressed(prev, prev, cur, (true, false, true), CLEAN3),
-            "suspect E + DMG drops must not vote — no mid-game split"
+            "suspect E + DMG drops must not vote: no mid-game split"
         );
     }
 
@@ -13038,7 +13184,9 @@ mod tests {
             "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;"
         ));
         // the offer sits on the new reader's own read path (O10)
-        assert!(hc_body.contains("if let Some(board) = new_board { offer_own_name_seed("));
+        assert!(hc_body.contains(
+            "if let Some(board) = new_board { let guesses = reader_apply::own_row_guesses(&board, board_row); offer_own_name_seed("
+        ));
         // no name is matched for the board's row
         assert!(hc_body.contains(
             "let board_row = reader_apply::own_row(None, None, player_row_idx, team_size);"
@@ -14345,7 +14493,7 @@ mod tests {
     const NIGHT_TICKS: usize = 4;
 
     fn night_tick() -> Duration {
-        Duration::from_secs(config::AutoDetectConfig::default().poll_interval_secs)
+        config::AutoDetectConfig::default().poll_interval(false)
     }
 
     fn night_debounce() -> Duration {
@@ -14732,6 +14880,7 @@ mod tests {
             ) == PreparedRow::Drop
             {
                 let report = CaptureReport {
+                    best_guess: None,
                     recorded: false,
                     outcome: staged.outcome,
                     map: None,
@@ -14795,6 +14944,7 @@ mod tests {
             .await
             .unwrap();
             let report = CaptureReport {
+                best_guess: None,
                 recorded: true,
                 outcome: staged.outcome,
                 map: staged.recorded_map,
@@ -16840,6 +16990,7 @@ mod tests {
         let mut night = Night::new().await;
         let busan = arm_busan_defeat(&mut night).await;
         let report = CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome: detect::MatchOutcome::Victory,
             map: None,
@@ -17447,6 +17598,7 @@ mod tests {
 
     fn rejected_report(session_id: &str) -> CaptureReport {
         CaptureReport {
+            best_guess: None,
             recorded: false,
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -18060,6 +18212,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "stale-unfinished".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: Some("Busan".into()),
@@ -18222,6 +18375,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "colosseo-defeat".into(),
             outcome: detect::MatchOutcome::Defeat,
             map: Some("Colosseo".into()),
@@ -18646,6 +18800,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::hours(9);
         let stale = PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: "next-game".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
@@ -18740,6 +18895,7 @@ mod tests {
     ) -> PersistedGame {
         PersistedGame {
             replaced_text_fallback_map: None,
+            best_guess: None,
             session_id: session_id.into(),
             outcome,
             map: map.map(str::to_string),
@@ -20513,11 +20669,13 @@ mod tests {
         );
     }
 
-    /// F266-1 at game end: a game where a column was never read stores
-    /// nothing, and one line names the column. The reviewer's probe: two
-    /// Tabs, healing suspect on both, used to upload healing 0.
+    /// alpha.8 (replaces F266-1 at game end): a game where a column never
+    /// had a sure read stores the reader's best guess when it closes, and
+    /// lists the column in `suspect_fields` so the app marks it unsure.
+    /// While the game runs no row is written (the Tabs stay pending), so a
+    /// later sure read is still taken as the column's first read.
     #[tokio::test]
-    async fn new_reader_game_with_a_never_read_column_is_not_stored() {
+    async fn new_reader_game_with_a_never_read_column_stores_its_best_guess() {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(dir.path(), true).await;
@@ -20537,20 +20695,29 @@ mod tests {
         )
         .await;
         assert!(seen.iter().all(|tab| tab.pending), "{seen:?}");
-        retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
-        assert_eq!(ctx.store.match_count().await.unwrap(), 0);
-        assert!(ctx.store.get_all_sessions().await.unwrap().is_empty());
-        assert!(
-            st.settle_closed_unknown.is_none(),
-            "nothing to settle: no row"
+        assert_eq!(
+            ctx.store.match_count().await.unwrap(),
+            0,
+            "nothing mid-game"
         );
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        let line: serde_json::Value = serde_json::from_str(note.trim()).unwrap();
-        assert_eq!(line["session_id"], "o10");
-        assert_eq!(line["unread"], serde_json::json!(["h"]));
-        assert_eq!(line["never_read"], serde_json::json!(["h"]));
-        assert_eq!(line["read_not_taken"], serde_json::json!([]));
+        retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
+        let rows = ctx.store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1, "the best guess is stored at game end");
+        let row = &rows[0];
+        assert_eq!(row.session_id, "o10");
+        // The newest Tab's guess, the sure columns as read.
+        assert_eq!((row.elims, row.damage, row.healing), (13, 3700, 7300));
+        assert_eq!(
+            crate::reader_apply::upload_suspect_fields(&row.suspect_fields),
+            vec!["h".to_string()]
+        );
+        assert!(
+            !dir.path()
+                .join("debug")
+                .join("unrecorded_games.jsonl")
+                .exists(),
+            "a stored game is not an unrecorded one"
+        );
 
         // ocr-v1 on the same Tabs has a number for every cell and stores both
         let dir = tempfile::tempdir().unwrap();
@@ -20693,9 +20860,13 @@ mod tests {
             seen[1]
         );
         assert!(seen[2].split && seen[2].recorded, "{:?}", seen[2]);
-        // game 1 never had a healing read: nothing of it is stored, and
-        // above all not game 2's 100
-        assert!(o10_rows(&ctx, "o10").await.is_empty());
+        // game 1 never had a sure healing read: at its close it stores its
+        // own best guess (5000, marked unsure), and above all not game 2's
+        // 100 (alpha.8)
+        assert_eq!(
+            o10_rows(&ctx, "o10").await,
+            vec![[30, 12, 9, 14000, 5000, 900]]
+        );
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         assert_ne!(new_id, "o10");
         assert_eq!(seen[2].session_id, new_id);
@@ -20703,10 +20874,7 @@ mod tests {
             o10_rows(&ctx, &new_id).await,
             vec![[1, 0, 0, 300, 100, 0], [3, 1, 0, 900, 400, 0]]
         );
-        assert_eq!(ctx.store.match_count().await.unwrap(), 2);
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        assert!(note.contains("\"unread\":[\"h\"]"), "{note}");
+        assert_eq!(ctx.store.match_count().await.unwrap(), 3);
 
         // 30 s after game 1's Tab is too soon for the reset rule. The gate
         // is then the guard: the read columns drop, so the first read of
@@ -20724,16 +20892,15 @@ mod tests {
         assert_eq!(gate.unread_cols(), vec!["h"]);
         assert_eq!(gate.accepted.healing, 0);
         assert_eq!(gate.accepted.elims, 30);
-        // the not-stored line tells "read, and not taken" from "never read"
-        // (R3-2): healing was read on the second Tab
+        // At close the game stores game 1's own guess. The second Tab's
+        // healing read was not taken (the other columns dropped), so its
+        // 100 is not the guess (alpha.8).
         let mut st = st;
         retire_active_game(&mut st, &ctx.store, dir.path(), None, "test: game over").await;
-        let note = std::fs::read_to_string(dir.path().join("debug").join("unrecorded_games.jsonl"))
-            .unwrap();
-        let line: serde_json::Value = serde_json::from_str(note.trim()).unwrap();
-        assert_eq!(line["unread"], serde_json::json!(["h"]));
-        assert_eq!(line["read_not_taken"], serde_json::json!(["h"]));
-        assert_eq!(line["never_read"], serde_json::json!([]));
+        assert_eq!(
+            o10_rows(&ctx, "o10").await,
+            vec![[30, 12, 9, 14000, 5000, 900]]
+        );
     }
 
     /// A split under `reader = "new"`, with the carried board (F266-1's

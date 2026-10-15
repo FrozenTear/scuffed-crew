@@ -198,7 +198,7 @@ esac
 
 arch="$(uname -m)"
 if [[ "$arch" != "x86_64" && "$arch" != "amd64" ]]; then
-    warn "Release binaries are built for x86_64; this machine is $arch — they may not run."
+    warn "Release binaries are built for x86_64; this machine is $arch, so they may not run."
 fi
 
 if ! groups 2>/dev/null | grep -qw input; then
@@ -207,8 +207,8 @@ if ! groups 2>/dev/null | grep -qw input; then
     warn "companion shortcut does the same. Add your user to the group:"
     warn "    sudo usermod -aG input \$USER"
     warn "Then log out of the desktop session and log back in."
-    warn "A new terminal is not enough — open sessions keep the old groups."
-    warn "Continuing anyway — you can fix this later."
+    warn "A new terminal is not enough: open sessions keep the old groups."
+    warn "Continuing anyway. You can fix this later."
     echo >&2
 fi
 
@@ -249,7 +249,7 @@ elif config_ocr_is_off "$HOME"; then
     info "  Debian:  sudo apt install tesseract-ocr-eng"
     info "  Fedora:  sudo dnf install tesseract-langpack-eng"
 else
-    warn "eng.traineddata not found — install your distro's eng tessdata package."
+    warn "eng.traineddata not found. Install your distro's eng tessdata package."
     warn "  Arch:    sudo pacman -S tesseract-data-eng"
     warn "  Debian:  sudo apt install tesseract-ocr-eng"
     warn "  Fedora:  sudo dnf install tesseract-langpack-eng"
@@ -325,7 +325,7 @@ if [[ -d "$BUNDLE_SRC" ]]; then
 elif [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
     # Older tarball with a flat lib/. Isolate into the private OCR dir and
     # skip OpenSSL so a mixed upgrade cannot re-shadow system libcrypto.
-    warn "flat lib/ layout (pre-0.4.1 tarball) — installing into $BUNDLE_DEST/ocr, skipping OpenSSL"
+    warn "flat lib/ layout (pre-0.4.1 tarball): installing into $BUNDLE_DEST/ocr, skipping OpenSSL"
     mkdir -p "$BUNDLE_DEST/ocr"
     count=0
     for f in "$PKG_ROOT/lib"/*; do
@@ -372,7 +372,7 @@ USER_TESSDATA_DIR="$DATA_ROOT/tessdata"
 USER_ENG="$USER_TESSDATA_DIR/eng.traineddata"
 if [[ -f "$BUNDLED_ENG" ]]; then
     if [[ -f "$USER_ENG" ]]; then
-        info "eng.traineddata already present at $USER_ENG — keeping yours (not overwriting)."
+        info "eng.traineddata already present at $USER_ENG, keeping yours (not overwriting)."
     else
         mkdir -p "$USER_TESSDATA_DIR"
         install -m644 "$BUNDLED_ENG" "$USER_ENG"
@@ -407,12 +407,12 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     warn "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
     warn "    export PATH=\"$BIN_DIR:\$PATH\""
     warn "App launchers (AerynOS / Cosmic / GNOME) often omit this dir even"
-    warn "when a terminal has it — the .desktop Exec is an absolute path so"
+    warn "when a terminal has it. The .desktop Exec is an absolute path so"
     warn "the menu does not depend on session PATH."
 fi
 
 if [[ -n "$SKIP_INTEGRATION" ]]; then
-    info "SKIP_INTEGRATION set — skipping desktop entry and systemd unit (binaries only)"
+    info "SKIP_INTEGRATION set: skipping desktop entry and systemd unit (binaries only)"
 else
     # ── Desktop entry ─────────────────────────────────────────────────────────
     write_desktop_entry "$ASSETS_DIR/$DESKTOP" "$DESKTOP_DIR/$DESKTOP" "$(absolute_gui_bin)"
@@ -444,7 +444,7 @@ else
     )
     if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
         MANIFEST_ENTRIES+=("$DATA_DIR_DROPIN")
-        info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
+        info "Custom data_dir is outside the unit sandbox: wrote $DATA_DIR_DROPIN"
     fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
     if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
@@ -512,7 +512,7 @@ else
     done
 fi
 if [[ "$appindicator_found" -eq 0 ]]; then
-    warn "Ayatana AppIndicator not found — stat-tracker-gui will start without a tray."
+    warn "Ayatana AppIndicator not found. stat-tracker-gui will start without a tray."
     warn "Hide-to-tray needs libayatana-appindicator3 (or libappindicator3)."
     warn "  Debian/Ubuntu: sudo apt install libayatana-appindicator3-1"
     warn "  Fedora:        sudo dnf install libayatana-appindicator-gtk3"
@@ -539,7 +539,7 @@ fi
         echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE)."
         echo "  On Sway/Hyprland those are read from the compositor each start."
         echo "  If you installed with no graphical session, start the daemon"
-        echo "  again after login — the oneshot retries. See the README if"
+        echo "  again after login. The oneshot retries. See the README if"
         echo "  capture stays on CaptureBackend::None."
     fi
     echo

@@ -70,7 +70,7 @@ fn with_wayshot<T>(
                 // ensure_conn. Always surface the original capture/list error —
                 // do not reconnect here (wasted work) or replace first_err with
                 // a reconnect failure.
-                tracing::warn!(error = %first_err, "wayshot call failed — dropping connection");
+                tracing::warn!(error = %first_err, "wayshot call failed: dropping connection");
                 *slot = None;
                 Err(first_err)
             }
@@ -93,7 +93,7 @@ pub async fn capture_with_output(
                 outputs.iter().find(|o| o.name == *name).ok_or_else(|| {
                     let available: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
                     Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                        "output '{}' not found — available: {}",
+                        "output '{}' not found: available: {}",
                         name,
                         available.join(", ")
                     ))
