@@ -180,7 +180,7 @@ pub fn AdminSeasons() -> Element {
             match data {
                 None => admin_pending(&seasons, "seasons"),
                 Some(list) if list.is_empty() => rsx! {
-                    p { class: "empty-state", "No seasons yet — stats show all time until one exists." }
+                    p { class: "empty-state", "No seasons yet. Stats show all time until one exists." }
                 },
                 Some(list) => rsx! {
                     DataTable { headers: vec!["Name", "Starts (UTC)", "Ends (UTC)", "Current", "Actions"],
@@ -195,7 +195,7 @@ pub fn AdminSeasons() -> Element {
                                         td { "{season.name}" }
                                         td { "{starts}" }
                                         td { "{ends}" }
-                                        td { if season.is_current { "Yes" } else { "—" } }
+                                        td { if season.is_current { "Yes" } else { "-" } }
                                         td {
                                             div { class: "row-actions",
                                                 button {

@@ -258,7 +258,7 @@ pub fn Community() -> Element {
         main { class: "community-page",
             h1 { class: "community-page-title", "Community" }
             p { class: "community-subtitle",
-                "Our community lives on the Nostr protocol — decentralized, censorship-resistant, and open."
+                "Our community lives on the Nostr protocol. It is decentralized, censorship-resistant, and open."
             }
 
             div { class: "community-hero",
@@ -278,7 +278,7 @@ pub fn Community() -> Element {
                         }
                     }
                     p { class: "community-desc",
-                        "A competitive gaming community built on Nostr. No central servers own your identity — your keys, your account, everywhere."
+                        "A competitive gaming community built on Nostr. No central servers own your identity. Your keys, your account, everywhere."
                     }
 
                     if let Some(stats) = overview_ref {
@@ -315,7 +315,7 @@ fn CommunityFeatures(org_name: Option<String>) -> Element {
             h3 { class: "community-section-title", "How It Works" }
             div { class: "community-rules",
                 "{intro}\
-                 • Your identity is portable — take it to any Nostr-compatible app\n\
+                 • Your identity is portable. Take it to any Nostr-compatible app\n\
                  • Messages flow through relays, not centralized servers\n\
                  • NIP-05 verification proves your identity on this org domain\n\
                  • NIP-49 encrypted backups keep your keys safe\n\
@@ -340,7 +340,7 @@ fn OfficerCommunityActions(org_name: String) -> Element {
                 community_id: "scuffed-crew".to_string(),
                 name: name.clone(),
                 description: Some(format!(
-                    "{name} — competitive gaming community on Nostr. Your keys, your identity."
+                    "{name}. Competitive gaming community on Nostr. Your keys, your identity."
                 )),
                 rules: Some(
                     "1. Be respectful\n2. No drama, no politics\n3. Age 16+\n4. Have fun"

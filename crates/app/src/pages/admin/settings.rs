@@ -292,7 +292,7 @@ pub fn AdminSettings() -> Element {
             div { class: "form-section",
                 h2 { "Homepage identity" }
                 p { class: "form-section-lead",
-                    "Start from a pack, then tune shell, skin, and sections. Apply pack fills copy — Save to persist."
+                    "Start from a pack, then tune shell, skin, and sections. Apply pack fills copy. Save to persist."
                 }
                 div { class: "form-section-card",
                     label { class: "form-label", style: "margin-bottom:0.5rem;", "Identity pack" }
@@ -355,7 +355,7 @@ pub fn AdminSettings() -> Element {
                                         s
                                     });
                                     toast.show(Toast::success(format!(
-                                        "Applied “{}” — click Save to persist.",
+                                        "Applied “{}”. Click Save to persist.",
                                         preset.name,
                                     )));
                                 } else {
@@ -372,7 +372,7 @@ pub fn AdminSettings() -> Element {
                     div { class: "option-tiles", style: "margin-bottom:1rem;",
                         {
                             let shells = [
-                                (HomeShell::OpsHub, "Ops hub", "Dense board — schedule, roster table."),
+                                (HomeShell::OpsHub, "Ops hub", "Dense board. Schedule, roster table."),
                                 (HomeShell::RecruitLanding, "Recruit landing", "Apply-first, team cards, more space."),
                                 (HomeShell::Minimal, "Minimal", "Hero + apply; lean front door."),
                                 (HomeShell::Manifesto, "Manifesto", "Principles first; comps quieter."),
@@ -403,7 +403,7 @@ pub fn AdminSettings() -> Element {
                     div { class: "option-tiles", style: "margin-bottom:1rem;",
                         {
                             let skins = [
-                                (HomeSkin::Clean, "Clean", "Calmer product look — default for most packs."),
+                                (HomeSkin::Clean, "Clean", "Calmer product look. Default for most packs."),
                                 (HomeSkin::Esports, "Esports", "Clipped badges, denser competitive DNA."),
                             ];
                             rsx! {
@@ -826,7 +826,7 @@ pub fn AdminSettings() -> Element {
                         onclick: move |_| {
                             nav.set(NavConfig::default());
                             toast.show(Toast::success(
-                                "Nav reset to small-org defaults — click Save to persist.",
+                                "Nav reset to small-org defaults. Click Save to persist.",
                             ));
                         },
                         "Reset defaults"
@@ -836,7 +836,7 @@ pub fn AdminSettings() -> Element {
                     if strategies_enabled() {
                         "Primary bar, More menu, or hidden. Small-org default: Members, Forum, Events, Stats primary; Tournaments / Scrims / Strategy under More. Hidden routes still work via URL."
                     } else {
-                        "Primary bar, More menu, or hidden. Strategies is off under Features — it will not appear in Primary or More even if placed here, and /strategy URLs are blocked. Patch Notes stay available."
+                        "Primary bar, More menu, or hidden. Strategies is off under Features. It will not appear in Primary or More even if placed here, and /strategy URLs are blocked. Patch Notes stay available."
                     }
                 }
                 NavColumn {
@@ -853,7 +853,7 @@ pub fn AdminSettings() -> Element {
                 }
                 NavColumn {
                     title: "Hidden",
-                    hint: "Not in the nav — promote when you need them.",
+                    hint: "Not in the nav. Promote when you need them.",
                     placement: NavPlacement::Hidden,
                     nav: nav,
                 }

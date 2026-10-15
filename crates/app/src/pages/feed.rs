@@ -128,7 +128,7 @@ pub fn Feed() -> Element {
         main { class: "feed-page",
             h1 { class: "feed-page-title", "Feed" }
             p { class: "feed-subtitle",
-                "The latest from The Scuffed Crew — powered by Nostr."
+                "The latest from The Scuffed Crew, powered by Nostr."
             }
             span { class: "feed-nostr-badge", "Kind 1 · Text Notes" }
 

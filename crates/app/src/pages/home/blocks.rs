@@ -391,7 +391,7 @@ fn ResultsTicker(results: Vec<RecentResult>) -> Element {
                     {
                         let score = match (r.score_us, r.score_them) {
                             (Some(u), Some(t)) => format!("{u}–{t}"),
-                            _ => "—".into(),
+                            _ => "-".into(),
                         };
                         let outcome_class = format!("ticker-chip {}", r.outcome);
                         let date: String = r.played_at.chars().take(10).collect();
@@ -490,7 +490,7 @@ fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> E
         .unwrap_or_else(|| team.game_id.clone());
     let forming = team.roster_count == 0;
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
-        "—".to_string()
+        "-".to_string()
     } else {
         format!("{}–{}", team.record.wins, team.record.losses)
     };

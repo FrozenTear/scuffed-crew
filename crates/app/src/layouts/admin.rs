@@ -217,7 +217,7 @@ pub fn AdminLayout() -> Element {
         .as_ref()
         .and_then(|u| u.role.as_ref())
         .map(|r| format!("{r:?}"))
-        .unwrap_or_else(|| "—".into());
+        .unwrap_or_else(|| "-".into());
 
     // Auth loading: avoid flashing Access Denied before /api/auth/me resolves
     if auth().loading {

@@ -495,7 +495,7 @@ fn render_hero_card(h: &HeroAgg) -> Element {
     let winrate = if h.games > 0 {
         format!("{:.0}%", h.winrate * 100.0)
     } else {
-        "—".to_string()
+        "-".to_string()
     };
     rsx! {
         Card {

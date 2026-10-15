@@ -126,12 +126,12 @@ pub fn AdminForum() -> Element {
                             div { class: "af-cat", "{cat.category.name} ({cat.category.slug})" }
                             for node in cat.boards.iter() {
                                 div { class: "af-board",
-                                    "• {node.board.name} — /forum/b/{node.board.slug}"
+                                    "• {node.board.name} - /forum/b/{node.board.slug}"
                                     if node.board.is_locked { " [locked]" }
                                 }
                                 for sub in node.sub_boards.iter() {
                                     div { class: "af-sub",
-                                        "↳ {sub.name} — /forum/b/{sub.slug}"
+                                        "↳ {sub.name} - /forum/b/{sub.slug}"
                                     }
                                 }
                             }
@@ -186,7 +186,7 @@ pub fn AdminForum() -> Element {
                         div { class: "af-form",
                             select {
                                 onchange: move |e| board_cat.set(e.value()),
-                                option { value: "", "— Category —" }
+                                option { value: "", "- Category -" }
                                 for cat in cats.iter() {
                                     option {
                                         value: "{cat.category.id}",
@@ -197,7 +197,7 @@ pub fn AdminForum() -> Element {
                             }
                             select {
                                 onchange: move |e| board_parent.set(e.value()),
-                                option { value: "", "— Top-level board (no parent) —" }
+                                option { value: "", "- Top-level board (no parent) -" }
                                 for cat in cats.iter() {
                                     for node in cat.boards.iter() {
                                         option {

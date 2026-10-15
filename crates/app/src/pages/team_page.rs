@@ -77,7 +77,7 @@ fn day_name(d: u8) -> &'static str {
         4 => "Fri",
         5 => "Sat",
         6 => "Sun",
-        _ => "—",
+        _ => "-",
     }
 }
 
@@ -508,7 +508,7 @@ fn render_match_row(m: &TeamMatch) -> Element {
             };
             (format!("{us}–{them}"), class)
         }
-        _ => ("—".to_string(), "draw"),
+        _ => ("-".to_string(), "draw"),
     };
     let mut meta_parts: Vec<String> = Vec::new();
     if let Some(map) = &m.map_name

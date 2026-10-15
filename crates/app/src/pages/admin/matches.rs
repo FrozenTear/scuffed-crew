@@ -277,7 +277,7 @@ pub fn AdminMatches() -> Element {
                                     let mc = m.clone();
                                     let score = match (m.score_us, m.score_them) {
                                         (Some(u), Some(t)) => format!("{u}-{t}"),
-                                        _ => "—".to_string(),
+                                        _ => "-".to_string(),
                                     };
                                     let map = m.map_name.clone().unwrap_or("-".to_string());
                                     let date: String = m

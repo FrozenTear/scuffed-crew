@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::bracket::BRACKET_STYLES;
 use crate::routes::Route;
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +34,15 @@ fn format_label(f: &str) -> &str {
         "round_robin" => "Round Robin",
         "swiss" => "Swiss",
         _ => f,
+    }
+}
+
+/// The staff sentence is only for officers and admins. Visitors get the public line.
+fn tournaments_empty_copy(show_staff_hint: bool) -> &'static str {
+    if show_staff_hint {
+        "When the org runs a bracket or open cup, it shows up here. Officers add them under Admin → Tournaments."
+    } else {
+        "When the org runs a bracket or open cup, it shows up here."
     }
 }
 
@@ -138,6 +148,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Tournaments() -> Element {
+    let auth = use_auth();
     let tournaments = use_resource(|| async {
         ApiClient::web()
             .fetch::<CursorPage<Tournament>>("/api/tournaments")
@@ -163,11 +174,13 @@ pub fn Tournaments() -> Element {
                             .filter(|t| t.status != "draft")
                             .collect();
                         if visible.is_empty() {
+                            let show_staff = auth().is_officer_or_above();
+                            let detail = tournaments_empty_copy(show_staff);
                             rsx! {
                                 div { class: "tournaments-empty",
                                     p { "No tournaments yet." }
                                     p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-3);",
-                                        "When the org runs a bracket or open cup, it shows up here. Officers add them under Admin → Tournaments."
+                                        "{detail}"
                                     }
                                 }
                             }
@@ -218,5 +231,21 @@ fn render_tournament_card(t: &Tournament) -> Element {
             }
             span { class: "{status_class}", "{status_text}" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tournaments_empty_copy;
+
+    #[test]
+    fn visitors_do_not_see_the_staff_tournaments_hint() {
+        let visitor = tournaments_empty_copy(false);
+        assert!(visitor.contains("shows up here"));
+        assert!(!visitor.contains("Officers"));
+        assert!(!visitor.contains("Admin"));
+        let staff = tournaments_empty_copy(true);
+        assert!(staff.contains("Officers add them under Admin"));
+        assert!(staff.starts_with(visitor));
     }
 }

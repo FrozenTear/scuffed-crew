@@ -55,7 +55,7 @@ fn RsvpCell(event_id: String) -> Element {
     let data = summary.data.read();
     let data = data.as_ref().and_then(|d| d.as_ref());
     match data {
-        None => rsx! { span { style: "color: var(--text-3);", "\u{2014}" } },
+        None => rsx! { span { style: "color: var(--text-3);", "-" } },
         Some(s) => rsx! {
             span { style: "font-size: 0.85rem; white-space: nowrap;",
                 span { style: "color: var(--ok);", "{s.yes_count}" }
@@ -285,7 +285,7 @@ pub fn AdminSchedule() -> Element {
                                 let day_label = DAYS.get(evt.day_of_week as usize).unwrap_or(&"?");
                                 let recurring_label = if evt.is_recurring { "Yes" } else { "No" };
                                 let public_label = if evt.is_public { "Yes" } else { "No" };
-                                let team_label = evt.team_name.clone().unwrap_or_else(|| "\u{2014}".into());
+                                let team_label = evt.team_name.clone().unwrap_or_else(|| "-".into());
                                 rsx! {
                                     tr { key: "{evt.id}",
                                         td { "{evt.title}" }
@@ -409,7 +409,7 @@ pub fn AdminSchedule() -> Element {
                         let v = e.value();
                         form_team_id.set(if v.is_empty() { None } else { Some(v) });
                     },
-                    option { value: "", "\u{2014} None \u{2014}" }
+                    option { value: "", "- None -" }
                     {
                         let teams_data = teams.data.read();
                         let teams_data = teams_data.as_ref().and_then(|d| d.as_ref());

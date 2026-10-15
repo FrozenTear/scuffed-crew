@@ -14,9 +14,9 @@ use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
 use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
-use crate::hooks::{use_api, use_api_with};
+use crate::hooks::use_api_with;
 use crate::routes::Route;
-use crate::state::use_auth;
+use crate::state::{AuthState, use_auth};
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -147,9 +147,13 @@ pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
 const TRACKER_PLATFORM_COPY: &str =
     "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
-/// Release-week note inside the tracker install and reinstall blocks on `/stats`.
-/// Remove this const, [`tracker_release_notice`], and those call sites when the week is over.
-const TRACKER_RELEASE_NOTICE: &str = "Install alpha.8 between games, not during one.";
+/// Stat-tracker build named in the install note on `/stats`.
+/// One constant, so the banner tracks the current build instead of an older alpha.
+const TRACKER_RELEASE: &str = "alpha.10";
+
+fn tracker_release_notice_text() -> String {
+    format!("Install {TRACKER_RELEASE} between games, not during one.")
+}
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -1047,10 +1051,20 @@ const STATS_CSS: &str = r#"
     }
 "#;
 
-/// Release-week note. Delete with [`TRACKER_RELEASE_NOTICE`].
+/// Release note inside the tracker install and reinstall blocks.
 fn tracker_release_notice() -> Element {
     rsx! {
-        p { class: "tracker-release-notice", "{TRACKER_RELEASE_NOTICE}" }
+        p { class: "tracker-release-notice", "{tracker_release_notice_text()}" }
+    }
+}
+
+/// Member stats endpoints 401 when there is no session. Skip them until auth
+/// settles on a signed-in user, so a signed-out visit does not fire those requests.
+fn member_stats_url(auth: &AuthState, path: String) -> String {
+    if auth.loading || !auth.is_logged_in() {
+        String::new()
+    } else {
+        path
     }
 }
 
@@ -1062,13 +1076,21 @@ pub fn Stats() -> Element {
     // rollover follows. Every season row is pinned by id, including the one
     // that is current now, an upcoming season, and a second flagged season.
     let season = use_stats_season();
-    let stats = use_api_with::<PersonalStats>(move || season.fetch_path("/api/stats/me"));
-    let heroes = use_api_with::<Vec<HeroStats>>(move || season.fetch_path("/api/stats/me/heroes"));
-    let role_stats = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
-        season.fetch_path(role::my_roles_path())
+    let stats = use_api_with::<PersonalStats>(move || {
+        member_stats_url(&auth(), season.fetch_path("/api/stats/me"))
     });
-    let maps = use_api_with::<Vec<MapStats>>(move || season.fetch_path("/api/stats/me/maps"));
-    let server_settings = use_api::<MemberSettingsResponse>("/api/stats/settings");
+    let heroes = use_api_with::<Vec<HeroStats>>(move || {
+        member_stats_url(&auth(), season.fetch_path("/api/stats/me/heroes"))
+    });
+    let role_stats = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
+        member_stats_url(&auth(), season.fetch_path(role::my_roles_path()))
+    });
+    let maps = use_api_with::<Vec<MapStats>>(move || {
+        member_stats_url(&auth(), season.fetch_path("/api/stats/me/maps"))
+    });
+    let server_settings = use_api_with::<MemberSettingsResponse>(move || {
+        member_stats_url(&auth(), "/api/stats/settings".to_string())
+    });
 
     let mut tab = use_signal(|| StatsTab::Overview);
     let mut toast = use_toast();
@@ -1127,11 +1149,12 @@ pub fn Stats() -> Element {
             Some(c) => format!("/api/stats/me/matches?limit=25&cursor={c}"),
             None => "/api/stats/me/matches?limit=25".to_string(),
         };
-        season.fetch_path(&base)
+        member_stats_url(&auth(), season.fetch_path(&base))
     });
     // Overview form strip — same endpoint, limit=10, no new backend (Q3).
-    let form_matches =
-        use_api_with::<MatchPage>(move || season.fetch_path("/api/stats/me/matches?limit=10"));
+    let form_matches = use_api_with::<MatchPage>(move || {
+        member_stats_url(&auth(), season.fetch_path("/api/stats/me/matches?limit=10"))
+    });
 
     let mut density = use_signal(initial_density);
     let hero_role = use_signal(|| "All");
@@ -1167,6 +1190,16 @@ pub fn Stats() -> Element {
     };
 
     let dens = density();
+
+    if !auth().loading && !auth().is_logged_in() {
+        return rsx! {
+            style { {STATS_CSS} }
+            div { class: "stats-page",
+                h1 { "My Stats" }
+                {member_pending(&auth(), &stats, "stats")}
+            }
+        };
+    }
 
     rsx! {
         style { {STATS_CSS} }
@@ -1287,7 +1320,7 @@ pub fn Stats() -> Element {
                     None => member_pending(&auth(), &stats, "stats"),
                     Some(s) if s.total_matches == 0 => rsx! {
                         p { class: "empty-state",
-                            "No matches tracked yet. Install the tracker above and play — your stats land here automatically."
+                            "No matches tracked yet. Install the tracker above and play. Your stats land here automatically."
                         }
                     },
                     Some(s) => {
@@ -1650,7 +1683,7 @@ mod header_layout_tests {
 
 #[cfg(test)]
 mod tracker_platform_copy_tests {
-    use super::{TRACKER_PLATFORM_COPY, TRACKER_RELEASE_NOTICE};
+    use super::{TRACKER_PLATFORM_COPY, TRACKER_RELEASE, tracker_release_notice_text};
 
     /// The install blurb on `/stats`, from the heading through the curl command.
     fn tracker_download_blurb(src: &str) -> &str {
@@ -1699,14 +1732,33 @@ mod tracker_platform_copy_tests {
     }
 
     #[test]
-    fn release_notice_stays_inside_the_tracker_blocks() {
+    fn release_notice_names_the_current_tracker_build() {
+        assert_eq!(TRACKER_RELEASE, "alpha.10");
         assert_eq!(
-            TRACKER_RELEASE_NOTICE,
-            "Install alpha.8 between games, not during one."
+            tracker_release_notice_text(),
+            format!("Install {TRACKER_RELEASE} between games, not during one.")
         );
-        assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2014}'));
-        assert!(!TRACKER_RELEASE_NOTICE.contains('\u{2013}'));
+        let notice = tracker_release_notice_text();
+        assert!(!notice.contains('\u{2014}'));
+        assert!(!notice.contains('\u{2013}'));
+        assert!(notice.contains(TRACKER_RELEASE));
         let src = include_str!("mod.rs");
+        // Built here so this test file does not itself contain the old label.
+        let previous = ["alpha", "8"].join(".");
+        assert!(
+            !src.contains(&previous),
+            "the install note must not keep the previous tracker build"
+        );
+        let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
+        assert_eq!(
+            prod.matches("alpha.10").count(),
+            1,
+            "the build name lives only on TRACKER_RELEASE"
+        );
+        assert!(
+            !prod.contains("Install alpha."),
+            "the sentence must be built from TRACKER_RELEASE"
+        );
         let slim = src.find("if slim_tracker {").expect("slim tracker");
         assert!(
             !src[..slim].contains("{tracker_release_notice()}"),
@@ -1729,11 +1781,75 @@ mod tracker_platform_copy_tests {
             download_body[guard..].contains("{tracker_release_notice()}"),
             "members with no matches still see the notice in the install block"
         );
+    }
+}
+
+#[cfg(test)]
+mod signed_out_tests {
+    use super::member_stats_url;
+    use crate::state::AuthState;
+    use scuffed_types::{OrgRole, UserInfo};
+
+    fn member() -> AuthState {
+        AuthState {
+            user: Some(UserInfo {
+                id: "u1".into(),
+                username: "dev".into(),
+                avatar_url: None,
+                role: Some(OrgRole::Member),
+            }),
+            loading: false,
+        }
+    }
+
+    #[test]
+    fn signed_out_and_loading_skip_member_stats_urls() {
+        let signed_out = AuthState {
+            user: None,
+            loading: false,
+        };
+        assert_eq!(member_stats_url(&signed_out, "/api/stats/me".into()), "");
+        let loading = AuthState::new();
+        assert!(loading.loading);
+        assert_eq!(member_stats_url(&loading, "/api/stats/settings".into()), "");
         assert_eq!(
-            src.matches(TRACKER_RELEASE_NOTICE).count(),
-            2,
-            "the sentence lives on the const and in this test"
+            member_stats_url(&member(), "/api/stats/me/heroes".into()),
+            "/api/stats/me/heroes"
         );
+    }
+
+    #[test]
+    fn signed_out_branch_returns_before_the_stats_chrome() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("mod signed_out_tests").next().unwrap();
+        let gate = prod
+            .find("if !auth().loading && !auth().is_logged_in()")
+            .expect("signed-out gate");
+        let chrome = prod.find("Density: Compact").expect("density control");
+        assert!(
+            gate < chrome,
+            "signed-out visitors must not reach the stats chrome"
+        );
+        assert!(
+            !prod[gate..chrome].contains("Couldn't load"),
+            "the sign-in return must not render load errors"
+        );
+        assert_eq!(
+            prod.matches("member_stats_url(&auth()").count(),
+            7,
+            "summary, heroes, roles, maps, settings, history, and form"
+        );
+        for path in [
+            "\"/api/stats/me\"",
+            "\"/api/stats/me/heroes\"",
+            "role::my_roles_path()",
+            "\"/api/stats/me/maps\"",
+            "\"/api/stats/settings\"",
+            "\"/api/stats/me/matches?limit=25\"",
+            "\"/api/stats/me/matches?limit=10\"",
+        ] {
+            assert!(prod.contains(path), "missing member stats path {path}");
+        }
     }
 }
 

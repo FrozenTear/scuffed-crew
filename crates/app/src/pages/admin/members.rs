@@ -831,7 +831,7 @@ pub fn AdminMembers() -> Element {
                     class: "form-input",
                     r#type: "text",
                     value: "{pw_new}",
-                    placeholder: "min 12 characters — member should change it after login",
+                    placeholder: "min 12 characters. Member should change it after login",
                     oninput: move |e| pw_new.set(e.value()),
                 }
                 p { class: "form-hint", "Only works for local (username/password) accounts." }
@@ -1015,7 +1015,7 @@ pub fn AdminMembers() -> Element {
                                     for acct in accts_data.read().iter() {
                                         {
                                             let a_del = acct.clone();
-                                            let acct_id_display = acct.account_id.clone().unwrap_or_else(|| "\u{2014}".into());
+                                            let acct_id_display = acct.account_id.clone().unwrap_or_else(|| "-".into());
                                             rsx! {
                                                 tr { key: "{acct.id}",
                                                     td { "{acct.game_id}" }
@@ -1142,7 +1142,7 @@ pub fn AdminMembers() -> Element {
                                         f.name(),
                                         f.size() / 1024.0
                                     ),
-                                    None => "No file selected yet — click here".to_string(),
+                                    None => "No file selected yet. Click here.".to_string(),
                                 };
                                 rsx! {
                                     label {

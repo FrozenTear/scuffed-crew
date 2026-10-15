@@ -141,7 +141,7 @@ pub fn MessageList(messages: Vec<ChatMessage>, #[props(default = false)] loading
         return rsx! {
             style { {MESSAGE_LIST_CSS} }
             div { class: "chat-messages chat-messages--empty",
-                "No messages yet — say something!"
+                "No messages yet. Say something!"
             }
         };
     }

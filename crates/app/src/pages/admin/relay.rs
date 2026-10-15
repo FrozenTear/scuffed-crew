@@ -91,7 +91,7 @@ pub fn AdminRelay() -> Element {
                             }
                         });
                     let unconfigured_help = if local_forum {
-                        "Forum runs locally — a Nostr relay is optional. Set NOSTR_RELAY_URL only when you need relay-backed features (profile publish, DMs, Nostr forum)."
+                        "Forum runs locally. A Nostr relay is optional. Set NOSTR_RELAY_URL only when you need relay-backed features (profile publish, DMs, Nostr forum)."
                     } else {
                         "Forum is set to Nostr but no primary relay URL is configured. Set the NOSTR_RELAY_URL environment variable (non-empty ws:// or wss:// URL)."
                     };
