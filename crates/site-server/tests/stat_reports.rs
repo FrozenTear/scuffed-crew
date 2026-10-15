@@ -965,6 +965,81 @@ async fn daily_cap_is_ten_successful_stores() {
 }
 
 #[tokio::test]
+async fn daily_cap_resets_at_the_utc_day_boundary() {
+    let h = harness().await;
+    assert_eq!(DAILY_REPORT_CAP, 10);
+    let mut ids = Vec::new();
+    for n in 1..=DAILY_REPORT_CAP {
+        let (status, created) = send(
+            &h.app,
+            Method::POST,
+            "/api/stat-reports",
+            Some(MEMBER_TOKEN),
+            Some(valid_bundle(false).bytes),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "report {n}: {created}");
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+
+    let day_start = scuffed_db::utc_day_start(Utc::now());
+    let yesterday = day_start - Duration::hours(12);
+    for id in &ids {
+        h.state
+            .db
+            .set_stat_report_clock(id, yesterday, None)
+            .await
+            .unwrap();
+    }
+
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a report today is accepted after 10 stores on the previous UTC day: {created}"
+    );
+    let today_id = created["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reports = body["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), DAILY_REPORT_CAP as usize + 1);
+    let today = reports
+        .iter()
+        .find(|report| report["id"].as_str() == Some(today_id.as_str()))
+        .unwrap();
+    let today_at = chrono::DateTime::parse_from_rfc3339(today["created_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert!(today_at >= day_start);
+    for id in &ids {
+        let row = reports
+            .iter()
+            .find(|report| report["id"].as_str() == Some(id.as_str()))
+            .unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339(row["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(at < day_start, "{id} should count against yesterday");
+    }
+    assert_eq!(zip_count(&h.reports_dir), DAILY_REPORT_CAP as usize + 1);
+}
+
+#[tokio::test]
 async fn rejects_bad_manifest_extra_file_traversal_and_non_png() {
     let h = harness().await;
 
