@@ -1318,8 +1318,28 @@ fn sync_lock_path(data_dir: &Path) -> PathBuf {
 
 /// Exclusive `flock` on [`sync_lock_path`]. Released when dropped, or when
 /// the process dies.
+///
+/// Drop unlocks with `LOCK_UN` before the descriptor is closed. `open`
+/// already sets `O_CLOEXEC`, so a child drops the inherited descriptor at
+/// exec. `close` alone still leaves the lock held until that exec, and a
+/// keeper that tries again in that window sees [`PackSync::Busy`].
+/// `F_OFD_SETLK` is the same kind of lock: the child shares it until exec
+/// or an explicit unlock.
 struct SyncLock {
     _file: std::fs::File,
+}
+
+impl Drop for SyncLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: this descriptor is the one `try_acquire` locked, and it
+        // is still open: `Drop` runs before the `File` field is dropped.
+        // `LOCK_UN` removes that flock from the open file description,
+        // including the copy a child inherited across `fork`.
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 impl SyncLock {
@@ -1347,6 +1367,15 @@ impl SyncLock {
         } else {
             Err(err)
         }
+    }
+
+    /// `true` when this descriptor will be closed in a child at exec.
+    #[cfg(test)]
+    fn is_cloexec(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fd` is the descriptor `try_acquire` opened, still open.
+        let flags = unsafe { libc::fcntl(self._file.as_raw_fd(), libc::F_GETFD) };
+        flags >= 0 && (flags & libc::FD_CLOEXEC) != 0
     }
 }
 
@@ -5797,6 +5826,97 @@ mod tests {
             "{guide:?}"
         );
         assert_eq!(requests(&served).len(), expected.len() + 1);
+    }
+
+    /// `true` when a sync lock that has just been dropped can be taken
+    /// again while the child forked under that lock is still alive.
+    ///
+    /// `fork` copies the open file description into the child. `close` on
+    /// the parent's side does not release an `flock` until the child closes
+    /// its copy (at exec, or when the child exits). The child here never
+    /// execs: it waits until this function is done, so the inherited
+    /// descriptor stays open across the drop and the next acquire.
+    fn lock_drop_is_visible_while_a_child_holds_the_fd(data_dir: &Path) -> bool {
+        let mut ready = [0; 2];
+        let mut release = [0; 2];
+        // SAFETY: two fresh pipes. The child inherits both ends and uses
+        // only async-signal-safe calls (`close`, `write`, `read`, `_exit`).
+        let pipes_ok =
+            unsafe { libc::pipe(ready.as_mut_ptr()) == 0 && libc::pipe(release.as_mut_ptr()) == 0 };
+        assert!(pipes_ok, "pipe: {}", std::io::Error::last_os_error());
+        let held = SyncLock::try_acquire(data_dir)
+            .expect("lock file")
+            .expect("lock was free");
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                let byte = 1u8;
+                libc::write(ready[1], &byte as *const u8 as *const libc::c_void, 1);
+                libc::close(ready[1]);
+                let mut buf = [0u8; 1];
+                libc::read(release[0], buf.as_mut_ptr() as *mut libc::c_void, 1);
+                libc::close(release[0]);
+                libc::_exit(0);
+            }
+        }
+        struct Reap {
+            pid: libc::pid_t,
+            release_write: libc::c_int,
+        }
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let byte = 1u8;
+                unsafe {
+                    libc::write(
+                        self.release_write,
+                        &byte as *const u8 as *const libc::c_void,
+                        1,
+                    );
+                    libc::close(self.release_write);
+                    let mut status = 0;
+                    libc::waitpid(self.pid, &mut status, 0);
+                }
+            }
+        }
+        let _reap = Reap {
+            pid,
+            release_write: release[1],
+        };
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        let mut saw = [0u8; 1];
+        let n = unsafe { libc::read(ready[0], saw.as_mut_ptr() as *mut libc::c_void, 1) };
+        unsafe { libc::close(ready[0]) };
+        assert_eq!(n, 1, "the child never signalled that it was alive");
+        assert!(
+            held.is_cloexec(),
+            "the pack lock descriptor is inherited across exec"
+        );
+        drop(held);
+        SyncLock::try_acquire(data_dir)
+            .expect("lock file")
+            .is_some()
+    }
+
+    #[test]
+    fn dropping_the_sync_lock_frees_it_while_a_forked_child_still_has_the_fd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cycles = 50;
+        let mut missed = 0u32;
+        for _ in 0..cycles {
+            if !lock_drop_is_visible_while_a_child_holds_the_fd(dir.path()) {
+                missed += 1;
+            }
+        }
+        assert_eq!(
+            missed, 0,
+            "the pack lock was still held after drop in {missed}/{cycles} cycles while a forked child kept the inherited descriptor"
+        );
     }
 
     fn lock_is_free(data_dir: &Path) -> bool {
