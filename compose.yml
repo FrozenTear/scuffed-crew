@@ -45,13 +45,24 @@ services:
       SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD (run scripts/install.sh)}
       SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
       SURREALDB_DB: ${SURREALDB_DB:-main}
+      # Same flag as site-server. When it is set, relay-policy and the read
+      # gate refuse to start on a missing password, root/root, or a loopback
+      # SURREALDB_URL. They do not fall back to root/root.
+      PRODUCTION: ${PRODUCTION:-}
+      # Gate listens here and dials strfry on 127.0.0.1:7777 inside this
+      # container. Host 127.0.0.1:7777 is the gate, not raw strfry.
+      RELAY_GATE_LISTEN: 0.0.0.0:7779
+      RELAY_GATE_UPSTREAM: ws://127.0.0.1:7777
     volumes:
       - strfry-data:/app/strfry-db
     networks:
       - internal
       - external
+    # Host port 7777 is the read gate (container 7779). Container port 7777
+    # is strfry itself and stays on the Compose network so site-server can
+    # use ws://strfry:7777. Do not publish 7777:7777; that would skip the gate.
     ports:
-      - "127.0.0.1:7777:7777"
+      - "127.0.0.1:7777:7779"
     restart: unless-stopped
 
   site-server:

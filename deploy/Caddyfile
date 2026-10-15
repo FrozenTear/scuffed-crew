@@ -8,7 +8,7 @@ ow.scuffedcrew.no {
 	encode zstd gzip
 
 	# Cache-Control is set by the origin (cache_control_value). Do not add a
-	# second Cache-Control header here — it would duplicate the origin policy
+	# second Cache-Control header here. It would duplicate the origin policy
 	# and freeze unhashed .js/.css/.wasm plus the HTML shell for a year.
 
 	# Security headers. CSP is set by scuffed-server: enforcing
@@ -19,9 +19,20 @@ ow.scuffedcrew.no {
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
-	# Keep compose bound to 127.0.0.1 — only Caddy is public.
+	# Same-origin Nostr relay. Caddy strips /relay so the read gate sees /.
+	# The gate (host 127.0.0.1:7777) requires NIP-42 AUTH before any REQ.
+	# handle blocks are mutually exclusive, so the site catch-all is a handle
+	# too. A bare reverse_proxy would also claim /relay.
+	handle /relay* {
+		uri strip_prefix /relay
+		reverse_proxy 127.0.0.1:7777
+	}
+
+	# Keep compose bound to 127.0.0.1. Only Caddy is public.
 	# reverse_proxy sets X-Forwarded-For to the real client. The app trusts
 	# that header only from loopback and from TRUSTED_PROXIES (the Podman
 	# network gateway this hop shows up as inside the container). See docs/deploy.md.
-	reverse_proxy 127.0.0.1:HOST_PORT_HERE
+	handle {
+		reverse_proxy 127.0.0.1:HOST_PORT_HERE
+	}
 }

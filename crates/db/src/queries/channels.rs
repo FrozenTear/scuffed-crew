@@ -141,6 +141,19 @@ impl Database {
         .await
     }
 
+    /// Every team channel, including deactivated rows.
+    ///
+    /// The relay read gate uses this so a channel that was turned off stays
+    /// classified (officer history does not become world-readable).
+    pub async fn list_all_team_channels(&self) -> DbResult<Vec<TeamChannel>> {
+        with_timeout(async {
+            let mut result = self.client.query("SELECT * FROM team_channel").await?;
+            let channels: Vec<DbTeamChannel> = result.take(0)?;
+            Ok(channels.into_iter().map(db_to_team_channel).collect())
+        })
+        .await
+    }
+
     /// List every officer-only group id, including deactivated channels.
     ///
     /// The feed ACL must keep historical posts from a deactivated officer

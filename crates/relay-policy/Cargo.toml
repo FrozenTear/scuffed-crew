@@ -9,11 +9,23 @@ description = "strfry write-policy plugin for Scuffed Crew relay"
 name = "relay-policy"
 path = "src/main.rs"
 
+[lib]
+name = "relay_policy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relay-read-gate"
+path = "src/bin/read_gate.rs"
+
 [dependencies]
 scuffed-db = { path = "../db" }
+# Same floor as scuffed-chat. Signature checks for NIP-42 only; no NIP-44.
+nostr = { version = "0.44.8", default-features = false, features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake"] }
+futures-util = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
