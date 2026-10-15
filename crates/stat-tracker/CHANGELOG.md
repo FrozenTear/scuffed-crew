@@ -21,12 +21,10 @@ The daily report limit is now 10 (#284). A restart continues the game you were i
 
 ### Highlights
 
-- You can send 10 reports in one UTC day. The next one waits until the next UTC day, and reports from yesterday do not count (#284).
-- The open game resumes only when it has a map and the last scoreboard is at most 5 minutes old. After a result, the next game starts once the post-match wait has passed, even on the same map.
-- Your own hero on a later scoreboard is stored when it matches the hero panel. A panel that names a different hero, or names none, keeps the earlier hero and marks it unsure.
-- Names read on a scoreboard stay on this PC and are used to blank those names in a report. They are never included in the report file.
-- If an in-app update fails, the tracker puts the previous version back and starts again, instead of staying stopped.
-- The tracker now has a memory limit, so it can no longer help push your PC into running out of memory.
+- If an in-app update fails, the tracker puts the previous version back and starts again, instead of staying stopped (#298).
+- The tracker now has a memory limit, so it can no longer help push your PC into running out of memory (#298).
+- Hero portraits now come from the downloaded hero pack instead of being built into the app (#299).
+- Names read on a scoreboard stay on this PC and are used to blank those names in a report. They are never included in the report file (#290, #292).
 
 Technical detail.
 
