@@ -190,6 +190,30 @@ fn require_crypto(
     })
 }
 
+/// Dial URL for a team channel on the server.
+///
+/// `channel_relay_url` is the `team_channel.relay_url` column the browser
+/// also reads. An absolute `ws://` or `wss://` value is used as stored
+/// (trimmed). Blank, whitespace, and browser paths such as `/relay` are not
+/// dialable from this process, so `configured` is used instead.
+/// `configured` is `AppState.relay_url`, loaded once from `NOSTR_RELAY_URL`.
+/// It must also be `ws://` or `wss://`. Returns `None` when neither side is
+/// a websocket URL. Callers answer that with 503. This does not rewrite the
+/// stored column: browsers still map a blank or relative value to the public
+/// relay.
+fn resolve_server_relay_url(channel_relay_url: &str, configured: Option<&str>) -> Option<String> {
+    let channel = channel_relay_url.trim();
+    if channel.starts_with("ws://") || channel.starts_with("wss://") {
+        return Some(channel.to_string());
+    }
+    let configured = configured?.trim();
+    if configured.starts_with("ws://") || configured.starts_with("wss://") {
+        Some(configured.to_string())
+    } else {
+        None
+    }
+}
+
 /// POST /api/chat/send-encrypted — encrypt and publish a message to an officer channel.
 ///
 /// Flow:
@@ -351,10 +375,28 @@ pub async fn send_encrypted(
 
     let recipients_count = gift_wraps.len();
 
-    // Publish each gift wrap to the relay and require success
-    // TODO(Phase 2c): Use the RelayClient from shared state instead of creating per-request
-    let relay_url = &channel.relay_url;
-    let relay_client = scuffed_chat::RelayClient::new(relay_url);
+    // Publish each gift wrap to the relay and require success.
+    // TODO(Phase 2c): Use the RelayClient from shared state instead of creating per-request.
+    // Do not dial `channel.relay_url` raw: live rows are blank, and a path
+    // like `/relay` is a browser hint, not a server socket.
+    let relay_url = match resolve_server_relay_url(&channel.relay_url, state.relay_url.as_deref()) {
+        Some(url) => url,
+        None => {
+            tracing::error!(
+                group_id = %body.group_id,
+                channel_relay = %channel.relay_url,
+                configured = state.relay_url.as_deref().unwrap_or(""),
+                "No usable relay URL for encrypted send"
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "No usable relay URL for publishing. Set a ws:// or wss:// channel relay, or set NOSTR_RELAY_URL to a ws:// or wss:// URL.".into(),
+                }),
+            ));
+        }
+    };
+    let relay_client = scuffed_chat::RelayClient::new(&relay_url);
     match relay_client.connect().await {
         Ok(_rx) => {
             let mut failed = 0usize;
@@ -801,11 +843,64 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::SERVICE_UNAVAILABLE,
-            "an active officer is still a recipient, so publish reaches the relay: {body}"
+            "an active officer is still a recipient; with no dialable relay the send is 503: {body}"
         );
         assert!(
-            body.contains("Cannot connect to relay"),
-            "expected the relay error, got {body}"
+            body.contains("No usable relay URL"),
+            "blank channel and unset NOSTR_RELAY_URL must 503 before dialing, got {body}"
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_blank_uses_configured() {
+        assert_eq!(
+            resolve_server_relay_url("", Some("ws://strfry:7777")).as_deref(),
+            Some("ws://strfry:7777")
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_relative_path_uses_configured() {
+        assert_eq!(
+            resolve_server_relay_url("/relay", Some("wss://relay.example")).as_deref(),
+            Some("wss://relay.example")
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_ws_channel_wins() {
+        assert_eq!(
+            resolve_server_relay_url("ws://x", Some("wss://other")).as_deref(),
+            Some("ws://x")
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_wss_channel_wins() {
+        assert_eq!(
+            resolve_server_relay_url("wss://x", Some("ws://other")).as_deref(),
+            Some("wss://x")
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_whitespace_uses_configured() {
+        assert_eq!(
+            resolve_server_relay_url("  \t\n  ", Some("  ws://strfry:7777  ")).as_deref(),
+            Some("ws://strfry:7777")
+        );
+    }
+
+    #[test]
+    fn resolve_server_relay_url_both_missing() {
+        assert_eq!(resolve_server_relay_url("", None), None);
+        assert_eq!(resolve_server_relay_url("   ", None), None);
+        assert_eq!(resolve_server_relay_url("/relay", None), None);
+        assert_eq!(resolve_server_relay_url("", Some("   ")), None);
+        assert_eq!(resolve_server_relay_url("/relay", Some("")), None);
+        assert_eq!(
+            resolve_server_relay_url("", Some("https://relay.example")),
+            None
         );
     }
 }
