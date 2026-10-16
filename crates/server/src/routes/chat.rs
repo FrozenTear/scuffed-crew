@@ -10,7 +10,7 @@ use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{AuthTokenRequest, AuthTokenResponse, EncryptionService, NostrAuthService};
 use scuffed_db::NostrKeyMode;
 use scuffed_site_server::nostr_rate_limit::RateClass;
-use scuffed_types::{SendPublicRequest, SendPublicResponse};
+use scuffed_types::{MAX_CHAT_MESSAGE_CHARS, SendPublicRequest, SendPublicResponse};
 use serde::{Deserialize, Serialize};
 
 use scuffed_site_server::extractors::{OfficerUser, OrgMember};
@@ -243,6 +243,24 @@ fn require_crypto(
 /// a websocket URL. Callers answer that with 503. This does not rewrite the
 /// stored column: browsers still map a blank or relative value to the public
 /// relay.
+/// Trim chat text and enforce [`MAX_CHAT_MESSAGE_CHARS`].
+///
+/// Length is Unicode scalar values of the trimmed text. Blank input is
+/// returned as an empty string; callers that reject blank content do that
+/// themselves.
+fn trimmed_chat_content(raw: &str) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let content = raw.trim();
+    if content.chars().count() > MAX_CHAT_MESSAGE_CHARS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Message is too long (max {MAX_CHAT_MESSAGE_CHARS} characters)"),
+            }),
+        ));
+    }
+    Ok(content.to_string())
+}
+
 fn resolve_server_relay_url(channel_relay_url: &str, configured: Option<&str>) -> Option<String> {
     let channel = channel_relay_url.trim();
     if channel.starts_with("ws://") || channel.starts_with("wss://") {
@@ -275,6 +293,7 @@ pub async fn send_encrypted(
     caller: OfficerUser,
     Json(body): Json<SendEncryptedRequest>,
 ) -> Result<Json<SendEncryptedResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let content = trimmed_chat_content(&body.content)?;
     let crypto = require_crypto(&state)?;
 
     // Verify sender has server-managed keys (secret loaded via full member fetch).
@@ -408,7 +427,7 @@ pub async fn send_encrypted(
             sender_encrypted_key,
             &sender_pubkey,
             &recipient_pubkeys,
-            &body.content,
+            &content,
             &body.group_id,
             body.reply_to.as_deref(),
         )
@@ -500,10 +519,10 @@ pub async fn send_encrypted(
 /// Caller must be an org member and on the roster of the team that owns the
 /// channel. Officer channels are rejected with 400 pointing at
 /// `POST /api/chat/send-encrypted`. External (NIP-07) keys must sign
-/// client-side. Content is trimmed; blank content is rejected.
-/// `send_encrypted` has no separate character cap, and this route does not
-/// add one. Both sit behind the process 10 MiB body limit. This route charges
-/// the shared per-member interactive nostr limiter.
+/// client-side. Content is trimmed. Blank content is rejected. After trim,
+/// more than 2000 characters (`MAX_CHAT_MESSAGE_CHARS`) is 400, same as
+/// `send_encrypted`. This route charges the shared per-member interactive
+/// nostr limiter.
 ///
 /// `group_id` comes from `GET /api/teams/:id/channels` (`group_type: public`).
 pub async fn send_public(
@@ -511,10 +530,7 @@ pub async fn send_public(
     caller: OrgMember,
     Json(body): Json<SendPublicRequest>,
 ) -> Result<Json<SendPublicResponse>, SendPublicError> {
-    charge_interactive_send(&state, &caller.member.id)?;
-    let crypto = require_crypto(&state)?;
-
-    let content = body.content.trim();
+    let content = trimmed_chat_content(&body.content)?;
     if content.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -524,7 +540,8 @@ pub async fn send_public(
         )
             .into());
     }
-    let content = content.to_string();
+    charge_interactive_send(&state, &caller.member.id)?;
+    let crypto = require_crypto(&state)?;
 
     let group_id = body.group_id.trim();
     if group_id.is_empty() {
@@ -1543,5 +1560,185 @@ mod tests {
             .unwrap();
         let (status, body) = response_text(resp).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+
+    fn assert_too_long(status: StatusCode, body: &str) {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let value: serde_json::Value = serde_json::from_str(body).expect("json");
+        assert_eq!(
+            value["error"], "Message is too long (max 2000 characters)",
+            "{body}"
+        );
+    }
+
+    fn encrypted_app(state: AppState) -> Router {
+        Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state)
+    }
+
+    fn encrypted_req(group_id: &str, content: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat/send-encrypted")
+            .header(header::AUTHORIZATION, format!("Bearer {OFFICER_TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "group_id": group_id,
+                    "content": content
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn send_public_over_limit_rejected() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "longmember",
+            "longuser",
+            "long-token",
+            "member",
+            false,
+        )
+        .await;
+        let over = "a".repeat(MAX_CHAT_MESSAGE_CHARS + 1);
+        let resp = public_app(state)
+            .oneshot(public_req(Some("long-token"), "missing", &over))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_too_long(status, &body);
+    }
+
+    #[tokio::test]
+    async fn send_encrypted_over_limit_rejected() {
+        let state = test_state().await;
+        seed_officer(&state.db).await;
+        let over = "a".repeat(MAX_CHAT_MESSAGE_CHARS + 1);
+        let resp = encrypted_app(state)
+            .oneshot(encrypted_req("missing", &over))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_too_long(status, &body);
+    }
+
+    #[tokio::test]
+    async fn send_public_exactly_2000_ok() {
+        let (relay_url, mut published) = spawn_ok_relay().await;
+        let mut state = test_state().await;
+        state.relay_url = Some(relay_url);
+        seed_chat_member(
+            &state.db,
+            "capmember",
+            "capuser",
+            "cap-token",
+            "member",
+            false,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster("capmember", &channels.team_id, scuffed_db::TeamRole::Player)
+            .await
+            .unwrap();
+        let exact = "a".repeat(MAX_CHAT_MESSAGE_CHARS);
+        let resp = public_app(state.clone())
+            .oneshot(public_req(Some("cap-token"), &channels.public_id, &exact))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let event = published.recv().await.expect("relay event");
+        assert_eq!(
+            event["content"].as_str().unwrap().chars().count(),
+            exact.chars().count()
+        );
+
+        // Surrounding whitespace must not count toward the cap.
+        let padded = format!("  {exact}  ");
+        let resp = public_app(state)
+            .oneshot(public_req(Some("cap-token"), &channels.public_id, &padded))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let event = published.recv().await.expect("relay event");
+        assert_eq!(event["content"], exact);
+    }
+
+    #[tokio::test]
+    async fn send_encrypted_exactly_2000_ok() {
+        let (relay_url, _published) = spawn_ok_relay().await;
+        let mut state = test_state().await;
+        state.relay_url = Some(relay_url);
+        seed_officer(&state.db).await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster(
+                "officermember",
+                &channels.team_id,
+                scuffed_db::TeamRole::Player,
+            )
+            .await
+            .unwrap();
+        let exact = "a".repeat(MAX_CHAT_MESSAGE_CHARS);
+        let resp = encrypted_app(state.clone())
+            .oneshot(encrypted_req(&channels.officer_id, &exact))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let padded = format!("\n{exact}\n");
+        let resp = encrypted_app(state)
+            .oneshot(encrypted_req(&channels.officer_id, &padded))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "2000 characters after trim must be accepted: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_public_rate_limited() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "ratemember",
+            "rateuser",
+            "rate-token",
+            "member",
+            false,
+        )
+        .await;
+        let mut limited = None;
+        for _ in 0..40 {
+            let resp = public_app(state.clone())
+                .oneshot(public_req(Some("rate-token"), "missing-group", "hi"))
+                .await
+                .unwrap();
+            let (status, body) = response_text(resp).await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                limited = Some(body);
+                break;
+            }
+        }
+        let body = limited.expect("interactive limiter should return 429");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(value["error"], "rate_limited", "{body}");
+        assert!(
+            value["retry_after"].as_u64().is_some(),
+            "retry_after must be a number: {body}"
+        );
     }
 }

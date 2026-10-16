@@ -50,6 +50,12 @@ pub struct TeamChannel {
     pub synced_at: Option<DateTime<Utc>>,
 }
 
+/// Maximum chat message length, in Unicode scalar values, measured after trim.
+///
+/// `POST /api/chat/send-public` and `POST /api/chat/send-encrypted` both reject
+/// a longer body with `Message is too long (max 2000 characters)`.
+pub const MAX_CHAT_MESSAGE_CHARS: usize = 2000;
+
 /// POST /api/chat/send-encrypted
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SendEncryptedRequest {
@@ -205,6 +211,11 @@ mod tests {
         assert_eq!(ch.group_type, GroupType::Public);
         assert!(ch.is_active);
         assert!(ch.synced_at.is_none());
+    }
+
+    #[test]
+    fn chat_message_cap_is_2000_chars() {
+        assert_eq!(MAX_CHAT_MESSAGE_CHARS, 2000);
     }
 
     #[test]
