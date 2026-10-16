@@ -708,15 +708,24 @@ fn prune_locked(data_dir: &Path, keep: Retention) {
     dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
     let now = std::time::SystemTime::now();
     let mut total: u64 = 0;
+    // Strictly oldest first: once a game is dropped, every older one goes
+    // too, so an older game is never kept while a newer one is deleted.
+    let mut dropping = false;
     for (i, (at, p)) in dirs.into_iter().enumerate() {
-        let size = dir_bytes(&p);
-        let too_old = now.duration_since(at).is_ok_and(|age| age > MAX_AGE);
-        // The newest kit is always kept by the size cap.
-        let too_big = i > 0 && total.saturating_add(size) > keep.max_bytes;
-        if i >= keep.max_games || too_old || too_big {
+        // The newest kit is always kept, by every limit.
+        if i > 0 && !dropping {
+            let size = dir_bytes(&p);
+            let too_old = now.duration_since(at).is_ok_and(|age| age > MAX_AGE);
+            let too_big = total.saturating_add(size) > keep.max_bytes;
+            dropping = i >= keep.max_games || too_old || too_big;
+            if !dropping {
+                total += size;
+            }
+        } else if i == 0 {
+            total = dir_bytes(&p);
+        }
+        if dropping {
             let _ = fs::remove_dir_all(p);
-        } else {
-            total += size;
         }
     }
 }
@@ -1073,6 +1082,35 @@ mod tests {
         }
         prune(tmp.path(), Retention::new(2, 500));
         assert_eq!(kit_dirs(tmp.path()), vec!["b", "d"]);
+    }
+
+    #[test]
+    fn a_smaller_older_game_is_not_kept_after_a_newer_one_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mb = 1024 * 1024;
+        sized_kit(tmp.path(), "oldest_small", 10);
+        sized_kit(tmp.path(), "middle_big", 2 * mb);
+        sized_kit(tmp.path(), "newest", mb);
+        // 2 MB cap: newest fits, middle_big does not, so oldest_small goes too.
+        prune(tmp.path(), Retention::new(50, 2));
+        assert_eq!(kit_dirs(tmp.path()), vec!["newest"]);
+    }
+
+    #[test]
+    fn the_newest_game_stays_past_the_age_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        sized_kit(tmp.path(), "old", 10);
+        sized_kit(tmp.path(), "new", 10);
+        let past = std::time::SystemTime::now() - MAX_AGE - std::time::Duration::from_secs(3600);
+        let older = past - std::time::Duration::from_secs(60);
+        for (sid, at) in [("new", past), ("old", older)] {
+            fs::File::open(session_dir(tmp.path(), sid).unwrap())
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+        prune(tmp.path(), Retention::default());
+        assert_eq!(kit_dirs(tmp.path()), vec!["new"]);
     }
 
     #[test]
