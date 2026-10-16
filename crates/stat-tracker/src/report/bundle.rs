@@ -785,6 +785,31 @@ pub const MAX_FILES: usize = 30;
 /// Widest and tallest picture the site accepts, in pixels.
 pub const MAX_IMAGE_SIDE: u32 = 7680;
 
+/// The pictures a game report for `kit` would carry, for a preview before
+/// a report is built. Same rule as the report: only a trusted kit with
+/// reads gives pictures, and an unreadable or oversized one is left out.
+pub fn kit_preview_images(kit: &super::kit::Kit) -> Vec<ReportImage> {
+    if kit.reads.is_none() || !super::kit::is_trusted(kit) {
+        return Vec::new();
+    }
+    [
+        ("crops/scoreboard.png", kit.scoreboard_png.as_ref()),
+        ("crops/outcome.png", kit.outcome_png.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(path, png)| {
+        let png = png?;
+        let (width, height) = png_size(png).ok()?;
+        (width <= MAX_IMAGE_SIDE && height <= MAX_IMAGE_SIDE).then(|| ReportImage {
+            path: path.to_string(),
+            png: png.clone(),
+            width,
+            height,
+        })
+    })
+    .collect()
+}
+
 fn png_size(png: &[u8]) -> Result<(u32, u32), ReportError> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|_| ReportError::InvalidInput("a saved crop is not a PNG"))?;

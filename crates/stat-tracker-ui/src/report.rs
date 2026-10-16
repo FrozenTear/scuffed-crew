@@ -115,6 +115,35 @@ pub fn kit_images_from_zip(zip: &ReportZip) -> Vec<KitImage> {
         .collect()
 }
 
+/// Preview handles for `images` loaded straight from a game's kit.
+pub fn kit_images_from_report_images(
+    images: Vec<stat_tracker::report::bundle::ReportImage>,
+) -> Vec<KitImage> {
+    images
+        .into_iter()
+        .map(|image| KitImage {
+            path: image.path,
+            width: image.width,
+            height: image.height,
+            handle: iced::widget::image::Handle::from_bytes(image.png),
+        })
+        .collect()
+}
+
+/// Load a game's saved pictures without building a report, so a game
+/// opened from its card shows them before a category is picked.
+pub async fn load_kit_preview(
+    data_dir: PathBuf,
+    session_id: String,
+) -> Vec<stat_tracker::report::bundle::ReportImage> {
+    tokio::task::spawn_blocking(move || {
+        let kit = stat_tracker::report::kit::load(&data_dir, &session_id);
+        stat_tracker::report::bundle::kit_preview_images(&kit)
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Messages the dialog sends. Wrapped in [`Message::Report`].
 #[derive(Debug, Clone)]
 pub enum ReportMessage {
@@ -138,6 +167,8 @@ pub enum ReportMessage {
     ToggleLog,
     /// A finished build. The `u64` is the build generation; stale ones are dropped.
     Built(u64, Result<Arc<ReportZip>, String>),
+    /// A game's pictures loaded before any build, for that generation.
+    KitLoaded(u64, Vec<stat_tracker::report::bundle::ReportImage>),
     Send,
     Sent(SendOutcome),
     /// First press shows the private-file warning; the second saves.
@@ -188,6 +219,8 @@ pub struct ReportDialog {
     pub built: Option<Result<Arc<ReportZip>, String>>,
     /// Generation of the build in flight, if any.
     pub building: Option<u64>,
+    /// Generation of a picture load in flight (no category picked yet).
+    pub kit_loading: Option<u64>,
     /// Generation the inputs are at. A build for an older one is stale.
     /// Drawn from [`next_generation`], so a build from a closed dialog can
     /// never match a newer dialog.
@@ -217,6 +250,7 @@ impl ReportDialog {
             training: false,
             built: None,
             building: None,
+            kit_loading: None,
             generation: 0,
             text_edited_at: None,
             send: SendState::Idle,
@@ -259,23 +293,24 @@ impl ReportDialog {
         self.game_report && self.game_category.is_none()
     }
 
-    /// The line shown where the pictures go when none are loaded. A game
-    /// opened from its card has no category yet, so nothing is built and
-    /// the pictures are not loaded: say so instead of claiming none exist.
+    /// The line shown where the pictures go when none are loaded. Only once
+    /// the game's pictures were looked for (by a build, or by the picture
+    /// load for a game opened from its card) and none came back.
     pub fn pictures_note(&self) -> Option<&'static str> {
-        if !self.kit_images.is_empty() || !self.is_game() {
+        if !self.kit_images.is_empty()
+            || !self.is_game()
+            || self.building.is_some()
+            || self.kit_loading.is_some()
+            || self.text_edited_at.is_some()
+            || self.game_category.is_some_and(|c| c.allows_missing_kit())
+        {
             return None;
         }
-        if self.needs_game_category() {
-            return Some("Pick what went wrong to load this game's pictures.");
+        if self.needs_game_category() && self.game_session.is_none() {
+            // Nothing picked and no game: there is nothing to look for yet.
+            return None;
         }
-        if self.building.is_none()
-            && self.text_edited_at.is_none()
-            && !self.game_category.is_some_and(|c| c.allows_missing_kit())
-        {
-            return Some("No pictures for this game yet.");
-        }
-        None
+        Some("No pictures for this game yet.")
     }
 
     /// Send posts the preview zip. A log zip is never sent from a game
@@ -1657,9 +1692,13 @@ mod tests {
     fn a_game_opened_from_its_card_does_not_claim_no_pictures() {
         let mut d = ReportDialog::for_game(None, true);
         d.game_session = Some("827e7d10be7f0232".into());
+        d.kit_loading = Some(1);
+        assert_eq!(d.pictures_note(), None, "still loading");
+        d.kit_loading = None;
         assert_eq!(
             d.pictures_note(),
-            Some("Pick what went wrong to load this game's pictures.")
+            Some("No pictures for this game yet."),
+            "looked and found none"
         );
         let built = ReportDialog::for_game(Some(GameCategory::WrongHero), true);
         assert_eq!(

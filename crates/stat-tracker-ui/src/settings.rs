@@ -498,7 +498,7 @@ impl SettingsForm {
         }
     }
 
-    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
+    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
     /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
@@ -528,6 +528,8 @@ impl SettingsForm {
             finished_game_close_secs: base.finished_game_close_secs,
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
+            report_kit_max_games: base.report_kit_max_games,
+            report_kit_max_mb: base.report_kit_max_mb,
             ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
             update_channel: update_channel_for(base, self.prerelease_updates),
