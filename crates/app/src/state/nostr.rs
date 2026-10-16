@@ -112,6 +112,8 @@ pub enum NostrRelayEvent {
     AuthChallenge,
     /// Authentication completed successfully.
     AuthSuccess,
+    /// The relay rejected NIP-42 sign-in. `message` is chat-banner text.
+    AuthRejected { message: String },
     /// Relay sent a notice.
     Notice(String),
     /// Relay refused a subscription. `message` is chat-banner text.
@@ -139,6 +141,19 @@ enum CloseOutcome {
     Resend,
     /// Show this sentence in the chat error banner.
     Banner(String),
+    /// The relay rejected NIP-42 sign-in. Show the banner and stop.
+    SignInRejected(String),
+    /// Sign-in already failed. Leave the socket and the banner alone.
+    Held,
+}
+
+/// Result of the OK frame for the AUTH event we sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuthOkOutcome {
+    /// AUTH succeeded. These subscription ids may be sent once.
+    Accepted(Vec<String>),
+    /// AUTH was rejected. Banner text for the chat widget.
+    Rejected(String),
 }
 
 /// Per-connection bookkeeping for subscription `CLOSED` frames.
@@ -153,6 +168,10 @@ struct RelayCloseGate {
     /// Sticky across reconnects. Set by an AUTH challenge or an
     /// `auth-required` CLOSED reason.
     relay_requires_auth: bool,
+    /// We have sent an AUTH event and are waiting for its OK.
+    auth_presented: bool,
+    /// The relay rejected sign-in. Do not release subscriptions or reconnect.
+    auth_rejected: bool,
     waiting: Vec<String>,
     resent: Vec<String>,
 }
@@ -170,6 +189,21 @@ impl RelayCloseGate {
         self.relay_requires_auth = true;
     }
 
+    fn note_auth_presented(&mut self) {
+        self.auth_presented = true;
+    }
+
+    fn mark_rejected(&mut self) {
+        self.auth_rejected = true;
+        self.authed = false;
+        self.waiting.clear();
+    }
+
+    /// `false` after a rejected sign-in, so a socket close does not reconnect.
+    fn allows_reconnect(&self) -> bool {
+        !self.auth_rejected
+    }
+
     fn contains(ids: &[String], subscription_id: &str) -> bool {
         ids.iter().any(|id| id == subscription_id)
     }
@@ -185,6 +219,9 @@ impl RelayCloseGate {
 
     /// `true` means the caller must not send the REQ yet.
     fn hold_outgoing_req(&mut self, auth_configured: bool, subscription_id: &str) -> bool {
+        if self.auth_rejected {
+            return true;
+        }
         if !auth_configured || !self.relay_requires_auth || self.authed {
             return false;
         }
@@ -208,6 +245,9 @@ impl RelayCloseGate {
     }
 
     fn on_auth_success(&mut self) -> Vec<String> {
+        if self.auth_rejected {
+            return Vec::new();
+        }
         self.authed = true;
         let waiting = std::mem::take(&mut self.waiting);
         let mut send = Vec::new();
@@ -221,7 +261,42 @@ impl RelayCloseGate {
         send
     }
 
+    fn on_auth_ok(&mut self, accepted: bool, message: &str) -> AuthOkOutcome {
+        if self.auth_rejected || !accepted {
+            self.mark_rejected();
+            return AuthOkOutcome::Rejected(sign_in_banner(message));
+        }
+        AuthOkOutcome::Accepted(self.on_auth_success())
+    }
+
+    /// `Some` when this NOTICE is the relay rejecting sign-in.
+    fn on_notice(&mut self, message: &str) -> Option<String> {
+        if !self.notice_or_closed_is_sign_in_failure(message) {
+            return None;
+        }
+        self.mark_rejected();
+        Some(sign_in_banner(message))
+    }
+
+    fn notice_or_closed_is_sign_in_failure(&self, reason: &str) -> bool {
+        if self.authed || !self.auth_presented {
+            return false;
+        }
+        is_sign_in_failure_reason(reason)
+    }
+
     fn on_closed(&mut self, subscription_id: &str, reason: &str) -> CloseOutcome {
+        if self.auth_rejected {
+            if is_sign_in_failure_reason(reason) {
+                return CloseOutcome::SignInRejected(sign_in_banner(reason));
+            }
+            // Sign-in already failed. Do not queue a resend or replace the banner.
+            return CloseOutcome::Held;
+        }
+        if self.notice_or_closed_is_sign_in_failure(reason) {
+            self.mark_rejected();
+            return CloseOutcome::SignInRejected(sign_in_banner(reason));
+        }
         if reason.starts_with(AUTH_REQUIRED_PREFIX) {
             self.relay_requires_auth = true;
             if Self::contains(&self.resent, subscription_id) {
@@ -247,6 +322,42 @@ fn relay_closed_banner(reason: &str) -> String {
     } else {
         format!("The chat relay refused this channel: {reason}")
     }
+}
+
+fn sign_in_banner(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        "The chat relay rejected sign-in.".to_string()
+    } else {
+        format!("The chat relay rejected sign-in: {reason}")
+    }
+}
+
+/// CLOSED or NOTICE text that means the AUTH event was rejected.
+///
+/// A plain `auth-required:` hold ("AUTH required before REQ") is not a
+/// rejection. That one still waits for a successful AUTH and resends once.
+fn is_sign_in_failure_reason(reason: &str) -> bool {
+    let lower = reason.trim().to_ascii_lowercase();
+    if lower.starts_with("invalid:") || lower.starts_with("error:") {
+        return true;
+    }
+    let Some(detail) = lower.strip_prefix("auth-required:") else {
+        return false;
+    };
+    let detail = detail.trim();
+    [
+        "invalid",
+        "fail",
+        "rejected",
+        "denied",
+        "mismatch",
+        "signature",
+        "unauthorized",
+        "bad",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
 }
 
 fn warn_console(message: &str) {
@@ -395,6 +506,12 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                     return;
                 }
 
+                // A rejected sign-in stays on Error. Do not schedule another
+                // socket or the page loops Authenticating/Reconnecting.
+                if !shared_close.auth_gate.borrow().allows_reconnect() {
+                    return;
+                }
+
                 let attempts = *shared_close.reconnect_attempts.borrow();
                 if attempts < MAX_RECONNECT_ATTEMPTS {
                     let delay = reconnect_delay(attempts);
@@ -473,10 +590,15 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             let pending = shared.pending_auth_event_id.borrow().clone();
             if pending.as_deref() == Some(event_id.as_str()) {
                 shared.pending_auth_event_id.borrow_mut().take();
-                if accepted {
-                    finish_auth(shared);
-                } else {
-                    warn_console(&format!("Relay rejected NIP-42 AUTH: {message}"));
+                match shared.auth_gate.borrow_mut().on_auth_ok(accepted, &message) {
+                    AuthOkOutcome::Accepted(ids) => {
+                        for id in &ids {
+                            resend_subscription(shared, id);
+                        }
+                        shared.emit_event(NostrRelayEvent::AuthSuccess);
+                        shared.emit_state(RelayConnectionState::Ready);
+                    }
+                    AuthOkOutcome::Rejected(banner) => fail_sign_in(shared, banner),
                 }
                 return;
             }
@@ -502,6 +624,7 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
                 wasm_bindgen_futures::spawn_local(async move {
                     match fetch_auth_event(&endpoint, &relay_url, &challenge).await {
                         Ok(event) => {
+                            shared_auth.auth_gate.borrow_mut().note_auth_presented();
                             *shared_auth.pending_auth_event_id.borrow_mut() =
                                 Some(event.id.clone());
                             if let Some(socket) = shared_auth.socket.borrow().as_ref() {
@@ -523,6 +646,10 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             }
         }
         RelayMessage::Notice(msg) => {
+            if let Some(banner) = shared.auth_gate.borrow_mut().on_notice(&msg) {
+                fail_sign_in(shared, banner);
+                return;
+            }
             tracing::info!("Relay notice: {}", msg);
             shared.emit_event(NostrRelayEvent::Notice(msg));
         }
@@ -544,18 +671,25 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
                 CloseOutcome::Banner(text) => {
                     shared.emit_event(NostrRelayEvent::SubscriptionRefused { message: text });
                 }
+                CloseOutcome::SignInRejected(text) => fail_sign_in(shared, text),
+                CloseOutcome::Held => {}
             }
         }
     }
 }
 
-fn finish_auth(shared: &Rc<SharedRelayState>) {
-    let ids = shared.auth_gate.borrow_mut().on_auth_success();
-    for id in &ids {
-        resend_subscription(shared, id);
+fn fail_sign_in(shared: &Rc<SharedRelayState>, banner: String) {
+    warn_console(&banner);
+    shared.auth_gate.borrow_mut().mark_rejected();
+    if let Some(timer_id) = shared.reconnect_timer_id.borrow_mut().take()
+        && let Some(window) = web_sys::window()
+    {
+        window.clear_timeout_with_handle(timer_id);
     }
-    shared.emit_event(NostrRelayEvent::AuthSuccess);
-    shared.emit_state(RelayConnectionState::Ready);
+    // Error first, then the banner event, so the sign-in sentence wins
+    // over the generic connection-error copy.
+    shared.emit_state(RelayConnectionState::Error);
+    shared.emit_event(NostrRelayEvent::AuthRejected { message: banner });
 }
 
 fn resend_subscription(shared: &SharedRelayState, subscription_id: &str) {
@@ -975,5 +1109,63 @@ mod tests {
         assert!(!gate.hold_outgoing_req(true, "sub-1"));
         gate.reset_connection();
         assert!(gate.hold_outgoing_req(true, "sub-1"));
+    }
+
+    #[test]
+    fn rejected_sign_in_stays_in_error_and_does_not_reconnect() {
+        let mut gate = RelayCloseGate::default();
+        gate.note_auth_challenge();
+        assert!(gate.hold_outgoing_req(true, "sub-1"));
+        gate.note_auth_presented();
+
+        assert_eq!(
+            gate.on_auth_ok(false, "invalid: bad signature"),
+            AuthOkOutcome::Rejected(
+                "The chat relay rejected sign-in: invalid: bad signature".into()
+            )
+        );
+        assert!(!gate.allows_reconnect());
+        assert!(gate.hold_outgoing_req(true, "sub-2"));
+        assert!(gate.on_auth_success().is_empty());
+        assert_eq!(
+            gate.on_auth_ok(true, ""),
+            AuthOkOutcome::Rejected("The chat relay rejected sign-in.".into())
+        );
+        assert_eq!(
+            gate.on_closed("sub-1", "auth-required: NIP-42 AUTH required before REQ"),
+            CloseOutcome::Held
+        );
+
+        let mut closed = RelayCloseGate::default();
+        closed.note_auth_presented();
+        assert_eq!(
+            closed.on_closed("sub-1", "auth-required: invalid signature"),
+            CloseOutcome::SignInRejected(
+                "The chat relay rejected sign-in: auth-required: invalid signature".into()
+            )
+        );
+        assert!(!closed.allows_reconnect());
+        assert!(closed.on_auth_success().is_empty());
+
+        let mut notice = RelayCloseGate::default();
+        notice.note_auth_challenge();
+        assert_eq!(
+            notice.on_notice("auth-required: NIP-42 AUTH required before REQ"),
+            None
+        );
+        notice.note_auth_presented();
+        assert_eq!(
+            notice.on_notice("error: signature mismatch"),
+            Some("The chat relay rejected sign-in: error: signature mismatch".into())
+        );
+        assert!(!notice.allows_reconnect());
+
+        let mut still_waiting = RelayCloseGate::default();
+        still_waiting.note_auth_presented();
+        assert_eq!(
+            still_waiting.on_closed("sub-1", "auth-required: NIP-42 AUTH required before REQ"),
+            CloseOutcome::Queued
+        );
+        assert!(still_waiting.allows_reconnect());
     }
 }

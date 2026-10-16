@@ -527,9 +527,16 @@ pub fn ChatWidget(
                 ) {
                     loading.set(false);
                     if matches!(state, RelayConnectionState::Error) {
-                        panel_error.set(Some(
-                            "Can't reach the chat relay. Check your connection and retry.".into(),
-                        ));
+                        let keep_sign_in = panel_error
+                            .peek()
+                            .as_deref()
+                            .is_some_and(|msg| msg.starts_with("The chat relay rejected sign-in"));
+                        if !keep_sign_in {
+                            panel_error.set(Some(
+                                "Can't reach the chat relay. Check your connection and retry."
+                                    .into(),
+                            ));
+                        }
                     }
                 }
                 if matches!(
@@ -561,6 +568,11 @@ pub fn ChatWidget(
                 NostrRelayEvent::AuthSuccess => {
                     connection_state.set(RelayConnectionState::Ready);
                     panel_error.set(None);
+                }
+                NostrRelayEvent::AuthRejected { message } => {
+                    loading.set(false);
+                    connection_state.set(RelayConnectionState::Error);
+                    panel_error.set(Some(message));
                 }
                 NostrRelayEvent::Notice(msg) => {
                     tracing::info!("Relay notice: {}", msg);
