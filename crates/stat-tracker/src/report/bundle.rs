@@ -727,6 +727,16 @@ impl GameReportInput {
                 reads: Some(reads),
             };
         }
+        // The kit is written at Tab time, usually before the result screen.
+        // The stored row has the result the tracker uploaded.
+        if let (Some(reads), Some(m)) = (
+            kit.reads.as_mut(),
+            snapshot
+                .as_ref()
+                .and_then(|s| s.matches.iter().find(|m| m.session_id == session_id)),
+        ) {
+            reads.fill_result(&m.outcome);
+        }
         if kit.reads.is_none() && category != GameCategory::MissedGame {
             return Err(ReportError::InvalidInput(
                 "this game is not in the tracker's history",

@@ -95,8 +95,10 @@ const NAMES_MAX: usize = 64;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KitRead {
     pub value: Option<String>,
-    /// The tracker does not keep a per-field confidence today, so this is
-    /// `null` unless a reader supplies one.
+    /// The new reader's confidence for this read, 0 to 1
+    /// ([`KitReads::with_confidences`]). `null` under ocr-v1, for a stat
+    /// the capture gate replaced, and for a result filled from the stored
+    /// game ([`KitReads::fill_result`]).
     pub confidence: Option<f64>,
     /// The read before the capture gate (spec section 2). `reader =
     /// "ocr-v1"`: the Tesseract read. `reader = "new"`: Tesseract reads no
@@ -208,6 +210,78 @@ impl KitReads {
             },
             reads,
         }
+    }
+}
+
+/// One field as the active reader read it: its confidence and its own
+/// value (before the capture gate), for [`KitReads::with_confidences`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReaderRead {
+    pub confidence: f64,
+    pub value: Option<String>,
+}
+
+impl ReaderRead {
+    pub fn from_field(f: &crate::shadow::FieldRead) -> Self {
+        Self {
+            confidence: f64::from(f.confidence),
+            value: f.value.as_ref().map(|v| match v {
+                crate::shadow::Value::Int(n) => n.to_string(),
+                crate::shadow::Value::Text(t) => t.trim().to_string(),
+            }),
+        }
+    }
+}
+
+/// True unless `result` is a decided outcome (victory, defeat, draw).
+pub fn result_is_unknown(result: &str) -> bool {
+    let r = result.trim();
+    !["victory", "defeat", "draw"]
+        .iter()
+        .any(|o| r.eq_ignore_ascii_case(o))
+}
+
+impl KitReads {
+    /// Fill each read's `confidence` from the active reader's (keyed by read
+    /// key). A stat the capture gate replaced (the stored value is not the
+    /// reader's own read) gets none: the confidence belongs to the read, not
+    /// to the stored value. A reader read that disagrees with Tesseract
+    /// (`ocr_v1`) keeps its confidence. NaN and infinite give none; other
+    /// values are clamped to 0..1.
+    pub fn with_confidences(mut self, confidences: &BTreeMap<String, ReaderRead>) -> Self {
+        for (key, read) in self.reads.iter_mut() {
+            let Some(r) = confidences.get(key) else {
+                continue;
+            };
+            let c = r.confidence;
+            let gated = matches!(key.as_str(), "e" | "a" | "d" | "dmg" | "h" | "mit")
+                && (r.value.is_none() || read.value != r.value);
+            if !gated && c.is_finite() {
+                read.confidence = Some(c.clamp(0.0, 1.0));
+            }
+        }
+        self
+    }
+
+    /// The game's result as stored when the game closed, for a kit whose
+    /// Tab capture came before the result was known. The Tab read stays in
+    /// `ocr_v1`. A known kit result is never replaced.
+    pub fn fill_result(&mut self, stored_outcome: &str) {
+        let known = |s: &str| !result_is_unknown(s);
+        if !known(stored_outcome) || self.result.as_deref().is_some_and(known) {
+            return;
+        }
+        let outcome = stored_outcome.trim().chars().take(64).collect::<String>();
+        self.result = Some(outcome.clone());
+        let read = self.reads.entry("result".into()).or_insert(KitRead {
+            value: None,
+            confidence: None,
+            ocr_v1: None,
+            suspect: false,
+        });
+        read.value = Some(outcome);
+        read.confidence = None;
+        read.suspect = false;
     }
 }
 
@@ -1008,6 +1082,123 @@ mod tests {
                 .all(|k| ["IHDR", "IDAT", "IEND"].contains(&k.as_str())),
             "{kinds:?}"
         );
+    }
+
+    #[test]
+    fn reader_confidences_reach_the_kit_except_for_a_gated_stat() {
+        let mut r = reads();
+        let read = |value: &str, ocr: &str| KitRead {
+            value: Some(value.into()),
+            confidence: None,
+            ocr_v1: Some(ocr.into()),
+            suspect: false,
+        };
+        r.reads.insert("e".into(), read("10", "10"));
+        r.reads.insert("d".into(), read("3", "3"));
+        r.reads.insert("mode".into(), read("Control", "Control"));
+        // the reader read d as 8; the gate stored 3
+        let c = conf(&[("e", 0.97, "10"), ("d", 0.9, "8"), ("mode", 1.5, "Control")]);
+        let r = r.with_confidences(&c);
+        assert_eq!(r.reads["e"].confidence, Some(0.97));
+        assert_eq!(r.reads["d"].confidence, None, "the gate replaced this read");
+        assert_eq!(r.reads["mode"].confidence, Some(1.0), "clamped");
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["reads"]["e"]["confidence"], 0.97);
+    }
+
+    fn conf(entries: &[(&str, f64, &str)]) -> BTreeMap<String, ReaderRead> {
+        entries
+            .iter()
+            .map(|&(k, c, v)| {
+                (
+                    k.to_string(),
+                    ReaderRead {
+                        confidence: c,
+                        value: Some(v.to_string()),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// QA on #316: a cv read that Tesseract read differently was kept by
+    /// the gate, so it keeps its confidence.
+    #[test]
+    fn a_cv_read_that_disagrees_with_tesseract_keeps_its_confidence() {
+        let mut r = reads();
+        r.reads.insert(
+            "dmg".into(),
+            KitRead {
+                value: Some("8432".into()),
+                confidence: None,
+                ocr_v1: Some("8482".into()),
+                suspect: true,
+            },
+        );
+        let r = r.with_confidences(&conf(&[("dmg", 0.91, "8432")]));
+        assert_eq!(r.reads["dmg"].confidence, Some(0.91));
+    }
+
+    #[test]
+    fn nan_and_infinite_confidences_are_null_and_others_are_clamped() {
+        let mut r = reads();
+        for k in ["e", "a", "d", "h"] {
+            r.reads.insert(
+                k.into(),
+                KitRead {
+                    value: Some("5".into()),
+                    confidence: None,
+                    ocr_v1: Some("5".into()),
+                    suspect: false,
+                },
+            );
+        }
+        let c = conf(&[
+            ("e", f64::NAN, "5"),
+            ("a", f64::INFINITY, "5"),
+            ("d", -0.4, "5"),
+            ("h", f64::NEG_INFINITY, "5"),
+        ]);
+        let r = r.with_confidences(&c);
+        assert_eq!(r.reads["e"].confidence, None);
+        assert_eq!(r.reads["a"].confidence, None);
+        assert_eq!(r.reads["d"].confidence, Some(0.0));
+        assert_eq!(r.reads["h"].confidence, None);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("NaN") && !json.contains("inf"));
+    }
+
+    #[test]
+    fn only_victory_defeat_and_draw_are_known_results() {
+        for r in ["victory", " Defeat ", "DRAW"] {
+            assert!(!result_is_unknown(r), "{r}");
+        }
+        for r in ["", "unknown", "Unknown", "  ", "win"] {
+            assert!(result_is_unknown(r), "{r:?}");
+        }
+        let mut k = reads();
+        k.result = Some("".into());
+        k.fill_result("unknown");
+        assert_eq!(k.result.as_deref(), Some(""));
+        k.fill_result("victory");
+        assert_eq!(k.result.as_deref(), Some("victory"));
+    }
+
+    #[test]
+    fn a_kit_from_before_the_result_takes_the_stored_result() {
+        let mut r = reads();
+        r.result = Some("unknown".into());
+        r.fill_result("defeat");
+        assert_eq!(r.result.as_deref(), Some("defeat"));
+        assert_eq!(r.reads["result"].value.as_deref(), Some("defeat"));
+        assert!(!r.reads["result"].suspect);
+        // a known kit result is never replaced, and unknown never fills
+        r.fill_result("victory");
+        assert_eq!(r.result.as_deref(), Some("defeat"));
+        let mut none = reads();
+        none.result = None;
+        none.fill_result("unknown");
+        assert_eq!(none.result, None);
     }
 
     #[test]
