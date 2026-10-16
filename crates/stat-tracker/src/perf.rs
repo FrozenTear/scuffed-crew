@@ -70,6 +70,23 @@ pub struct Summary {
     pub capture: StageStats,
     pub poll_analyze: StageStats,
     pub tab_analyze: StageStats,
+    /// Thread CPU time spent in screen grabs during the window.
+    pub capture_cpu_ms: u64,
+    /// Thread CPU time spent in scoreboard OCR during the window.
+    pub tab_cpu_ms: u64,
+    /// X11 grab details, when X11 grabbed in the window.
+    pub x11: Option<X11Stats>,
+}
+
+/// X11 GetImage grabs in one window. X11 capture never uses shm: every
+/// grab is a full GetImage readback of the selected output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct X11Stats {
+    pub width: u16,
+    pub height: u16,
+    /// `full` when the output covers the whole X screen, else `output`.
+    pub scope: &'static str,
+    pub grabs: StageStats,
 }
 
 /// Samples gathered since `opened`.
@@ -78,6 +95,9 @@ pub struct Window {
     opened: Option<Instant>,
     backend: &'static str,
     samples: [Vec<u64>; STAGES],
+    cpu_us: [u64; STAGES],
+    x11_size: Option<(u16, u16, &'static str)>,
+    x11_grabs: Vec<u64>,
 }
 
 impl Window {
@@ -86,6 +106,9 @@ impl Window {
             opened: None,
             backend: "unknown",
             samples: [Vec::new(), Vec::new(), Vec::new()],
+            cpu_us: [0; STAGES],
+            x11_size: None,
+            x11_grabs: Vec::new(),
         }
     }
 
@@ -113,6 +136,19 @@ impl Window {
         self.backend = backend;
     }
 
+    /// Thread CPU time used by one sample of `stage`.
+    pub fn add_cpu(&mut self, stage: Stage, cpu: Duration) {
+        let us = u64::try_from(cpu.as_micros()).unwrap_or(u64::MAX);
+        self.cpu_us[stage.index()] = self.cpu_us[stage.index()].saturating_add(us);
+    }
+
+    /// One X11 GetImage grab of `width` x `height`.
+    pub fn add_x11_grab(&mut self, width: u16, height: u16, full: bool, took: Duration) {
+        self.x11_size = Some((width, height, if full { "full" } else { "output" }));
+        self.x11_grabs
+            .push(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+    }
+
     fn summarize(&mut self, elapsed: Duration) -> Option<Summary> {
         if self.samples.iter().all(Vec::is_empty) {
             return None;
@@ -121,12 +157,30 @@ impl Window {
             let mut samples = std::mem::take(&mut self.samples[stage.index()]);
             StageStats::from_samples(&mut samples)
         };
+        let capture = take(Stage::Capture);
+        let poll_analyze = take(Stage::PollAnalyze);
+        let tab_analyze = take(Stage::TabAnalyze);
+        let cpu = std::mem::take(&mut self.cpu_us);
+        let mut grabs = std::mem::take(&mut self.x11_grabs);
+        let x11 =
+            (!grabs.is_empty())
+                .then_some(self.x11_size)
+                .flatten()
+                .map(|(width, height, scope)| X11Stats {
+                    width,
+                    height,
+                    scope,
+                    grabs: StageStats::from_samples(&mut grabs),
+                });
         Some(Summary {
             window_secs: elapsed.as_secs(),
             backend: self.backend,
-            capture: take(Stage::Capture),
-            poll_analyze: take(Stage::PollAnalyze),
-            tab_analyze: take(Stage::TabAnalyze),
+            capture,
+            poll_analyze,
+            tab_analyze,
+            capture_cpu_ms: cpu[Stage::Capture.index()] / 1000,
+            tab_cpu_ms: cpu[Stage::TabAnalyze.index()] / 1000,
+            x11,
         })
     }
 }
@@ -148,7 +202,38 @@ pub fn record(stage: Stage, took: Duration) {
     };
     if let Some(summary) = closed {
         log_summary(&summary);
+        crate::perf_log::write_summary(&summary);
     }
+}
+
+/// Add thread CPU time for one sample of `stage`.
+pub fn record_cpu(stage: Stage, cpu: Duration) {
+    if let Ok(mut window) = WINDOW_STATE.lock() {
+        window.add_cpu(stage, cpu);
+    }
+}
+
+/// Note one X11 GetImage grab (no shm).
+pub fn record_x11_grab(width: u16, height: u16, full: bool, took: Duration) {
+    if let Ok(mut window) = WINDOW_STATE.lock() {
+        window.add_x11_grab(width, height, full, took);
+    }
+}
+
+/// CPU time of the calling thread so far.
+pub fn thread_cpu() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid out pointer for clock_gettime.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(
+        ts.tv_sec.max(0) as u64,
+        ts.tv_nsec.clamp(0, 999_999_999) as u32,
+    )
 }
 
 /// Name the capture backend on the next summary.
@@ -252,5 +337,26 @@ mod tests {
         assert_eq!(s.capture, StageStats::default());
         assert_eq!(s.poll_analyze, StageStats::default());
         assert_eq!(s.tab_analyze.count, 1);
+    }
+
+    #[test]
+    fn x11_grabs_and_cpu_land_in_the_summary() {
+        let t0 = Instant::now();
+        let mut w = Window::new();
+        w.set_backend("x11");
+        w.record(Stage::Capture, ms(40), t0);
+        w.add_x11_grab(2560, 1440, false, ms(33));
+        w.add_x11_grab(2560, 1440, false, ms(35));
+        w.add_cpu(Stage::Capture, ms(12));
+        w.add_cpu(Stage::TabAnalyze, ms(800));
+        let s = w.record(Stage::Capture, ms(1), t0 + WINDOW).unwrap();
+        let x = s.x11.expect("x11 stats");
+        assert_eq!((x.width, x.height, x.scope), (2560, 1440, "output"));
+        assert_eq!(x.grabs.count, 2);
+        assert_eq!(x.grabs.max_ms, 35);
+        assert_eq!((s.capture_cpu_ms, s.tab_cpu_ms), (12, 800));
+        let next = w.record(Stage::Capture, ms(1), t0 + WINDOW * 2).unwrap();
+        assert!(next.x11.is_none());
+        assert_eq!(next.capture_cpu_ms, 0);
     }
 }

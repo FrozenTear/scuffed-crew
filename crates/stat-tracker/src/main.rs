@@ -439,6 +439,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Existing installs may have been created with umask 022. Tighten the
     // tree before the store opens so the DB and command queue are owner-only.
     stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
+    stat_tracker::perf_log::init(&config.data_dir);
 
     // Refuse to start alongside a live daemon. On drop the guard removes
     // daemon.pid only if the file still names this process. Held across
@@ -6204,6 +6205,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         .context("screen capture failed")?;
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
+                        let cpu_started = stat_tracker::perf::thread_cpu();
                         let analysis = analyze_frame(
                             img,
                             matcher,
@@ -6211,6 +6213,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                             game_outcome,
                             flags,
                             own_seeds,
+                        );
+                        stat_tracker::perf::record_cpu(
+                            stat_tracker::perf::Stage::TabAnalyze,
+                            stat_tracker::perf::thread_cpu().saturating_sub(cpu_started),
                         );
                         stat_tracker::perf::record(
                             stat_tracker::perf::Stage::TabAnalyze,

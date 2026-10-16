@@ -512,8 +512,14 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         return Err(ReportError::InvalidInput("ui_scale must be in (0, 200]"));
     }
 
-    let raw_log = scrub::read_daemon_logs(&input.log_dir);
-    let log_text = scrub::scrub_log(&input.scrub, &input.window, &raw_log);
+    let log_text = if input.category == LogOnlyCategory::Performance {
+        // A Performance report carries the performance log and nothing else:
+        // no daemon log lines, no board pictures, no crops.
+        performance_log_text(&input.scrub, &crate::perf_log::read(&input.log_dir))
+    } else {
+        let raw_log = scrub::read_daemon_logs(&input.log_dir);
+        scrub::scrub_log(&input.scrub, &input.window, &raw_log)
+    };
     let reason_text = scrub_reason_text(&input.scrub, &input.text);
 
     let files = vec![ReportFile {
@@ -565,6 +571,37 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         log_text,
         images: Vec::new(),
     })
+}
+
+/// `log.txt` of a Performance report: the scrubbed `perf.log`, newest
+/// lines kept within the log size cap, the latest setup header kept first.
+pub fn performance_log_text(ctx: &ScrubContext, raw: &str) -> String {
+    let raw = raw.replace('\0', "");
+    if raw.trim().is_empty() {
+        return "no performance log yet\n".to_string();
+    }
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    let header = lines.iter().rev().find(|l| l.contains(" setup ")).copied();
+    let cap = scrub::LOG_MAX_BYTES / 2;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = header.map_or(0, |h| h.len() + 1);
+    for l in lines.iter().rev() {
+        if Some(*l) == header {
+            continue;
+        }
+        if total + l.len() + 1 > cap {
+            break;
+        }
+        total += l.len() + 1;
+        kept.push(l);
+    }
+    kept.reverse();
+    let mut out = String::with_capacity(total);
+    for l in header.into_iter().chain(kept) {
+        out.push_str(l);
+        out.push('\n');
+    }
+    scrub::scrub_text(ctx, &out)
 }
 
 /// Deflated zip, every entry dated 1980-01-01 00:00:00, no comment, no

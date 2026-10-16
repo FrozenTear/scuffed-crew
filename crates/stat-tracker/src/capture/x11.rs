@@ -60,6 +60,18 @@ fn list_outputs_blocking() -> Result<Vec<String>, BoxError> {
 }
 
 fn capture_blocking(output_name: Option<&str>) -> Result<DynamicImage, BoxError> {
+    let cpu_started = crate::perf::thread_cpu();
+    let result = capture_blocking_inner(output_name);
+    if result.is_ok() {
+        crate::perf::record_cpu(
+            crate::perf::Stage::Capture,
+            crate::perf::thread_cpu().saturating_sub(cpu_started),
+        );
+    }
+    result
+}
+
+fn capture_blocking_inner(output_name: Option<&str>) -> Result<DynamicImage, BoxError> {
     let (conn, screen_num) = connect_x()?;
     let setup = conn.setup().clone();
     let screen = setup
@@ -122,6 +134,8 @@ fn capture_blocking(output_name: Option<&str>) -> Result<DynamicImage, BoxError>
         )
     })?;
 
+    // Plain GetImage, no MIT-SHM: the whole output is read back each grab.
+    let grab_started = std::time::Instant::now();
     let reply = conn
         .get_image(
             ImageFormat::Z_PIXMAP,
@@ -133,6 +147,12 @@ fn capture_blocking(output_name: Option<&str>) -> Result<DynamicImage, BoxError>
             !0,
         )?
         .reply()?;
+    crate::perf::record_x11_grab(
+        selected.width,
+        selected.height,
+        selected.width == screen.width_in_pixels && selected.height == screen.height_in_pixels,
+        grab_started.elapsed(),
+    );
 
     // bpp / pad from setup formats for the reply depth — for diagnostics on failure.
     let (reply_bpp, reply_byte_order) = pixmap_format_diag(&setup, reply.depth);
