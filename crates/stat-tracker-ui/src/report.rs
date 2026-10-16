@@ -259,6 +259,25 @@ impl ReportDialog {
         self.game_report && self.game_category.is_none()
     }
 
+    /// The line shown where the pictures go when none are loaded. A game
+    /// opened from its card has no category yet, so nothing is built and
+    /// the pictures are not loaded: say so instead of claiming none exist.
+    pub fn pictures_note(&self) -> Option<&'static str> {
+        if !self.kit_images.is_empty() || !self.is_game() {
+            return None;
+        }
+        if self.needs_game_category() {
+            return Some("Pick what went wrong to load this game's pictures.");
+        }
+        if self.building.is_none()
+            && self.text_edited_at.is_none()
+            && !self.game_category.is_some_and(|c| c.allows_missing_kit())
+        {
+            return Some("No pictures for this game yet.");
+        }
+        None
+    }
+
     /// Send posts the preview zip. A log zip is never sent from a game
     /// dialog, and a game zip is never sent from a log dialog.
     pub fn can_send(&self) -> bool {
@@ -881,17 +900,8 @@ fn game_row(d: &ReportDialog) -> Element<'_, Message> {
     }
     if !d.kit_images.is_empty() {
         col = col.push(kit_pictures(d));
-    } else if d.is_game()
-        && d.building.is_none()
-        && d.text_edited_at.is_none()
-        && !d.game_category.is_some_and(|c| c.allows_missing_kit())
-    {
-        col = col.push(
-            text("No pictures for this game yet.")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
-        );
+    } else if let Some(note) = d.pictures_note() {
+        col = col.push(text(note).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
     }
     col.into()
 }
@@ -1639,5 +1649,26 @@ mod tests {
         let picked = ReportDialog::for_game(Some(GameCategory::WrongHero), true);
         assert!(!picked.needs_game_category());
         assert!(!ReportDialog::new(LogOnlyCategory::Other, true).needs_game_category());
+    }
+
+    /// A game opened from its card has no category, so its pictures are not
+    /// loaded yet. The dialog must not say the game has no pictures.
+    #[test]
+    fn a_game_opened_from_its_card_does_not_claim_no_pictures() {
+        let mut d = ReportDialog::for_game(None, true);
+        d.game_session = Some("827e7d10be7f0232".into());
+        assert_eq!(
+            d.pictures_note(),
+            Some("Pick what went wrong to load this game's pictures.")
+        );
+        let built = ReportDialog::for_game(Some(GameCategory::WrongHero), true);
+        assert_eq!(
+            built.pictures_note(),
+            Some("No pictures for this game yet.")
+        );
+        assert_eq!(
+            ReportDialog::new(LogOnlyCategory::Other, true).pictures_note(),
+            None
+        );
     }
 }
