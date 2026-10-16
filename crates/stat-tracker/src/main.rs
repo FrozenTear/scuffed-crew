@@ -6843,6 +6843,8 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // The new reader's own read of each stat before the gate held
             // any: the best guess for a column that never gets a sure read.
             let mut raw_guess: Option<[u32; capture_gate::GATE_COLS]> = None;
+            // The reader's confidences, for the report kit (empty under ocr-v1).
+            let mut kit_confidences = std::collections::BTreeMap::new();
             if let Some(board) = new_board {
                 let guesses = reader_apply::own_row_guesses(&board, board_row);
                 offer_own_name_seed(
@@ -6852,6 +6854,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     &parsed.map_name,
                 )
                 .await;
+                kit_confidences = reader_apply::kit_confidences(&board, board_row);
+                kit_confidences.insert(
+                    "result".to_string(),
+                    f64::from(shadow::result_field(&req.result_evidence).confidence),
+                );
                 apply_new_reader(
                     &mut parsed,
                     &req.result_evidence,
@@ -6998,6 +7005,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 captured_at,
                 req.tab_at,
                 board_names(&rows),
+                &kit_confidences,
             );
 
             // Re-derive the session's hero timeline from its RAW snapshots after
@@ -7254,6 +7262,7 @@ fn record_report_kit(
     captured_at: chrono::DateTime<Utc>,
     tab_at: stat_tracker::report::blank::CaptureTime,
     board_names: Vec<String>,
+    confidences: &std::collections::BTreeMap<String, f64>,
 ) {
     let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
     else {
@@ -7266,7 +7275,8 @@ fn record_report_kit(
         frame.height(),
         layout,
         captured_at,
-    );
+    )
+    .with_confidences(confidences);
     let (data_dir, session_id, frame) = (
         data_dir.to_path_buf(),
         session_id.to_string(),

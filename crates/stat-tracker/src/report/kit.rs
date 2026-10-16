@@ -166,6 +166,47 @@ impl KitReads {
     }
 }
 
+impl KitReads {
+    /// Fill each read's `confidence` from the reader's own (keyed by read
+    /// key). A stat the capture gate replaced (stored value differs from
+    /// the read) gets none: the confidence belongs to the read, not to the
+    /// stored value.
+    pub fn with_confidences(mut self, confidences: &BTreeMap<String, f64>) -> Self {
+        for (key, read) in self.reads.iter_mut() {
+            let Some(&c) = confidences.get(key) else {
+                continue;
+            };
+            let gated = matches!(key.as_str(), "e" | "a" | "d" | "dmg" | "h" | "mit")
+                && read.value != read.ocr_v1;
+            if !gated && c.is_finite() {
+                read.confidence = Some(c.clamp(0.0, 1.0));
+            }
+        }
+        self
+    }
+
+    /// The game's result as stored when the game closed, for a kit whose
+    /// Tab capture came before the result was known. The Tab read stays in
+    /// `ocr_v1`. A known kit result is never replaced.
+    pub fn fill_result(&mut self, stored_outcome: &str) {
+        let known = |s: &str| !crate::parse::hero_is_unknown_label(s);
+        if !known(stored_outcome) || self.result.as_deref().is_some_and(known) {
+            return;
+        }
+        let outcome = stored_outcome.trim().chars().take(64).collect::<String>();
+        self.result = Some(outcome.clone());
+        let read = self.reads.entry("result".into()).or_insert(KitRead {
+            value: None,
+            confidence: None,
+            ocr_v1: None,
+            suspect: false,
+        });
+        read.value = Some(outcome);
+        read.confidence = None;
+        read.suspect = false;
+    }
+}
+
 /// What [`load`] found for one session.
 #[derive(Debug, Clone, Default)]
 pub struct Kit {
@@ -954,6 +995,47 @@ mod tests {
                 .all(|k| ["IHDR", "IDAT", "IEND"].contains(&k.as_str())),
             "{kinds:?}"
         );
+    }
+
+    #[test]
+    fn reader_confidences_reach_the_kit_except_for_a_gated_stat() {
+        let mut r = reads();
+        let read = |value: &str, ocr: &str| KitRead {
+            value: Some(value.into()),
+            confidence: None,
+            ocr_v1: Some(ocr.into()),
+            suspect: false,
+        };
+        r.reads.insert("e".into(), read("10", "10"));
+        r.reads.insert("d".into(), read("3", "8"));
+        r.reads.insert("mode".into(), read("Control", "Control"));
+        let c: BTreeMap<String, f64> = [("e", 0.97), ("d", 0.9), ("mode", 1.5)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let r = r.with_confidences(&c);
+        assert_eq!(r.reads["e"].confidence, Some(0.97));
+        assert_eq!(r.reads["d"].confidence, None, "the gate replaced this read");
+        assert_eq!(r.reads["mode"].confidence, Some(1.0), "clamped");
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["reads"]["e"]["confidence"], 0.97);
+    }
+
+    #[test]
+    fn a_kit_from_before_the_result_takes_the_stored_result() {
+        let mut r = reads();
+        r.result = Some("unknown".into());
+        r.fill_result("defeat");
+        assert_eq!(r.result.as_deref(), Some("defeat"));
+        assert_eq!(r.reads["result"].value.as_deref(), Some("defeat"));
+        assert!(!r.reads["result"].suspect);
+        // a known kit result is never replaced, and unknown never fills
+        r.fill_result("victory");
+        assert_eq!(r.result.as_deref(), Some("defeat"));
+        let mut none = reads();
+        none.result = None;
+        none.fill_result("unknown");
+        assert_eq!(none.result, None);
     }
 
     #[test]

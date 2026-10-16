@@ -590,6 +590,27 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
     })
 }
 
+/// The new reader's confidence for each report kit read key (`mode`,
+/// `hero`, `e`, `a`, `d`, `dmg`, `h`, `mit`) of the own row. A field the
+/// reader did not attempt has no entry. `result` is not on the board until
+/// [`crate::shadow::result_field`] sets it, so the caller adds it.
+pub fn kit_confidences(board: &BoardRead, own: OwnRow) -> std::collections::BTreeMap<String, f64> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut put = |key: &str, name: &str| {
+        if let Some(f) = board.get(name).filter(|f| field_attempted(f)) {
+            out.insert(key.to_string(), f64::from(f.confidence));
+        }
+    };
+    put("mode", "mode");
+    if let OwnRow::Identified { index, .. } = own {
+        put("hero", &format!("r{index}.hero"));
+        for suffix in STAT_SUFFIXES {
+            put(suffix, &format!("r{index}.{suffix}"));
+        }
+    }
+    out
+}
+
 /// A field the new reader wrote, as opposed to the unread placeholder
 /// (`value` none, confidence 0, suspect).
 fn field_attempted(field: &FieldRead) -> bool {
@@ -651,6 +672,27 @@ mod tests {
             confidence: 0.0,
             suspect: true,
         }
+    }
+
+    #[test]
+    fn kit_confidences_carry_the_own_rows_reads_and_skip_unread_fields() {
+        let mut board = confident_board(5, 2);
+        if let Some(f) = board.fields.iter_mut().find(|f| f.name == "r2.mit") {
+            *f = unread("r2.mit");
+        }
+        let c = kit_confidences(
+            &board,
+            OwnRow::Identified {
+                index: 2,
+                team_size: 5,
+            },
+        );
+        assert_eq!(c.get("mode"), Some(&f64::from(0.9f32)));
+        assert_eq!(c.get("e"), Some(&f64::from(0.9f32)));
+        assert_eq!(c.get("hero"), Some(&f64::from(0.9f32)));
+        assert!(!c.contains_key("mit"), "an unread cell has no confidence");
+        let uncertain = kit_confidences(&board, OwnRow::Uncertain);
+        assert_eq!(uncertain.keys().collect::<Vec<_>>(), vec!["mode"]);
     }
 
     /// A Read board whose row `index` is fully confident, plus match fields.
