@@ -12,6 +12,7 @@ pub mod omp;
 pub mod packs;
 pub mod parse;
 pub mod perf;
+pub mod perf_log;
 pub mod proc_id;
 pub mod reader_apply;
 pub mod report;
