@@ -15,6 +15,18 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.11
+
+The tracker now keeps a small always-on performance log while it runs. Choosing Performance under Send report sends only that log, with no board pictures or crops (#318).
+
+### Highlights
+
+- The performance log notes your setup once (including Proton when it is running), then about once a minute records CPU, memory, screen grab time and read time, and how CPU is split between grabbing and reading.
+- On X11 each grab also logs how long it took, its size, and whether it took the whole screen, so a slow full-screen grab shows up clearly.
+- Performance reports stay small: only the scrubbed performance log goes up, as a no-game report the site already accepts.
+
+Technical detail. New `perf_log` module writes `perf.log` in the data dir (rotates to `perf.log.1` at 256 KiB, about 512 KiB kept). Setup header covers app version, session type, kernel, CPU count, RAM and Proton version. Sample lines include daemon CPU% and RSS, capture p50/max, `capture_cpu_ms` / `ocr_cpu_ms`, poll analysis timing, and OCR run count with p50/max. X11 GetImage grabs record time, size and scope (`full` vs `output`) plus `x11_shm=no`. Wayland and portal grabs use the shared capture timing only. Report a problem, Performance: `log.txt` is only the scrubbed perf log (latest setup header first, newest lines); no daemon journal lines, pictures or crops. Manifest stays the no-game shape (`session_id` none, `game` null, empty suspect reads, one `log` file).
+
 ## 0.5.0-alpha.10
 
 The daily report limit is now 10 (#284). A restart continues the game you were in only when it is clearly that same game, and a clipped 5v5 scoreboard no longer stores a hero the tracker is not sure of. A game report waits until you pick what was wrong. A game report's log now covers only that game. If you crash mid-match and rejoin, it stays one game with your stats added up (#293).
