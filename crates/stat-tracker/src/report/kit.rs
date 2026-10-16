@@ -11,7 +11,8 @@
 //!   ([`super::blank::outcome_band`]), when the tracker saw that screen.
 //! - `reads.json`: the reads of the capture `scoreboard.png` came from.
 //!
-//! The newest [`KEEP`] sessions are kept. The directory is private (0700,
+//! Up to [`Retention::max_games`] sessions are kept, within
+//! [`Retention::max_bytes`] in total, oldest trimmed first. The directory is private (0700,
 //! files 0600) and every file is replaced atomically. `reads.json` carries
 //! the hash of the `scoreboard.png` it was written with, and [`load`] only
 //! returns a matching pair: the app reads a kit while the daemon replaces it.
@@ -28,14 +29,58 @@ use serde::{Deserialize, Serialize};
 use super::blank::{self, TeamLayout};
 
 pub const KIT_DIR: &str = "report-kit";
-/// Sessions kept. Older kits are deleted when a new session writes one.
-pub const KEEP: usize = 10;
+/// Games kept by default. Config: `report_kit_max_games`.
+pub const DEFAULT_MAX_GAMES: usize = 50;
+/// Total size cap by default, in MB. Config: `report_kit_max_mb`.
+pub const DEFAULT_MAX_MB: u64 = 500;
+
+/// How many game kits are kept and how large they may be together. The
+/// oldest games go first; the newest game is never trimmed, even when it
+/// alone is over `max_bytes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub max_games: usize,
+    pub max_bytes: u64,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_GAMES, DEFAULT_MAX_MB)
+    }
+}
+
+impl Retention {
+    /// `max_games` is at least 1, so the newest game always stays.
+    pub fn new(max_games: usize, max_mb: u64) -> Self {
+        Self {
+            max_games: max_games.max(1),
+            max_bytes: max_mb.saturating_mul(1024 * 1024),
+        }
+    }
+}
+
+static RETENTION_GAMES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_GAMES);
+static RETENTION_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(DEFAULT_MAX_MB * 1024 * 1024);
+
+/// Set the retention the daemon prunes with after each kit write.
+pub fn set_retention(r: Retention) {
+    use std::sync::atomic::Ordering::Relaxed;
+    RETENTION_GAMES.store(r.max_games.max(1), Relaxed);
+    RETENTION_BYTES.store(r.max_bytes, Relaxed);
+}
+
+pub fn retention() -> Retention {
+    use std::sync::atomic::Ordering::Relaxed;
+    Retention {
+        max_games: RETENTION_GAMES.load(Relaxed),
+        max_bytes: RETENTION_BYTES.load(Relaxed),
+    }
+}
 
 /// A kit older than this is deleted on the next prune.
 pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
-
-/// All kits together stay under this many bytes; oldest go first.
-pub const MAX_TOTAL_BYTES: u64 = 40 * 1024 * 1024;
 
 pub const SCOREBOARD_PNG: &str = "scoreboard.png";
 pub const OUTCOME_PNG: &str = "outcome.png";
@@ -394,7 +439,7 @@ pub fn record_scoreboard_at(
     // match, and [`load`] reports nothing.
     write_private(&dir, SCOREBOARD_PNG, &png)?;
     write_private(&dir, READS_JSON, &json)?;
-    prune_locked(data_dir, KEEP);
+    prune_locked(data_dir, retention());
     Ok(())
 }
 
@@ -417,7 +462,7 @@ fn record_reads_only(data_dir: &Path, dir: &Path, reads: &KitReads) -> io::Resul
     private_dir(&kit_root(data_dir))?;
     private_dir(dir)?;
     write_private(dir, READS_JSON, &json)?;
-    prune_locked(data_dir, KEEP);
+    prune_locked(data_dir, retention());
     Ok(())
 }
 
@@ -467,7 +512,7 @@ pub fn record_outcome_png(data_dir: &Path, session_id: &str, png: &[u8]) -> io::
     private_dir(&kit_root(data_dir))?;
     private_dir(&dir)?;
     write_private(&dir, OUTCOME_PNG, png)?;
-    prune_locked(data_dir, KEEP);
+    prune_locked(data_dir, retention());
     Ok(())
 }
 
@@ -643,13 +688,13 @@ pub fn remove(data_dir: &Path, session_id: &str) {
     }
 }
 
-/// Keep the newest `keep` session kits and delete the rest.
-pub fn prune(data_dir: &Path, keep: usize) {
+/// Trim session kits to `keep`: oldest first, newest always kept.
+pub fn prune(data_dir: &Path, keep: Retention) {
     let _guard = write_lock();
     prune_locked(data_dir, keep);
 }
 
-fn prune_locked(data_dir: &Path, keep: usize) {
+fn prune_locked(data_dir: &Path, keep: Retention) {
     let root = kit_root(data_dir);
     let Ok(rd) = fs::read_dir(&root) else {
         return;
@@ -667,8 +712,8 @@ fn prune_locked(data_dir: &Path, keep: usize) {
         let size = dir_bytes(&p);
         let too_old = now.duration_since(at).is_ok_and(|age| age > MAX_AGE);
         // The newest kit is always kept by the size cap.
-        let too_big = i > 0 && total + size > MAX_TOTAL_BYTES;
-        if i >= keep || too_old || too_big {
+        let too_big = i > 0 && total.saturating_add(size) > keep.max_bytes;
+        if i >= keep.max_games || too_old || too_big {
             let _ = fs::remove_dir_all(p);
         } else {
             total += size;
@@ -974,10 +1019,69 @@ mod tests {
             record_scoreboard(tmp.path(), &format!("s{i}"), &frame(), Some(6), &reads()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
-        prune(tmp.path(), 3);
+        prune(tmp.path(), Retention::new(3, 500));
         let mut left = sessions(tmp.path());
         left.sort();
         assert_eq!(left, vec!["s2", "s3", "s4"]);
+    }
+
+    /// A kit folder of `bytes`, written `i` steps after the first.
+    fn sized_kit(data: &Path, sid: &str, bytes: usize) {
+        let dir = session_dir(data, sid).unwrap();
+        private_dir(&kit_root(data)).unwrap();
+        private_dir(&dir).unwrap();
+        write_private(&dir, OUTCOME_PNG, &vec![0u8; bytes]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+
+    /// Kit folders left on disk, sorted.
+    fn kit_dirs(data: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(kit_root(data))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn the_defaults_are_fifty_games_and_500_mb() {
+        let r = Retention::default();
+        assert_eq!(r.max_games, 50);
+        assert_eq!(r.max_bytes, 500 * 1024 * 1024);
+        assert_eq!(Retention::new(0, 1).max_games, 1);
+    }
+
+    #[test]
+    fn the_size_cap_trims_the_oldest_games_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mb = 1024 * 1024;
+        for i in 0..5 {
+            sized_kit(tmp.path(), &format!("s{i}"), mb);
+        }
+        // 3 MB cap: the three newest fit, s0 and s1 go.
+        prune(tmp.path(), Retention::new(50, 3));
+        assert_eq!(kit_dirs(tmp.path()), vec!["s2", "s3", "s4"]);
+    }
+
+    #[test]
+    fn the_game_cap_trims_in_age_order_not_name_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        for sid in ["c", "a", "d", "b"] {
+            sized_kit(tmp.path(), sid, 10);
+        }
+        prune(tmp.path(), Retention::new(2, 500));
+        assert_eq!(kit_dirs(tmp.path()), vec!["b", "d"]);
+    }
+
+    #[test]
+    fn the_newest_game_stays_even_when_it_alone_is_over_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        sized_kit(tmp.path(), "old", 10);
+        sized_kit(tmp.path(), "new", 2 * 1024 * 1024);
+        prune(tmp.path(), Retention::new(50, 1));
+        assert_eq!(kit_dirs(tmp.path()), vec!["new"]);
     }
 
     #[test]
@@ -1121,14 +1225,17 @@ mod tests {
     fn every_write_path_keeps_only_the_newest_sessions() {
         // K1: games that only ever wrote an outcome crop are pruned too
         let tmp = tempfile::tempdir().unwrap();
-        for i in 0..KEEP + 3 {
+        for i in 0..DEFAULT_MAX_GAMES + 3 {
             record_outcome_png(tmp.path(), &format!("o{i:02}"), b"png").unwrap();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let dirs = fs::read_dir(kit_root(tmp.path())).unwrap().count();
-        assert_eq!(dirs, KEEP);
+        assert_eq!(dirs, DEFAULT_MAX_GAMES);
         assert!(session_dir(tmp.path(), "o00").is_some_and(|d| !d.exists()));
-        assert!(session_dir(tmp.path(), &format!("o{:02}", KEEP + 2)).is_some_and(|d| d.exists()));
+        assert!(
+            session_dir(tmp.path(), &format!("o{:02}", DEFAULT_MAX_GAMES + 2))
+                .is_some_and(|d| d.exists())
+        );
     }
 
     #[test]

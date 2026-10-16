@@ -40,6 +40,15 @@ pub struct Config {
     /// unblanked and show other players' names.
     #[serde(default)]
     pub debug_ocr: bool,
+    /// Most games whose report pictures are kept in `report-kit/`. Missing
+    /// means [`crate::report::kit::DEFAULT_MAX_GAMES`] (50). Oldest go first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_kit_max_games: Option<usize>,
+    /// Total size cap of `report-kit/` in MB. Missing means
+    /// [`crate::report::kit::DEFAULT_MAX_MB`] (500). The newest game is kept
+    /// even when it alone is larger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_kit_max_mb: Option<u64>,
     /// Parallel OCR workers (each keeps a ~23 MB Tesseract model resident).
     /// `None` / omit = auto (`(cores/2).clamp(2, 4)`). Set to `1` for lowest
     /// RAM, higher for faster Tab OCR. Clamped to 1..=8 at resolve time.
@@ -651,6 +660,16 @@ impl Config {
     }
 
     /// Whether OCR should write debug PNGs this process (config and/or env).
+    /// Report kit retention from `report_kit_max_games` and `report_kit_max_mb`.
+    pub fn report_kit_retention(&self) -> crate::report::kit::Retention {
+        crate::report::kit::Retention::new(
+            self.report_kit_max_games
+                .unwrap_or(crate::report::kit::DEFAULT_MAX_GAMES),
+            self.report_kit_max_mb
+                .unwrap_or(crate::report::kit::DEFAULT_MAX_MB),
+        )
+    }
+
     pub fn debug_ocr_enabled(&self) -> bool {
         self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
     }
@@ -1110,6 +1129,8 @@ impl Default for Config {
             finished_game_close_secs: default_finished_game_close_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
+            report_kit_max_games: None,
+            report_kit_max_mb: None,
             ocr_threads: None,
             shadow_recognizer: false,
             update_channel: String::new(),
@@ -1622,6 +1643,23 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
         assert_eq!(blank.reader_pack_url.as_deref(), Some(""));
     }
 
+    #[test]
+    fn report_kit_retention_defaults_to_50_games_and_500_mb() {
+        let cfg: Config = toml::from_str("data_dir = \"/tmp/x\"").unwrap();
+        assert_eq!(
+            cfg.report_kit_retention(),
+            crate::report::kit::Retention::new(50, 500)
+        );
+        let cfg: Config = toml::from_str(
+            "data_dir = \"/tmp/x\"\nreport_kit_max_games = 20\nreport_kit_max_mb = 100",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.report_kit_retention(),
+            crate::report::kit::Retention::new(20, 100)
+        );
+    }
+
     fn sample(full: bool) -> Config {
         Config {
             data_dir: PathBuf::from("/var/lib/scuffed-outside"),
@@ -1644,6 +1682,8 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
                 Vec::new()
             },
             debug_ocr: full,
+            report_kit_max_games: full.then_some(80),
+            report_kit_max_mb: full.then_some(1000),
             ocr_threads: full.then_some(2),
             shadow_recognizer: full,
             update_channel: String::new(),
