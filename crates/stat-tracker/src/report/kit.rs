@@ -50,8 +50,10 @@ const NAMES_MAX: usize = 64;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KitRead {
     pub value: Option<String>,
-    /// The tracker does not keep a per-field confidence today, so this is
-    /// `null` unless a reader supplies one.
+    /// The new reader's confidence for this read, 0 to 1
+    /// ([`KitReads::with_confidences`]). `null` under ocr-v1, for a stat
+    /// the capture gate replaced, and for a result filled from the stored
+    /// game ([`KitReads::fill_result`]).
     pub confidence: Option<f64>,
     /// The read before the capture gate (spec section 2). `reader =
     /// "ocr-v1"`: the Tesseract read. `reader = "new"`: Tesseract reads no
