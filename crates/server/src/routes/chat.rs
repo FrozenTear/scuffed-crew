@@ -1,12 +1,16 @@
-//! Chat endpoints: NIP-42 auth provisioning + NIP-44/NIP-59 encrypted messaging.
+//! Chat endpoints: NIP-42 auth provisioning, NIP-29 public channel sends,
+//! and NIP-44/NIP-59 encrypted messaging.
 //!
 //! Provides server-managed key generation, relay auth event signing,
-//! and encrypted group messaging for officer/private channels.
+//! public kind 9 publishes, and encrypted group messaging for officer channels.
 
+use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{AuthTokenRequest, AuthTokenResponse, EncryptionService, NostrAuthService};
 use scuffed_db::NostrKeyMode;
+use scuffed_site_server::nostr_rate_limit::RateClass;
+use scuffed_types::{SendPublicRequest, SendPublicResponse};
 use serde::{Deserialize, Serialize};
 
 use scuffed_site_server::extractors::{OfficerUser, OrgMember};
@@ -34,6 +38,44 @@ fn bad_request_logged(
             error: client_msg.into(),
         }),
     )
+}
+
+/// Outcome for `POST /api/chat/send-public`.
+///
+/// Ordinary failures stay `(status, {"error"})`. The shared nostr limiter
+/// uses `{"error":"rate_limited","retry_after":N}`.
+pub enum SendPublicError {
+    Status(StatusCode, Json<ErrorResponse>),
+    Limited(Box<Response>),
+}
+
+impl From<(StatusCode, Json<ErrorResponse>)> for SendPublicError {
+    fn from(value: (StatusCode, Json<ErrorResponse>)) -> Self {
+        Self::Status(value.0, value.1)
+    }
+}
+
+impl IntoResponse for SendPublicError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status, body) => (status, body).into_response(),
+            Self::Limited(response) => *response,
+        }
+    }
+}
+
+/// Charge the shared per-member interactive bucket used by other
+/// secret-touching publishes (challenge, verify, dm-send).
+fn charge_interactive_send(state: &AppState, member_id: &str) -> Result<(), SendPublicError> {
+    match state
+        .nostr_rate_limiter
+        .check(member_id, RateClass::Interactive)
+    {
+        Ok(()) => Ok(()),
+        Err(secs) => Err(SendPublicError::Limited(Box::new(
+            scuffed_site_server::rate_limit::rate_limited_response(secs),
+        ))),
+    }
 }
 
 /// POST /api/chat/auth-token — provision a NIP-42 auth event for relay authentication.
@@ -443,6 +485,231 @@ pub async fn send_encrypted(
     Ok(Json(SendEncryptedResponse {
         recipients_count,
         sender_pubkey,
+    }))
+}
+
+/// POST /api/chat/send-public. Publish one NIP-29 kind 9 event to a public team channel.
+///
+/// Body: `{ "group_id": string, "content": string }`.
+/// Success: `{ "event_id", "sender_pubkey", "created_at" }`.
+///
+/// The signed event is kind 9 with a single `["h", group_id]` tag and the
+/// trimmed plaintext as content. That is the event `nip07_sign_kind9` builds,
+/// so relay readers render it the same way.
+///
+/// Caller must be an org member and on the roster of the team that owns the
+/// channel. Officer channels are rejected with 400 pointing at
+/// `POST /api/chat/send-encrypted`. External (NIP-07) keys must sign
+/// client-side. Content is trimmed; blank content is rejected.
+/// `send_encrypted` has no separate character cap, and this route does not
+/// add one. Both sit behind the process 10 MiB body limit. This route charges
+/// the shared per-member interactive nostr limiter.
+///
+/// `group_id` comes from `GET /api/teams/:id/channels` (`group_type: public`).
+pub async fn send_public(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<SendPublicRequest>,
+) -> Result<Json<SendPublicResponse>, SendPublicError> {
+    charge_interactive_send(&state, &caller.member.id)?;
+    let crypto = require_crypto(&state)?;
+
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Message content must not be empty".into(),
+            }),
+        )
+            .into());
+    }
+    let content = content.to_string();
+
+    let group_id = body.group_id.trim();
+    if group_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "group_id must not be empty".into(),
+            }),
+        )
+            .into());
+    }
+
+    // Key mode before channel lookup, matching send_encrypted.
+    let full = match caller.member.nostr_key_mode {
+        Some(NostrKeyMode::ServerManaged) => {
+            load_member_with_secret(&state, &caller.member.id).await?
+        }
+        Some(NostrKeyMode::External) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "External key users must sign client-side (NIP-07)".into(),
+                }),
+            )
+                .into());
+        }
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "No Nostr keys provisioned. Call /api/chat/auth-token first.".into(),
+                }),
+            )
+                .into());
+        }
+    };
+    let sender_encrypted_key = full.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Server-managed key missing encrypted secret".into(),
+            }),
+        )
+    })?;
+    let sender_pubkey = full.nostr_pubkey.clone().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Server-managed key missing public key".into(),
+            }),
+        )
+    })?;
+
+    let channel = state
+        .db
+        .get_channel_by_group_id(group_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to look up channel: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to look up channel".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Channel '{group_id}' not found"),
+                }),
+            )
+        })?;
+
+    match channel.group_type {
+        scuffed_db::GroupType::Officer => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Officer channels use POST /api/chat/send-encrypted.".into(),
+                }),
+            )
+                .into());
+        }
+        scuffed_db::GroupType::Public => {}
+    }
+
+    if !channel.is_active {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Channel '{group_id}' not found"),
+            }),
+        )
+            .into());
+    }
+
+    let on_roster = state
+        .db
+        .is_on_team_roster(&full.id, &channel.team_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check team roster: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to check team membership".into(),
+                }),
+            )
+        })?;
+    if !on_roster {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Not a member of this team".into(),
+            }),
+        )
+            .into());
+    }
+
+    let auth_service = NostrAuthService::new(crypto);
+    let event = auth_service
+        .sign_event_for_member(
+            sender_encrypted_key,
+            &sender_pubkey,
+            scuffed_types::nostr::event_kinds::GROUP_CHAT_MESSAGE,
+            &content,
+            vec![vec!["h".to_string(), channel.group_id.clone()]],
+        )
+        .map_err(|e| internal_err(e, "Public channel event signing failed"))?;
+
+    // Do not dial `channel.relay_url` raw: live rows are blank, and a path
+    // like `/relay` is a browser hint, not a server socket.
+    let relay_url = match resolve_server_relay_url(&channel.relay_url, state.relay_url.as_deref()) {
+        Some(url) => url,
+        None => {
+            tracing::error!(
+                group_id = %channel.group_id,
+                channel_relay = %channel.relay_url,
+                configured = state.relay_url.as_deref().unwrap_or(""),
+                "No usable relay URL for public send"
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "No usable relay URL for publishing. Set a ws:// or wss:// channel relay, or set NOSTR_RELAY_URL to a ws:// or wss:// URL.".into(),
+                }),
+            )
+                .into());
+        }
+    };
+
+    if let Err(e) = scuffed_chat::publish_event_oneshot(&relay_url, event.clone()).await {
+        tracing::error!(error = %e, "Failed to publish public channel event");
+        let status = if matches!(e, scuffed_chat::RelayError::ConnectionFailed(_)) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        let message = if status == StatusCode::SERVICE_UNAVAILABLE {
+            "Cannot connect to relay for publishing"
+        } else {
+            "Relay rejected or failed to accept the message"
+        };
+        return Err((
+            status,
+            Json(ErrorResponse {
+                error: message.into(),
+            }),
+        )
+            .into());
+    }
+
+    tracing::info!(
+        member_id = %full.id,
+        group_id = %channel.group_id,
+        event_id = %event.id,
+        "Published public channel message"
+    );
+
+    Ok(Json(SendPublicResponse {
+        event_id: event.id,
+        sender_pubkey,
+        created_at: event.created_at,
     }))
 }
 
@@ -902,5 +1169,379 @@ mod tests {
             resolve_server_relay_url("", Some("https://relay.example")),
             None
         );
+    }
+
+    fn public_app(state: AppState) -> Router {
+        Router::new()
+            .route("/api/chat/send-public", post(send_public))
+            .with_state(state)
+    }
+
+    fn public_req(token: Option<&str>, group_id: &str, content: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat/send-public")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "group_id": group_id,
+                    "content": content
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    async fn response_text(resp: axum::response::Response) -> (StatusCode, String) {
+        let status = resp.status();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    /// Returns the member pubkey (real for server-managed, placeholder for external).
+    async fn seed_chat_member(
+        db: &Database,
+        member_id: &str,
+        user_id: &str,
+        token: &str,
+        org_role: &str,
+        external: bool,
+    ) -> String {
+        let token_hash = hash_session_token(token);
+        db.client
+            .query(format!(
+                r#"CREATE user:{user_id} SET
+                    provider = 'discord',
+                    username = '{user_id}',
+                    avatar_url = NONE,
+                    provider_id = '{user_id}-pid',
+                    provider_id_hash = '{user_id}-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now();
+                   CREATE member:{member_id} SET
+                    user_id = '{user_id}',
+                    org_role = '{org_role}',
+                    display_name = '{user_id}',
+                    bio = NONE,
+                    avatar_url = NONE,
+                    timezone = NONE,
+                    pronouns = NONE,
+                    availability_status = NONE,
+                    joined_at = time::now(),
+                    is_active = true;
+                   CREATE session:sess_{member_id} SET
+                    user_id = '{user_id}',
+                    token = $tok,
+                    expires_at = time::now() + 365d,
+                    created_at = time::now()"#
+            ))
+            .bind(("tok", token_hash))
+            .await
+            .expect("seed member");
+
+        if external {
+            let pubkey = "ab".repeat(32);
+            db.update_member_nostr_keys(member_id, Some(&pubkey), Some("external"), None)
+                .await
+                .expect("external key");
+            pubkey
+        } else {
+            let (pubkey, encrypted) = NostrAuthService::new(test_crypto())
+                .generate_keypair()
+                .expect("keypair");
+            db.update_member_nostr_keys(
+                member_id,
+                Some(&pubkey),
+                Some("server_managed"),
+                Some(&encrypted),
+            )
+            .await
+            .expect("store keys");
+            pubkey
+        }
+    }
+
+    struct Provisioned {
+        team_id: String,
+        public_id: String,
+        officer_id: String,
+    }
+
+    async fn provision_team(state: &AppState) -> Provisioned {
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .unwrap();
+        scuffed_chat::ensure_team_channel_rows(&state.db, &team.id, "")
+            .await
+            .unwrap();
+        Provisioned {
+            public_id: scuffed_chat::public_group_id(&team.id),
+            officer_id: scuffed_chat::officer_group_id(&team.id),
+            team_id: team.id,
+        }
+    }
+
+    async fn spawn_ok_relay() -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay");
+        let addr = listener.local_addr().expect("relay addr");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    let (mut sink, mut incoming) = ws.split();
+                    while let Some(Ok(msg)) = incoming.next().await {
+                        let Message::Text(text) = msg else {
+                            continue;
+                        };
+                        let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
+                            continue;
+                        };
+                        if frame.get(0).and_then(|v| v.as_str()) != Some("EVENT") {
+                            continue;
+                        }
+                        let Some(event) = frame.get(1).cloned() else {
+                            continue;
+                        };
+                        let id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let ok = serde_json::json!(["OK", id, true, ""]).to_string();
+                        if sink.send(Message::Text(ok.into())).await.is_err() {
+                            break;
+                        }
+                        let _ = tx.send(event);
+                    }
+                });
+            }
+        });
+        (format!("ws://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn send_public_member_ok() {
+        let (relay_url, mut published) = spawn_ok_relay().await;
+        let mut state = test_state().await;
+        state.relay_url = Some(relay_url);
+        let pubkey = seed_chat_member(
+            &state.db,
+            "publicmember",
+            "publicuser",
+            "public-token",
+            "member",
+            false,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster(
+                "publicmember",
+                &channels.team_id,
+                scuffed_db::TeamRole::Player,
+            )
+            .await
+            .unwrap();
+
+        let resp = public_app(state)
+            .oneshot(public_req(
+                Some("public-token"),
+                &channels.public_id,
+                "  hello team  ",
+            ))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["sender_pubkey"], pubkey);
+        assert!(json["created_at"].as_u64().is_some_and(|ts| ts > 0));
+        let event_id = json["event_id"].as_str().expect("event_id");
+        assert_eq!(event_id.len(), 64);
+
+        let event = published.recv().await.expect("relay accepted the event");
+        assert_eq!(event["id"], event_id);
+        assert_eq!(event["kind"], 9);
+        assert_eq!(event["content"], "hello team");
+        assert_eq!(event["pubkey"], pubkey);
+        let tags = event["tags"].as_array().expect("tags");
+        assert_eq!(
+            tags.len(),
+            1,
+            "kind 9 should carry only the h tag: {tags:?}"
+        );
+        assert_eq!(tags[0][0], "h");
+        assert_eq!(tags[0][1], channels.public_id);
+        assert!(!event["sig"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_public_non_team_member_forbidden() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "outsider",
+            "outuser",
+            "out-token",
+            "member",
+            false,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        let resp = public_app(state)
+            .oneshot(public_req(Some("out-token"), &channels.public_id, "hello"))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("Not a member of this team"),
+            "non-roster org member must be forbidden: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_public_officer_channel_rejected() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "pubmember2",
+            "pubuser2",
+            "pub-token-2",
+            "member",
+            false,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster(
+                "pubmember2",
+                &channels.team_id,
+                scuffed_db::TeamRole::Player,
+            )
+            .await
+            .unwrap();
+        let resp = public_app(state)
+            .oneshot(public_req(
+                Some("pub-token-2"),
+                &channels.officer_id,
+                "hello officers",
+            ))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("send-encrypted"),
+            "officer channels must point at send-encrypted: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_public_external_key_rejected() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "extmember",
+            "extuser",
+            "ext-token",
+            "member",
+            true,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster("extmember", &channels.team_id, scuffed_db::TeamRole::Player)
+            .await
+            .unwrap();
+        let resp = public_app(state)
+            .oneshot(public_req(Some("ext-token"), &channels.public_id, "hello"))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("sign client-side"),
+            "external keys must sign client-side: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_public_empty_content_rejected() {
+        let state = test_state().await;
+        seed_chat_member(
+            &state.db,
+            "emptymember",
+            "emptyuser",
+            "empty-token",
+            "member",
+            false,
+        )
+        .await;
+        let channels = provision_team(&state).await;
+        state
+            .db
+            .add_to_roster(
+                "emptymember",
+                &channels.team_id,
+                scuffed_db::TeamRole::Player,
+            )
+            .await
+            .unwrap();
+        for content in ["", "   \n\t  "] {
+            let resp = public_app(state.clone())
+                .oneshot(public_req(
+                    Some("empty-token"),
+                    &channels.public_id,
+                    content,
+                ))
+                .await
+                .unwrap();
+            let (status, body) = response_text(resp).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.contains("must not be empty"),
+                "blank content must be rejected: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn send_public_unauthenticated() {
+        let state = test_state().await;
+        let resp = public_app(state)
+            .oneshot(public_req(None, "anywhere", "hello"))
+            .await
+            .unwrap();
+        let (status, body) = response_text(resp).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     }
 }

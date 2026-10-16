@@ -1751,11 +1751,23 @@ impl TrackerApp {
         dialog.text_edited_at = None;
         dialog.kit_images.clear();
         let generation = dialog.bump();
+        dialog.kit_loading = None;
         if dialog.needs_game_category() {
-            // Nothing to build until the member picks a category.
+            // Nothing to build until the member picks a category, but the
+            // game's pictures load now so the dialog shows them at once.
             dialog.built = None;
             dialog.building = None;
-            return Task::none();
+            let Some(session_id) = dialog.game_session.clone() else {
+                return Task::none();
+            };
+            dialog.kit_loading = Some(generation);
+            let data_dir = config.data_dir.clone();
+            return Task::perform(
+                crate::report::load_kit_preview(data_dir, session_id),
+                move |images| {
+                    Message::Report(crate::report::ReportMessage::KitLoaded(generation, images))
+                },
+            );
         }
         dialog.building = Some(generation);
         if let Some(category) = dialog.game_category {
@@ -1937,6 +1949,17 @@ impl TrackerApp {
                             _ => Vec::new(),
                         };
                         d.built = Some(result);
+                    }
+                }
+                Task::none()
+            }
+            ReportMessage::KitLoaded(generation, images) => {
+                if let Some(d) = self.report_dialog_mut()
+                    && d.kit_loading == Some(generation)
+                {
+                    d.kit_loading = None;
+                    if d.generation == generation && d.building.is_none() {
+                        d.kit_images = crate::report::kit_images_from_report_images(images);
                     }
                 }
                 Task::none()

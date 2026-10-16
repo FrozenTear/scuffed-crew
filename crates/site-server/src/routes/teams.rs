@@ -203,8 +203,9 @@ pub async fn update_team(
 /// GET /api/teams/:id/channels — list provisioned chat channels for a team.
 ///
 /// Site chat mount: use `group_id` of the `officer` row as `POST
-/// /api/chat/send-encrypted` `group_id`. Members see public channels only;
-/// officer+ also see the officer channel.
+/// /api/chat/send-encrypted` `group_id`. Public rows use `POST
+/// /api/chat/send-public` with that row's `group_id`. Members see public
+/// channels only; officer+ also see the officer channel.
 pub async fn list_team_channels(
     State(state): State<AppState>,
     caller: OrgMember,
