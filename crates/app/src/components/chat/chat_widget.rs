@@ -274,6 +274,15 @@ fn connect_relay(relay: &NostrRelayManager, dial: &RelayDial) {
     }
 }
 
+/// `Authenticating` is excluded so a REQ is not sent while NIP-42 is in
+/// flight. `Connected` still subscribes for a relay that never challenges.
+fn subscription_allowed(state: RelayConnectionState) -> bool {
+    matches!(
+        state,
+        RelayConnectionState::Connected | RelayConnectionState::Ready
+    )
+}
+
 fn has_nip07() -> bool {
     web_sys::window()
         .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("nostr")).ok())
@@ -518,9 +527,16 @@ pub fn ChatWidget(
                 ) {
                     loading.set(false);
                     if matches!(state, RelayConnectionState::Error) {
-                        panel_error.set(Some(
-                            "Can't reach the chat relay. Check your connection and retry.".into(),
-                        ));
+                        let keep_sign_in = panel_error
+                            .peek()
+                            .as_deref()
+                            .is_some_and(|msg| msg.starts_with("The chat relay rejected sign-in"));
+                        if !keep_sign_in {
+                            panel_error.set(Some(
+                                "Can't reach the chat relay. Check your connection and retry."
+                                    .into(),
+                            ));
+                        }
                     }
                 }
                 if matches!(
@@ -553,8 +569,17 @@ pub fn ChatWidget(
                     connection_state.set(RelayConnectionState::Ready);
                     panel_error.set(None);
                 }
+                NostrRelayEvent::AuthRejected { message } => {
+                    loading.set(false);
+                    connection_state.set(RelayConnectionState::Error);
+                    panel_error.set(Some(message));
+                }
                 NostrRelayEvent::Notice(msg) => {
                     tracing::info!("Relay notice: {}", msg);
+                }
+                NostrRelayEvent::SubscriptionRefused { message } => {
+                    loading.set(false);
+                    panel_error.set(Some(message));
                 }
                 NostrRelayEvent::EventPublished {
                     accepted: false,
@@ -631,7 +656,7 @@ pub fn ChatWidget(
     let channels_for_sub = channels.clone();
     use_effect(move || {
         let conn = *connection_state.read();
-        if !conn.is_connected() {
+        if !subscription_allowed(conn) {
             return;
         }
         let Some(group_id) = active_group.read().clone() else {
@@ -656,7 +681,7 @@ pub fn ChatWidget(
     let relay_wraps = relay.clone();
     use_effect(move || {
         let conn = *connection_state.read();
-        if !conn.is_connected() {
+        if !subscription_allowed(conn) {
             return;
         }
         let pubkey = me
@@ -907,6 +932,17 @@ mod tests {
             created_at: chrono::Utc::now(),
             synced_at: None,
         }
+    }
+
+    #[test]
+    fn subscriptions_wait_out_the_auth_challenge() {
+        assert!(subscription_allowed(RelayConnectionState::Connected));
+        assert!(subscription_allowed(RelayConnectionState::Ready));
+        assert!(!subscription_allowed(RelayConnectionState::Authenticating));
+        assert!(!subscription_allowed(RelayConnectionState::Reconnecting(1)));
+        assert!(!subscription_allowed(RelayConnectionState::Connecting));
+        assert!(!subscription_allowed(RelayConnectionState::Error));
+        assert!(!subscription_allowed(RelayConnectionState::Disconnected));
     }
 
     #[test]
