@@ -1,7 +1,8 @@
 //! Site chat API types (F-API-003/004).
 //!
 //! Mirrors `GET /api/teams/:id/channels`, `POST /api/chat/send-encrypted`,
-//! `POST /api/chat/decrypt`, and `POST /api/chat/auth-token`.
+//! `POST /api/chat/send-public`, `POST /api/chat/decrypt`, and
+//! `POST /api/chat/auth-token`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,29 @@ pub struct SendEncryptedRequest {
 pub struct SendEncryptedResponse {
     pub recipients_count: usize,
     pub sender_pubkey: String,
+}
+
+/// POST /api/chat/send-public
+///
+/// Server-managed keys only. The server signs one NIP-29 kind 9 event whose
+/// tags are `["h", group_id]`, the same event a NIP-07 client builds for a
+/// public channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SendPublicRequest {
+    pub group_id: String,
+    pub content: String,
+}
+
+/// Response from POST /api/chat/send-public.
+///
+/// Mirrors [`SendEncryptedResponse::sender_pubkey`] and adds the published
+/// event id plus that event's `created_at`, so the sender can render the
+/// message the same way readers do.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SendPublicResponse {
+    pub event_id: String,
+    pub sender_pubkey: String,
+    pub created_at: u64,
 }
 
 /// POST /api/chat/decrypt
@@ -181,6 +205,27 @@ mod tests {
         assert_eq!(ch.group_type, GroupType::Public);
         assert!(ch.is_active);
         assert!(ch.synced_at.is_none());
+    }
+
+    #[test]
+    fn send_public_roundtrip() {
+        let req = SendPublicRequest {
+            group_id: "teamalpha".into(),
+            content: "hello team".into(),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["group_id"], "teamalpha");
+        assert_eq!(v["content"], "hello team");
+        assert!(v.get("reply_to").is_none());
+
+        let resp = SendPublicResponse {
+            event_id: "abc".into(),
+            sender_pubkey: "def".into(),
+            created_at: 1_700_000_000,
+        };
+        let back: SendPublicResponse =
+            serde_json::from_value(serde_json::to_value(&resp).unwrap()).unwrap();
+        assert_eq!(back, resp);
     }
 
     #[test]

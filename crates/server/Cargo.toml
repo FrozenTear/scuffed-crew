@@ -38,3 +38,5 @@ sha2 = "0.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 flate2 = "1"
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
