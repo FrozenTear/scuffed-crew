@@ -748,8 +748,8 @@ fn category_hint(category: LogOnlyCategory) -> &'static str {
              2 minutes after."
         }
         LogOnlyCategory::Performance => {
-            "Low FPS, stutter, or the tracker using a lot of CPU. The log covers the last \
-             30 minutes."
+            "Low FPS, stutter, or the tracker using a lot of CPU. Sends only the performance \
+             log (CPU, memory, capture and OCR timing, and your setup). No pictures."
         }
         LogOnlyCategory::Other => "Anything else. The log covers the last 30 minutes.",
     }

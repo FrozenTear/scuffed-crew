@@ -297,10 +297,10 @@ fn crash_window_26_hours_after_last_seen() {
     ] {
         assert!(!log.contains(tag), "{tag} kept:\n{log}");
     }
-    // A performance report ignores the marker.
+    // An other report ignores the marker.
     let perf = LogWindow::for_log_only(built, false, seen);
     let mut inp = input(dir.path(), perf);
-    inp.category = LogOnlyCategory::Performance;
+    inp.category = LogOnlyCategory::Other;
     let log = bundle::build_log_report(&inp).unwrap().log_text;
     assert!(
         !log.contains("qxcrash_in") && log.contains("qxbuild_in"),
@@ -710,6 +710,56 @@ fn manifest_matches_section_2_for_every_log_only_category() {
     let m: Value =
         serde_json::from_str(&bundle::build_log_report(&inp).unwrap().manifest_json).unwrap();
     assert_eq!(m["consent"]["training"], true);
+}
+
+#[test]
+fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    crate::perf_log::append_to(
+        dir.path(),
+        "2026-10-16T17:00:00Z setup app=x session=x11 kernel=6.8.0 cpus=8 ram_mb=15890 proton=GE-Proton9-20",
+        crate::perf_log::MAX_BYTES,
+    );
+    crate::perf_log::append_to(
+        dir.path(),
+        "2026-10-16T17:01:00Z sample window_s=60 cpu_pct=3.1 x11_shm=no",
+        crate::perf_log::MAX_BYTES,
+    );
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
+    inp.category = LogOnlyCategory::Performance;
+    let report = bundle::build_log_report(&inp).unwrap();
+    let m: Value = serde_json::from_str(&report.manifest_json).unwrap();
+    check_log_only_manifest(&m);
+    assert_eq!(m["reason"]["category"], "performance");
+    assert_eq!(m["session_id"], "none");
+    assert!(m["game"].is_null());
+    let files = m["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "log.txt");
+    assert_eq!(files[0]["role"], "log");
+    assert!(report.images.is_empty());
+    let reads = m["reads"].as_object().unwrap();
+    assert_eq!(reads.len(), 9);
+    for (k, r) in reads {
+        assert!(r["value"].is_null(), "{k}");
+        assert!(r["confidence"].is_null(), "{k}");
+        assert!(r["ocr_v1"].is_null(), "{k}");
+        assert_eq!(r["suspect"], true, "{k}");
+    }
+    assert!(report.log_text.starts_with("2026-10-16T17:00:00Z setup"));
+    assert!(report.log_text.contains("x11_shm=no"));
+    assert!(
+        !report.log_text.contains("qx"),
+        "daemon log leaked:\n{}",
+        report.log_text
+    );
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(report.bytes)).unwrap();
+    let mut names: Vec<_> = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["log.txt", "manifest.json"]);
 }
 
 #[test]
