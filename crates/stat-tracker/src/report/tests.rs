@@ -999,6 +999,31 @@ mod game {
         }
     }
 
+    /// The card preview shows the same pictures the report would carry,
+    /// without building a report, and nothing for a game with no kit.
+    #[test]
+    fn the_kit_preview_matches_the_report_pictures() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        assert!(
+            crate::report::bundle::kit_preview_images(&kit::load(tmp.path(), "sess-1")).is_empty()
+        );
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let preview = crate::report::bundle::kit_preview_images(&kit::load(tmp.path(), "sess-1"));
+        let zip = build_game_report(&input(tmp.path(), GameCategory::WrongHero)).unwrap();
+        assert_eq!(
+            preview
+                .iter()
+                .map(|i| (&i.path, &i.png))
+                .collect::<Vec<_>>(),
+            zip.images
+                .iter()
+                .map(|i| (&i.path, &i.png))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(preview.len(), 1);
+    }
+
     #[test]
     fn game_report_passes_the_server_validator_with_both_crops() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1279,7 +1304,7 @@ mod own_name_seeds {
             bundle::build_log_report(&input(dir, LogWindow::log_only(t("2026-10-09T12:10:00Z"))))
                 .expect("log report");
         let game = build_game_report(&game_input(dir)).expect("game report");
-        kit::prune(dir, 1);
+        kit::prune(dir, kit::Retention::new(1, 500));
         vec![log.bytes, game.bytes]
     }
 

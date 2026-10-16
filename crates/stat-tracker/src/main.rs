@@ -429,6 +429,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         .map_err(anyhow::Error::from_boxed)
         .context("failed to load config")?;
     tracing::info!("Scuffed Stat Tracker starting");
+    stat_tracker::report::kit::set_retention(config.report_kit_retention());
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
     // ProtectSystem=strict (when the user manager can apply it) makes a
