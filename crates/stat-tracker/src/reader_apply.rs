@@ -594,11 +594,19 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
 /// `hero`, `e`, `a`, `d`, `dmg`, `h`, `mit`) of the own row. A field the
 /// reader did not attempt has no entry. `result` is not on the board until
 /// [`crate::shadow::result_field`] sets it, so the caller adds it.
-pub fn kit_confidences(board: &BoardRead, own: OwnRow) -> std::collections::BTreeMap<String, f64> {
+/// Each entry carries the reader's own value, so the kit can tell a read
+/// the capture gate replaced from one it kept.
+pub fn kit_confidences(
+    board: &BoardRead,
+    own: OwnRow,
+) -> std::collections::BTreeMap<String, crate::report::kit::ReaderRead> {
     let mut out = std::collections::BTreeMap::new();
     let mut put = |key: &str, name: &str| {
         if let Some(f) = board.get(name).filter(|f| field_attempted(f)) {
-            out.insert(key.to_string(), f64::from(f.confidence));
+            out.insert(
+                key.to_string(),
+                crate::report::kit::ReaderRead::from_field(f),
+            );
         }
     };
     put("mode", "mode");
@@ -687,9 +695,14 @@ mod tests {
                 team_size: 5,
             },
         );
-        assert_eq!(c.get("mode"), Some(&f64::from(0.9f32)));
-        assert_eq!(c.get("e"), Some(&f64::from(0.9f32)));
-        assert_eq!(c.get("hero"), Some(&f64::from(0.9f32)));
+        assert_eq!(c["mode"].confidence, f64::from(0.9f32));
+        assert_eq!(c["e"].confidence, f64::from(0.9f32));
+        assert_eq!(c["hero"].confidence, f64::from(0.9f32));
+        assert_eq!(c["mode"].value.as_deref(), Some("Control"));
+        assert!(
+            c["e"].value.is_some(),
+            "the reader's own number rides along"
+        );
         assert!(!c.contains_key("mit"), "an unread cell has no confidence");
         let uncertain = kit_confidences(&board, OwnRow::Uncertain);
         assert_eq!(uncertain.keys().collect::<Vec<_>>(), vec!["mode"]);

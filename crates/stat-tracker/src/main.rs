@@ -6857,7 +6857,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 kit_confidences = reader_apply::kit_confidences(&board, board_row);
                 kit_confidences.insert(
                     "result".to_string(),
-                    f64::from(shadow::result_field(&req.result_evidence).confidence),
+                    stat_tracker::report::kit::ReaderRead::from_field(&shadow::result_field(
+                        &req.result_evidence,
+                    )),
                 );
                 apply_new_reader(
                     &mut parsed,
@@ -7262,7 +7264,7 @@ fn record_report_kit(
     captured_at: chrono::DateTime<Utc>,
     tab_at: stat_tracker::report::blank::CaptureTime,
     board_names: Vec<String>,
-    confidences: &std::collections::BTreeMap<String, f64>,
+    confidences: &std::collections::BTreeMap<String, stat_tracker::report::kit::ReaderRead>,
 ) {
     let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
     else {
