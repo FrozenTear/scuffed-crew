@@ -247,6 +247,10 @@ async fn main() {
             axum::routing::post(routes::chat::send_encrypted).with_state(state.clone()),
         )
         .route(
+            "/api/chat/send-public",
+            axum::routing::post(routes::chat::send_public).with_state(state.clone()),
+        )
+        .route(
             "/api/chat/decrypt",
             axum::routing::post(routes::chat::decrypt_message).with_state(state),
         )
