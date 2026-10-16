@@ -79,8 +79,8 @@ pub fn retention() -> Retention {
     }
 }
 
-/// A kit older than this is deleted on the next prune.
-pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+/// A kit older than this (14 days) is deleted on the next prune.
+pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
 
 pub const SCOREBOARD_PNG: &str = "scoreboard.png";
 pub const OUTCOME_PNG: &str = "outcome.png";
