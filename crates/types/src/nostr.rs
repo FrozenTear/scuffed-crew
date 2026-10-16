@@ -230,7 +230,7 @@ impl ClientRelayMessage {
 }
 
 /// Messages received from relay to client (NIP-01 + NIP-42).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RelayMessage {
     /// An event matching a subscription.
     Event {
@@ -249,6 +249,15 @@ pub enum RelayMessage {
     Auth { challenge: String },
     /// Human-readable notice from relay.
     Notice(String),
+    /// Relay refused or ended a subscription (NIP-01 `CLOSED`).
+    ///
+    /// `message` is empty when the relay omits a reason. A reason that
+    /// starts with `auth-required:` means the client should finish NIP-42
+    /// AUTH and send the same REQ again.
+    Closed {
+        subscription_id: String,
+        message: String,
+    },
 }
 
 impl RelayMessage {
@@ -321,6 +330,23 @@ impl RelayMessage {
                     .unwrap_or("")
                     .to_string();
                 Ok(RelayMessage::Notice(msg))
+            }
+            "CLOSED" => {
+                let sub_id = arr
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .ok_or("CLOSED: missing subscription_id")?
+                    .to_string();
+                // A missing or non-string reason is still a CLOSED frame.
+                let message = arr
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(RelayMessage::Closed {
+                    subscription_id: sub_id,
+                    message,
+                })
             }
             other => Err(format!("unknown relay message type: {other}")),
         }
@@ -423,4 +449,58 @@ pub mod event_kinds {
     pub const REACTION: u32 = 7;
     /// NIP-72 community definition (replaceable).
     pub const COMMUNITY_DEFINITION: u32 = 34550;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_closed_with_reason() {
+        let msg = RelayMessage::from_json(
+            r#"["CLOSED","scuffed-group-1","auth-required: NIP-42 AUTH required before REQ"]"#,
+        )
+        .expect("CLOSED with a reason");
+        assert_eq!(
+            msg,
+            RelayMessage::Closed {
+                subscription_id: "scuffed-group-1".into(),
+                message: "auth-required: NIP-42 AUTH required before REQ".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_closed_when_reason_is_missing() {
+        let omitted = RelayMessage::from_json(r#"["CLOSED","sub-9"]"#).expect("omitted reason");
+        assert_eq!(
+            omitted,
+            RelayMessage::Closed {
+                subscription_id: "sub-9".into(),
+                message: String::new(),
+            }
+        );
+
+        let null_reason =
+            RelayMessage::from_json(r#"["CLOSED","sub-9",null]"#).expect("null reason");
+        assert_eq!(
+            null_reason,
+            RelayMessage::Closed {
+                subscription_id: "sub-9".into(),
+                message: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn closed_without_subscription_id_is_an_error() {
+        let err = RelayMessage::from_json(r#"["CLOSED"]"#).expect_err("id is required");
+        assert!(err.contains("CLOSED: missing subscription_id"), "{err}");
+    }
+
+    #[test]
+    fn unknown_relay_message_is_still_an_error() {
+        let err = RelayMessage::from_json(r#"["NOPE","x"]"#).expect_err("unknown type");
+        assert_eq!(err, "unknown relay message type: NOPE");
+    }
 }

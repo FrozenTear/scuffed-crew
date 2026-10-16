@@ -114,6 +114,8 @@ pub enum NostrRelayEvent {
     AuthSuccess,
     /// Relay sent a notice.
     Notice(String),
+    /// Relay refused a subscription. `message` is chat-banner text.
+    SubscriptionRefused { message: String },
 }
 
 // =============================================================================
@@ -123,6 +125,132 @@ pub enum NostrRelayEvent {
 fn reconnect_delay(attempt: u32) -> u32 {
     let delay = BASE_RECONNECT_DELAY_MS.saturating_mul(2u32.saturating_pow(attempt.min(5)));
     delay.min(MAX_RECONNECT_DELAY_MS)
+}
+
+/// NIP-42 machine-readable prefix on a `CLOSED` reason.
+const AUTH_REQUIRED_PREFIX: &str = "auth-required:";
+
+/// What to do with one relay `CLOSED` frame. Never closes the WebSocket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CloseOutcome {
+    /// AUTH has not finished. Send this subscription after it succeeds.
+    Queued,
+    /// AUTH has finished. Send this subscription one time.
+    Resend,
+    /// Show this sentence in the chat error banner.
+    Banner(String),
+}
+
+/// Per-connection bookkeeping for subscription `CLOSED` frames.
+///
+/// Once this relay has sent an AUTH challenge, a new socket does not put
+/// `REQ` on the wire until NIP-42 AUTH succeeds. An `auth-required`
+/// refusal is retried once per connection, so a second refusal cannot
+/// spin the socket. A relay that never challenges is left alone.
+#[derive(Debug, Default)]
+struct RelayCloseGate {
+    authed: bool,
+    /// Sticky across reconnects. Set by an AUTH challenge or an
+    /// `auth-required` CLOSED reason.
+    relay_requires_auth: bool,
+    waiting: Vec<String>,
+    resent: Vec<String>,
+}
+
+impl RelayCloseGate {
+    fn reset_connection(&mut self) {
+        let relay_requires_auth = self.relay_requires_auth;
+        *self = Self {
+            relay_requires_auth,
+            ..Self::default()
+        };
+    }
+
+    fn note_auth_challenge(&mut self) {
+        self.relay_requires_auth = true;
+    }
+
+    fn contains(ids: &[String], subscription_id: &str) -> bool {
+        ids.iter().any(|id| id == subscription_id)
+    }
+
+    fn queue(&mut self, subscription_id: &str) {
+        if Self::contains(&self.waiting, subscription_id)
+            || Self::contains(&self.resent, subscription_id)
+        {
+            return;
+        }
+        self.waiting.push(subscription_id.to_string());
+    }
+
+    /// `true` means the caller must not send the REQ yet.
+    fn hold_outgoing_req(&mut self, auth_configured: bool, subscription_id: &str) -> bool {
+        if !auth_configured || !self.relay_requires_auth || self.authed {
+            return false;
+        }
+        self.queue(subscription_id);
+        true
+    }
+
+    /// `true` means stored subscriptions may be sent on this open socket.
+    fn allow_open_resubscribe(
+        &mut self,
+        auth_configured: bool,
+        subscription_ids: &[String],
+    ) -> bool {
+        if auth_configured && self.relay_requires_auth && !self.authed {
+            for id in subscription_ids {
+                self.queue(id);
+            }
+            return false;
+        }
+        true
+    }
+
+    fn on_auth_success(&mut self) -> Vec<String> {
+        self.authed = true;
+        let waiting = std::mem::take(&mut self.waiting);
+        let mut send = Vec::new();
+        for id in waiting {
+            if Self::contains(&self.resent, &id) {
+                continue;
+            }
+            self.resent.push(id.clone());
+            send.push(id);
+        }
+        send
+    }
+
+    fn on_closed(&mut self, subscription_id: &str, reason: &str) -> CloseOutcome {
+        if reason.starts_with(AUTH_REQUIRED_PREFIX) {
+            self.relay_requires_auth = true;
+            if Self::contains(&self.resent, subscription_id) {
+                return CloseOutcome::Banner(relay_closed_banner(reason));
+            }
+            if self.authed {
+                self.resent.push(subscription_id.to_string());
+                self.waiting.retain(|id| id != subscription_id);
+                return CloseOutcome::Resend;
+            }
+            self.queue(subscription_id);
+            return CloseOutcome::Queued;
+        }
+        self.waiting.retain(|id| id != subscription_id);
+        CloseOutcome::Banner(relay_closed_banner(reason))
+    }
+}
+
+fn relay_closed_banner(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        "The chat relay refused this channel.".to_string()
+    } else {
+        format!("The chat relay refused this channel: {reason}")
+    }
+}
+
+fn warn_console(message: &str) {
+    web_sys::console::warn_1(&JsValue::from_str(message));
 }
 
 // =============================================================================
@@ -145,6 +273,10 @@ struct SharedRelayState {
     current_group: RefCell<Option<String>>,
     on_state_change: RefCell<Box<dyn FnMut(RelayConnectionState)>>,
     on_event: RefCell<Box<dyn FnMut(NostrRelayEvent)>>,
+    /// NIP-42 bookkeeping for this socket. Reset on each new connection.
+    auth_gate: RefCell<RelayCloseGate>,
+    /// Event id of the AUTH frame just sent, so its OK is not a publish.
+    pending_auth_event_id: RefCell<Option<String>>,
 }
 
 impl SharedRelayState {
@@ -162,6 +294,9 @@ impl SharedRelayState {
 // =============================================================================
 
 fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
+    shared.auth_gate.borrow_mut().reset_connection();
+    *shared.pending_auth_event_id.borrow_mut() = None;
+
     let url = match shared.relay_url.borrow().clone() {
         Some(url) => url,
         None => {
@@ -184,9 +319,20 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 shared_open.emit_state(RelayConnectionState::Connected);
                 *shared_open.reconnect_attempts.borrow_mut() = 0;
 
-                // Re-subscribe to active subscriptions after reconnect
+                // Re-subscribe after reconnect. Once this relay has asked for
+                // NIP-42, wait until AUTH succeeds. A pre-auth REQ is what
+                // it answers with CLOSED `auth-required:`, and repeating
+                // that on every reconnect is the Authenticating/Reconnecting
+                // loop.
                 let subs = shared_open.subscriptions.borrow().clone();
-                if !subs.is_empty()
+                let ids: Vec<String> = subs.iter().map(|(id, _)| id.clone()).collect();
+                let auth_configured = shared_open.auth_endpoint.borrow().is_some();
+                let send_now = shared_open
+                    .auth_gate
+                    .borrow_mut()
+                    .allow_open_resubscribe(auth_configured, &ids);
+                if send_now
+                    && !subs.is_empty()
                     && let Some(socket) = shared_open.socket.borrow().as_ref()
                 {
                     for (sub_id, filters) in &subs {
@@ -211,7 +357,9 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                     match RelayMessage::from_json(&text) {
                         Ok(msg) => handle_relay_message(&shared_msg, msg),
                         Err(err) => {
-                            tracing::warn!("Failed to parse relay message: {}", err);
+                            // A bad frame is not a dead socket. Reconnect runs
+                            // only from the WebSocket close handler below.
+                            warn_console(&format!("Failed to parse relay message: {err}"));
                         }
                     }
                 }
@@ -230,8 +378,16 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
 
             // -- On close --
             let shared_close = shared.clone();
-            let onclose = Closure::wrap(Box::new(move |_: JsValue| {
-                tracing::info!("Relay WebSocket closed");
+            let onclose = Closure::wrap(Box::new(move |ev: JsValue| {
+                // Transport close only. A NIP-01 CLOSED frame is handled in
+                // `handle_relay_message` and must not reach this path.
+                if let Ok(ev) = ev.dyn_into::<web_sys::CloseEvent>() {
+                    warn_console(&format!(
+                        "Relay WebSocket closed (code {}, reason {})",
+                        ev.code(),
+                        ev.reason()
+                    ));
+                }
                 *shared_close.socket.borrow_mut() = None;
 
                 if *shared_close.intentional_disconnect.borrow() {
@@ -314,6 +470,16 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             accepted,
             message,
         } => {
+            let pending = shared.pending_auth_event_id.borrow().clone();
+            if pending.as_deref() == Some(event_id.as_str()) {
+                shared.pending_auth_event_id.borrow_mut().take();
+                if accepted {
+                    finish_auth(shared);
+                } else {
+                    warn_console(&format!("Relay rejected NIP-42 AUTH: {message}"));
+                }
+                return;
+            }
             shared.emit_event(NostrRelayEvent::EventPublished {
                 event_id,
                 accepted,
@@ -324,6 +490,7 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             shared.emit_event(NostrRelayEvent::Eose { subscription_id });
         }
         RelayMessage::Auth { challenge } => {
+            shared.auth_gate.borrow_mut().note_auth_challenge();
             shared.emit_event(NostrRelayEvent::AuthChallenge);
             shared.emit_state(RelayConnectionState::Authenticating);
 
@@ -335,6 +502,8 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
                 wasm_bindgen_futures::spawn_local(async move {
                     match fetch_auth_event(&endpoint, &relay_url, &challenge).await {
                         Ok(event) => {
+                            *shared_auth.pending_auth_event_id.borrow_mut() =
+                                Some(event.id.clone());
                             if let Some(socket) = shared_auth.socket.borrow().as_ref() {
                                 let msg = ClientRelayMessage::Auth(event);
                                 if let Ok(json) = msg.to_json() {
@@ -357,6 +526,56 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             tracing::info!("Relay notice: {}", msg);
             shared.emit_event(NostrRelayEvent::Notice(msg));
         }
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            // CLOSED retires one subscription. Leave the WebSocket up.
+            warn_console(&format!(
+                "Relay CLOSED subscription {subscription_id}: {message}"
+            ));
+            let outcome = shared
+                .auth_gate
+                .borrow_mut()
+                .on_closed(&subscription_id, &message);
+            match outcome {
+                CloseOutcome::Queued => {}
+                CloseOutcome::Resend => resend_subscription(shared, &subscription_id),
+                CloseOutcome::Banner(text) => {
+                    shared.emit_event(NostrRelayEvent::SubscriptionRefused { message: text });
+                }
+            }
+        }
+    }
+}
+
+fn finish_auth(shared: &Rc<SharedRelayState>) {
+    let ids = shared.auth_gate.borrow_mut().on_auth_success();
+    for id in &ids {
+        resend_subscription(shared, id);
+    }
+    shared.emit_event(NostrRelayEvent::AuthSuccess);
+    shared.emit_state(RelayConnectionState::Ready);
+}
+
+fn resend_subscription(shared: &SharedRelayState, subscription_id: &str) {
+    let filters = shared
+        .subscriptions
+        .borrow()
+        .iter()
+        .find(|(id, _)| id == subscription_id)
+        .map(|(_, filters)| filters.clone());
+    let Some(filters) = filters else {
+        return;
+    };
+    let msg = ClientRelayMessage::Req {
+        subscription_id: subscription_id.to_string(),
+        filters,
+    };
+    if let Some(socket) = shared.socket.borrow().as_ref()
+        && let Ok(json) = msg.to_json()
+    {
+        let _ = socket.send_with_str(&json);
     }
 }
 
@@ -454,6 +673,8 @@ impl NostrRelayManager {
             current_group: RefCell::new(None),
             on_state_change: RefCell::new(Box::new(on_state_change)),
             on_event: RefCell::new(Box::new(on_event)),
+            auth_gate: RefCell::new(RelayCloseGate::default()),
+            pending_auth_event_id: RefCell::new(None),
         });
 
         Self {
@@ -614,6 +835,20 @@ impl NostrRelayManager {
 
     /// Send a raw client relay message.
     fn send_raw(&self, message: ClientRelayMessage) {
+        if let ClientRelayMessage::Req {
+            subscription_id, ..
+        } = &message
+        {
+            let auth_configured = self.shared.auth_endpoint.borrow().is_some();
+            if self
+                .shared
+                .auth_gate
+                .borrow_mut()
+                .hold_outgoing_req(auth_configured, subscription_id)
+            {
+                return;
+            }
+        }
         if let Some(socket) = self.shared.socket.borrow().as_ref()
             && let Ok(json) = message.to_json()
         {
@@ -636,5 +871,109 @@ impl NostrRelayManager {
         {
             window.clear_timeout_with_handle(timer_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn req_is_not_held_until_the_relay_asks_for_auth() {
+        let mut gate = RelayCloseGate::default();
+        assert!(!gate.hold_outgoing_req(true, "sub-1"));
+        assert!(gate.allow_open_resubscribe(true, &["sub-1".into()]));
+        gate.note_auth_challenge();
+        assert!(gate.hold_outgoing_req(true, "sub-2"));
+    }
+
+    #[test]
+    fn held_req_is_sent_once_when_auth_succeeds() {
+        let mut gate = RelayCloseGate::default();
+        gate.note_auth_challenge();
+        assert!(gate.hold_outgoing_req(true, "sub-1"));
+        assert!(gate.hold_outgoing_req(true, "sub-1"));
+        assert_eq!(
+            gate.on_closed("sub-1", "auth-required: still waiting"),
+            CloseOutcome::Queued
+        );
+        assert_eq!(gate.on_auth_success(), vec!["sub-1".to_string()]);
+        assert!(gate.on_auth_success().is_empty());
+        assert!(!gate.hold_outgoing_req(true, "sub-2"));
+    }
+
+    #[test]
+    fn auth_required_after_success_resends_once() {
+        let mut gate = RelayCloseGate::default();
+        assert!(gate.on_auth_success().is_empty());
+        assert_eq!(
+            gate.on_closed("sub-9", "auth-required: late"),
+            CloseOutcome::Resend
+        );
+        assert_eq!(
+            gate.on_closed("sub-9", "auth-required: late"),
+            CloseOutcome::Banner("The chat relay refused this channel: auth-required: late".into())
+        );
+    }
+
+    #[test]
+    fn other_reason_is_a_banner_and_is_not_resent() {
+        let mut gate = RelayCloseGate::default();
+        gate.note_auth_challenge();
+        assert!(gate.hold_outgoing_req(true, "sub-1"));
+        assert_eq!(
+            gate.on_closed("sub-1", "restricted: not a member"),
+            CloseOutcome::Banner(
+                "The chat relay refused this channel: restricted: not a member".into()
+            )
+        );
+        assert!(gate.on_auth_success().is_empty());
+    }
+
+    #[test]
+    fn auth_required_prefix_must_lead() {
+        let mut gate = RelayCloseGate::default();
+        let outcome = gate.on_closed("sub-1", "restricted: auth-required: no");
+        assert_eq!(
+            outcome,
+            CloseOutcome::Banner(
+                "The chat relay refused this channel: restricted: auth-required: no".into()
+            )
+        );
+    }
+
+    #[test]
+    fn blank_reason_banner_stops_after_the_channel() {
+        let mut gate = RelayCloseGate::default();
+        assert_eq!(
+            gate.on_closed("sub-1", "   "),
+            CloseOutcome::Banner("The chat relay refused this channel.".into())
+        );
+    }
+
+    #[test]
+    fn open_waits_after_the_relay_has_asked_for_auth() {
+        let mut gate = RelayCloseGate::default();
+        gate.note_auth_challenge();
+        gate.reset_connection();
+        assert!(!gate.allow_open_resubscribe(true, &["keep".into()]));
+        assert_eq!(gate.on_auth_success(), vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn open_resends_immediately_without_auth_endpoint() {
+        let mut gate = RelayCloseGate::default();
+        assert!(gate.allow_open_resubscribe(false, &["keep".into()]));
+        assert!(gate.on_auth_success().is_empty());
+    }
+
+    #[test]
+    fn new_connection_holds_again() {
+        let mut gate = RelayCloseGate::default();
+        gate.note_auth_challenge();
+        let _ = gate.on_auth_success();
+        assert!(!gate.hold_outgoing_req(true, "sub-1"));
+        gate.reset_connection();
+        assert!(gate.hold_outgoing_req(true, "sub-1"));
     }
 }
