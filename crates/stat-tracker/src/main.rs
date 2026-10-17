@@ -1622,6 +1622,7 @@ fn note_untracked_once(data_dir: &std::path::Path, g: &ActiveGame, reason: &str)
 const QUIET_CLOSE_REASON: &str = "finished game closed after quiet period";
 const SHUTDOWN_CLOSE_REASON: &str = "daemon shutdown";
 const UNFINISHED_MAX_REASON: &str = "unfinished game closed after several hours";
+const EMPTY_IDLE_REASON: &str = "empty game closed after 20 minutes idle";
 
 /// Quiet close, shutdown, and the long unfinished bound each keep their own
 /// message. Every other close is a new-game boundary.
@@ -1630,6 +1631,7 @@ fn session_close_log(reason: &str) -> &'static str {
         QUIET_CLOSE_REASON => QUIET_CLOSE_REASON,
         SHUTDOWN_CLOSE_REASON => SHUTDOWN_CLOSE_REASON,
         UNFINISHED_MAX_REASON => UNFINISHED_MAX_REASON,
+        EMPTY_IDLE_REASON => EMPTY_IDLE_REASON,
         _ => "closed session at new-game boundary",
     }
 }
@@ -1824,7 +1826,8 @@ where
         "closing quiet session"
     );
     // No seal. A finished game already has its outcome. An unfinished game
-    // closes here only after [`UNFINISHED_SESSION_MAX`].
+    // closes here only after [`UNFINISHED_SESSION_MAX`], or after
+    // [`UNFINISHED_SESSION_IDLE`] when it is empty ([`is_empty_tab_game`]).
     retire_active_game(st, store, data_dir, None, reason).await;
     if let Some((counters, hero, at)) = carried {
         let mut opened = ActiveGame::open_at(
@@ -2489,14 +2492,23 @@ fn finished_game_close_after(configured_secs: u64) -> std::time::Duration {
 /// with no result, this timer closes it. Its `unknown` rows are marked
 /// synced locally and are not sent. A GUI SetOutcome requeues them with
 /// `edited` set.
+///
+/// An empty game ([`is_empty_tab_game`]) has nothing a late result could
+/// attach to, so it closes after [`UNFINISHED_SESSION_IDLE`] instead. That
+/// is the same bound after which the next Tab would start a fresh game
+/// anyway. Nothing is stored or uploaded for it.
 fn quiet_close_reason(
     game: &ActiveGame,
     now: Instant,
     close_after: std::time::Duration,
 ) -> Option<&'static str> {
     if !game.finished() {
-        if now.saturating_duration_since(game.last_activity) >= UNFINISHED_SESSION_MAX {
+        let idle = now.saturating_duration_since(game.last_activity);
+        if idle >= UNFINISHED_SESSION_MAX {
             return Some(UNFINISHED_MAX_REASON);
+        }
+        if is_empty_tab_game(game) && idle >= UNFINISHED_SESSION_IDLE {
+            return Some(EMPTY_IDLE_REASON);
         }
         return None;
     }
@@ -2510,6 +2522,20 @@ fn quiet_close_reason(
     } else {
         None
     }
+}
+
+/// A game a Tab opened whose captures were all rejected: no row stored, no
+/// board read, no held board, no result hint, and not opened by a start
+/// screen. On 2026-10-17 a Tab on the rank screen 81s after a Victory opened
+/// one, and it stayed open for [`UNFINISHED_SESSION_MAX`].
+fn is_empty_tab_game(game: &ActiveGame) -> bool {
+    !game.session_created
+        && !game.awaiting_first_board
+        && game.gate.is_none()
+        && game.best_guess.is_none()
+        && game.deferred.is_none()
+        && game.result_mark.is_none()
+        && game.rejoin_carry.is_none()
 }
 
 /// How long an unfinished session stays reusable with no recorded activity.
@@ -3457,6 +3483,37 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
     }
 }
 
+/// Whether this Tab closes a game that has a result and stored rows. That
+/// game is then uploaded right away ([`open_fresh_for_tab_and_sync`]).
+fn tab_closes_a_recorded_game(game: Option<&ActiveGame>, now: Instant) -> bool {
+    game.is_some_and(|g| g.finished() && g.session_created) && should_start_fresh_session(game, now)
+}
+
+/// [`open_fresh_if_tab_starts_one`], then `sync_now` when the game this Tab
+/// closed had a result and stored rows. Without this the closed game waited
+/// for the next game's periodic sync, and the quiet-close timer only looks
+/// at the open game, so a late Tab off the scoreboard left the last game of
+/// the night unsent for hours (2026-10-17, Oasis). `sync_now` schedules
+/// [`schedule_store_sync`]; it does not block the loop.
+async fn open_fresh_for_tab_and_sync<F, Fut>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    now: Instant,
+    sync_now: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let upload_closed = tab_closes_a_recorded_game(st.active_game.as_ref(), now);
+    let opened = open_fresh_if_tab_starts_one(st, store, data_dir, now).await;
+    if opened && upload_closed {
+        sync_now().await;
+    }
+    opened
+}
+
 /// Open a session when this Tab is past grace or the unfinished idle bound.
 /// Returns whether this Tab opened it. The deferred board of the session
 /// being closed is carried onto the new one.
@@ -4298,8 +4355,24 @@ async fn run_loop(
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
                         let now = Instant::now();
-                        let opened_by_this_tab =
-                            open_fresh_if_tab_starts_one(&mut st, store, data_dir, now).await;
+                        let opened_by_this_tab = open_fresh_for_tab_and_sync(
+                            &mut st,
+                            store,
+                            data_dir,
+                            now,
+                            || {
+                                schedule_store_sync(
+                                    &mut sync_task,
+                                    &sync_backoff,
+                                    store,
+                                    sync_client,
+                                    data_dir,
+                                    None,
+                                );
+                                std::future::ready(())
+                            },
+                        )
+                        .await;
                         let req = build_capture_request(
                             st.active_game.as_ref().expect("active_game set above"),
                             opened_by_this_tab,
@@ -21215,6 +21288,176 @@ mod tests {
         assert!(closed);
         assert!(st.active_game.is_none());
         assert_eq!(st.settle_closed_unknown.as_deref(), Some("long-busan"));
+    }
+
+    /// Replays 2026-10-17: Oasis ends in Victory, a Tab 81s later lands on
+    /// the rank screen and its capture is rejected, then nothing else
+    /// happens. Oasis must upload at that Tab, and the empty game the Tab
+    /// opened must close after 20 minutes idle with nothing uploaded for it.
+    #[tokio::test]
+    async fn last_night_replay_uploads_oasis_at_the_late_tab_and_closes_the_empty_game() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("oasis", "victory");
+        row.map_name = "Oasis".into();
+        row.game_mode = "Control".into();
+        row.hero = "Wrecking Ball".into();
+        row.role = "Tank".into();
+        store.insert_match(row).await.unwrap();
+        let tab_at = test_now();
+        let mut g = game(detect::MatchOutcome::Victory, Some(81), tab_at);
+        g.session_id = "oasis".into();
+        g.map = Some("Oasis".into());
+        g.last_activity = tab_at - Duration::from_secs(81);
+        let mut st = session(Some(g), tab_at);
+        persist_active_game(dir.path(), st.active_game.as_ref());
+
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let syncs = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let upload_into = |seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            move |matches: Vec<storage::PersonalMatch>, _| {
+                seen.lock()
+                    .unwrap()
+                    .extend(matches.into_iter().map(|row| row.session_id));
+                async { Ok(upload_ok()) }
+            }
+        };
+
+        // The 81s Tab: past the 75s grace, so it closes Oasis and opens a game.
+        let opened = {
+            let (seen, syncs) = (
+                std::sync::Arc::clone(&uploaded),
+                std::sync::Arc::clone(&syncs),
+            );
+            let store = &store;
+            let path = dir.path();
+            open_fresh_for_tab_and_sync(&mut st, store, path, tab_at, move || async move {
+                syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                try_sync_with(store, path, None, upload_into(seen)).await;
+            })
+            .await
+        };
+        assert!(opened, "a Tab 81s after the result opens the next game");
+        assert_eq!(syncs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*uploaded.lock().unwrap(), vec!["oasis".to_string()]);
+        let oasis = store.get_all_matches().await.unwrap();
+        assert!(
+            oasis
+                .iter()
+                .all(|row| row.session_id != "oasis" || row.synced),
+            "Oasis is uploaded at the Tab, not hours later"
+        );
+
+        // The capture of that Tab is rejected: not a scoreboard.
+        let empty = st.active_game.as_ref().unwrap().session_id.clone();
+        assert_ne!(empty, "oasis");
+        let reject_at = tab_at + Duration::from_secs(1);
+        let recorded = apply_capture_report(
+            &mut st,
+            &store,
+            dir.path(),
+            &empty,
+            Ok(rejected_report(&empty)),
+            reject_at,
+        )
+        .await;
+        assert!(!recorded);
+        let g = st.active_game.as_ref().expect("the empty game is open");
+        assert!(!g.session_created);
+        assert!(is_empty_tab_game(g));
+
+        // The quiet timer: still open at 19 minutes, closed at 20.
+        uploaded.lock().unwrap().clear();
+        let quiet = finished_game_close_after(config::FINISHED_GAME_CLOSE_DEFAULT_SECS);
+        let early = tab_at + Duration::from_secs(19 * 60);
+        assert!(
+            !close_quiet_session_and_sync(&mut st, &store, dir.path(), early, quiet, || async {})
+                .await
+        );
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some(empty.as_str())
+        );
+        let idle_at = reject_at + UNFINISHED_SESSION_IDLE;
+        let closed = {
+            let seen = std::sync::Arc::clone(&uploaded);
+            let store = &store;
+            let path = dir.path();
+            close_quiet_session_and_sync(&mut st, store, path, idle_at, quiet, move || async move {
+                try_sync_with(store, path, None, upload_into(seen)).await;
+            })
+            .await
+        };
+        assert!(closed, "the empty game closes after 20 minutes idle");
+        assert!(st.active_game.is_none());
+        assert!(!active_game_path(dir.path()).exists());
+        assert!(st.settle_closed_unknown.is_none());
+        assert!(
+            uploaded.lock().unwrap().iter().all(|sid| sid != &empty),
+            "nothing is uploaded for the empty game"
+        );
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(rows.iter().all(|row| row.session_id != empty));
+    }
+
+    #[test]
+    fn only_a_tab_that_closes_a_finished_recorded_game_uploads() {
+        let now = test_now();
+        // Inside the 75s grace the Tab still belongs to the finished game.
+        let inside = game(detect::MatchOutcome::Victory, Some(60), now);
+        assert!(!tab_closes_a_recorded_game(Some(&inside), now));
+        // Past grace: closes a finished game with rows, so upload it.
+        let past = game(detect::MatchOutcome::Victory, Some(81), now);
+        assert!(tab_closes_a_recorded_game(Some(&past), now));
+        // A finished game that never stored a row has nothing to send.
+        let mut no_rows = game(detect::MatchOutcome::Defeat, Some(81), now);
+        no_rows.session_created = false;
+        assert!(!tab_closes_a_recorded_game(Some(&no_rows), now));
+        // An unfinished game is held locally, not sent.
+        let mut unfinished = game(detect::MatchOutcome::Unknown, None, now);
+        unfinished.last_activity = now - UNFINISHED_SESSION_IDLE - Duration::from_secs(1);
+        assert!(!tab_closes_a_recorded_game(Some(&unfinished), now));
+        assert!(!tab_closes_a_recorded_game(None, now));
+    }
+
+    #[test]
+    fn only_an_empty_tab_game_closes_after_twenty_minutes() {
+        let now = test_now();
+        let quiet = finished_game_close_after(config::FINISHED_GAME_CLOSE_DEFAULT_SECS);
+        let idle = |mut g: ActiveGame| {
+            g.last_activity = now - UNFINISHED_SESSION_IDLE;
+            g
+        };
+        let empty = || {
+            let mut g = game(detect::MatchOutcome::Unknown, None, now);
+            g.session_created = false;
+            g
+        };
+        assert_eq!(
+            quiet_close_reason(&idle(empty()), now, quiet),
+            Some(EMPTY_IDLE_REASON)
+        );
+        let mut recent = empty();
+        recent.last_activity = now - UNFINISHED_SESSION_IDLE + Duration::from_secs(1);
+        assert_eq!(quiet_close_reason(&recent, now, quiet), None);
+        // A game with stored rows waits for its result as before.
+        let stored = game(detect::MatchOutcome::Unknown, None, now);
+        assert_eq!(quiet_close_reason(&idle(stored), now, quiet), None);
+        // A start-screen game still waiting for its first board stays open.
+        let mut start = empty();
+        start.awaiting_first_board = true;
+        assert_eq!(quiet_close_reason(&idle(start), now, quiet), None);
+        // A held board or a result hint is not empty.
+        let mut held = empty();
+        held.deferred = Some(fresh_counters(2));
+        assert_eq!(quiet_close_reason(&idle(held), now, quiet), None);
+        let mut hinted = empty();
+        hinted.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Victory,
+            confirmed: false,
+            seen_at: now - UNFINISHED_SESSION_IDLE,
+        });
+        assert_eq!(quiet_close_reason(&idle(hinted), now, quiet), None);
     }
 
     // ---- O10: cell trust (OCR sites T3, T7, T2) under each reader.
