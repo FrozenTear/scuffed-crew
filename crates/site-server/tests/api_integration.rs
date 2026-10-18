@@ -8951,6 +8951,166 @@ async fn unpublished_article_hidden_from_non_editors() {
     assert!(list.as_array().unwrap().is_empty());
 }
 
+/// Clock time is `HH:MM` (what the schedule form's time input sends). Duration
+/// is 1 to 1440 minutes. A zero duration ends when it starts and is rejected.
+/// The form omits duration, so the server default of 120 must still save.
+#[tokio::test]
+async fn event_time_must_be_a_clock_time() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let post = |app: &axum::Router, body: Value| {
+        let app = app.clone();
+        async move {
+            app.oneshot(authed_json_request(
+                Method::POST,
+                "/api/events",
+                OFFICER_TOKEN,
+                body,
+            ))
+            .await
+            .unwrap()
+        }
+    };
+
+    let clock = post(
+        &app,
+        json!({
+            "title": "Clock overflow",
+            "day_of_week": 1,
+            "time": "71582789:00",
+            "is_public": true
+        }),
+    )
+    .await;
+    assert_eq!(clock.status(), StatusCode::BAD_REQUEST);
+    let clock_body = body_json(clock).await;
+    assert!(
+        clock_body["error"].as_str().unwrap_or("").contains("HH:MM"),
+        "{clock_body}"
+    );
+
+    let duration = post(
+        &app,
+        json!({
+            "title": "Duration overflow",
+            "day_of_week": 1,
+            "time": "20:00",
+            "duration_minutes": 4294967295u64,
+            "is_public": true
+        }),
+    )
+    .await;
+    assert_eq!(duration.status(), StatusCode::BAD_REQUEST);
+    let duration_body = body_json(duration).await;
+    assert!(
+        duration_body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("1440"),
+        "{duration_body}"
+    );
+
+    let zero = post(
+        &app,
+        json!({
+            "title": "Zero length",
+            "day_of_week": 1,
+            "time": "20:00",
+            "duration_minutes": 0,
+            "is_public": true
+        }),
+    )
+    .await;
+    assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
+    let zero_body = body_json(zero).await;
+    assert!(
+        zero_body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("after the start"),
+        "{zero_body}"
+    );
+
+    let garbage = post(
+        &app,
+        json!({
+            "title": "Not a clock",
+            "day_of_week": 2,
+            "time": "evening",
+            "is_public": true
+        }),
+    )
+    .await;
+    assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
+
+    // Admin schedule form: type=time value "19:00", duration omitted (default 120).
+    let created = post(
+        &app,
+        json!({
+            "title": "Evening practice",
+            "day_of_week": 0,
+            "time": "19:00",
+            "timezone": "Europe/Berlin",
+            "is_recurring": true,
+            "is_public": false
+        }),
+    )
+    .await;
+    let created_status = created.status();
+    let created_body = body_json(created).await;
+    assert_eq!(created_status, StatusCode::CREATED, "{created_body}");
+
+    let late = post(
+        &app,
+        json!({
+            "title": "Past midnight",
+            "day_of_week": 4,
+            "time": "23:00",
+            "duration_minutes": 120,
+            "timezone": "UTC",
+            "is_public": true
+        }),
+    )
+    .await;
+    assert_eq!(late.status(), StatusCode::CREATED);
+    let late_body = body_json(late).await;
+    let late_id = late_body["id"].as_str().unwrap();
+
+    let updated = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/events/{late_id}"),
+            OFFICER_TOKEN,
+            json!({ "time": "25:99" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::BAD_REQUEST);
+    let updated_body = body_json(updated).await;
+    assert!(
+        updated_body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("HH:MM"),
+        "{updated_body}"
+    );
+
+    let still = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/events/{late_id}"),
+            OFFICER_TOKEN,
+            json!({ "duration_minutes": 90 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(still.status(), StatusCode::OK);
+    assert_eq!(body_json(still).await["duration_minutes"], 90);
+}
+
 /// Missing public rows use the not-found error string. A draft article stays
 /// indistinguishable from a missing slug. A missing event id on update is the
 /// same shape, not 500.

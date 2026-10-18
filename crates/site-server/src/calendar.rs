@@ -14,9 +14,97 @@ fn day_to_rrule(day: u8) -> &'static str {
     }
 }
 
+/// Longest duration create and update accept: 24 hours.
+///
+/// The schedule form omits `duration_minutes` (the handler default is 120).
+/// Stored seeds and tests use 60, 90, or 120. A weekly clock-time slot longer
+/// than a day is rejected so the ICS sum cannot overflow.
+pub(crate) const MAX_EVENT_DURATION_MINUTES: u32 = 24 * 60;
+
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// Why a create or update clock is rejected.
+pub(crate) enum ScheduleError {
+    Time,
+    Duration,
+    EndsBeforeStart,
+}
+
+impl ScheduleError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            ScheduleError::Time => "time must be HH:MM from 00:00 to 23:59",
+            ScheduleError::Duration => "duration_minutes must be from 1 to 1440",
+            ScheduleError::EndsBeforeStart => "end time must be after the start time",
+        }
+    }
+}
+
+/// `HH:MM` with hour 00-23 and minute 00-59.
+///
+/// The admin schedule control is an HTML time input. Its value is `HH:MM`
+/// (the form default is `19:00`). Seconds are not part of that value.
+pub(crate) fn parse_hhmm(time: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = time.split_once(':')?;
+    if hour.len() != 2 || minute.len() != 2 {
+        return None;
+    }
+    if !hour.bytes().all(|b| b.is_ascii_digit()) || !minute.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some((hour, minute))
+}
+
+/// Accept a schedule the API may store.
+///
+/// Duration `0` ends when it starts. Anything above 1440 minutes is rejected
+/// even when the sum would still fit in a `u32`.
+pub(crate) fn check_event_schedule(time: &str, duration_minutes: u32) -> Result<(), ScheduleError> {
+    if parse_hhmm(time).is_none() {
+        return Err(ScheduleError::Time);
+    }
+    if duration_minutes == 0 {
+        return Err(ScheduleError::EndsBeforeStart);
+    }
+    if duration_minutes > MAX_EVENT_DURATION_MINUTES {
+        return Err(ScheduleError::Duration);
+    }
+    event_instants(time, duration_minutes).ok_or(ScheduleError::EndsBeforeStart)?;
+    Ok(())
+}
+
+/// Start clock and end instant, with the end date rolled forward past midnight.
+///
+/// Returns `(start_hour, start_minute, end_day_of_january, end_hour, end_minute)`.
+/// The feed anchors on 1 January, so an end that would leave that month is
+/// `None` instead of wrapping the clock onto an earlier time. Addition uses
+/// checked math so a huge stored duration cannot overflow.
+fn event_instants(time: &str, duration_minutes: u32) -> Option<(u32, u32, u32, u32, u32)> {
+    let (hour, minute) = parse_hhmm(time)?;
+    let start = hour.checked_mul(60)?.checked_add(minute)?;
+    let end = start.checked_add(duration_minutes)?;
+    if end <= start {
+        return None;
+    }
+    let day = 1u32.checked_add(end / MINUTES_PER_DAY)?;
+    if day > 31 {
+        return None;
+    }
+    let end_clock = end % MINUTES_PER_DAY;
+    Some((hour, minute, day, end_clock / 60, end_clock % 60))
+}
+
 /// Generate a VEVENT block for a single event.
-fn generate_vevent(event: &Event, host: &str) -> String {
-    // Id and host are not TEXT values, so escaping is wrong here — strip
+///
+/// `None` when the stored clock or duration cannot be written without
+/// overflow or an end that is not after the start.
+fn generate_vevent(event: &Event, host: &str) -> Option<String> {
+    // Id and host are not TEXT values, so escaping is wrong here. Strip
     // breaks instead so a crafted id cannot start a new property line.
     let uid = format!(
         "event-{}@{}",
@@ -25,13 +113,8 @@ fn generate_vevent(event: &Event, host: &str) -> String {
     );
     let rrule_day = day_to_rrule(event.day_of_week);
 
-    // Parse time (expected "HH:MM" format)
-    let time_parts: Vec<&str> = event.time.split(':').collect();
-    let hour: u32 = time_parts
-        .first()
-        .and_then(|h| h.parse().ok())
-        .unwrap_or(20);
-    let minute: u32 = time_parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
+    let (hour, minute, end_day, end_hour, end_min) =
+        event_instants(&event.time, event.duration_minutes)?;
 
     // TZID is a parameter, not a TEXT value. Backslash-escaping does not
     // neutralize CR/LF or `;`/`:`, so only a safe IANA-name charset is emitted.
@@ -40,14 +123,9 @@ fn generate_vevent(event: &Event, host: &str) -> String {
         "DTSTART;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
         tzid, 2026, 1, 1, hour, minute
     );
-
-    // Calculate end time
-    let end_minutes = hour * 60 + minute + event.duration_minutes;
-    let end_hour = (end_minutes / 60) % 24;
-    let end_min = end_minutes % 60;
     let dtend = format!(
         "DTEND;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
-        tzid, 2026, 1, 1, end_hour, end_min
+        tzid, 2026, 1, end_day, end_hour, end_min
     );
 
     let mut vevent = String::new();
@@ -66,7 +144,7 @@ fn generate_vevent(event: &Event, host: &str) -> String {
     }
 
     vevent.push_str("END:VEVENT\r\n");
-    vevent
+    Some(vevent)
 }
 
 /// Escape an iCalendar TEXT value (RFC 5545).
@@ -128,7 +206,9 @@ pub fn generate_ical(events: &[Event], host: &str, calendar_name: &str) -> Strin
     ical.push_str("METHOD:PUBLISH\r\n");
 
     for event in events {
-        ical.push_str(&generate_vevent(event, host));
+        if let Some(block) = generate_vevent(event, host) {
+            ical.push_str(&block);
+        }
     }
 
     ical.push_str("END:VCALENDAR\r\n");
@@ -230,5 +310,34 @@ mod tests {
         let ics = generate_ical(&[event("Ok", "\r\n;:\"", None)], "clan.example", "Name");
         assert_ics_lines_intact(&ics);
         assert!(ics.contains("DTSTART;TZID=UTC:"));
+    }
+
+    /// A late start plus the default 120 minute duration crosses midnight.
+    /// DTEND must be the next calendar day, so the end stays after the start.
+    #[test]
+    fn overnight_duration_rolls_the_end_date() {
+        let mut ev = event("Late practice", "UTC", None);
+        ev.time = "23:00".into();
+        ev.duration_minutes = 120;
+        let ics = generate_ical(&[ev], "clan.example", "Name");
+        assert!(ics.contains("DTSTART;TZID=UTC:20260101T230000"), "{ics}");
+        assert!(
+            ics.contains("DTEND;TZID=UTC:20260102T010000"),
+            "end must be the next day, got {ics}"
+        );
+    }
+
+    /// `u32::MAX` minutes used to overflow `hour * 60 + minute + duration` in debug.
+    #[test]
+    fn absurd_duration_does_not_overflow_the_ics_end() {
+        let mut ev = event("Too long", "UTC", None);
+        ev.time = "20:00".into();
+        ev.duration_minutes = u32::MAX;
+        let ics = generate_ical(&[ev], "clan.example", "Name");
+        assert!(ics.contains("BEGIN:VCALENDAR"), "{ics}");
+        assert!(
+            !ics.contains("BEGIN:VEVENT"),
+            "a duration that cannot be placed on the feed must be omitted, got {ics}"
+        );
     }
 }
