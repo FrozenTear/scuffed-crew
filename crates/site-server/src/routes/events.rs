@@ -225,15 +225,19 @@ pub async fn update_event(
     if let Some(time) = body.time.as_deref() {
         reject_controls("time", time).map_err(|msg| bad_request(&msg))?;
         if crate::calendar::parse_hhmm(time).is_none() {
-            return Err(bad_request("time must be HH:MM from 00:00 to 23:59"));
+            return Err(bad_request(crate::calendar::ScheduleError::Time.message()));
         }
     }
     if let Some(duration_minutes) = body.duration_minutes {
         if duration_minutes == 0 {
-            return Err(bad_request("end time must be after the start time"));
+            return Err(bad_request(
+                crate::calendar::ScheduleError::EndsBeforeStart.message(),
+            ));
         }
         if duration_minutes > crate::calendar::MAX_EVENT_DURATION_MINUTES {
-            return Err(bad_request("duration_minutes must be from 1 to 1440"));
+            return Err(bad_request(
+                crate::calendar::ScheduleError::Duration.message(),
+            ));
         }
     }
     if let Some(timezone) = body.timezone.as_deref() {
