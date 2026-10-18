@@ -24,6 +24,14 @@ struct CalibCache {
 
 static COLUMN_OFFSET_CACHE: Mutex<Option<CalibCache>> = Mutex::new(None);
 
+// Offset sweeps started on this thread. Tests use it to prove a board that
+// never clears the 75% floor sweeps once.
+#[cfg(test)]
+thread_local! {
+    static COLUMN_OFFSET_SWEEPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static COLUMN_SWEEP_UNDER_FLOOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Process-wide OCR debug dump switch. Set once from config/env at daemon start
 /// via [`set_debug_ocr`]; GUI/tools that never call it stay off.
 static DEBUG_OCR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -881,10 +889,14 @@ pub fn unread_rows(team_size: usize) -> Vec<RowOcrResult> {
 /// rightmost column and decapitated MIT / injected its lead digit into HLG
 /// (the 2026-07-22 Numbani 22994 defect).
 ///
-/// Fallback path (headers unreadable or anchored windows score poorly): the
-/// two-phase offset sweep — coarse around the header-detected offset, then
-/// fine-tune — with the winning offset cached per board geometry and reused
-/// while a quick re-score holds ≥75% of the max probe score.
+/// Fallback path (headers unreadable or anchored windows score poorly): one
+/// offset sweep around the header-detected offset, with the winning offset
+/// cached per board geometry and reused while a quick re-score holds at
+/// least 75% of the max probe score. A fine sweep around that winner runs
+/// only when the coarse winner already clears the floor, so a board that
+/// clears it keeps the same columns. When no coarse offset clears the floor,
+/// the fine sweep does not run: the best coarse offset is used, unless the
+/// header-anchored windows score at least as high.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
     let header_groups = preprocess::header_label_groups(scoreboard);
     let header_offset = preprocess::offset_from_header_groups(&header_groups, scoreboard.width());
@@ -968,6 +980,8 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
     }
 
     let best_of = |offsets: Vec<f64>| -> (f64, i32) {
+        #[cfg(test)]
+        COLUMN_OFFSET_SWEEPS.with(|c| c.set(c.get() + 1));
         // No pool (OCR off) scores like an empty sweep.
         let Ok(pool) = ocr_pool() else {
             return (0.0f64, i32::MIN);
@@ -992,9 +1006,15 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         offset += 0.02;
     }
     let (mut best_offset, mut best_valid) = best_of(coarse);
+    #[cfg(test)]
+    COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.set(best_valid < anchored_floor));
 
-    // Early-exit: perfect coarse score means fine sweep cannot improve.
-    if best_valid < max_score {
+    // The coarse pass already tracked the best offset. A second, finer sweep
+    // runs only when that winner clears the 75% floor and is not already
+    // perfect, so a board that clears the floor keeps today's columns. Below
+    // the floor the fine sweep does not change the read: keep this offset,
+    // or the anchored fallback when it scores at least as well.
+    if best_valid >= anchored_floor && best_valid < max_score {
         // Phase 2: fine-tune ±0.02 around the best coarse result in 0.005 steps.
         // Only offsets not already scored in the coarse grid (skip exact coarse
         // centre — already known).
@@ -1663,6 +1683,30 @@ mod tests {
     #[test]
     fn better_offset_tie_without_anchor_prefers_smaller_magnitude() {
         assert_eq!(better_offset((-0.20, 4), (-0.05, 4), None), (-0.05, 4));
+    }
+
+    /// A flat board never reads a valid stat, so no offset clears the 75%
+    /// floor. The calibration sweep has to run once: the fine pass would
+    /// repeat the same losing search.
+    #[test]
+    fn under_threshold_board_sweeps_column_offsets_once() {
+        COLUMN_OFFSET_SWEEPS.with(|c| c.set(0));
+        COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.set(false));
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        let _columns = calibrate_columns(&board, 5);
+        assert!(
+            COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.get()),
+            "this board must stay under the 75% floor"
+        );
+        assert_eq!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
+            1,
+            "the offset sweep must run once"
+        );
     }
 }
 
