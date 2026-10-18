@@ -24,6 +24,7 @@ const STRATEGY_CSS: &str = r#"
     .strategy-nav .links {
         display: flex;
         gap: 0.25rem;
+        min-width: 0;
     }
     .strategy-nav .links a {
         padding: 0.35rem 0.7rem;
@@ -44,6 +45,33 @@ const STRATEGY_CSS: &str = r#"
     }
     .strategy-nav .back-link:hover {
         color: var(--text-2);
+    }
+    /* Phones: brand and Back to Clan share the top row, the section links
+       wrap onto their own rows below, so the page never gets wider than
+       the screen and every link stays reachable without a menu. */
+    @media (max-width: 720px) {
+        .strategy-nav {
+            flex-wrap: wrap;
+            height: auto;
+            min-height: 50px;
+            gap: 0.35rem 1rem;
+            padding: 0.6rem 1rem;
+        }
+        .strategy-nav .brand {
+            order: 1;
+        }
+        .strategy-nav .back-link {
+            order: 2;
+        }
+        .strategy-nav .links {
+            order: 3;
+            flex: 1 1 100%;
+            flex-wrap: wrap;
+            margin-left: -0.7rem;
+        }
+        .strategy-nav .links a {
+            white-space: nowrap;
+        }
     }
     .strategy-off {
         min-height: calc(100vh - 50px);
