@@ -25,6 +25,25 @@ fn default_limit() -> u32 {
     50
 }
 
+/// Missing page is 404 with the not-found body. Other failures stay 500.
+/// Conflict (a lost wiki edit race) stays 409 and keeps its existing body.
+fn wiki_err(err: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    let (status, error) = match err {
+        scuffed_db::DbError::NotFound(_) => (StatusCode::NOT_FOUND, "Page not found"),
+        scuffed_db::DbError::Conflict(_) => (StatusCode::CONFLICT, "Internal error"),
+        other => {
+            tracing::error!(error = %other, "wiki request failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+        }
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+}
+
 #[derive(Serialize)]
 pub struct WikiListResponse {
     pub data: Vec<WikiPage>,
@@ -61,18 +80,7 @@ pub async fn get_wiki_page(
         .get_wiki_page_by_topic(&topic)
         .await
         .map(Json)
-        .map_err(|e| {
-            let status = match &e {
-                scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })
+        .map_err(wiki_err)
 }
 
 #[derive(Deserialize)]
@@ -146,19 +154,7 @@ pub async fn update_wiki_page(
             body.prev_updated_at,
         )
         .await
-        .map_err(|e| {
-            let status = match &e {
-                scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-                scuffed_db::DbError::Conflict(_) => StatusCode::CONFLICT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+        .map_err(wiki_err)?;
 
     audit(
         &state.db,
@@ -192,18 +188,11 @@ pub async fn list_wiki_revisions(
     Path(topic): Path<String>,
 ) -> Result<Json<WikiRevisionsResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Look up page to get the ID
-    let page = state.db.get_wiki_page_by_topic(&topic).await.map_err(|e| {
-        let status = match &e {
-            scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (
-            status,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    let page = state
+        .db
+        .get_wiki_page_by_topic(&topic)
+        .await
+        .map_err(wiki_err)?;
 
     let revisions = state
         .db
@@ -228,18 +217,11 @@ pub async fn delete_wiki_page(
     Path(topic): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Get page ID for audit log before deactivating
-    let page = state.db.get_wiki_page_by_topic(&topic).await.map_err(|e| {
-        let status = match &e {
-            scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (
-            status,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    let page = state
+        .db
+        .get_wiki_page_by_topic(&topic)
+        .await
+        .map_err(wiki_err)?;
 
     state.db.deactivate_wiki_page(&topic).await.map_err(|_e| {
         (

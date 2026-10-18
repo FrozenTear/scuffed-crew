@@ -210,13 +210,22 @@ pub async fn update_event(
             body.is_public,
         )
         .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+        .map_err(|err| match err {
+            scuffed_db::DbError::NotFound(_) => (
+                StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: "Internal error".into(),
+                    error: "Event not found".into(),
                 }),
-            )
+            ),
+            other => {
+                tracing::error!(error = %other, "update event failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            }
         })?;
 
     audit(

@@ -8428,3 +8428,68 @@ async fn unpublished_article_hidden_from_non_editors() {
     let list = body_json(resp).await;
     assert!(list.as_array().unwrap().is_empty());
 }
+
+/// Missing public rows use the not-found error string. A draft article stays
+/// indistinguishable from a missing slug. A missing event id on update is the
+/// same shape, not 500.
+#[tokio::test]
+async fn missing_public_content_is_not_found_not_internal_error() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let cases = [
+        ("/api/forum/threads/does-not-exist", "Thread not found"),
+        ("/api/wiki/does-not-exist", "Page not found"),
+        ("/api/articles/does-not-exist", "Article not found"),
+    ];
+    for (uri, expected) in cases {
+        let resp = app
+            .clone()
+            .oneshot(unauthed_request(Method::GET, uri))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], expected, "{uri}: {body}");
+        assert_ne!(body["error"], "Internal error");
+    }
+
+    // Draft and missing stay the same body, so a hidden draft is not revealed.
+    let draft = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            json!({
+                "slug": "hidden-draft",
+                "title": "Hidden",
+                "content_markdown": "secret"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(draft.status(), StatusCode::CREATED);
+
+    let (missing_status, missing_body) = article_get(&app, "does-not-exist", None).await;
+    let (draft_status, draft_body) = article_get(&app, "hidden-draft", None).await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(draft_status, StatusCode::NOT_FOUND);
+    assert_eq!(draft_body, missing_body);
+    assert_eq!(draft_body["error"], "Article not found");
+
+    let missing_event = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/events/does-not-exist",
+            OFFICER_TOKEN,
+            json!({ "title": "Nope" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_event.status(), StatusCode::NOT_FOUND);
+    let event_body = body_json(missing_event).await;
+    assert_eq!(event_body["error"], "Event not found");
+    assert_ne!(event_body["error"], "Internal error");
+}
