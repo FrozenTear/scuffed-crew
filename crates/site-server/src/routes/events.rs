@@ -115,6 +115,41 @@ fn validate_event_text(
     Ok(())
 }
 
+fn schedule_error(time: &str, duration_minutes: u32) -> Result<(), String> {
+    crate::calendar::check_event_schedule(time, duration_minutes)
+        .map_err(|err| err.message().to_string())
+}
+
+/// When only the clock or only the duration is being changed, check it against
+/// the row that is already stored. A missing row is left for the update call.
+async fn merged_schedule(
+    state: &AppState,
+    id: &str,
+    time: Option<&str>,
+    duration_minutes: Option<u32>,
+) -> Result<Option<(String, u32)>, (StatusCode, Json<ErrorResponse>)> {
+    match (time, duration_minutes) {
+        (None, None) => Ok(None),
+        (Some(time), Some(duration_minutes)) => Ok(Some((time.to_string(), duration_minutes))),
+        (time, duration_minutes) => match state.db.get_event(id).await {
+            Ok(Some(existing)) => Ok(Some((
+                time.unwrap_or(existing.time.as_str()).to_string(),
+                duration_minutes.unwrap_or(existing.duration_minutes),
+            ))),
+            Ok(None) => Ok(None),
+            Err(err) => {
+                tracing::error!(error = %err, "load event before schedule check");
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                ))
+            }
+        },
+    }
+}
+
 /// POST /api/events — create event (officer+)
 pub async fn create_event(
     State(state): State<AppState>,
@@ -128,6 +163,7 @@ pub async fn create_event(
         body.team_id.as_deref(),
     )
     .map_err(|msg| bad_request(&msg))?;
+    schedule_error(&body.time, body.duration_minutes).map_err(|msg| bad_request(&msg))?;
 
     let event = state
         .db
@@ -188,12 +224,28 @@ pub async fn update_event(
     }
     if let Some(time) = body.time.as_deref() {
         reject_controls("time", time).map_err(|msg| bad_request(&msg))?;
+        if crate::calendar::parse_hhmm(time).is_none() {
+            return Err(bad_request("time must be HH:MM from 00:00 to 23:59"));
+        }
+    }
+    if let Some(duration_minutes) = body.duration_minutes {
+        if duration_minutes == 0 {
+            return Err(bad_request("end time must be after the start time"));
+        }
+        if duration_minutes > crate::calendar::MAX_EVENT_DURATION_MINUTES {
+            return Err(bad_request("duration_minutes must be from 1 to 1440"));
+        }
     }
     if let Some(timezone) = body.timezone.as_deref() {
         validate_timezone(timezone).map_err(|msg| bad_request(&msg))?;
     }
     if let Some(Some(team_id)) = body.team_id.as_ref() {
         reject_controls("team", team_id).map_err(|msg| bad_request(&msg))?;
+    }
+    if let Some((time, duration_minutes)) =
+        merged_schedule(&state, &id, body.time.as_deref(), body.duration_minutes).await?
+    {
+        schedule_error(&time, duration_minutes).map_err(|msg| bad_request(&msg))?;
     }
 
     let event = state
