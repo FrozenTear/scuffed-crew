@@ -3,7 +3,7 @@
 //! `GET /api/public/seasons` on launch and every 30 minutes. Cached to
 //! `<data_dir>/seasons.json`. Header selection persists in `<data_dir>/ui_state.json`.
 //! Fixture mode never hits the network. Aggregation is half-open
-//! `starts_at <= played_at < ends_at` (UTC) — same as the website.
+//! `starts_at <= played_at < ends_at` (UTC), same as the website.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -112,7 +112,7 @@ fn write_ui_state_file(data_dir: &Path, file: &UiStateFile) -> std::io::Result<(
     std::fs::write(ui_state_path(data_dir), bytes)
 }
 
-/// `None` when the file is missing or unreadable — caller applies
+/// `None` when the file is missing or unreadable, caller applies
 /// [`default_selection`]. A present file with `season: null` is All time.
 pub fn load_ui_state(data_dir: &Path) -> Option<SeasonSel> {
     let file = read_ui_state_file(data_dir)?;
@@ -238,7 +238,7 @@ pub fn seasons_url_from_server(server_url: &str) -> String {
     format!("{}/api/public/seasons", server_url.trim_end_matches('/'))
 }
 
-/// Fixtures never hit the network — production `[]` would wipe the sample list.
+/// Fixtures never hit the network, production `[]` would wipe the sample list.
 pub fn should_fetch_seasons(fixture_active: bool, url: Option<&str>) -> bool {
     !fixture_active && url.is_some()
 }

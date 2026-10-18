@@ -562,7 +562,7 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
     .into()
 }
 
-/// Compact Maps-screen card. Surface + 4 px WR stripe (no role tint — a map
+/// Compact Maps-screen card. Surface + 4 px WR stripe (no role tint, a map
 /// is not a single role). Same hierarchy as [`hero_card`]: title, featured WR,
 /// games · W–L, FillPortion win bar.
 pub fn map_card(m: &MapAgg) -> Element<'static, Message> {
@@ -1329,7 +1329,7 @@ fn card_shell(
     height: f32,
 ) -> Element<'static, Message> {
     // Fixed height + explicit stripe height (not Fill). A Fill-height stripe
-    // inside a shrink-height Row resolves to 0 — featured worked only because
+    // inside a shrink-height Row resolves to 0, featured worked only because
     // it sat in a Column that already had a measured height.
     container(
         row![

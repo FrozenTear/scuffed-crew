@@ -33,7 +33,7 @@ pub struct Config {
     /// When true, Tab OCR writes intermediate PNGs under `{data_dir}/debug/`,
     /// and the poller writes Victory/Defeat evidence frames to `debug/poll/`
     /// on confirm (banner or second agreeing word-OCR) and first word-OCR
-    /// streak — not every mid-match tick. Off by default — the Tab path
+    /// streak, not every mid-match tick. Off by default, the Tab path
     /// recomputes preprocess just to dump stages and dominated capture
     /// latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`. Also gates
     /// the `debug/accepted/` and `debug/rejected/` rings: those crops are
@@ -291,8 +291,8 @@ impl Default for AutoDetectConfig {
     fn default() -> Self {
         Self {
             // The poller watches for the map-vote (game start) and post-match
-            // accolade (win/loss) screens — required for automatic win/loss
-            // detection — at ~25-35ms of CPU per tick. Enabled by default.
+            // accolade (win/loss) screens, required for automatic win/loss
+            // detection, at ~25-35ms of CPU per tick. Enabled by default.
             enabled: true,
             poll_interval_secs: None,
             // Debounce between opening new games: long enough that a map-vote
@@ -482,7 +482,7 @@ impl Config {
         }
 
         // Auto-save if we built a usable sync config from CLI args and there was
-        // no file yet — avoids requiring flags on every subsequent start.
+        // no file yet, avoids requiring flags on every subsequent start.
         if !config_path.exists()
             && let Some(sync) = &config.sync
             && !sync.server_url.is_empty()

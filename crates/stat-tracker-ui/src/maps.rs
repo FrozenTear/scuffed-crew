@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn live_map_strings_bucket_to_game_mode() {
-        // Same six forms the site Maps tab classifies — tracker-ui does not
+        // Same six forms the site Maps tab classifies, tracker-ui does not
         // group by mode today, but the shared MapName table must stay aligned.
         let cases = [
             ("Neon Junction", "Hybrid"),

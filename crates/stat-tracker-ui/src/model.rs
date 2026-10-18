@@ -57,7 +57,7 @@ impl Outcome {
             Outcome::Win => "Win",
             Outcome::Loss => "Loss",
             Outcome::Draw => "Draw",
-            Outcome::Unknown => "—",
+            Outcome::Unknown => "-",
         }
     }
 
@@ -218,8 +218,8 @@ impl SegmentView {
     }
 }
 
-/// Display-normalized game row. Aggregation and views share this — not the
-/// daemon's storage struct — so season math stays a pure UI-crate function.
+/// Display-normalized game row. Aggregation and views share this, not the
+/// daemon's storage struct, so season math stays a pure UI-crate function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Game {
     pub session_id: String,
@@ -469,7 +469,7 @@ pub fn display_hero_name(name: &str) -> String {
 }
 
 fn empty_dash(s: String) -> String {
-    if s.is_empty() { "—".into() } else { s }
+    if s.is_empty() { "-".into() } else { s }
 }
 
 #[cfg(test)]
@@ -712,6 +712,22 @@ impl SeasonSel {
         match self {
             SeasonSel::AllTime => None,
             SeasonSel::Season(id) => Some(id.as_str()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::{Outcome, empty_dash};
+
+    /// Placeholders shown in the app use a plain hyphen, not an em dash.
+    #[test]
+    fn placeholders_have_no_em_dash() {
+        assert_eq!(Outcome::Unknown.label(), "-");
+        assert_eq!(empty_dash(String::new()), "-");
+        assert_eq!(empty_dash("Dorado".into()), "Dorado");
+        for o in [Outcome::Win, Outcome::Loss, Outcome::Draw, Outcome::Unknown] {
+            assert!(!o.label().contains('\u{2014}'), "{}", o.label());
         }
     }
 }

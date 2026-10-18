@@ -2,7 +2,7 @@
 //!
 //! The overlay surface is `KeyboardInteractivity::None` (click-through), so it
 //! cannot see keys. This listens on `/dev/input` the same way the daemon
-//! listens for Tab — evdev, no X11 grab, works on niri / Wayland.
+//! listens for Tab, evdev, no X11 grab, works on niri / Wayland.
 //!
 //! niri does not implement the xdg-desktop-portal GlobalShortcuts backend, so
 //! that portal is not used. Optional compositor bind: touch

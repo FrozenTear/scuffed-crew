@@ -185,7 +185,7 @@ impl SyncBackoff {
     }
 
     /// Pause periodic sync. Does not grow the failure streak and does not
-    /// schedule a retry — the next attempt waits for a credential change.
+    /// schedule a retry, the next attempt waits for a credential change.
     pub fn record_auth_rejected(&mut self) {
         self.auth_rejected = true;
         self.next_attempt_at = None;
@@ -257,7 +257,7 @@ pub struct SyncClient {
 impl SyncClient {
     pub fn new(config: SyncConfig) -> Self {
         // A hung connection must never hang the caller: sync runs concurrently
-        // with capture, and shutdown does a final inline upload. Fail closed —
+        // with capture, and shutdown does a final inline upload. Fail closed,
         // a client without the timeout re-opens the M4 daemon-stall bug.
         // Redirects to a URL that fails the same check are errors, so a
         // downgrade to cleartext cannot carry the bearer token.
@@ -360,7 +360,7 @@ impl SyncClient {
     }
 }
 
-/// Honor `Retry-After` only on 429 and 503 — the statuses the API uses for
+/// Honor `Retry-After` only on 429 and 503, the statuses the API uses for
 /// rate limits and "try later". Other errors keep the plain exponential clock.
 async fn error_from_response(resp: reqwest::Response, what: &str) -> SyncUploadError {
     let status = resp.status();
@@ -538,7 +538,7 @@ fn auth_pause_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join(AUTH_PAUSE_FILE)
 }
 
-/// Stable equality token for the bearer. Not a password hash — the file is
+/// Stable equality token for the bearer. Not a password hash, the file is
 /// mode 0600 beside `config.toml`, which already stores the token. It only
 /// answers "did this exact token change?".
 fn token_fingerprint(token: &str) -> String {

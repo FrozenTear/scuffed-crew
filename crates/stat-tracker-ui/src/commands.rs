@@ -1,4 +1,4 @@
-//! Write `StoreCommand` files under `<data_dir>/commands/` — same contract
+//! Write `StoreCommand` files under `<data_dir>/commands/`, same contract
 //! as the Dioxus GUI. The daemon applies them; this crate never opens the store.
 
 use std::path::Path;

@@ -1593,7 +1593,7 @@ impl TrackerApp {
                 if self.window_id == Some(id) {
                     self.window_id = None;
                 }
-                // No tray and no window: nothing can restore us — exit.
+                // No tray and no window: nothing can restore us, exit.
                 if self.window_id.is_none() && self.tray.is_none() {
                     overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
                     iced::exit()

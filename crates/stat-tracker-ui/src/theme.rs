@@ -92,7 +92,7 @@ pub const ROLE_DAMAGE: Color = Color::from_rgb(
 );
 pub const ROLE_SUPPORT: Color = OK;
 
-/// Card radius — documented product exception (Nirify 16–20 range).
+/// Card radius, documented product exception (Nirify 16–20 range).
 pub const RADIUS_CARD: f32 = 16.0;
 /// Inner blocks / stat boxes.
 pub const RADIUS_INNER: f32 = 12.0;
@@ -102,16 +102,16 @@ pub const PAD_INNER: f32 = 12.0;
 pub const PAGE_PAD_Y: f32 = 24.0;
 pub const PAGE_PAD_X: f32 = 32.0;
 pub const GRID_GAP: f32 = 12.0;
-/// Outcome stripe — 4 px, not a Fill-height child (that collapses in Row).
+/// Outcome stripe, 4 px, not a Fill-height child (that collapses in Row).
 pub const STRIPE: f32 = 4.0;
 pub const HEIGHT_FEATURED: f32 = 216.0;
 pub const HEIGHT_COMPACT: f32 = 180.0;
 /// Open game on the Games tab: label, two stat rows, and the not-final note.
 pub const HEIGHT_IN_PROGRESS: f32 = 292.0;
 pub const HEIGHT_HERO: f32 = 160.0;
-/// Maps screen compact card — name, featured WR, games · W–L, win bar.
+/// Maps screen compact card, name, featured WR, games · W–L, win bar.
 pub const HEIGHT_MAP: f32 = 148.0;
-/// Fixed sidebar; the content pane flexes (rev 3 — no left-pinned 1400 cap).
+/// Fixed sidebar; the content pane flexes (rev 3, no left-pinned 1400 cap).
 pub const SIDEBAR_WIDTH: f32 = 168.0;
 
 pub const SIZE_LABEL: f32 = 11.0;

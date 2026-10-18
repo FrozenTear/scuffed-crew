@@ -9,7 +9,7 @@ pub fn is_available() -> bool {
 /// not availability, so we cheap-check the env first, then connect and require
 /// ≥1 output. Connection work runs on the blocking pool (Send-safe error), same
 /// shape as `x11::probe`. R2-3: this warms one blocking-thread's thread-local
-/// connection; other threads reconnect lazily — that is correct, leave it.
+/// connection; other threads reconnect lazily, that is correct, leave it.
 pub async fn probe() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !is_available() {
         return Err("WAYLAND_DISPLAY not set".into());

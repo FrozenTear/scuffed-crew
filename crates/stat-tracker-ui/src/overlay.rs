@@ -1,4 +1,4 @@
-//! P3 companion overlay — design-doc §4.6.
+//! P3 companion overlay, design-doc §4.6.
 //!
 //! The main window stays on `iced::daemon` + tray (P4). The overlay is a
 //! same-binary `--companion` process on `iced_layershell` (`Layer::Overlay`,
@@ -7,7 +7,7 @@
 //! ([`OverlayHold`]): it sticks until the game ends, then the next launch
 //! auto-shows. Esc is N/A (`KeyboardInteractivity::None`). The show/hide
 //! shortcut (Settings → Companion, default Super+Shift+C) is the same action
-//! as tray **Hide / show overlay** — it toggles [`OverlayHold`] now. Hide
+//! as tray **Hide / show overlay**, it toggles [`OverlayHold`] now. Hide
 //! sticks until the game ends; show mid-session clears the hold.
 
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use crate::theme::{
     SIZE_LABEL, SIZE_META, SIZE_TITLE, STRIPE, TEXT, TEXT_2, TEXT_3,
 };
 
-/// Design §4.6 — width 360, margins 24, exclusive zone 0.
+/// Design §4.6, width 360, margins 24, exclusive zone 0.
 pub const OVERLAY_WIDTH: u32 = 360;
 pub const OVERLAY_MARGIN: i32 = 24;
 pub const OVERLAY_EXCLUSIVE_ZONE: i32 = 0;
@@ -47,7 +47,7 @@ const FIXTURE_SESSION_KEY: &str = "fixture";
 pub const DEFAULT_SESSION_WINDOW_SECS: u64 = 1800;
 
 /// Manual hide is scoped to one live game. Auto-show resumes when that
-/// process ends and the next one starts — we do not reopen mid-session.
+/// process ends and the next one starts, we do not reopen mid-session.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OverlayHold {
     #[default]
@@ -81,7 +81,7 @@ pub fn overlay_visible(hold: &OverlayHold, game_running: bool) -> bool {
 ///
 /// Hide sticks until the **process** ends (`key` is `None`). A new match id
 /// or a `process` ↔ `session_id` swap while Overwatch is still up keeps the
-/// hold — we do not reopen mid-session. Next launch (None, then a key) is Auto.
+/// hold, we do not reopen mid-session. Next launch (None, then a key) is Auto.
 pub fn reconcile_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
     match (hold, key) {
         (OverlayHold::Auto, _) => OverlayHold::Auto,
@@ -104,7 +104,7 @@ pub fn toggle_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
 
 /// Identity of the live game, if any.
 ///
-/// **Process-first:** `active_game.json` never opens the gate — the daemon
+/// **Process-first:** `active_game.json` never opens the gate, the daemon
 /// leaves that file on disk after a match (FrozenTear's last-night Defeat). Empty
 /// process names are not running. While the process is live the file may
 /// supply a `session_id` only for an *unfinished* game inside `window_secs`;
@@ -213,8 +213,8 @@ pub fn process_is_running(names: &[String]) -> bool {
 }
 
 /// Fixture mode pretends the game is running so the toggle can open the
-/// overlay for layout shots. Live mode is the configured process scan only
-/// — a leftover `active_game.json` does not count.
+/// overlay for layout shots. Live mode is the configured process scan only;
+/// a leftover `active_game.json` does not count.
 pub fn detect_game_running(data_dir: &Path, process_names: &[String], fixture: bool) -> bool {
     live_session_key(
         data_dir,
@@ -642,7 +642,7 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
 }
 
 fn stat_line(game: &OverlayLastGame) -> Element<'static, OverlayViewMessage> {
-    // Two rows of three — a 6-across row crushes labels at 360px.
+    // Two rows of three, a 6-across row crushes labels at 360px.
     column![
         row![
             stat_box("E", game.elims),
@@ -697,7 +697,7 @@ fn format_stat(n: u32) -> String {
 fn tonight_strip(outcomes: &[Outcome]) -> Element<'static, OverlayViewMessage> {
     let mut row = row![label("Tonight")].spacing(6).align_y(Alignment::Center);
     if outcomes.is_empty() {
-        row = row.push(text("—").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
+        row = row.push(text("-").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
     } else {
         for outcome in outcomes {
             row = row.push(container(space().width(10).height(16)).style(theme::stripe(*outcome)));
@@ -796,7 +796,7 @@ fn chip<'a>(label_s: &'a str) -> Element<'a, OverlayViewMessage> {
     .into()
 }
 
-/// One line at 360px — wrapping grew the stack past the computed height.
+/// One line at 360px, wrapping grew the stack past the computed height.
 fn ellipsize(s: &str, max_chars: usize) -> String {
     let count = s.chars().count();
     if count <= max_chars {
@@ -1137,7 +1137,7 @@ mod tests {
     fn sample_model_has_header_last_game_strip_and_heroes() {
         let games = sample_games();
         let seasons = sample_seasons();
-        // Newest game's instant — 22:00 UTC is already 00:00 in Europe/Oslo
+        // Newest game's instant, 22:00 UTC is already 00:00 in Europe/Oslo
         // and drops the Sept 2 evening games off "tonight".
         let clock = games[0].played_at;
         let model = build_model(
