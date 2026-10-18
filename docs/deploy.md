@@ -436,9 +436,13 @@ and 39002). The site learns the group id from `GET /api/teams/:id/channels`.
 filtered by `#p`. `subscribe_group_metadata` has no caller. Kind 9 delivery
 uses the SurrealDB roster and `team_channel` rows.
 
-`RELAY_POLICY_ENFORCE_GROUPS` defaults to false. An allowlisted pubkey can
-publish a kind 9 for any `h` group. Restricting writes to roster membership
-is a follow-up. This deploy does not turn that check on.
+`RELAY_POLICY_ENFORCE_GROUPS` defaults to true, in the image and in
+Compose. An event with an `h` tag is stored only when that id is an active
+`team_channel` and the author is on that team's roster (the same rows as
+`GET /api/teams/{id}/channels` and `send_public`). Kind 1059 gift wraps have
+no `h` tag, so this check does not apply to them. Kind 0, kind 7, and kind
+34550 are signed with the member key and also have no `h` tag. Set the
+variable to `false` to allow any allowlisted pubkey to write any `h` group.
 
 The relay image has to be rebuilt before this plugin is what a running
 container executes. `./scripts/relay-up.sh` does that (`up --build` recreates

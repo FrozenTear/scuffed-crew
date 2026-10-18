@@ -18,7 +18,10 @@
 //! - `RELAY_POLICY_RATE_LIMIT` Max events per pubkey per window (default: 30)
 //! - `RELAY_POLICY_RATE_WINDOW` Rate limit window in seconds (default: 60)
 //! - `RELAY_POLICY_REFRESH_SECS` Allowlist refresh interval (default: 60)
-//! - `RELAY_POLICY_ENFORCE_GROUPS` Set to "true" to enforce NIP-29 group membership
+//! - `RELAY_POLICY_ENFORCE_GROUPS` Default true. An `h` tag must name an active
+//!   team channel, and the author must be on that team's roster. Set to "false"
+//!   to allow any allowlisted pubkey to write any `h` group. Kind 1059 and
+//!   events with no `h` tag are not group-checked.
 //! - `RUST_LOG` Tracing filter (default: `relay_policy=info`)
 
 mod policy;
@@ -135,7 +138,8 @@ fn main() {
     let config = PolicyConfig {
         rate_limit_events: env_parse("RELAY_POLICY_RATE_LIMIT", 30),
         rate_limit_window_secs: env_parse("RELAY_POLICY_RATE_WINDOW", 60),
-        enforce_group_membership: env_or("RELAY_POLICY_ENFORCE_GROUPS", "false") == "true",
+        enforce_group_membership: !env_or("RELAY_POLICY_ENFORCE_GROUPS", "true")
+            .eq_ignore_ascii_case("false"),
         ..PolicyConfig::default()
     };
 
@@ -166,7 +170,26 @@ fn main() {
             Ok(database) => {
                 let db = Arc::new(database);
                 let allowlist = load_pubkey_allowlist(&db).await;
-                engine.lock().unwrap().update_allowlist(allowlist);
+                let groups = match relay_policy::directory::load_group_writers(&db).await {
+                    Ok(groups) => {
+                        tracing::info!(
+                            groups = groups.len(),
+                            "loaded group writers from team channels"
+                        );
+                        groups
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to load group writers; rejecting every h-tagged event"
+                        );
+                        std::collections::HashMap::new()
+                    }
+                };
+                let mut eng = engine.lock().unwrap();
+                eng.update_allowlist(allowlist);
+                eng.update_group_members(groups);
+                drop(eng);
                 tracing::info!(url = %db_cfg.url, "connected to SurrealDB");
                 Some(db)
             }
@@ -190,8 +213,21 @@ fn main() {
             loop {
                 interval.tick().await;
                 let allowlist = load_pubkey_allowlist(&db).await;
+                let groups = match relay_policy::directory::load_group_writers(&db).await {
+                    Ok(groups) => Some(groups),
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "group writer refresh failed; keeping the previous map"
+                        );
+                        None
+                    }
+                };
                 let mut eng = engine_bg.lock().unwrap();
                 eng.update_allowlist(allowlist);
+                if let Some(groups) = groups {
+                    eng.update_group_members(groups);
+                }
                 eng.prune_rate_buckets();
                 tracing::debug!(
                     allowlist_size = eng.allowlist_size(),
@@ -358,7 +394,10 @@ mod tests {
         let pubkey = "aa".repeat(32);
         let mut allowlist = HashSet::new();
         allowlist.insert(pubkey.clone());
-        engine.update_allowlist(allowlist);
+        engine.update_allowlist(allowlist.clone());
+        let mut groups = std::collections::HashMap::new();
+        groups.insert("team".to_string(), allowlist);
+        engine.update_group_members(groups);
 
         let input_json = format!(
             r#"{{"type":"new","event":{{"id":"eventid","pubkey":"{pubkey}","kind":9,"tags":[["h","team"]],"content":"hello","sig":"sig","created_at":0}}}}"#

@@ -4,7 +4,8 @@
 # The check authenticates to the read gate, loads the public channel from
 # the team_channel rows, subscribes to kind 9 on #h and kind 1059 on #p,
 # publishes one of each straight to strfry, and reads both back.
-# It also requires the allowlist, unrelated-kind, and rate-limit rejections.
+# It also requires a cross-team h tag, the allowlist, an unrelated kind,
+# and the rate limit to be refused. Group enforcement defaults on.
 #
 # RELAY_SKIP_BUILD=1 uses $RELAY_IMAGE as-is (for a before/after image).
 # RELAY_POLICY_RATE_LIMIT inside the container is 1 so the second member

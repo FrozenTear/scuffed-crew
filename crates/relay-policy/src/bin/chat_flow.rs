@@ -13,7 +13,8 @@
 //! 6. Publish one kind 1059 from an ephemeral key with a `p` tag for that
 //!    member, the outer shape of `EncryptionService::build_gift_wraps`, and
 //!    read it back on the `#p` subscription.
-//! 7. Refuse a pubkey that is not on the allowlist, a kind the site never
+//! 7. Refuse a kind 9 whose `h` tag is another team's channel.
+//! 8. Refuse a pubkey that is not on the allowlist, a kind the site never
 //!    publishes, and the next kind 9 once the member rate limit is full.
 //!
 //! The container must be started with `RELAY_POLICY_RATE_LIMIT=1`. Kind 1059
@@ -41,6 +42,7 @@ struct SeedState {
     group_id: String,
     member_id: String,
     team_id: String,
+    other_team_id: String,
 }
 
 fn main() {
@@ -128,6 +130,15 @@ async fn seed() -> Result<(), String> {
     db.create_team_channel(&team.id, &officer_id, scuffed_db::GroupType::Officer, "")
         .await
         .map_err(|e| format!("officer channel: {e}"))?;
+    // Second team. The seeded member is not on its roster, so an `h` tag
+    // for its public channel must be refused.
+    let other = db
+        .create_team("Relay CI Other", "ow2", None, None, None)
+        .await
+        .map_err(|e| format!("create other team: {e}"))?;
+    db.create_team_channel(&other.id, &other.id, scuffed_db::GroupType::Public, "")
+        .await
+        .map_err(|e| format!("other channel: {e}"))?;
 
     let state = SeedState {
         secret_hex: keys.secret_key().to_secret_hex(),
@@ -135,6 +146,7 @@ async fn seed() -> Result<(), String> {
         group_id,
         member_id: member.id,
         team_id: team.id,
+        other_team_id: other.id,
     };
     let path = state_path();
     std::fs::write(
@@ -484,6 +496,11 @@ async fn check() -> Result<(), String> {
     let event_id = expect_stored(&strfry, &event, "kind 9").await?;
     expect_received(&mut read, "group", &event_id, 9, CONTENT, "h", &group_id).await?;
     println!("received kind 9 id={event_id} on the #h subscription");
+
+    let other_group = public_group_id(&state.other_team_id).await?;
+    println!("other team channel from get_team_channels group_id={other_group}");
+    let cross = kind9(&keys, &other_group, "other team")?;
+    expect_reject(&strfry, &cross, "not a member", "other team").await?;
 
     // Member bucket is already full when the rate limit is 1. The wrap uses
     // the gift: bucket, so it still stores.

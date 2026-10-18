@@ -17,8 +17,8 @@ pub struct PolicyConfig {
     pub rate_limit_window_secs: u64,
     /// Allowed event kinds. Events with kinds not in this set are rejected.
     pub allowed_kinds: HashSet<u64>,
-    /// Whether to require group membership for NIP-29 group events.
-    /// When false, any allowed pubkey can write to any group.
+    /// Whether to require roster membership for events that carry an `h` tag.
+    /// Default true. Kind 1059 and other events with no `h` tag skip this check.
     pub enforce_group_membership: bool,
 }
 
@@ -87,7 +87,7 @@ impl Default for PolicyConfig {
             rate_limit_events: 30,
             rate_limit_window_secs: 60,
             allowed_kinds,
-            enforce_group_membership: false,
+            enforce_group_membership: true,
         }
     }
 }
@@ -139,10 +139,9 @@ impl PolicyEngine {
         self.pubkey_allowlist = pubkeys;
     }
 
-    /// Replace the group membership map.
-    /// Currently exercised only by tests — the binary does not yet load group
-    /// membership from the DB (NIP-29 group enforcement is not wired into `main`).
-    #[allow(dead_code)]
+    /// Replace the group membership map (`group_id` to writer pubkeys).
+    ///
+    /// `main` loads this from `team_channel` rows and active roster edges.
     pub fn update_group_members(&mut self, groups: HashMap<String, HashSet<String>>) {
         self.group_members = groups;
     }
@@ -196,7 +195,27 @@ impl PolicyEngine {
             event.pubkey.clone()
         };
 
-        // Rate limiting
+        // Roster check for `h` tags, before the rate bucket, so a refused
+        // group write does not consume the member's budget. Events with no
+        // `h` tag skip this. That includes kind 1059 gift wraps (the member
+        // is the `p` tag) and the kinds site-server signs with the member
+        // key and no group tag: 0, 7, and 34550.
+        if self.config.enforce_group_membership {
+            if let Some(group_id) = event.group_id() {
+                match self.group_members.get(group_id) {
+                    Some(members) if members.contains(&event.pubkey) => {}
+                    Some(_) => {
+                        return Decision::Reject(format!(
+                            "blocked: not a member of group '{group_id}'"
+                        ));
+                    }
+                    None => {
+                        return Decision::Reject(format!("blocked: unknown group '{group_id}'"));
+                    }
+                }
+            }
+        }
+
         let now = Instant::now();
         let bucket = self
             .rate_buckets
@@ -206,26 +225,6 @@ impl PolicyEngine {
         if count > self.config.rate_limit_events as usize {
             return Decision::Reject("rate-limited: too many events".into());
         }
-
-        // 4. NIP-29 group membership (if enforcement is enabled)
-        if self.config.enforce_group_membership {
-            if let Some(group_id) = event.group_id() {
-                if let Some(members) = self.group_members.get(group_id) {
-                    if !members.contains(&event.pubkey) {
-                        return Decision::Reject(format!(
-                            "blocked: not a member of group '{group_id}'"
-                        ));
-                    }
-                } else {
-                    // Unknown group — reject
-                    return Decision::Reject(format!("blocked: unknown group '{group_id}'"));
-                }
-            }
-        }
-
-        // 5. Encrypted events (NIP-44 gift wrap, seals): metadata-only validation.
-        //    We already checked pubkey + kind + rate. Never inspect content.
-        //    This is an explicit no-op — the checks above are sufficient.
 
         Decision::Accept
     }
@@ -406,11 +405,48 @@ mod tests {
     }
 
     #[test]
-    fn group_membership_not_enforced_by_default() {
-        let mut engine = make_engine();
-        // Group event from allowed pubkey should pass when enforcement is off
-        let event = make_group_event(&"aabbccdd".repeat(8), 9, "any-group");
+    fn group_membership_skipped_when_disabled() {
+        let config = PolicyConfig {
+            enforce_group_membership: false,
+            ..PolicyConfig::default()
+        };
+        let mut engine = PolicyEngine::new(config);
+        let pubkey = "aabbccdd".repeat(8);
+        let mut allowlist = HashSet::new();
+        allowlist.insert(pubkey.clone());
+        engine.update_allowlist(allowlist);
+        let event = make_group_event(&pubkey, 9, "any-group");
         assert_eq!(engine.evaluate(&event), Decision::Accept);
+    }
+
+    #[test]
+    fn default_enforcement_rejects_unknown_h_group() {
+        assert!(PolicyConfig::default().enforce_group_membership);
+        let mut engine = make_engine();
+        let event = make_group_event(&"aabbccdd".repeat(8), 9, "no-such-channel");
+        assert!(
+            matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("unknown group"))
+        );
+    }
+
+    #[test]
+    fn gift_wrap_and_server_kinds_skip_group_check() {
+        let mut engine = make_engine();
+        let member = "aabbccdd".repeat(8);
+        let wrap = EventInfo {
+            id: "deadbeef".repeat(8),
+            pubkey: "ff".repeat(32),
+            kind: 1059,
+            tags: vec![vec!["p".to_string(), member.clone()]],
+        };
+        assert_eq!(engine.evaluate(&wrap), Decision::Accept);
+        for kind in [0_u64, 7, 34550] {
+            assert_eq!(
+                engine.evaluate(&make_event(&member, kind)),
+                Decision::Accept,
+                "kind {kind} has no h tag"
+            );
+        }
     }
 
     #[test]
