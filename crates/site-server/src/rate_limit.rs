@@ -7,12 +7,14 @@
 //! and the limiter never bites — defeating the brute-force / credential-stuffing
 //! control on the auth routes (DR1-AUTH-001).
 //!
-//! [`TrustedProxyIpKeyExtractor`] only honors forwarded headers when the request
+//! [`TrustedProxyIpKeyExtractor`] only honors `X-Forwarded-For` when the request
 //! actually arrives from a configured trusted proxy; otherwise it keys off the
-//! direct peer socket address. Forwarded entries are resolved right-to-left,
-//! skipping trusted hops, so even a proxy that *appends* (rather than replaces)
-//! `X-Forwarded-For` cannot be tricked into keying off an attacker-supplied
-//! leftmost value.
+//! direct peer socket address. `X-Real-IP` is never a bucket key: a client can
+//! set it, and Caddy does not send it. When a trusted peer supplies no usable
+//! `X-Forwarded-For`, the key is the peer address. Forwarded entries are
+//! resolved right-to-left, skipping trusted hops, so even a proxy that
+//! *appends* (rather than replaces) `X-Forwarded-For` cannot be tricked into
+//! keying off an attacker-supplied leftmost value.
 //!
 //! ## Configuration
 //!
@@ -38,7 +40,6 @@ use ipnet::IpNet;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
-const X_REAL_IP: &str = "x-real-ip";
 
 /// A [`KeyExtractor`] that keys rate limiting on the client IP, trusting
 /// forwarded headers only from configured trusted proxies.
@@ -96,7 +97,7 @@ impl TrustedProxyIpKeyExtractor {
     ///   ignore every forwarded header (the spoofing-resistant path).
     /// - If the peer **is** a trusted proxy, walk `X-Forwarded-For` right-to-left
     ///   skipping further trusted hops; the first untrusted entry is the client.
-    ///   Fall back to `X-Real-IP`, then the peer, when XFF yields nothing.
+    ///   When XFF yields nothing, use the peer. `X-Real-IP` is ignored.
     ///
     /// Callers behind Caddy must use this and not the raw peer address, or
     /// every visitor shares the compose-network gateway's bucket.
@@ -110,9 +111,6 @@ impl TrustedProxyIpKeyExtractor {
             return peer;
         }
         if let Some(ip) = client_from_forwarded_for(headers, &self.trusted) {
-            return ip;
-        }
-        if let Some(ip) = single_ip_header(headers, X_REAL_IP) {
             return ip;
         }
         peer
@@ -132,14 +130,6 @@ impl KeyExtractor for TrustedProxyIpKeyExtractor {
             .ok_or(GovernorError::UnableToExtractKey)?;
         Ok(self.resolve_key(peer, req.headers()))
     }
-}
-
-/// Parse the single-IP `X-Real-IP` style header.
-fn single_ip_header(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
-    headers
-        .get(name)
-        .and_then(|hv| hv.to_str().ok())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
 }
 
 /// Resolve the client IP from `X-Forwarded-For` given the trusted proxy set.
@@ -387,6 +377,36 @@ mod tests {
         let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
         let k = ex.extract(&req("127.0.0.1", None)).unwrap();
         assert_eq!(k, ip("127.0.0.1"));
+    }
+
+    /// From a trusted peer, a missing or unusable `X-Forwarded-For` must not
+    /// let the client pick a fresh bucket by rotating `X-Real-IP`.
+    #[test]
+    fn trusted_peer_without_xff_ignores_x_real_ip() {
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
+        let mut first = req("127.0.0.1", None);
+        first
+            .headers_mut()
+            .insert("x-real-ip", "203.0.113.50".parse().unwrap());
+        let key = ex.extract(&first).unwrap();
+        assert_eq!(key, ip("127.0.0.1"), "got {key}");
+
+        let mut rotated = req("127.0.0.1", None);
+        rotated
+            .headers_mut()
+            .insert("x-real-ip", "198.51.100.8".parse().unwrap());
+        assert_eq!(
+            ex.extract(&rotated).unwrap(),
+            key,
+            "rotating X-Real-IP must not open a new bucket"
+        );
+
+        // A garbage X-Forwarded-For is not a usable client address either.
+        let mut garbage = req("127.0.0.1", Some("not-an-ip"));
+        garbage
+            .headers_mut()
+            .insert("x-real-ip", "203.0.113.77".parse().unwrap());
+        assert_eq!(ex.extract(&garbage).unwrap(), key);
     }
 
     #[test]
