@@ -364,6 +364,30 @@ if [[ -f "$MANIFEST" ]]; then
     fi
 fi
 
+# Tesseract 5 bundles libtesseract.so.5. An older install left
+# libtesseract.so.4 (and sometimes libtesseract.so.4.*) in the private OCR
+# directory. Drop that soname when this tarball does not ship it, and take
+# it off the manifest so a later uninstall cannot leave the file behind.
+drop_replaced_tesseract4() {
+    local ocr="$BUNDLE_DEST/ocr" old base
+    [[ -d "$ocr" ]] || return 0
+    shopt -s nullglob
+    for old in "$ocr"/libtesseract.so.4 "$ocr"/libtesseract.so.4.*; do
+        [[ -e "$old" || -L "$old" ]] || continue
+        base="$(basename "$old")"
+        if [[ -d "$BUNDLE_SRC" ]]; then
+            [[ -f "$BUNDLE_SRC/ocr/$base" ]] && continue
+        elif [[ -f "$PKG_ROOT/lib/$base" ]]; then
+            continue
+        fi
+        rm -f -- "$old"
+        REMOVED_ENTRIES+=("$old")
+        info "Removed leftover $base from $ocr"
+    done
+    shopt -u nullglob
+}
+drop_replaced_tesseract4
+
 # Bundled runtime eng model → user tessdata dir (first-priority lookup, no root,
 # no distro tessdata package needed). Never clobber a user's own eng model
 # (e.g. a tuned koverwatch or hand-placed eng.traineddata).

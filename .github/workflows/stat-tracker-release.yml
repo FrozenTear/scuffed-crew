@@ -6,13 +6,17 @@ name: Stat Tracker Release
 #
 # Portability strategy (release must run on most Linux distros):
 # - Daemon builds on ubuntu-22.04 → glibc floor 2.35 (covers Ubuntu 22.04+,
-#   Debian 12+, Fedora, Arch, openSUSE, RHEL 9+).
+#   Debian 12+, Fedora, Arch, openSUSE, RHEL 9+, Linux Mint 21).
+# - The daemon links a pinned Tesseract 5.5.3 built on this runner (OpenMP
+#   on, no -march=native, no libcurl, no libarchive, SONAME
+#   libtesseract.so.5). Leptonica stays Ubuntu 22.04's 1.82. The koverwatch
+#   model is still trained with the distro Tesseract 4.1.1 tools.
 # - tesseract/leptonica sonames are fragmented across distros (Ubuntu ships
 #   liblept.so.5, Arch libleptonica.so.6), so the OCR library closure is
 #   BUNDLED into lib/scuffed-stat-tracker/ocr (daemon RUNPATH
 #   $ORIGIN/../lib/scuffed-stat-tracker/ocr). GUI libxdo lives in
 #   lib/scuffed-stat-tracker/gui so OCR deps never sit on the GUI RUNPATH.
-#   glibc / toolchain / compositor / OpenSSL stay host-provided — never
+#   glibc / toolchain / compositor / OpenSSL stay host-provided. Never
 #   bundle libcrypto/libssl (v0.4.0 shadowed system OpenSSL on Aerynos).
 # - The GUI is Iced 0.14 (wgpu) + GTK tray from crates/stat-tracker-ui.
 #   Built on ubuntu-22.04 (glibc 2.35 floor, same as the daemon).
@@ -28,6 +32,8 @@ on:
 
 permissions:
   contents: write
+  # actions/cache on the daemon job. contents: write stays for gh release.
+  actions: write
 
 env:
   STAGE: scuffed-stat-tracker-linux-x86_64
@@ -36,7 +42,12 @@ jobs:
   build-daemon:
     name: Daemon (ubuntu-22.04, glibc 2.35 floor)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      # Job env, not GITHUB_ENV: actions/cache reads ${{ env.* }} before
+      # a step can append to GITHUB_ENV. Outside the checkout so a local
+      # run of the build script (default $HOME/.local/...) is unaffected.
+      TESSERACT_PREFIX: /home/runner/.local/tesseract-5.5.3
     steps:
       - uses: actions/checkout@v4
 
@@ -53,16 +64,33 @@ jobs:
           sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
-            tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev \
+            tesseract-ocr tesseract-ocr-eng libleptonica-dev libtiff-dev \
+            build-essential cmake \
             libevdev-dev libudev-dev \
             fontconfig unzip \
-            pkg-config patchelf
+            pkg-config patchelf ca-certificates curl
+          # libtesseract-dev is the 4.1.1 headers. Do not install it: the
+          # daemon links the pinned 5.5.3 prefix. tesseract-ocr stays so
+          # training can keep using the 4.1.1 tools.
+
+      - name: Cache pinned Tesseract 5.5.3
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TESSERACT_PREFIX }}
+          key: tesseract-5.5.3-lept182-ubuntu2204-openmp-soname5-${{ hashFiles('crates/stat-tracker/dist/build-tesseract.sh') }}
+
+      - name: Build pinned Tesseract 5.5.3
+        run: |
+          set -euo pipefail
+          # The script defaults to 2 jobs. This runner can use its cores.
+          TESSERACT_BUILD_JOBS="$(nproc)" bash crates/stat-tracker/dist/build-tesseract.sh
+          echo "PKG_CONFIG_PATH=${TESSERACT_PREFIX}/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: daemon-2204
+          key: daemon-2204-tesseract-5.5.3
 
       - name: Set release version env
         run: |
@@ -77,22 +105,41 @@ jobs:
 
       - name: Build daemon (release)
         working-directory: crates/stat-tracker
-        run: cargo build --release --bin scuffed-stat-tracker
+        run: |
+          set -euo pipefail
+          pkg-config --modversion tesseract | grep -qx '5.5.3'
+          cargo build --release --bin scuffed-stat-tracker
 
       - name: Bundle OCR library closure + set RPATH
         run: |
           set -euo pipefail
           mkdir -p out/bin out/lib/scuffed-stat-tracker/ocr
           cp target/release/scuffed-stat-tracker out/bin/
+          needed="$(readelf -d out/bin/scuffed-stat-tracker | awk -F'[][]' '/NEEDED/ && /libtesseract/ {print $2; exit}')"
+          echo "daemon NEEDED ${needed}"
+          [ "${needed}" = "libtesseract.so.5" ]
           # Seed the closure from the binary: pulls tesseract, leptonica, image
-          # codecs, and their transitive deps with consistent versions. Shared
-          # script also bundles/stamps for the GUI job (libxdo). OpenSSL is
-          # denied — never land libcrypto/libssl on a RUNPATH.
-          bash crates/stat-tracker/dist/bundle-native-libs.sh \
+          # codecs, and their transitive deps with consistent versions. ldd
+          # only sees the pinned 5.5.3 library while LD_LIBRARY_PATH is set.
+          # That variable is not written to GITHUB_ENV. Shared script also
+          # bundles/stamps for the GUI job (libxdo). OpenSSL is denied.
+          # Never land libcrypto/libssl on a RUNPATH.
+          LD_LIBRARY_PATH="${TESSERACT_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            bash crates/stat-tracker/dist/bundle-native-libs.sh \
             out/bin/scuffed-stat-tracker out/lib/scuffed-stat-tracker/ocr
-          if find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*' | grep -q .; then
-            echo "refusing to ship OpenSSL in the daemon bundle" >&2
-            find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*'
+          if find out/lib \( -name 'libcrypto.so*' -o -name 'libssl.so*' -o -name 'libcurl.so*' -o -name 'libarchive.so*' \) | grep -q .; then
+            echo "refusing to ship OpenSSL, libcurl, or libarchive in the daemon bundle" >&2
+            find out/lib \( -name 'libcrypto.so*' -o -name 'libssl.so*' -o -name 'libcurl.so*' -o -name 'libarchive.so*' \)
+            exit 1
+          fi
+          if ! find out/lib/scuffed-stat-tracker/ocr -name 'libtesseract.so.5' | grep -q .; then
+            echo "bundle is missing libtesseract.so.5" >&2
+            find out/lib/scuffed-stat-tracker/ocr -type f >&2 || true
+            exit 1
+          fi
+          if find out/lib -name 'libtesseract.so.4*' | grep -q .; then
+            echo "bundle still contains libtesseract.so.4" >&2
+            find out/lib -name 'libtesseract.so.4*' >&2
             exit 1
           fi
           patchelf --set-rpath '$ORIGIN/../lib/scuffed-stat-tracker/ocr' \
@@ -101,11 +148,26 @@ jobs:
       - name: Train koverwatch OCR model (production code path)
         run: |
           set -euo pipefail
-          # Runs setup::ensure_koverwatch_tessdata via the release binary — the
-          # exact pipeline users would run. Must happen on THIS runner (22.04
+          # Runs setup::ensure_koverwatch_tessdata via the staged release
+          # binary (RPATH already points at the bundled libtesseract.so.5).
+          # The training tools themselves stay Ubuntu 22.04's Tesseract 4.1.1:
+          # the 5.5.3 prefix is not on PATH. Must happen on THIS runner (22.04
           # pango works; pango >= 1.56 hosts hang/segfault text2image) and
           # BEFORE the clean-room step below uninstalls the training tools.
-          ./target/release/scuffed-stat-tracker --generate-tessdata 2>&1 | tee train.log
+          unset LD_LIBRARY_PATH
+          tess_bin="$(command -v tesseract)"
+          echo "training tesseract: ${tess_bin}"
+          case "${tess_bin}" in
+            "${TESSERACT_PREFIX}"/*)
+              echo "training picked the Tesseract 5 prefix binary; PATH must stay on the Ubuntu 4.1.1 tools" >&2
+              exit 1
+              ;;
+          esac
+          tesseract --version >tesseract-train-version.txt 2>&1 || true
+          cat tesseract-train-version.txt
+          grep -q 'tesseract 4.1.1' tesseract-train-version.txt \
+            || { echo "training must use Ubuntu tesseract 4.1.1" >&2; exit 1; }
+          ./out/bin/scuffed-stat-tracker --generate-tessdata 2>&1 | tee train.log
           # ensure_koverwatch_tessdata tolerates skipped pages; a release model
           # must not silently train on a subset — fail on any page skip.
           if grep -qE 'text2image (failed|timed out)|produced no output|lstm\.train failed' train.log; then
@@ -125,6 +187,7 @@ jobs:
       - name: Clean-room smoke test (no system OCR libs)
         run: |
           set -euo pipefail
+          unset LD_LIBRARY_PATH
           sudo apt-get remove -y libtesseract-dev 'libtesseract*' libleptonica-dev 'liblept*' tesseract-ocr || true
           sudo apt-get autoremove -y || true
           out="$(./out/bin/scuffed-stat-tracker --version)"
@@ -133,6 +196,27 @@ jobs:
             || { echo "version mismatch: got '${out}', want scuffed-stat-tracker ${SST_RELEASE_VERSION}" >&2; exit 1; }
           echo "daemon runs with bundled OCR libs only"
           ldd ./out/bin/scuffed-stat-tracker | grep -iE 'tesseract|lept' || true
+          tess_line="$(ldd ./out/bin/scuffed-stat-tracker | awk '/libtesseract\.so/ {print}')"
+          echo "libtesseract: ${tess_line}"
+          printf '%s\n' "${tess_line}" | grep -q 'libtesseract\.so\.5' \
+            || { echo "daemon did not request libtesseract.so.5" >&2; exit 1; }
+          if printf '%s\n' "${tess_line}" | grep -q 'libtesseract\.so\.4'; then
+            echo "daemon still loads libtesseract.so.4" >&2
+            exit 1
+          fi
+          tess_path="$(ldd ./out/bin/scuffed-stat-tracker | awk '/libtesseract\.so\.5/ {print $3; exit}')"
+          tess_real="$(realpath "${tess_path:-/nonexistent}" 2>/dev/null || true)"
+          bundle_dir="$(realpath ./out/lib/scuffed-stat-tracker/ocr)"
+          case "${tess_real}" in
+            "${bundle_dir}"/*) echo "libtesseract.so.5 resolves to the bundled copy" ;;
+            *)
+              echo "libtesseract.so.5 did not resolve to the bundle (got: ${tess_real:-missing}, want prefix: ${bundle_dir}/)" >&2
+              exit 1
+              ;;
+          esac
+          bash crates/stat-tracker/dist/check-bundled-glibc.sh 2.35 \
+            ./out/bin/scuffed-stat-tracker \
+            ./out/lib/scuffed-stat-tracker/ocr
           crypto_line="$(ldd ./out/bin/scuffed-stat-tracker | awk '/libcrypto\.so/ {print $3; exit}')"
           echo "libcrypto resolves to: ${crypto_line:-<none>}"
           case "${crypto_line:-}" in

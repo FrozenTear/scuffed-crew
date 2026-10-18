@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.13
+
+Release builds now ship Tesseract 5 for classic OCR. The game-font model is the same one as before. Updating removes the old bundled OCR library, so an older install does not keep both.
+
+### Highlights
+
+- Classic OCR in the downloaded Linux release uses Tesseract 5.5.3. Linux Mint 21 and other systems with glibc 2.35 still run it.
+- An update or uninstall removes a leftover libtesseract.so.4 from an older install.
+
+The release is still built on Ubuntu 22.04. Tesseract 5.5.3 is compiled on that runner with OpenMP on, without -march=native, and without libcurl or libarchive. Leptonica stays Ubuntu 22.04's 1.82. The daemon loads the bundled libtesseract.so.5. The koverwatch model is still trained with Ubuntu's Tesseract 4.1.1 tools, and the same size check still applies. How this library reads that model has not been measured yet.
+
 ## 0.5.0-alpha.12
 
 The new reader is now the default, and when it finds nothing on a scoreboard the tracker reads that board with the old reader (ocr-v1) instead of skipping it (#333). Your last game now uploads right away even when a late Tab closes it, and capture on X11 is much lighter on bigger screens (#320, #330).
