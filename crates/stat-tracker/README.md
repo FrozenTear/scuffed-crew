@@ -310,6 +310,12 @@ column of that one scoreboard and looks for your configured `player_name`,
 as `reader = "ocr-v1"` does on every scoreboard. With `ocr = "off"` there
 is no such read, and that Tab is not stored.
 
+With the new reader (the default since alpha.12), a scoreboard it finds
+nothing on is read with ocr-v1 instead, for that one Tab, while Tesseract
+is on. Those stats are saved and uploaded marked as read by `ocr-v1`. To
+use the old reader for everything, choose it in Settings or set
+`reader = "ocr-v1"` in `config.toml`.
+
 Only trusted crops are written to the file: crops confirmed as your own
 name line. A crop that is still waiting for confirmation could be another
 player's name, so it is kept in memory only and is gone when the tracker
@@ -318,10 +324,11 @@ and until your name is trusted your row is found by its highlight or by
 the hero panel alone.
 The file holds pixels and a hash of the configured `player_name`, never
 the name. It is cleared when another name is configured, which the tracker
-notices when it next starts with `reader = "new"`; a start where the name
+notices when it next starts with the new reader (`reader = "new"`, the
+default when there is no `reader` line); a start where the name
 is not known (not set here and not fetched) keeps it. It is removed on
 uninstall, and never put in a report, an upload or the log.
-`reader = "ocr-v1"` (the default) does not create it and does not read it;
+`reader = "ocr-v1"` does not create it and does not read it;
 after a switch back to `ocr-v1` an existing file stays, unused, until
 uninstall or until you delete it.
 

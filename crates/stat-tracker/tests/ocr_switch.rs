@@ -898,8 +898,9 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         run.out
     );
     assert!(!run.out.contains("classic OCR is off"), "{}", run.out);
-    // a refused off runs with the file's reader, which is ocr-v1 here
-    assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
+    // a refused off runs with the file's reader: no `reader` line, so the
+    // new reader (the default since alpha.12), with classic OCR still on
+    assert!(run.out.contains(NEW_READER_LINE), "{}", run.out);
 }
 
 /// `ocr` is read from config.toml (the other daemon tests use the env
@@ -1038,7 +1039,9 @@ fn the_daemon_runs_classic_ocr_when_nothing_asks_for_off() {
     assert_eq!(run.status.packs, None, "the packs are not looked at");
     assert_eq!(run.status.notice(), None);
     assert!(run.out.contains(OCR_WORKERS_LINE), "{}", run.out);
-    assert!(!run.out.contains(NEW_READER_LINE), "{}", run.out);
+    // no `reader` line: the new reader is the default, OCR stays on for
+    // the boards it finds nothing on
+    assert!(run.out.contains(NEW_READER_LINE), "{}", run.out);
     // the temp file of the status write does not stay behind
     assert!(!data_dir.join(ocr_switch::STATUS_TMP_FILE).exists());
 }

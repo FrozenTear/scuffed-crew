@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.12
+
+The new reader is now the default. If your config has no `reader` line, the tracker reads the scoreboard with the new reader; to go back, pick the old reader (ocr-v1) in Settings, or put `reader = "ocr-v1"` in `config.toml`.
+
+### Highlights
+
+- If you already chose `reader = "ocr-v1"`, nothing changes for you.
+- When the new reader finds nothing on a board, the tracker reads that one board with the old reader instead of skipping it, and marks the saved stats as read by `ocr-v1`.
+
+Technical detail. `ReaderSetting` defaults to `New`; a config without a `reader` key loads as `new`, and `reader = "ocr-v1"` is still written out explicitly. Per-Tab fallback (`reader_apply::ocr_fallback_reason`): a board with status not found or team size unknown, or with no digit value in any stat cell, is read with ocr-v1's cell pass for that Tab when classic OCR is on, and stored with recognizer `ocr-v1`. A board the reader found but doubts (team size disagreement, unsure own row) is refused or held as before, and with `ocr = "off"` nothing falls back.
+
 ## 0.5.0-alpha.11
 
 The tracker now keeps a small always-on performance log while it runs. Choosing Performance under Send report sends only that log, with no board pictures or crops (#318).

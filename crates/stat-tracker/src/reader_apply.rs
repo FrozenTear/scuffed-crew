@@ -463,6 +463,18 @@ fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> 
 }
 
 /// The board itself is no read: not found, no team size, or no digit value.
+/// Why a Tab under `reader = "new"` is read with ocr-v1 instead, if it is:
+/// the reader found nothing on the board (not found, team size unknown, no
+/// digit values) and classic OCR may run (`ocr_off` false). A board it found
+/// and doubts (a team size that disagrees, an unsure own row) is not handed
+/// to OCR: it is refused or held as before. With OCR off nothing falls back.
+pub fn ocr_fallback_reason(board: &BoardRead, ocr_off: bool) -> Option<&'static str> {
+    if ocr_off {
+        return None;
+    }
+    board_fallback_reason(board)
+}
+
 fn board_fallback_reason(board: &BoardRead) -> Option<&'static str> {
     match board.status {
         BoardStatus::Read => {}
@@ -639,6 +651,61 @@ fn order_suspects(names: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::shadow::{FieldRead, Value};
+
+    /// Only a board the new reader found nothing on falls back to ocr-v1,
+    /// and only while classic OCR may run.
+    #[test]
+    fn ocr_fallback_only_for_a_board_found_empty_with_ocr_on() {
+        let not_found = crate::shadow::reader::not_found(BoardStatus::NotFound);
+        let size_unknown = crate::shadow::reader::not_found(BoardStatus::TeamSizeUnknown);
+        let no_digits = BoardRead {
+            status: BoardStatus::Read,
+            team_size: Some(5),
+            fields: vec![FieldRead {
+                name: "r0.e".into(),
+                value: None,
+                confidence: 0.0,
+                suspect: true,
+            }],
+            elapsed_ms: 1,
+        };
+        let read = BoardRead {
+            status: BoardStatus::Read,
+            team_size: Some(5),
+            fields: vec![FieldRead {
+                name: "r0.e".into(),
+                value: Some(Value::Int(7)),
+                confidence: 0.9,
+                suspect: false,
+            }],
+            elapsed_ms: 1,
+        };
+        for empty in [&not_found, &size_unknown, &no_digits] {
+            assert!(
+                ocr_fallback_reason(empty, false).is_some(),
+                "{:?}",
+                empty.status
+            );
+            assert_eq!(
+                ocr_fallback_reason(empty, true),
+                None,
+                "OCR off: no fallback"
+            );
+        }
+        assert_eq!(
+            ocr_fallback_reason(&read, false),
+            None,
+            "a found board stays"
+        );
+        let mut six = read.clone();
+        six.team_size = Some(6);
+        assert_eq!(
+            ocr_fallback_reason(&six, false),
+            None,
+            "a found board that disagrees is refused, not handed to OCR"
+        );
+        assert!(board_refusal(&six, 5).is_some());
+    }
 
     fn ocr() -> PolicyRow {
         PolicyRow {

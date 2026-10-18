@@ -507,7 +507,7 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
     config.ocr = OcrSetting::Off;
     let from_config = collect(&config);
     assert_eq!(from_config.ocr, OcrSetting::On, "the config value alone");
-    assert_eq!(from_config.reader, ReaderSetting::OcrV1);
+    assert_eq!(from_config.reader, ReaderSetting::New, "the default reader");
 
     let status = |pid, effective, sites: &[(&str, u64)]| Status {
         pid,
@@ -531,8 +531,8 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
     assert_eq!(refused.ocr, OcrSetting::On);
     assert_eq!(
         refused.reader,
-        ReaderSetting::OcrV1,
-        "the file's reader ran"
+        ReaderSetting::New,
+        "the file's reader ran (missing means new)"
     );
     // It ran with OCR off: off, the new reader, and the sites, busiest first.
     let sites = [("main.rs:1 recognize", 3), ("main.rs:9 recognize_cell", 17)];

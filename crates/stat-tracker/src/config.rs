@@ -87,8 +87,14 @@ pub struct Config {
     pub reader_pack_url: Option<String>,
     /// Which reader supplies saved and uploaded stats.
     ///
-    /// Missing, or `"ocr-v1"`, keeps today's Tesseract reads. `"new"` stores
-    /// the shadow reader's values when a field is read and not suspect. The
+    /// Missing, or `"new"`, stores the new reader's values when a field is
+    /// read and not suspect (the default from alpha.12, after cv-v6 read
+    /// 720 of 720 held-out benchmark boards with none wrong). `"ocr-v1"`
+    /// keeps the Tesseract reads; Settings writes it explicitly, so a member
+    /// who switches back stays on it. Under `"new"` with classic OCR on, a
+    /// Tab whose board the new reader finds nothing on (not found, team size
+    /// unknown, no digit values) is read with ocr-v1 instead and stored with
+    /// recognizer `ocr-v1`. The
     /// six stats then come from that reader only: a Tab whose board it does
     /// not vouch for is not stored, and a stat cell it is unsure of keeps
     /// the game's last accepted value and is marked, with no OCR number in
@@ -103,7 +109,7 @@ pub struct Config {
     /// game-start screens are read from the words pack, with OCR only where
     /// a template or mask is not loaded; the accolade and rank words and
     /// the accolade map are still OCR.
-    #[serde(default, skip_serializing_if = "ReaderSetting::is_ocr_v1")]
+    #[serde(default, skip_serializing_if = "ReaderSetting::is_default")]
     pub reader: ReaderSetting,
     /// Whether classic OCR (Tesseract) may run at all.
     ///
@@ -202,11 +208,12 @@ impl OcrControl {
     }
 }
 
-/// `reader` in config.toml. Missing means [`Self::OcrV1`].
+/// `reader` in config.toml. Missing means [`Self::New`] (alpha.12 on;
+/// before that, missing meant [`Self::OcrV1`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReaderSetting {
-    #[default]
     OcrV1,
+    #[default]
     New,
 }
 
@@ -223,6 +230,12 @@ impl ReaderSetting {
 
     pub const fn is_ocr_v1(&self) -> bool {
         matches!(self, Self::OcrV1)
+    }
+
+    /// The value a missing key means. A full save leaves it out and writes
+    /// `"ocr-v1"`, so an explicit switch back survives a reload.
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::New)
     }
 
     pub const fn is_new(self) -> bool {
@@ -994,8 +1007,9 @@ fn insert_root_shadow_recognizer(
 /// Change `reader` and nothing else.
 ///
 /// A root string is spliced in place. A missing root key is inserted on the
-/// root table, before the first `[table]` header. Turning the switch off
-/// writes `"ocr-v1"` only when the key is already there.
+/// root table, before the first `[table]` header, for either value: a
+/// missing key means `"new"`, so turning the switch off has to write
+/// `"ocr-v1"`.
 fn patch_reader(
     existing: &str,
     reader: ReaderSetting,
@@ -1138,7 +1152,7 @@ impl Default for Config {
             update_channel: String::new(),
             setup_completed: false,
             reader_pack_url: None,
-            reader: ReaderSetting::OcrV1,
+            reader: ReaderSetting::New,
             ocr: OcrSetting::On,
         }
     }
@@ -2146,18 +2160,26 @@ token = \"old-token\"
     }
 
     #[test]
-    fn reader_defaults_to_ocr_v1_and_rejects_unknown_values() {
-        assert!(Config::default().reader.is_ocr_v1());
-        assert!(!Config::default().uses_new_reader());
-        assert!(!Config::default().shadow_log_enabled());
+    fn reader_defaults_to_new_and_rejects_unknown_values() {
+        assert_eq!(Config::default().reader, ReaderSetting::New);
+        assert!(Config::default().uses_new_reader());
+        assert!(Config::default().shadow_log_enabled());
         let raw = settings_shaped_without_shadow();
         let loaded = Config::parse_file_contents(&raw).expect("missing reader");
-        assert!(loaded.reader.is_ocr_v1());
+        assert!(
+            loaded.uses_new_reader(),
+            "no reader line means the new reader"
+        );
         let with_new = format!("reader = \"new\"\n{raw}");
         let on = Config::parse_file_contents(&with_new).expect("reader = new");
         assert!(on.uses_new_reader());
         assert!(on.shadow_log_enabled());
         assert!(!on.shadow_recognizer);
+        let with_old = format!("reader = \"ocr-v1\"\n{raw}");
+        let old = Config::parse_file_contents(&with_old).expect("reader = ocr-v1");
+        assert!(old.reader.is_ocr_v1(), "an explicit ocr-v1 stays");
+        assert!(!old.uses_new_reader());
+        assert!(!old.shadow_log_enabled());
         let unknown = format!("reader = \"cv-v5\"\n{raw}");
         assert!(Config::parse_file_contents(&unknown).is_err());
     }
@@ -2168,10 +2190,23 @@ token = \"old-token\"
         let tables = table_block(&original).to_string();
         assert!(!original.contains("reader"));
         let mut current = Config::parse_file_contents(&original).expect("seed parses");
-        assert!(current.reader.is_ocr_v1());
+        assert!(current.uses_new_reader(), "no reader line: the new reader");
+
+        // Switching back to ocr-v1 has to write the key: missing means new.
+        current.reader = ReaderSetting::OcrV1;
+        let back = Config::text_for_save(Some(&original), &current).expect("switch back");
+        assert!(back.contains("reader = \"ocr-v1\""), "{back}");
+        assert_eq!(table_block(&back), tables, "tables stay:\n{back}");
+        assert!(
+            Config::parse_file_contents(&back)
+                .expect("reload back")
+                .reader
+                .is_ocr_v1(),
+            "the switch back survives a reload"
+        );
 
         current.reader = ReaderSetting::New;
-        let on = Config::text_for_save(Some(&original), &current).expect("turn on");
+        let on = Config::text_for_save(Some(&back), &current).expect("turn on");
         assert!(on.contains("# ") || !original.contains("# "));
         assert!(on.contains("reader = \"new\""), "{on}");
         assert_eq!(
@@ -2197,6 +2232,29 @@ token = \"old-token\"
         assert!(
             Config::parse_file_contents(&off)
                 .expect("reload off")
+                .reader
+                .is_ocr_v1()
+        );
+    }
+
+    /// A full save (not a one-key patch) leaves the default reader out and
+    /// writes an explicit ocr-v1, so neither changes on the next load.
+    #[test]
+    fn a_full_save_keeps_an_explicit_ocr_v1_and_leaves_the_default_out() {
+        let mut cfg = Config::default();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.lines().any(|l| l.starts_with("reader")), "{text}");
+        assert!(
+            Config::parse_file_contents(&text)
+                .unwrap()
+                .uses_new_reader()
+        );
+        cfg.reader = ReaderSetting::OcrV1;
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("reader = \"ocr-v1\""), "{text}");
+        assert!(
+            Config::parse_file_contents(&text)
+                .unwrap()
                 .reader
                 .is_ocr_v1()
         );
@@ -2256,8 +2314,11 @@ custom_note = \"leave this line alone\"
             );
         }
         // `reader` is its own key: turning OCR off does not rewrite it.
-        assert!(off.reader.is_ocr_v1());
-        assert!(!off.uses_new_reader());
+        assert_eq!(off.reader, ReaderSetting::New, "missing reader is new");
+        let off_old =
+            Config::parse_file_contents(&format!("ocr = \"off\"\nreader = \"ocr-v1\"\n{raw}"))
+                .expect("off with ocr-v1");
+        assert!(off_old.reader.is_ocr_v1());
     }
 
     #[test]

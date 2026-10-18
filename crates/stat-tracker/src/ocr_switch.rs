@@ -1162,7 +1162,11 @@ mod tests {
         assert_eq!(effective_reader(OcrSetting::Off, New), New);
         assert_eq!(effective_reader(OcrSetting::On, OcrV1), OcrV1);
         assert_eq!(effective_reader(OcrSetting::On, New), New);
-        let config = Config::default();
+        // a file that chose ocr-v1 (missing `reader` is the new reader)
+        let config = Config {
+            reader: OcrV1,
+            ..Config::default()
+        };
         assert_eq!(decide(OcrSetting::Off, &READY, &[]).reader(&config), New);
         // a refused off runs with the file's reader
         assert_eq!(

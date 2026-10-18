@@ -3170,6 +3170,10 @@ struct FrameAnalysis {
     /// `reader = "new"` nothing is read into them: no name and no stat cell
     /// on any row (`ocr::unread_rows`, [`read_tab_rows`]).
     rows: Vec<ocr::RowOcrResult>,
+    /// `reader = "new"`: the board was found empty and this Tab's rows
+    /// were read with ocr-v1 instead ([`reader_apply::ocr_fallback_reason`]).
+    /// The Tab is then read and stored as an ocr-v1 Tab.
+    ocr_fallback: bool,
     /// `reader = "new"`: the digit, icon and banner reads of this Tab, which
     /// carry the trust gate and the stats. `None` under ocr-v1.
     board: Option<shadow::BoardRead>,
@@ -4894,11 +4898,8 @@ fn analyze_frame(
     // the member's own-name seeds, the highlight and the career hero's row
     // (alpha.7 O9, O9b), so the rows are the board's rows with nothing read
     // on them.
-    let rows = read_tab_rows(
-        use_new_reader,
-        || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size),
-        || ocr::unread_rows(team_size),
-    );
+    let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
+    let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));
 
     // Player row. ocr-v1: if a player name is configured, scan ALL rows (both
     // teams) for a name match — this handles replays and post-match screens
@@ -5036,12 +5037,27 @@ fn analyze_frame(
     let board = read_tab_board(use_new_reader, || {
         shadow::read_board_with(&img, top_bar.banner, tab_heroes)
     });
+    // A board the new reader found nothing on (heavy dimming, an unusual UI
+    // scale, headers not located) is read with ocr-v1 for this Tab instead
+    // of being dropped, when classic OCR is on. The Tab is then stored like
+    // an ocr-v1 Tab, with recognizer `ocr-v1`.
+    let ocr_fallback = board
+        .as_ref()
+        .and_then(|board| reader_apply::ocr_fallback_reason(board, ocr::gate::is_off()));
+    if let Some(reason) = ocr_fallback {
+        tracing::info!(
+            reason,
+            "new reader found nothing on this board: reading it with ocr-v1"
+        );
+        rows = read_cells();
+    }
 
     FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
         frame_outcome,
         ocr,
         rows,
         board,
+        ocr_fallback: ocr_fallback.is_some(),
         portrait_hero: portrait_match,
         career_hero,
         pack_hero,
@@ -6384,6 +6400,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         ocr,
         rows,
         board: analysis_board,
+        ocr_fallback,
         portrait_hero,
         career_hero,
         pack_hero,
@@ -6408,7 +6425,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         .context("full-board OCR failed")?;
     // `reader = "new"`: the board the trust gate and the stats come from.
     // No board (a test injection without one) is a board that was not found.
-    let new_board = ctx.use_new_reader.then(|| {
+    // A board found empty with OCR on was read with ocr-v1 instead
+    // (`ocr_fallback`): this Tab then takes the ocr-v1 path for its stats
+    // and is stored with recognizer `ocr-v1`.
+    let board_reader = ctx.use_new_reader && !ocr_fallback;
+    let new_board = board_reader.then(|| {
         board_override
             .or(analysis_board)
             .unwrap_or_else(|| shadow::reader::not_found(shadow::BoardStatus::NotFound))
@@ -6544,7 +6565,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             player_row_idx,
             &ocr_result.raw_text,
             &outcome_label,
-            text_fallback_name(ctx.use_new_reader, player_row_idx, player_name),
+            text_fallback_name(board_reader, player_row_idx, player_name),
         )
         .map(|read| {
             (
@@ -6681,7 +6702,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // gate (a suspect read never corroborates a jump or drives an un-latch).
             // Under the new reader the mask is its held cells: no OCR cell
             // was read, so there is no edge ink to look at.
-            let suspect = if ctx.use_new_reader {
+            let suspect = if board_reader {
                 held_cols
             } else {
                 parse::player_row_suspect_mask(&rows, player_row_idx)
@@ -6809,7 +6830,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     );
                     continue;
                 }
-                if ctx.use_new_reader {
+                if board_reader {
                     // No OCR read the cell: the digit read does not fit
                     // the game so far.
                     tracing::warn!(
@@ -11948,6 +11969,7 @@ mod tests {
                     confidence: 80,
                 }),
                 rows: stat_rows(elims),
+                ocr_fallback: false,
                 portrait_hero: None,
                 career_hero: None,
                 pack_hero: None,
@@ -12105,6 +12127,7 @@ mod tests {
                     confidence: 80,
                 }),
                 rows: rows(),
+                ocr_fallback: false,
                 portrait_hero: None,
                 career_hero: None,
                 pack_hero: None,
@@ -12360,6 +12383,7 @@ mod tests {
                 confidence: 0,
             }),
             rows: Vec::new(),
+            ocr_fallback: false,
             map_from_panel: None,
             map_panel_raw: None,
             player_row_idx: None,
@@ -12968,6 +12992,7 @@ mod tests {
                 confidence: 80,
             }),
             rows: o8_rows(),
+            ocr_fallback: false,
             portrait_hero: None,
             career_hero: career.map(str::to_string),
             pack_hero: pack.map(str::to_string),
@@ -13754,7 +13779,7 @@ mod tests {
         // reader gets rows with nothing read on them (O10 took the stat
         // cells out of it, so `ocr::Names::Skip` has no caller here)
         assert!(body.contains(
-            "let rows = read_tab_rows( use_new_reader, || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size), || ocr::unread_rows(team_size), );"
+            "let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size); let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));"
         ));
         assert_eq!(body.matches("recognize_scoreboard_cells").count(), 1);
         assert_eq!(body.matches("ocr::Names").count(), 0);
@@ -21540,7 +21565,7 @@ mod tests {
         let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
         let body = norm(src[at..].split("\n}\n").next().unwrap());
         assert!(body.contains(
-            "let rows = read_tab_rows( use_new_reader, || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size), || ocr::unread_rows(team_size), );"
+            "let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size); let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));"
         ));
         assert_eq!(body.matches("recognize_scoreboard_cells").count(), 1);
         assert!(body.contains("let ocr = full_board_text( use_new_reader, || {"));
@@ -21558,12 +21583,16 @@ mod tests {
         ));
         assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 1);
         assert!(hc_body.contains(
-            "let suspect = if ctx.use_new_reader { held_cols } else { parse::player_row_suspect_mask(&rows, player_row_idx) };"
+            "let suspect = if board_reader { held_cols } else { parse::player_row_suspect_mask(&rows, player_row_idx) };"
         ));
         assert!(hc_body.contains(
             "match &new_board { Some(board) => reader_apply::both_teams_have_stats(board, team_size), None => parse::both_teams_have_stats(&rows, team_size), },"
         ));
-        assert!(hc_body.contains("let new_board = ctx.use_new_reader.then(|| {"));
+        assert!(hc_body.contains("let board_reader = ctx.use_new_reader && !ocr_fallback;"));
+        assert!(hc_body.contains("let new_board = board_reader.then(|| {"));
+        // the only other cell read: a board found empty, with OCR on
+        assert!(body.contains("if let Some(reason) = ocr_fallback {"));
+        assert!(body.contains("rows = read_cells();"));
     }
 
     /// `o8_board` with the own row's stats as given: `(value, suspect)` per
@@ -21747,6 +21776,39 @@ mod tests {
             assert_eq!(row.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
             assert!(row.suspect_fields.is_empty());
         }
+    }
+
+    /// A board the new reader found nothing on, read with ocr-v1 instead
+    /// (`ocr_fallback`), stores ocr-v1's read of that Tab, tagged `ocr-v1`.
+    /// The next Tab with a board the reader finds goes back to the board.
+    #[tokio::test]
+    async fn new_reader_board_found_empty_falls_back_to_ocr_v1_for_that_tab() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let mut fallback = o8_analysis(None, Some("ana"));
+        fallback.board = Some(shadow::reader::not_found(shadow::BoardStatus::NotFound));
+        fallback.ocr_fallback = true;
+        let tabs = vec![
+            (fallback, None),
+            (
+                o8_analysis(None, Some("ana")),
+                Some(o10_board([
+                    sure(12),
+                    sure(5),
+                    sure(3),
+                    sure(3500),
+                    sure(900),
+                    sure(450),
+                ])),
+            ),
+        ];
+        let (rows, recorded) = o10_tabs(&ctx, tabs).await;
+        assert_eq!(recorded, vec![true, true]);
+        assert_eq!(o10_stats(&rows[0]), [10, 4, 2, 3000, 800, 400]);
+        assert_eq!(rows[0].recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert_eq!(o10_stats(&rows[1]), [12, 5, 3, 3500, 900, 450]);
+        assert_eq!(rows[1].recognizer, shadow::digits::RECOGNIZER_ID);
     }
 
     /// Under the new reader the Tab's name-only rows have no stat cell, and
