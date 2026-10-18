@@ -470,6 +470,14 @@ async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()>
 
 // ─── Database API ───────────────────────────────────────────────────────────
 
+/// Fixed filter fragments for thread list and count. `category` is bound as `$cat`.
+fn thread_board_filter(category: Option<&str>) -> &'static str {
+    match category {
+        Some(_) => "is_active = true AND board_id IN $board_ids AND category = $cat",
+        None => "is_active = true AND board_id IN $board_ids",
+    }
+}
+
 impl Database {
     pub async fn list_forum_tree(&self) -> DbResult<Vec<ForumCategoryNode>> {
         with_timeout(async {
@@ -787,6 +795,80 @@ impl Database {
             };
             let threads: Vec<DbForumThread> = result.take(0)?;
             Ok(threads.into_iter().map(db_to_thread).collect())
+        })
+        .await
+    }
+
+    /// Every forum board, including inactive ones.
+    ///
+    /// Callers apply `min_role` and `is_active`. The public tree stays active-only.
+    pub async fn list_forum_boards(&self) -> DbResult<Vec<ForumBoard>> {
+        with_timeout(async {
+            let mut result = self.client.query("SELECT * FROM forum_board").await?;
+            let rows: Vec<DbForumBoard> = result.take(0)?;
+            Ok(rows.into_iter().map(db_to_board).collect())
+        })
+        .await
+    }
+
+    /// Active threads whose `board_id` is in `board_ids`.
+    ///
+    /// An empty id list matches nothing. `category`, when set, also requires the
+    /// legacy category string. Limit and offset run after that filter.
+    pub async fn list_forum_threads_on_boards(
+        &self,
+        board_ids: &[String],
+        category: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<ForumThread>> {
+        if board_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_timeout(async {
+            let filter = thread_board_filter(category);
+            let sql = format!(
+                "SELECT * FROM forum_thread WHERE {filter} \
+                 ORDER BY pinned DESC, updated_at DESC LIMIT $lim START $off"
+            );
+            let mut request = self
+                .client
+                .query(sql)
+                .bind(("board_ids", board_ids.to_vec()))
+                .bind(("lim", limit))
+                .bind(("off", offset));
+            if let Some(cat) = category {
+                request = request.bind(("cat", cat.to_string()));
+            }
+            let mut result = request.await?;
+            let threads: Vec<DbForumThread> = result.take(0)?;
+            Ok(threads.into_iter().map(db_to_thread).collect())
+        })
+        .await
+    }
+
+    /// Count of threads matching [`Self::list_forum_threads_on_boards`], ignoring page size.
+    pub async fn count_forum_threads_on_boards(
+        &self,
+        board_ids: &[String],
+        category: Option<&str>,
+    ) -> DbResult<u64> {
+        if board_ids.is_empty() {
+            return Ok(0);
+        }
+        with_timeout(async {
+            let filter = thread_board_filter(category);
+            let sql = format!("SELECT count() AS total FROM forum_thread WHERE {filter} GROUP ALL");
+            let mut request = self
+                .client
+                .query(sql)
+                .bind(("board_ids", board_ids.to_vec()));
+            if let Some(cat) = category {
+                request = request.bind(("cat", cat.to_string()));
+            }
+            let mut result = request.await?;
+            let row: Option<CountRow> = result.take(0)?;
+            Ok(row.map(|row| row.total).unwrap_or(0))
         })
         .await
     }

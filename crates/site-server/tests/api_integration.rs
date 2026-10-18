@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -7443,6 +7444,365 @@ async fn forum_get_thread_enforces_min_role_and_fails_closed_without_board() {
         StatusCode::NOT_FOUND,
         "missing board fails closed even for admin"
     );
+}
+
+// ─── #335 / #342: role filter before LIMIT, total is the match count ────────
+
+async fn set_board_min_role(db: &Database, slug: &str, role: &str) {
+    db.client
+        .query("UPDATE forum_board SET min_role = $role WHERE slug = $slug")
+        .bind(("role", role.to_string()))
+        .bind(("slug", slug.to_string()))
+        .await
+        .unwrap_or_else(|e| panic!("set min_role {slug}: {e}"));
+}
+
+/// Stamp `updated_at` with a fixed SurrealQL duration so list order does not
+/// depend on insert timing. Only the match arms below are interpolated.
+async fn stamp_thread_age(db: &Database, title: &str, age_secs: u32) {
+    let sql = match age_secs {
+        1 => "UPDATE forum_thread SET updated_at = time::now() - 1s WHERE title = $title",
+        2 => "UPDATE forum_thread SET updated_at = time::now() - 2s WHERE title = $title",
+        3 => "UPDATE forum_thread SET updated_at = time::now() - 3s WHERE title = $title",
+        4 => "UPDATE forum_thread SET updated_at = time::now() - 4s WHERE title = $title",
+        5 => "UPDATE forum_thread SET updated_at = time::now() - 5s WHERE title = $title",
+        6 => "UPDATE forum_thread SET updated_at = time::now() - 6s WHERE title = $title",
+        7 => "UPDATE forum_thread SET updated_at = time::now() - 7s WHERE title = $title",
+        8 => "UPDATE forum_thread SET updated_at = time::now() - 8s WHERE title = $title",
+        9 => "UPDATE forum_thread SET updated_at = time::now() - 9s WHERE title = $title",
+        10 => "UPDATE forum_thread SET updated_at = time::now() - 10s WHERE title = $title",
+        _ => panic!("stamp age {age_secs} is not a fixed fragment"),
+    };
+    db.client
+        .query(sql)
+        .bind(("title", title.to_string()))
+        .await
+        .unwrap_or_else(|e| panic!("stamp {title}: {e}"));
+}
+
+async fn make_aged_thread(db: &Database, title: &str, board_id: &str, age_secs: u32) {
+    db.create_forum_thread(title, board_id, "officermember", "body")
+        .await
+        .unwrap_or_else(|e| panic!("create {title}: {e}"));
+    stamp_thread_age(db, title, age_secs).await;
+}
+
+/// Newest rows are the ones a caller may not see, so a post-LIMIT role filter
+/// would drop them and shrink the page.
+async fn seed_forum_paging_fixtures(db: &Database) {
+    seed_all_roles(db).await;
+    let general = db
+        .get_forum_board_by_slug("general")
+        .await
+        .expect("get general")
+        .expect("default general board");
+    let cat = general.category_id.clone();
+
+    let members = db
+        .create_forum_board(&cat, None, "Members", "members-only", None, 20)
+        .await
+        .expect("members board");
+    set_board_min_role(db, "members-only", "member").await;
+    let officers = db
+        .create_forum_board(&cat, None, "Officers", "officers-only", None, 21)
+        .await
+        .expect("officers board");
+    set_board_min_role(db, "officers-only", "officer").await;
+    let admins = db
+        .create_forum_board(&cat, None, "Admins", "admins-only", None, 22)
+        .await
+        .expect("admins board");
+    set_board_min_role(db, "admins-only", "admin").await;
+    let retired = db
+        .create_forum_board(&cat, None, "Retired", "retired", None, 23)
+        .await
+        .expect("retired board");
+    db.update_forum_board(&retired.id, None, None, None, None, Some(false))
+        .await
+        .expect("deactivate retired");
+    db.create_forum_board(&cat, None, "Empty", "empty-board", None, 24)
+        .await
+        .expect("empty board");
+
+    db.client
+        .query(
+            r#"CREATE forum_thread:pagingorphan SET
+                title = 'Orphan Secret',
+                category = 'ghost',
+                board_id = 'missing-board',
+                author_member_id = 'officermember',
+                content = 'should not leak',
+                pinned = false,
+                locked = false,
+                created_at = time::now(),
+                updated_at = time::now(),
+                is_active = true"#,
+        )
+        .await
+        .expect("orphan thread");
+    stamp_thread_age(db, "Orphan Secret", 1).await;
+
+    make_aged_thread(db, "Retired Thread", &retired.id, 2).await;
+    make_aged_thread(db, "Officer Alpha", &officers.id, 3).await;
+    make_aged_thread(db, "Officer Beta", &officers.id, 4).await;
+    make_aged_thread(db, "Member Alpha", &members.id, 5).await;
+    make_aged_thread(db, "Member Beta", &members.id, 6).await;
+    make_aged_thread(db, "Public Alpha", &general.id, 7).await;
+    make_aged_thread(db, "Public Beta", &general.id, 8).await;
+    make_aged_thread(db, "Public Gamma", &general.id, 9).await;
+    make_aged_thread(db, "Admin Alpha", &admins.id, 10).await;
+}
+
+async fn forum_list_json(app: &Router, token: Option<&str>, query: &str) -> Value {
+    let uri = format!("/api/forum/threads{query}");
+    let req = match token {
+        Some(token) => authed_request(Method::GET, &uri, token),
+        None => unauthed_request(Method::GET, &uri),
+    };
+    let resp = app.clone().oneshot(req).await.expect("forum list");
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{uri} body {json}");
+    json
+}
+
+/// Walk pages until a short one. `total` must stay the same on every page.
+async fn forum_list_pages(
+    app: &Router,
+    token: Option<&str>,
+    limit: u32,
+) -> (Vec<Vec<String>>, u64) {
+    let mut pages = Vec::new();
+    let mut total = None;
+    let mut offset = 0u32;
+    for _ in 0..20 {
+        let json = forum_list_json(app, token, &format!("?limit={limit}&offset={offset}")).await;
+        let page_total = json["total"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("total missing: {json}"));
+        if let Some(prev) = total {
+            assert_eq!(prev, page_total, "total changed between pages");
+        }
+        total = Some(page_total);
+        let titles = thread_titles(&json);
+        let n = titles.len() as u32;
+        pages.push(titles);
+        if n < limit {
+            break;
+        }
+        offset = offset.saturating_add(limit);
+    }
+    (pages, total.expect("at least one page"))
+}
+
+fn assert_page_sizes(pages: &[Vec<String>], limit: usize) {
+    assert!(!pages.is_empty(), "no pages");
+    for (i, page) in pages.iter().enumerate() {
+        if i + 1 == pages.len() {
+            assert!(page.len() <= limit, "last page longer than limit: {page:?}");
+        } else {
+            assert_eq!(
+                page.len(),
+                limit,
+                "hidden threads shrank page {i}: {page:?}"
+            );
+        }
+    }
+}
+
+fn flat_titles(pages: &[Vec<String>]) -> Vec<String> {
+    pages.iter().flatten().cloned().collect()
+}
+
+fn assert_absent(titles: &[String], banned: &[&str]) {
+    for title in banned {
+        assert!(
+            !titles.iter().any(|t| t == title),
+            "{title} leaked in {titles:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn forum_list_does_not_hide_public_threads_behind_restricted_ones() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let (anon_pages, anon_total) = forum_list_pages(&app, None, 2).await;
+    assert_page_sizes(&anon_pages, 2);
+    let anon_titles = flat_titles(&anon_pages);
+    assert_eq!(
+        anon_titles,
+        vec!["Public Alpha", "Public Beta", "Public Gamma"]
+    );
+    assert_eq!(anon_total, anon_titles.len() as u64);
+    assert_absent(
+        &anon_titles,
+        &[
+            "Orphan Secret",
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Member Alpha",
+            "Member Beta",
+            "Admin Alpha",
+        ],
+    );
+
+    let (member_pages, member_total) = forum_list_pages(&app, Some(MEMBER_TOKEN), 2).await;
+    assert_page_sizes(&member_pages, 2);
+    let member_titles = flat_titles(&member_pages);
+    assert_eq!(
+        member_titles,
+        vec![
+            "Member Alpha",
+            "Member Beta",
+            "Public Alpha",
+            "Public Beta",
+            "Public Gamma",
+        ]
+    );
+    assert_eq!(member_total, 5);
+    assert_absent(
+        &member_titles,
+        &[
+            "Orphan Secret",
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Admin Alpha",
+        ],
+    );
+
+    let (officer_pages, officer_total) = forum_list_pages(&app, Some(OFFICER_TOKEN), 2).await;
+    assert_page_sizes(&officer_pages, 2);
+    let officer_titles = flat_titles(&officer_pages);
+    assert_eq!(
+        officer_titles,
+        vec![
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Member Alpha",
+            "Member Beta",
+            "Public Alpha",
+            "Public Beta",
+            "Public Gamma",
+        ]
+    );
+    assert_eq!(officer_total, 8);
+    assert_absent(&officer_titles, &["Orphan Secret", "Admin Alpha"]);
+
+    let (recruit_pages, recruit_total) = forum_list_pages(&app, Some(RECRUIT_TOKEN), 2).await;
+    assert_eq!(flat_titles(&recruit_pages), anon_titles);
+    assert_eq!(recruit_total, anon_total);
+
+    let (admin_pages, admin_total) = forum_list_pages(&app, Some(ADMIN_TOKEN), 2).await;
+    assert_page_sizes(&admin_pages, 2);
+    let admin_titles = flat_titles(&admin_pages);
+    assert!(admin_titles.iter().any(|t| t == "Admin Alpha"));
+    assert_eq!(admin_titles.len() as u64, admin_total);
+    assert_eq!(admin_total, 9);
+    assert_absent(&admin_titles, &["Orphan Secret"]);
+}
+
+#[tokio::test]
+async fn forum_thread_total_counts_every_match() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let (pages, total) = forum_list_pages(&app, None, 2).await;
+    assert_eq!(pages.len(), 2, "pages {pages:?} total {total}");
+    assert_eq!(pages[0].len(), 2, "first page shrank: {:?}", pages[0]);
+    assert_eq!(pages[1], vec!["Public Gamma".to_string()]);
+    assert_eq!(total, 3, "anonymous total must count every visible thread");
+    assert_eq!(flat_titles(&pages).len() as u64, total);
+
+    let last = forum_list_json(&app, None, "?limit=2&offset=2").await;
+    assert_eq!(last["total"].as_u64(), Some(total));
+    assert_eq!(thread_titles(&last), vec!["Public Gamma".to_string()]);
+
+    let scoped = forum_list_json(&app, None, "?board=general&limit=1").await;
+    assert_eq!(thread_titles(&scoped), vec!["Public Alpha".to_string()]);
+    assert_eq!(scoped["total"].as_u64(), Some(3));
+
+    let empty = forum_list_json(&app, None, "?board=empty-board&limit=10").await;
+    assert!(thread_titles(&empty).is_empty(), "empty board: {empty}");
+    assert_eq!(empty["total"].as_u64(), Some(0));
+
+    let member_cat =
+        forum_list_json(&app, Some(MEMBER_TOKEN), "?category=members-only&limit=1").await;
+    assert_eq!(thread_titles(&member_cat), vec!["Member Alpha".to_string()]);
+    assert_eq!(member_cat["total"].as_u64(), Some(2));
+
+    let anon_cat = forum_list_json(&app, None, "?category=members-only&limit=10").await;
+    assert!(
+        thread_titles(&anon_cat).is_empty(),
+        "anon category leak: {anon_cat}"
+    );
+    assert_eq!(anon_cat["total"].as_u64(), Some(0));
+
+    let officer_board =
+        forum_list_json(&app, Some(OFFICER_TOKEN), "?board=officers-only&limit=1").await;
+    assert_eq!(
+        thread_titles(&officer_board),
+        vec!["Officer Alpha".to_string()]
+    );
+    assert_eq!(officer_board["total"].as_u64(), Some(2));
+
+    let anon_forbidden = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/forum/threads?board=officers-only",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(anon_forbidden.status(), StatusCode::UNAUTHORIZED);
+
+    let member_forbidden = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=officers-only",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(member_forbidden.status(), StatusCode::FORBIDDEN);
+
+    let officer_admin_board = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=admins-only",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(officer_admin_board.status(), StatusCode::FORBIDDEN);
+
+    let retired_anon = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/forum/threads?board=retired",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retired_anon.status(), StatusCode::NOT_FOUND);
+
+    let retired_officer = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=retired",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retired_officer.status(), StatusCode::NOT_FOUND);
 }
 
 // ─── Seasons: admin CRUD + season window on personal stats ──────────────────
