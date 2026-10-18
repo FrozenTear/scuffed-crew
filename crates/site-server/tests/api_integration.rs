@@ -3087,6 +3087,153 @@ async fn setup_creates_admin_and_blocks_second_setup() {
     assert_eq!(res2.status(), StatusCode::FORBIDDEN);
 }
 
+/// Register and setup only accept a trimmed, lowercased username of 1 to 32
+/// ASCII letters, digits, `_`, or `-`. Login applies those same rules before
+/// lookup. A string that could never be registered gets the same 401 body as
+/// a wrong password, and it is not a lockout key. A username that passes the
+/// rules still locks out, including one that is not registered.
+#[tokio::test]
+async fn login_rejects_usernames_register_would_reject() {
+    use scuffed_site_server::login_lockout::{FIRST_LOCK_AFTER, LOCKOUT_MESSAGE};
+
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let created = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "Boss",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+
+    // Trim and case fold match registration, so the stored name still logs in.
+    let spaced = app
+        .clone()
+        .oneshot(password_login(
+            [198, 51, 100, 1],
+            "  BoSs  ",
+            "correct-horse-1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        spaced.status(),
+        StatusCode::OK,
+        "normalized username must log in"
+    );
+
+    let wrong = app
+        .clone()
+        .oneshot(password_login(
+            [198, 51, 100, 2],
+            "no-such-user",
+            "whatever-password",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let wrong_body = body_json(wrong).await;
+    assert_eq!(wrong_body["error"], "invalid username or password");
+
+    let illegal = [
+        "a".repeat(33),
+        "has space".to_string(),
+        "user@name".to_string(),
+        String::new(),
+        "üser".to_string(),
+    ];
+    for (i, username) in illegal.iter().enumerate() {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 100, 10 + i as u8],
+                username,
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "illegal username {username:?} must not be a distinct error"
+        );
+        let body = body_json(res).await;
+        assert_eq!(
+            body["error"], wrong_body["error"],
+            "illegal username {username:?} leaked a different error: {body}"
+        );
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("32") && !rendered.to_lowercase().contains("letter"),
+            "validation detail would distinguish this from a wrong password: {body}"
+        );
+    }
+
+    // Repeated illegal names stay on the generic 401. They must not take a
+    // lockout slot (that would let a spray of impossible names fill the map).
+    let long_name = "b".repeat(33);
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 101, i as u8],
+                &long_name,
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {} on a username register would reject",
+            i + 1
+        );
+        let body = body_json(res).await;
+        assert_eq!(body["error"], "invalid username or password");
+        assert_ne!(body["error"], LOCKOUT_MESSAGE);
+    }
+
+    // Lockout for a username that passes the rules is unchanged.
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 102, i as u8],
+                "missing-but-legal",
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        if i + 1 < FIRST_LOCK_AFTER {
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "legal miss {}",
+                i + 1
+            );
+        } else {
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+            let body = body_json(res).await;
+            assert_eq!(body["error"], LOCKOUT_MESSAGE);
+        }
+    }
+}
+
 #[tokio::test]
 async fn local_login_works_after_setup() {
     let state = test_state().await;
