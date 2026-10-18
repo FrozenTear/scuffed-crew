@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::http_gate::{self, HttpClass};
 use crate::limits::{self, GateLimits};
 use crate::read_policy::ReadDirectory;
-use crate::session::{AuthVerifier, GateSession, GiftBudget};
+use crate::session::{AuthVerifier, GateSession, GiftBudget, GIFT_BUCKET_SWEEP};
 
 pub async fn serve(
     listen: SocketAddr,
@@ -46,6 +46,15 @@ pub async fn serve_listener(
     limits: GateLimits,
 ) -> std::io::Result<()> {
     let gifts = Arc::new(GiftBudget::from_env());
+    let gifts_sweep = Arc::clone(&gifts);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(GIFT_BUCKET_SWEEP);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            gifts_sweep.sweep();
+        }
+    });
     loop {
         let (stream, peer) = listener.accept().await?;
         let upstream = upstream.clone();

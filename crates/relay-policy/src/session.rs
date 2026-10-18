@@ -24,6 +24,10 @@ pub const COUNT_DISABLED: &str = "restricted: COUNT is disabled";
 pub const NEG_DISABLED: &str = "restricted: negentropy sync is disabled";
 pub const RATE_LIMITED: &str = "rate-limited: too many events";
 
+/// How often the gate drops expired `gift:{sender}:{recipient}` buckets.
+/// `allow` only trims a bucket when that same pair sends again.
+pub const GIFT_BUCKET_SWEEP: Duration = Duration::from_secs(60);
+
 /// Per-sender gift-wrap budget for publishes that come through the gate.
 ///
 /// Keyed `gift:{authed pubkey}:{recipient}`. One signed-in member cannot
@@ -95,6 +99,31 @@ impl GiftBudget {
             stamps.push(now);
         }
         true
+    }
+
+    /// Drop stamps outside the window, and drop buckets that are then empty.
+    ///
+    /// A pair that never sends again would otherwise keep its key forever.
+    /// The read gate calls this on [`GIFT_BUCKET_SWEEP`].
+    pub fn sweep(&self) {
+        self.sweep_at(Instant::now());
+    }
+
+    fn sweep_at(&self, now: Instant) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        let window = self.window;
+        buckets.retain(|_, stamps| {
+            stamps.retain(|stamp| now.saturating_duration_since(*stamp) < window);
+            !stamps.is_empty()
+        });
+    }
+
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
     }
 }
 
@@ -350,6 +379,7 @@ mod tests {
     use super::*;
     use crate::read_policy::{GroupAcl, MemberAcl, ReadDirectory, GIFT_WRAP_KIND};
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     struct FixedVerifier {
         pubkey: String,
@@ -648,6 +678,23 @@ mod tests {
             &gifts,
         );
         assert_eq!(other_recipient.to_relay.len(), 1);
+    }
+
+    #[test]
+    fn sweep_removes_expired_gift_buckets() {
+        let gifts = GiftBudget::new(1, 60);
+        let frame: Value = serde_json::from_str(&format!(
+            r#"["EVENT",{{"id":"w1","kind":1059,"tags":[["p","{}"]]}}]"#,
+            pk(0x22)
+        ))
+        .unwrap();
+        assert!(gifts.allow(&pk(0x11), &frame));
+        gifts.sweep();
+        assert_eq!(gifts.bucket_count(), 1);
+        assert!(!gifts.allow(&pk(0x11), &frame));
+        gifts.sweep_at(Instant::now() + Duration::from_secs(61));
+        assert_eq!(gifts.bucket_count(), 0);
+        assert!(gifts.allow(&pk(0x11), &frame));
     }
 
     #[test]

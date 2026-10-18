@@ -449,32 +449,53 @@ no `h` tag. Set the variable to `false` to allow any allowlisted pubkey to
 write any `h` group.
 
 The write plugin and the read gate reload when `plays_on`, `team_channel`,
-or `member` changes, using a SurrealDB LIVE query. Officer permission and
-the Nostr pubkey live on `member`, so a promotion reloads too. A rejected
-write for an unknown author, an unknown group, or a pubkey outside that
-group's writer set schedules the same reload, debounced to at least 2
-seconds, as a backup. `RELAY_POLICY_REFRESH_SECS` (default 60) is the slow
-backup if LIVE is down.
+or `member` changes, using a SurrealDB LIVE query. Those statements are
+`LIVE SELECT id FROM <table>`. The notice is only a reload trigger.
+`member` holds `nostr_secret_key_encrypted`, and that field must not enter
+the relay process. `plays_on` and `team_channel` have no secret columns.
+They use the same `id` projection so the body is not shipped either.
+Officer permission and the Nostr pubkey live on `member`, so a promotion
+reloads too. A rejected write for an unknown author, an unknown group, or a
+pubkey outside that group's writer set schedules the same reload, debounced
+to at least 2 seconds, as a backup. `RELAY_POLICY_REFRESH_SECS` (default 60)
+is the slow backup if LIVE is down.
 
 Kind 1059 is not one rate bucket per recipient. The plugin keys
 `gift:{sender}:{recipient}`. The sender is strfry's authenticated pubkey
 when that connection completed NIP-42. site-server publishes straight to
-`ws://strfry:7777` with no AUTH (`publish_event_oneshot` in
-`crates/server/src/routes/chat.rs` and `crates/site-server`), and the wrap
-author is ephemeral, so each of those wraps has its own bucket and does not
-consume a member's kind 9 budget. The gate keeps a second bucket,
+`ws://strfry:7777` with no AUTH. `publish_event_oneshot` is defined in
+`crates/chat/src/nostr/relay.rs`. Kind 1059 DMs call it from
+`crates/site-server/src/routes/nostr.rs` (`POST /api/nostr/dm/send`).
+Officer gift wraps use `RelayClient::publish_event` in
+`crates/server/src/routes/chat.rs` (`send_encrypted`), also with no AUTH.
+The wrap author is ephemeral, so each of those wraps has its own bucket and
+does not consume a member's kind 9 budget. The gate keeps a second bucket,
 `gift:{authed member}:{recipient}`, and refuses the EVENT before forward
 when that member is over `RELAY_POLICY_RATE_LIMIT`. One signed-in member
-cannot use up another member's inbox budget.
+cannot use up another member's inbox budget. The gate drops expired
+`gift:` buckets on a 60 second timer. The write plugin does the same for
+its rate buckets, including `gift:` keys.
+
+Gift wraps that the site publishes on `ws://strfry:7777` do not pass
+through the gate. The plugin bucket does not cap them, because each wrap
+author is a new ephemeral key. The gate's
+`gift:{authed member}:{recipient}` limit is the only cap on gift wraps a
+browser can send. That holds only while container port 7777 stays on the
+Compose network and is never published on a host port. `compose.yml` maps
+host `127.0.0.1:7777` to the gate on container port 7779
+(`127.0.0.1:7777:7779`). Publishing `7777:7777` would let a client reach
+strfry directly and skip that cap.
 
 The relay image has to be rebuilt before this plugin is what a running
 container executes. `./scripts/relay-up.sh` does that (`up --build` recreates
 strfry). Restarting a container built from an older image keeps the old
 write plugin.
 
-Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
-Compose network only, so site-server still uses `ws://strfry:7777` for publish
-and its own subscriptions. Do not publish `7777:7777`; that would skip the gate.
+Host `127.0.0.1:7777` is the gate (container port 7779). Container port 7777
+is strfry itself and stays on the Compose network, so site-server still uses
+`ws://strfry:7777` for publish and its own subscriptions. Do not publish
+`7777:7777`. A published strfry port would skip the gate, and gift wraps on
+that path have no other cap.
 
 The gate does not pipe HTTP through to strfry. A NIP-11 request
 (`Accept: application/nostr+json`) is answered by the gate, then the connection

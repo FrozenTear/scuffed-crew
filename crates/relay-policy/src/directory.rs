@@ -139,12 +139,19 @@ pub async fn watch_writer_tables(db: Arc<Database>, tx: UnboundedSender<()>) {
     );
 }
 
+/// Reload trigger only. The caller discards the notification body.
+///
+/// SurrealDB 3 accepts a field projection on `LIVE SELECT`. `id` is enough
+/// to notice a change. `SELECT *` on `member` would stream
+/// `nostr_secret_key_encrypted` into this process. `plays_on` (role and
+/// timestamps) and `team_channel` (group id, type, relay URL) have no secret
+/// columns. They use the same projection so a later column cannot ride along.
 fn live_sql(table: &'static str) -> &'static str {
     match table {
-        "plays_on" => "LIVE SELECT * FROM plays_on",
-        "team_channel" => "LIVE SELECT * FROM team_channel",
-        "member" => "LIVE SELECT * FROM member",
-        _ => "LIVE SELECT * FROM member WHERE false",
+        "plays_on" => "LIVE SELECT id FROM plays_on",
+        "team_channel" => "LIVE SELECT id FROM team_channel",
+        "member" => "LIVE SELECT id FROM member",
+        _ => "LIVE SELECT id FROM member WHERE false",
     }
 }
 
@@ -313,5 +320,71 @@ mod tests {
             .expect("create");
         let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
         assert!(notice.expect("live timeout").is_some());
+    }
+
+    #[test]
+    fn live_queries_project_the_record_id() {
+        for table in ["member", "plays_on", "team_channel"] {
+            let sql = live_sql(table);
+            assert!(
+                sql.starts_with("LIVE SELECT id FROM "),
+                "{table} live query must project id only: {sql}"
+            );
+            assert!(!sql.contains('*'), "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_notices_omit_secret_fields() {
+        use futures_util::StreamExt;
+
+        let secret = "sekrit-nostr-blob-do-not-leak";
+        for table in ["member", "plays_on", "team_channel"] {
+            let db = mem(&format!("relay-policy-live-{table}")).await;
+            db.client
+                .query(format!("DEFINE TABLE {table} SCHEMALESS"))
+                .await
+                .expect("define");
+            let mut response = db
+                .client
+                .query(live_sql(table))
+                .await
+                .unwrap_or_else(|err| panic!("{table} live query failed: {err}"));
+            let mut stream = response
+                .stream::<surrealdb::Notification<surrealdb::types::Value>>(0)
+                .unwrap_or_else(|err| panic!("{table} live stream failed: {err}"));
+            let record = format!("{table}:secretprobe");
+            db.client
+                .query(format!(
+                    "CREATE {record} SET nostr_secret_key_encrypted = $secret, note = $secret"
+                ))
+                .bind(("secret", secret))
+                .await
+                .unwrap_or_else(|err| panic!("{table} create failed: {err}"));
+            let stored = db
+                .client
+                .query(format!("SELECT * FROM {record}"))
+                .await
+                .expect("select star");
+            let stored = format!("{stored:?}");
+            assert!(
+                stored.contains(secret),
+                "{table} fixture must store the secret so a SELECT * live query would fail this test: {stored}"
+            );
+            let notice = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .unwrap_or_else(|_| panic!("{table} live timeout"))
+                .unwrap_or_else(|| panic!("{table} live stream ended"))
+                .unwrap_or_else(|err| panic!("{table} live notice: {err}"));
+            let rendered = format!("{:?}", notice.data);
+            assert!(
+                !rendered.contains(secret),
+                "{table} live notice carried a secret field: {rendered}"
+            );
+            assert!(
+                rendered.contains("secretprobe"),
+                "{table} live notice should still name the record: {rendered}"
+            );
+        }
     }
 }

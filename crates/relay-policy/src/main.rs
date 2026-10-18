@@ -268,6 +268,23 @@ fn main() {
         None
     };
 
+    // Gift-wrap buckets (`gift:{sender}:{recipient}`) are trimmed inside
+    // evaluate only when that same pair sends again. Sweep them on a timer
+    // so a quiet pair does not keep a map entry. This runs even when
+    // SurrealDB is down and the writer reload never fires.
+    let engine_sweep = Arc::clone(&engine);
+    rt.spawn(async move {
+        let mut interval = tokio::time::interval(policy::RATE_BUCKET_SWEEP);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            engine_sweep
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .prune_rate_buckets();
+        }
+    });
+
     // Main stdin/stdout policy loop.
     let stdin = io::stdin();
     let stdout = io::stdout();

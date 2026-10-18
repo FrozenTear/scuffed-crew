@@ -113,6 +113,11 @@ impl RateBucket {
     }
 }
 
+/// How often the write plugin drops expired rate buckets, including
+/// `gift:{sender}:{recipient}` keys. `evaluate` only trims a bucket when
+/// that same key is used again.
+pub const RATE_BUCKET_SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The core policy engine that evaluates incoming Nostr events.
 pub struct PolicyEngine {
     config: PolicyConfig,
@@ -235,13 +240,28 @@ impl PolicyEngine {
         Decision::Accept
     }
 
-    /// Prune rate-limit buckets for pubkeys that haven't sent events recently.
-    /// Call periodically to prevent unbounded memory growth.
+    /// Drop stamps outside the rate window, then drop empty buckets.
+    ///
+    /// Gift-wrap keys are `gift:{sender}:{recipient}`. A pair that never
+    /// sends again would otherwise keep that entry. The plugin calls this
+    /// on [`RATE_BUCKET_SWEEP`], and also after a writer reload.
     pub fn prune_rate_buckets(&mut self) {
-        let cutoff =
-            Instant::now() - std::time::Duration::from_secs(self.config.rate_limit_window_secs * 2);
-        self.rate_buckets
-            .retain(|_, bucket| bucket.timestamps.last().is_some_and(|t| *t > cutoff));
+        self.prune_rate_buckets_at(Instant::now());
+    }
+
+    fn prune_rate_buckets_at(&mut self, now: Instant) {
+        let window = std::time::Duration::from_secs(self.config.rate_limit_window_secs);
+        self.rate_buckets.retain(|_, bucket| {
+            bucket
+                .timestamps
+                .retain(|stamp| now.saturating_duration_since(*stamp) < window);
+            !bucket.timestamps.is_empty()
+        });
+    }
+
+    #[cfg(test)]
+    fn rate_bucket_count(&self) -> usize {
+        self.rate_buckets.len()
     }
 }
 
@@ -657,5 +677,42 @@ mod tests {
         engine.prune_rate_buckets();
         // Should still work after prune
         assert_eq!(engine.evaluate(&event), Decision::Accept);
+    }
+
+    #[test]
+    fn sweep_drops_expired_gift_buckets() {
+        let config = PolicyConfig {
+            rate_limit_events: 1,
+            rate_limit_window_secs: 60,
+            ..PolicyConfig::default()
+        };
+        let mut engine = PolicyEngine::new(config);
+        let member = "aabbccdd".repeat(8);
+        let mut allowlist = HashSet::new();
+        allowlist.insert(member.clone());
+        engine.update_allowlist(allowlist);
+        let wrap = EventInfo {
+            id: "deadbeef".repeat(8),
+            pubkey: "11".repeat(32),
+            kind: 1059,
+            tags: vec![vec!["p".to_string(), member]],
+            authed: None,
+        };
+        assert_eq!(engine.evaluate(&wrap), Decision::Accept);
+        assert_eq!(engine.rate_bucket_count(), 1);
+        assert!(engine
+            .rate_buckets
+            .keys()
+            .any(|key| key.starts_with("gift:")));
+        engine.prune_rate_buckets();
+        assert_eq!(engine.rate_bucket_count(), 1);
+        assert!(matches!(
+            engine.evaluate(&wrap),
+            Decision::Reject(msg) if msg.contains("rate-limited")
+        ));
+        engine
+            .prune_rate_buckets_at(std::time::Instant::now() + std::time::Duration::from_secs(61));
+        assert_eq!(engine.rate_bucket_count(), 0);
+        assert_eq!(engine.evaluate(&wrap), Decision::Accept);
     }
 }
