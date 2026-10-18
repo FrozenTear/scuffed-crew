@@ -718,7 +718,7 @@ fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
     seed_logs(dir.path());
     crate::perf_log::append_to(
         dir.path(),
-        "2026-10-16T17:00:00Z setup app=x session=x11 kernel=6.8.0 cpus=8 ram_mb=15890 proton=GE-Proton9-20",
+        "2026-10-16T17:00:00Z setup app=x session=x11 kernel=6.8.0 cpus=8 ram_mb=15890 proton=GE-Proton9-20 cpu_model=\"AMD Ryzen 7 5800X 8-Core Processor\"",
         crate::perf_log::MAX_BYTES,
     );
     crate::perf_log::append_to(
@@ -749,6 +749,13 @@ fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
     }
     assert!(report.log_text.starts_with("2026-10-16T17:00:00Z setup"));
     assert!(report.log_text.contains("x11_shm=no"));
+    assert!(
+        report
+            .log_text
+            .contains("cpu_model=\"AMD Ryzen 7 5800X 8-Core Processor\""),
+        "the CPU model survives the scrub:\n{}",
+        report.log_text
+    );
     assert!(
         !report.log_text.contains("qx"),
         "daemon log leaked:\n{}",

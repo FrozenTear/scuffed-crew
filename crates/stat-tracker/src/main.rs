@@ -23,10 +23,10 @@ const OUTCOME_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_se
 
 /// PR-B (fleet::tracker-fps): mid-match the poller performs its screencopy
 /// only on every Nth interval tick. Each compositor screencopy is a GPU
-/// readback on the gaming output — the frametime hitch behind the "fuzzy"
-/// reports — and mid-match ticks carry no signal worth that cost at full
+/// readback on the gaming output, the frametime hitch behind the "fuzzy"
+/// reports, and mid-match ticks carry no signal worth that cost at full
 /// cadence. 2 (not 3): phase/end screens must still land two poll ticks
-/// inside their lifetime — the OCR stability gate defers the first sighting,
+/// inside their lifetime, the OCR stability gate defers the first sighting,
 /// and the shortest screen (map vote, ~15s) only fits two ticks at the 8s
 /// effective cadence this yields under the default 4s interval.
 const SLOW_POLL_DIVISOR: u32 = 2;
@@ -34,7 +34,7 @@ const SLOW_POLL_DIVISOR: u32 = 2;
 /// How recently a game must have opened for the poller to stay at full
 /// cadence: start screens (map vote / ban / hero select) and early corrective
 /// evidence cluster in the first stretch of a session, and matches don't end
-/// this early — after it, mid-match slow cadence applies until end evidence
+/// this early, after it, mid-match slow cadence applies until end evidence
 /// shows up (outcome recorded, fresh word-OCR streak, POTG / end-reel wake,
 /// or a new game opening).
 const SLOW_AFTER_GAME_OPEN: std::time::Duration = std::time::Duration::from_secs(120);
@@ -44,12 +44,12 @@ const SLOW_AFTER_GAME_OPEN: std::time::Duration = std::time::Duration::from_secs
 /// accolade screen follows immediately (see `read_result_word`). 45s from
 /// first sighting covers remaining reel + the short V/D window with margin,
 /// then slow mode resumes if no outcome/streak has landed. Mid-point of the
-/// 30–60s range — long enough to not miss Victory, short enough that a
+/// 30–60s range, long enough to not miss Victory, short enough that a
 /// false letterbox does not pin 4s screencopy for a full minute.
 const END_REEL_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// How many poll-tick frames `--dump-poll-frames` keeps (ring buffer on disk).
-/// At a 4s poll interval this is ~10 minutes — enough that a defeat's
+/// At a 4s poll interval this is ~10 minutes, enough that a defeat's
 /// post-match sequence survives even if the next game is already underway
 /// before the frames are copied out. Frames are a few MB each.
 const POLL_DUMP_KEEP: usize = 150;
@@ -65,7 +65,10 @@ const REJECTED_KEEP: usize = 30;
 /// A silently-corrupt accepted board (OCR drift that still passed every trust
 /// gate) is otherwise unrecoverable for calibration retuning. Written only
 /// with `debug_ocr` on: the crop is unblanked and shows other players' names.
-const ACCEPTED_KEEP: usize = 20;
+/// 60 covers about three evenings of Tab presses (20 held about one game's
+/// worth on a busy night); one crop is 1 to 2 MB, so the ring stays under
+/// about 120 MB.
+const ACCEPTED_KEEP: usize = 60;
 
 /// After this many consecutive scoreboard captures that parsed but resolved no
 /// map, dump the map-label region to `debug/mapmiss/` so the miss is
@@ -86,7 +89,7 @@ const MAPMISS_KEEP: usize = 10;
 const KEYBOARD_OPEN_ATTEMPTS: u32 = 3;
 
 /// Gap between [`KEYBOARD_OPEN_ATTEMPTS`]. This wait also polls SIGTERM
-/// and Ctrl+C — without that, `systemctl --user stop` sits until
+/// and Ctrl+C, without that, `systemctl --user stop` sits until
 /// TimeoutStopSec and SIGKILL while the handler is registered but never
 /// received.
 const KEYBOARD_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -136,7 +139,7 @@ impl KeyboardWaiter for SignalKeyboardWaiter<'_> {
     }
 }
 
-/// Open a keyboard, retrying on failure. `Err` is "still no keyboard" —
+/// Open a keyboard, retrying on failure. `Err` is "still no keyboard",
 /// callers must propagate it so the process exits non-zero. `Ok(Shutdown)`
 /// is a clean stop during the retry wait.
 async fn acquire_keyboard<T, E, F, W>(
@@ -282,7 +285,7 @@ struct DaemonCtx {
     dump_poll_frames: bool,
     /// Same gate as Tab OCR dumps (`debug_ocr` / `STAT_TRACKER_DEBUG_OCR`).
     /// When set, the poller writes Victory/Defeat evidence frames on confirm
-    /// and first word-OCR streak — not every mid-match tick. Also gates the
+    /// and first word-OCR streak, not every mid-match tick. Also gates the
     /// `debug/accepted` and `debug/rejected` rings (unblanked board pixels).
     debug_ocr: bool,
     data_dir: std::path::PathBuf,
@@ -454,7 +457,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // One client for the whole process. An unsafe URL logs once here and
-    // leaves sync off — including the startup player-name fetch — so the
+    // leaves sync off, including the startup player-name fetch, so the
     // bearer token is never sent. The daemon keeps running.
     let sync_client = open_sync_client(config.sync.as_ref());
     // heroes-v1 syncs here; the other packs sync in the background once
@@ -495,7 +498,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         ));
     }
 
-    // Single wiring point for OCR debug dumps — the lib reads this switch
+    // Single wiring point for OCR debug dumps, the lib reads this switch
     // instead of re-loading config on first use; dumps land under data_dir.
     ocr::set_debug_ocr(config.debug_ocr_enabled());
     ocr::set_debug_dir(config.data_dir.join("debug"));
@@ -603,7 +606,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     }
 
     // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
-    // Don't run it at daemon startup — it can take minutes and blocks Tab capture.
+    // Don't run it at daemon startup, it can take minutes and blocks Tab capture.
 
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
@@ -806,7 +809,7 @@ async fn handle_info_flags() -> bool {
     if std::env::args().any(|a| a == "--list-outputs") {
         // Enumerate through the exact backend detect_backend chose so the CLI
         // and daemon agree on the capture source. An unavailable backend is a
-        // hard error (non-zero exit) — it must not read as "zero outputs".
+        // hard error (non-zero exit), it must not read as "zero outputs".
         let backend = capture::detect_backend().await;
         match backend {
             capture::CaptureBackend::None => {
@@ -992,7 +995,7 @@ async fn offer_own_name_seed(
 
 /// When `player_name` isn't set locally, fetch it from the server. This is the
 /// "first run via GUI" path: the user set their name in the web UI and launched
-/// the daemon with just a token — no manual config editing needed.
+/// the daemon with just a token, no manual config editing needed.
 ///
 /// `client` is only present when [`open_sync_client`] accepted the URL.
 async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync::SyncClient) {
@@ -1185,7 +1188,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 
 /// The game currently in progress. Opened when the poller sees a game-start
 /// screen (map vote / hero select / ban) and reused for every Tab capture until
-/// the next game starts — so captures taken across hero swaps all land in one
+/// the next game starts, so captures taken across hero swaps all land in one
 /// session. `outcome` is filled in when the poller reads the post-match screens
 /// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
@@ -1223,7 +1226,7 @@ struct ActiveGame {
     /// on that file as untrusted text.
     map_source: Option<boundary::MapSource>,
     /// Canonicalized names seen on the map-vote screen. The winner is
-    /// unknowable at vote time, so these are CANDIDATES only — they constrain
+    /// unknowable at vote time, so these are CANDIDATES only, they constrain
     /// later OCR reads (a read that isn't one of them is a misread) but are
     /// never stored as the played map themselves.
     map_candidates: Vec<String>,
@@ -1237,7 +1240,7 @@ struct ActiveGame {
     opened_at: Instant,
     /// Last recorded evidence the game is still this game (capture stored,
     /// outcome/map recorded). Bounds how long an unfinished session can
-    /// absorb captures — see [`UNFINISHED_SESSION_IDLE`].
+    /// absorb captures, see [`UNFINISHED_SESSION_IDLE`].
     last_activity: Instant,
     /// Per-cell capture-gate state (last accepted + last raw counters) from the
     /// most recent accepted capture. Scoreboard stats are cumulative within a
@@ -1453,7 +1456,7 @@ impl ActiveGame {
 
 /// On-disk mirror of [`ActiveGame`] (wall-clock timestamps instead of
 /// `Instant`s). The session state machine is otherwise memory-only, and daemon
-/// restarts are routine — without this, a restart mid-game either split the
+/// restarts are routine, without this, a restart mid-game either split the
 /// game (new session per Tab) or merged it into whatever came next.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedGame {
@@ -1473,7 +1476,7 @@ struct PersistedGame {
     last_activity: chrono::DateTime<Utc>,
     outcome_recorded_at: Option<chrono::DateTime<Utc>>,
     // Renamed from `last_stats: (u32,u32,u32)`; an old on-disk skeleton simply
-    // defaults this to None (one game's cross-restart gate memory lost — the
+    // defaults this to None (one game's cross-restart gate memory lost, the
     // file is best-effort recovery, never the capture itself).
     #[serde(default)]
     gate: Option<GateState>,
@@ -2180,7 +2183,7 @@ fn active_game_from_persisted(
         opened_at: to_instant(p.opened_at)?,
         last_activity,
         // An unrecoverable timestamp behaves as "unstamped", which the grace
-        // logic already treats as stale — the outcome can't leak forward.
+        // logic already treats as stale, the outcome can't leak forward.
         outcome_recorded_at: p.outcome_recorded_at.and_then(to_instant),
         last_stats_at: p.last_stats_at.and_then(to_instant),
         gate: p.gate,
@@ -2541,7 +2544,7 @@ fn is_empty_tab_game(game: &ActiveGame) -> bool {
 /// How long an unfinished session stays reusable with no recorded activity.
 /// If the poller misses the outcome AND the next game's start screens (likely
 /// under Tab starvation, or with auto-detect off), an unbounded session would
-/// absorb every capture that follows — yesterday's unfinished game swallowing
+/// absorb every capture that follows, yesterday's unfinished game swallowing
 /// today's first Tab. Sized comfortably above a long match plus queue time.
 const UNFINISHED_SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
@@ -2555,11 +2558,11 @@ const UNFINISHED_SESSION_MAX: std::time::Duration = std::time::Duration::from_se
 /// heavy mid-fight red vignettes; a real banner can't appear this early into
 /// a match. The end-title text path stays available regardless, and a
 /// session freshly opened by the Tab itself (daemon joined mid/post match) is
-/// exempt — there the banner is exactly the evidence being recovered.
+/// exempt, there the banner is exactly the evidence being recovered.
 const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Wall-vs-monotonic divergence treated as a suspend (m4). `Instant` is
-/// CLOCK_MONOTONIC, which freezes during suspend — after resume every
+/// CLOCK_MONOTONIC, which freezes during suspend, after resume every
 /// in-memory window (grace, pending TTL, idle bound) silently believes no
 /// time passed, so yesterday's post-match state can swallow today's first
 /// game. Well above tick jitter and NTP step corrections, far below any
@@ -2579,9 +2582,9 @@ fn restored_result_is_past_grace(g: &ActiveGame, now: Instant) -> bool {
 /// active one.
 fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
     match game {
-        // No game open — daemon started mid-match or the start screen was missed.
+        // No game open, daemon started mid-match or the start screen was missed.
         None => true,
-        // Mid-game capture — unless the session has been idle so long it
+        // Mid-game capture, unless the session has been idle so long it
         // can't plausibly be the same game.
         Some(g) if !g.finished() => {
             now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE
@@ -2624,7 +2627,7 @@ fn maps_compatible(
         // (lingering vote with empty OCR, or a split frame that hasn't
         // resolved). Same match until a contradictory map arrives.
         (Some(_), None) => true,
-        // No confirmed previous map — identity reuse does not apply.
+        // No confirmed previous map, identity reuse does not apply.
         // Map-vote debounce still covers a lingering vote with no Tab yet.
         (None, _) => false,
     }
@@ -2643,7 +2646,7 @@ fn heroes_compatible(prev: Option<&str>, incoming: Option<&str>) -> bool {
 /// The map-vote cooldown (`auto_detect.cooldown_secs`, default 120s) only
 /// debounces a lingering vote opening a *second* new game. A Tab that opened
 /// the first session sets `last_game_open`, so after 120s a lingering or
-/// false-positive vote can open another — observed as two Games cards for one
+/// false-positive vote can open another, observed as two Games cards for one
 /// match (same map/hero, empty first row + later WIN, ~6 min apart).
 fn same_unfinished_match(
     unfinished: bool,
@@ -2768,10 +2771,10 @@ const STAT_SPLIT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1
 
 /// Whether a capture's player stats regressed versus the session's previous
 /// accepted capture. Elims, deaths, and damage are cumulative within one
-/// match (hero swaps included) — they never decrease. Requiring at least two
+/// match (hero swaps included), they never decrease. Requiring at least two
 /// of the three to drop keeps a single misread column (e.g. an inflated
-/// elims read) from faking a boundary, while a real new game — all counters
-/// restarting near zero — trips it reliably.
+/// elims read) from faking a boundary, while a real new game, all counters
+/// restarting near zero, trips it reliably.
 ///
 /// DUP-1 guard: a column whose CURRENT read is `cur_suspect` (edge-ink
 /// clipped/bled, CG-3) must NOT vote as a drop.
@@ -2782,7 +2785,7 @@ const STAT_SPLIT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1
 /// read (streak still 0, un-latch not yet fired) drops versus the latched
 /// `accepted` and would split MID-game (Rialto 2026-07-20T22:23:41Z: "active
 /// game replaced after stat-regression split"). So a column votes only if the
-/// read also dropped versus `prev_raw` beyond the corroboration band — a
+/// read also dropped versus `prev_raw` beyond the corroboration band, a
 /// latch-recovery read is continuous with `last_raw` and does not, while a
 /// genuine new-game reset drops versus BOTH and still splits. When `prev_raw`
 /// for a column is itself suspect (untrustworthy for continuity) we fall back
@@ -2856,9 +2859,9 @@ fn take_fresh_pending(
 /// The map to store on a capture snapshot.
 ///
 /// Priority: the session's confirmed map > top-bar label OCR > the fuzzy
-/// scoreboard-text read. Map-vote names never appear here — the vote winner
+/// scoreboard-text read. Map-vote names never appear here, the vote winner
 /// is unknowable at vote time (recording candidates as the played map was
-/// wrong ~2/3 of the time with 2+ candidates) — but when candidates are known
+/// wrong ~2/3 of the time with 2+ candidates), but when candidates are known
 /// they veto OCR reads that aren't among them: the played map must be one of
 /// the voted maps, so a read outside the set is a misread.
 #[cfg(test)]
@@ -3216,7 +3219,7 @@ struct FrameAnalysis {
     /// `reader = "new"`: what this board says about the trusted own-name
     /// seeds (confirmed, or naming another row than the career hero's).
     own_seed_verdict: detect::own_row::Verdict,
-    /// Detected team size (5 or 6) — portrait geometry depends on it.
+    /// Detected team size (5 or 6), portrait geometry depends on it.
     team_size: usize,
     /// The full frame, kept for the rejected-capture archive.
     frame: image::DynamicImage,
@@ -3257,11 +3260,11 @@ struct CaptureReport {
     /// A snapshot row was written (and the session row created if this was the
     /// session's first capture). False = rejected by a trust gate.
     recorded: bool,
-    /// Outcome stored on the snapshot — may have been recovered from the frame
+    /// Outcome stored on the snapshot, may have been recovered from the frame
     /// itself (banner colors / end-title text) when the game's outcome was still
     /// Unknown, in which case the caller back-fills it onto the session.
     outcome: detect::MatchOutcome,
-    /// Map stored on the snapshot, if one was read — the caller adopts the
+    /// Map stored on the snapshot, if one was read, the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
     /// Where `map` was read. [`resolved_map`] returns
@@ -3274,7 +3277,7 @@ struct CaptureReport {
     /// requested session when a stat regression split off a new game.
     session_id: String,
     /// The capture's stats regressed versus the session's previous accepted
-    /// capture — a new game was detected and written to a fresh session; the
+    /// capture, a new game was detected and written to a fresh session; the
     /// caller must replace its active game to match.
     split: bool,
     /// First fresh-match board. Not written to the current session. The
@@ -3339,24 +3342,24 @@ impl CaptureReport {
 /// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
 /// locals that the `select!` arms read and write so they travel as one value
 /// instead of a fistful of parallel `let mut`s (QUAL-004). Purely
-/// organizational — every field keeps the exact meaning it had as a standalone
+/// organizational, every field keeps the exact meaning it had as a standalone
 /// local; no behavior depends on the grouping.
 struct SessionState {
     /// Accepted-capture counter driving the periodic sync cadence
     /// (`SYNC_EVERY_N_CAPTURES`).
     capture_count: u32,
-    /// When the current game was last (re)opened — debounces poller-driven
+    /// When the current game was last (re)opened, debounces poller-driven
     /// new-game detection against `new_game_debounce`.
     last_game_open: Option<Instant>,
-    /// Last accepted Tab capture — powers the Tab debounce.
+    /// Last accepted Tab capture, powers the Tab debounce.
     last_tab_capture: Option<Instant>,
-    /// The game currently in progress — opened at the map-vote / hero-select
+    /// The game currently in progress, opened at the map-vote / hero-select
     /// screen, reused for every capture until the next game starts. Recovered
     /// from the previous run when the daemon restarted mid-game (crash, upgrade,
     /// systemd restart), so the restart neither splits the game into two
     /// sessions nor loses its outcome/map context.
     active_game: Option<ActiveGame>,
-    /// Outcome detected by the poller while no game was open — applied to the
+    /// Outcome detected by the poller while no game was open, applied to the
     /// next session that opens, if still fresh (`PENDING_OUTCOME_TTL`).
     pending_outcome: Option<(detect::MatchOutcome, Instant)>,
     /// Last result-word OCR read, for confirmation: a word outcome is only
@@ -3396,7 +3399,7 @@ fn end_reel_wake_active(st: &SessionState, now: Instant) -> bool {
     st.end_reel_wake_until.is_some_and(|until| now < until)
 }
 
-/// Fresh word-OCR streak or an unexpired end-reel wake — both force full
+/// Fresh word-OCR streak or an unexpired end-reel wake, both force full
 /// cadence. One helper so the two wake sources cannot drift.
 fn cadence_wake_active(st: &SessionState, now: Instant) -> bool {
     st.word_outcome_streak
@@ -3407,7 +3410,7 @@ fn cadence_wake_active(st: &SessionState, now: Instant) -> bool {
 
 /// Mid-match, skip the auto-detect poll while Tab scoreboard OCR saturates
 /// the pool. During an active `end_reel_wake_until` the short Victory/Defeat
-/// banner (~3s) can land in that same window — skipping starves the only
+/// banner (~3s) can land in that same window, skipping starves the only
 /// outcome path (2026-09-06: Tab held through end-reel, no poll
 /// `result word: VICTORY`, no `poll_confirm_victory_*` dump). Outcome-signal
 /// OCR is small-crop, not the Tab cell pool; see
@@ -3420,7 +3423,7 @@ fn skip_poll_for_tab_in_flight(tab_in_flight: bool, st: &SessionState, now: Inst
 /// still hot. Screenshot + `detect_outcome_signal_*` + `detect_end_reel` +
 /// existing confirm/streak / `poll_debug_hit` dumps. Phase and accolade-map
 /// OCR stay off so we do not compete with the Tab cell pool. Mid-match
-/// (no wake) never takes this path — those ticks still skip.
+/// (no wake) never takes this path, those ticks still skip.
 fn poll_outcome_only_while_tab_busy(tab_in_flight: bool, st: &SessionState, now: Instant) -> bool {
     tab_in_flight && end_reel_wake_active(st, now)
 }
@@ -3945,7 +3948,7 @@ async fn apply_capture_report(
     }
 }
 
-/// PR-B: whether the poller sits mid-match with nothing imminent — a mature
+/// PR-B: whether the poller sits mid-match with nothing imminent, a mature
 /// open game, outcome still unknown, and no cadence wake (fresh word-OCR
 /// streak or POTG / end-reel deadline). Every end-of-match signal path
 /// already drops this back to full cadence through existing state: a banner
@@ -4159,7 +4162,7 @@ async fn apply_poll_tick(
     } else if tick.signal_confirmed
         && let Some(outcome) = tick.signal
     {
-        // No game open yet — applies to the next session if one opens
+        // No game open yet, applies to the next session if one opens
         // within the TTL.
         st.pending_outcome = Some((outcome, now));
     }
@@ -4240,7 +4243,7 @@ async fn run_loop(
     let data_dir: &std::path::Path = &ctx.data_dir;
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
-    // The GUI's Stop button (and systemd) send SIGTERM — shut down as
+    // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
     // for the reader packs (only when that wait ran): a SIGTERM that came
@@ -4281,7 +4284,7 @@ async fn run_loop(
     //
     // After a server/network failure the next *periodic* trigger waits on
     // `sync_backoff` (exponential, capped, reset on success). Shutdown does
-    // not consult that clock — it still joins the in-flight task, then uploads
+    // not consult that clock, it still joins the in-flight task, then uploads
     // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
     let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
@@ -4311,7 +4314,7 @@ async fn run_loop(
 
     // Tab OCR also runs as a spawned task (single-flight), reporting back on
     // this channel. Awaited inline, one capture starved the poller for a
-    // measured 45-70s — long enough to miss the ~3s VICTORY/DEFEAT banner and
+    // measured 45-70s, long enough to miss the ~3s VICTORY/DEFEAT banner and
     // the whole accolade screen, i.e. the outcome. The 400ms "let the game
     // render the scoreboard" wait sleeps inside the task too.
     let (capture_tx, mut capture_rx) =
@@ -4321,7 +4324,7 @@ async fn run_loop(
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // GUI command queue (manual outcome edits, session deletion) — checked on
+    // GUI command queue (manual outcome edits, session deletion), checked on
     // its own timer so edits apply even while no game is running.
     let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4343,7 +4346,7 @@ async fn run_loop(
                             }
 
                         // Single-flight: OCR of the previous Tab may still be
-                        // running (it takes seconds) — don't stack captures.
+                        // running (it takes seconds), don't stack captures.
                         if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
                             tracing::debug!("Tab ignored: a capture is already in progress");
                             continue;
@@ -4436,7 +4439,7 @@ async fn run_loop(
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
-                // Mid-match: a Tab capture saturates the OCR pool — skip the
+                // Mid-match: a Tab capture saturates the OCR pool, skip the
                 // full poll so we do not contend (H3). During end-reel wake
                 // that skip starves the ~3s Victory/Defeat window (2026-09-06:
                 // Tab held, wake set, no poll result word). Run a cheap
@@ -4460,7 +4463,7 @@ async fn run_loop(
                     continue;
                 }
 
-                // PR-B: adaptive cadence — mid-match, pay the screencopy only
+                // PR-B: adaptive cadence, mid-match, pay the screencopy only
                 // on every SLOW_POLL_DIVISORth tick. The skipped ticks cost
                 // nothing (no capture, no scans); full cadence resumes the
                 // moment any end/start evidence lands in session state.
@@ -4493,7 +4496,7 @@ async fn run_loop(
                             // detectors (P6); title OCR still uses the original frame.
                             let rgb = img.to_rgb8();
                             // PR-A: the polled variants gate their OCR on the
-                            // crop holding still across consecutive ticks —
+                            // crop holding still across consecutive ticks,
                             // combat frames stop paying a Tesseract call per
                             // tick; static post-match/phase screens still read
                             // (one tick later at most).
@@ -4549,7 +4552,7 @@ async fn run_loop(
                                     detect::match_start::PhaseSource::for_reader(use_new_reader),
                                 )
                             };
-                            // Wake hint only — does not confirm an outcome.
+                            // Wake hint only, does not confirm an outcome.
                             // Ban Heroes is a distinct hook (`detect_ban_screen`)
                             // and is excluded inside detect_end_reel; do not
                             // treat GamePhase::HeroBan as end_reel_wake_until.
@@ -4627,7 +4630,7 @@ async fn run_loop(
                         }
 
                         // The banner color-flood is specific enough to act on
-                        // immediately (and only lasts ~3s — a second tick may
+                        // immediately (and only lasts ~3s, a second tick may
                         // never come). A word-OCR outcome (accolade or rank
                         // screen) needs a second agreeing read within the
                         // confirmation window. The streak is recorded before
@@ -4711,7 +4714,7 @@ async fn run_loop(
                 maybe_resume_sync_after_settings_change(sync_client, &sync_backoff, data_dir);
                 // Suspend detection (m4): after a sleep, every Instant-based
                 // window believes no time passed. Treat resume like a daemon
-                // restart — drop the volatile windows and re-admit the active
+                // restart, drop the volatile windows and re-admit the active
                 // game only through the wall-clock recovery bound (the on-disk
                 // skeleton was persisted with correct wall times pre-suspend).
                 // A skeleton past that bound is dropped. Decided rows upload.
@@ -4817,7 +4820,7 @@ fn analyze_frame(
     } = flags;
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection plus the word reads
-    // (only when the caller deems a banner plausible — see
+    // (only when the caller deems a banner plausible, see
     // MIN_BANNER_SESSION_AGE), which end in the end-title read; else the
     // end-title read alone. T1, an OCR of the top-centre band for a result
     // header, is gone (alpha.7 O4; what that was measured on is in
@@ -4901,7 +4904,7 @@ fn analyze_frame(
     );
 
     // Player row. ocr-v1: if a player name is configured, scan ALL rows (both
-    // teams) for a name match — this handles replays and post-match screens
+    // teams) for a name match, this handles replays and post-match screens
     // where the player may be on team 2. Fall back to brightness-detected row
     // otherwise. `reader = "new"`: the seed match combined with the
     // highlight, and where both are silent the row the career panel's hero
@@ -4952,7 +4955,7 @@ fn analyze_frame(
 
     // Hero authority (OCR site T5). ocr-v1 reads the career-panel hero
     // title. Guard against garbage OCR (happens when there is no career
-    // panel — replay, post-match — by requiring the result to actually
+    // panel, replay, post-match, by requiring the result to actually
     // match a known hero name, which match_hero_in_text already does). The
     // new reader never reads it: the heroes-v2 reads of the career panel's
     // portrait and of the own row take its place (alpha.7 O8).
@@ -5009,9 +5012,9 @@ fn analyze_frame(
     let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);
 
     // Full-board OCR exists only to supply raw text for hero/map name
-    // lookup and the name-in-raw-text stats fallback. On the happy path —
+    // lookup and the name-in-raw-text stats fallback. On the happy path,
     // player row found and parseable, hero identified (career panel,
-    // heroes-v2 icons or portrait match), map already known — it is pure
+    // heroes-v2 icons or portrait match), map already known, it is pure
     // redundancy (adaptive preprocessing plus up to three threshold sweeps), so run
     // it lazily. A portrait match alone satisfies the hero requirement:
     // replay/post-match layouts have no career panel, and the raw-text
@@ -6235,7 +6238,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     if ctx.use_new_reader {
         req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await;
     }
-    // QUAL-002 follow-up (multi-file seam split — parked for USER per DR-1 A4)
+    // QUAL-002 follow-up (multi-file seam split, parked for USER per DR-1 A4)
     // Ergonomic locals over the context/request (the body predates A1).
     let backend = &ctx.backend;
     let store = &ctx.store;
@@ -7542,7 +7545,7 @@ async fn flush_snapshot_if_due(store: &storage::LocalStore, data_dir: &std::path
     }
 }
 
-/// Shutdown path: export a trailing dirty snapshot regardless of the window —
+/// Shutdown path: export a trailing dirty snapshot regardless of the window,
 /// the GUI must see the final state (try_sync only force-exports on success).
 async fn flush_snapshot_if_dirty(store: &storage::LocalStore, data_dir: &std::path::Path) {
     let dirty = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner()).0;
@@ -7604,7 +7607,7 @@ async fn try_sync(
 /// True when this capture should start a periodic sync task.
 ///
 /// Single-flight (`task_in_flight`) and the backoff window are both gates.
-/// Shutdown does not use this predicate — it joins the in-flight task and
+/// Shutdown does not use this predicate, it joins the in-flight task and
 /// uploads once regardless of the backoff clock.
 fn periodic_sync_due(capture_count: u32, task_in_flight: bool, backoff_allows: bool) -> bool {
     capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !task_in_flight && backoff_allows
@@ -8713,7 +8716,7 @@ mod tests {
         }
     }
 
-    /// Session state around an optional game, everything else quiescent —
+    /// Session state around an optional game, everything else quiescent,
     /// the baseline the poll_slow_mode tests perturb.
     fn session(active_game: Option<ActiveGame>, now: Instant) -> SessionState {
         SessionState {
@@ -8863,7 +8866,7 @@ mod tests {
             "wake expired → skip again"
         );
 
-        // Word streak alone is not the Tab-busy exception — mid-match skip
+        // Word streak alone is not the Tab-busy exception, mid-match skip
         // stays unless end-reel wake is hot.
         st.end_reel_wake_until = None;
         st.word_outcome_streak = Some(word_streak(
@@ -8923,7 +8926,7 @@ mod tests {
     #[test]
     fn tab_on_post_match_scoreboard_reuses_finished_session() {
         // Within the grace window the Tab capture is the post-match scoreboard
-        // of the SAME match — a fresh session would double-count the game.
+        // of the SAME match, a fresh session would double-count the game.
         let now = test_now();
         let g = game(detect::MatchOutcome::Defeat, Some(30), now);
         assert!(!should_start_fresh_session(Some(&g), now));
@@ -8955,8 +8958,8 @@ mod tests {
 
     /// Career profile (Competitive Open Queue): **one** Neon Junction,
     /// ~10:02, 3–0 Victory. Oasis defeat and Ilios victory are different maps.
-    /// The Games pair (21:49 empty `—`, 21:55 WIN, same Tank / Neon Junction /
-    /// Wrecking Ball) is a double capture of that one match — not two queues.
+    /// The Games pair (21:49 empty `, `, 21:55 WIN, same Tank / Neon Junction /
+    /// Wrecking Ball) is a double capture of that one match, not two queues.
     /// Do not invent a second Neon Junction session.
     #[test]
     fn unfinished_neon_junction_ball_2149_empty_2155_win_reuses() {
@@ -9008,7 +9011,7 @@ mod tests {
             "stat-looking regression 6 min later must not split this match"
         );
 
-        // Ilios on the career profile is a later, different match — a vote
+        // Ilios on the career profile is a later, different match, a vote
         // that does not include Neon Junction may still open. Same-map must not.
         let other_vote = [String::from("Ilios"), String::from("Busan")];
         assert!(map_vote_should_open_new_game(
@@ -9019,7 +9022,7 @@ mod tests {
             &other_vote,
         ));
 
-        // Outcome already recorded — this is a finished game, not the pair.
+        // Outcome already recorded, this is a finished game, not the pair.
         let mut won = game(detect::MatchOutcome::Victory, Some(6 * 60 - 30), second);
         won.map = Some("Neon Junction".into());
         won.hero_auth.accepted_hero = Some("Wrecking Ball".into());
@@ -9255,7 +9258,7 @@ mod tests {
             "a recovered session still inside the debounce does not split on select"
         );
 
-        // Clearing removes the file — nothing to recover.
+        // Clearing removes the file, nothing to recover.
         persist_active_game(dir.path(), None);
         assert!(recover_active_game(dir.path()).is_none());
     }
@@ -11237,7 +11240,7 @@ mod tests {
     fn vote_candidates_constrain_but_never_become_the_map() {
         let candidates = vec!["Oasis".to_string(), "Busan".to_string()];
 
-        // No trusted read yet: candidates alone must NOT pick a map — the
+        // No trusted read yet: candidates alone must NOT pick a map, the
         // vote winner is unknowable, and detected_maps[0] used to be wrong
         // ~2/3 of the time.
         assert_eq!(resolve_map(None, None, "", &candidates), "");
@@ -11291,7 +11294,7 @@ mod tests {
     #[test]
     fn stat_regression_detects_real_game_boundaries() {
         // Colosseo end -> Neon Junction first capture (E11->0, DMG 2740->0;
-        // deaths 0->0 is NOT strictly lower — two drops still suffice).
+        // deaths 0->0 is NOT strictly lower, two drops still suffice).
         assert!(regressed((11, 0, 2740), (0, 0, 0)));
         // Neon Junction end -> Dorado first capture: all three drop.
         assert!(regressed((34, 10, 11742), (1, 0, 254)));
@@ -11314,7 +11317,7 @@ mod tests {
     #[test]
     fn stat_regression_after_garbage_row_needs_the_gap_guard() {
         // A garbage row (E9 D11 DMG61029) followed by the next real capture
-        // DOES look like a regression — the STAT_SPLIT_MIN_GAP guard is what
+        // DOES look like a regression, the STAT_SPLIT_MIN_GAP guard is what
         // prevents this from splitting (captures were 86s apart, gap is 120s).
         assert!(regressed((9, 11, 61029), (3, 5, 10865)));
         assert!(STAT_SPLIT_MIN_GAP > Duration::from_secs(86));
@@ -11368,7 +11371,7 @@ mod tests {
         // DMG35031) while `last_raw` tracks reality (E10, DMG10311 from the last
         // real capture). After the ≥120s gap the first clean read (E10,
         // DMG10500) drops versus the latched `accepted` but is CONTINUOUS with
-        // last_raw — the un-latch streak is still 0, yet this must NOT split.
+        // last_raw, the un-latch streak is still 0, yet this must NOT split.
         let prev_acc = (40, 4, 35031);
         let prev_raw = (10, 4, 10311);
         let cur = (10, 5, 10500);
@@ -11380,7 +11383,7 @@ mod tests {
 
     #[test]
     fn fcg2_genuine_reset_drops_versus_both_and_splits() {
-        // Same latched state, but a genuine new game resets every counter to ~0 —
+        // Same latched state, but a genuine new game resets every counter to ~0,
         // which drops versus BOTH accepted AND last_raw, so the boundary trips.
         let prev_acc = (40, 4, 35031);
         let prev_raw = (10, 4, 10311);
@@ -11681,6 +11684,42 @@ mod tests {
         );
         assert!(stale_board_debug_dirs(true, dir.path()).is_empty());
         assert!(keep.exists(), "the user's files are left untouched");
+    }
+
+    #[test]
+    fn accepted_ring_keeps_the_newest_60_crops() {
+        assert_eq!(ACCEPTED_KEEP, 60);
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([8, 16, 32]),
+        ));
+        // 70 older crops, one minute apart, oldest first.
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+        for i in 0..70u64 {
+            let path = dir.path().join(format!("accepted_old_{i:03}.png"));
+            img.save(&path).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(base + std::time::Duration::from_secs(60 * i))
+                .unwrap();
+        }
+        save_frame_ring(dir.path(), "accepted", &img, ACCEPTED_KEEP);
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), ACCEPTED_KEEP, "names={names:?}");
+        // The new crop and the 59 newest old ones stay; 000..=010 go.
+        assert!(
+            names.iter().any(|n| n.starts_with("accepted_2")),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"accepted_old_010.png".to_string()));
+        assert!(names.contains(&"accepted_old_011.png".to_string()));
+        assert!(names.contains(&"accepted_old_069.png".to_string()));
     }
 
     #[test]

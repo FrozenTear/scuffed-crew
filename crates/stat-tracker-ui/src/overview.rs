@@ -119,7 +119,7 @@ fn heroes_shelf(stats: &crate::aggregate::Aggregates, cols: usize) -> Element<'s
 
 /// Games on `clock`'s local calendar day, newest first (one row per game).
 /// Callers in tests should pass a clock on the same instant as a tonight
-/// game — a fixed "22:00 UTC" is the next calendar day east of UTC+2.
+/// game, a fixed "22:00 UTC" is the next calendar day east of UTC+2.
 pub fn tonight_games(games: &[Game], clock: DateTime<Utc>) -> Vec<&Game> {
     let today = clock.with_timezone(&Local).date_naive();
     games

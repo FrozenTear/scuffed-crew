@@ -29,7 +29,7 @@ use crate::theme::{
 use crate::update;
 use crate::widgets;
 
-/// Seconds / counts — must stay compact on ultrawide.
+/// Seconds / counts, must stay compact on ultrawide.
 pub(crate) const FIELD_NUMERIC: f32 = 168.0;
 /// Shortcut, in-game name.
 pub(crate) const FIELD_SHORT: f32 = 280.0;
@@ -593,7 +593,7 @@ pub fn nonempty(s: &str) -> Option<String> {
     }
 }
 
-/// Both URL and token are required — same as the Dioxus save path.
+/// Both URL and token are required, same as the Dioxus save path.
 /// An unsafe URL yields `None` so a config value cannot carry a token that
 /// the daemon would have to refuse. Save itself is blocked first
 /// ([`sync_url_problem`]) so an existing cleartext URL is not wiped.

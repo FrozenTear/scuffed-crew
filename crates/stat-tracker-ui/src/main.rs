@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // tray-icon on Linux needs GTK before the menu is built. Failure is fine
-    // — the Iced window still runs. AppIndicator is probed in `tray::try_create`;
+    // the Iced window still runs. AppIndicator is probed in `tray::try_create`;
     // a missing libayatana-appindicator3 must not panic (AerynOS).
     if gtk::init().is_err() {
         tracing::info!("system tray unavailable (no display / GTK)");

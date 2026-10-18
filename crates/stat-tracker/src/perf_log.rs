@@ -4,7 +4,7 @@
 //! and RSS for that window, capture and OCR timing, and the X11 grab
 //! details (size, full screen or one output, and that no shm is used). The
 //! first line after start is a header with the setup: session type, kernel,
-//! CPU count, RAM and the Proton version seen running. Overhead is one small
+//! CPU model and count, RAM and the Proton version seen running. Overhead is one small
 //! write a minute. The file rotates at [`MAX_BYTES`] into `perf.log.1`, so
 //! at most twice that is kept. A Performance report sends only this log.
 
@@ -88,6 +88,9 @@ pub struct SetupInfo {
     pub session: &'static str,
     pub kernel: String,
     pub cpus: usize,
+    /// `model name` of the first CPU in `/proc/cpuinfo`, cleaned by
+    /// [`cpu_model_from_cpuinfo`].
+    pub cpu_model: Option<String>,
     pub ram_mb: u64,
     pub proton: Option<String>,
 }
@@ -105,6 +108,9 @@ impl SetupInfo {
             session: crate::report::SessionType::from_env().as_str(),
             kernel,
             cpus: std::thread::available_parallelism().map_or(1, |n| n.get()),
+            cpu_model: std::fs::read_to_string("/proc/cpuinfo")
+                .ok()
+                .and_then(|c| cpu_model_from_cpuinfo(&c)),
             ram_mb,
             proton: detect_proton(),
         }
@@ -117,7 +123,7 @@ fn now_stamp() -> String {
 
 pub fn header_line(s: &SetupInfo) -> String {
     format!(
-        "{} setup app={} session={} kernel={} cpus={} ram_mb={} proton={}",
+        "{} setup app={} session={} kernel={} cpus={} ram_mb={} proton={} cpu_model=\"{}\"",
         now_stamp(),
         crate::report::bundle::APP_VERSION,
         s.session,
@@ -125,6 +131,7 @@ pub fn header_line(s: &SetupInfo) -> String {
         s.cpus,
         s.ram_mb,
         s.proton.as_deref().unwrap_or("none"),
+        s.cpu_model.as_deref().unwrap_or("unknown"),
     )
 }
 
@@ -165,6 +172,39 @@ pub fn cpu_percent(ticks: u64, hz: u64, secs: f64) -> Option<f64> {
     (secs > 0.0 && hz > 0).then(|| ticks as f64 / hz as f64 / secs * 100.0)
 }
 
+/// Longest CPU model kept, in characters.
+const CPU_MODEL_MAX_CHARS: usize = 80;
+
+/// The first `model name` in `/proc/cpuinfo` (x86), else the first
+/// `Hardware` or `Model` line (ARM), with runs of whitespace collapsed to
+/// one space, quotes and control characters dropped, and at most
+/// [`CPU_MODEL_MAX_CHARS`] characters. The model stays space separated so
+/// the log scrub, which replaces any run of 24 or more token characters,
+/// leaves it readable.
+pub fn cpu_model_from_cpuinfo(cpuinfo: &str) -> Option<String> {
+    let value = |key: &str| {
+        cpuinfo.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == key).then(|| v.to_string())
+        })
+    };
+    let raw = value("model name")
+        .or_else(|| value("Hardware"))
+        .or_else(|| value("Model"))?;
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(CPU_MODEL_MAX_CHARS)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 fn mem_total_mb(meminfo: &str) -> Option<u64> {
     let line = meminfo.lines().find(|l| l.starts_with("MemTotal:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
@@ -199,7 +239,8 @@ fn proc_rss_kb() -> Option<u64> {
 }
 
 /// A Proton build name from any running process command line, such as
-/// `GE-Proton9-20` or `Proton 9.0`.
+/// `GE-Proton9-20` or `Proton 9.0`. Only the game's Proton runtime counts
+/// (see [`proton_from_cmdline`]); Proton VPN and Proton Mail never do.
 fn detect_proton() -> Option<String> {
     let entries = std::fs::read_dir("/proc").ok()?;
     for e in entries.flatten() {
@@ -216,13 +257,38 @@ fn detect_proton() -> Option<String> {
     None
 }
 
+/// The Proton build in one process command line (`/proc/<pid>/cmdline`,
+/// arguments split by NUL), or `None`.
+///
+/// Only a Proton install counts: an absolute path argument with a folder whose name
+/// holds `proton` followed by the `proton` launcher script, or by the
+/// `files` or `dist` folder that holds Proton's Wine. For example
+/// `.../steamapps/common/Proton 9.0 (Beta)/proton waitforexitandrun` or
+/// `.../compatibilitytools.d/GE-Proton9-20/files/bin/wine64-preloader`.
+/// A folder name that mentions `vpn` or `mail` never counts, and a name with
+/// no path around it (`proton.vpn.daemon`, `protonvpn-app`) is not a Proton
+/// install.
 pub fn proton_from_cmdline(cmd: &str) -> Option<String> {
-    cmd.split(['\0', '/'])
-        .find(|seg| {
-            seg.to_ascii_lowercase().contains("proton") && !seg.ends_with(".py") && seg != &"proton"
-        })
-        .map(|s| s.trim().replace(' ', "_"))
-        .filter(|s| !s.is_empty())
+    cmd.split('\0').find_map(proton_from_path)
+}
+
+fn proton_from_path(arg: &str) -> Option<String> {
+    // An absolute path only: a shell line such as `echo proton/files` is
+    // not an install.
+    if !arg.starts_with('/') {
+        return None;
+    }
+    let segs: Vec<&str> = arg.split('/').collect();
+    segs.windows(2).find_map(|pair| {
+        let (dir, next) = (pair[0].trim(), pair[1]);
+        let lower = dir.to_ascii_lowercase();
+        let runtime_child = next == "proton" || next == "files" || next == "dist";
+        let is_proton_dir = lower.contains("proton")
+            && lower != "proton"
+            && !lower.contains("vpn")
+            && !lower.contains("mail");
+        (runtime_child && is_proton_dir).then(|| dir.replace(' ', "_"))
+    })
 }
 
 #[cfg(test)]
@@ -313,6 +379,7 @@ mod tests {
             session: "x11",
             kernel: "6.8.0-45-generic".into(),
             cpus: 8,
+            cpu_model: Some("AMD Ryzen 7 5800X 8-Core Processor".into()),
             ram_mb: 15890,
             proton: Some("GE-Proton9-20".into()),
         });
@@ -322,8 +389,92 @@ mod tests {
             "cpus=8",
             "ram_mb=15890",
             "proton=GE-Proton9-20",
+            "cpu_model=\"AMD Ryzen 7 5800X 8-Core Processor\"",
         ] {
             assert!(h.contains(f), "{f} missing from {h}");
+        }
+        let unknown = header_line(&SetupInfo {
+            session: "wayland",
+            kernel: "6.17.1".into(),
+            cpus: 4,
+            cpu_model: None,
+            ram_mb: 8000,
+            proton: None,
+        });
+        assert!(
+            unknown.ends_with("proton=none cpu_model=\"unknown\""),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn cpu_model_comes_from_the_first_model_name() {
+        let x86 = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel\t\t: 33\n\
+                   model name\t: AMD Ryzen 7 5800X 8-Core Processor\nprocessor\t: 1\n\
+                   model name\t: AMD Ryzen 7 5800X 8-Core Processor\n";
+        assert_eq!(
+            cpu_model_from_cpuinfo(x86).as_deref(),
+            Some("AMD Ryzen 7 5800X 8-Core Processor")
+        );
+        // `model` (a number) is not `model name`.
+        assert_eq!(cpu_model_from_cpuinfo("model\t\t: 33\n"), None);
+        let intel = "model name\t:   Intel(R) Core(TM) i5-8250U  CPU @ 1.60GHz \n";
+        assert_eq!(
+            cpu_model_from_cpuinfo(intel).as_deref(),
+            Some("Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz")
+        );
+        let arm = "processor\t: 0\nBogoMIPS\t: 108.00\nModel\t\t: Raspberry Pi 5 Model B Rev 1.0\n";
+        assert_eq!(
+            cpu_model_from_cpuinfo(arm).as_deref(),
+            Some("Raspberry Pi 5 Model B Rev 1.0")
+        );
+        let odd = format!("model name\t: Fake \"quoted\"\u{7} {}\n", "x ".repeat(100));
+        let got = cpu_model_from_cpuinfo(&odd).unwrap();
+        assert!(
+            !got.contains('"') && !got.chars().any(char::is_control),
+            "{got}"
+        );
+        assert!(got.chars().count() <= CPU_MODEL_MAX_CHARS, "{got}");
+        assert_eq!(cpu_model_from_cpuinfo("model name\t:   \n"), None);
+        assert_eq!(cpu_model_from_cpuinfo(""), None);
+    }
+
+    #[test]
+    fn proton_matches_only_the_games_runtime() {
+        let game = [
+            (
+                "python3\0/home/a/.steam/steam/steamapps/common/Proton 9.0 (Beta)/proton\0waitforexitandrun\0/x/Overwatch.exe",
+                "Proton_9.0_(Beta)",
+            ),
+            (
+                "/home/a/.steam/root/compatibilitytools.d/GE-Proton9-20/files/bin/wine64-preloader\0C:\\Overwatch.exe",
+                "GE-Proton9-20",
+            ),
+            (
+                "/home/a/.local/share/Steam/steamapps/common/Proton - Experimental/files/bin/wineserver",
+                "Proton_-_Experimental",
+            ),
+            (
+                "/opt/proton-cachyos/dist/bin/wine64\0Battle.net.exe",
+                "proton-cachyos",
+            ),
+        ];
+        for (cmd, want) in game {
+            assert_eq!(proton_from_cmdline(cmd).as_deref(), Some(want), "{cmd:?}");
+        }
+        let not_game = [
+            "/usr/bin/python3\0-m\0proton.vpn.daemon",
+            "/usr/bin/python3\0/usr/bin/protonvpn-app",
+            "/usr/lib/python3/dist-packages/proton/vpn/daemon/__main__.py",
+            "/opt/proton-vpn/proton/bin\0--start-minimized",
+            "/opt/Proton Mail/proton\0--hidden",
+            "/usr/bin/proton-mail-bridge\0--noninteractive",
+            "/home/a/notes/proton-ideas.txt",
+            "/usr/bin/bash\0-c\0echo proton/files",
+            "/usr/bin/bash\0-c",
+        ];
+        for cmd in not_game {
+            assert_eq!(proton_from_cmdline(cmd), None, "{cmd:?}");
         }
     }
 
@@ -344,6 +495,5 @@ mod tests {
             ),
             Some("GE-Proton9-20".into())
         );
-        assert_eq!(proton_from_cmdline("/usr/bin/bash\0-c"), None);
     }
 }

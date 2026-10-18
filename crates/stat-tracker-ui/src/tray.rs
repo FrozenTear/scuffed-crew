@@ -1,7 +1,7 @@
-//! System tray via `tray-icon` (v1 — same crate as the Dioxus GUI).
+//! System tray via `tray-icon` (v1, same crate as the Dioxus GUI).
 //!
 //! Menu: Show window · Hide window · Quit. Left-click also shows the window.
-//! Hide/Show are handled by the iced daemon as close/open — not minimize.
+//! Hide/Show are handled by the iced daemon as close/open, not minimize.
 //!
 //! Tray creation is optional. `libappindicator-sys` 0.9 panics if it cannot
 //! `dlopen` Ayatana/AppIndicator; we probe those sonames first and swallow

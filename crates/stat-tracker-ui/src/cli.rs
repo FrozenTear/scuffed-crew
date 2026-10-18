@@ -94,7 +94,7 @@ impl Cli {
             }
         });
 
-        // Fixture runs never resolve a server URL — production `[]` must not
+        // Fixture runs never resolve a server URL, production `[]` must not
         // replace the sample season list written into the fixture cache.
         if fixture.is_none() && seasons_url.is_none() {
             if let Some(sync) = &config.sync

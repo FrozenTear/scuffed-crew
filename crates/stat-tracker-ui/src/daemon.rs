@@ -1,4 +1,4 @@
-//! Tracker service control — same systemctl user unit as the Dioxus GUI.
+//! Tracker service control, same systemctl user unit as the Dioxus GUI.
 //!
 //! Status and stop share the daemon's pid-file identity check
 //! (`stat_tracker::proc_id`): `/proc/<pid>/exe` must be the tracker binary,
@@ -8,13 +8,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// User unit installed by `install.sh` — same name the Dioxus GUI uses.
+/// User unit installed by `install.sh`, same name the Dioxus GUI uses.
 pub const SYSTEMD_UNIT: &str = "scuffed-stat-tracker.service";
 
 /// Daemon binary name (`/proc/<pid>/comm` truncates to 15 bytes).
 pub const DAEMON_BIN: &str = "scuffed-stat-tracker";
 
-/// Kernel-truncated `comm` of [`DAEMON_BIN`]. Exact match only — not a prefix.
+/// Kernel-truncated `comm` of [`DAEMON_BIN`]. Exact match only, not a prefix.
 pub const TRACKER_COMM: &str = stat_tracker::proc_id::DAEMON_COMM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

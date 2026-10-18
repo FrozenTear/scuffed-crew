@@ -12,7 +12,7 @@ pub enum CaptureBackend {
 }
 
 /// Normalized force target parsed from `STAT_TRACKER_CAPTURE` (pure; unit-tested).
-/// The accepted keyword set (and its case-folding) lives here and nowhere else —
+/// The accepted keyword set (and its case-folding) lives here and nowhere else,
 /// both `select_backend` and `detect_backend` route through `force_target`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForceTarget {
@@ -34,7 +34,7 @@ fn force_target(raw: &str) -> ForceTarget {
 /// Pure backend-selection policy (R1-6). Every env read and live probe happens
 /// in `detect_backend`; this takes their already-normalized results so the exact
 /// production decision is unit-testable without touching process env or an X
-/// server. `detect_backend` routes through this — the tests below exercise the
+/// server. `detect_backend` routes through this, the tests below exercise the
 /// real logic, not a parallel copy.
 ///
 /// `force` is the raw `STAT_TRACKER_CAPTURE` value (or `None`), normalized here
@@ -69,7 +69,7 @@ fn select_backend(
                     CaptureBackend::None
                 }
             }
-            // Unknown forced value — fail closed, no fallback.
+            // Unknown forced value, fail closed, no fallback.
             ForceTarget::Unknown => CaptureBackend::None,
         },
         // Automatic priority: usable Wayshot → X11 → Portal → None.
@@ -122,7 +122,7 @@ pub async fn detect_backend() -> CaptureBackend {
                 }
                 backend
             }
-            // Unknown forced value — warn with the raw value, then route the
+            // Unknown forced value, warn with the raw value, then route the
             // decision through `select_backend` (fail-closed → None) rather than
             // returning inline, so the tested policy owns the outcome.
             ForceTarget::Unknown => {
@@ -131,7 +131,7 @@ pub async fn detect_backend() -> CaptureBackend {
             }
         },
         // Automatic probe order (R1-2): real connect + ≥1 output per candidate;
-        // a failed candidate falls through. Short-circuit — a winning probe
+        // a failed candidate falls through. Short-circuit, a winning probe
         // skips the rest.
         None => {
             let wayshot_ok = wayshot::probe().await.is_ok();
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(perf_backend_label(&CaptureBackend::None), None);
     }
 
-    // Pure selection-policy tests (R1-6). No `std::env::set_var` — process-global
+    // Pure selection-policy tests (R1-6). No `std::env::set_var`, process-global
     // env mutation races parallel test threads; we feed `select_backend` explicit
     // normalized inputs, which is exactly what `detect_backend` routes through.
 
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn forced_unavailable_never_falls_back() {
         // Each of the four force values, unavailable, must return None even when
-        // other backends are usable — force means force (R1-3).
+        // other backends are usable, force means force (R1-3).
         assert_eq!(
             select_backend(Some("wayshot"), false, true, true),
             CaptureBackend::None
@@ -340,7 +340,7 @@ mod tests {
     }
 
     // --- MUTANT_A: a forced backend wins even when a higher-priority,
-    // non-forced backend is also usable. Force means force — the auto priority
+    // non-forced backend is also usable. Force means force, the auto priority
     // order (Wayshot > X11 > Portal) must not leak into a forced decision. ---
 
     #[test]

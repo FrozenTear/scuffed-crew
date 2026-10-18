@@ -1,4 +1,4 @@
-//! Season-window aggregation — pure function, UI crate only (design §6).
+//! Season-window aggregation, pure function, UI crate only (design §6).
 //!
 //! A game belongs to a window when `starts_at <= played_at < ends_at` (UTC),
 //! matching `GET /api/public/seasons` / the website.
