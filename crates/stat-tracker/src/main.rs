@@ -7401,18 +7401,22 @@ fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImag
 /// Written only while `debug_ocr` is on.
 const BOARD_PIXEL_DEBUG_DIRS: [&str; 2] = ["accepted", "rejected"];
 
-/// One debug image write. A single `debug-save` thread owns the encode so a
-/// Tab capture does not start a short-lived blocking thread per PNG.
-enum DebugSaveKind {
-    Ring {
-        dir: std::path::PathBuf,
-        prefix: String,
-        img: Arc<image::DynamicImage>,
-        keep: usize,
-    },
-    Report(Box<DebugReportSave>),
-    MapCrop(mapcrops::MapcropJob),
-}
+/// How many unblanked debug-ring PNGs may wait. Past this, another ring
+/// picture is dropped. Report kits and map crops do not use this queue.
+const DEBUG_RING_QUEUE: usize = 4;
+
+/// Tests that fill the ring queue hold this so a parallel test cannot
+/// enqueue a ring picture into the full queue and observe a drop.
+#[cfg(test)]
+static DEBUG_RING_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// While set, the ring worker parks before taking the next picture.
+#[cfg(test)]
+static DEBUG_RING_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set while the ring worker is parked on [`DEBUG_RING_HOLD`].
+#[cfg(test)]
+static DEBUG_RING_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 struct DebugReportSave {
     data_dir: std::path::PathBuf,
@@ -7424,29 +7428,69 @@ struct DebugReportSave {
     board_names: Vec<String>,
 }
 
-struct DebugSaveJob {
-    kind: DebugSaveKind,
+struct DebugRingJob {
+    dir: std::path::PathBuf,
+    prefix: String,
+    img: Arc<image::DynamicImage>,
+    keep: usize,
     done: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-fn debug_save_sender() -> &'static std::sync::mpsc::SyncSender<DebugSaveJob> {
-    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<DebugSaveJob>> =
+enum KeptSave {
+    Report(Box<DebugReportSave>),
+    MapCrop(mapcrops::MapcropJob),
+}
+
+struct KeptSaveJob {
+    kind: KeptSave,
+    done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+fn park_debug_ring() {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        if !DEBUG_RING_HOLD.load(Ordering::SeqCst) {
+            return;
+        }
+        DEBUG_RING_PARKED.store(true, Ordering::SeqCst);
+        while DEBUG_RING_HOLD.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        DEBUG_RING_PARKED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn debug_ring_sender() -> &'static std::sync::mpsc::SyncSender<DebugRingJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<DebugRingJob>> =
         std::sync::OnceLock::new();
     TX.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(DEBUG_RING_QUEUE);
         std::thread::Builder::new()
             .name("debug-save".into())
-            .spawn(move || debug_save_loop(rx))
+            .spawn(move || debug_ring_loop(rx))
             .expect("debug-save thread");
         tx
     })
 }
 
-fn debug_save_loop(rx: std::sync::mpsc::Receiver<DebugSaveJob>) {
-    while let Ok(job) = rx.recv() {
-        let DebugSaveJob { kind, done } = job;
+fn debug_ring_loop(rx: std::sync::mpsc::Receiver<DebugRingJob>) {
+    loop {
+        park_debug_ring();
+        let Ok(job) = rx.recv() else {
+            break;
+        };
+        let DebugRingJob {
+            dir,
+            prefix,
+            img,
+            keep,
+            done,
+        } = job;
         let started = Instant::now();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_debug_save(kind)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            save_frame_ring(&dir, &prefix, &img, keep);
+        }));
         stat_tracker::perf::record_debug_save(started.elapsed());
         if let Some(done) = done {
             let _ = done.send(());
@@ -7454,15 +7498,34 @@ fn debug_save_loop(rx: std::sync::mpsc::Receiver<DebugSaveJob>) {
     }
 }
 
-fn run_debug_save(kind: DebugSaveKind) {
+fn kept_save_sender() -> &'static std::sync::mpsc::Sender<KeptSaveJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<KeptSaveJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("report-save".into())
+            .spawn(move || kept_save_loop(rx))
+            .expect("report-save thread");
+        tx
+    })
+}
+
+fn kept_save_loop(rx: std::sync::mpsc::Receiver<KeptSaveJob>) {
+    while let Ok(job) = rx.recv() {
+        let KeptSaveJob { kind, done } = job;
+        let started = Instant::now();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_kept_save(kind)));
+        stat_tracker::perf::record_debug_save(started.elapsed());
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+    }
+}
+
+fn run_kept_save(kind: KeptSave) {
     match kind {
-        DebugSaveKind::Ring {
-            dir,
-            prefix,
-            img,
-            keep,
-        } => save_frame_ring(&dir, &prefix, &img, keep),
-        DebugSaveKind::Report(report) => {
+        KeptSave::Report(report) => {
             if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
                 &report.data_dir,
                 &report.session_id,
@@ -7485,29 +7548,79 @@ fn run_debug_save(kind: DebugSaveKind) {
                 tracing::debug!(error = %e, "report kit: names not written");
             }
         }
-        DebugSaveKind::MapCrop(job) => mapcrops::commit_mapcrop(job),
+        KeptSave::MapCrop(job) => mapcrops::commit_mapcrop(job),
     }
 }
 
-/// Queue one debug write. `wait` is for tests: the handle finishes when the
-/// worker has run the job. A full queue (4) drops the job and counts the drop.
-fn enqueue_debug_save(kind: DebugSaveKind, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
-    let (done, wait_rx) = if wait {
+fn oneshot_pair(
+    wait: bool,
+) -> (
+    Option<tokio::sync::oneshot::Sender<()>>,
+    Option<tokio::sync::oneshot::Receiver<()>>,
+) {
+    if wait {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (Some(tx), Some(rx))
     } else {
         (None, None)
-    };
-    match debug_save_sender().try_send(DebugSaveJob { kind, done }) {
+    }
+}
+
+/// Queue one debug-ring PNG. `Ok(None)` is queued without a waiter.
+/// `Ok(Some)` is queued and the handle finishes when the worker has written
+/// it. `Err` means the queue was full: the picture was dropped and counted.
+/// Report kits never go through here.
+fn enqueue_debug_ring(
+    dir: std::path::PathBuf,
+    prefix: String,
+    img: Arc<image::DynamicImage>,
+    keep: usize,
+    wait: bool,
+) -> Result<Option<tokio::task::JoinHandle<()>>, ()> {
+    let (done, wait_rx) = oneshot_pair(wait);
+    match debug_ring_sender().try_send(DebugRingJob {
+        dir,
+        prefix,
+        img,
+        keep,
+        done,
+    }) {
+        Ok(()) => Ok(wait_rx.map(|rx| {
+            tokio::spawn(async move {
+                let _ = rx.await;
+            })
+        })),
+        Err(_) => {
+            stat_tracker::perf_log::note_debug_save_drop();
+            tracing::debug!("debug ring queue full, dropping picture");
+            Err(())
+        }
+    }
+}
+
+/// Queue a report kit or a map crop. The queue is unbounded, so a full
+/// debug-ring queue cannot drop it. `wait` is for tests.
+fn enqueue_kept_save(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
+    let (done, wait_rx) = oneshot_pair(wait);
+    match kept_save_sender().send(KeptSaveJob { kind, done }) {
         Ok(()) => wait_rx.map(|rx| {
             tokio::spawn(async move {
                 let _ = rx.await;
             })
         }),
-        Err(_) => {
-            stat_tracker::perf_log::note_debug_save_drop();
-            tracing::debug!("debug-save queue full, dropping job");
-            None
+        Err(std::sync::mpsc::SendError(job)) => {
+            // The worker is gone. Write it here so the report is not lost,
+            // and do not count a debug-ring drop.
+            let KeptSaveJob { kind, done } = job;
+            run_kept_save(kind);
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+            wait_rx.map(|rx| {
+                tokio::spawn(async move {
+                    let _ = rx.await;
+                })
+            })
         }
     }
 }
@@ -7525,15 +7638,17 @@ fn save_rejected_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
-    enqueue_debug_save(
-        DebugSaveKind::Ring {
-            dir,
-            prefix: format!("rejected_{reason}"),
-            img: img.into(),
-            keep: REJECTED_KEEP,
-        },
+    #[cfg(test)]
+    let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_debug_ring(
+        dir,
+        format!("rejected_{reason}"),
+        img.into(),
+        REJECTED_KEEP,
         true,
     )
+    .ok()
+    .flatten()
 }
 
 /// A rank screen's `outcome.png` goes to the active game only when that game
@@ -7551,9 +7666,10 @@ fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
 }
 
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
-/// accepted capture. Written on the debug-save thread; a failure is logged
-/// and never touches the stored match. `frame` is a refcount clone of the
-/// capture, not a pixel copy.
+/// accepted capture. Written on the report-save thread, which does not drop
+/// work when the debug-ring queue is full. A failure is logged and never
+/// touches the stored match. `frame` is a refcount clone of the capture,
+/// not a pixel copy.
 #[allow(clippy::too_many_arguments)]
 fn record_report_kit(
     data_dir: &std::path::Path,
@@ -7580,8 +7696,8 @@ fn record_report_kit(
         captured_at,
     )
     .with_confidences(confidences);
-    enqueue_debug_save(
-        DebugSaveKind::Report(Box::new(DebugReportSave {
+    enqueue_kept_save(
+        KeptSave::Report(Box::new(DebugReportSave {
             data_dir: data_dir.to_path_buf(),
             session_id: session_id.to_string(),
             frame,
@@ -7609,15 +7725,11 @@ fn save_accepted_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("accepted");
-    enqueue_debug_save(
-        DebugSaveKind::Ring {
-            dir,
-            prefix: "accepted".to_string(),
-            img: board,
-            keep: ACCEPTED_KEEP,
-        },
-        true,
-    )
+    #[cfg(test)]
+    let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_debug_ring(dir, "accepted".to_string(), board, ACCEPTED_KEEP, true)
+        .ok()
+        .flatten()
 }
 
 /// Board-pixel debug folders left over on disk while `debug_ocr` is off.
@@ -7651,7 +7763,7 @@ fn archive_map_label_crop(
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
-    enqueue_debug_save(DebugSaveKind::MapCrop(job), true)
+    enqueue_kept_save(KeptSave::MapCrop(job), true)
 }
 
 /// [`archive_map_label_crop`] for a capture a trust gate rejected: only with
@@ -11877,6 +11989,113 @@ mod tests {
             rejected.len() == 1 && rejected[0].starts_with("rejected_unreadable_"),
             "rejected={rejected:?}"
         );
+    }
+
+    /// A full debug-ring queue drops ring pictures only. The report kit for
+    /// that Tab still lands, and the drop counter does not move for it.
+    #[test]
+    fn a_full_debug_ring_still_saves_the_report_kit() {
+        let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        DEBUG_RING_HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+        struct ReleaseHold;
+        impl Drop for ReleaseHold {
+            fn drop(&mut self) {
+                DEBUG_RING_HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let hold = ReleaseHold;
+
+        let dir = tempfile::tempdir().unwrap();
+        let img = Arc::new(tiny_board());
+        enqueue_debug_ring(
+            dir.path().join("debug").join("accepted"),
+            "poke".to_string(),
+            Arc::clone(&img),
+            ACCEPTED_KEEP,
+            false,
+        )
+        .expect("the poke picture has a free slot");
+        let parked = Instant::now();
+        while !DEBUG_RING_PARKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                parked.elapsed() < std::time::Duration::from_secs(2),
+                "debug ring worker did not park"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let before = stat_tracker::perf_log::debug_save_drops();
+        let mut queued = Vec::new();
+        let mut dropped = 0u64;
+        for i in 0..(DEBUG_RING_QUEUE + 2) {
+            let prefix = format!("fill{i}");
+            if enqueue_debug_ring(
+                dir.path().join("debug").join("accepted"),
+                prefix.clone(),
+                Arc::clone(&img),
+                ACCEPTED_KEEP,
+                false,
+            )
+            .is_ok()
+            {
+                queued.push(prefix);
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(dropped >= 1, "the ring queue never filled");
+        assert!(queued.len() <= DEBUG_RING_QUEUE, "{queued:?}");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "debug_save_drops counts only dropped ring pictures"
+        );
+
+        let session = "kept-report";
+        let row = test_match(session, "victory");
+        record_report_kit(
+            dir.path(),
+            session,
+            Arc::clone(&img),
+            5,
+            &row,
+            &row,
+            Utc::now(),
+            stat_tracker::report::blank::CaptureTime::now(),
+            vec!["KeptName".into()],
+            &std::collections::BTreeMap::new(),
+        );
+        let kit = dir.path().join("report-kit").join(session);
+        let started = Instant::now();
+        while !kit.join("reads.json").is_file() || !kit.join("names.json").is_file() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "report kit did not land while the debug ring queue was full"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let names = std::fs::read_to_string(kit.join("names.json")).unwrap();
+        assert!(names.contains("KeptName"), "{names}");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "the report save was counted as a debug drop"
+        );
+
+        drop(hold);
+        let drained = Instant::now();
+        let accepted = dir.path().join("debug").join("accepted");
+        while queued.iter().any(|prefix| {
+            png_names(&accepted)
+                .iter()
+                .all(|name| !name.starts_with(prefix))
+        }) {
+            assert!(
+                drained.elapsed() < std::time::Duration::from_secs(2),
+                "queued ring pictures did not flush"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// Release soak for the arena cap. Generated frames only, no captured boards.
