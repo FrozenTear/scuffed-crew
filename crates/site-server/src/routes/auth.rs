@@ -680,6 +680,9 @@ pub async fn setup(
         .create_member(&user.id, &username, OrgRole::Admin)
         .await
     {
+        if let Some(response) = crate::routes::members::display_name_write_error(&e) {
+            return response.into_response();
+        }
         tracing::error!("setup create_member: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

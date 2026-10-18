@@ -188,6 +188,33 @@ fn normalize_optional_handle(
 
 type ProfileEditReject = (StatusCode, Json<ErrorResponse>);
 
+/// Map a display-name write failure to the JSON the frontend matches on.
+///
+/// `display_name_taken` (409) means another member already has this name after
+/// normalization. The UI should show "That name is taken".
+/// `display_name_invalid` (400) means the name is empty after normalization or
+/// contains a control character.
+/// Other database errors return `None` so the caller keeps its own 500 path.
+pub(crate) fn display_name_write_error(
+    error: &scuffed_db::DbError,
+) -> Option<(StatusCode, Json<ErrorResponse>)> {
+    match error {
+        scuffed_db::DbError::DisplayNameInvalid => Some((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "display_name_invalid".into(),
+            }),
+        )),
+        scuffed_db::DbError::DisplayNameTaken => Some((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "display_name_taken".into(),
+            }),
+        )),
+        _ => None,
+    }
+}
+
 /// Load `id` and require the caller may edit that member's profile, including avatar.
 ///
 /// Self (same user) always. Otherwise officer or admin. This is the only gate
@@ -227,7 +254,14 @@ pub(crate) async fn require_profile_edit(
     Ok(target)
 }
 
-/// PUT /api/members/:id — update member profile (self or officer+)
+/// PUT /api/members/:id. Update member profile (self or officer+).
+///
+/// A display name that clashes with another member after normalization is
+/// **409** `{"error":"display_name_taken"}`. The frontend should show
+/// "That name is taken". A name that is empty after normalization, or that
+/// contains a control character, is **400** `{"error":"display_name_invalid"}`.
+/// Renaming to your own name with different casing, spacing, or invisible
+/// characters is the same key and is allowed. See `docs/api/member-display-name.md`.
 pub async fn update_member(
     State(state): State<AppState>,
     caller: OrgMember,
@@ -359,6 +393,9 @@ pub async fn update_member(
         )
         .await
         .map_err(|e| {
+            if let Some(response) = display_name_write_error(&e) {
+                return response;
+            }
             tracing::error!(error = %e, "update_member failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1116,7 +1153,7 @@ mod tests {
     use axum::http::StatusCode;
     use scuffed_db::OrgRole;
 
-    use super::get_member;
+    use super::{UpdateMemberRequest, get_member, update_member};
     use crate::extractors::OrgMember;
     use crate::test_support::{must_err, must_ok, seed_user, test_state};
 
@@ -1177,5 +1214,168 @@ mod tests {
         );
         assert!(!visible.is_active);
         assert_eq!(visible.display_name, "targetuser");
+    }
+
+    fn rename(display_name: &str) -> UpdateMemberRequest {
+        UpdateMemberRequest {
+            display_name: Some(display_name.to_string()),
+            bio: None,
+            avatar_url: None,
+            timezone: None,
+            pronouns: None,
+            availability_status: None,
+            nostr_pubkey: None,
+            is_active: None,
+            main_role: None,
+            twitch: None,
+            twitter: None,
+        }
+    }
+
+    async fn named_member(
+        state: &crate::state::AppState,
+        user_id: &str,
+        display_name: &str,
+        role: OrgRole,
+    ) -> OrgMember {
+        seed_user(state, user_id, user_id).await;
+        let member = state
+            .db
+            .create_member(user_id, display_name, role)
+            .await
+            .unwrap_or_else(|e| panic!("create {user_id}: {e}"));
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        OrgMember { user, member }
+    }
+
+    async fn put_name(
+        state: &crate::state::AppState,
+        caller: OrgMember,
+        target_id: &str,
+        display_name: &str,
+    ) -> Result<
+        Json<scuffed_db::Member>,
+        (
+            StatusCode,
+            Json<scuffed_auth::server::session::ErrorResponse>,
+        ),
+    > {
+        update_member(
+            State(state.clone()),
+            caller,
+            Path(target_id.to_string()),
+            Json(rename(display_name)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn officer_case_clash_returns_display_name_taken() {
+        let state = test_state().await;
+        let _holder = named_member(&state, "holder", "Frozen", OrgRole::Member).await;
+        let target = named_member(&state, "target", "Other", OrgRole::Member).await;
+        let officer = named_member(&state, "officer", "Officer", OrgRole::Officer).await;
+        let target_id = target.member.id.clone();
+
+        let (status, body) = must_err(
+            put_name(&state, officer, &target_id, "FROZEN").await,
+            "case clash",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "display_name_taken");
+
+        let still = state.db.get_member(&target_id).await.unwrap().unwrap();
+        assert_eq!(still.display_name, "Other");
+    }
+
+    #[tokio::test]
+    async fn whitespace_clash_returns_display_name_taken() {
+        let state = test_state().await;
+        let _holder = named_member(&state, "holder", "Frozen Tear", OrgRole::Member).await;
+        let editor = named_member(&state, "editor", "Other", OrgRole::Member).await;
+        let id = editor.member.id.clone();
+
+        let (status, body) = must_err(
+            put_name(&state, editor, &id, "  Frozen   Tear ").await,
+            "whitespace clash",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "display_name_taken");
+    }
+
+    #[tokio::test]
+    async fn zero_width_clash_returns_display_name_taken() {
+        let state = test_state().await;
+        let _holder = named_member(&state, "holder", "Frozen", OrgRole::Member).await;
+        let editor = named_member(&state, "editor", "Other", OrgRole::Member).await;
+        let id = editor.member.id.clone();
+
+        let (status, body) = must_err(
+            put_name(&state, editor, &id, "Fro\u{200B}zen").await,
+            "zero-width clash",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "display_name_taken");
+    }
+
+    #[tokio::test]
+    async fn homoglyph_clash_returns_display_name_taken() {
+        let state = test_state().await;
+        let _holder = named_member(&state, "holder", "Frozen", OrgRole::Member).await;
+        let editor = named_member(&state, "editor", "Other", OrgRole::Member).await;
+        let id = editor.member.id.clone();
+
+        // Cyrillic o (U+043E) in place of Latin o.
+        let (status, body) = must_err(
+            put_name(&state, editor, &id, "Fr\u{043E}zen").await,
+            "homoglyph clash",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "display_name_taken");
+    }
+
+    #[tokio::test]
+    async fn self_rename_display_name_case_change_is_allowed() {
+        let state = test_state().await;
+        let editor = named_member(&state, "editor", "Frozen", OrgRole::Member).await;
+        let id = editor.member.id.clone();
+
+        let Json(updated) = must_ok(put_name(&state, editor, &id, "fRoZeN").await, "self rename");
+        assert_eq!(updated.display_name, "fRoZeN");
+        let body = serde_json::to_value(&updated).unwrap();
+        assert!(body.get("display_name_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_display_name_returns_400_and_keeps_the_old_name() {
+        let state = test_state().await;
+        let editor = named_member(&state, "editor", "Frozen", OrgRole::Member).await;
+        let id = editor.member.id.clone();
+
+        let (status, body) = must_err(
+            put_name(&state, editor, &id, "bad\nname").await,
+            "control character",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.error, "display_name_invalid");
+
+        let editor = named_member(&state, "blank", "Kept", OrgRole::Member).await;
+        let blank_id = editor.member.id.clone();
+        let (status, body) = must_err(
+            put_name(&state, editor, &blank_id, "\u{200B}").await,
+            "empty after normalization",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.error, "display_name_invalid");
+
+        let still = state.db.get_member(&id).await.unwrap().unwrap();
+        assert_eq!(still.display_name, "Frozen");
+        let blank = state.db.get_member(&blank_id).await.unwrap().unwrap();
+        assert_eq!(blank.display_name, "Kept");
     }
 }

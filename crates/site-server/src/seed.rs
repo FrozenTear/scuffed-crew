@@ -9,6 +9,9 @@ pub async fn seed_dev_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let token_hash = hash_session_token(dev_session_token);
 
+    let dev_admin_key =
+        scuffed_db::display_name_key("DevAdmin").expect("DevAdmin is a valid display name");
+
     db.client
         .query(
             r#"
@@ -25,6 +28,7 @@ pub async fn seed_dev_data(
                 user_id = 'devadmin',
                 org_role = 'admin',
                 display_name = 'DevAdmin',
+                display_name_key = $name_key,
                 bio = NONE,
                 avatar_url = NONE,
                 timezone = NONE,
@@ -44,6 +48,7 @@ pub async fn seed_dev_data(
         "#,
         )
         .bind(("token_hash", token_hash))
+        .bind(("name_key", dev_admin_key))
         .await?;
 
     tracing::info!("Dev data seeded: user=devadmin, role=admin");

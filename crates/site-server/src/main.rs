@@ -73,6 +73,9 @@ async fn main() {
         use scuffed_auth::crypto::hash_session_token;
         let token_hash = hash_session_token(DEV_SESSION_TOKEN);
 
+        let dev_admin_key =
+            scuffed_db::display_name_key("DevAdmin").expect("DevAdmin is a valid display name");
+
         db.client
             .query(
                 r#"
@@ -89,6 +92,7 @@ async fn main() {
                     user_id = 'devadmin',
                     org_role = 'admin',
                     display_name = 'DevAdmin',
+                    display_name_key = $name_key,
                     bio = NONE,
                     avatar_url = NONE,
                     timezone = NONE,
@@ -105,6 +109,7 @@ async fn main() {
             "#,
             )
             .bind(("token_hash", token_hash))
+            .bind(("name_key", dev_admin_key))
             .await
             .expect("Failed to seed dev data");
 
