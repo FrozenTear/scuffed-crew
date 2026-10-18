@@ -281,3 +281,25 @@ grep -q 'release notes contains an en dash' "$TMP/guard.err" \
 grep -q 'requirements footer contains an en dash' "$TMP/guard.err" \
   && fail "the footer check ran instead of the whole-notes guard"
 pass "en dash in the footer exits 1 through the whole-notes guard"
+
+# Every stat-tracker-v* body has a terminal update pinned to that tag, so a
+# player whose in-app Update button does not offer the release can still
+# update. Other tags (manual drafts) do not host bootstrap.sh and skip it.
+term_out="$(bash "$NOTES" --tag stat-tracker-v9.9.9-rc7 --changelog "$TMP/empty.md" --skip-commits)"
+printf '%s\n' "$term_out" | grep -qx '## Update from the terminal' \
+  || fail "release notes are missing the Update from the terminal section"
+printf '%s\n' "$term_out" | grep -qxF 'TAG=stat-tracker-v9.9.9-rc7' \
+  || fail "terminal update is not pinned to the release tag"
+want_term='curl --proto '"'"'=https'"'"' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash'
+printf '%s\n' "$term_out" | grep -qxF "$want_term" \
+  || fail "terminal update curl line changed: $(printf '%s\n' "$term_out" | grep -F bootstrap.sh)"
+printf '%s\n' "$term_out" | grep -qF 'About shows 9.9.9-rc7.' \
+  || fail "terminal update does not name the version About shows"
+printf '%s\n' "$term_out" | grep -qF 'This is for the tarball install.' \
+  || fail "terminal update does not say it is for the tarball install"
+printf '%s\n' "$term_out" | grep -qF 'If you installed from the AUR, update with your AUR helper instead' \
+  || fail "terminal update does not send AUR users to their AUR helper"
+manual_out="$(bash "$NOTES" --tag stat-tracker-manual-9 --changelog "$TMP/empty.md" --skip-commits)"
+printf '%s\n' "$manual_out" | grep -q 'Update from the terminal' \
+  && fail "a manual draft tag got a terminal update"
+pass "stat-tracker-v* notes carry a pinned terminal update; manual tags do not"
