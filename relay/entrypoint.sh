@@ -3,6 +3,9 @@
 # Compose publishes as host 127.0.0.1:7777 for Caddy /relay.
 set -eu
 cd /app
+# strfry.conf stores the DB at ./strfry-db. Compose mounts a volume here.
+# A container started without that mount still needs the directory.
+mkdir -p /app/strfry-db
 # The base image keeps the binary at /app/strfry and does not put it on PATH.
 /app/strfry relay &
 strfry_pid=$!

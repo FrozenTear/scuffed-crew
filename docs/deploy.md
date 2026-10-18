@@ -406,17 +406,14 @@ podman compose --env-file data/secrets.env up --build -d
 The relay is off until you opt in. Browsers use same-origin `/relay`. That path
 is a read gate: no NIP-42 AUTH means no events, a member only receives kind
 1059 gift wraps `p`-tagged to their own key, team chat only if they are on that
-team, and officer chat only if they are an officer on that team. strfry and
-strfry29 only filter writes, so the gate is a separate process in the same
+team, and officer chat only if they are an officer on that team. The write
+policy plugin is `/usr/local/bin/relay-policy` only. It checks the member
+allowlist, the kind whitelist, and the per-pubkey rate limit. It does not
+filter `REQ` results, so the read gate is a separate process in the same
 container.
 
-`relay/Containerfile` pins strfry29 to fiatjaf/relay29 commit
-`3276594e9d85670af13ba5cf0aad235f9692acd9`. That commit's `go.mod` requires
-Go 1.24.1 or newer. The builder image is
-`docker.io/library/golang:1.24.13-alpine` because it sets `GOTOOLCHAIN=local`
-and will not download a newer toolchain. Change the `RELAY29_COMMIT` build
-arg in that file to move the pin. `relay-policy` and `relay-read-gate` are
-compiled from this repository as static musl binaries. The runtime base is
+`relay-policy` and `relay-read-gate` are compiled from this repository as
+static musl binaries. The runtime base is
 `docker.io/dockurr/strfry` pinned by digest
 `sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d`
 (Alpine 3.18, musl). A short name (`dockurr/strfry@sha256:...`) makes
@@ -424,9 +421,24 @@ compiled from this repository as static musl binaries. The runtime base is
 `compose.yml` use a registry host on every image (`docker.io/library/...`
 for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
 `ghcr.io/...` for the site image). A glibc build of those plugins does not
-load there. `strfry29` is a static Go binary. CI builds the Go stage on
-every pull request. The full image also release-builds those Rust plugins,
-so that step stays out of CI.
+load there. CI builds this image, seeds one team channel, and walks the
+browser chat path: NIP-42 AUTH on the gate, the group-metadata query the
+app's filter uses, a kind 9 subscription, then a kind 9 publish the way
+`POST /api/chat/send-public` does. The event must come back on that
+subscription.
+
+Team chat does not need relay-signed group metadata (kinds 39000, 39001,
+and 39002). The site learns the group id from `GET /api/teams/:id/channels`.
+`ensure_team_channel_rows` writes those rows. The browser subscribes to kind
+9 with an `h` tag for that id. `subscribe_group_metadata` has no caller.
+Kind 9 delivery uses the SurrealDB roster and `team_channel` rows. The CI
+metadata query is the same filter as `NostrFilter::group_metadata`. An empty
+EOSE is the live shape, and the check continues with the channel id.
+
+The relay image has to be rebuilt before this plugin is what a running
+container executes. `./scripts/relay-up.sh` does that (`up --build` recreates
+strfry). Restarting a container built from an older image keeps the old
+write plugin.
 
 Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
 Compose network only, so site-server still uses `ws://strfry:7777` for publish
@@ -480,9 +492,11 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    to start when that flag is set and the SurrealDB password is missing,
    the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
 
-2. Build and start strfry (the image also starts the read gate). The main
+2. Rebuild and start strfry (the image also starts the read gate). The main
    stack must already be up, so Surreal is the existing container and not a
-   new one:
+   new one. Pull this change first. `relay-up.sh` rebuilds the image and
+   recreates the container. A restart of the previous container does not
+   load the new write plugin:
 
    ```bash
    ./scripts/relay-up.sh

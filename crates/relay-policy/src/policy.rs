@@ -26,8 +26,14 @@ impl Default for PolicyConfig {
     fn default() -> Self {
         let mut allowed_kinds = HashSet::new();
 
-        // NIP-01: basic text notes
+        // NIP-01 profile metadata and text notes. site-server publishes kind 0
+        // from member profile updates and kind 1 for community posts and forum
+        // threads.
+        allowed_kinds.insert(0);
         allowed_kinds.insert(1);
+
+        // NIP-25 reactions. site-server routes/nostr.rs publishes these.
+        allowed_kinds.insert(7);
 
         // NIP-29: group chat
         allowed_kinds.insert(9); // group chat message
@@ -38,10 +44,15 @@ impl Default for PolicyConfig {
         // NIP-42: relay auth
         allowed_kinds.insert(22242);
 
-        // NIP-44/NIP-59: encrypted DMs and gift wrap
+        // NIP-44/NIP-59: encrypted DMs and gift wrap.
+        // Kind 1059 is what send_encrypted and POST /api/nostr/dm/send publish.
+        // The author is an ephemeral key. evaluate() allowlists the p tag.
         allowed_kinds.insert(13); // seal
         allowed_kinds.insert(14); // rumor (should not appear on relay, but allow for gift-wrapped)
         allowed_kinds.insert(1059); // gift wrap
+
+        // NIP-72 community definition. site-server routes/nostr.rs publishes this.
+        allowed_kinds.insert(34550);
 
         // NIP-17: private DMs
         allowed_kinds.insert(1111); // NIP-17 DM (wrapped in gift wrap, kind 1059)
@@ -141,6 +152,19 @@ impl PolicyEngine {
         self.pubkey_allowlist.len()
     }
 
+    /// First `p` tag whose pubkey is on the member allowlist.
+    fn allowlisted_recipient(&self, event: &EventInfo) -> Option<String> {
+        event.tags.iter().find_map(|tag| {
+            if tag.len() >= 2 && tag[0] == "p" {
+                let pubkey = tag[1].to_ascii_lowercase();
+                if self.pubkey_allowlist.contains(&pubkey) {
+                    return Some(pubkey);
+                }
+            }
+            None
+        })
+    }
+
     /// Evaluate an event and return an accept/reject decision.
     pub fn evaluate(&mut self, event: &EventInfo) -> Decision {
         // Kind 4 is a plain DM. This relay only stores NIP-59 gift wraps
@@ -149,21 +173,34 @@ impl PolicyEngine {
             return Decision::Reject("blocked: kind 4 plain DMs are not accepted".into());
         }
 
-        // 1. Pubkey allowlist check
-        if !self.pubkey_allowlist.contains(&event.pubkey) {
+        // Kind 1059 authors are ephemeral (NIP-59). Officer chat and DMs
+        // publish these. The member is the `p` tag. Rate-limit that recipient
+        // on its own bucket so wraps do not consume the member's kind 9 budget.
+        let rate_key = if event.kind == 1059 {
+            if !self.config.allowed_kinds.contains(&event.kind) {
+                return Decision::Reject(format!("blocked: event kind {} not allowed", event.kind));
+            }
+            match self.allowlisted_recipient(event) {
+                Some(pubkey) => format!("gift:{pubkey}"),
+                None => {
+                    return Decision::Reject(
+                        "blocked: gift wrap recipient not in member allowlist".into(),
+                    );
+                }
+            }
+        } else if !self.pubkey_allowlist.contains(&event.pubkey) {
             return Decision::Reject("blocked: pubkey not in member allowlist".into());
-        }
-
-        // 2. Kind whitelist check
-        if !self.config.allowed_kinds.contains(&event.kind) {
+        } else if !self.config.allowed_kinds.contains(&event.kind) {
             return Decision::Reject(format!("blocked: event kind {} not allowed", event.kind));
-        }
+        } else {
+            event.pubkey.clone()
+        };
 
-        // 3. Rate limiting
+        // Rate limiting
         let now = Instant::now();
         let bucket = self
             .rate_buckets
-            .entry(event.pubkey.clone())
+            .entry(rate_key)
             .or_insert_with(RateBucket::new);
         let count = bucket.record(now, self.config.rate_limit_window_secs);
         if count > self.config.rate_limit_events as usize {
@@ -379,13 +416,49 @@ mod tests {
     #[test]
     fn encrypted_event_accepted_by_metadata() {
         let mut engine = make_engine();
-        // Gift wrap (kind 1059) — should be accepted based on pubkey + kind only
-        let event = make_event(&"aabbccdd".repeat(8), 1059);
-        assert_eq!(engine.evaluate(&event), Decision::Accept);
+        let member = "aabbccdd".repeat(8);
+        // Gift wrap (kind 1059) is signed by an ephemeral key. The member is the p tag.
+        let wrap = EventInfo {
+            id: "deadbeef".repeat(8),
+            pubkey: "ff".repeat(32),
+            kind: 1059,
+            tags: vec![vec!["p".to_string(), member.to_uppercase()]],
+        };
+        assert_eq!(engine.evaluate(&wrap), Decision::Accept);
 
-        // Seal (kind 13) — same
-        let event = make_event(&"aabbccdd".repeat(8), 13);
+        // Seal (kind 13) is signed by the member key.
+        let event = make_event(&member, 13);
         assert_eq!(engine.evaluate(&event), Decision::Accept);
+    }
+
+    #[test]
+    fn gift_wrap_without_allowlisted_recipient_is_rejected() {
+        let mut engine = make_engine();
+        let wrap = EventInfo {
+            id: "deadbeef".repeat(8),
+            pubkey: "ff".repeat(32),
+            kind: 1059,
+            tags: vec![vec!["p".to_string(), "ab".repeat(32)]],
+        };
+        assert!(
+            matches!(engine.evaluate(&wrap), Decision::Reject(msg) if msg.contains("gift wrap"))
+        );
+    }
+
+    #[test]
+    fn site_published_kinds_accepted() {
+        let mut engine = make_engine();
+        let pubkey = "aabbccdd".repeat(8);
+        // Kinds site-server actually publishes, signed by the member key.
+        // Kind 1059 is covered by encrypted_event_accepted_by_metadata.
+        for kind in [0_u64, 1, 7, 9, 34550] {
+            let event = make_event(&pubkey, kind);
+            assert_eq!(
+                engine.evaluate(&event),
+                Decision::Accept,
+                "kind {kind} should be accepted"
+            );
+        }
     }
 
     #[test]

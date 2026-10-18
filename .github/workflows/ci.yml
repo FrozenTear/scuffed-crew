@@ -171,18 +171,19 @@ jobs:
       - name: Favicon is in the dx bundle
         run: test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg
 
-  # Cheap guard for relay/Containerfile stage 1. The full strfry image also
-  # release-builds relay-policy (SurrealDB) and is not run here.
-  relay-strfry29:
-    name: Relay strfry29
+  # Builds the relay image and walks the site chat path against it.
+  # A write plugin that exits (the old strfry29 command) fails this job:
+  # the kind 9 publish is rejected and never comes back on the subscription.
+  relay-policy:
+    name: Relay policy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build strfry29 stage
-        run: |
-          docker build --target strfry29-builder -f relay/Containerfile -t strfry29-builder .
-          docker run --rm --entrypoint go strfry29-builder version
-          docker run --rm --entrypoint git strfry29-builder -C /src/relay29 rev-parse HEAD
-          docker run --rm --entrypoint /bin/ls strfry29-builder -l /usr/local/bin/strfry29
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Kind 9 chat flow through the relay image
+        run: bash relay/ci-chat-flow.sh

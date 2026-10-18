@@ -17,6 +17,15 @@ path = "src/lib.rs"
 name = "relay-read-gate"
 path = "src/bin/read_gate.rs"
 
+# CI chat-flow harness. Not part of the relay image build.
+[[bin]]
+name = "relay-chat-flow"
+path = "src/bin/chat_flow.rs"
+required-features = ["chat-flow"]
+
+[features]
+chat-flow = []
+
 [dependencies]
 scuffed-db = { path = "../db" }
 httparse = "1"
