@@ -13,13 +13,20 @@ use rayon::prelude::*;
 
 use crate::detect::hero_portrait::{ScoreboardPreflight, detect_team_size};
 
-/// Cached column offset from a previous successful calibration (keyed by board
-/// size + team size). Avoids re-running ~300 probe OCRs when the layout is stable.
+/// Cached column calibration, keyed by board size and team size.
+///
+/// `below_floor` is a result that finished under the 75% floor. Later reads
+/// of the same size reuse it with no re-score and no sweep. Above-floor
+/// entries are still re-scored, and kept only while that score clears the floor.
 struct CalibCache {
     width: u32,
     height: u32,
     team_size: usize,
     offset: f64,
+    below_floor: bool,
+    /// Below-floor winner was the header-anchored columns. Recompute those
+    /// for this frame instead of applying `offset`.
+    anchored: bool,
 }
 
 static COLUMN_OFFSET_CACHE: Mutex<Option<CalibCache>> = Mutex::new(None);
@@ -30,6 +37,43 @@ static COLUMN_OFFSET_CACHE: Mutex<Option<CalibCache>> = Mutex::new(None);
 thread_local! {
     static COLUMN_OFFSET_SWEEPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static COLUMN_SWEEP_UNDER_FLOOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CALIB_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Serializes calibration in tests so one test's cache write cannot land
+/// between another test's two reads of the same board.
+#[cfg(test)]
+static CALIB_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+struct CalibTestGuard {
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+impl Drop for CalibTestGuard {
+    fn drop(&mut self) {
+        if self._guard.is_some() {
+            CALIB_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+}
+
+/// Lock calibration for this thread. A caller that already holds it (a test
+/// wrapping several reads) gets a no-op guard, so `calibrate_columns` can
+/// take the same lock without deadlocking.
+#[cfg(test)]
+fn calib_test_guard() -> CalibTestGuard {
+    if CALIB_LOCK_HELD.with(|held| held.get()) {
+        return CalibTestGuard { _guard: None };
+    }
+    let guard = CALIB_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    CALIB_LOCK_HELD.with(|held| held.set(true));
+    CalibTestGuard {
+        _guard: Some(guard),
+    }
 }
 
 /// Process-wide OCR debug dump switch. Set once from config/env at daemon start
@@ -890,14 +934,18 @@ pub fn unread_rows(team_size: usize) -> Vec<RowOcrResult> {
 /// (the 2026-07-22 Numbani 22994 defect).
 ///
 /// Fallback path (headers unreadable or anchored windows score poorly): one
-/// offset sweep around the header-detected offset, with the winning offset
-/// cached per board geometry and reused while a quick re-score holds at
-/// least 75% of the max probe score. A fine sweep around that winner runs
-/// only when the coarse winner already clears the floor, so a board that
-/// clears it keeps the same columns. When no coarse offset clears the floor,
-/// the fine sweep does not run: the best coarse offset is used, unless the
+/// offset sweep around the header-detected offset. The result is cached per
+/// board size and team size. An above-floor entry is reused while a quick
+/// re-score holds at least 75% of the max probe score. A result that finishes
+/// under that floor is cached too, and later reads of the same size reuse it
+/// with no re-score and no sweep. A fine sweep around the coarse winner runs
+/// only when that winner already clears the floor, so a board that clears it
+/// keeps the same columns. When no coarse offset clears the floor, the fine
+/// sweep does not run: the best coarse offset is used, unless the
 /// header-anchored windows score at least as high.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
+    #[cfg(test)]
+    let _calib_test_guard = calib_test_guard();
     let header_groups = preprocess::header_label_groups(scoreboard);
     let header_offset = preprocess::offset_from_header_groups(&header_groups, scoreboard.width());
     let (board_w, board_h) = (scoreboard.width(), scoreboard.height());
@@ -910,6 +958,36 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
     if probe_rows.is_empty() {
         return preprocess::columns_from_header_groups(&header_groups, board_w)
             .unwrap_or_else(|| preprocess::columns_with_offset(header_offset));
+    }
+
+    // A below-floor result for this size is final until the size or team
+    // size changes. Reuse it before any probe OCR: re-scoring it fails the
+    // floor again and would repeat the coarse sweep.
+    let below_floor_hit = COLUMN_OFFSET_CACHE.lock().ok().and_then(|guard| {
+        guard.as_ref().and_then(|cached| {
+            if cached.below_floor
+                && cached.width == board_w
+                && cached.height == board_h
+                && cached.team_size == team_size
+            {
+                Some((cached.offset, cached.anchored))
+            } else {
+                None
+            }
+        })
+    });
+    if let Some((offset, use_anchored)) = below_floor_hit {
+        if use_anchored
+            && let Some(cols) = preprocess::columns_from_header_groups(&header_groups, board_w)
+        {
+            tracing::debug!("reusing below-floor header-anchored columns");
+            return cols;
+        }
+        tracing::debug!(
+            offset_px = (offset * board_w as f64) as i32,
+            "reusing below-floor column offset"
+        );
+        return preprocess::columns_with_offset(offset);
     }
 
     // CELL_SCORE_CLEAN per clean valid cell; suspect cells (edge ink) subtract
@@ -925,6 +1003,18 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         probe_rows.iter().map(|r| count_valid_cells(r, cols)).sum()
     };
     let score = |offset: f64| -> i32 { score_cols(&preprocess::columns_with_offset(offset)) };
+    let remember = |offset: f64, below_floor: bool, anchored: bool| {
+        if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
+            *guard = Some(CalibCache {
+                width: board_w,
+                height: board_h,
+                team_size,
+                offset,
+                below_floor,
+                anchored,
+            });
+        }
+    };
 
     // Header-anchored per-column windows: accept immediately when they score
     // at least the same 75%-of-max floor the cached-offset reuse path uses.
@@ -960,6 +1050,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         && cached.width == board_w
         && cached.height == board_h
         && cached.team_size == team_size
+        && !cached.below_floor
     {
         anchor = Some(cached.offset);
         let cached_score = score(cached.offset);
@@ -1048,17 +1139,16 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
             sweep_score = best_valid,
             "header-anchored columns beat the offset sweep"
         );
+        // This path is only reached when the anchored score is under the
+        // floor (the above-floor case returned before the sweep). Remember
+        // that choice so the next read of this size does not sweep again.
+        if *anchored_score < anchored_floor {
+            remember(best_offset, true, true);
+        }
         return *cols;
     }
 
-    if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
-        *guard = Some(CalibCache {
-            width: board_w,
-            height: board_h,
-            team_size,
-            offset: best_offset,
-        });
-    }
+    remember(best_offset, best_valid < anchored_floor, false);
 
     tracing::debug!(
         header_offset_px = (header_offset * board_w as f64) as i32,
@@ -1690,6 +1780,10 @@ mod tests {
     /// repeat the same losing search.
     #[test]
     fn under_threshold_board_sweeps_column_offsets_once() {
+        let _hold = calib_test_guard();
+        if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
+            *guard = None;
+        }
         COLUMN_OFFSET_SWEEPS.with(|c| c.set(0));
         COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.set(false));
         let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
@@ -1706,6 +1800,48 @@ mod tests {
             COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
             1,
             "the offset sweep must run once"
+        );
+    }
+
+    /// The second read of a below-floor board reuses the cached choice.
+    /// It does not re-score that choice and does not sweep. A different
+    /// board size misses the cache and sweeps again.
+    #[test]
+    fn below_floor_cache_skips_the_sweep_on_the_same_board_size() {
+        let _hold = calib_test_guard();
+        if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
+            *guard = None;
+        }
+        COLUMN_OFFSET_SWEEPS.with(|c| c.set(0));
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        let first = calibrate_columns(&board, 5);
+        assert!(
+            COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.get()),
+            "this board must stay under the 75% floor"
+        );
+        let sweeps = COLUMN_OFFSET_SWEEPS.with(|c| c.get());
+        assert!(sweeps >= 1, "the first read has to sweep");
+        let second = calibrate_columns(&board, 5);
+        assert_eq!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
+            sweeps,
+            "the second read of this size must not sweep"
+        );
+        assert_eq!(first, second);
+
+        let other = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1600,
+            900,
+            image::Rgb([20, 24, 30]),
+        ));
+        let _ = calibrate_columns(&other, 5);
+        assert!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()) > sweeps,
+            "a different board size must sweep again"
         );
     }
 }
