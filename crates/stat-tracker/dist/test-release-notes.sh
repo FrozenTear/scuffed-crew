@@ -295,6 +295,10 @@ printf '%s\n' "$term_out" | grep -qxF "$want_term" \
   || fail "terminal update curl line changed: $(printf '%s\n' "$term_out" | grep -F bootstrap.sh)"
 printf '%s\n' "$term_out" | grep -qF 'About shows 9.9.9-rc7.' \
   || fail "terminal update does not name the version About shows"
+printf '%s\n' "$term_out" | grep -qF 'This is for the tarball install.' \
+  || fail "terminal update does not say it is for the tarball install"
+printf '%s\n' "$term_out" | grep -qF 'If you installed from the AUR, update with your AUR helper instead' \
+  || fail "terminal update does not send AUR users to their AUR helper"
 manual_out="$(bash "$NOTES" --tag stat-tracker-manual-9 --changelog "$TMP/empty.md" --skip-commits)"
 printf '%s\n' "$manual_out" | grep -q 'Update from the terminal' \
   && fail "a manual draft tag got a terminal update"
