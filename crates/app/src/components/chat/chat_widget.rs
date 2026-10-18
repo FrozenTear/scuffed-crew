@@ -1,14 +1,16 @@
 //! Main expandable chat widget — sidebar/panel layout.
 //!
-//! Wires F-API-003/004: discovered `TeamChannel` group_ids, NIP-29 kind 9 on
-//! public channels, and send-encrypted / decrypt on officer channels.
+//! Wires F-API-003/004: discovered `TeamChannel` group_ids, team (public)
+//! sends via `POST /api/chat/send-public`, and send-encrypted / decrypt on
+//! officer channels.
 
 use dioxus::prelude::*;
 use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::nostr::{ChatMessage, NostrEvent, NostrFilter, event_kinds};
 use scuffed_types::{
     AuthTokenRequest, AuthTokenResponse, DecryptMessageRequest, DecryptMessageResponse, GroupType,
-    MeResponse, SendEncryptedRequest, SendEncryptedResponse, TeamChannel, chat_api_error_copy,
+    MeResponse, SendEncryptedRequest, SendEncryptedResponse, SendPublicRequest, SendPublicResponse,
+    TeamChannel, chat_api_error_copy,
 };
 
 use crate::components::chat::encrypted_chat::{EncryptedChat, KeyMode};
@@ -175,16 +177,6 @@ const CHAT_WIDGET_CSS: &str = r#"
     line-height: 1.4;
 }
 
-.chat-widget__hint {
-    margin: 8px 12px 0;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: var(--surface-2);
-    color: var(--text-2);
-    font-size: 12px;
-    line-height: 1.4;
-}
-
 .chat-widget__empty {
     flex: 1;
     display: flex;
@@ -281,13 +273,6 @@ fn subscription_allowed(state: RelayConnectionState) -> bool {
         state,
         RelayConnectionState::Connected | RelayConnectionState::Ready
     )
-}
-
-fn has_nip07() -> bool {
-    web_sys::window()
-        .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("nostr")).ok())
-        .map(|v| !v.is_undefined() && !v.is_null())
-        .unwrap_or(false)
 }
 
 async fn provision_auth_token(relay_url: &str) -> Result<AuthTokenResponse, String> {
@@ -422,58 +407,137 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
     })
 }
 
-async fn nip07_sign_kind9(group_id: &str, content: &str) -> Result<NostrEvent, String> {
-    use wasm_bindgen::{JsCast, JsValue};
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicSendError {
+    message: String,
+    retry_after_secs: Option<u64>,
+}
 
-    let window = web_sys::window().ok_or("No window")?;
-    let nostr = js_sys::Reflect::get(&window, &JsValue::from_str("nostr"))
-        .map_err(|_| "NIP-07 extension not found")?;
-    if nostr.is_undefined() || nostr.is_null() {
-        return Err("NIP-07 extension not found".into());
+const RATE_LIMIT_LATER: &str = "Too many messages. Try again later.";
+
+fn rate_limit_copy(secs: u64) -> String {
+    if secs == 1 {
+        "Too many messages. Try again in 1 second.".to_string()
+    } else {
+        format!("Too many messages. Try again in {secs} seconds.")
     }
+}
 
-    let created_at = (js_sys::Date::now() / 1000.0) as u64;
-    let event_obj = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &event_obj,
-        &JsValue::from_str("kind"),
-        &JsValue::from_f64(9.0),
-    )
-    .map_err(|_| "Failed to set kind")?;
-    js_sys::Reflect::set(
-        &event_obj,
-        &JsValue::from_str("content"),
-        &JsValue::from_str(content),
-    )
-    .map_err(|_| "Failed to set content")?;
-    js_sys::Reflect::set(
-        &event_obj,
-        &JsValue::from_str("created_at"),
-        &JsValue::from_f64(created_at as f64),
-    )
-    .map_err(|_| "Failed to set created_at")?;
+/// Whole seconds left until `until_ms`, rounded up. Zero once `now_ms` catches up.
+fn remaining_hold_secs(until_ms: f64, now_ms: f64) -> u64 {
+    if !until_ms.is_finite() || !now_ms.is_finite() || until_ms <= now_ms {
+        return 0;
+    }
+    let secs = ((until_ms - now_ms) / 1000.0).ceil();
+    if !secs.is_finite() || secs >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        secs as u64
+    }
+}
 
-    let tags = js_sys::Array::new();
-    let htag = js_sys::Array::new();
-    htag.push(&JsValue::from_str("h"));
-    htag.push(&JsValue::from_str(group_id));
-    tags.push(&htag);
-    js_sys::Reflect::set(&event_obj, &JsValue::from_str("tags"), &tags)
-        .map_err(|_| "Failed to set tags")?;
+/// Plain copy for `POST /api/chat/send-public` failures.
+///
+/// 429 uses the JSON `retry_after` (then the `Retry-After` header) so the
+/// composer can count down. Waits outside 1..=3600 stay a static message.
+fn public_send_failure(
+    status: u16,
+    body: &str,
+    header_retry_after: Option<u64>,
+) -> PublicSendError {
+    if status == 429 {
+        let secs = scuffed_types::json_retry_after(body).or(header_retry_after);
+        return match secs {
+            Some(secs) => PublicSendError {
+                message: rate_limit_copy(secs),
+                retry_after_secs: Some(secs),
+            },
+            None => PublicSendError {
+                message: RATE_LIMIT_LATER.to_string(),
+                retry_after_secs: None,
+            },
+        };
+    }
+    let message = match status {
+        400 if body.contains("too long") => "Message is too long.",
+        400 if body.contains("Message content must not be empty") => {
+            "Write a message before sending."
+        }
+        400 => "That message couldn't be sent.",
+        401 => "Sign in to send a message.",
+        403 => "You are not allowed in this channel.",
+        404 => "Channel not found.",
+        502 | 503 => "Couldn't reach the chat server.",
+        _ => "Something went wrong sending that message.",
+    };
+    PublicSendError {
+        message: message.to_string(),
+        retry_after_secs: None,
+    }
+}
 
-    let sign = js_sys::Reflect::get(&nostr, &JsValue::from_str("signEvent"))
-        .map_err(|_| "signEvent missing")?;
-    let sign_fn: js_sys::Function = sign.dyn_into().map_err(|_| "signEvent is not a function")?;
-    let promise = sign_fn
-        .call1(&nostr, &event_obj)
-        .map_err(|e| format!("{e:?}"))?;
-    let promise: js_sys::Promise = promise
-        .dyn_into()
-        .map_err(|_| "signEvent did not return a promise")?;
-    let signed = wasm_bindgen_futures::JsFuture::from(promise)
+fn public_send_client_error(err: ClientError) -> PublicSendError {
+    match err {
+        ClientError::Http {
+            status,
+            body,
+            retry_after,
+        } => public_send_failure(status, &body, retry_after),
+        ClientError::Network(_) => PublicSendError {
+            message: "Couldn't reach the chat server.".into(),
+            retry_after_secs: None,
+        },
+        ClientError::Deserialize(_) => PublicSendError {
+            message: "Something went wrong sending that message.".into(),
+            retry_after_secs: None,
+        },
+    }
+}
+
+fn needs_key_provision(body: &str) -> bool {
+    body.contains("No Nostr keys") || body.contains("Nostr keys provisioned")
+}
+
+async fn post_public_message(
+    client: &ApiClient,
+    req: &SendPublicRequest,
+) -> Result<SendPublicResponse, PublicSendError> {
+    client
+        .post_json::<_, SendPublicResponse>("/api/chat/send-public", req)
         .await
-        .map_err(|e| format!("NIP-07 signEvent failed: {e:?}"))?;
-    serde_wasm_bindgen::from_value(signed).map_err(|e| e.to_string())
+        .map_err(public_send_client_error)
+}
+
+/// Publish a team channel message with the session cookie.
+///
+/// A member with no server key yet gets one provision attempt, the same
+/// recovery officer send already uses, then one retry. The relay echo of the
+/// returned event id is ignored by [`push_unique`].
+async fn send_public_message(
+    group_id: &str,
+    content: &str,
+    relay_url: &str,
+) -> Result<SendPublicResponse, PublicSendError> {
+    let client = ApiClient::web();
+    let req = SendPublicRequest {
+        group_id: group_id.to_string(),
+        content: content.to_string(),
+    };
+    match client
+        .post_json::<_, SendPublicResponse>("/api/chat/send-public", &req)
+        .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(ClientError::Http {
+            status: 400, body, ..
+        }) if needs_key_provision(&body) => {
+            if provision_auth_token(relay_url).await.is_err() {
+                return Err(public_send_failure(400, &body, None));
+            }
+            post_public_message(&client, &req).await
+        }
+        Err(other) => Err(public_send_client_error(other)),
+    }
 }
 
 fn push_unique(messages: &mut Vec<ChatMessage>, msg: ChatMessage) {
@@ -514,6 +578,14 @@ pub fn ChatWidget(
     let mut loading = use_signal(|| false);
     let mut panel_error = use_signal(|| Option::<String>::None);
     let mut sending = use_signal(|| false);
+    let mut send_hold_until_ms = use_signal(|| 0.0);
+    let mut hold_tick = use_signal(|| 0u32);
+    let _hold_timer = use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(1_000).await;
+            hold_tick += 1;
+        }
+    });
     let mut decrypt_relay = use_signal(String::new);
     let mut me_refresh = use_signal(|| 0u64);
 
@@ -720,6 +792,8 @@ pub fn ChatWidget(
     let me_data = me.read();
     let key_mode = key_mode_from_me(me_data.as_ref().and_then(|o| o.as_ref()));
     let err = panel_error.read().clone();
+    let _hold_render = hold_tick();
+    let public_send_wait = remaining_hold_secs(send_hold_until_ms(), js_sys::Date::now());
     let relay_retry = relay.clone();
     let active_channels: Vec<TeamChannel> =
         channels.iter().filter(|c| c.is_active).cloned().collect();
@@ -797,7 +871,9 @@ pub fn ChatWidget(
                     }
                 }
 
-                if let Some(msg) = err {
+                if !is_officer && public_send_wait > 0 {
+                    div { class: "chat-widget__error", "{rate_limit_copy(public_send_wait)}" }
+                } else if let Some(msg) = err {
                     div { class: "chat-widget__error", "{msg}" }
                 }
 
@@ -848,13 +924,6 @@ pub fn ChatWidget(
                         },
                     }
                 } else {
-                    if !has_nip07() {
-                        div { class: "chat-widget__hint",
-                            "Public messages are NIP-29 kind 9 on the discovered group. \
-                            Sending needs a NIP-07 extension. Server-managed keys can listen here \
-                            and send on officer channels via the API."
-                        }
-                    }
                     MessageList {
                         messages: visible,
                         loading: is_loading,
@@ -864,52 +933,49 @@ pub fn ChatWidget(
                             if sending() {
                                 return;
                             }
-                            let Some(ch) = active.clone() else { return };
-                            if !has_nip07() {
-                                let msg = "Public channel send needs a NIP-07 extension.".to_string();
-                                panel_error.set(Some(msg.clone()));
-                                toast.show(Toast::error(msg));
+                            if remaining_hold_secs(send_hold_until_ms(), js_sys::Date::now()) > 0 {
                                 return;
                             }
-                            let relay_pub = relay.clone();
+                            let Some(ch) = active.clone() else { return };
+                            let relay_url = auth_relay_url(&ch.relay_url);
                             sending.set(true);
                             panel_error.set(None);
                             spawn(async move {
-                                match nip07_sign_kind9(&ch.group_id, &text).await {
-                                    Ok(event) => {
-                                        let pubkey = event.pubkey.clone();
-                                        let id = event.id.clone();
-                                        relay_pub.publish_event(event);
-                                        let now = (js_sys::Date::now() / 1000.0) as u64;
+                                match send_public_message(&ch.group_id, &text, &relay_url).await {
+                                    Ok(resp) => {
                                         push_unique(
                                             &mut messages.write(),
                                             ChatMessage {
-                                                id,
-                                                pubkey,
+                                                id: resp.event_id,
+                                                pubkey: resp.sender_pubkey,
                                                 display_name: None,
                                                 avatar_url: None,
                                                 content: text,
-                                                created_at: now,
+                                                created_at: resp.created_at,
                                                 group_id: ch.group_id,
                                                 encrypted: false,
                                                 reply_to: None,
                                             },
                                         );
                                     }
-                                    Err(e) => {
-                                        panel_error.set(Some(e.clone()));
-                                        toast.show(Toast::error(e));
+                                    Err(err) => {
+                                        if let Some(secs) = err.retry_after_secs {
+                                            let until =
+                                                js_sys::Date::now() + (secs as f64) * 1000.0;
+                                            send_hold_until_ms.set(until);
+                                            panel_error.set(None);
+                                        } else {
+                                            panel_error.set(Some(err.message.clone()));
+                                            toast.show(Toast::error(err.message));
+                                        }
                                     }
                                 }
                                 sending.set(false);
                             });
                         },
-                        disabled: !conn.is_ready() || sending(),
-                        placeholder: if conn.is_ready() {
-                            "Type a message...".to_string()
-                        } else {
-                            "Connecting to relay...".to_string()
-                        },
+                        disabled: sending(),
+                        send_locked: public_send_wait > 0,
+                        placeholder: "Type a message...".to_string(),
                     }
                 }
             }
@@ -1011,5 +1077,163 @@ mod tests {
         );
         assert_eq!(prod.matches("relay.connect(").count(), 1);
         assert_eq!(prod.matches("connect_same_origin(").count(), 1);
+    }
+
+    #[test]
+    fn public_send_posts_to_the_session_endpoint() {
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(prod.contains("/api/chat/send-public"));
+        assert!(prod.contains("send_public_message"));
+        assert!(!prod.contains("nip07_sign_kind9"));
+        assert!(!prod.contains("has_nip07"));
+        assert!(prod.contains("send_officer_message"));
+        assert!(prod.contains("/api/chat/send-encrypted"));
+    }
+
+    #[test]
+    fn public_send_errors_use_plain_language() {
+        let too_long = public_send_failure(
+            400,
+            r#"{"error":"Message is too long (max 2000 characters)"}"#,
+            None,
+        );
+        assert_eq!(too_long.message, "Message is too long.");
+        assert_eq!(too_long.retry_after_secs, None);
+
+        let empty = public_send_failure(
+            400,
+            r#"{"error":"Message content must not be empty"}"#,
+            None,
+        );
+        assert_eq!(empty.message, "Write a message before sending.");
+
+        let blank_group =
+            public_send_failure(400, r#"{"error":"group_id must not be empty"}"#, None);
+        assert_eq!(blank_group.message, "That message couldn't be sent.");
+
+        let external = public_send_failure(
+            400,
+            r#"{"error":"External key users must sign client-side (NIP-07)"}"#,
+            None,
+        );
+        assert_eq!(external.message, "That message couldn't be sent.");
+
+        let missing_keys = public_send_failure(
+            400,
+            r#"{"error":"No Nostr keys provisioned. Call /api/chat/auth-token first."}"#,
+            None,
+        );
+        assert_eq!(missing_keys.message, "That message couldn't be sent.");
+        assert!(needs_key_provision(
+            r#"{"error":"No Nostr keys provisioned. Call /api/chat/auth-token first."}"#
+        ));
+        assert!(!needs_key_provision(
+            r#"{"error":"External key users must sign client-side (NIP-07)"}"#
+        ));
+
+        assert_eq!(
+            public_send_failure(401, r#"{"error":"Unauthorized"}"#, None).message,
+            "Sign in to send a message."
+        );
+        assert_eq!(
+            public_send_failure(403, r#"{"error":"Not a member of this team"}"#, None).message,
+            "You are not allowed in this channel."
+        );
+        assert_eq!(
+            public_send_failure(404, r#"{"error":"Channel 'alpha' not found"}"#, None).message,
+            "Channel not found."
+        );
+        assert_eq!(
+            public_send_failure(
+                502,
+                r#"{"error":"Relay rejected or failed to accept the message"}"#,
+                None
+            )
+            .message,
+            "Couldn't reach the chat server."
+        );
+        assert_eq!(
+            public_send_failure(
+                503,
+                r#"{"error":"Cannot connect to relay for publishing"}"#,
+                None
+            )
+            .message,
+            "Couldn't reach the chat server."
+        );
+        assert_eq!(
+            public_send_failure(500, r#"{"error":"Internal error"}"#, None).message,
+            "Something went wrong sending that message."
+        );
+
+        let limited =
+            public_send_failure(429, r#"{"error":"rate_limited","retry_after":12}"#, Some(3));
+        assert_eq!(limited.retry_after_secs, Some(12));
+        assert_eq!(
+            limited.message,
+            "Too many messages. Try again in 12 seconds."
+        );
+
+        let one = public_send_failure(429, r#"{"error":"rate_limited","retry_after":1}"#, None);
+        assert_eq!(one.retry_after_secs, Some(1));
+        assert_eq!(one.message, "Too many messages. Try again in 1 second.");
+
+        let from_header = public_send_failure(429, "nope", Some(4));
+        assert_eq!(from_header.retry_after_secs, Some(4));
+        assert_eq!(
+            from_header.message,
+            "Too many messages. Try again in 4 seconds."
+        );
+
+        let numeric_string =
+            public_send_failure(429, r#"{"error":"rate_limited","retry_after":"8"}"#, None);
+        assert_eq!(numeric_string.retry_after_secs, Some(8));
+
+        let later =
+            public_send_failure(429, r#"{"error":"rate_limited","retry_after":3601}"#, None);
+        assert_eq!(later.message, "Too many messages. Try again later.");
+        assert_eq!(later.retry_after_secs, None);
+
+        let fraction =
+            public_send_failure(429, r#"{"error":"rate_limited","retry_after":1.5}"#, None);
+        assert_eq!(fraction.retry_after_secs, None);
+        assert_eq!(fraction.message, "Too many messages. Try again later.");
+    }
+
+    #[test]
+    fn rate_limit_hold_counts_down_to_zero() {
+        assert_eq!(remaining_hold_secs(1_000_000.0, 995_000.0), 5);
+        assert_eq!(remaining_hold_secs(1_000_000.0, 999_000.0), 1);
+        assert_eq!(remaining_hold_secs(1_000_000.0, 999_001.0), 1);
+        assert_eq!(remaining_hold_secs(1_000_000.0, 1_000_000.0), 0);
+        assert_eq!(remaining_hold_secs(1_000_000.0, 1_000_001.0), 0);
+        assert_eq!(remaining_hold_secs(0.0, 0.0), 0);
+        assert_eq!(remaining_hold_secs(f64::NAN, 0.0), 0);
+        let now = 1_700_000_000_000.0;
+        let until = now + 12_000.0;
+        assert_eq!(remaining_hold_secs(until, now), 12);
+        assert_eq!(remaining_hold_secs(until, now + 11_001.0), 1);
+        assert_eq!(remaining_hold_secs(until, now + 12_000.0), 0);
+    }
+
+    #[test]
+    fn push_unique_drops_a_relay_echo_of_the_same_event() {
+        let mut messages = Vec::new();
+        let sent = ChatMessage {
+            id: "abc".into(),
+            pubkey: "pk".into(),
+            display_name: None,
+            avatar_url: None,
+            content: "hello team".into(),
+            created_at: 10,
+            group_id: "g".into(),
+            encrypted: false,
+            reply_to: None,
+        };
+        push_unique(&mut messages, sent.clone());
+        push_unique(&mut messages, sent);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "hello team");
     }
 }

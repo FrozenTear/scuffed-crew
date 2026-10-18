@@ -83,7 +83,7 @@ pub fn EncryptedChat(
         div { class: "encrypted-chat",
             div { class: "encrypted-chat__badge",
                 span { class: "encrypted-chat__badge-icon", "\u{1F512}" }
-                "End-to-end encrypted channel"
+                "Encrypted"
             }
             match key_mode {
                 KeyMode::None => rsx! {

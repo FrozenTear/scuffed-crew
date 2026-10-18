@@ -1,6 +1,48 @@
 //! Reply input + send button for the chat widget.
 
 use dioxus::prelude::*;
+use scuffed_types::MAX_CHAT_MESSAGE_CHARS;
+
+/// Show the remaining count once this many characters or fewer are left after trim.
+const CHAT_COUNTER_WINDOW: usize = 200;
+
+/// Unicode scalar length after `trim`.
+///
+/// Matches server `trimmed_chat_content`: `str::trim`, then `chars().count()`.
+/// The cap is [`MAX_CHAT_MESSAGE_CHARS`] (2000).
+fn trimmed_chat_len(raw: &str) -> usize {
+    raw.trim().chars().count()
+}
+
+/// True when trimmed text is non-empty and within the server cap.
+fn chat_compose_can_send(raw: &str) -> bool {
+    let len = trimmed_chat_len(raw);
+    len > 0 && len <= MAX_CHAT_MESSAGE_CHARS
+}
+
+/// Remaining-character label. Hidden until the draft is near the cap.
+fn chat_counter_label(raw: &str) -> Option<String> {
+    let len = trimmed_chat_len(raw);
+    let over = len > MAX_CHAT_MESSAGE_CHARS;
+    let near = len + CHAT_COUNTER_WINDOW >= MAX_CHAT_MESSAGE_CHARS;
+    if !over && !near {
+        return None;
+    }
+    if over {
+        let extra = len - MAX_CHAT_MESSAGE_CHARS;
+        return Some(if extra == 1 {
+            "1 character over the limit".to_string()
+        } else {
+            format!("{extra} characters over the limit")
+        });
+    }
+    let left = MAX_CHAT_MESSAGE_CHARS - len;
+    Some(if left == 1 {
+        "1 character left".to_string()
+    } else {
+        format!("{left} characters left")
+    })
+}
 
 const COMPOSE_BOX_CSS: &str = r#"
 .chat-compose {
@@ -74,6 +116,18 @@ const COMPOSE_BOX_CSS: &str = r#"
     padding: 2px 12px 4px;
     background: var(--surface);
 }
+
+.chat-compose__counter {
+    font-size: 11px;
+    color: var(--text-3);
+    text-align: right;
+    padding: 0 12px 6px;
+    background: var(--surface);
+}
+
+.chat-compose__counter--over {
+    color: var(--danger);
+}
 "#;
 
 /// Chat message compose box with text input and send button.
@@ -83,14 +137,20 @@ pub fn ComposeBox(
     #[props(default = false)] disabled: bool,
     #[props(default = "Type a message...".to_string())] placeholder: String,
     #[props(default = false)] encrypted: bool,
+    /// Blocks the send button without locking the input (rate-limit countdown).
+    #[props(default = false)]
+    send_locked: bool,
 ) -> Element {
     let mut draft = use_signal(String::new);
-
-    let can_send = !disabled && !draft.read().trim().is_empty();
+    let draft_text = draft();
+    let trimmed_len = trimmed_chat_len(&draft_text);
+    let over_limit = trimmed_len > MAX_CHAT_MESSAGE_CHARS;
+    let can_send = !disabled && !send_locked && chat_compose_can_send(&draft_text);
+    let counter = chat_counter_label(&draft_text);
 
     let mut submit = move || {
         let text = draft.read().trim().to_string();
-        if !text.is_empty() && !disabled {
+        if chat_compose_can_send(&text) && !disabled && !send_locked {
             on_send.call(text);
             draft.set(String::new());
         }
@@ -124,5 +184,76 @@ pub fn ComposeBox(
                 "Send"
             }
         }
+        if let Some(label) = counter {
+            div {
+                class: if over_limit {
+                    "chat-compose__counter chat-compose__counter--over"
+                } else {
+                    "chat-compose__counter"
+                },
+                "{label}"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_then_count_matches_server_scalars() {
+        assert_eq!(trimmed_chat_len("  hello  "), 5);
+        assert_eq!(trimmed_chat_len("\n\thi\t\n"), 2);
+        assert_eq!(trimmed_chat_len("\u{00A0}hi\u{00A0}"), 2);
+        assert_eq!(trimmed_chat_len("   "), 0);
+        assert_eq!(trimmed_chat_len("é"), 1);
+        assert_eq!(trimmed_chat_len("👍"), 1);
+        // ZWJ family is several scalars, not one grapheme and not bytes.
+        assert_eq!(trimmed_chat_len("👨‍👩‍👧"), 5);
+        assert_eq!(trimmed_chat_len(&format!("  {}  ", "a".repeat(3))), 3);
+    }
+
+    #[test]
+    fn send_blocks_empty_and_over_cap() {
+        assert!(!chat_compose_can_send(""));
+        assert!(!chat_compose_can_send("   \n"));
+        assert!(chat_compose_can_send(" hi "));
+        assert!(chat_compose_can_send(&"a".repeat(MAX_CHAT_MESSAGE_CHARS)));
+        assert!(!chat_compose_can_send(
+            &"a".repeat(MAX_CHAT_MESSAGE_CHARS + 1)
+        ));
+        let edge = format!("{}é", "a".repeat(MAX_CHAT_MESSAGE_CHARS - 1));
+        assert_eq!(trimmed_chat_len(&edge), MAX_CHAT_MESSAGE_CHARS);
+        assert!(chat_compose_can_send(&edge));
+    }
+
+    #[test]
+    fn counter_shows_remaining_only_near_the_limit() {
+        assert_eq!(chat_counter_label("hello"), None);
+        let under = "a".repeat(MAX_CHAT_MESSAGE_CHARS - CHAT_COUNTER_WINDOW - 1);
+        assert_eq!(chat_counter_label(&under), None);
+        let at_window = "a".repeat(MAX_CHAT_MESSAGE_CHARS - CHAT_COUNTER_WINDOW);
+        assert_eq!(
+            chat_counter_label(&at_window).as_deref(),
+            Some("200 characters left")
+        );
+        assert_eq!(
+            chat_counter_label(&"a".repeat(MAX_CHAT_MESSAGE_CHARS - 1)).as_deref(),
+            Some("1 character left")
+        );
+        assert_eq!(
+            chat_counter_label(&"a".repeat(MAX_CHAT_MESSAGE_CHARS)).as_deref(),
+            Some("0 characters left")
+        );
+        assert_eq!(
+            chat_counter_label(&"a".repeat(MAX_CHAT_MESSAGE_CHARS + 1)).as_deref(),
+            Some("1 character over the limit")
+        );
+        assert_eq!(
+            chat_counter_label(&format!("  {}  ", "a".repeat(MAX_CHAT_MESSAGE_CHARS + 2)))
+                .as_deref(),
+            Some("2 characters over the limit")
+        );
     }
 }
