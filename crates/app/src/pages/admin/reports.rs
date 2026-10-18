@@ -11,7 +11,7 @@ use scuffed_api_client::{ApiClient, ClientError};
 use crate::state::use_auth;
 
 use super::super::stat_reports::{
-    ListedError, OfficerReportsBody, StatReportList, officer_screen, without_expired,
+    ListedError, OfficerReportsBody, officer_screen, parse_officer_reports, report_is_current,
 };
 
 #[component]
@@ -22,13 +22,19 @@ pub fn AdminReports() -> Element {
     let reports = use_resource(move || async move {
         let _generation = refresh();
         match ApiClient::web()
-            .fetch::<StatReportList>("/api/stat-reports")
+            .fetch::<serde_json::Value>("/api/stat-reports")
             .await
         {
-            Ok(list) => {
-                list_error.set(None);
-                Some(list)
-            }
+            Ok(value) => match parse_officer_reports(&value) {
+                Ok(list) => {
+                    list_error.set(None);
+                    Some(list)
+                }
+                Err(message) => {
+                    list_error.set(Some(ClientError::Deserialize(message)));
+                    None
+                }
+            },
             Err(err) => {
                 list_error.set(Some(err));
                 None
@@ -41,9 +47,20 @@ pub fn AdminReports() -> Element {
         current.as_ref().map(ListedError::from_client)
     };
     let list = reports.read().clone().flatten();
-    let rows = list
+    let now = Utc::now();
+    let (rows, display_names) = list
         .as_ref()
-        .map(|list| without_expired(list.reports.clone(), Utc::now()))
+        .map(|list| {
+            let mut rows = Vec::new();
+            let mut names = Vec::new();
+            for (row, name) in list.rows.iter().zip(list.display_names.iter()) {
+                if report_is_current(row, now) {
+                    rows.push(row.clone());
+                    names.push(name.clone());
+                }
+            }
+            (rows, names)
+        })
         .unwrap_or_default();
     let row_count = list.as_ref().map(|_| rows.len());
     let screen = officer_screen(&auth_now, failure.as_ref(), row_count);
@@ -58,6 +75,7 @@ pub fn AdminReports() -> Element {
                 .unwrap_or_default(),
             retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
             rows,
+            display_names,
             truncated: list.as_ref().is_some_and(|list| list.truncated),
             on_retry: move |_| {
                 refresh += 1;
