@@ -1764,61 +1764,72 @@ impl TrackerApp {
         dialog.kit_images.clear();
         let generation = dialog.bump();
         dialog.kit_loading = None;
-        if dialog.needs_game_category() {
-            // Nothing to build until the member picks a category, but the
-            // game's pictures load now so the dialog shows them at once.
-            dialog.built = None;
-            dialog.building = None;
-            let Some(session_id) = dialog.game_session.clone() else {
-                return Task::none();
-            };
-            dialog.kit_loading = Some(generation);
-            let data_dir = config.data_dir.clone();
-            return Task::perform(
-                crate::report::load_kit_preview(data_dir, session_id),
-                move |images| {
-                    Message::Report(crate::report::ReportMessage::KitLoaded(generation, images))
-                },
-            );
-        }
-        dialog.building = Some(generation);
-        if let Some(category) = dialog.game_category {
-            let req = crate::report::GameBuildRequest {
-                config,
-                session_id: dialog.game_session.clone().unwrap_or_default(),
+        // The zip kind follows the one picked kind: a log pick never builds
+        // a game zip, so Performance and Crash never carry pictures.
+        match dialog.build_plan() {
+            crate::report::BuildPlan::Nothing => {
+                dialog.built = None;
+                dialog.building = None;
+                Task::none()
+            }
+            crate::report::BuildPlan::LoadKit(session_id) => {
+                // Nothing to build until the member picks a category, but
+                // the game's pictures load now so the dialog shows them.
+                dialog.built = None;
+                dialog.building = None;
+                dialog.kit_loading = Some(generation);
+                let data_dir = config.data_dir.clone();
+                Task::perform(
+                    crate::report::load_kit_preview(data_dir, session_id),
+                    move |images| {
+                        Message::Report(crate::report::ReportMessage::KitLoaded(generation, images))
+                    },
+                )
+            }
+            crate::report::BuildPlan::Game {
+                session_id,
                 category,
-                text: dialog.text.clone(),
-                training: dialog.training,
-                capture_backend,
-            };
-            return Task::perform(crate::report::build_game(req), move |result| {
-                Message::Report(crate::report::ReportMessage::Built(generation, result))
-            });
+            } => {
+                dialog.building = Some(generation);
+                let req = crate::report::GameBuildRequest {
+                    config,
+                    session_id,
+                    category,
+                    text: dialog.text.clone(),
+                    training: dialog.training,
+                    capture_backend,
+                };
+                Task::perform(crate::report::build_game(req), move |result| {
+                    Message::Report(crate::report::ReportMessage::Built(generation, result))
+                })
+            }
+            crate::report::BuildPlan::Log(category) => {
+                dialog.building = Some(generation);
+                let req = crate::report::BuildRequest {
+                    config,
+                    category,
+                    text: dialog.text.clone(),
+                    training: dialog.training,
+                    resolution: crate::report::display_resolution(),
+                    capture_backend,
+                };
+                Task::perform(crate::report::build(req), move |result| {
+                    Message::Report(crate::report::ReportMessage::Built(generation, result))
+                })
+            }
         }
-        let req = crate::report::BuildRequest {
-            config,
-            category: dialog.category,
-            text: dialog.text.clone(),
-            training: dialog.training,
-            resolution: crate::report::display_resolution(),
-            capture_backend,
-        };
-        Task::perform(crate::report::build(req), move |result| {
-            Message::Report(crate::report::ReportMessage::Built(generation, result))
-        })
     }
 
     fn on_report(&mut self, message: crate::report::ReportMessage) -> Task<Message> {
-        use crate::report::{
-            GameReportCategory, ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState,
-        };
+        use crate::report::{ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState};
         match message {
             ReportMessage::Open(category) => {
                 if self.report_dialog_mut().is_some_and(|d| d.busy()) {
                     return Task::none();
                 }
                 let linked = self.saved_config.sync.is_some();
-                let category = category.unwrap_or(LogOnlyCategory::Other);
+                // A fresh dialog every time: nothing is picked unless the
+                // caller asked for a kind.
                 self.report = Some(ReportUi::Dialog(Box::new(ReportDialog::new(
                     category, linked,
                 ))));
@@ -1858,7 +1869,7 @@ impl TrackerApp {
             ReportMessage::CrashYes => {
                 let linked = self.saved_config.sync.is_some();
                 self.report = Some(ReportUi::Dialog(Box::new(ReportDialog::new(
-                    LogOnlyCategory::Crash,
+                    Some(LogOnlyCategory::Crash),
                     linked,
                 ))));
                 self.rebuild_report()
@@ -1880,14 +1891,10 @@ impl TrackerApp {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.category == category && !d.is_game() {
+                // Clears the game row, the game, and its pictures.
+                if !d.pick_log(category) {
                     return Task::none();
                 }
-                d.category = category;
-                d.game_report = false;
-                d.game_category = None;
-                d.game_session = None;
-                d.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::GameCategory(category) => {
@@ -1895,29 +1902,19 @@ impl TrackerApp {
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if dialog.busy() || dialog.sent() {
+                // Clears the top row.
+                if !dialog.pick_game(category, choices) {
                     return Task::none();
                 }
-                dialog.game_report = true;
-                dialog.game_category = Some(category);
-                if dialog.game_choices.is_empty() {
-                    dialog.game_choices = choices;
-                }
-                if category.allows_missing_kit() {
-                    dialog.game_session = None;
-                }
-                dialog.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::PickGame(session_id) => {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.busy() || d.sent() {
+                if !d.pick_session(session_id) {
                     return Task::none();
                 }
-                d.game_session = Some(session_id);
-                d.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::ToggleImageScale => {
@@ -2004,7 +2001,7 @@ impl TrackerApp {
                         // accepted them.
                         d.built = None;
                         d.show_log = false;
-                        if let Some(sid) = d.game_session.clone() {
+                        if let Some(sid) = d.game_session.clone().filter(|_| d.is_game()) {
                             stat_tracker::report::kit::remove(&data_dir, &sid);
                         }
                     }
