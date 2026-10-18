@@ -7405,6 +7405,12 @@ const BOARD_PIXEL_DEBUG_DIRS: [&str; 2] = ["accepted", "rejected"];
 /// picture is dropped. Report kits and map crops do not use this queue.
 const DEBUG_RING_QUEUE: usize = 4;
 
+/// How many report kits and map crops may wait. Each job holds a full frame
+/// (about 8 MB at 1440p). Two covers the capture in flight and one more.
+/// The next sender blocks, so a stalled disk cannot pile frames up, and a
+/// kit is never dropped.
+const REPORT_SAVE_QUEUE: usize = 2;
+
 /// Tests that fill the ring queue hold this so a parallel test cannot
 /// enqueue a ring picture into the full queue and observe a drop.
 #[cfg(test)]
@@ -7417,6 +7423,20 @@ static DEBUG_RING_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// Set while the ring worker is parked on [`DEBUG_RING_HOLD`].
 #[cfg(test)]
 static DEBUG_RING_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests that fill the report queue hold this so a parallel test cannot
+/// sneak a kit into the same slots.
+#[cfg(test)]
+static REPORT_SAVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// While set, the report worker parks before taking the next job.
+#[cfg(test)]
+static REPORT_SAVE_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set while the report worker is parked on [`REPORT_SAVE_HOLD`].
+#[cfg(test)]
+static REPORT_SAVE_PARKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 struct DebugReportSave {
     data_dir: std::path::PathBuf,
@@ -7498,11 +7518,26 @@ fn debug_ring_loop(rx: std::sync::mpsc::Receiver<DebugRingJob>) {
     }
 }
 
-fn kept_save_sender() -> &'static std::sync::mpsc::Sender<KeptSaveJob> {
-    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<KeptSaveJob>> =
+fn park_report_save() {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        if !REPORT_SAVE_HOLD.load(Ordering::SeqCst) {
+            return;
+        }
+        REPORT_SAVE_PARKED.store(true, Ordering::SeqCst);
+        while REPORT_SAVE_HOLD.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        REPORT_SAVE_PARKED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn kept_save_sender() -> &'static std::sync::mpsc::SyncSender<KeptSaveJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<KeptSaveJob>> =
         std::sync::OnceLock::new();
     TX.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(REPORT_SAVE_QUEUE);
         std::thread::Builder::new()
             .name("report-save".into())
             .spawn(move || kept_save_loop(rx))
@@ -7512,7 +7547,11 @@ fn kept_save_sender() -> &'static std::sync::mpsc::Sender<KeptSaveJob> {
 }
 
 fn kept_save_loop(rx: std::sync::mpsc::Receiver<KeptSaveJob>) {
-    while let Ok(job) = rx.recv() {
+    loop {
+        park_report_save();
+        let Ok(job) = rx.recv() else {
+            break;
+        };
         let KeptSaveJob { kind, done } = job;
         let started = Instant::now();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_kept_save(kind)));
@@ -7598,16 +7637,28 @@ fn enqueue_debug_ring(
     }
 }
 
-/// Queue a report kit or a map crop. The queue is unbounded, so a full
-/// debug-ring queue cannot drop it. `wait` is for tests.
+/// Queue a report kit or a map crop. A full queue blocks the sender. The
+/// kit is never dropped. `wait` is for tests.
 fn enqueue_kept_save(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
+    #[cfg(test)]
+    let _report_tests = REPORT_SAVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_kept_save_unlocked(kind, wait)
+}
+
+fn enqueue_kept_save_unlocked(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
     let (done, wait_rx) = oneshot_pair(wait);
-    match kept_save_sender().send(KeptSaveJob { kind, done }) {
-        Ok(()) => wait_rx.map(|rx| {
-            tokio::spawn(async move {
-                let _ = rx.await;
-            })
-        }),
+    let job = KeptSaveJob { kind, done };
+    // Each job holds a full frame (about 8 MB at 1440p). The queue is a
+    // bounded sync_channel, so a stalled disk blocks the sender instead of
+    // dropping the kit or stacking frames. That block must not run on a
+    // tokio worker: the worker would stall the runtime until the disk
+    // moved. The multi-thread runtime marks this thread blocking
+    // (block_in_place) and the caller waits, so the frame is not queued
+    // again outside the channel. A current-thread runtime cannot do that,
+    // so the send moves to spawn_blocking. A thread with no runtime (a
+    // test, or code already off the worker) sends here.
+    let send = move || match kept_save_sender().send(job) {
+        Ok(()) => {}
         Err(std::sync::mpsc::SendError(job)) => {
             // The worker is gone. Write it here so the report is not lost,
             // and do not count a debug-ring drop.
@@ -7616,13 +7667,22 @@ fn enqueue_kept_save(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHand
             if let Some(done) = done {
                 let _ = done.send(());
             }
-            wait_rx.map(|rx| {
-                tokio::spawn(async move {
-                    let _ = rx.await;
-                })
-            })
         }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(send);
+        }
+        Ok(_) => {
+            let _queued = tokio::task::spawn_blocking(send);
+        }
+        Err(_) => send(),
     }
+    wait_rx.map(|rx| {
+        tokio::spawn(async move {
+            let _ = rx.await;
+        })
+    })
 }
 
 /// Archive a frame whose capture was rejected by a trust gate, for diagnosis.
@@ -11991,8 +12051,36 @@ mod tests {
         );
     }
 
+    fn kept_report(
+        data_dir: &std::path::Path,
+        session_id: &str,
+        frame: &Arc<image::DynamicImage>,
+        row: &storage::PersonalMatch,
+    ) -> KeptSave {
+        let layout =
+            stat_tracker::report::blank::TeamLayout::from_team_size(Some(5)).expect("team size 5");
+        let reads = stat_tracker::report::kit::KitReads::from_capture(
+            row,
+            row,
+            frame.width(),
+            frame.height(),
+            layout,
+            Utc::now(),
+        );
+        KeptSave::Report(Box::new(DebugReportSave {
+            data_dir: data_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+            frame: Arc::clone(frame),
+            team_size: 5,
+            reads,
+            tab_at: stat_tracker::report::blank::CaptureTime::now(),
+            board_names: vec!["KeptName".into()],
+        }))
+    }
+
     /// A full debug-ring queue drops ring pictures only. The report kit for
     /// that Tab still lands, and the drop counter does not move for it.
+    /// A full report queue blocks the sender instead of dropping the kit.
     #[test]
     fn a_full_debug_ring_still_saves_the_report_kit() {
         let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
@@ -12081,6 +12169,137 @@ mod tests {
             dropped,
             "the report save was counted as a debug drop"
         );
+
+        // Park the report worker, then send one more job than the queue
+        // holds. The extra send stays blocked until the worker runs again.
+        // A drop would return immediately and skip the kit.
+        let _report_tests = REPORT_SAVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        REPORT_SAVE_HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+        struct ReleaseReportHold;
+        impl Drop for ReleaseReportHold {
+            fn drop(&mut self) {
+                REPORT_SAVE_HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let report_hold = ReleaseReportHold;
+
+        let (poke_done, poke_rx) = std::sync::mpsc::channel();
+        let poke_dir = dir.path().to_path_buf();
+        let poke_img = Arc::clone(&img);
+        let poke_thread = std::thread::spawn(move || {
+            let row = test_match("qpoke", "victory");
+            enqueue_kept_save_unlocked(kept_report(&poke_dir, "qpoke", &poke_img, &row), false);
+            let _ = poke_done.send(());
+        });
+        let report_parked = Instant::now();
+        while !REPORT_SAVE_PARKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                report_parked.elapsed() < std::time::Duration::from_secs(2),
+                "report worker did not park"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let blockers = REPORT_SAVE_QUEUE + 1;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut joins = Vec::new();
+        for i in 0..blockers {
+            let started_tx = started_tx.clone();
+            let done_tx = done_tx.clone();
+            let block_dir = dir.path().to_path_buf();
+            let frame = Arc::clone(&img);
+            joins.push(std::thread::spawn(move || {
+                let session = format!("qblock{i}");
+                let row = test_match(&session, "victory");
+                let job = kept_report(&block_dir, &session, &frame, &row);
+                let _ = started_tx.send(());
+                enqueue_kept_save_unlocked(job, false);
+                let _ = done_tx.send(i);
+            }));
+        }
+        drop(started_tx);
+        drop(done_tx);
+        for _ in 0..blockers {
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("report send thread did not start");
+        }
+        // Long enough that a send which is not blocked would have returned.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut finished = Vec::new();
+        while let Ok(i) = done_rx.try_recv() {
+            finished.push(i);
+        }
+        assert!(
+            finished.len() < blockers,
+            "a full report queue returned every send ({finished:?}); it should block"
+        );
+        assert!(
+            finished.len() <= REPORT_SAVE_QUEUE,
+            "more sends returned than the report queue can hold ({finished:?})"
+        );
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "a blocked report save was counted as a debug drop"
+        );
+
+        drop(report_hold);
+        let released = Instant::now();
+        while finished.len() < blockers {
+            match done_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(i) => finished.push(i),
+                Err(_) => panic!(
+                    "blocked report send did not finish after the worker was released ({finished:?})"
+                ),
+            }
+            assert!(
+                released.elapsed() < std::time::Duration::from_secs(2),
+                "blocked report sends took too long"
+            );
+        }
+        poke_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("report poke send did not finish");
+        poke_thread.join().expect("report poke thread");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "a finished report save was counted as a debug drop"
+        );
+        for i in 0..blockers {
+            let session = format!("qblock{i}");
+            let reads = dir
+                .path()
+                .join("report-kit")
+                .join(&session)
+                .join("reads.json");
+            let started = Instant::now();
+            while !reads.is_file() {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(2),
+                    "report kit {session} did not land after the blocked send"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let poke_reads = dir
+            .path()
+            .join("report-kit")
+            .join("qpoke")
+            .join("reads.json");
+        let poke_written = Instant::now();
+        while !poke_reads.is_file() {
+            assert!(
+                poke_written.elapsed() < std::time::Duration::from_secs(2),
+                "report poke kit did not land"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for join in joins {
+            join.join().expect("report block thread");
+        }
 
         drop(hold);
         let drained = Instant::now();
