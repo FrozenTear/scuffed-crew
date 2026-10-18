@@ -5450,6 +5450,7 @@ async fn store_held_board(
         segment_resolutions: Vec::new(),
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
+        reader_held: Vec::new(),
     };
     storage::append_match_log(data_dir, &row);
     store
@@ -5995,6 +5996,12 @@ fn apply_new_reader(
     // row and career panel portrait) names it too.
     let saved =
         reader_apply::merge_saved_with_authority(&policy, own, Some(&board), Some(authority));
+    // Only cells this reader actually held on the stored row: a board the
+    // merge fell back on gives no offers.
+    parsed.reader_held = reader_apply::held_reads(&board, own)
+        .into_iter()
+        .filter(|r| saved.suspect_fields.contains(&r.field))
+        .collect();
     parsed.map_name = saved.map;
     parsed.game_mode = saved.mode;
     parsed.outcome = saved.result;
@@ -11771,6 +11778,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
         }
     }
 

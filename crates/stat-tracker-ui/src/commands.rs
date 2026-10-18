@@ -114,6 +114,25 @@ pub fn pick_hero(data_dir: &Path, session_id: &str, hero: &str) -> Result<(), St
     )
 }
 
+/// Queue the reader's own read of a held stat cell as a manual correction
+/// of that stat. `field` is a flat stat name (`e`, `a`, `d`, `dmg`, `h`,
+/// `mit`). The daemon applies it like any edit: the stat is marked edited
+/// and its unsure mark is cleared.
+pub fn accept_reader_read(
+    data_dir: &Path,
+    session_id: &str,
+    field: &str,
+    value: u32,
+) -> Result<(), String> {
+    let read = storage::HeldRead {
+        field: field.to_string(),
+        value,
+        confidence: 0.0,
+    };
+    let edit = read.as_edit().ok_or("Not a stat")?;
+    edit_match(data_dir, session_id, edit)
+}
+
 /// Newest queued command (tests / docs). Empty if the directory is missing.
 pub fn queued(data_dir: &Path) -> Vec<StoreCommand> {
     read_commands(data_dir)
@@ -160,6 +179,7 @@ mod tests {
             segments: Vec::new(),
             upload_reject: None,
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
             synced: false,
         }
     }
@@ -233,6 +253,35 @@ mod tests {
             &cmds[0],
             StoreCommand::RetryUpload { session_id } if session_id == "sess-t1"
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_reader_read_queues_a_stat_edit() {
+        let dir = tmp();
+        accept_reader_read(&dir, "sess-dorado", "h", 5298).unwrap();
+        accept_reader_read(&dir, "sess-dorado", "dmg", 1268).unwrap();
+        let cmds = queued(&dir);
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(
+            &cmds[0],
+            StoreCommand::EditMatch { session_id, edit }
+                if session_id == "sess-dorado"
+                    && *edit == MatchEdit { healing: Some(5298), ..MatchEdit::default() }
+        ));
+        assert!(matches!(
+            &cmds[1],
+            StoreCommand::EditMatch { edit, .. }
+                if *edit == MatchEdit { damage: Some(1268), ..MatchEdit::default() }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_reader_read_refuses_a_non_stat_field() {
+        let dir = tmp();
+        assert!(accept_reader_read(&dir, "sess-dorado", "hero", 1).is_err());
+        assert!(queued(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
