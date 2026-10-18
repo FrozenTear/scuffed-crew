@@ -488,7 +488,7 @@ Routes:
 
 Officer means `OfficerUser` (officer or admin). A member who is not an officer gets 403 on the zip bytes and on the manifest route. Ids are unguessable. A create response returns the id, the training flag, and `expires_at`. It does not echo the zip. The manifest route returns the stored manifest, after the hash recompute below.
 
-An officer `GET /api/stat-reports` row includes `display_name` beside `member_id`. `display_name` is a string (the member record's display name) or JSON null when that member has no display name or the member record is gone. A member's own list omits `display_name` and `member_id`. The name is read from the member record when the list is built. It is not a column on the report.
+An officer `GET /api/stat-reports` row includes `display_name` beside `member_id`. `display_name` is a string (the member record's display name) or JSON null when that member has no display name or the member record is gone. A member's own list omits `display_name` and `member_id`. The name is read from the member record when the list is built. It is not a column on the report. If that lookup fails, the list is still returned and every `display_name` on that response is JSON null.
 
 Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncompressed files together are also at most 10 MB. Either one over that size is 413. At most 30 files besides the manifest. No image edge is longer than 7680 pixels. A member may store 10 successful reports per UTC day. A rejected upload does not count. Over the daily cap, respond 429.
 
