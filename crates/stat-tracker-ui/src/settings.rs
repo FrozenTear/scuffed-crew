@@ -2786,7 +2786,7 @@ token = \"not-a-real-token\"
         let off = form.to_config(&loaded);
         assert_eq!(off.ocr, OcrSetting::Off);
         // Off implies the new reader; it does not rewrite `reader`.
-        assert!(off.reader.is_ocr_v1());
+        assert_eq!(off.reader, loaded.reader);
         let mut rest = off.clone();
         rest.ocr = OcrSetting::On;
         assert_eq!(rest, loaded, "only `ocr` may change");

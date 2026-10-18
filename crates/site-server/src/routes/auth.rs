@@ -818,7 +818,6 @@ pub async fn local_login(
     jar: CookieJar,
     Json(body): Json<LocalLoginRequest>,
 ) -> impl IntoResponse {
-    let username = scuffed_db::Database::normalize_local_username(&body.username);
     let invalid = || {
         (
             StatusCode::UNAUTHORIZED,
@@ -827,6 +826,19 @@ pub async fn local_login(
             }),
         )
             .into_response()
+    };
+
+    // Same trim, case fold, length, and character rules as register and setup.
+    // A string that could never be stored is not looked up and is not a lockout
+    // key (that map is only for names that pass the rules). The body matches a
+    // wrong password. `verify_dummy` keeps this branch from returning faster
+    // than a missing account. The per-IP login governor still covers the request.
+    let username = match validate_local_username(&body.username) {
+        Ok(username) => username,
+        Err(_) => {
+            verify_dummy(&body.password);
+            return invalid();
+        }
     };
 
     // Already locked: same 429 for a real account and a missing one. Do not

@@ -15,6 +15,21 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.12
+
+The new reader is now the default, and when it finds nothing on a scoreboard the tracker reads that board with the old reader (ocr-v1) instead of skipping it (#333). Your last game now uploads right away even when a late Tab closes it, and capture on X11 is much lighter on bigger screens (#320, #330).
+
+### Highlights
+
+- If you already chose `reader = "ocr-v1"`, nothing changes for you. To go back to the old reader, pick it in Settings or put `reader = "ocr-v1"` in `config.toml`. If you had chosen the old reader, check Settings after updating: an older bug could drop that choice when several settings were saved at once.
+- Alpha installs are now offered newer alphas in the app even if you never ticked "Get alpha updates", and every release page has a pinned "Update from the terminal" line (#321, #322).
+- Report a problem picks one kind at a time, Performance and Crash reports never send pictures, and the note box asks what you noticed (#323, #329).
+- Smaller fixes: Proton VPN is no longer mistaken for the game's Proton, the setup line names your CPU, up to 60 debug crops are kept, and the app says when hero names need site sync (#327, #332).
+
+Technical detail. `ReaderSetting` defaults to `New`; a config without a `reader` key loads as `new`, and `reader = "ocr-v1"` is still written out explicitly. Per-Tab fallback (`reader_apply::ocr_fallback_reason`): a board with status not found or team size unknown, or with no digit value in any stat cell, is read with ocr-v1's cell pass for that Tab when classic OCR is on, and stored with recognizer `ocr-v1`. A board the reader found but doubts (team size disagreement, unsure own row) is refused or held as before, and with `ocr = "off"` nothing falls back.
+
+Also since alpha.11: a game closed at a Tab boundary schedules its own upload, and an empty Tab-opened game closes after 20 minutes instead of 6 hours (#320). X11 `image_to_rgba8` converts the common 32-bit ZPixmap layout a row at a time, about 48 ms to 3 ms per 2560x1440 frame on the build box (#330). Update checks treat an alpha install with no `update_channel` as the alpha channel (#321). `dist/release-notes.sh` adds a tag-pinned terminal update block to every release body (#322).
+
 ## 0.5.0-alpha.11
 
 The tracker now keeps a small always-on performance log while it runs. Choosing Performance under Send report sends only that log, with no board pictures or crops (#318).

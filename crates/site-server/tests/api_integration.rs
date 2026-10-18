@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -3085,6 +3086,153 @@ async fn setup_creates_admin_and_blocks_second_setup() {
         .await
         .unwrap();
     assert_eq!(res2.status(), StatusCode::FORBIDDEN);
+}
+
+/// Register and setup only accept a trimmed, lowercased username of 1 to 32
+/// ASCII letters, digits, `_`, or `-`. Login applies those same rules before
+/// lookup. A string that could never be registered gets the same 401 body as
+/// a wrong password, and it is not a lockout key. A username that passes the
+/// rules still locks out, including one that is not registered.
+#[tokio::test]
+async fn login_rejects_usernames_register_would_reject() {
+    use scuffed_site_server::login_lockout::{FIRST_LOCK_AFTER, LOCKOUT_MESSAGE};
+
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let created = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "Boss",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+
+    // Trim and case fold match registration, so the stored name still logs in.
+    let spaced = app
+        .clone()
+        .oneshot(password_login(
+            [198, 51, 100, 1],
+            "  BoSs  ",
+            "correct-horse-1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        spaced.status(),
+        StatusCode::OK,
+        "normalized username must log in"
+    );
+
+    let wrong = app
+        .clone()
+        .oneshot(password_login(
+            [198, 51, 100, 2],
+            "no-such-user",
+            "whatever-password",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let wrong_body = body_json(wrong).await;
+    assert_eq!(wrong_body["error"], "invalid username or password");
+
+    let illegal = [
+        "a".repeat(33),
+        "has space".to_string(),
+        "user@name".to_string(),
+        String::new(),
+        "üser".to_string(),
+    ];
+    for (i, username) in illegal.iter().enumerate() {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 100, 10 + i as u8],
+                username,
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "illegal username {username:?} must not be a distinct error"
+        );
+        let body = body_json(res).await;
+        assert_eq!(
+            body["error"], wrong_body["error"],
+            "illegal username {username:?} leaked a different error: {body}"
+        );
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("32") && !rendered.to_lowercase().contains("letter"),
+            "validation detail would distinguish this from a wrong password: {body}"
+        );
+    }
+
+    // Repeated illegal names stay on the generic 401. They must not take a
+    // lockout slot (that would let a spray of impossible names fill the map).
+    let long_name = "b".repeat(33);
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 101, i as u8],
+                &long_name,
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {} on a username register would reject",
+            i + 1
+        );
+        let body = body_json(res).await;
+        assert_eq!(body["error"], "invalid username or password");
+        assert_ne!(body["error"], LOCKOUT_MESSAGE);
+    }
+
+    // Lockout for a username that passes the rules is unchanged.
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 102, i as u8],
+                "missing-but-legal",
+                "whatever-password",
+            ))
+            .await
+            .unwrap();
+        if i + 1 < FIRST_LOCK_AFTER {
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "legal miss {}",
+                i + 1
+            );
+        } else {
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+            let body = body_json(res).await;
+            assert_eq!(body["error"], LOCKOUT_MESSAGE);
+        }
+    }
 }
 
 #[tokio::test]
@@ -7445,6 +7593,380 @@ async fn forum_get_thread_enforces_min_role_and_fails_closed_without_board() {
     );
 }
 
+// ─── #335 / #342: role filter before LIMIT, total is the match count ────────
+
+async fn set_board_min_role(db: &Database, slug: &str, role: &str) {
+    db.client
+        .query("UPDATE forum_board SET min_role = $role WHERE slug = $slug")
+        .bind(("role", role.to_string()))
+        .bind(("slug", slug.to_string()))
+        .await
+        .unwrap_or_else(|e| panic!("set min_role {slug}: {e}"));
+}
+
+/// Stamp `updated_at` with a fixed SurrealQL duration so list order does not
+/// depend on insert timing. Each match arm is a complete query string. The
+/// title is bound as `$title` and is not spliced into the query.
+async fn stamp_thread_age(db: &Database, title: &str, age_secs: u32) {
+    let sql = match age_secs {
+        1 => "UPDATE forum_thread SET updated_at = time::now() - 1s WHERE title = $title",
+        2 => "UPDATE forum_thread SET updated_at = time::now() - 2s WHERE title = $title",
+        3 => "UPDATE forum_thread SET updated_at = time::now() - 3s WHERE title = $title",
+        4 => "UPDATE forum_thread SET updated_at = time::now() - 4s WHERE title = $title",
+        5 => "UPDATE forum_thread SET updated_at = time::now() - 5s WHERE title = $title",
+        6 => "UPDATE forum_thread SET updated_at = time::now() - 6s WHERE title = $title",
+        7 => "UPDATE forum_thread SET updated_at = time::now() - 7s WHERE title = $title",
+        8 => "UPDATE forum_thread SET updated_at = time::now() - 8s WHERE title = $title",
+        9 => "UPDATE forum_thread SET updated_at = time::now() - 9s WHERE title = $title",
+        10 => "UPDATE forum_thread SET updated_at = time::now() - 10s WHERE title = $title",
+        _ => panic!("stamp age {age_secs} is not a fixed fragment"),
+    };
+    db.client
+        .query(sql)
+        .bind(("title", title.to_string()))
+        .await
+        .unwrap_or_else(|e| panic!("stamp {title}: {e}"));
+}
+
+async fn make_aged_thread(db: &Database, title: &str, board_id: &str, age_secs: u32) {
+    db.create_forum_thread(title, board_id, "officermember", "body")
+        .await
+        .unwrap_or_else(|e| panic!("create {title}: {e}"));
+    stamp_thread_age(db, title, age_secs).await;
+}
+
+/// Newest rows are the ones a caller may not see, so a post-LIMIT role filter
+/// would drop them and shrink the page.
+async fn seed_forum_paging_fixtures(db: &Database) {
+    seed_all_roles(db).await;
+    let general = db
+        .get_forum_board_by_slug("general")
+        .await
+        .expect("get general")
+        .expect("default general board");
+    let cat = general.category_id.clone();
+
+    let members = db
+        .create_forum_board(&cat, None, "Members", "members-only", None, 20)
+        .await
+        .expect("members board");
+    set_board_min_role(db, "members-only", "member").await;
+    let officers = db
+        .create_forum_board(&cat, None, "Officers", "officers-only", None, 21)
+        .await
+        .expect("officers board");
+    set_board_min_role(db, "officers-only", "officer").await;
+    let admins = db
+        .create_forum_board(&cat, None, "Admins", "admins-only", None, 22)
+        .await
+        .expect("admins board");
+    set_board_min_role(db, "admins-only", "admin").await;
+    let retired = db
+        .create_forum_board(&cat, None, "Retired", "retired", None, 23)
+        .await
+        .expect("retired board");
+    db.update_forum_board(&retired.id, None, None, None, None, Some(false))
+        .await
+        .expect("deactivate retired");
+    db.create_forum_board(&cat, None, "Empty", "empty-board", None, 24)
+        .await
+        .expect("empty board");
+
+    db.client
+        .query(
+            r#"CREATE forum_thread:pagingorphan SET
+                title = 'Orphan Secret',
+                category = 'ghost',
+                board_id = 'missing-board',
+                author_member_id = 'officermember',
+                content = 'should not leak',
+                pinned = false,
+                locked = false,
+                created_at = time::now(),
+                updated_at = time::now(),
+                is_active = true"#,
+        )
+        .await
+        .expect("orphan thread");
+    stamp_thread_age(db, "Orphan Secret", 1).await;
+
+    make_aged_thread(db, "Retired Thread", &retired.id, 2).await;
+    make_aged_thread(db, "Officer Alpha", &officers.id, 3).await;
+    make_aged_thread(db, "Officer Beta", &officers.id, 4).await;
+    make_aged_thread(db, "Member Alpha", &members.id, 5).await;
+    make_aged_thread(db, "Member Beta", &members.id, 6).await;
+    make_aged_thread(db, "Public Alpha", &general.id, 7).await;
+    make_aged_thread(db, "Public Beta", &general.id, 8).await;
+    make_aged_thread(db, "Public Gamma", &general.id, 9).await;
+    make_aged_thread(db, "Admin Alpha", &admins.id, 10).await;
+}
+
+async fn forum_list_json(app: &Router, token: Option<&str>, query: &str) -> Value {
+    let uri = format!("/api/forum/threads{query}");
+    let req = match token {
+        Some(token) => authed_request(Method::GET, &uri, token),
+        None => unauthed_request(Method::GET, &uri),
+    };
+    let resp = app.clone().oneshot(req).await.expect("forum list");
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{uri} body {json}");
+    json
+}
+
+/// Walk pages until a short one. `total` must stay the same on every page.
+async fn forum_list_pages(
+    app: &Router,
+    token: Option<&str>,
+    limit: u32,
+) -> (Vec<Vec<String>>, u64) {
+    let mut pages = Vec::new();
+    let mut total = None;
+    let mut offset = 0u32;
+    for _ in 0..20 {
+        let json = forum_list_json(app, token, &format!("?limit={limit}&offset={offset}")).await;
+        let page_total = json["total"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("total missing: {json}"));
+        if let Some(prev) = total {
+            assert_eq!(prev, page_total, "total changed between pages");
+        }
+        total = Some(page_total);
+        let titles = thread_titles(&json);
+        let n = titles.len() as u32;
+        pages.push(titles);
+        if n < limit {
+            break;
+        }
+        offset = offset.saturating_add(limit);
+    }
+    (pages, total.expect("at least one page"))
+}
+
+fn assert_page_sizes(pages: &[Vec<String>], limit: usize) {
+    assert!(!pages.is_empty(), "no pages");
+    for (i, page) in pages.iter().enumerate() {
+        if i + 1 == pages.len() {
+            assert!(page.len() <= limit, "last page longer than limit: {page:?}");
+        } else {
+            assert_eq!(
+                page.len(),
+                limit,
+                "hidden threads shrank page {i}: {page:?}"
+            );
+        }
+    }
+}
+
+fn flat_titles(pages: &[Vec<String>]) -> Vec<String> {
+    pages.iter().flatten().cloned().collect()
+}
+
+fn assert_absent(titles: &[String], banned: &[&str]) {
+    for title in banned {
+        assert!(
+            !titles.iter().any(|t| t == title),
+            "{title} leaked in {titles:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn forum_list_does_not_hide_public_threads_behind_restricted_ones() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let (anon_pages, anon_total) = forum_list_pages(&app, None, 2).await;
+    assert_page_sizes(&anon_pages, 2);
+    let anon_titles = flat_titles(&anon_pages);
+    assert_eq!(
+        anon_titles,
+        vec!["Public Alpha", "Public Beta", "Public Gamma"]
+    );
+    assert_eq!(anon_total, anon_titles.len() as u64);
+    assert_absent(
+        &anon_titles,
+        &[
+            "Orphan Secret",
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Member Alpha",
+            "Member Beta",
+            "Admin Alpha",
+        ],
+    );
+
+    let (member_pages, member_total) = forum_list_pages(&app, Some(MEMBER_TOKEN), 2).await;
+    assert_page_sizes(&member_pages, 2);
+    let member_titles = flat_titles(&member_pages);
+    assert_eq!(
+        member_titles,
+        vec![
+            "Member Alpha",
+            "Member Beta",
+            "Public Alpha",
+            "Public Beta",
+            "Public Gamma",
+        ]
+    );
+    assert_eq!(member_total, 5);
+    assert_absent(
+        &member_titles,
+        &[
+            "Orphan Secret",
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Admin Alpha",
+        ],
+    );
+
+    let (officer_pages, officer_total) = forum_list_pages(&app, Some(OFFICER_TOKEN), 2).await;
+    assert_page_sizes(&officer_pages, 2);
+    let officer_titles = flat_titles(&officer_pages);
+    assert_eq!(
+        officer_titles,
+        vec![
+            "Retired Thread",
+            "Officer Alpha",
+            "Officer Beta",
+            "Member Alpha",
+            "Member Beta",
+            "Public Alpha",
+            "Public Beta",
+            "Public Gamma",
+        ]
+    );
+    assert_eq!(officer_total, 8);
+    assert_absent(&officer_titles, &["Orphan Secret", "Admin Alpha"]);
+
+    let (recruit_pages, recruit_total) = forum_list_pages(&app, Some(RECRUIT_TOKEN), 2).await;
+    assert_eq!(flat_titles(&recruit_pages), anon_titles);
+    assert_eq!(recruit_total, anon_total);
+
+    let (admin_pages, admin_total) = forum_list_pages(&app, Some(ADMIN_TOKEN), 2).await;
+    assert_page_sizes(&admin_pages, 2);
+    let admin_titles = flat_titles(&admin_pages);
+    assert!(admin_titles.iter().any(|t| t == "Admin Alpha"));
+    assert_eq!(admin_titles.len() as u64, admin_total);
+    assert_eq!(admin_total, 9);
+    assert_absent(&admin_titles, &["Orphan Secret"]);
+}
+
+#[tokio::test]
+async fn forum_thread_total_counts_every_match() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let (pages, total) = forum_list_pages(&app, None, 2).await;
+    assert_eq!(pages.len(), 2, "pages {pages:?} total {total}");
+    assert_eq!(pages[0].len(), 2, "first page shrank: {:?}", pages[0]);
+    assert_eq!(pages[1], vec!["Public Gamma".to_string()]);
+    assert_eq!(total, 3, "anonymous total must count every visible thread");
+    assert_eq!(flat_titles(&pages).len() as u64, total);
+
+    let last = forum_list_json(&app, None, "?limit=2&offset=2").await;
+    assert_eq!(last["total"].as_u64(), Some(total));
+    assert_eq!(thread_titles(&last), vec!["Public Gamma".to_string()]);
+
+    let scoped = forum_list_json(&app, None, "?board=general&limit=1").await;
+    assert_eq!(thread_titles(&scoped), vec!["Public Alpha".to_string()]);
+    assert_eq!(scoped["total"].as_u64(), Some(3));
+
+    let empty = forum_list_json(&app, None, "?board=empty-board&limit=10").await;
+    assert!(thread_titles(&empty).is_empty(), "empty board: {empty}");
+    assert_eq!(empty["total"].as_u64(), Some(0));
+
+    let member_cat =
+        forum_list_json(&app, Some(MEMBER_TOKEN), "?category=members-only&limit=1").await;
+    assert_eq!(thread_titles(&member_cat), vec!["Member Alpha".to_string()]);
+    assert_eq!(member_cat["total"].as_u64(), Some(2));
+
+    let anon_cat = forum_list_json(&app, None, "?category=members-only&limit=10").await;
+    assert!(
+        thread_titles(&anon_cat).is_empty(),
+        "anon category leak: {anon_cat}"
+    );
+    assert_eq!(anon_cat["total"].as_u64(), Some(0));
+
+    let officer_board =
+        forum_list_json(&app, Some(OFFICER_TOKEN), "?board=officers-only&limit=1").await;
+    assert_eq!(
+        thread_titles(&officer_board),
+        vec!["Officer Alpha".to_string()]
+    );
+    assert_eq!(officer_board["total"].as_u64(), Some(2));
+
+    let anon_forbidden = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/forum/threads?board=officers-only",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(anon_forbidden.status(), StatusCode::UNAUTHORIZED);
+
+    let member_forbidden = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=officers-only",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(member_forbidden.status(), StatusCode::FORBIDDEN);
+
+    let officer_admin_board = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=admins-only",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(officer_admin_board.status(), StatusCode::FORBIDDEN);
+
+    let retired_anon = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/forum/threads?board=retired",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retired_anon.status(), StatusCode::NOT_FOUND);
+
+    let retired_officer = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads?board=retired",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retired_officer.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn forum_thread_list_offset_past_end_keeps_match_total() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let page = forum_list_json(&app, None, "?limit=2&offset=50").await;
+    assert!(
+        thread_titles(&page).is_empty(),
+        "offset past the three public threads must be an empty page: {page}"
+    );
+    assert_eq!(page["total"].as_u64(), Some(3));
+}
+
 // ─── Seasons: admin CRUD + season window on personal stats ──────────────────
 
 #[tokio::test]
@@ -8587,4 +9109,69 @@ async fn event_time_must_be_a_clock_time() {
         .unwrap();
     assert_eq!(still.status(), StatusCode::OK);
     assert_eq!(body_json(still).await["duration_minutes"], 90);
+}
+
+/// Missing public rows use the not-found error string. A draft article stays
+/// indistinguishable from a missing slug. A missing event id on update is the
+/// same shape, not 500.
+#[tokio::test]
+async fn missing_public_content_is_not_found_not_internal_error() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let cases = [
+        ("/api/forum/threads/does-not-exist", "Thread not found"),
+        ("/api/wiki/does-not-exist", "Page not found"),
+        ("/api/articles/does-not-exist", "Article not found"),
+    ];
+    for (uri, expected) in cases {
+        let resp = app
+            .clone()
+            .oneshot(unauthed_request(Method::GET, uri))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], expected, "{uri}: {body}");
+        assert_ne!(body["error"], "Internal error");
+    }
+
+    // Draft and missing stay the same body, so a hidden draft is not revealed.
+    let draft = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            json!({
+                "slug": "hidden-draft",
+                "title": "Hidden",
+                "content_markdown": "secret"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(draft.status(), StatusCode::CREATED);
+
+    let (missing_status, missing_body) = article_get(&app, "does-not-exist", None).await;
+    let (draft_status, draft_body) = article_get(&app, "hidden-draft", None).await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(draft_status, StatusCode::NOT_FOUND);
+    assert_eq!(draft_body, missing_body);
+    assert_eq!(draft_body["error"], "Article not found");
+
+    let missing_event = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/events/does-not-exist",
+            OFFICER_TOKEN,
+            json!({ "title": "Nope" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_event.status(), StatusCode::NOT_FOUND);
+    let event_body = body_json(missing_event).await;
+    assert_eq!(event_body["error"], "Event not found");
+    assert_ne!(event_body["error"], "Internal error");
 }

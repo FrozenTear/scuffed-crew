@@ -140,7 +140,7 @@ const PAGE_CSS: &str = r#"
     /* Card grid */
     .strategy-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
         gap: 1.25rem;
     }
     .strategy-card {

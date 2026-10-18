@@ -1,16 +1,47 @@
 use axum::{
     Json,
     extract::FromRequestParts,
-    http::{StatusCode, header, header::AUTHORIZATION, request::Parts},
+    http::{HeaderMap, StatusCode, header, header::AUTHORIZATION, request::Parts},
     response::{IntoResponse, Response},
 };
+use axum_extra::extract::cookie::CookieJar;
 
 use scuffed_auth::User;
 use scuffed_auth::server::AuthUser;
+use scuffed_auth::server::HasAuth;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Member, OrgRole};
 
 use crate::state::AppState;
+
+/// Session user from the same credentials as [`AuthUser`].
+///
+/// `Authorization: Bearer` is tried first. A present `Authorization` header
+/// does not fall back to the session cookie. With no header, the session
+/// cookie is used. Missing, malformed, or unknown credentials are `None` so
+/// public reads stay anonymous. Routes that require a user still use
+/// [`AuthUser`], which answers 401 for those cases.
+pub async fn optional_session_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Option<User> {
+    let token = presented_session_token(&state.session_config.cookie_name, headers, jar)?;
+    state.get_session_user(&token).await.ok().flatten()
+}
+
+/// Bearer token when `Authorization` is present, otherwise the session cookie.
+fn presented_session_token(
+    cookie_name: &str,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Option<String> {
+    if let Some(value) = headers.get(AUTHORIZATION) {
+        let header_str = value.to_str().ok()?;
+        return header_str.strip_prefix("Bearer ").map(ToOwned::to_owned);
+    }
+    jar.get(cookie_name).map(|cookie| cookie.value().to_owned())
+}
 
 /// Extractor: any authenticated org member.
 pub struct OrgMember {
@@ -430,5 +461,39 @@ impl FromRequestParts<AppState> for ReportCreator {
             member,
             credential: ReportCredential::SyncToken,
         })
+    }
+}
+
+#[cfg(test)]
+mod presented_token_tests {
+    use super::presented_session_token;
+    use axum::http::{HeaderMap, header::AUTHORIZATION};
+    use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+    fn jar_with_session() -> CookieJar {
+        CookieJar::new().add(Cookie::new("sc_session", "cookie-token"))
+    }
+
+    #[test]
+    fn bearer_is_used_when_authorization_is_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer desk-token".parse().unwrap());
+        let token = presented_session_token("sc_session", &headers, &jar_with_session());
+        assert_eq!(token.as_deref(), Some("desk-token"));
+    }
+
+    #[test]
+    fn malformed_authorization_does_not_fall_back_to_the_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Basic nope".parse().unwrap());
+        let token = presented_session_token("sc_session", &headers, &jar_with_session());
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn cookie_is_used_when_authorization_is_absent() {
+        let headers = HeaderMap::new();
+        let token = presented_session_token("sc_session", &headers, &jar_with_session());
+        assert_eq!(token.as_deref(), Some("cookie-token"));
     }
 }

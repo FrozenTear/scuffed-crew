@@ -108,7 +108,7 @@ fn article_not_found() -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
-            error: "Internal error".into(),
+            error: "Article not found".into(),
         }),
     )
 }
@@ -182,12 +182,7 @@ pub async fn update_article(
         .get_article_by_slug(&slug)
         .await
         .map_err(|e| match &e {
-            scuffed_db::DbError::NotFound(_) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            ),
+            scuffed_db::DbError::NotFound(_) => article_not_found(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -239,12 +234,7 @@ pub async fn publish_article(
         .get_article_by_slug(&slug)
         .await
         .map_err(|e| match &e {
-            scuffed_db::DbError::NotFound(_) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            ),
+            scuffed_db::DbError::NotFound(_) => article_not_found(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -286,12 +276,7 @@ pub async fn unpublish_article(
         .get_article_by_slug(&slug)
         .await
         .map_err(|e| match &e {
-            scuffed_db::DbError::NotFound(_) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            ),
+            scuffed_db::DbError::NotFound(_) => article_not_found(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -337,12 +322,7 @@ pub async fn delete_article(
         .get_article_by_slug(&slug)
         .await
         .map_err(|e| match &e {
-            scuffed_db::DbError::NotFound(_) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            ),
+            scuffed_db::DbError::NotFound(_) => article_not_found(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
