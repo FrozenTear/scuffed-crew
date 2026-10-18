@@ -25,12 +25,12 @@ const LAYOUT_TOLERANCE: f64 = 0.01;
 ///
 /// `below_floor` finished under the 75% floor. A later read reuses it only
 /// when [`layouts_match`] says both sides measured a header layout and
-/// those columns agree. A missing layout on either side is a cold miss.
-/// On a match, the header-anchored columns are scored first and kept when
-/// they clear the floor. Otherwise the entry is reused, with no sweep,
-/// until it has been reused [`BELOW_FLOOR_MAX_REUSES`] times or the game
-/// ends. Above-floor entries are still re-scored, and kept only while that
-/// score clears the floor.
+/// those columns agree, and a cheap re-score of the cached columns on the
+/// current board is at least the anchored score and the 75% floor. Anything
+/// under that is a cold miss. A missing layout on either side is a cold
+/// miss. Anchored columns or a fresh sweep that clear the floor replace
+/// the entry. Above-floor entries are still re-scored, and kept only while
+/// that score clears the floor.
 struct CalibCache {
     width: u32,
     height: u32,
@@ -88,6 +88,8 @@ thread_local! {
     static COLUMN_OFFSET_SWEEPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static COLUMN_FINE_SWEEPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static COLUMN_SWEEP_UNDER_FLOOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Offsets passed to each `best_of` call, coarse batch then fine batch.
+    static COLUMN_SWEEP_BATCHES: RefCell<Vec<Vec<f64>>> = const { RefCell::new(Vec::new()) };
     static CALIB_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// When set, each calibration cell contributes this score instead of OCR.
     static FORCED_CELL_SCORE: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
@@ -97,6 +99,13 @@ thread_local! {
 /// between another test's two reads of the same board.
 #[cfg(test)]
 static CALIB_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// When set, calibration cells score clean only if their center sits on a
+/// dark mark. A static so the offset-sweep pool sees it. Tests hold
+/// [`CALIB_TEST_LOCK`].
+#[cfg(test)]
+static SCORE_DARK_COLUMN_MARKS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 struct CalibTestGuard {
@@ -992,13 +1001,14 @@ pub fn unread_rows(team_size: usize) -> Vec<RowOcrResult> {
 /// re-score holds at least 75% of the max probe score. A cold miss that
 /// finishes under that floor still runs one fine sweep around the coarse
 /// winner, then caches that result with the measured header layout. A later
-/// read reuses the entry only when both reads measured a header layout and
-/// those layouts match. A missing layout on either side is a cold miss.
-/// On a match, the header-anchored columns are scored first and used when
-/// they clear the floor. Otherwise the cached choice is reused, with no
-/// sweep, until the entry expires or the game ends. A different layout is
-/// a cold miss.
-/// A board that already clears the floor keeps the same columns.
+/// read reuses that entry only when both reads measured a header layout,
+/// those layouts match, and the cached columns still score at least as
+/// well as the anchored columns and at least the 75% floor on this board.
+/// A miss on any of those is a cold miss. Anchored columns or a fresh
+/// sweep that clear the floor replace the below-floor entry. A headerless
+/// cold miss runs the pre-cache coarse and fine sweep, including the
+/// same-size offset as the tie-break anchor. A board that already clears
+/// the floor keeps the same columns.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
     #[cfg(test)]
     let _calib_test_guard = calib_test_guard();
@@ -1048,10 +1058,11 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
 
     // A live below-floor entry still yields to header-anchored columns that
     // clear the floor. That is the cheap probe: one layout, not the sweep.
-    // The cached choice is used only when that probe also misses, the
-    // measured column layout matches the one stored with the entry, and the
-    // entry has not been reused too many times. A missing layout, or any
-    // other mismatch, is a cold miss: it does not consume a reuse.
+    // Reuse also requires the measured layout to match and a re-score of
+    // the cached columns on this board. The cached columns are a cold miss
+    // when they score below the anchored columns or below the floor, and
+    // that miss does not consume a reuse. A result that clears the floor
+    // replaces the below-floor entry.
     let below_floor_hit = COLUMN_OFFSET_CACHE.lock().ok().and_then(|guard| {
         let cached = guard.as_ref()?;
         if cached.below_floor
@@ -1065,42 +1076,66 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
             None
         }
     });
+    let mut known_anchored_score: Option<i32> = None;
     if let Some((offset, use_anchored, reuses)) = below_floor_hit {
         if reuses >= BELOW_FLOOR_MAX_REUSES {
             clear_below_floor_column_cache();
-        } else if let Some(cols) = anchored_cols
-            && score_cols(&cols) >= anchored_floor
-        {
-            clear_below_floor_column_cache();
-            tracing::debug!(
-                "header-anchored columns cleared the floor: dropping below-floor cache"
-            );
-            return cols;
         } else {
-            if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock()
-                && let Some(cached) = guard.as_mut()
+            known_anchored_score = anchored_cols.map(|cols| score_cols(&cols));
+            if let Some(cols) = anchored_cols
+                && known_anchored_score.is_some_and(|score| score >= anchored_floor)
             {
-                cached.reuses = cached.reuses.saturating_add(1);
-            }
-            if use_anchored
-                && let Some(cols) = preprocess::columns_from_header_groups(&header_groups, board_w)
-            {
-                tracing::debug!("reusing below-floor header-anchored columns");
+                clear_below_floor_column_cache();
+                tracing::debug!(
+                    "header-anchored columns cleared the floor: dropping below-floor cache"
+                );
                 return cols;
             }
+            let (cached_cols, cached_score) = if use_anchored {
+                if let Some(cols) = anchored_cols {
+                    (cols, known_anchored_score.unwrap_or(0))
+                } else {
+                    let cols = preprocess::columns_with_offset(offset);
+                    let score = score_cols(&cols);
+                    (cols, score)
+                }
+            } else {
+                let cols = preprocess::columns_with_offset(offset);
+                let score = score_cols(&cols);
+                (cols, score)
+            };
+            let worse_than_anchored =
+                known_anchored_score.is_some_and(|score| cached_score < score);
+            if !worse_than_anchored && cached_score >= anchored_floor {
+                // These columns clear the floor on this board. Drop the
+                // below-floor mark and keep them, the same as a fresh
+                // calibration that clears the floor.
+                remember(offset, false, use_anchored);
+                tracing::debug!(
+                    cached_score,
+                    floor = anchored_floor,
+                    "cached columns cleared the floor: replacing below-floor entry"
+                );
+                return cached_cols;
+            }
             tracing::debug!(
-                offset_px = (offset * board_w as f64) as i32,
-                "reusing below-floor column offset"
+                cached_score,
+                floor = anchored_floor,
+                "cached columns scored too low on this board: cold miss"
             );
-            return preprocess::columns_with_offset(offset);
         }
     }
 
     // Header-anchored per-column windows: accept immediately when they score
     // at least the same 75%-of-max floor the cached-offset reuse path uses.
-    let anchored = anchored_cols.map(|cols| (cols, score_cols(&cols)));
+    // Clearing the floor also drops a below-floor entry left by another board.
+    let anchored = anchored_cols.map(|cols| {
+        let score = known_anchored_score.unwrap_or_else(|| score_cols(&cols));
+        (cols, score)
+    });
     if let Some((cols, anchored_score)) = &anchored {
         if *anchored_score >= anchored_floor {
+            clear_below_floor_column_cache();
             tracing::debug!(
                 anchored_score,
                 max_score,
@@ -1123,34 +1158,43 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
 
     // Reuse last good offset when the board geometry matches and validity has
     // not degraded (threshold: ≥75% of max probe cells still clean).
+    // A headerless cold miss still takes the previous same-size offset as
+    // the tie-break anchor, which is what the pre-cache sweep did. Boards
+    // that measured a layout do not inherit a below-floor offset that way.
     if let Ok(guard) = COLUMN_OFFSET_CACHE.lock()
         && let Some(cached) = guard.as_ref()
         && cached.width == board_w
         && cached.height == board_h
         && cached.team_size == team_size
-        && !cached.below_floor
     {
-        anchor = Some(cached.offset);
-        let cached_score = score(cached.offset);
-        let reuse_floor = (max_score * 3 / 4).max(1);
-        if cached_score >= reuse_floor {
-            tracing::debug!(
-                offset_px = (cached.offset * board_w as f64) as i32,
-                valid_cells = cached_score,
-                "reusing cached column calibration"
-            );
-            return preprocess::columns_with_offset(cached.offset);
+        if !cached.below_floor || anchored_cols.is_none() {
+            anchor = Some(cached.offset);
         }
-        tracing::debug!(
-            valid_cells = cached_score,
-            floor = reuse_floor,
-            "cached column offset degraded: recalibrating"
-        );
+        if !cached.below_floor {
+            let cached_score = score(cached.offset);
+            let reuse_floor = (max_score * 3 / 4).max(1);
+            if cached_score >= reuse_floor {
+                tracing::debug!(
+                    offset_px = (cached.offset * board_w as f64) as i32,
+                    valid_cells = cached_score,
+                    "reusing cached column calibration"
+                );
+                return preprocess::columns_with_offset(cached.offset);
+            }
+            tracing::debug!(
+                valid_cells = cached_score,
+                floor = reuse_floor,
+                "cached column offset degraded: recalibrating"
+            );
+        }
     }
 
     let best_of = |offsets: Vec<f64>| -> (f64, i32) {
         #[cfg(test)]
-        COLUMN_OFFSET_SWEEPS.with(|c| c.set(c.get() + 1));
+        {
+            COLUMN_OFFSET_SWEEPS.with(|c| c.set(c.get() + 1));
+            COLUMN_SWEEP_BATCHES.with(|slot| slot.borrow_mut().push(offsets.clone()));
+        }
         // No pool (OCR off) scores like an empty sweep.
         let Ok(pool) = ocr_pool() else {
             return (0.0f64, i32::MIN);
@@ -1290,6 +1334,34 @@ pub(crate) const CELL_SCORE_SUSPECT: i32 = 1;
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
+        #[cfg(test)]
+        if SCORE_DARK_COLUMN_MARKS.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols) {
+                let rgb = cell.to_rgb8();
+                if rgb.width() > 0 && rgb.height() > 0 {
+                    let cx = rgb.width() / 2;
+                    let x0 = cx.saturating_sub(2);
+                    let x1 = (cx + 3).min(rgb.width());
+                    let mut dark = 0u32;
+                    let mut seen = 0u32;
+                    for y in 0..rgb.height() {
+                        for x in x0..x1 {
+                            let px = rgb.get_pixel(x, y);
+                            let brightness =
+                                (u32::from(px.0[0]) + u32::from(px.0[1]) + u32::from(px.0[2])) / 3;
+                            if brightness < 80 {
+                                dark += 1;
+                            }
+                            seen += 1;
+                        }
+                    }
+                    if seen > 0 && dark * 2 >= seen {
+                        valid += CELL_SCORE_CLEAN;
+                    }
+                }
+            }
+            continue;
+        }
         #[cfg(test)]
         if let Some(forced) = FORCED_CELL_SCORE.with(|slot| slot.get()) {
             valid += forced;
@@ -1979,25 +2051,51 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
+    /// Same headers as [`board_with_stat_headers`], plus dark marks at the
+    /// fallback columns shifted by `offset`. The marks sit below the header
+    /// strip, so the measured layout stays on the labels.
+    fn board_with_headers_and_column_marks(w: u32, h: u32, offset: f64) -> DynamicImage {
+        let mut img = board_with_stat_headers(w, h).to_rgb8();
+        let y0 = (h as f64 * 0.04) as u32;
+        for (start, width) in preprocess::columns_with_offset(offset) {
+            let center = ((start + width / 2.0) * w as f64).round() as i32;
+            for y in y0..h {
+                for dx in -3..4 {
+                    let x = center + dx;
+                    if x >= 0 && (x as u32) < w {
+                        img.put_pixel(x as u32, y, image::Rgb([16, 16, 16]));
+                    }
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    fn column_offset_of(cols: &preprocess::StatColumns) -> f64 {
+        cols[0].0 - preprocess::columns_with_offset(0.0)[0].0
+    }
+
     fn reset_calib_for_test() {
         if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
             *guard = None;
         }
         COLUMN_OFFSET_SWEEPS.with(|c| c.set(0));
         COLUMN_FINE_SWEEPS.with(|c| c.set(0));
+        COLUMN_SWEEP_BATCHES.with(|slot| slot.borrow_mut().clear());
         COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.set(false));
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
+        SCORE_DARK_COLUMN_MARKS.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// A cold below-floor miss runs the fine sweep once. The same board
-    /// again is a warm hit and does not sweep.
+    /// A cold below-floor miss runs the fine sweep once. A repeat whose
+    /// cached columns stay under the floor is a cold miss and sweeps again.
     #[test]
-    fn cold_below_floor_fine_sweep_runs_once_then_a_repeat_skips_it() {
+    fn cold_below_floor_fine_sweep_runs_once_and_a_weak_repeat_sweeps_again() {
         let _hold = calib_test_guard();
         reset_calib_for_test();
         FORCED_CELL_SCORE.with(|slot| slot.set(Some(0)));
         let board = board_with_stat_headers(1664, 1007);
-        let first = calibrate_columns(&board, 5);
+        let _first = calibrate_columns(&board, 5);
         assert!(
             COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.get()),
             "the cold read must stay under the 75% floor"
@@ -2012,18 +2110,15 @@ mod tests {
             sweeps >= 2,
             "the cold read runs the coarse sweep and the fine sweep"
         );
-        let second = calibrate_columns(&board, 5);
-        assert_eq!(
-            COLUMN_FINE_SWEEPS.with(|c| c.get()),
-            1,
-            "a repeat of the same board skips the fine sweep"
+        let _second = calibrate_columns(&board, 5);
+        assert!(
+            COLUMN_FINE_SWEEPS.with(|c| c.get()) > 1,
+            "cached columns under the floor do not skip the fine sweep"
         );
-        assert_eq!(
-            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
-            sweeps,
-            "a repeat of the same board skips the coarse sweep"
+        assert!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()) > sweeps,
+            "cached columns under the floor are a cold miss"
         );
-        assert_eq!(first, second);
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
     }
 
@@ -2073,10 +2168,9 @@ mod tests {
         );
         let after = COLUMN_OFFSET_SWEEPS.with(|c| c.get());
         let _ = calibrate_columns(&right, 5);
-        assert_eq!(
-            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
-            after,
-            "a repeat of the second layout reuses its own entry"
+        assert!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()) > after,
+            "a repeat under the floor does not inherit the entry"
         );
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
     }
@@ -2135,6 +2229,188 @@ mod tests {
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
     }
 
+    /// Same resolution and the same header layout, but the stat marks sit
+    /// on different offsets. The second board must not keep the first
+    /// board's below-floor columns.
+    #[test]
+    fn matching_layouts_with_different_offsets_do_not_reuse_a_below_floor_entry() {
+        let _hold = calib_test_guard();
+        reset_calib_for_test();
+        let left = board_with_stat_headers(1248, 756);
+        let right = board_with_headers_and_column_marks(1248, 756, 0.04);
+        let left_layout = preprocess::columns_from_header_groups(
+            &preprocess::header_label_groups(&left),
+            left.width(),
+        )
+        .expect("left headers anchor six columns");
+        let right_layout = preprocess::columns_from_header_groups(
+            &preprocess::header_label_groups(&right),
+            right.width(),
+        )
+        .expect("right headers anchor six columns");
+        assert!(
+            layouts_match(&Some(left_layout), &Some(right_layout)),
+            "the fixtures share a header layout within tolerance"
+        );
+
+        FORCED_CELL_SCORE.with(|slot| slot.set(Some(0)));
+        let first = calibrate_columns(&left, 5);
+        assert!(
+            COLUMN_SWEEP_UNDER_FLOOR.with(|c| c.get()),
+            "the first board must stay under the 75% floor"
+        );
+        let stored_below = COLUMN_OFFSET_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|cached| cached.below_floor));
+        assert_eq!(
+            stored_below,
+            Some(true),
+            "the first board stores a below-floor entry"
+        );
+        let sweeps = COLUMN_OFFSET_SWEEPS.with(|c| c.get());
+
+        FORCED_CELL_SCORE.with(|slot| slot.set(None));
+        SCORE_DARK_COLUMN_MARKS.store(true, std::sync::atomic::Ordering::Relaxed);
+        let second = calibrate_columns(&right, 5);
+        assert!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()) > sweeps,
+            "a different offset at the same layout is a cold miss"
+        );
+        assert!(
+            (column_offset_of(&second) - 0.04).abs() < 0.01,
+            "the fresh sweep follows this board's column marks, got {}",
+            column_offset_of(&second)
+        );
+        assert_ne!(
+            first, second,
+            "the second board must not keep the first board's columns"
+        );
+        let replaced = COLUMN_OFFSET_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|cached| cached.below_floor));
+        assert_eq!(
+            replaced,
+            Some(false),
+            "a fresh calibration that clears the floor replaces the below-floor entry"
+        );
+        SCORE_DARK_COLUMN_MARKS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A headerless cold miss searches the pre-cache coarse range and the
+    /// fine range around that winner. With a same-size below-floor offset
+    /// already cached, equal scores tie-break toward that offset.
+    #[test]
+    fn headerless_cold_path_runs_the_pre_cache_coarse_and_fine_sweep() {
+        let _hold = calib_test_guard();
+        reset_calib_for_test();
+        FORCED_CELL_SCORE.with(|slot| slot.set(Some(0)));
+        let board = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1664,
+            1007,
+            image::Rgb([20, 24, 30]),
+        ));
+        assert!(
+            preprocess::columns_from_header_groups(
+                &preprocess::header_label_groups(&board),
+                board.width(),
+            )
+            .is_none(),
+            "this fixture has no header layout"
+        );
+        let first = calibrate_columns(&board, 5);
+        let batches = COLUMN_SWEEP_BATCHES.with(|slot| slot.borrow().clone());
+        assert_eq!(
+            batches.len(),
+            2,
+            "a headerless cold miss runs the coarse sweep and the fine sweep"
+        );
+        let header_offset = preprocess::offset_from_header_groups(
+            &preprocess::header_label_groups(&board),
+            board.width(),
+        );
+        let coarse_min = header_offset.min(-0.02) - 0.04;
+        let coarse_max = header_offset.max(0.04) + 0.04;
+        let mut expected_coarse = Vec::new();
+        let mut offset = coarse_min;
+        while offset <= coarse_max {
+            expected_coarse.push(offset);
+            offset += 0.02;
+        }
+        let coarse = &batches[0];
+        assert_eq!(
+            coarse.len(),
+            expected_coarse.len(),
+            "coarse sweep uses the pre-cache range"
+        );
+        for (got, want) in coarse.iter().zip(&expected_coarse) {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "coarse offset {got} does not match the pre-cache sweep {want}"
+            );
+        }
+        for pair in coarse.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - 0.02).abs() < 1e-6,
+                "coarse step is 0.02"
+            );
+        }
+        assert!(
+            column_offset_of(&first).abs() < 1e-6,
+            "with no anchor, equal scores pick the smallest offset"
+        );
+        let fine = &batches[1];
+        assert!(!fine.is_empty(), "the fine sweep has offsets");
+        for offset in fine {
+            let distance = (offset - column_offset_of(&first)).abs();
+            assert!(
+                distance <= 0.02 + 1e-6 && distance > 1e-9,
+                "fine offsets stay within 0.02 of the coarse winner and skip it"
+            );
+        }
+
+        if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
+            *guard = Some(CalibCache {
+                width: 1664,
+                height: 1007,
+                team_size: 5,
+                offset: 0.04,
+                below_floor: true,
+                anchored: false,
+                reuses: 0,
+                layout: None,
+            });
+        }
+        COLUMN_OFFSET_SWEEPS.with(|c| c.set(0));
+        COLUMN_FINE_SWEEPS.with(|c| c.set(0));
+        COLUMN_SWEEP_BATCHES.with(|slot| slot.borrow_mut().clear());
+        let second = calibrate_columns(&board, 5);
+        assert_eq!(
+            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
+            2,
+            "the headerless cold path still sweeps instead of reusing"
+        );
+        assert_eq!(
+            COLUMN_FINE_SWEEPS.with(|c| c.get()),
+            1,
+            "the headerless cold path runs the fine sweep once"
+        );
+        let again = COLUMN_SWEEP_BATCHES.with(|slot| slot.borrow().clone());
+        assert!(
+            again
+                .first()
+                .is_some_and(|coarse| (coarse[0] - coarse_min).abs() < 1e-9),
+            "the second cold miss keeps the pre-cache coarse range"
+        );
+        assert!(
+            (column_offset_of(&second) - 0.04).abs() < 1e-6,
+            "equal scores tie-break toward the cached offset, got {}",
+            column_offset_of(&second)
+        );
+        FORCED_CELL_SCORE.with(|slot| slot.set(None));
+    }
+
     /// A clean read at the same size beats a below-floor cache: the
     /// header-anchored columns clear the floor, that entry is dropped, and
     /// the next weak read has to sweep again.
@@ -2179,10 +2455,10 @@ mod tests {
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
     }
 
-    /// After [`BELOW_FLOOR_MAX_REUSES`] weak reads, the entry is gone and
-    /// the next read sweeps.
+    /// After a below-floor read, another read whose cached columns stay
+    /// under the floor does not inherit the entry.
     #[test]
-    fn below_floor_cache_expires_after_n_reuses() {
+    fn below_floor_entry_is_not_reused_when_cached_columns_stay_under_the_floor() {
         let _hold = calib_test_guard();
         reset_calib_for_test();
         FORCED_CELL_SCORE.with(|slot| slot.set(Some(0)));
@@ -2190,18 +2466,10 @@ mod tests {
         let _first = calibrate_columns(&board, 5);
         let sweeps = COLUMN_OFFSET_SWEEPS.with(|c| c.get());
         assert!(sweeps >= 1, "the first read has to sweep");
-        for _ in 0..BELOW_FLOOR_MAX_REUSES {
-            let _ = calibrate_columns(&board, 5);
-        }
-        assert_eq!(
-            COLUMN_OFFSET_SWEEPS.with(|c| c.get()),
-            sweeps,
-            "reuses of a weak board must not sweep"
-        );
-        let _ = calibrate_columns(&board, 5);
+        let _second = calibrate_columns(&board, 5);
         assert!(
             COLUMN_OFFSET_SWEEPS.with(|c| c.get()) > sweeps,
-            "the entry expires after {BELOW_FLOOR_MAX_REUSES} reuses"
+            "columns that stay under the floor are a cold miss"
         );
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
     }
