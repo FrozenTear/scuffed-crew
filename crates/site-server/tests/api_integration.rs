@@ -7458,7 +7458,8 @@ async fn set_board_min_role(db: &Database, slug: &str, role: &str) {
 }
 
 /// Stamp `updated_at` with a fixed SurrealQL duration so list order does not
-/// depend on insert timing. Only the match arms below are interpolated.
+/// depend on insert timing. Each match arm is a complete query string. The
+/// title is bound as `$title` and is not spliced into the query.
 async fn stamp_thread_age(db: &Database, title: &str, age_secs: u32) {
     let sql = match age_secs {
         1 => "UPDATE forum_thread SET updated_at = time::now() - 1s WHERE title = $title",
@@ -7803,6 +7804,20 @@ async fn forum_thread_total_counts_every_match() {
         .await
         .unwrap();
     assert_eq!(retired_officer.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn forum_thread_list_offset_past_end_keeps_match_total() {
+    let state = test_state().await;
+    seed_forum_paging_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let page = forum_list_json(&app, None, "?limit=2&offset=50").await;
+    assert!(
+        thread_titles(&page).is_empty(),
+        "offset past the three public threads must be an empty page: {page}"
+    );
+    assert_eq!(page["total"].as_u64(), Some(3));
 }
 
 // ─── Seasons: admin CRUD + season window on personal stats ──────────────────
