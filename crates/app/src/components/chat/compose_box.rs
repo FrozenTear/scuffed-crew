@@ -28,11 +28,15 @@ pub enum ComposeOutcome {
     RateLimited,
 }
 
-/// Typed text after the server answers. Errors leave the draft unchanged.
-pub fn draft_after_outcome(typed: &str, outcome: ComposeOutcome) -> String {
+/// Typed text after the server answers.
+///
+/// Success clears the box only when `current` is still the exact input captured
+/// at send time (`sent_exact`). Text the user added or edited while the request
+/// was in flight stays. Errors always keep `current`.
+pub fn draft_after_outcome(current: &str, sent_exact: &str, outcome: ComposeOutcome) -> String {
     match outcome {
-        ComposeOutcome::Success => String::new(),
-        ComposeOutcome::Error | ComposeOutcome::RateLimited => typed.to_string(),
+        ComposeOutcome::Success if current == sent_exact => String::new(),
+        _ => current.to_string(),
     }
 }
 
@@ -55,6 +59,8 @@ pub fn begin_send(typed: &str, pending: bool, blocked: bool) -> Option<String> {
 pub struct ComposerState {
     pub text: String,
     pub pending: bool,
+    /// Input value at the moment Send was pressed.
+    sent_exact: String,
 }
 
 impl ComposerState {
@@ -62,17 +68,19 @@ impl ComposerState {
         Self {
             text: text.into(),
             pending: false,
+            sent_exact: String::new(),
         }
     }
 
     pub fn begin_send(&mut self, blocked: bool) -> Option<String> {
         let payload = begin_send(&self.text, self.pending, blocked)?;
+        self.sent_exact = self.text.clone();
         self.pending = true;
         Some(payload)
     }
 
     pub fn settle(&mut self, outcome: ComposeOutcome) {
-        self.text = draft_after_outcome(&self.text, outcome);
+        self.text = draft_after_outcome(&self.text, &self.sent_exact, outcome);
         self.pending = false;
     }
 }
@@ -221,9 +229,10 @@ pub fn ComposeBox(
 ) -> Element {
     let mut draft = use_signal(String::new);
     let mut pending = use_signal(|| false);
+    let mut sent_exact = use_signal(String::new);
     let finish = use_callback(move |outcome: ComposeOutcome| {
         let current = draft();
-        draft.set(draft_after_outcome(&current, outcome));
+        draft.set(draft_after_outcome(&current, &sent_exact(), outcome));
         pending.set(false);
     });
     let draft_text = draft();
@@ -238,6 +247,7 @@ pub fn ComposeBox(
         let Some(text) = begin_send(&typed, pending(), disabled || send_locked) else {
             return;
         };
+        sent_exact.set(typed);
         pending.set(true);
         on_send.call(ComposeAttempt { text, finish });
     };
@@ -254,7 +264,7 @@ pub fn ComposeBox(
                 class: "chat-compose__input",
                 r#type: "text",
                 placeholder: "{placeholder}",
-                disabled: disabled || in_flight,
+                disabled: disabled,
                 value: "{draft}",
                 oninput: move |evt| draft.set(evt.value()),
                 onkeydown: move |evt| {
@@ -379,10 +389,32 @@ mod tests {
         assert_eq!(state.text, typed);
         assert!(!state.pending);
         assert_eq!(
-            draft_after_outcome(typed, ComposeOutcome::RateLimited),
+            draft_after_outcome(typed, typed, ComposeOutcome::RateLimited),
             typed
         );
-        assert_eq!(draft_after_outcome(typed, ComposeOutcome::Success), "");
+        assert_eq!(
+            draft_after_outcome(typed, typed, ComposeOutcome::Success),
+            ""
+        );
+    }
+
+    #[test]
+    fn success_keeps_text_typed_while_the_send_is_in_flight() {
+        let mut state = ComposerState::new("hello");
+        assert_eq!(state.begin_send(false).as_deref(), Some("hello"));
+        assert!(state.begin_send(false).is_none());
+        state.text.push_str(" there");
+        state.settle(ComposeOutcome::Success);
+        assert_eq!(state.text, "hello there");
+        assert!(!state.pending);
+        assert_eq!(
+            draft_after_outcome("hello there", "hello", ComposeOutcome::Success),
+            "hello there"
+        );
+        assert_eq!(
+            draft_after_outcome("hello", "hello", ComposeOutcome::Success),
+            ""
+        );
     }
 
     #[test]
@@ -394,6 +426,10 @@ mod tests {
         assert!(
             !prod.contains("draft.set(String::new())"),
             "the box must not wipe the draft before the parent settles"
+        );
+        assert!(
+            !prod.contains("disabled || in_flight"),
+            "the input stays editable while a send is in flight"
         );
     }
 }

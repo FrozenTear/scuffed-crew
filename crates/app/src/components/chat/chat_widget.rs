@@ -990,7 +990,6 @@ pub fn ChatWidget(
                                 sending.set(false);
                             });
                         },
-                        disabled: sending(),
                         send_locked: public_send_wait > 0,
                         placeholder: "Type a message...".to_string(),
                     }
