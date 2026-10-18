@@ -4,12 +4,14 @@
 //! member that owns the tracker sync token sent as `Authorization: Bearer`.
 //! Every other route here is session-only, so a sync token there is a 401.
 //! `GET /api/stat-reports` lists the caller's rows, or every row for an officer.
+//! Officer rows include `display_name` beside `member_id`. A member's rows omit both.
 //! `GET /api/stat-reports/{id}` and `GET /api/stat-reports/{id}/manifest` are
 //! officer-only. `DELETE` is the owner or an officer. `POST .../withdraw` and
 //! `PATCH /api/stat-reports/{id}` clear training consent for the owner only.
 //! Withdraw sets expiry to the original received time plus 30 days, and deletes
 //! the report now if that instant has already passed.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use axum::Json;
@@ -70,6 +72,7 @@ fn member_item(report: &StatReport) -> StatReportListItem {
         glyphs_included: report.glyphs_included,
         size_bytes: report.size_bytes,
         member_id: None,
+        display_name: None,
         reason_category: None,
         reason_text: None,
         app_version: None,
@@ -79,9 +82,21 @@ fn member_item(report: &StatReport) -> StatReportListItem {
     }
 }
 
-fn officer_item(report: &StatReport) -> StatReportListItem {
+fn officer_display_name(names: &HashMap<String, String>, member_id: &str) -> Option<String> {
+    names.get(member_id).and_then(|name| {
+        if name.trim().is_empty() {
+            None
+        } else {
+            Some(name.clone())
+        }
+    })
+}
+
+fn officer_item(report: &StatReport, names: &HashMap<String, String>) -> StatReportListItem {
     StatReportListItem {
         member_id: Some(report.member_id.clone()),
+        // `Some` keeps JSON null when the name is missing. `None` would omit it.
+        display_name: Some(officer_display_name(names, &report.member_id)),
         reason_category: Some(report.reason_category.clone()),
         reason_text: Some(report.reason_text.clone()),
         app_version: Some(report.app_version.clone()),
@@ -326,7 +341,14 @@ pub async fn list_stat_reports(
         .filter(report_is_current)
         .collect();
     let reports = if officer {
-        rows.iter().map(officer_item).collect()
+        let mut ids: Vec<String> = rows.iter().map(|row| row.member_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        let names = state.db.member_display_names(&ids).await.map_err(|error| {
+            tracing::error!(%error, "stat report member names failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+        })?;
+        rows.iter().map(|row| officer_item(row, &names)).collect()
     } else {
         rows.iter().map(member_item).collect()
     };

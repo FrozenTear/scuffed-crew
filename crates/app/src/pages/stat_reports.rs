@@ -1296,6 +1296,7 @@ mod tests {
             glyphs_included: false,
             size_bytes: 2048,
             member_id: None,
+            display_name: None,
             reason_category: None,
             reason_text: None,
             app_version: None,

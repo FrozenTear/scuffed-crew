@@ -1248,6 +1248,157 @@ async fn member_lists_own_rows_officer_reads_and_member_is_forbidden() {
 }
 
 #[tokio::test]
+async fn officer_list_resolves_display_name_and_non_officer_is_rejected() {
+    let h = harness().await;
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    let (status, other) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(OTHER_TOKEN),
+        Some(valid_bundle(false).bytes),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_id = other["id"].as_str().unwrap().to_string();
+
+    let (status, mine) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mine_row = &mine["reports"][0];
+    assert!(mine_row.get("display_name").is_none());
+    assert!(mine_row.get("member_id").is_none());
+    let mine_text = mine.to_string();
+    assert!(!mine_text.contains("MemberOne"));
+    assert!(!mine_text.contains("MemberTwo"));
+
+    // Zip and manifest stay officer-only.
+    let (status, _) = send(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}"),
+        Some(MEMBER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &h.app,
+        Method::GET,
+        &format!("/api/stat-reports/{id}/manifest"),
+        Some(OTHER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, all) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let named = all["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert_eq!(named["member_id"], "membermember");
+    assert_eq!(named["display_name"], "MemberOne");
+    assert_eq!(named["reason_text"], "elims looked high");
+    let other_row = all["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == other_id)
+        .unwrap();
+    assert_eq!(other_row["member_id"], "othermember");
+    assert_eq!(other_row["display_name"], "MemberTwo");
+
+    h.state
+        .db
+        .client
+        .query("UPDATE member:membermember SET display_name = $name")
+        .bind(("name", ""))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (status, blanked) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let blank = blanked["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert!(blank.get("display_name").is_some());
+    assert!(blank["display_name"].is_null());
+    assert_eq!(blank["member_id"], "membermember");
+    let still_named = blanked["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == other_id)
+        .unwrap();
+    assert_eq!(still_named["display_name"], "MemberTwo");
+
+    h.state
+        .db
+        .client
+        .query("DELETE member:othermember")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (status, gone) = send(
+        &h.app,
+        Method::GET,
+        "/api/stat-reports",
+        Some(OFFICER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let missing = gone["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == other_id)
+        .unwrap();
+    assert_eq!(missing["member_id"], "othermember");
+    assert!(missing.get("display_name").is_some());
+    assert!(missing["display_name"].is_null());
+    assert_eq!(missing["reason_category"], "wrong_stats");
+}
+
+#[tokio::test]
 async fn owner_delete_and_withdraw_are_refused_for_other_members() {
     let h = harness().await;
     let (status, created) = send(

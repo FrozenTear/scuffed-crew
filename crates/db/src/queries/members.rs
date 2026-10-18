@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
@@ -306,6 +308,49 @@ impl Database {
                 Some(m) => Ok(Some(db_to_member(m)?)),
                 None => Ok(None),
             }
+        })
+        .await
+    }
+
+    /// Display names for a set of member ids, in one query.
+    ///
+    /// Missing ids are absent from the map. An empty input does not query.
+    /// The projection is `id` and `display_name` only, so encrypted secrets
+    /// stay out of the read. Callers turn a blank name into a null API field.
+    pub async fn member_display_names(
+        &self,
+        member_ids: &[String],
+    ) -> DbResult<HashMap<String, String>> {
+        let mut ids: Vec<&str> = member_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rids: Vec<RecordId> = ids.iter().map(|id| RecordId::new("member", *id)).collect();
+        with_timeout(async {
+            #[derive(Debug, Deserialize, SurrealValue)]
+            struct NameRow {
+                id: Option<RecordId>,
+                display_name: String,
+            }
+            let mut result = self
+                .client
+                .query("SELECT id, display_name FROM member WHERE id IN $rids")
+                .bind(("rids", rids))
+                .await?;
+            let rows: Vec<NameRow> = result.take(0)?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for row in rows {
+                if let Some(rid) = row.id {
+                    map.insert(crate::record_id_key_to_string(rid.key), row.display_name);
+                }
+            }
+            Ok(map)
         })
         .await
     }
@@ -1074,5 +1119,47 @@ mod tests {
             matches!(missing, crate::DbError::NotFound(_)),
             "missing member must be NotFound, got {missing:?}"
         );
+    }
+
+    /// One query resolves every requested id. A missing member is left out.
+    #[tokio::test]
+    async fn member_display_names_batches_present_ids_and_skips_missing() {
+        let db = test_db_with_crypto().await;
+        let alice = db
+            .create_member("user-alice", "Alice", OrgRole::Member)
+            .await
+            .unwrap();
+        let bob = db
+            .create_member("user-bob", "Bob", OrgRole::Officer)
+            .await
+            .unwrap();
+        let names = db
+            .member_display_names(&[
+                alice.id.clone(),
+                alice.id.clone(),
+                bob.id.clone(),
+                "no-such-member".into(),
+                String::new(),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names.get(&alice.id).map(String::as_str), Some("Alice"));
+        assert_eq!(names.get(&bob.id).map(String::as_str), Some("Bob"));
+        assert!(!names.contains_key("no-such-member"));
+        assert!(db.member_display_names(&[]).await.unwrap().is_empty());
+
+        db.client
+            .query("UPDATE $rid SET display_name = ''")
+            .bind(("rid", RecordId::new("member", alice.id.as_str())))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let blank = db
+            .member_display_names(std::slice::from_ref(&alice.id))
+            .await
+            .unwrap();
+        assert_eq!(blank.get(&alice.id).map(String::as_str), Some(""));
     }
 }

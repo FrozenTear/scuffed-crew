@@ -470,7 +470,7 @@ Create accepts either of two credentials. Every other report route accepts only 
 - The site session for an org member (`OrgMember`), the same session the site already uses.
 - The tracker's sync token, sent as `Authorization: Bearer <token>` (the same header the tracker uses for stats sync). The server resolves it to the member that owns it and applies the same membership checks as the session: an inactive, suspended, or banned member gets 403. The sync token authorizes `POST /api/stat-reports` and nothing else on this API. List, download, the manifest read, delete, and withdraw answer 401 to a sync token. The token goes only in that header. It is never in the zip, the manifest, the free text, or a file name, and the log scrub (section 6) still replaces it.
 
-A report sent with the sync token is stored exactly like one sent with the session: the member id is the token's owner, and the daily cap counts both together. Officers see the member id, as for any report. Hiding it from officers is a later option, not part of this revision.
+A report sent with the sync token is stored exactly like one sent with the session: the member id is the token's owner, and the daily cap counts both together. Officers see the member id, as for any report, and the member's display name beside it. Hiding the member id from officers is a later option, not part of this revision.
 
 Routes:
 
@@ -488,6 +488,8 @@ Routes:
 
 Officer means `OfficerUser` (officer or admin). A member who is not an officer gets 403 on the zip bytes and on the manifest route. Ids are unguessable. A create response returns the id, the training flag, and `expires_at`. It does not echo the zip. The manifest route returns the stored manifest, after the hash recompute below.
 
+An officer `GET /api/stat-reports` row includes `display_name` beside `member_id`. `display_name` is a string (the member record's display name) or JSON null when that member has no display name or the member record is gone. A member's own list omits `display_name` and `member_id`. The name is read from the member record when the list is built. It is not a column on the report.
+
 Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncompressed files together are also at most 10 MB. Either one over that size is 413. At most 30 files besides the manifest. No image edge is longer than 7680 pixels. A member may store 10 successful reports per UTC day. A rejected upload does not count. Over the daily cap, respond 429.
 
 The server checks the zip again. It does not trust the client. It responds 400 for a bad manifest, a path that escapes the zip, a repeated JSON key, JPEG magic (`FF D8 FF`), a file named as JPEG, or a PNG that is not a real 8-bit image (bad magic, bad CRC, interlace, or a critical chunk other than `IHDR`, `IDAT`, `IEND`, or `PLTE`). On that failure it stores nothing. It does not keep the last value of a repeated key. If a manifest lists a path under `debug/mapcrops/`, the server responds 400 with `file missing` and stores nothing.
@@ -500,7 +502,7 @@ Storage is private. The zip bytes sit outside the database and outside the git r
 
 Retention: a report with training left off is deleted 30 times 24 hours after it was received, in UTC. A sweeper may run hourly. It deletes expired files, files whose metadata is gone, and metadata whose file is gone. Delete removes the file and the metadata now. Withdraw clears training. Expiry is then the original received time plus 30 days. If that time has already passed, withdraw deletes the report now. Withdraw does not extend the life of a report.
 
-Reading the zip is officer-only. A member can list their own report ids, times, and consent flags, and can delete or withdraw. They cannot download the stored zip. An officer download, a create, a delete, and a withdraw each write an audit log entry. Audit is fire-and-forget: log an error, and do not fail the request because the audit write failed.
+Reading the zip is officer-only. A member can list their own report ids, times, and consent flags, and can delete or withdraw. That list does not include display names. They cannot download the stored zip. An officer download, a create, a delete, and a withdraw each write an audit log entry. Audit is fire-and-forget: log an error, and do not fail the request because the audit write failed.
 
 Contabo has no backups. A report stored on that disk is for testing this flow only. A lost disk loses the reports. The site does not tell a member that a training report is archived, and nobody treats that disk as the only copy of training data.
 
