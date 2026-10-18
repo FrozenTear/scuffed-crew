@@ -210,21 +210,28 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 /// `role` on the match stays the scoreboard hero role (`Tank`, `Damage`,
 /// `Support`, or empty). The queue on the rank screen is [`Self::rank_role`]
 /// (`tank`, `damage`, `support`). That screen's season-progression number
-/// is not stored. `top500` is not a tier here; this repo does not model it.
+/// is not stored. [`RANK_TIER_TOP500`] is a tier and does not use a division.
 ///
 /// These fields are returned on the member match list
 /// (`GET /api/stats/me/matches`). Public and anonymous responses do not
 /// include them.
+///
+/// A present value whose JSON type matches the field, but which is out of
+/// range or not allowed, is stored as none. The rest of that match is still
+/// stored. `rank_modifiers` keeps the valid names, at most
+/// [`RANK_MODIFIERS_MAX_LEN`]. `rank_confidence` keeps the valid entries.
+/// A wrong JSON type rejects the upload. Names of dropped fields are listed
+/// on [`Self::rank_dropped`]. The client does not send that list.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RankScreenFields {
     /// Queue on the rank screen: `tank`, `damage`, or `support`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_role: Option<String>,
     /// `bronze`, `silver`, `gold`, `platinum`, `diamond`, `master`,
-    /// `grandmaster`, or `champion`.
+    /// `grandmaster`, `champion`, or `top500`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_tier: Option<String>,
-    /// Division inside the tier, `1..=5`.
+    /// Division inside the tier, `1..=5`. Omitted for [`RANK_TIER_TOP500`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_division: Option<i32>,
     /// Progress through the current division, `0..=100`.
@@ -250,12 +257,22 @@ pub struct RankScreenFields {
     /// Per-field confidence, `0.0..=1.0`, keyed by the rank-screen field names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_confidence: Option<BTreeMap<String, f64>>,
+    /// Names the server dropped on this upload, in first-seen order, without
+    /// duplicates. Absent when nothing was dropped. A confidence entry is
+    /// `rank_confidence.<field>`. Modifier drops are `rank_modifiers`.
+    /// Upload JSON is not a source for this list: a client value is ignored.
+    /// Returned on `GET /api/stats/me/matches` with the other rank fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_dropped: Option<Vec<String>>,
 }
 
 /// Rank-screen queue values accepted on upload.
 pub const RANK_ROLES: &[&str] = &["tank", "damage", "support"];
 
-/// Rank tiers accepted on upload. `top500` is not in this list.
+/// `rank_tier` value for the top 500 leaderboard. It has no division.
+pub const RANK_TIER_TOP500: &str = "top500";
+
+/// Rank tiers accepted on upload. Includes [`RANK_TIER_TOP500`].
 pub const RANK_TIERS: &[&str] = &[
     "bronze",
     "silver",
@@ -265,6 +282,7 @@ pub const RANK_TIERS: &[&str] = &[
     "master",
     "grandmaster",
     "champion",
+    RANK_TIER_TOP500,
 ];
 
 pub const RANK_DIVISION_MIN: i32 = 1;
@@ -298,18 +316,63 @@ pub const RANK_CONFIDENCE_FIELDS: &[&str] = &[
     "rank_recognizer",
 ];
 
-pub const RANK_ROLE_ERROR: &str = "rank_role must be tank, damage, or support";
-pub const RANK_TIER_ERROR: &str =
-    "rank_tier must be bronze, silver, gold, platinum, diamond, master, grandmaster, or champion";
-pub const RANK_DIVISION_ERROR: &str = "rank_division must be an integer from 1 to 5";
-pub const RANK_PROGRESS_PCT_ERROR: &str = "rank_progress_pct must be an integer from 0 to 100";
-pub const RANK_DELTA_PCT_ERROR: &str = "rank_delta_pct must be an integer from -100 to 100";
-pub const RANK_MODIFIERS_ERROR: &str = "rank_modifiers must be an array of at most 8 names, each at most 32 characters after normalizing to lowercase snake_case";
-pub const HERO_SR_ERROR: &str = "hero_sr must be an integer from 0 to 6000";
-pub const HERO_SR_DELTA_ERROR: &str = "hero_sr_delta must be an integer from -1000 to 1000";
-pub const RANK_RECOGNIZER_ERROR: &str =
-    "rank_recognizer must be a string of 1-32 characters in [a-z0-9.-] including a letter or digit";
-pub const RANK_CONFIDENCE_ERROR: &str = "rank_confidence must be an object whose keys are rank fields and whose values are numbers from 0.0 to 1.0";
+/// HTTP 400 when `rank_role` is present but not a JSON string.
+/// A string outside [`RANK_ROLES`] is dropped, not rejected.
+pub const RANK_ROLE_ERROR: &str = "rank_role must be a string";
+/// HTTP 400 when `rank_tier` is present but not a JSON string.
+/// A string outside [`RANK_TIERS`] is dropped, not rejected.
+pub const RANK_TIER_ERROR: &str = "rank_tier must be a string";
+/// HTTP 400 when `rank_division` is present but not a JSON integer.
+/// An integer outside [`RANK_DIVISION_MIN`]..=[`RANK_DIVISION_MAX`] is dropped.
+pub const RANK_DIVISION_ERROR: &str = "rank_division must be an integer";
+/// HTTP 400 when `rank_progress_pct` is present but not a JSON integer.
+/// An integer outside 0..=100 is dropped.
+pub const RANK_PROGRESS_PCT_ERROR: &str = "rank_progress_pct must be an integer";
+/// HTTP 400 when `rank_delta_pct` is present but not a JSON integer.
+/// An integer outside -100..=100 is dropped.
+pub const RANK_DELTA_PCT_ERROR: &str = "rank_delta_pct must be an integer";
+/// HTTP 400 when `rank_modifiers` is present but not a JSON array.
+/// Invalid entries are dropped. More than [`RANK_MODIFIERS_MAX_LEN`] valid
+/// names keeps the first [`RANK_MODIFIERS_MAX_LEN`].
+pub const RANK_MODIFIERS_ERROR: &str = "rank_modifiers must be an array";
+/// HTTP 400 when `hero_sr` is present but not a JSON integer.
+/// An integer outside 0..=6000 is dropped.
+pub const HERO_SR_ERROR: &str = "hero_sr must be an integer";
+/// HTTP 400 when `hero_sr_delta` is present but not a JSON integer.
+/// An integer outside -1000..=1000 is dropped.
+pub const HERO_SR_DELTA_ERROR: &str = "hero_sr_delta must be an integer";
+/// HTTP 400 when `rank_recognizer` is present but not a JSON string.
+/// A string that is not a recognizer id is dropped.
+pub const RANK_RECOGNIZER_ERROR: &str = "rank_recognizer must be a string";
+/// HTTP 400 when `rank_confidence` is present but not a JSON object.
+/// Entries that are not a rank field mapped to a finite number in 0.0..=1.0
+/// are dropped one at a time.
+pub const RANK_CONFIDENCE_ERROR: &str = "rank_confidence must be an object";
+
+const RANK_DROP_NOT_ALLOWED: &str = "not allowed";
+const RANK_DROP_OUT_OF_RANGE: &str = "out of range";
+const RANK_DROP_BAD_RECOGNIZER: &str = "not a usable recognizer id";
+const RANK_DROP_INVALID_MODIFIER: &str = "invalid entry dropped";
+const RANK_DROP_MODIFIERS_TRUNCATED: &str = "truncated to the first 8 valid entries";
+const RANK_DROP_CONFIDENCE_ENTRY: &str = "confidence entry dropped";
+const RANK_DROP_DIVISION_TOP500: &str = "not used for top500";
+
+/// One rank-screen value that was present with the right JSON type, but not stored.
+///
+/// `field` is the JSON name. `reason` is a fixed phrase. The raw OCR text is
+/// not included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankScreenDrop {
+    pub field: &'static str,
+    pub reason: &'static str,
+}
+
+/// Rank-screen fields kept from one upload object, plus the values dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedRankScreen {
+    pub fields: RankScreenFields,
+    pub drops: Vec<RankScreenDrop>,
+}
 
 fn json_i64(number: &serde_json::Number) -> Option<i64> {
     if let Some(value) = number.as_i64() {
@@ -329,11 +392,17 @@ fn json_i64(number: &serde_json::Number) -> Option<i64> {
     }
 }
 
+fn note_drop(drops: &mut Vec<RankScreenDrop>, field: &'static str, reason: &'static str) {
+    drops.push(RankScreenDrop { field, reason });
+}
+
 fn parse_bounded_int(
     value: Option<serde_json::Value>,
     min: i64,
     max: i64,
+    field: &'static str,
     err: &'static str,
+    drops: &mut Vec<RankScreenDrop>,
 ) -> Result<Option<i32>, &'static str> {
     let Some(value) = value else {
         return Ok(None);
@@ -344,24 +413,33 @@ fn parse_bounded_int(
     let serde_json::Value::Number(number) = value else {
         return Err(err);
     };
-    let Some(parsed) = json_i64(&number) else {
+    // A non-integer, or an integer that does not fit i32, is a type serde
+    // would reject for this field. That still fails the batch.
+    let Some(parsed) = json_i64(&number).and_then(|n| i32::try_from(n).ok()) else {
         return Err(err);
     };
-    if parsed < min || parsed > max {
-        return Err(err);
+    if i64::from(parsed) < min || i64::from(parsed) > max {
+        note_drop(drops, field, RANK_DROP_OUT_OF_RANGE);
+        return Ok(None);
     }
-    Ok(Some(parsed as i32))
+    Ok(Some(parsed))
 }
 
 fn parse_rank_token(
     value: Option<serde_json::Value>,
     allowed: &[&str],
+    field: &'static str,
     err: &'static str,
+    drops: &mut Vec<RankScreenDrop>,
 ) -> Result<Option<String>, &'static str> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(token)) if allowed.contains(&token.as_str()) => {
             Ok(Some(token))
+        }
+        Some(serde_json::Value::String(_)) => {
+            note_drop(drops, field, RANK_DROP_NOT_ALLOWED);
+            Ok(None)
         }
         Some(_) => Err(err),
     }
@@ -406,6 +484,7 @@ fn normalize_rank_modifier(raw: &str) -> Option<String> {
 
 fn parse_rank_modifiers(
     value: Option<serde_json::Value>,
+    drops: &mut Vec<RankScreenDrop>,
 ) -> Result<Option<Vec<String>>, &'static str> {
     let Some(value) = value else {
         return Ok(None);
@@ -416,30 +495,76 @@ fn parse_rank_modifiers(
     let serde_json::Value::Array(items) = value else {
         return Err(RANK_MODIFIERS_ERROR);
     };
-    if items.len() > RANK_MODIFIERS_MAX_LEN {
-        return Err(RANK_MODIFIERS_ERROR);
-    }
-    let mut names = Vec::with_capacity(items.len());
+    let mut names = Vec::new();
+    let mut truncated = false;
     for item in items {
         let serde_json::Value::String(raw) = item else {
-            return Err(RANK_MODIFIERS_ERROR);
+            note_drop(drops, "rank_modifiers", RANK_DROP_INVALID_MODIFIER);
+            continue;
         };
         let Some(name) = normalize_rank_modifier(&raw) else {
-            return Err(RANK_MODIFIERS_ERROR);
+            note_drop(drops, "rank_modifiers", RANK_DROP_INVALID_MODIFIER);
+            continue;
         };
-        if !names.iter().any(|existing| existing == &name) {
-            names.push(name);
+        if names.iter().any(|existing| existing == &name) {
+            continue;
         }
+        if names.len() >= RANK_MODIFIERS_MAX_LEN {
+            truncated = true;
+            continue;
+        }
+        names.push(name);
+    }
+    if truncated {
+        note_drop(drops, "rank_modifiers", RANK_DROP_MODIFIERS_TRUNCATED);
     }
     Ok(Some(names))
 }
 
-fn parse_rank_recognizer(value: Option<serde_json::Value>) -> Result<Option<String>, &'static str> {
+fn parse_rank_recognizer(
+    value: Option<serde_json::Value>,
+    drops: &mut Vec<RankScreenDrop>,
+) -> Result<Option<String>, &'static str> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(id)) if is_recognizer_id(&id) => Ok(Some(id)),
+        Some(serde_json::Value::String(_)) => {
+            note_drop(drops, "rank_recognizer", RANK_DROP_BAD_RECOGNIZER);
+            Ok(None)
+        }
         Some(_) => Err(RANK_RECOGNIZER_ERROR),
     }
+}
+
+/// Name stored in `rank_dropped` for one bad confidence entry.
+///
+/// A known rank field keeps its key (`rank_confidence.rank_tier`). Any other
+/// key is recorded as `rank_confidence` so an arbitrary client string is not
+/// stored.
+fn confidence_drop_field(key: &str) -> &'static str {
+    match key {
+        "rank_role" => "rank_confidence.rank_role",
+        "rank_tier" => "rank_confidence.rank_tier",
+        "rank_division" => "rank_confidence.rank_division",
+        "rank_progress_pct" => "rank_confidence.rank_progress_pct",
+        "rank_delta_pct" => "rank_confidence.rank_delta_pct",
+        "rank_modifiers" => "rank_confidence.rank_modifiers",
+        "hero_sr" => "rank_confidence.hero_sr",
+        "hero_sr_delta" => "rank_confidence.hero_sr_delta",
+        "rank_recognizer" => "rank_confidence.rank_recognizer",
+        _ => "rank_confidence",
+    }
+}
+
+fn dropped_field_names(drops: &[RankScreenDrop]) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    for drop in drops {
+        if names.iter().any(|name| name == drop.field) {
+            continue;
+        }
+        names.push(drop.field.to_string());
+    }
+    if names.is_empty() { None } else { Some(names) }
 }
 
 fn parse_confidence_number(value: &serde_json::Value) -> Option<f64> {
@@ -452,6 +577,7 @@ fn parse_confidence_number(value: &serde_json::Value) -> Option<f64> {
 
 fn parse_rank_confidence(
     value: Option<serde_json::Value>,
+    drops: &mut Vec<RankScreenDrop>,
 ) -> Result<Option<BTreeMap<String, f64>>, &'static str> {
     let Some(value) = value else {
         return Ok(None);
@@ -467,71 +593,121 @@ fn parse_rank_confidence(
     }
     let mut out = BTreeMap::new();
     for (key, raw) in map {
-        if !RANK_CONFIDENCE_FIELDS.contains(&key.as_str()) {
-            return Err(RANK_CONFIDENCE_ERROR);
-        }
-        let Some(score) = parse_confidence_number(&raw) else {
-            return Err(RANK_CONFIDENCE_ERROR);
+        let known = RANK_CONFIDENCE_FIELDS.contains(&key.as_str());
+        let score = known.then(|| parse_confidence_number(&raw)).flatten();
+        let Some(score) = score else {
+            note_drop(
+                drops,
+                confidence_drop_field(&key),
+                RANK_DROP_CONFIDENCE_ENTRY,
+            );
+            continue;
         };
         out.insert(key, score);
     }
-    Ok(Some(out))
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 /// Read rank-screen fields off one upload object and remove them.
 ///
-/// Omitted and null fields become `None`. A bad value is [`Err`] and is not
-/// stored. Called from [`StatsUploadMatch`] before the rest of the object is
+/// Omitted and null fields become `None`. A value of the right JSON type that
+/// is out of range or not allowed is stored as none and recorded in
+/// [`ParsedRankScreen::drops`]. A wrong JSON type is [`Err`] and rejects the
+/// batch. Called from [`StatsUploadMatch`] before the rest of the object is
 /// decoded, so an old client that does not send these keys still decodes.
 pub fn parse_rank_screen(
     obj: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<RankScreenFields, &'static str> {
-    let rank_role = parse_rank_token(obj.remove("rank_role"), RANK_ROLES, RANK_ROLE_ERROR)?;
-    let rank_tier = parse_rank_token(obj.remove("rank_tier"), RANK_TIERS, RANK_TIER_ERROR)?;
-    let rank_division = parse_bounded_int(
-        obj.remove("rank_division"),
-        i64::from(RANK_DIVISION_MIN),
-        i64::from(RANK_DIVISION_MAX),
-        RANK_DIVISION_ERROR,
+) -> Result<ParsedRankScreen, &'static str> {
+    let mut drops = Vec::new();
+    // The server fills `rank_dropped`. A client value is not a rank read.
+    obj.remove("rank_dropped");
+    let rank_role = parse_rank_token(
+        obj.remove("rank_role"),
+        RANK_ROLES,
+        "rank_role",
+        RANK_ROLE_ERROR,
+        &mut drops,
     )?;
+    let rank_tier = parse_rank_token(
+        obj.remove("rank_tier"),
+        RANK_TIERS,
+        "rank_tier",
+        RANK_TIER_ERROR,
+        &mut drops,
+    )?;
+    let division_raw = obj.remove("rank_division");
+    let rank_division = if rank_tier.as_deref() == Some(RANK_TIER_TOP500) {
+        match division_raw {
+            None | Some(serde_json::Value::Null) => None,
+            Some(_) => {
+                note_drop(&mut drops, "rank_division", RANK_DROP_DIVISION_TOP500);
+                None
+            }
+        }
+    } else {
+        parse_bounded_int(
+            division_raw,
+            i64::from(RANK_DIVISION_MIN),
+            i64::from(RANK_DIVISION_MAX),
+            "rank_division",
+            RANK_DIVISION_ERROR,
+            &mut drops,
+        )?
+    };
     let rank_progress_pct = parse_bounded_int(
         obj.remove("rank_progress_pct"),
         i64::from(RANK_PROGRESS_PCT_MIN),
         i64::from(RANK_PROGRESS_PCT_MAX),
+        "rank_progress_pct",
         RANK_PROGRESS_PCT_ERROR,
+        &mut drops,
     )?;
     let rank_delta_pct = parse_bounded_int(
         obj.remove("rank_delta_pct"),
         i64::from(RANK_DELTA_PCT_MIN),
         i64::from(RANK_DELTA_PCT_MAX),
+        "rank_delta_pct",
         RANK_DELTA_PCT_ERROR,
+        &mut drops,
     )?;
-    let rank_modifiers = parse_rank_modifiers(obj.remove("rank_modifiers"))?;
+    let rank_modifiers = parse_rank_modifiers(obj.remove("rank_modifiers"), &mut drops)?;
     let hero_sr = parse_bounded_int(
         obj.remove("hero_sr"),
         i64::from(HERO_SR_MIN),
         i64::from(HERO_SR_MAX),
+        "hero_sr",
         HERO_SR_ERROR,
+        &mut drops,
     )?;
     let hero_sr_delta = parse_bounded_int(
         obj.remove("hero_sr_delta"),
         i64::from(HERO_SR_DELTA_MIN),
         i64::from(HERO_SR_DELTA_MAX),
+        "hero_sr_delta",
         HERO_SR_DELTA_ERROR,
+        &mut drops,
     )?;
-    let rank_recognizer = parse_rank_recognizer(obj.remove("rank_recognizer"))?;
-    let rank_confidence = parse_rank_confidence(obj.remove("rank_confidence"))?;
-    Ok(RankScreenFields {
-        rank_role,
-        rank_tier,
-        rank_division,
-        rank_progress_pct,
-        rank_delta_pct,
-        rank_modifiers,
-        hero_sr,
-        hero_sr_delta,
-        rank_recognizer,
-        rank_confidence,
+    let rank_recognizer = parse_rank_recognizer(obj.remove("rank_recognizer"), &mut drops)?;
+    let rank_confidence = parse_rank_confidence(obj.remove("rank_confidence"), &mut drops)?;
+    Ok(ParsedRankScreen {
+        fields: RankScreenFields {
+            rank_role,
+            rank_tier,
+            rank_division,
+            rank_progress_pct,
+            rank_delta_pct,
+            rank_modifiers,
+            hero_sr,
+            hero_sr_delta,
+            rank_recognizer,
+            rank_confidence,
+            rank_dropped: dropped_field_names(&drops),
+        },
+        drops,
     })
 }
 
@@ -550,10 +726,16 @@ pub fn parse_rank_screen(
 /// names stored by an earlier upload of that session.
 ///
 /// Each match may also carry the optional rank-screen fields on
-/// [`RankScreenFields`]. They are validated before any row is written.
-/// A value outside its range is HTTP 400 and the batch is not stored.
-/// Omitting them, including from a client that has never heard of them,
-/// stores none. A later upload that leaves them out clears them.
+/// [`RankScreenFields`]. A value of the right JSON type that is out of range
+/// or not allowed is dropped and stored as none. The game and the rest of the
+/// batch are still written. Each drop is logged with the field name, a fixed
+/// reason, and the match id. Dropped names are stored on `rank_dropped`.
+/// `top500` is a `rank_tier` and does not use `rank_division`: any division
+/// sent with that tier is dropped. A client `rank_dropped` value is ignored.
+/// A wrong JSON type, malformed JSON, or a missing required core field is
+/// HTTP 400 and the batch is not stored.
+/// Omitting a rank-screen field, including from a client that has never heard
+/// of it, stores none. A later upload that leaves a field out clears it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatsUploadBody {
     pub matches: Vec<StatsUploadMatch>,
@@ -569,9 +751,11 @@ pub struct StatsUploadMatch {
     pub entry: StatsUploadEntry,
     pub recognizer: RecognizerInput,
     pub suspect_fields: SuspectFieldsInput,
-    /// `Ok` when every present rank-screen field is in range. `Err` is the
-    /// 400 message. Absent fields are an empty [`RankScreenFields`], not an error.
-    pub rank_screen: Result<RankScreenFields, &'static str>,
+    /// `Ok` when the rank-screen JSON types decode. Out-of-range and other
+    /// disallowed values are listed on [`ParsedRankScreen::drops`] and stored
+    /// as none. `Err` is the 400 message for a wrong JSON type. Absent fields
+    /// are an empty [`RankScreenFields`], not an error.
+    pub rank_screen: Result<ParsedRankScreen, &'static str>,
 }
 
 impl TryFrom<serde_json::Value> for StatsUploadMatch {
@@ -1035,10 +1219,9 @@ mod tests {
     #[test]
     fn rank_screen_absent_and_null_are_empty() {
         let mut empty = serde_json::Map::new();
-        assert_eq!(
-            parse_rank_screen(&mut empty).unwrap(),
-            RankScreenFields::default()
-        );
+        let empty = parse_rank_screen(&mut empty).unwrap();
+        assert_eq!(empty.fields, RankScreenFields::default());
+        assert!(empty.drops.is_empty());
 
         let mut nulls = serde_json::json!({
             "rank_role": null,
@@ -1055,10 +1238,9 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        assert_eq!(
-            parse_rank_screen(&mut nulls).unwrap(),
-            RankScreenFields::default()
-        );
+        let parsed = parse_rank_screen(&mut nulls).unwrap();
+        assert_eq!(parsed.fields, RankScreenFields::default());
+        assert!(parsed.drops.is_empty());
         assert!(nulls.is_empty(), "rank keys are consumed: {nulls:?}");
     }
 
@@ -1080,6 +1262,8 @@ mod tests {
         .unwrap()
         .clone();
         let low = parse_rank_screen(&mut low).unwrap();
+        assert!(low.drops.is_empty());
+        let low = low.fields;
         assert_eq!(low.rank_role.as_deref(), Some("tank"));
         assert_eq!(low.rank_tier.as_deref(), Some("bronze"));
         assert_eq!(low.rank_division, Some(1));
@@ -1106,6 +1290,8 @@ mod tests {
         .unwrap()
         .clone();
         let high = parse_rank_screen(&mut high).unwrap();
+        assert!(high.drops.is_empty());
+        let high = high.fields;
         assert_eq!(high.rank_division, Some(5));
         assert_eq!(high.rank_progress_pct, Some(100));
         assert_eq!(high.rank_delta_pct, Some(100));
@@ -1118,6 +1304,8 @@ mod tests {
 
         let mut mid = rank_object();
         let mid = parse_rank_screen(&mut mid).unwrap();
+        assert!(mid.drops.is_empty());
+        let mid = mid.fields;
         assert_eq!(
             mid.rank_modifiers,
             Some(vec![
@@ -1139,6 +1327,8 @@ mod tests {
         .unwrap()
         .clone();
         let dupes = parse_rank_screen(&mut dupes).unwrap();
+        assert!(dupes.drops.is_empty());
+        let dupes = dupes.fields;
         assert_eq!(
             dupes.rank_modifiers,
             Some(vec!["victory".into(), "uphill_battle".into()])
@@ -1147,33 +1337,142 @@ mod tests {
         let eight: Vec<_> = (0..8).map(|i| format!("mod_{i}")).collect();
         let mut eight_obj = serde_json::Map::new();
         eight_obj.insert("rank_modifiers".into(), serde_json::json!(eight));
-        assert!(parse_rank_screen(&mut eight_obj).is_ok());
+        let eight = parse_rank_screen(&mut eight_obj).unwrap();
+        assert!(eight.drops.is_empty());
+        assert_eq!(eight.fields.rank_modifiers.unwrap().len(), 8);
+    }
+
+    fn assert_field_dropped(key: &str, bad: serde_json::Value, reason: &str) {
+        let mut obj = rank_object();
+        obj.insert(key.to_string(), bad.clone());
+        let parsed = parse_rank_screen(&mut obj)
+            .unwrap_or_else(|err| panic!("{key} = {bad} should be dropped, not rejected ({err})"));
+        let stored = serde_json::to_value(&parsed.fields).unwrap();
+        assert!(
+            stored.get(key).is_none(),
+            "{key} = {bad} should store none, got {stored}"
+        );
+        assert!(
+            parsed
+                .drops
+                .iter()
+                .any(|drop| drop.field == key && drop.reason == reason),
+            "{key} = {bad} drops: {:?}",
+            parsed.drops
+        );
+        if key == "rank_tier" {
+            assert_eq!(parsed.fields.rank_role.as_deref(), Some("support"));
+        } else {
+            assert_eq!(parsed.fields.rank_tier.as_deref(), Some("diamond"));
+        }
+        let rendered = format!("{:?}", parsed.drops);
+        let raw = bad.to_string();
+        assert!(
+            !rendered.contains(&raw),
+            "drop record must not include the raw value {raw}"
+        );
+        assert_eq!(parsed.fields.rank_dropped, Some(vec![key.to_string()]));
     }
 
     #[test]
-    fn rank_screen_rejects_each_out_of_range_value() {
-        let cases = [
-            ("rank_role", serde_json::json!("Tank"), RANK_ROLE_ERROR),
-            ("rank_role", serde_json::json!("dps"), RANK_ROLE_ERROR),
-            ("rank_role", serde_json::json!(""), RANK_ROLE_ERROR),
-            ("rank_role", serde_json::json!(1), RANK_ROLE_ERROR),
-            ("rank_tier", serde_json::json!("top500"), RANK_TIER_ERROR),
-            ("rank_tier", serde_json::json!("Bronze"), RANK_TIER_ERROR),
-            ("rank_tier", serde_json::json!("radiant"), RANK_TIER_ERROR),
-            ("rank_division", serde_json::json!(0), RANK_DIVISION_ERROR),
-            ("rank_division", serde_json::json!(6), RANK_DIVISION_ERROR),
-            ("rank_division", serde_json::json!(-1), RANK_DIVISION_ERROR),
-            ("rank_division", serde_json::json!(1.5), RANK_DIVISION_ERROR),
-            ("rank_division", serde_json::json!("3"), RANK_DIVISION_ERROR),
+    fn rank_screen_drops_type_compatible_bad_values() {
+        let dropped = [
+            (
+                "rank_role",
+                serde_json::json!("Tank"),
+                RANK_DROP_NOT_ALLOWED,
+            ),
+            ("rank_role", serde_json::json!("dps"), RANK_DROP_NOT_ALLOWED),
+            ("rank_role", serde_json::json!(""), RANK_DROP_NOT_ALLOWED),
+            (
+                "rank_tier",
+                serde_json::json!("Bronze"),
+                RANK_DROP_NOT_ALLOWED,
+            ),
+            (
+                "rank_tier",
+                serde_json::json!("radiant"),
+                RANK_DROP_NOT_ALLOWED,
+            ),
+            (
+                "rank_division",
+                serde_json::json!(0),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "rank_division",
+                serde_json::json!(6),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "rank_division",
+                serde_json::json!(-1),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
             (
                 "rank_progress_pct",
                 serde_json::json!(-1),
-                RANK_PROGRESS_PCT_ERROR,
+                RANK_DROP_OUT_OF_RANGE,
             ),
             (
                 "rank_progress_pct",
                 serde_json::json!(101),
-                RANK_PROGRESS_PCT_ERROR,
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "rank_delta_pct",
+                serde_json::json!(-101),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "rank_delta_pct",
+                serde_json::json!(150),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            ("hero_sr", serde_json::json!(-1), RANK_DROP_OUT_OF_RANGE),
+            ("hero_sr", serde_json::json!(6001), RANK_DROP_OUT_OF_RANGE),
+            (
+                "hero_sr_delta",
+                serde_json::json!(-1001),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "hero_sr_delta",
+                serde_json::json!(1001),
+                RANK_DROP_OUT_OF_RANGE,
+            ),
+            (
+                "rank_recognizer",
+                serde_json::json!(""),
+                RANK_DROP_BAD_RECOGNIZER,
+            ),
+            (
+                "rank_recognizer",
+                serde_json::json!("NOPE"),
+                RANK_DROP_BAD_RECOGNIZER,
+            ),
+            (
+                "rank_recognizer",
+                serde_json::json!("a".repeat(RECOGNIZER_ID_MAX_LEN + 1)),
+                RANK_DROP_BAD_RECOGNIZER,
+            ),
+        ];
+        for (key, bad, reason) in dropped {
+            assert_field_dropped(key, bad, reason);
+        }
+    }
+
+    #[test]
+    fn rank_screen_rejects_wrong_json_types() {
+        let cases = [
+            ("rank_role", serde_json::json!(1), RANK_ROLE_ERROR),
+            ("rank_tier", serde_json::json!(true), RANK_TIER_ERROR),
+            ("rank_division", serde_json::json!("3"), RANK_DIVISION_ERROR),
+            ("rank_division", serde_json::json!(1.5), RANK_DIVISION_ERROR),
+            (
+                "rank_division",
+                serde_json::json!(i64::from(i32::MAX) + 1),
+                RANK_DIVISION_ERROR,
             ),
             (
                 "rank_progress_pct",
@@ -1182,47 +1481,22 @@ mod tests {
             ),
             (
                 "rank_delta_pct",
-                serde_json::json!(-101),
-                RANK_DELTA_PCT_ERROR,
-            ),
-            (
-                "rank_delta_pct",
-                serde_json::json!(101),
-                RANK_DELTA_PCT_ERROR,
-            ),
-            (
-                "rank_delta_pct",
                 serde_json::json!(0.5),
                 RANK_DELTA_PCT_ERROR,
             ),
-            ("hero_sr", serde_json::json!(-1), HERO_SR_ERROR),
-            ("hero_sr", serde_json::json!(6001), HERO_SR_ERROR),
+            (
+                "rank_delta_pct",
+                serde_json::json!(true),
+                RANK_DELTA_PCT_ERROR,
+            ),
+            (
+                "rank_delta_pct",
+                serde_json::json!("150"),
+                RANK_DELTA_PCT_ERROR,
+            ),
             ("hero_sr", serde_json::json!(1.2), HERO_SR_ERROR),
-            (
-                "hero_sr_delta",
-                serde_json::json!(-1001),
-                HERO_SR_DELTA_ERROR,
-            ),
-            (
-                "hero_sr_delta",
-                serde_json::json!(1001),
-                HERO_SR_DELTA_ERROR,
-            ),
-            (
-                "rank_recognizer",
-                serde_json::json!(""),
-                RANK_RECOGNIZER_ERROR,
-            ),
-            (
-                "rank_recognizer",
-                serde_json::json!("NOPE"),
-                RANK_RECOGNIZER_ERROR,
-            ),
-            (
-                "rank_recognizer",
-                serde_json::json!("a".repeat(RECOGNIZER_ID_MAX_LEN + 1)),
-                RANK_RECOGNIZER_ERROR,
-            ),
+            ("hero_sr", serde_json::json!("6000"), HERO_SR_ERROR),
+            ("hero_sr_delta", serde_json::json!("1"), HERO_SR_DELTA_ERROR),
             (
                 "rank_recognizer",
                 serde_json::json!(1),
@@ -1230,47 +1504,17 @@ mod tests {
             ),
             (
                 "rank_modifiers",
-                serde_json::json!(["ok", "!!!"]),
-                RANK_MODIFIERS_ERROR,
-            ),
-            (
-                "rank_modifiers",
-                serde_json::json!(["a".repeat(RANK_MODIFIER_MAX_LEN + 1)]),
-                RANK_MODIFIERS_ERROR,
-            ),
-            (
-                "rank_modifiers",
                 serde_json::json!("victory"),
                 RANK_MODIFIERS_ERROR,
             ),
             (
-                "rank_modifiers",
-                serde_json::json!([1]),
-                RANK_MODIFIERS_ERROR,
-            ),
-            (
-                "rank_confidence",
-                serde_json::json!({"role": 0.5}),
-                RANK_CONFIDENCE_ERROR,
-            ),
-            (
-                "rank_confidence",
-                serde_json::json!({"rank_tier": 1.1}),
-                RANK_CONFIDENCE_ERROR,
-            ),
-            (
-                "rank_confidence",
-                serde_json::json!({"rank_tier": -0.01}),
-                RANK_CONFIDENCE_ERROR,
-            ),
-            (
-                "rank_confidence",
-                serde_json::json!({"hero_sr": "high"}),
-                RANK_CONFIDENCE_ERROR,
-            ),
-            (
                 "rank_confidence",
                 serde_json::json!(["rank_tier"]),
+                RANK_CONFIDENCE_ERROR,
+            ),
+            (
+                "rank_confidence",
+                serde_json::json!("high"),
                 RANK_CONFIDENCE_ERROR,
             ),
         ];
@@ -1280,14 +1524,189 @@ mod tests {
             assert_eq!(
                 parse_rank_screen(&mut obj),
                 Err(err),
-                "{key} = {bad} should be rejected"
+                "{key} = {bad} should be a structural error"
             );
         }
+    }
 
-        let mut too_many = serde_json::Map::new();
+    #[test]
+    fn rank_modifiers_drop_invalid_entries_and_keep_eight() {
+        let mut mixed = serde_json::json!({
+            "rank_tier": "gold",
+            "rank_modifiers": ["ok", "!!!", 1, "Victory", "a".repeat(RANK_MODIFIER_MAX_LEN + 1)]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mixed = parse_rank_screen(&mut mixed).unwrap();
+        assert_eq!(
+            mixed.fields.rank_modifiers,
+            Some(vec!["ok".into(), "victory".into()])
+        );
+        assert_eq!(mixed.fields.rank_tier.as_deref(), Some("gold"));
+        assert_eq!(
+            mixed
+                .drops
+                .iter()
+                .filter(|drop| drop.field == "rank_modifiers"
+                    && drop.reason == RANK_DROP_INVALID_MODIFIER)
+                .count(),
+            3
+        );
+        assert_eq!(
+            mixed.fields.rank_dropped,
+            Some(vec!["rank_modifiers".into()])
+        );
+
         let nine: Vec<_> = (0..9).map(|i| format!("mod_{i}")).collect();
+        let mut too_many = serde_json::Map::new();
         too_many.insert("rank_modifiers".into(), serde_json::json!(nine));
-        assert_eq!(parse_rank_screen(&mut too_many), Err(RANK_MODIFIERS_ERROR));
+        let too_many = parse_rank_screen(&mut too_many).unwrap();
+        let kept = too_many.fields.rank_modifiers.unwrap();
+        assert_eq!(kept.len(), 8);
+        assert_eq!(kept[0], "mod_0");
+        assert_eq!(kept[7], "mod_7");
+        assert_eq!(
+            too_many.drops,
+            vec![RankScreenDrop {
+                field: "rank_modifiers",
+                reason: RANK_DROP_MODIFIERS_TRUNCATED,
+            }]
+        );
+        assert_eq!(
+            too_many.fields.rank_dropped,
+            Some(vec!["rank_modifiers".into()])
+        );
+    }
+
+    #[test]
+    fn top500_saves_and_drops_any_division() {
+        let mut bare = serde_json::json!({ "rank_tier": "top500", "hero_sr": 4800 })
+            .as_object()
+            .unwrap()
+            .clone();
+        let bare = parse_rank_screen(&mut bare).unwrap();
+        assert_eq!(bare.fields.rank_tier.as_deref(), Some("top500"));
+        assert_eq!(bare.fields.rank_division, None);
+        assert_eq!(bare.fields.hero_sr, Some(4800));
+        assert!(bare.drops.is_empty());
+        assert_eq!(bare.fields.rank_dropped, None);
+
+        for division in [
+            serde_json::json!(4),
+            serde_json::json!(9),
+            serde_json::json!("3"),
+            serde_json::json!(true),
+        ] {
+            let raw = division.to_string();
+            let mut obj = serde_json::json!({
+                "rank_tier": "top500",
+                "rank_role": "tank",
+                "rank_division": division
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let parsed = parse_rank_screen(&mut obj).unwrap();
+            assert_eq!(parsed.fields.rank_tier.as_deref(), Some("top500"));
+            assert_eq!(parsed.fields.rank_role.as_deref(), Some("tank"));
+            assert_eq!(parsed.fields.rank_division, None);
+            assert_eq!(
+                parsed.drops,
+                vec![RankScreenDrop {
+                    field: "rank_division",
+                    reason: RANK_DROP_DIVISION_TOP500,
+                }]
+            );
+            assert_eq!(
+                parsed.fields.rank_dropped,
+                Some(vec!["rank_division".into()])
+            );
+            let rendered = format!("{:?}", parsed.drops);
+            assert!(!rendered.contains(&raw), "{raw} leaked into {rendered}");
+        }
+
+        let mut null_division = serde_json::json!({
+            "rank_tier": "top500",
+            "rank_division": null
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let null_division = parse_rank_screen(&mut null_division).unwrap();
+        assert!(null_division.drops.is_empty());
+        assert_eq!(null_division.fields.rank_dropped, None);
+    }
+
+    #[test]
+    fn client_rank_dropped_is_ignored() {
+        let mut obj = serde_json::json!({
+            "rank_tier": "gold",
+            "rank_dropped": ["rank_role", "secret_name"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let parsed = parse_rank_screen(&mut obj).unwrap();
+        assert_eq!(parsed.fields.rank_tier.as_deref(), Some("gold"));
+        assert_eq!(parsed.fields.rank_dropped, None);
+        assert!(parsed.drops.is_empty());
+        assert!(!obj.contains_key("rank_dropped"));
+        let rendered = format!("{parsed:?}");
+        assert!(!rendered.contains("secret_name"));
+    }
+
+    #[test]
+    fn rank_confidence_drops_bad_entries_individually() {
+        let mut obj = serde_json::json!({
+            "rank_role": "tank",
+            "hero_sr": 2500,
+            "rank_confidence": {
+                "rank_role": 0.5,
+                "rank_tier": 1.1,
+                "ocr_junk_token": 0.2,
+                "hero_sr": "high"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let parsed = parse_rank_screen(&mut obj).unwrap();
+        assert_eq!(parsed.fields.rank_role.as_deref(), Some("tank"));
+        assert_eq!(parsed.fields.hero_sr, Some(2500));
+        let scores = parsed.fields.rank_confidence.unwrap();
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores["rank_role"], 0.5);
+        assert_eq!(
+            parsed
+                .drops
+                .iter()
+                .map(|drop| drop.field)
+                .collect::<Vec<_>>(),
+            vec![
+                "rank_confidence.hero_sr",
+                "rank_confidence",
+                "rank_confidence.rank_tier",
+            ]
+        );
+        assert!(
+            parsed
+                .drops
+                .iter()
+                .all(|drop| drop.reason == RANK_DROP_CONFIDENCE_ENTRY)
+        );
+        assert_eq!(
+            parsed.fields.rank_dropped,
+            Some(vec![
+                "rank_confidence.hero_sr".into(),
+                "rank_confidence".into(),
+                "rank_confidence.rank_tier".into(),
+            ])
+        );
+        let rendered = format!("{:?}", parsed.drops);
+        assert!(!rendered.contains("ocr_junk_token"));
+        assert!(!rendered.contains("1.1"));
+        assert!(!rendered.contains("high"));
     }
 
     #[test]
@@ -1296,10 +1715,9 @@ mod tests {
             r#"{"matches":[{"hero":"Ana","map_name":"Oasis","game_mode":"control","role":"Support","outcome":"victory","played_at":"2026-07-01T20:00:00Z"}]}"#,
         )
         .unwrap();
-        assert_eq!(
-            body.matches[0].rank_screen.as_ref().unwrap(),
-            &RankScreenFields::default()
-        );
+        let parsed = body.matches[0].rank_screen.as_ref().unwrap();
+        assert_eq!(parsed.fields, RankScreenFields::default());
+        assert!(parsed.drops.is_empty());
         assert_eq!(body.matches[0].entry.role, "Support");
     }
 }

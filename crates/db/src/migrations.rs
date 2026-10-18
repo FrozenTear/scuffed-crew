@@ -655,8 +655,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- rows written before this column set still load. `rank_role` is the
         -- queue (tank, damage, support). It is not the scoreboard hero role
         -- stored in `role`. The season-progression number is not a column.
-        -- Ranges are enforced on upload (HTTP 400), not by a schema ASSERT,
-        -- so a rejected value never becomes a 500 from the database.
+        -- A value of the right JSON type that is out of range or not allowed
+        -- is dropped on upload and stored as none. A wrong JSON type rejects
+        -- the batch. There is no schema ASSERT, so a dropped or omitted value
+        -- never becomes a 500 from the database.
+        -- `top500` is a rank_tier and does not store rank_division.
+        -- `rank_dropped` is the server list of fields dropped on that upload.
+        -- Clients do not write it. None means nothing was dropped.
         DEFINE FIELD OVERWRITE rank_role ON personal_match TYPE option<string>;
         DEFINE FIELD OVERWRITE rank_tier ON personal_match TYPE option<string>;
         DEFINE FIELD OVERWRITE rank_division ON personal_match TYPE option<int>;
@@ -667,6 +672,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE hero_sr_delta ON personal_match TYPE option<int>;
         DEFINE FIELD OVERWRITE rank_recognizer ON personal_match TYPE option<string>;
         DEFINE FIELD OVERWRITE rank_confidence ON personal_match TYPE option<object> FLEXIBLE;
+        DEFINE FIELD OVERWRITE rank_dropped ON personal_match TYPE option<array<string>>;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not

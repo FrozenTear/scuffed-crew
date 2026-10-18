@@ -81,6 +81,9 @@ struct DbPersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     rank_confidence: Option<serde_json::Value>,
+    #[serde(default)]
+    #[surreal(default)]
+    rank_dropped: Option<Vec<String>>,
 }
 
 fn opt_i32(value: Option<i64>) -> Option<i32> {
@@ -154,6 +157,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
             hero_sr_delta: opt_i32(db.hero_sr_delta),
             rank_recognizer: db.rank_recognizer,
             rank_confidence: confidence_from_db(db.rank_confidence),
+            rank_dropped: db.rank_dropped.filter(|names| !names.is_empty()),
         },
     }
 }
@@ -313,6 +317,7 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     rank_progress_pct = $rank_progress_pct, rank_delta_pct = $rank_delta_pct,
     rank_modifiers = $rank_modifiers, hero_sr = $hero_sr, hero_sr_delta = $hero_sr_delta,
     rank_recognizer = $rank_recognizer, rank_confidence = $rank_confidence,
+    rank_dropped = $rank_dropped,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -326,6 +331,7 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     rank_progress_pct = $rank_progress_pct, rank_delta_pct = $rank_delta_pct,
     rank_modifiers = $rank_modifiers, hero_sr = $hero_sr, hero_sr_delta = $hero_sr_delta,
     rank_recognizer = $rank_recognizer, rank_confidence = $rank_confidence,
+    rank_dropped = $rank_dropped,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -452,6 +458,7 @@ impl Database {
                     "rank_confidence",
                     confidence_to_json(&m.rank.rank_confidence),
                 ))
+                .bind(("rank_dropped", m.rank.rank_dropped.clone()))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
                 .await?
                 .check()?;
@@ -1682,6 +1689,7 @@ mod tests {
             hero_sr_delta: Some(-40),
             rank_recognizer: Some("ocr-v1".into()),
             rank_confidence: Some(std::collections::BTreeMap::from([("hero_sr".into(), 0.5)])),
+            rank_dropped: Some(vec!["rank_delta_pct".into()]),
         };
         db.upsert_personal_matches("m1", &[row]).await.unwrap();
         let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
@@ -1705,6 +1713,10 @@ mod tests {
                 .as_ref()
                 .and_then(|scores| scores.get("hero_sr").copied()),
             Some(0.5)
+        );
+        assert_eq!(
+            rows[0].rank.rank_dropped,
+            Some(vec!["rank_delta_pct".into()])
         );
 
         let mut empty_mods = entry("rank-empty", "draw", 1);
