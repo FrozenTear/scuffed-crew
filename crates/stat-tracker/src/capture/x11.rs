@@ -154,7 +154,7 @@ fn capture_blocking_inner(output_name: Option<&str>) -> Result<DynamicImage, Box
         grab_started.elapsed(),
     );
 
-    // bpp / pad from setup formats for the reply depth — for diagnostics on failure.
+    // bpp / pad from setup formats for the reply depth, for diagnostics on failure.
     let (reply_bpp, reply_byte_order) = pixmap_format_diag(&setup, reply.depth);
     let format = setup
         .pixmap_formats
@@ -269,6 +269,14 @@ fn image_to_rgba8(
         ));
     }
 
+    if let Some(out) = rgba_from_xrgb32(img, visual, bits_per_pixel) {
+        return Ok(out);
+    }
+    Ok(rgba_general(img, layout))
+}
+
+/// Any 24 or 32 bpp TrueColor format, one pixel at a time.
+fn rgba_general(img: &Image<'_>, layout: PixelLayout) -> Vec<u8> {
     let w = img.width();
     let h = img.height();
     let mut out = Vec::with_capacity(usize::from(w) * usize::from(h) * 4);
@@ -280,11 +288,52 @@ fn image_to_rgba8(
             out.push((r16 >> 8) as u8);
             out.push((g16 >> 8) as u8);
             out.push((b16 >> 8) as u8);
-            // image::reencode does NOT set alpha — force opaque (Task 0 API notes).
+            // image::reencode does NOT set alpha, force opaque (Task 0 API notes).
             out.push(0xFF);
         }
     }
-    Ok(out)
+    out
+}
+
+/// Fast path for the usual desktop format: 32 bits per pixel, 8 bits per
+/// channel with red, green and blue at `0xff0000`, `0xff00` and `0xff`.
+/// Copies whole rows instead of decoding pixel by pixel through
+/// `Image::get_pixel` and `PixelLayout::decode`, which took most of the
+/// 66 to 98 ms post-grab step on a 2560x1440 Mint desktop. The output is
+/// byte for byte what the general loop makes. `None` for any other format,
+/// which then takes the general loop.
+fn rgba_from_xrgb32(img: &Image<'_>, visual: &Visualtype, bits_per_pixel: u8) -> Option<Vec<u8>> {
+    if bits_per_pixel != 32
+        || visual.red_mask != 0x00ff_0000
+        || visual.green_mask != 0x0000_ff00
+        || visual.blue_mask != 0x0000_00ff
+    {
+        return None;
+    }
+    let w = usize::from(img.width());
+    let h = usize::from(img.height());
+    let pad = usize::from(img.scanline_pad());
+    let stride = (w * 32).div_ceil(pad) * pad / 8;
+    let data = img.data();
+    if data.len() < stride * h {
+        return None;
+    }
+    // Byte offsets of red, green and blue inside one 4-byte pixel.
+    let (r, g, b) = match img.byte_order() {
+        x11rb::image::ImageOrder::LsbFirst => (2, 1, 0),
+        x11rb::image::ImageOrder::MsbFirst => (1, 2, 3),
+    };
+    let mut out = vec![0xFF; w * h * 4];
+    for (row, dst) in data.chunks(stride).take(h).zip(out.chunks_exact_mut(w * 4)) {
+        let (src_px, _) = row[..w * 4].as_chunks::<4>();
+        let (dst_px, _) = dst.as_chunks_mut::<4>();
+        for (px, o) in src_px.iter().zip(dst_px.iter_mut()) {
+            o[0] = px[r];
+            o[1] = px[g];
+            o[2] = px[b];
+        }
+    }
+    Some(out)
 }
 
 fn connect_x() -> Result<(x11rb::rust_connection::RustConnection, usize), BoxError> {
@@ -365,7 +414,7 @@ fn sort_outputs(outs: &mut [X11Output]) {
     });
 }
 
-/// Pure selection helper — unit-tested without an X server (Task 4 Step 2).
+/// Pure selection helper, unit-tested without an X server (Task 4 Step 2).
 /// Exact match only (`==`); first hit in slice order (stable order after sort).
 fn select_output<'a>(
     outputs: &'a [X11Output],
@@ -479,7 +528,7 @@ mod tests {
         assert!(select_output(&outs, Some("DP")).is_err());
     }
 
-    /// F-PR2-3: duplicate names — first by stable order wins (`.find`, not `.rfind`).
+    /// F-PR2-3: duplicate names, first by stable order wins (`.find`, not `.rfind`).
     #[test]
     fn select_duplicate_name_picks_first_stable() {
         // Two outputs with the same name, different geometry; after sort, lower x first.
@@ -551,5 +600,92 @@ mod tests {
         assert!(msg.contains("red_mask=0xff0000"), "{msg}");
         assert!(msg.contains("green_mask=0xff00"), "{msg}");
         assert!(msg.contains("blue_mask=0xff"), "{msg}");
+    }
+
+    fn truecolor(red: u32, green: u32, blue: u32) -> Visualtype {
+        Visualtype {
+            visual_id: 1,
+            class: VisualClass::TRUE_COLOR,
+            bits_per_rgb_value: 8,
+            colormap_entries: 256,
+            red_mask: red,
+            green_mask: green,
+            blue_mask: blue,
+        }
+    }
+
+    /// Deterministic noise, so every channel value shows up.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x: u32 = 0x9e37_79b9;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn image(w: u16, h: u16, order: ImageOrder, data: Vec<u8>) -> Image<'static> {
+        let order = if order == ImageOrder::MSB_FIRST {
+            x11rb::image::ImageOrder::MsbFirst
+        } else {
+            x11rb::image::ImageOrder::LsbFirst
+        };
+        Image::new(
+            w,
+            h,
+            x11rb::image::ScanlinePad::Pad32,
+            24,
+            x11rb::image::BitsPerPixel::B32,
+            order,
+            std::borrow::Cow::Owned(data),
+        )
+        .unwrap()
+    }
+
+    /// The fast path makes exactly the bytes of the pixel-by-pixel loop,
+    /// for both byte orders, odd sizes included.
+    #[test]
+    fn fast_xrgb32_matches_the_general_loop() {
+        let visual = truecolor(0xff0000, 0x00ff00, 0x0000ff);
+        let layout = PixelLayout::from_visual_type(visual).unwrap();
+        for order in [ImageOrder::LSB_FIRST, ImageOrder::MSB_FIRST] {
+            for (w, h) in [(1u16, 1u16), (7, 3), (64, 36), (333, 17)] {
+                let len = usize::from(w) * usize::from(h) * 4;
+                let img = image(w, h, order, noise(len));
+                let fast = rgba_from_xrgb32(&img, &visual, 32).expect("fast path");
+                assert_eq!(fast, rgba_general(&img, layout), "{order:?} {w}x{h}");
+                assert!(fast.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
+                let via = image_to_rgba8(&img, layout, &visual, 24, 32, order).unwrap();
+                assert_eq!(via, fast);
+            }
+        }
+    }
+
+    /// One known pixel: LSB first stores B, G, R, X.
+    #[test]
+    fn fast_xrgb32_reads_bgrx_on_lsb_first() {
+        let visual = truecolor(0xff0000, 0x00ff00, 0x0000ff);
+        let img = image(1, 1, ImageOrder::LSB_FIRST, vec![0x30, 0x20, 0x10, 0x00]);
+        assert_eq!(
+            rgba_from_xrgb32(&img, &visual, 32).unwrap(),
+            vec![0x10, 0x20, 0x30, 0xFF]
+        );
+    }
+
+    /// Other formats take the general loop.
+    #[test]
+    fn fast_xrgb32_declines_other_formats() {
+        let img = image(4, 2, ImageOrder::LSB_FIRST, noise(32));
+        let bgr = truecolor(0x0000ff, 0x00ff00, 0xff0000);
+        assert!(rgba_from_xrgb32(&img, &bgr, 32).is_none());
+        let rgb = truecolor(0xff0000, 0x00ff00, 0x0000ff);
+        assert!(rgba_from_xrgb32(&img, &rgb, 24).is_none());
+        // The general loop still handles the swapped masks.
+        let layout = PixelLayout::from_visual_type(bgr).unwrap();
+        let out = image_to_rgba8(&img, layout, &bgr, 24, 32, ImageOrder::LSB_FIRST).unwrap();
+        assert_eq!(out, rgba_general(&img, layout));
     }
 }
