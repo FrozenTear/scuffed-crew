@@ -35,11 +35,17 @@ pub const FIRST_LOCK_SECS: u64 = 30;
 /// past this, so an attacker cannot pin a real user out forever.
 const MAX_LOCK: Duration = Duration::from_secs(15 * 60);
 
-/// Bound the map so a spray of random usernames cannot grow it without limit.
-/// At the cap, idle records are dropped first. If every record is still live,
-/// the least-failed one is evicted (oldest on a tie, and an unlocked record
-/// before a locked one) so a new username is always tracked. A username that
-/// is already in the map keeps its record.
+/// Cap on tracked usernames, so a spray cannot grow the map without limit.
+///
+/// A locked account can still be evicted, but only once every slot in this
+/// 8192-entry map holds a locked account. A not-yet-locked account's failure
+/// count can be pushed out by a flood of new usernames.
+///
+/// Idle records are dropped first. If the map is still full, the least-failed
+/// live record is evicted (oldest on a tie, and an unlocked record before a
+/// locked one) so the new username is tracked. A full-map insert scans every
+/// entry while holding the lock, which is acceptable behind the per-IP rate
+/// limit.
 const MAX_TRACKED_ACCOUNTS: usize = 8_192;
 
 struct Tier {
