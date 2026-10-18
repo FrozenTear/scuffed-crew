@@ -22661,23 +22661,14 @@ mod tests {
             let analysis = *analysis;
             assert!(analysis.own_row.is_some(), "the own row is O9's");
             assert_eq!(analysis.rows.len(), analysis.team_size * 2);
-            // The stand-in frame is blank, so the reader cannot size its board and, with classic
-            // OCR on that Tab falls back to ocr-v1's cell pass. Only that
-            // fallback may read a stat or name cell; the full-board text
-            // is still never read.
+            // The stand-in frame is blank, so the reader cannot size its
+            // board and, with classic OCR on, that Tab falls back to ocr-v1's
+            // cell pass, which may read stat and name cells. The full-board
+            // text is still never read.
             let board = analysis.board.as_ref().expect("the board is the reader's");
             let fallback = reader_apply::ocr_fallback_reason(board, ocr::gate::is_off());
             assert_eq!(fallback, Some("team size is unknown"));
             assert!(analysis.ocr_fallback, "a blank board falls back to ocr-v1");
-            for row in &analysis.rows {
-                assert!(
-                    analysis.ocr_fallback || row.stats.is_empty(),
-                    "an OCR stat cell was read"
-                );
-                assert!(
-                    analysis.ocr_fallback || (row.name.is_none() && row.name_alternates.is_empty())
-                );
-            }
             let text = analysis.ocr.expect("no OCR, so no OCR error");
             assert_eq!((text.raw_text.as_str(), text.confidence), ("", 0));
             assert!(analysis.board.is_some(), "the board is the reader's");
