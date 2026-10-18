@@ -4,12 +4,14 @@
 //! member that owns the tracker sync token sent as `Authorization: Bearer`.
 //! Every other route here is session-only, so a sync token there is a 401.
 //! `GET /api/stat-reports` lists the caller's rows, or every row for an officer.
+//! Officer rows include `display_name` beside `member_id`. A member's rows omit both.
 //! `GET /api/stat-reports/{id}` and `GET /api/stat-reports/{id}/manifest` are
 //! officer-only. `DELETE` is the owner or an officer. `POST .../withdraw` and
 //! `PATCH /api/stat-reports/{id}` clear training consent for the owner only.
 //! Withdraw sets expiry to the original received time plus 30 days, and deletes
 //! the report now if that instant has already passed.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use axum::Json;
@@ -70,6 +72,7 @@ fn member_item(report: &StatReport) -> StatReportListItem {
         glyphs_included: report.glyphs_included,
         size_bytes: report.size_bytes,
         member_id: None,
+        display_name: None,
         reason_category: None,
         reason_text: None,
         app_version: None,
@@ -79,9 +82,41 @@ fn member_item(report: &StatReport) -> StatReportListItem {
     }
 }
 
-fn officer_item(report: &StatReport) -> StatReportListItem {
+/// Officer names for this list. A failed lookup is warned and discarded, so
+/// every row still loads with `display_name` JSON null. The log carries the
+/// error and the distinct member count, not ids or names.
+fn display_names_or_nulls<E: std::fmt::Display>(
+    lookup: Result<HashMap<String, String>, E>,
+    member_count: usize,
+) -> HashMap<String, String> {
+    match lookup {
+        Ok(names) => names,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                member_count,
+                "stat report display name lookup failed"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn officer_display_name(names: &HashMap<String, String>, member_id: &str) -> Option<String> {
+    names.get(member_id).and_then(|name| {
+        if name.trim().is_empty() {
+            None
+        } else {
+            Some(name.clone())
+        }
+    })
+}
+
+fn officer_item(report: &StatReport, names: &HashMap<String, String>) -> StatReportListItem {
     StatReportListItem {
         member_id: Some(report.member_id.clone()),
+        // `Some` keeps JSON null when the name is missing. `None` would omit it.
+        display_name: Some(officer_display_name(names, &report.member_id)),
         reason_category: Some(report.reason_category.clone()),
         reason_text: Some(report.reason_text.clone()),
         app_version: Some(report.app_version.clone()),
@@ -326,7 +361,12 @@ pub async fn list_stat_reports(
         .filter(report_is_current)
         .collect();
     let reports = if officer {
-        rows.iter().map(officer_item).collect()
+        let mut ids: Vec<String> = rows.iter().map(|row| row.member_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        let member_count = ids.len();
+        let names = display_names_or_nulls(state.db.member_display_names(&ids).await, member_count);
+        rows.iter().map(|row| officer_item(row, &names)).collect()
     } else {
         rows.iter().map(member_item).collect()
     };
@@ -575,4 +615,105 @@ fn withdraw_body_ok(body: &[u8]) -> bool {
         ),
         (Some(false), None) | (None, Some(false))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuf {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
+    }
+
+    fn with_log<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (value, text)
+    }
+
+    fn report(id: &str, member_id: &str) -> StatReport {
+        StatReport {
+            id: id.into(),
+            member_id: member_id.into(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap(),
+            reason_category: "wrong_stats".into(),
+            reason_text: "elims looked high".into(),
+            app_version: "0.0.0".into(),
+            recognizer_matcher: "cv-v3".into(),
+            recognizer_ocr: "ocr-v1".into(),
+            training_consent: false,
+            own_name_included: false,
+            glyphs_included: false,
+            size_bytes: 24,
+            zip_sha256: "ab".repeat(32),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_name_lookup_nulls_every_display_name_and_logs_only_the_count() {
+        let rows = vec![
+            report("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "membermember"),
+            report("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "othermember"),
+        ];
+        let (names, log) =
+            with_log(|| display_names_or_nulls::<&str>(Err("name index unavailable"), rows.len()));
+        assert!(names.is_empty());
+        assert!(log.contains("WARN"));
+        assert!(log.contains("stat report display name lookup failed"));
+        assert!(log.contains("name index unavailable"));
+        assert!(log.contains("member_count=2"));
+        assert!(!log.contains("membermember"));
+        assert!(!log.contains("othermember"));
+        assert!(!log.contains("MemberOne"));
+
+        let items: Vec<_> = rows.iter().map(|row| officer_item(row, &names)).collect();
+        let json = serde_json::to_value(&items).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        for (item, row) in json.as_array().unwrap().iter().zip(&rows) {
+            assert!(item.get("display_name").is_some());
+            assert!(item["display_name"].is_null());
+            assert_eq!(item["member_id"], row.member_id);
+            assert_eq!(item["reason_text"], "elims looked high");
+            assert_eq!(item["id"], row.id);
+        }
+    }
+
+    #[test]
+    fn a_successful_name_lookup_is_kept_and_not_warned() {
+        let mut found = HashMap::new();
+        found.insert("membermember".into(), "MemberOne".into());
+        let (names, log) = with_log(|| display_names_or_nulls::<&str>(Ok(found), 1));
+        assert_eq!(
+            names.get("membermember").map(String::as_str),
+            Some("MemberOne")
+        );
+        assert!(!log.contains("WARN"));
+        assert!(!log.contains("stat report display name lookup failed"));
+    }
 }

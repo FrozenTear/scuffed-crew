@@ -147,6 +147,10 @@ pub struct StatReportDeleted {
 /// Members receive id, time, size, and the three consent flags. Officer-only
 /// fields are omitted for a member (`skip_serializing_if`). Free text is one
 /// of those fields.
+///
+/// `display_name` sits beside `member_id` on an officer row. It is the member
+/// record's display name, or JSON null when that member has no name or the
+/// member record is gone. A member's own list omits it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatReportListItem {
     pub id: String,
@@ -158,6 +162,10 @@ pub struct StatReportListItem {
     pub size_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_id: Option<String>,
+    /// Outer `None` omits the field (member list). `Some(None)` is JSON null.
+    /// `Some(Some(name))` is the display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1602,5 +1610,50 @@ mod tests {
         let escaped = br#"{"a":1,"\u0061":2}"#;
         let err = parse_bundle_manifest(escaped).unwrap_err();
         assert!(err.contains("duplicate"), "{err}");
+    }
+
+    fn list_item(display_name: Option<Option<String>>) -> StatReportListItem {
+        StatReportListItem {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            created_at: DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            expires_at: None,
+            training_consent: false,
+            own_name_included: false,
+            glyphs_included: false,
+            size_bytes: 24,
+            member_id: Some("membermember".into()),
+            display_name,
+            reason_category: None,
+            reason_text: None,
+            app_version: None,
+            recognizer_matcher: None,
+            recognizer_ocr: None,
+            zip_sha256: None,
+        }
+    }
+
+    #[test]
+    fn display_name_is_a_string_or_null_and_omitted_when_absent() {
+        let named = serde_json::to_value(list_item(Some(Some("MemberOne".into())))).unwrap();
+        assert_eq!(named["display_name"], "MemberOne");
+        assert_eq!(named["member_id"], "membermember");
+
+        let missing = serde_json::to_value(list_item(Some(None))).unwrap();
+        assert!(missing["display_name"].is_null());
+        assert!(missing.get("display_name").is_some());
+
+        let member = serde_json::to_value(list_item(None)).unwrap();
+        assert!(member.get("display_name").is_none());
+
+        let parsed: StatReportListItem = serde_json::from_value(named).unwrap();
+        assert_eq!(parsed.display_name, Some(Some("MemberOne".into())));
+        let parsed: StatReportListItem = serde_json::from_str(
+            r#"{"id":"0123456789abcdef0123456789abcdef","created_at":"2026-10-09T12:00:00Z","expires_at":null,"training_consent":false,"own_name_included":false,"glyphs_included":false,"size_bytes":24}"#,
+        )
+        .unwrap();
+        assert!(parsed.display_name.is_none());
+        assert!(parsed.member_id.is_none());
     }
 }
