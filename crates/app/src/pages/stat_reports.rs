@@ -4,12 +4,17 @@
 //! body is not in those types, so it stays here. Officer-only JSON
 //! keys are omitted for a member. `Option` fields accept that omission.
 //!
-//! The page never renders report contents (reason text, manifest, images, or
-//! the zip). The member column on the officer list is the member id from the
-//! API. It is not a display name.
+//! The officer list shows the report type and the note the member sent.
+//! It does not render the manifest, images, or the zip. `display_name` is an
+//! officer-only field beside `member_id`. The shared list type does not carry
+//! it yet, so this module reads it on its own (`#[serde(default)] Option<String>`).
+//! Absent and null both become `None`. A blank name is the same. The member
+//! column then shows a short id that does not wrap, with the full id in a
+//! tooltip. A member's own rows omit both fields, and that payload still parses.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use dioxus::prelude::*;
+use serde::Deserialize;
 use serde::Serialize;
 
 use scuffed_api_client::ClientError;
@@ -57,7 +62,7 @@ pub(crate) const COPY_LOADING_ALL: &str = "Loading reports.";
 pub(crate) const COPY_ERROR_ALL: &str =
     "Something went wrong loading reports. Try again in a moment.";
 pub(crate) const COPY_EMPTY_ALL: &str = "No reports yet.";
-pub(crate) const COPY_INTRO_ALL: &str = "Tracker reports from members. Download saves the zip. This page does not show what is inside a report.";
+pub(crate) const COPY_INTRO_ALL: &str = "Tracker reports from members. Type and note are what was sent with the report. Download saves the zip.";
 pub(crate) const COPY_DELETED: &str = "Report deleted.";
 pub(crate) const COPY_WITHDRAWN: &str = "Training consent withdrawn.";
 pub(crate) const COPY_DELETE_FAILED: &str = "Could not delete the report.";
@@ -127,10 +132,41 @@ const REPORTS_CSS: &str = r#"
     border-radius: var(--radius-md); padding: 0.4rem 0.75rem; cursor: pointer;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
     text-decoration: none; display: inline-flex; align-items: center;
+    overflow-wrap: normal; word-break: normal;
 }
 .report-btn-danger { background: var(--danger); color: var(--accent-fg); border: none; }
 .report-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.report-member-id { font-family: var(--font-mono); font-size: 0.8rem; word-break: break-all; }
+.report-member-name {
+    display: block; overflow-wrap: anywhere; word-break: break-word;
+}
+/* Ids stay on one line. The cell clips them with an ellipsis instead of
+   breaking the id in the middle. */
+.report-member-id {
+    display: block; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    overflow-wrap: normal; word-break: normal;
+    font-family: var(--font-mono); font-size: 0.8rem;
+}
+.report-member-id-sub {
+    color: var(--text-3); font-size: 0.72rem; margin-top: 0.15rem;
+}
+td.report-member, td.report-note {
+    min-width: 0; max-width: 100%; overflow: hidden;
+}
+.report-note-preview {
+    display: block; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    overflow-wrap: normal; word-break: normal;
+}
+.report-note-full {
+    display: block; margin-top: 0.35rem; white-space: pre-wrap;
+    overflow-wrap: anywhere; word-break: break-word;
+}
+.report-note-more { margin-top: 0.25rem; }
+.report-note-more summary {
+    cursor: pointer; color: var(--accent); font-size: 0.8rem;
+}
+.report-type { white-space: nowrap; }
 .report-control-label {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
@@ -158,6 +194,23 @@ const REPORTS_CSS: &str = r#"
         flex-direction: column; align-items: stretch; position: relative;
     }
     .report-btn { justify-content: center; text-align: center; white-space: normal; }
+    /* Seven columns. Percentages keep a short note on one line at 1280
+       and still leave the download button on one line. The member list
+       keeps the shared last-column width. */
+    .reports-table-officer th:nth-child(1),
+    .reports-table-officer td:nth-child(1) { width: 16%; }
+    .reports-table-officer th:nth-child(2),
+    .reports-table-officer td:nth-child(2) { width: 12%; }
+    .reports-table-officer th:nth-child(3),
+    .reports-table-officer td:nth-child(3) { width: 21%; }
+    .reports-table-officer th:nth-child(4),
+    .reports-table-officer td:nth-child(4) { width: 13%; }
+    .reports-table-officer th:nth-child(5),
+    .reports-table-officer td:nth-child(5) { width: 9%; }
+    .reports-table-officer th:nth-child(6),
+    .reports-table-officer td:nth-child(6) { width: 16%; }
+    .reports-table-officer th:last-child,
+    .reports-table-officer td:last-child { width: 13%; }
 }
 /* Narrow pages: one card per report, actions in the card, no sideways scroll. */
 @media (max-width: 760px) {
@@ -333,9 +386,174 @@ pub(crate) fn download_action(report_id: &str) -> Option<String> {
     Some(format!("/api/stat-reports/{report_id}"))
 }
 
-/// Officer list stamp, labelled UTC.
-pub(crate) fn format_report_when(at: DateTime<Utc>) -> String {
-    at.format("%Y-%m-%d %H:%M UTC").to_string()
+/// How many characters of a note the table shows before the ellipsis.
+const NOTE_PREVIEW_CHARS: usize = 80;
+
+/// Officer list parsed from `GET /api/stat-reports`.
+///
+/// `display_names` lines up with `rows`. `None` means the row had no usable
+/// display name, so the table shows a short member id.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedOfficerReports {
+    pub rows: Vec<StatReportListItem>,
+    pub display_names: Vec<Option<String>>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfficerListWire {
+    reports: Vec<serde_json::Value>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+/// Officer-only name on a list row. `#[serde(default)]` maps a missing field
+/// and JSON null to `None`, so a list from before the field still parses.
+/// A member's own row omits the field. Blank strings are dropped later.
+#[derive(Debug, Deserialize)]
+struct OfficerNameWire {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// Read the officer list, including `display_name` when the API sends it.
+pub(crate) fn parse_officer_reports(
+    value: &serde_json::Value,
+) -> Result<ParsedOfficerReports, String> {
+    let wire: OfficerListWire =
+        serde_json::from_value(value.clone()).map_err(|err| err.to_string())?;
+    let mut rows = Vec::with_capacity(wire.reports.len());
+    let mut display_names = Vec::with_capacity(wire.reports.len());
+    for report in wire.reports {
+        let item: StatReportListItem =
+            serde_json::from_value(report.clone()).map_err(|err| err.to_string())?;
+        let name: OfficerNameWire =
+            serde_json::from_value(report).map_err(|err| err.to_string())?;
+        rows.push(item);
+        display_names.push(present_display_name(name.display_name));
+    }
+    Ok(ParsedOfficerReports {
+        rows,
+        display_names,
+        truncated: wire.truncated,
+    })
+}
+
+/// Blank names are the same as a missing field: the id is the label.
+fn present_display_name(raw: Option<String>) -> Option<String> {
+    raw.and_then(|name| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Short label for `reason_category`. Unknown tokens become a short title
+/// when they are plain words, otherwise "Other".
+pub(crate) fn reason_type_label(category: Option<&str>) -> String {
+    let raw = category.unwrap_or("").trim();
+    match raw {
+        "" => "-".into(),
+        "wrong_stats" => "Wrong stats".into(),
+        "wrong_hero" => "Wrong hero".into(),
+        "wrong_map" => "Wrong map".into(),
+        "wrong_mode" => "Wrong mode".into(),
+        "wrong_result" => "Wrong result".into(),
+        "missed_game" => "Missed game".into(),
+        "crash" => "Crash".into(),
+        "performance" => "Performance".into(),
+        "other" => "Other".into(),
+        other => humanize_category(other),
+    }
+}
+
+fn humanize_category(raw: &str) -> String {
+    let mut words = Vec::new();
+    for part in raw.split(|c: char| c == '_' || c == '-' || c.is_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
+        if !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return "Other".into();
+        }
+        let mut chars = part.chars();
+        let Some(first) = chars.next() else {
+            continue;
+        };
+        let mut word = String::new();
+        word.push(first.to_ascii_uppercase());
+        for ch in chars {
+            word.push(ch.to_ascii_lowercase());
+        }
+        words.push(word);
+        if words.len() == 4 {
+            break;
+        }
+    }
+    if words.is_empty() {
+        "Other".into()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// Note text for one officer row. `None` is an empty note (the table shows a dash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReportNote {
+    pub preview: String,
+    pub full: String,
+    /// True when the table preview is not the whole note.
+    pub expand: bool,
+}
+
+pub(crate) fn report_note(text: Option<&str>) -> Option<ReportNote> {
+    let raw = text?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let flat: String = raw
+        .chars()
+        .map(|ch| {
+            if ch == '\n' || ch == '\r' || ch == '\t' {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let count = flat.chars().count();
+    let cut = count > NOTE_PREVIEW_CHARS;
+    let mut preview: String = if cut {
+        flat.chars().take(NOTE_PREVIEW_CHARS).collect()
+    } else {
+        flat
+    };
+    if cut {
+        preview.push_str("...");
+    }
+    let expand = cut || preview != raw;
+    Some(ReportNote {
+        preview,
+        full: raw.to_string(),
+        expand,
+    })
+}
+
+/// Id shown under a display name. Short ids stay whole. Longer ids keep
+/// the start and the end so two members are still easy to tell apart.
+pub(crate) fn short_member_id(id: &str) -> String {
+    const HEAD: usize = 6;
+    const TAIL: usize = 4;
+    let count = id.chars().count();
+    if count <= HEAD + TAIL + 3 {
+        return id.to_string();
+    }
+    let head: String = id.chars().take(HEAD).collect();
+    let tail: String = id.chars().skip(count - TAIL).collect();
+    format!("{head}...{tail}")
 }
 
 const REPORT_MONTHS: [&str; 12] = [
@@ -742,8 +960,11 @@ fn static_copy() -> &'static [&'static str] {
         "Cancel",
         "Sign in",
         "Apply",
-        "Member id",
+        "Member",
         "Member id missing",
+        "Type",
+        "Note",
+        "Show full note",
         "Date",
         "Size",
         "Status",
@@ -1014,6 +1235,9 @@ pub(crate) fn OfficerReportsBody(
     #[props(default)] error_body: String,
     #[props(default)] retry_after_seconds: Option<u64>,
     rows: Vec<StatReportListItem>,
+    /// Parallel to `rows`. Missing entries mean the row has no display name.
+    #[props(default)]
+    display_names: Vec<Option<String>>,
     #[props(default)] truncated: bool,
     #[props(default)] on_retry: EventHandler<()>,
 ) -> Element {
@@ -1068,10 +1292,12 @@ pub(crate) fn OfficerReportsBody(
                     h1 { "Reports" }
                     p { class: "reports-intro", "{COPY_INTRO_ALL}" }
                     div { class: "reports-scroll",
-                        table { class: "reports-table",
+                        table { class: "reports-table reports-table-officer",
                             thead {
                                 tr {
-                                    th { "Member id" }
+                                    th { "Member" }
+                                    th { "Type" }
+                                    th { "Note" }
                                     th { "Date" }
                                     th { "Size" }
                                     th { "Training consent" }
@@ -1079,8 +1305,11 @@ pub(crate) fn OfficerReportsBody(
                                 }
                             }
                             tbody {
-                                for row in rows.iter() {
-                                    {officer_row(row)}
+                                for (index, row) in rows.iter().enumerate() {
+                                    {officer_row(
+                                        row,
+                                        display_names.get(index).and_then(|name| name.as_deref()),
+                                    )}
                                 }
                             }
                         }
@@ -1202,28 +1431,67 @@ fn ReportDownload(path: String, filename: String, control_id: String, label: Str
     }
 }
 
-fn officer_row(row: &StatReportListItem) -> Element {
-    let when = format_report_when(row.created_at);
+fn officer_row(row: &StatReportListItem, display_name: Option<&str>) -> Element {
+    let when = format_report_when_local(row.created_at);
+    let when_title = row.created_at.to_rfc3339();
     let size = format_report_size(row.size_bytes);
     let consent = training_consent_text(row.training_consent);
     let extra = extra_consent_text(row.own_name_included, row.glyphs_included);
-    let member = row
+    let kind = reason_type_label(row.reason_category.as_deref());
+    let note = report_note(row.reason_text.as_deref());
+    let member_id = row
         .member_id
-        .clone()
-        .filter(|id| !id.trim().is_empty())
-        .unwrap_or_else(|| "Member id missing".into());
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let name = display_name.map(str::trim).filter(|name| !name.is_empty());
     let download = download_action(&row.id);
     let download_id = control_id("download", &row.id);
     let download_label = format!("Download report {}", row.id);
     rsx! {
         tr {
-            td {
-                span { class: "report-card-label", "Member id" }
-                code { class: "report-member-id", "{member}" }
+            td { class: "report-member", title: member_id.unwrap_or(""),
+                span { class: "report-card-label", "Member" }
+                if let Some(name) = name {
+                    span { class: "report-member-name", "{name}" }
+                    if let Some(id) = member_id {
+                        span {
+                            class: "report-member-id report-member-id-sub",
+                            title: "{id}",
+                            "{short_member_id(id)}"
+                        }
+                    }
+                } else if let Some(id) = member_id {
+                    span {
+                        class: "report-member-id",
+                        title: "{id}",
+                        "{short_member_id(id)}"
+                    }
+                } else {
+                    span { "Member id missing" }
+                }
             }
-            td {
+            td { class: "report-type",
+                span { class: "report-card-label", "Type" }
+                "{kind}"
+            }
+            td { class: "report-note",
+                span { class: "report-card-label", "Note" }
+                if let Some(note) = note {
+                    span { class: "report-note-preview", "{note.preview}" }
+                    if note.expand {
+                        details { class: "report-note-more",
+                            summary { "Show full note" }
+                            span { class: "report-note-full", "{note.full}" }
+                        }
+                    }
+                } else {
+                    span { class: "report-note-empty", "-" }
+                }
+            }
+            td { class: "report-when",
                 span { class: "report-card-label", "Date" }
-                "{when}"
+                time { datetime: "{when_title}", title: "{when_title}", "{when}" }
             }
             td {
                 span { class: "report-card-label", "Size" }
@@ -1936,14 +2204,50 @@ mod tests {
     }
 
     #[test]
-    fn officer_list_shows_member_id_and_download_not_report_contents() {
-        fn view() -> Element {
+    fn officer_list_shows_type_note_member_and_local_time() {
+        const MEMBER_ID: &str = "member-0123456789abcdef";
+        fn named() -> Element {
             let mut item = row(REPORT_A, true, None);
-            item.member_id = Some("m-100".into());
-            item.reason_text = Some("QXNAME".into());
-            item.reason_category = Some("wrong_stats".into());
+            item.member_id = Some(MEMBER_ID.into());
+            item.reason_text = Some(format!("saw <b>bad</b> stats {}", "x".repeat(120)));
+            item.reason_category = Some("crash".into());
             item.zip_sha256 = Some("abc".into());
             item.app_version = Some("9.9.9".into());
+            rsx! {
+                OfficerReportsBody {
+                    screen: OfficerScreen::Ready,
+                    rows: vec![item],
+                    display_names: vec![Some("  Ada Example  ".into())],
+                }
+            }
+        }
+        let html = html_of(named);
+        let when = format_report_when_local(at(2026, 10, 9, 12, 0));
+        assert!(html.contains("Ada Example"), "{html}");
+        assert!(html.contains(&short_member_id(MEMBER_ID)), "{html}");
+        assert!(html.contains(&format!("title=\"{MEMBER_ID}\"")), "{html}");
+        assert!(html.contains("Crash"), "{html}");
+        assert!(html.contains("Show full note"), "{html}");
+        assert!(html.contains("&#60;b&#62;bad&#60;/b&#62;"), "{html}");
+        assert!(!html.contains("<b>"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+        assert!(html.contains(&when), "{html}");
+        assert!(!html.contains(" UTC"), "{html}");
+        assert!(html.contains("Download"), "{html}");
+        assert!(!html.contains("<form"), "{html}");
+        assert!(html.contains("type=\"button\""), "{html}");
+        assert!(!html.contains("9.9.9"), "{html}");
+        assert!(!html.contains(">abc<"), "{html}");
+        assert!(html.contains("report-member-id"), "{html}");
+        assert!(html.contains("reports-table-officer"), "{html}");
+        assert_labeled(&html, &control_id("download", REPORT_A), "download-report");
+        assert_plain(&html);
+
+        fn id_only() -> Element {
+            let mut item = row(REPORT_A, true, None);
+            item.member_id = Some(MEMBER_ID.into());
+            item.reason_category = Some("performance".into());
+            item.reason_text = Some("   ".into());
             rsx! {
                 OfficerReportsBody {
                     screen: OfficerScreen::Ready,
@@ -1951,22 +2255,145 @@ mod tests {
                 }
             }
         }
-        let html = html_of(view);
-        assert!(html.contains("m-100"), "{html}");
-        assert!(html.contains("Member id"), "{html}");
-        assert!(html.contains("Download"), "{html}");
-        // The download is a fetch from a button, not a form that leaves the app.
-        assert!(!html.contains("<form"), "{html}");
-        assert!(html.contains("type=\"button\""), "{html}");
-        assert!(!html.contains("QXNAME"), "{html}");
-        assert!(!html.contains("wrong_stats"), "{html}");
-        assert!(!html.contains("9.9.9"), "{html}");
-        assert!(!html.contains(">abc<"), "{html}");
-        assert_labeled(&html, &control_id("download", REPORT_A), "download-report");
-        assert_plain(&html);
+        let plain = html_of(id_only);
+        assert!(plain.contains("Performance"), "{plain}");
+        let short_id = short_member_id(MEMBER_ID);
+        assert!(plain.contains("report-note-empty"), "{plain}");
+        assert!(
+            plain.contains(">-</span>") || plain.contains(">-<"),
+            "{plain}"
+        );
+        assert!(plain.contains(&format!(">{short_id}<")), "{plain}");
+        assert!(plain.contains(&format!("title=\"{MEMBER_ID}\"")), "{plain}");
+        assert!(!plain.contains(&format!(">{MEMBER_ID}<")), "{plain}");
+        assert!(plain.contains("report-member-id"), "{plain}");
+        assert!(!plain.contains("Ada Example"), "{plain}");
+        assert_plain(&plain);
         assert_eq!(
             COPY_FORBIDDEN,
             "You need officer permissions to access the admin panel."
+        );
+    }
+
+    #[test]
+    fn officer_columns_format_type_note_and_member_id() {
+        assert_eq!(reason_type_label(Some("crash")), "Crash");
+        assert_eq!(reason_type_label(Some("performance")), "Performance");
+        assert_eq!(reason_type_label(Some("other")), "Other");
+        assert_eq!(reason_type_label(Some("wrong_stats")), "Wrong stats");
+        assert_eq!(reason_type_label(Some("wrong_hero")), "Wrong hero");
+        assert_eq!(reason_type_label(Some("wrong_map")), "Wrong map");
+        assert_eq!(reason_type_label(Some("wrong_mode")), "Wrong mode");
+        assert_eq!(reason_type_label(Some("wrong_result")), "Wrong result");
+        assert_eq!(reason_type_label(Some("missed_game")), "Missed game");
+        assert_eq!(reason_type_label(Some("gpu_hang")), "Gpu Hang");
+        assert_eq!(reason_type_label(Some("nope<script>")), "Other");
+        assert_eq!(reason_type_label(None), "-");
+        assert_eq!(reason_type_label(Some("  ")), "-");
+        for label in [
+            reason_type_label(Some("crash")),
+            reason_type_label(Some("performance")),
+            reason_type_label(Some("other")),
+        ] {
+            assert_plain(&label);
+        }
+
+        assert!(report_note(None).is_none());
+        assert!(report_note(Some("  \n")).is_none());
+        let short = report_note(Some("elims looked high")).unwrap();
+        assert_eq!(short.preview, "elims looked high");
+        assert!(!short.expand);
+        let long = "a".repeat(NOTE_PREVIEW_CHARS + 5);
+        let cut = report_note(Some(&long)).unwrap();
+        assert!(cut.expand);
+        assert!(cut.preview.ends_with("..."));
+        assert_eq!(cut.preview.chars().filter(|ch| *ch == '.').count(), 3);
+        assert_eq!(cut.full, long);
+        assert!(!cut.preview.contains('\u{2014}'));
+        let lines = report_note(Some("one\ntwo")).unwrap();
+        assert!(lines.expand);
+        assert_eq!(lines.full, "one\ntwo");
+        assert!(!lines.preview.contains('\n'));
+
+        assert_eq!(short_member_id("m-100"), "m-100");
+        assert_eq!(short_member_id("member-0123456789abcdef"), "member...cdef");
+        assert!(!short_member_id("member-0123456789abcdef").contains(' '));
+    }
+
+    #[test]
+    fn officer_list_reads_display_name_when_the_api_sends_it() {
+        let base = serde_json::json!({
+            "id": REPORT_A,
+            "created_at": "2026-10-09T12:00:00Z",
+            "expires_at": null,
+            "training_consent": true,
+            "own_name_included": false,
+            "glyphs_included": false,
+            "size_bytes": 10,
+            "member_id": "m-100",
+            "reason_category": "crash",
+            "reason_text": "it stopped"
+        });
+        let mut with_name = base.clone();
+        with_name["display_name"] = serde_json::json!("  Ada Example  ");
+        let parsed = parse_officer_reports(&serde_json::json!({
+            "reports": [with_name],
+            "truncated": false
+        }))
+        .unwrap();
+        assert_eq!(parsed.display_names, vec![Some("Ada Example".into())]);
+        assert_eq!(parsed.rows[0].member_id.as_deref(), Some("m-100"));
+        assert_eq!(parsed.rows[0].reason_category.as_deref(), Some("crash"));
+
+        let missing =
+            parse_officer_reports(&serde_json::json!({ "reports": [base.clone()] })).unwrap();
+        assert_eq!(missing.display_names, vec![None]);
+
+        let mut blank = base.clone();
+        blank["display_name"] = serde_json::json!("   ");
+        let blanked = parse_officer_reports(&serde_json::json!({ "reports": [blank] })).unwrap();
+        assert_eq!(blanked.display_names, vec![None]);
+
+        let mut null_name = base.clone();
+        null_name["display_name"] = serde_json::Value::Null;
+        let nulled = parse_officer_reports(&serde_json::json!({ "reports": [null_name] })).unwrap();
+        assert_eq!(nulled.display_names, vec![None]);
+
+        // A member's own row omits member_id and display_name entirely.
+        let member_only = serde_json::json!({
+            "id": REPORT_A,
+            "created_at": "2026-10-09T12:00:00Z",
+            "expires_at": null,
+            "training_consent": true,
+            "own_name_included": false,
+            "glyphs_included": false,
+            "size_bytes": 10
+        });
+        let own = parse_officer_reports(&serde_json::json!({ "reports": [member_only] })).unwrap();
+        assert_eq!(own.display_names, vec![None]);
+        assert!(own.rows[0].member_id.is_none());
+    }
+
+    #[test]
+    fn member_ids_do_not_wrap_mid_string() {
+        let id = css_block(REPORTS_CSS, ".report-member-id {");
+        assert!(has_css_decl(&id, "white-space: nowrap"), "{id}");
+        assert!(has_css_decl(&id, "text-overflow: ellipsis"), "{id}");
+        assert!(has_css_decl(&id, "overflow: hidden"), "{id}");
+        assert!(has_css_decl(&id, "word-break: normal"), "{id}");
+        assert!(!id.contains("break-all"), "{id}");
+        assert!(!REPORTS_CSS.contains("word-break: break-all"));
+        let narrow = REPORTS_CSS
+            .split("@media (max-width: 760px)")
+            .nth(1)
+            .unwrap();
+        assert!(
+            narrow.contains("overflow-x: visible"),
+            "narrow cards must not hide the table in a sideways page scroll"
+        );
+        assert!(
+            REPORTS_CSS.contains("td.report-member, td.report-note"),
+            "member and note cells clip instead of widening the page"
         );
     }
 
