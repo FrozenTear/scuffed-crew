@@ -14,12 +14,18 @@
 //!    member, the outer shape of `EncryptionService::build_gift_wraps`, and
 //!    read it back on the `#p` subscription.
 //! 7. Refuse a kind 9 whose `h` tag is another team's channel.
-//! 8. Refuse a pubkey that is not on the allowlist, a kind the site never
-//!    publishes, and the next kind 9 once the member rate limit is full.
+//! 8. Refuse a plain member's kind 9 on the officer channel, and accept an
+//!    officer's kind 9 on that channel.
+//! 9. Refuse an anonymous kind 9 and kind 1059 on the gate (`auth-required`).
+//! 10. Accept a kind 1059 from an authenticated member connection on the gate.
+//! 11. After the relay is up, add a member and a team channel, wait for the
+//!     LIVE reload, and accept that member's kind 9.
+//! 12. Refuse a pubkey that is not on the allowlist, a kind the site never
+//!     publishes, and the next kind 9 once the member rate limit is full.
 //!
 //! The container must be started with `RELAY_POLICY_RATE_LIMIT=1`. Kind 1059
-//! uses the `gift:` bucket, so the wrap still stores after the kind 9 fills
-//! the member bucket. The second kind 9 is the rate-limit case.
+//! uses a per-sender `gift:` bucket, so the wrap still stores after the kind
+//! 9 fills the member bucket. The second kind 9 is the rate-limit case.
 
 use std::time::{Duration, Instant};
 
@@ -43,6 +49,8 @@ struct SeedState {
     member_id: String,
     team_id: String,
     other_team_id: String,
+    officer_secret_hex: String,
+    officer_group_id: String,
 }
 
 fn main() {
@@ -140,6 +148,23 @@ async fn seed() -> Result<(), String> {
         .await
         .map_err(|e| format!("other channel: {e}"))?;
 
+    let officer_keys = Keys::generate();
+    let officer_pubkey = officer_keys.public_key().to_hex();
+    let officer = db
+        .create_member(
+            "relay-ci-officer",
+            "Relay CI Officer",
+            scuffed_db::OrgRole::Officer,
+        )
+        .await
+        .map_err(|e| format!("create officer: {e}"))?;
+    db.update_member_nostr_keys(&officer.id, Some(&officer_pubkey), Some("external"), None)
+        .await
+        .map_err(|e| format!("officer pubkey: {e}"))?;
+    db.add_to_roster(&officer.id, &team.id, scuffed_db::TeamRole::Coach)
+        .await
+        .map_err(|e| format!("officer roster: {e}"))?;
+
     let state = SeedState {
         secret_hex: keys.secret_key().to_secret_hex(),
         pubkey,
@@ -147,6 +172,8 @@ async fn seed() -> Result<(), String> {
         member_id: member.id,
         team_id: team.id,
         other_team_id: other.id,
+        officer_secret_hex: officer_keys.secret_key().to_secret_hex(),
+        officer_group_id: officer_id,
     };
     let path = state_path();
     std::fs::write(
@@ -168,7 +195,11 @@ fn load_state() -> Result<SeedState, String> {
 }
 
 fn member_keys(state: &SeedState) -> Result<Keys, String> {
-    let sk = SecretKey::from_hex(&state.secret_hex).map_err(|e| format!("secret: {e}"))?;
+    keys_from_hex(&state.secret_hex)
+}
+
+fn keys_from_hex(secret_hex: &str) -> Result<Keys, String> {
+    let sk = SecretKey::from_hex(secret_hex).map_err(|e| format!("secret: {e}"))?;
     Ok(Keys::new(sk))
 }
 
@@ -398,6 +429,122 @@ where
     }
 }
 
+async fn publish_authed(
+    url: &str,
+    keys: &Keys,
+    event: &Value,
+) -> Result<(bool, String, String), String> {
+    let (ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .map_err(|e| format!("gate connect: {e}"))?;
+    let (mut write, mut read) = ws.split();
+    let challenge = loop {
+        let text = recv_text(&mut read).await?;
+        let value = parse_json(&text)?;
+        if frame_kind(&value) == Some("AUTH") {
+            break frame_sub(&value)
+                .ok_or("AUTH frame has no challenge")?
+                .to_string();
+        }
+    };
+    let auth = signed_event(
+        keys,
+        22242,
+        "",
+        vec![
+            Tag::custom(TagKind::custom("relay"), vec![url.to_string()]),
+            Tag::custom(TagKind::custom("challenge"), vec![challenge]),
+        ],
+    )?;
+    send_text(&mut write, &json!(["AUTH", auth]).to_string()).await?;
+    loop {
+        let text = recv_text(&mut read).await?;
+        let value = parse_json(&text)?;
+        if frame_kind(&value) != Some("OK") {
+            continue;
+        }
+        let accepted = value
+            .as_array()
+            .and_then(|a| a.get(2))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !accepted {
+            let message = value
+                .as_array()
+                .and_then(|a| a.get(3))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return Err(format!("gate AUTH rejected: {message}"));
+        }
+        break;
+    }
+    let frame = json!(["EVENT", event]).to_string();
+    send_text(&mut write, &frame).await?;
+    let event_id = event
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or("")
+        .to_string();
+    loop {
+        let text = recv_text(&mut read).await?;
+        let value = parse_json(&text)?;
+        if frame_kind(&value) != Some("OK") {
+            continue;
+        }
+        let accepted = value
+            .as_array()
+            .and_then(|a| a.get(2))
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| format!("OK frame missing accepted flag: {text}"))?;
+        let message = value
+            .as_array()
+            .and_then(|a| a.get(3))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok((accepted, message, event_id));
+    }
+}
+
+/// Create a member and a public channel after the relay is already running.
+/// The first kind 9 must be accepted without waiting for the 60s refresh.
+async fn expect_fresh_roster_write(strfry: &str) -> Result<(), String> {
+    let db = connect_db().await?;
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    let member = db
+        .create_member(
+            "relay-ci-late",
+            "Relay CI Late",
+            scuffed_db::OrgRole::Member,
+        )
+        .await
+        .map_err(|e| format!("late member: {e}"))?;
+    db.update_member_nostr_keys(&member.id, Some(&pubkey), Some("external"), None)
+        .await
+        .map_err(|e| format!("late pubkey: {e}"))?;
+    let team = db
+        .create_team("Relay CI Late", "ow2", None, None, None)
+        .await
+        .map_err(|e| format!("late team: {e}"))?;
+    db.add_to_roster(&member.id, &team.id, scuffed_db::TeamRole::Player)
+        .await
+        .map_err(|e| format!("late roster: {e}"))?;
+    db.create_team_channel(&team.id, &team.id, scuffed_db::GroupType::Public, "")
+        .await
+        .map_err(|e| format!("late channel: {e}"))?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let event = kind9(&keys, &team.id, "late roster write")?;
+    let (accepted, message, id) = publish_result(strfry, &event).await?;
+    if !accepted {
+        return Err(format!(
+            "roster reload did not admit the new member ({id}): {message}"
+        ));
+    }
+    println!("new roster member write accepted after live reload id={id}");
+    Ok(())
+}
+
 async fn expect_reject(url: &str, event: &Value, needle: &str, label: &str) -> Result<(), String> {
     let (accepted, message, id) = publish_result(url, event).await?;
     if accepted {
@@ -420,6 +567,11 @@ async fn check() -> Result<(), String> {
     }
     let gate = env_or("RELAY_GATE_URL", "ws://127.0.0.1:17779");
     let strfry = env_or("RELAY_STRFRY_URL", "ws://127.0.0.1:17778");
+
+    let anon9 = kind9(&keys, &state.group_id, "anonymous kind 9")?;
+    expect_reject(&gate, &anon9, "auth-required", "anonymous kind 9").await?;
+    let anon_wrap = gift_wrap(&state.pubkey)?;
+    expect_reject(&gate, &anon_wrap, "auth-required", "anonymous kind 1059").await?;
 
     let (ws, _) = tokio_tungstenite::connect_async(&gate)
         .await
@@ -502,8 +654,21 @@ async fn check() -> Result<(), String> {
     let cross = kind9(&keys, &other_group, "other team")?;
     expect_reject(&strfry, &cross, "not a member", "other team").await?;
 
+    let officer_group = state.officer_group_id.clone();
+    let member_officer = kind9(&keys, &officer_group, "member on officer channel")?;
+    expect_reject(
+        &strfry,
+        &member_officer,
+        "not a member",
+        "plain member officer channel",
+    )
+    .await?;
+    let officer_keys = keys_from_hex(&state.officer_secret_hex)?;
+    let officer_event = kind9(&officer_keys, &officer_group, "officer channel")?;
+    expect_stored(&strfry, &officer_event, "officer channel").await?;
+
     // Member bucket is already full when the rate limit is 1. The wrap uses
-    // the gift: bucket, so it still stores.
+    // its own gift: bucket, so it still stores.
     let wrap = gift_wrap(&state.pubkey)?;
     let wrap_id = expect_stored(&strfry, &wrap, "kind 1059").await?;
     expect_received(
@@ -517,6 +682,28 @@ async fn check() -> Result<(), String> {
     )
     .await?;
     println!("received kind 1059 id={wrap_id} on the #p subscription");
+
+    let gate_wrap = gift_wrap(&state.pubkey)?;
+    let (gate_ok, gate_message, gate_wrap_id) = publish_authed(&gate, &keys, &gate_wrap).await?;
+    if !gate_ok {
+        return Err(format!(
+            "authed member wrap rejected: {gate_message} (id {gate_wrap_id})"
+        ));
+    }
+    println!("authed member wrap stored id={gate_wrap_id}");
+    expect_received(
+        &mut read,
+        "wraps",
+        &gate_wrap_id,
+        1059,
+        WRAP_CONTENT,
+        "p",
+        &state.pubkey,
+    )
+    .await?;
+    println!("received authed gate wrap id={gate_wrap_id} on the #p subscription");
+
+    expect_fresh_roster_write(&strfry).await?;
 
     let outsider = Keys::generate();
     let foreign = kind9(&outsider, &group_id, "not a member")?;

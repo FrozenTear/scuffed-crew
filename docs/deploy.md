@@ -438,11 +438,34 @@ uses the SurrealDB roster and `team_channel` rows.
 
 `RELAY_POLICY_ENFORCE_GROUPS` defaults to true, in the image and in
 Compose. An event with an `h` tag is stored only when that id is an active
-`team_channel` and the author is on that team's roster (the same rows as
-`GET /api/teams/{id}/channels` and `send_public`). Kind 1059 gift wraps have
-no `h` tag, so this check does not apply to them. Kind 0, kind 7, and kind
-34550 are signed with the member key and also have no `h` tag. Set the
-variable to `false` to allow any allowlisted pubkey to write any `h` group.
+`team_channel` and the author may write it. A public channel accepts any
+active roster member of that team (the same rows as
+`GET /api/teams/{id}/channels` and `send_public`). An officer channel
+(`{team}-officers`) accepts only roster members whose org role is officer
+or admin, the same `can_access_officer_channel` check the read gate uses.
+Kind 1059 gift wraps have no `h` tag, so this check does not apply to them.
+Kind 0, kind 7, and kind 34550 are signed with the member key and also have
+no `h` tag. Set the variable to `false` to allow any allowlisted pubkey to
+write any `h` group.
+
+The write plugin and the read gate reload when `plays_on`, `team_channel`,
+or `member` changes, using a SurrealDB LIVE query. Officer permission and
+the Nostr pubkey live on `member`, so a promotion reloads too. A rejected
+write for an unknown author, an unknown group, or a pubkey outside that
+group's writer set schedules the same reload, debounced to at least 2
+seconds, as a backup. `RELAY_POLICY_REFRESH_SECS` (default 60) is the slow
+backup if LIVE is down.
+
+Kind 1059 is not one rate bucket per recipient. The plugin keys
+`gift:{sender}:{recipient}`. The sender is strfry's authenticated pubkey
+when that connection completed NIP-42. site-server publishes straight to
+`ws://strfry:7777` with no AUTH (`publish_event_oneshot` in
+`crates/server/src/routes/chat.rs` and `crates/site-server`), and the wrap
+author is ephemeral, so each of those wraps has its own bucket and does not
+consume a member's kind 9 budget. The gate keeps a second bucket,
+`gift:{authed member}:{recipient}`, and refuses the EVENT before forward
+when that member is over `RELAY_POLICY_RATE_LIMIT`. One signed-in member
+cannot use up another member's inbox budget.
 
 The relay image has to be rebuilt before this plugin is what a running
 container executes. `./scripts/relay-up.sh` does that (`up --build` recreates
@@ -457,7 +480,10 @@ The gate does not pipe HTTP through to strfry. A NIP-11 request
 (`Accept: application/nostr+json`) is answered by the gate, then the connection
 is closed. Any other non-upgrade request is `400` with `Connection: close`.
 Only a WebSocket upgrade (`Upgrade` and `Connection` tokens, optional
-whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`.
+whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`
+or an `EVENT`. The AUTH pubkey must be an active member. A publish with no
+member AUTH gets `OK false` and `auth-required:`, and that EVENT is not
+forwarded to strfry.
 
 Kind 4 plain DMs are rejected on write (the relay-policy plugin and the gate)
 as well as on read. DMs are NIP-59 kind 1059 gift wraps. NIP-29 group metadata

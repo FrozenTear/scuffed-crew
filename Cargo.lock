@@ -10151,6 +10151,7 @@ dependencies = [
  "scuffed-db",
  "serde",
  "serde_json",
+ "surrealdb",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",

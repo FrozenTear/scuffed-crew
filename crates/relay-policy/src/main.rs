@@ -58,6 +58,10 @@ struct StrfryInput {
     #[serde(rename = "sourceInfo")]
     #[allow(dead_code)]
     source_info: Option<String>,
+    /// NIP-42 pubkey when this connection to strfry completed AUTH.
+    /// Absent for the read gate and for site-server one-shot publishes.
+    #[serde(default)]
+    authed: Option<String>,
 }
 
 /// A Nostr event as sent by strfry.
@@ -86,6 +90,32 @@ struct StrfryOutput {
     action: String,
     /// Human-readable reason (strfry uses this in NIP-20 OK messages for rejections).
     msg: String,
+}
+
+async fn refresh_writers(db: &scuffed_db::Database, engine: &Mutex<PolicyEngine>) {
+    let allowlist = load_pubkey_allowlist(db).await;
+    let groups = match relay_policy::directory::load_group_writers(db).await {
+        Ok(groups) => Some(groups),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "group writer refresh failed; keeping the previous map"
+            );
+            None
+        }
+    };
+    let mut eng = engine.lock().unwrap_or_else(|err| err.into_inner());
+    eng.update_allowlist(allowlist);
+    if let Some(groups) = groups {
+        let count = groups.len();
+        eng.update_group_members(groups);
+        tracing::info!(
+            allowlist_size = eng.allowlist_size(),
+            groups = count,
+            "refreshed writer list"
+        );
+    }
+    eng.prune_rate_buckets();
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -203,39 +233,40 @@ fn main() {
         }
     });
 
-    // Spawn background allowlist refresh task.
-    if let Some(db) = db.clone() {
+    // Reload writers when roster edges, team channels, or member rows change.
+    // LIVE is the primary signal. A timed tick and a rejected write for an
+    // unknown author or group are the backup. All three share one debounced
+    // reload so a burst cannot hammer SurrealDB.
+    let reload_tx = if let Some(db) = db.clone() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let engine_bg = Arc::clone(&engine);
+        let db_reload = Arc::clone(&db);
+        rt.spawn(async move {
+            relay_policy::directory::coalesce_reloads(rx, || {
+                let db = Arc::clone(&db_reload);
+                let engine = Arc::clone(&engine_bg);
+                async move { refresh_writers(&db, &engine).await }
+            })
+            .await;
+        });
+        let tx_live = tx.clone();
+        let db_live = Arc::clone(&db);
+        rt.spawn(async move {
+            relay_policy::directory::watch_writer_tables(db_live, tx_live).await;
+        });
+        let tx_tick = tx.clone();
         rt.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
-            // Skip the first tick (we already loaded on startup).
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let allowlist = load_pubkey_allowlist(&db).await;
-                let groups = match relay_policy::directory::load_group_writers(&db).await {
-                    Ok(groups) => Some(groups),
-                    Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            "group writer refresh failed; keeping the previous map"
-                        );
-                        None
-                    }
-                };
-                let mut eng = engine_bg.lock().unwrap();
-                eng.update_allowlist(allowlist);
-                if let Some(groups) = groups {
-                    eng.update_group_members(groups);
-                }
-                eng.prune_rate_buckets();
-                tracing::debug!(
-                    allowlist_size = eng.allowlist_size(),
-                    "refreshed allowlist and pruned rate buckets"
-                );
+                let _ = tx_tick.send(());
             }
         });
-    }
+        Some(tx)
+    } else {
+        None
+    };
 
     // Main stdin/stdout policy loop.
     let stdin = io::stdin();
@@ -282,9 +313,17 @@ fn main() {
             pubkey: input.event.pubkey.to_lowercase(),
             kind: input.event.kind,
             tags: input.event.tags,
+            authed: input.authed.clone(),
         };
 
         let decision = engine.lock().unwrap().evaluate(&event_info);
+        if let Decision::Reject(reason) = &decision {
+            if policy::reload_on_write_miss(reason) {
+                if let Some(tx) = &reload_tx {
+                    let _ = tx.send(());
+                }
+            }
+        }
 
         let output = match decision {
             Decision::Accept => StrfryOutput {
@@ -408,6 +447,7 @@ mod tests {
             pubkey: parsed.event.pubkey.to_lowercase(),
             kind: parsed.event.kind,
             tags: parsed.event.tags,
+            authed: parsed.authed.clone(),
         };
         let decision = engine.evaluate(&event_info);
         assert_eq!(decision, Decision::Accept);
@@ -427,6 +467,7 @@ mod tests {
             pubkey: parsed.event.pubkey.to_lowercase(),
             kind: parsed.event.kind,
             tags: parsed.event.tags,
+            authed: parsed.authed.clone(),
         };
         let decision = engine.evaluate(&event_info);
         assert!(matches!(decision, Decision::Reject(_)));

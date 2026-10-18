@@ -173,14 +173,20 @@ impl PolicyEngine {
         }
 
         // Kind 1059 authors are ephemeral (NIP-59). Officer chat and DMs
-        // publish these. The member is the `p` tag. Rate-limit that recipient
-        // on its own bucket so wraps do not consume the member's kind 9 budget.
+        // publish these. The member is the `p` tag. The bucket is the sender
+        // plus that recipient, not the recipient alone: a per-recipient bucket
+        // lets one sender use up the inbox budget for everyone else. The
+        // sender is strfry's authenticated pubkey when the connection completed
+        // NIP-42. site-server and the read gate do not AUTH to strfry, so the
+        // sender there is the event author. Wrap authors are ephemeral, so
+        // those publishes do not share a bucket. The gate applies its own
+        // `gift:{authed member}:{recipient}` limit before it forwards.
         let rate_key = if event.kind == 1059 {
             if !self.config.allowed_kinds.contains(&event.kind) {
                 return Decision::Reject(format!("blocked: event kind {} not allowed", event.kind));
             }
             match self.allowlisted_recipient(event) {
-                Some(pubkey) => format!("gift:{pubkey}"),
+                Some(pubkey) => format!("gift:{}:{pubkey}", gift_sender(event)),
                 None => {
                     return Decision::Reject(
                         "blocked: gift wrap recipient not in member allowlist".into(),
@@ -239,8 +245,33 @@ impl PolicyEngine {
     }
 }
 
+/// A rejected write that may be a stale allowlist or writer map.
+///
+/// The LIVE query is the primary reload. This is the backup: an unknown
+/// author, an unknown group, or a pubkey that is not in the group's writer
+/// set. Callers debounce it so a flood of rejects cannot hammer SurrealDB.
+pub fn reload_on_write_miss(reason: &str) -> bool {
+    reason.contains("not in member allowlist")
+        || reason.contains("unknown group")
+        || reason.contains("not a member of group")
+}
+
+/// Sender half of a gift-wrap rate key.
+///
+/// Prefer the NIP-42 pubkey strfry attached to the connection. Fall back to
+/// the event author, which is ephemeral for kind 1059.
+fn gift_sender(event: &EventInfo) -> String {
+    if let Some(pk) = event.authed.as_deref() {
+        let pk = pk.trim().to_ascii_lowercase();
+        if pk.len() == 64 && pk.chars().all(|c| c.is_ascii_hexdigit()) {
+            return pk;
+        }
+    }
+    event.pubkey.to_ascii_lowercase()
+}
+
 /// Minimal event information extracted from the strfry input.
-/// Only fields needed for policy decisions — never the encrypted content.
+/// Only fields needed for policy decisions. Never the encrypted content.
 #[derive(Debug, Clone)]
 pub struct EventInfo {
     /// Carried for completeness/logging; policy decisions key off the strfry
@@ -250,6 +281,10 @@ pub struct EventInfo {
     pub pubkey: String,
     pub kind: u64,
     pub tags: Vec<Vec<String>>,
+    /// NIP-42 pubkey from strfry's `authed` field, when the connection to
+    /// strfry itself completed AUTH. Absent for gate-forwarded events and
+    /// for site-server's one-shot publishes.
+    pub authed: Option<String>,
 }
 
 impl EventInfo {
@@ -291,6 +326,7 @@ mod tests {
             pubkey: pubkey.to_string(),
             kind,
             tags: vec![],
+            authed: None,
         }
     }
 
@@ -300,6 +336,7 @@ mod tests {
             pubkey: pubkey.to_string(),
             kind,
             tags: vec![vec!["h".to_string(), group_id.to_string()]],
+            authed: None,
         }
     }
 
@@ -438,6 +475,7 @@ mod tests {
             pubkey: "ff".repeat(32),
             kind: 1059,
             tags: vec![vec!["p".to_string(), member.clone()]],
+            authed: None,
         };
         assert_eq!(engine.evaluate(&wrap), Decision::Accept);
         for kind in [0_u64, 7, 34550] {
@@ -459,6 +497,7 @@ mod tests {
             pubkey: "ff".repeat(32),
             kind: 1059,
             tags: vec![vec!["p".to_string(), member.to_uppercase()]],
+            authed: None,
         };
         assert_eq!(engine.evaluate(&wrap), Decision::Accept);
 
@@ -475,10 +514,75 @@ mod tests {
             pubkey: "ff".repeat(32),
             kind: 1059,
             tags: vec![vec!["p".to_string(), "ab".repeat(32)]],
+            authed: None,
         };
         assert!(
             matches!(engine.evaluate(&wrap), Decision::Reject(msg) if msg.contains("gift wrap"))
         );
+    }
+
+    #[test]
+    fn gift_wrap_senders_do_not_share_a_recipient_bucket() {
+        let config = PolicyConfig {
+            rate_limit_events: 1,
+            ..PolicyConfig::default()
+        };
+        let mut engine = PolicyEngine::new(config);
+        let member = "aabbccdd".repeat(8);
+        let mut allowlist = HashSet::new();
+        allowlist.insert(member.clone());
+        engine.update_allowlist(allowlist);
+
+        let wrap = |author: &str, authed: Option<&str>| EventInfo {
+            id: "deadbeef".repeat(8),
+            pubkey: author.to_string(),
+            kind: 1059,
+            tags: vec![vec!["p".to_string(), member.clone()]],
+            authed: authed.map(str::to_string),
+        };
+        let author_a = "11".repeat(32);
+        let author_b = "22".repeat(32);
+        assert_eq!(engine.evaluate(&wrap(&author_a, None)), Decision::Accept);
+        assert!(matches!(
+            engine.evaluate(&wrap(&author_a, None)),
+            Decision::Reject(msg) if msg.contains("rate-limited")
+        ));
+        assert_eq!(
+            engine.evaluate(&wrap(&author_b, None)),
+            Decision::Accept,
+            "a second ephemeral author must not consume the first sender's bucket"
+        );
+
+        let authed_a = "33".repeat(32);
+        let authed_b = "44".repeat(32);
+        assert_eq!(
+            engine.evaluate(&wrap(&author_a, Some(&authed_a))),
+            Decision::Accept
+        );
+        assert!(matches!(
+            engine.evaluate(&wrap(&author_b, Some(&authed_a))),
+            Decision::Reject(msg) if msg.contains("rate-limited")
+        ));
+        assert_eq!(
+            engine.evaluate(&wrap(&author_a, Some(&authed_b))),
+            Decision::Accept,
+            "a second authenticated sender must not consume the first sender's bucket"
+        );
+    }
+
+    #[test]
+    fn write_miss_reasons_schedule_a_reload() {
+        assert!(reload_on_write_miss(
+            "blocked: pubkey not in member allowlist"
+        ));
+        assert!(reload_on_write_miss("blocked: unknown group 'team-z'"));
+        assert!(reload_on_write_miss(
+            "blocked: not a member of group 'team-z-officers'"
+        ));
+        assert!(!reload_on_write_miss(
+            "blocked: event kind 12345 not allowed"
+        ));
+        assert!(!reload_on_write_miss("rate-limited: too many events"));
     }
 
     #[test]

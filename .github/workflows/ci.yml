@@ -177,7 +177,11 @@ jobs:
   relay-policy:
     name: Relay policy
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Slowest green run on this branch was 27m06s (actions run 39151255510,
+    # head 7f995aa, 2026-10-18). The two runs before it were 23m16s and
+    # 24m36s. 40 minutes is that measurement plus about 13 minutes for a
+    # cold cache. 30 is only three minutes over the slowest run.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
