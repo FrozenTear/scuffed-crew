@@ -67,9 +67,11 @@ pub struct Config {
     /// without templates that step is skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
-    /// `prerelease` opts the desktop updater into alphas and rcs.
-    /// Missing, empty, and anything else mean stable, so a release install
-    /// is not offered an alpha. Edited in place when this is the only change.
+    /// `prerelease` opts the desktop updater into alphas and rcs. Any other
+    /// set value means stable. Missing or empty follows the installed build:
+    /// a release install is not offered an alpha, and an alpha or rc install
+    /// keeps getting newer alphas and rcs. Edited in place when this is the
+    /// only change.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub update_channel: String,
     /// First-run guide finished or skipped. Missing means not completed, so

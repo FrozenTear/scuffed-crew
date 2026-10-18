@@ -2,7 +2,11 @@
 //!
 //! Log-only reports: the member picks `crash`, `performance`, or `other`,
 //! types a short note, and reads a preview built from the exact zip that
-//! would leave the PC. A game report (Games tab and the game card) is the
+//! would leave the PC. The dialog opens with nothing picked. Exactly one
+//! kind is picked at a time: a log chip clears the game row (and the game
+//! and its pictures), and a game chip clears the log row. `crash` and
+//! `performance` never carry a game or pictures. The Send button names the
+//! picked kind and says whether pictures go with it. A game report (Games tab and the game card) is the
 //! same dialog for one session: no category is picked when it opens, the
 //! member picks one before Send or Save, and the list leaves out `crash`
 //! and `performance`. **Send** posts that zip to the
@@ -199,9 +203,65 @@ pub enum SendState {
     Done(SendOutcome),
 }
 
+/// The one kind of report the member picked: a chip in the top row
+/// (log only, never a game or pictures) or a chip under About a game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickedKind {
+    Log(LogOnlyCategory),
+    Game(GameCategory),
+}
+
+impl PickedKind {
+    /// Every kind a member can pick, top row first.
+    pub const ALL: [Self; 10] = [
+        Self::Log(LogOnlyCategory::Crash),
+        Self::Log(LogOnlyCategory::Performance),
+        Self::Log(LogOnlyCategory::Other),
+        Self::Game(GameCategory::WrongStats),
+        Self::Game(GameCategory::WrongHero),
+        Self::Game(GameCategory::WrongMap),
+        Self::Game(GameCategory::WrongMode),
+        Self::Game(GameCategory::WrongResult),
+        Self::Game(GameCategory::MissedGame),
+        Self::Game(GameCategory::Other),
+    ];
+
+    /// `reason.category` the uploaded manifest carries for this kind.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Log(c) => c.as_str(),
+            Self::Game(c) => c.as_str(),
+        }
+    }
+
+    pub const fn is_game(self) -> bool {
+        matches!(self, Self::Game(_))
+    }
+}
+
+/// What [`ReportDialog::build_plan`] says to do for the current inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildPlan {
+    /// Nothing is picked and there is no game to show: no zip.
+    Nothing,
+    /// A game opened from its card with no kind picked yet: show its
+    /// pictures, build nothing.
+    LoadKit(String),
+    /// A log-only zip. Never a game, never pictures.
+    Log(LogOnlyCategory),
+    /// A game zip for `session_id`.
+    Game {
+        session_id: String,
+        category: GameCategory,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ReportDialog {
-    pub category: LogOnlyCategory,
+    /// The kind picked in the top row (log only). `None` when nothing is
+    /// picked there. Set only together with `game_report == false` and no
+    /// game category, so two rows are never picked at once.
+    pub category: Option<LogOnlyCategory>,
     /// The report is about a game. Log chips are then unselected.
     pub game_report: bool,
     /// The game category the member picked. `None` on a game report until
@@ -237,7 +297,8 @@ pub struct ReportDialog {
 }
 
 impl ReportDialog {
-    pub fn new(category: LogOnlyCategory, linked: bool) -> Self {
+    /// A log dialog with `category` picked, or nothing picked.
+    pub fn new(category: Option<LogOnlyCategory>, linked: bool) -> Self {
         Self {
             category,
             game_report: false,
@@ -277,15 +338,145 @@ impl ReportDialog {
     }
 
     /// A dialog about one game, opened with `category` picked or none.
+    /// The top row starts with nothing picked.
     pub fn for_game(category: Option<GameCategory>, linked: bool) -> Self {
-        let mut dialog = Self::new(LogOnlyCategory::Other, linked);
+        let mut dialog = Self::new(None, linked);
         dialog.game_report = true;
         dialog.game_category = category;
         dialog
     }
 
+    /// The report is about a game. A picked log kind always wins, so a
+    /// stale game flag can never turn a log report into a game one.
     pub fn is_game(&self) -> bool {
-        self.game_report
+        self.game_report && self.category.is_none()
+    }
+
+    /// The one kind that would be sent, if any.
+    pub fn picked(&self) -> Option<PickedKind> {
+        if let Some(category) = self.category {
+            return Some(PickedKind::Log(category));
+        }
+        if self.game_report {
+            return self.game_category.map(PickedKind::Game);
+        }
+        None
+    }
+
+    /// Whether `kind`'s chip is drawn selected. At most one chip is.
+    pub fn is_picked(&self, kind: PickedKind) -> bool {
+        self.picked() == Some(kind)
+    }
+
+    /// Edits are off while sending or saving and after a send.
+    fn locked(&self) -> bool {
+        self.busy() || self.sent()
+    }
+
+    /// Pick a top-row kind. Clears the game row, the game, and its
+    /// pictures: a log report never carries them. Returns true when the
+    /// inputs changed and the preview must be rebuilt.
+    pub fn pick_log(&mut self, category: LogOnlyCategory) -> bool {
+        if self.locked() || self.picked() == Some(PickedKind::Log(category)) {
+            return false;
+        }
+        self.category = Some(category);
+        self.game_report = false;
+        self.game_category = None;
+        self.game_session = None;
+        self.kit_images.clear();
+        self.kit_loading = None;
+        self.built = None;
+        true
+    }
+
+    /// Pick a kind under About a game. Clears the top row. `choices` fills
+    /// the game list when the dialog has none yet. Returns true when the
+    /// inputs changed.
+    pub fn pick_game(&mut self, category: GameCategory, choices: Vec<GameChoice>) -> bool {
+        if self.locked() || self.picked() == Some(PickedKind::Game(category)) {
+            return false;
+        }
+        self.category = None;
+        self.game_report = true;
+        self.game_category = Some(category);
+        if self.game_choices.is_empty() {
+            self.game_choices = choices;
+        }
+        if category.allows_missing_kit() {
+            self.game_session = None;
+        }
+        self.kit_images.clear();
+        self.built = None;
+        true
+    }
+
+    /// Pick the game a game report is about. Ignored on a log report, so a
+    /// game can never ride along with Crash or Performance.
+    pub fn pick_session(&mut self, session_id: String) -> bool {
+        if self.locked() || !self.is_game() {
+            return false;
+        }
+        if self.game_session.as_deref() == Some(session_id.as_str()) {
+            return false;
+        }
+        self.game_session = Some(session_id);
+        self.kit_images.clear();
+        self.built = None;
+        true
+    }
+
+    /// What to build for the current inputs. The zip kind always follows
+    /// [`Self::picked`].
+    pub fn build_plan(&self) -> BuildPlan {
+        match self.picked() {
+            Some(PickedKind::Log(category)) => BuildPlan::Log(category),
+            Some(PickedKind::Game(category)) => BuildPlan::Game {
+                session_id: self.game_session.clone().unwrap_or_default(),
+                category,
+            },
+            None => match (&self.game_session, self.is_game()) {
+                (Some(session_id), true) => BuildPlan::LoadKit(session_id.clone()),
+                _ => BuildPlan::Nothing,
+            },
+        }
+    }
+
+    /// Pictures go with the report. From the built zip when there is a
+    /// current one, else what the picked kind would carry.
+    pub fn sends_pictures(&self) -> bool {
+        match self.picked() {
+            None | Some(PickedKind::Log(_)) => false,
+            Some(PickedKind::Game(category)) => match &self.built {
+                Some(Ok(zip)) if self.preview_current() => !zip.images.is_empty(),
+                _ => !category.allows_missing_kit(),
+            },
+        }
+    }
+
+    /// The Send button's text: the picked kind and whether pictures go.
+    pub fn send_label(&self) -> String {
+        if matches!(self.send, SendState::Sending) {
+            return "Sending...".into();
+        }
+        let again = matches!(self.send, SendState::Done(SendOutcome::Failed(_)));
+        let Some(kind) = self.picked() else {
+            return if again { "Send again" } else { "Send" }.into();
+        };
+        let what = match kind {
+            PickedKind::Log(category) => format!("{} report", category_label(category)),
+            PickedKind::Game(category) => format!("game report: {}", category.label()),
+        };
+        let pictures = if self.sends_pictures() {
+            "with pictures"
+        } else {
+            "no pictures"
+        };
+        if again {
+            format!("Send again: {what} ({pictures})")
+        } else {
+            format!("Send {what} ({pictures})")
+        }
     }
 
     /// A game report needs a picked category before it is built or sent.
@@ -317,7 +508,7 @@ impl ReportDialog {
     /// dialog, and a game zip is never sent from a log dialog.
     pub fn can_send(&self) -> bool {
         self.linked
-            && !self.needs_game_category()
+            && self.picked().is_some()
             && self.preview_current()
             && self.preview_matches_kind()
             && !matches!(self.send, SendState::Sending)
@@ -329,19 +520,22 @@ impl ReportDialog {
     }
 
     pub fn can_save(&self) -> bool {
-        !self.needs_game_category()
+        self.picked().is_some()
             && self.preview_current()
             && self.preview_matches_kind()
             && !self.saving
             && !self.sent()
     }
 
-    /// The preview zip is a game report exactly when the dialog is one.
+    /// The preview zip is the picked kind: its `reason.category` is the
+    /// picked one, it has a game exactly when a game kind is picked, and a
+    /// log kind carries no pictures. A zip left from an earlier pick is
+    /// never sent.
     fn preview_matches_kind(&self) -> bool {
-        let Some(Ok(zip)) = &self.built else {
+        let (Some(Ok(zip)), Some(kind)) = (&self.built, self.picked()) else {
             return false;
         };
-        manifest_has_game(&zip.manifest_json) == self.is_game()
+        zip_matches_kind(zip, kind)
     }
 
     pub fn busy(&self) -> bool {
@@ -358,6 +552,29 @@ impl ReportDialog {
         }
         self.generation
     }
+}
+
+/// `zip` is a report of `kind`: same `reason.category`, a game exactly
+/// for a game kind, and no pictures for a log kind.
+pub fn zip_matches_kind(zip: &ReportZip, kind: PickedKind) -> bool {
+    if manifest_has_game(&zip.manifest_json) != kind.is_game() {
+        return false;
+    }
+    if manifest_reason_category(&zip.manifest_json).as_deref() != Some(kind.as_str()) {
+        return false;
+    }
+    kind.is_game()
+        || (zip.images.is_empty() && !zip.files.iter().any(|f| f.path.starts_with("crops/")))
+}
+
+/// `manifest.reason.category`, if the manifest has one.
+fn manifest_reason_category(manifest_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(manifest_json)
+        .ok()?
+        .get("reason")?
+        .get("category")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// `manifest.game` is an object on a game report and null on a log report.
@@ -755,7 +972,10 @@ fn category_hint(category: LogOnlyCategory) -> &'static str {
     }
 }
 
-fn btn<'a>(label: &'a str, color: iced::Color) -> iced::widget::Button<'a, Message> {
+fn btn<'a>(
+    label: impl iced::widget::text::IntoFragment<'a>,
+    color: iced::Color,
+) -> iced::widget::Button<'a, Message> {
     button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(color))
         .padding(Padding::from([8, 16]))
 }
@@ -832,7 +1052,7 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
         LogOnlyCategory::Performance,
         LogOnlyCategory::Other,
     ] {
-        let selected = d.category == category;
+        let selected = d.is_picked(PickedKind::Log(category));
         let mut chip = btn(
             category_label(category),
             if selected { TEXT } else { TEXT_2 },
@@ -846,12 +1066,11 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     body = body.push(chips);
     body = body.push(game_row(d));
     body = body.push(
-        text(if let Some(category) = d.game_category {
-            game_hint(category)
-        } else if d.is_game() {
-            "Pick what was wrong with this game before you send the report."
-        } else {
-            category_hint(d.category)
+        text(match d.picked() {
+            Some(PickedKind::Log(category)) => category_hint(category),
+            Some(PickedKind::Game(category)) => game_hint(category),
+            None if d.is_game() => "Pick what was wrong with this game before you send the report.",
+            None => "Pick what kind of problem this is before you send the report.",
         })
         .size(SIZE_META)
         .font(FONT_MEDIUM)
@@ -920,7 +1139,7 @@ fn game_row(d: &ReportDialog) -> Element<'_, Message> {
     for row in GameCategory::ALL.chunks(4) {
         let mut chips = Row::new().spacing(6);
         for category in row.iter().copied() {
-            let selected = d.game_category == Some(category);
+            let selected = d.is_picked(PickedKind::Game(category));
             let mut chip = btn(category.label(), if selected { TEXT } else { TEXT_2 })
                 .style(theme::chip(selected));
             if !d.busy() && !d.sent() {
@@ -933,7 +1152,7 @@ fn game_row(d: &ReportDialog) -> Element<'_, Message> {
     if d.is_game() && !d.game_category.is_some_and(|c| c.allows_missing_kit()) {
         col = col.push(game_picker(d));
     }
-    if !d.kit_images.is_empty() {
+    if d.is_game() && !d.kit_images.is_empty() {
         col = col.push(kit_pictures(d));
     } else if let Some(note) = d.pictures_note() {
         col = col.push(text(note).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
@@ -1052,10 +1271,10 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
             );
         }
         Some(Ok(zip)) => {
-            let pictures = if d.is_game() {
-                "The pictures above are the ones in the zip."
+            let pictures = if zip.images.is_empty() {
+                "No pictures."
             } else {
-                "No screenshots."
+                "The pictures above are the ones in the zip."
             };
             col = col.push(
                 text(format!(
@@ -1255,13 +1474,7 @@ fn actions(d: &ReportDialog) -> Element<'_, Message> {
     }
     if !d.sent() {
         let save = action_btn("Save report", false, d.can_save(), ReportMessage::Save);
-        let failed = matches!(d.send, SendState::Done(SendOutcome::Failed(_)));
-        let label = match d.send {
-            SendState::Sending => "Sending...",
-            _ if failed => "Send again",
-            _ => "Send",
-        };
-        let send = action_btn(label, true, d.can_send(), ReportMessage::Send);
+        let send = action_btn(d.send_label(), true, d.can_send(), ReportMessage::Send);
         out = out.push(save).push(send);
     }
     out.into()
@@ -1269,12 +1482,12 @@ fn actions(d: &ReportDialog) -> Element<'_, Message> {
 
 /// A disabled button is drawn flat with dim text, so it does not look
 /// pressable. Only an enabled primary button gets the accent fill.
-fn action_btn(
-    label: &str,
+fn action_btn<'a>(
+    label: impl iced::widget::text::IntoFragment<'a>,
     primary: bool,
     enabled: bool,
     on_press: ReportMessage,
-) -> iced::widget::Button<'_, Message> {
+) -> iced::widget::Button<'a, Message> {
     if !enabled {
         return btn(label, TEXT_3).style(theme::chip(false));
     }
@@ -1453,12 +1666,12 @@ mod tests {
     fn send_and_save_need_a_current_preview() {
         let zip = Arc::new(ReportZip {
             bytes: vec![1, 2, 3],
-            manifest_json: "{}".into(),
+            manifest_json: r#"{"game":null,"reason":{"category":"other"}}"#.into(),
             files: Vec::new(),
             log_text: String::new(),
             images: Vec::new(),
         });
-        let mut d = ReportDialog::new(LogOnlyCategory::Other, true);
+        let mut d = ReportDialog::new(Some(LogOnlyCategory::Other), true);
         assert!(!d.can_send() && !d.can_save());
         d.built = Some(Ok(zip.clone()));
         assert!(d.can_send() && d.can_save());
@@ -1486,8 +1699,8 @@ mod tests {
         assert!(d.generation > before);
         // Generations are process-wide: a reopened dialog's first build never
         // shares a number with a build still in flight from the closed one.
-        let closed = ReportDialog::new(LogOnlyCategory::Crash, true).bump();
-        let reopened = ReportDialog::new(LogOnlyCategory::Crash, true).bump();
+        let closed = ReportDialog::new(Some(LogOnlyCategory::Crash), true).bump();
+        let reopened = ReportDialog::new(Some(LogOnlyCategory::Crash), true).bump();
         assert_ne!(closed, reopened);
         assert_eq!(d.send, SendState::Idle);
     }
@@ -1581,11 +1794,12 @@ mod tests {
         let log_zip = stat_tracker::report::build_log_report(&log_input).unwrap();
         assert!(!manifest_has_game(&log_zip.manifest_json));
 
-        let mut dialog = ReportDialog::new(LogOnlyCategory::Other, true);
-        dialog.built = Some(Ok(Arc::new(log_zip)));
+        let log_zip = Arc::new(log_zip);
+        let mut dialog = ReportDialog::new(Some(LogOnlyCategory::Other), true);
+        dialog.built = Some(Ok(log_zip.clone()));
         assert!(dialog.can_send() && dialog.can_save());
-        dialog.game_report = true;
-        dialog.game_category = Some(GameCategory::WrongStats);
+        assert!(dialog.pick_game(GameCategory::WrongStats, Vec::new()));
+        dialog.built = Some(Ok(log_zip));
         assert!(!dialog.can_send() && !dialog.can_save());
 
         // A bare scoreboard file is not a kit. `kit::load` wants the hash.
@@ -1683,7 +1897,7 @@ mod tests {
         assert!(!d.can_send() && !d.can_save());
         let picked = ReportDialog::for_game(Some(GameCategory::WrongHero), true);
         assert!(!picked.needs_game_category());
-        assert!(!ReportDialog::new(LogOnlyCategory::Other, true).needs_game_category());
+        assert!(!ReportDialog::new(Some(LogOnlyCategory::Other), true).needs_game_category());
     }
 
     /// A game opened from its card has no category, so its pictures are not
@@ -1706,8 +1920,341 @@ mod tests {
             Some("No pictures for this game yet.")
         );
         assert_eq!(
-            ReportDialog::new(LogOnlyCategory::Other, true).pictures_note(),
+            ReportDialog::new(Some(LogOnlyCategory::Other), true).pictures_note(),
             None
+        );
+    }
+    /// Data dir with one checked kit (`s1`) for the pick tests.
+    fn pick_fixture() -> (tempfile::TempDir, Config) {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = stat_tracker::report::kit::session_dir(tmp.path(), "s1").unwrap();
+        write_checked_kit(&session, &one_pixel_png());
+        let config = Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        (tmp, config)
+    }
+
+    /// Build the zip `plan` asks for with the real report builders, the
+    /// same ones `rebuild_report` runs. `None` when the plan builds nothing.
+    fn build_for_plan(config: &Config, plan: &BuildPlan) -> Option<Arc<ReportZip>> {
+        let built_at = Utc.with_ymd_and_hms(2026, 10, 18, 12, 0, 0).unwrap();
+        match plan {
+            BuildPlan::Nothing | BuildPlan::LoadKit(_) => None,
+            BuildPlan::Log(category) => {
+                let input = LogReportInput::from_config(
+                    config,
+                    *category,
+                    String::new(),
+                    FALLBACK_RESOLUTION,
+                    CaptureBackend::None,
+                    false,
+                    Vec::new(),
+                    built_at,
+                );
+                Some(Arc::new(
+                    stat_tracker::report::build_log_report(&input).unwrap(),
+                ))
+            }
+            BuildPlan::Game {
+                session_id,
+                category,
+            } => {
+                let input = GameReportInput::from_config(
+                    config,
+                    session_id,
+                    *category,
+                    String::new(),
+                    CaptureBackend::None,
+                    false,
+                    Vec::new(),
+                    built_at,
+                )
+                .unwrap();
+                Some(Arc::new(
+                    stat_tracker::report::build_game_report(&input).unwrap(),
+                ))
+            }
+        }
+    }
+
+    fn choices() -> Vec<GameChoice> {
+        vec![GameChoice {
+            session_id: "s1".into(),
+            label: "Dorado".into(),
+            has_kit: true,
+        }]
+    }
+
+    /// Click `kind` the way the dialog does: a game kind also picks the
+    /// game from the list, except Missed game, which has none.
+    fn click(d: &mut ReportDialog, kind: PickedKind) {
+        match kind {
+            PickedKind::Log(category) => {
+                d.pick_log(category);
+            }
+            PickedKind::Game(category) => {
+                d.pick_game(category, choices());
+                if !category.allows_missing_kit() {
+                    d.pick_session("s1".into());
+                }
+            }
+        }
+    }
+
+    /// Never two rows at once, and a log kind never carries a game or
+    /// pictures.
+    fn assert_one_row(d: &ReportDialog, ctx: &str) {
+        let top = PickedKind::ALL[..3]
+            .iter()
+            .filter(|k| d.is_picked(**k))
+            .count();
+        let game = PickedKind::ALL[3..]
+            .iter()
+            .filter(|k| d.is_picked(**k))
+            .count();
+        assert!(
+            top + game <= 1,
+            "{ctx}: {top} top and {game} game chips picked"
+        );
+        if d.category.is_some() {
+            assert!(!d.is_game(), "{ctx}: log kind is a game report");
+            assert_eq!(d.game_category, None, "{ctx}: log kind kept a game kind");
+            assert_eq!(d.game_session, None, "{ctx}: log kind kept a game");
+            assert!(d.kit_images.is_empty(), "{ctx}: log kind kept pictures");
+        }
+    }
+
+    /// Build what the dialog would build, then check the zip Send would
+    /// post is exactly the picked kind, with pictures only for a game.
+    fn assert_sent_kind_is_picked(
+        d: &mut ReportDialog,
+        config: &Config,
+        expected: PickedKind,
+        ctx: &str,
+    ) {
+        assert_eq!(d.picked(), Some(expected), "{ctx}");
+        let zip = build_for_plan(config, &d.build_plan())
+            .unwrap_or_else(|| panic!("{ctx}: a picked kind builds a zip"));
+        d.built = Some(Ok(zip.clone()));
+        assert!(d.can_send() && d.can_save(), "{ctx}: cannot send");
+        let sent = d.zip().unwrap();
+        assert_eq!(
+            manifest_reason_category(&sent.manifest_json).as_deref(),
+            Some(expected.as_str()),
+            "{ctx}: uploaded kind"
+        );
+        assert_eq!(
+            manifest_has_game(&sent.manifest_json),
+            expected.is_game(),
+            "{ctx}: game in the upload"
+        );
+        let label = d.send_label();
+        match expected {
+            PickedKind::Log(category) => {
+                assert!(sent.images.is_empty(), "{ctx}: log kind sent pictures");
+                assert!(
+                    !sent.files.iter().any(|f| f.path.starts_with("crops/")),
+                    "{ctx}: log kind sent crops"
+                );
+                assert_eq!(
+                    label,
+                    format!("Send {} report (no pictures)", category_label(category)),
+                    "{ctx}"
+                );
+            }
+            PickedKind::Game(category) => {
+                assert_eq!(
+                    sent.images.is_empty(),
+                    category.allows_missing_kit(),
+                    "{ctx}: game pictures"
+                );
+                let pictures = if category.allows_missing_kit() {
+                    "no pictures"
+                } else {
+                    "with pictures"
+                };
+                assert_eq!(
+                    label,
+                    format!("Send game report: {} ({pictures})", category.label()),
+                    "{ctx}"
+                );
+            }
+        }
+        assert!(!label.contains('\u{2014}'), "{ctx}: no em dash in {label}");
+    }
+
+    /// The alpha.11 bug: Performance in the top row, then Other under
+    /// About a game with a game picked. Both chips looked picked and only
+    /// the game report (with its scoreboard) was sent. Now one row wins,
+    /// and going back to Performance sends Performance with no pictures.
+    #[test]
+    fn performance_then_other_game_sends_only_the_last_pick() {
+        let (_tmp, config) = pick_fixture();
+        let mut d = ReportDialog::new(None, true);
+        click(&mut d, PickedKind::Log(LogOnlyCategory::Performance));
+        click(&mut d, PickedKind::Game(GameCategory::Other));
+        assert_one_row(&d, "performance then other");
+        assert!(!d.is_picked(PickedKind::Log(LogOnlyCategory::Performance)));
+        assert!(!d.is_picked(PickedKind::Log(LogOnlyCategory::Other)));
+        assert_eq!(d.game_session.as_deref(), Some("s1"));
+        assert_sent_kind_is_picked(
+            &mut d,
+            &config,
+            PickedKind::Game(GameCategory::Other),
+            "performance then other",
+        );
+        let game_zip = d.built.clone();
+
+        // Back to Performance: the game, its pictures, and the game zip go.
+        d.kit_images = kit_images_from_zip(d.zip().as_ref().unwrap());
+        assert!(!d.kit_images.is_empty());
+        assert!(d.pick_log(LogOnlyCategory::Performance));
+        assert_one_row(&d, "back to performance");
+        assert_eq!(d.build_plan(), BuildPlan::Log(LogOnlyCategory::Performance));
+        // The game zip from the earlier pick is never sent as Performance.
+        d.built = game_zip;
+        assert!(!d.can_send() && !d.can_save(), "stale game zip");
+        assert_sent_kind_is_picked(
+            &mut d,
+            &config,
+            PickedKind::Log(LogOnlyCategory::Performance),
+            "back to performance",
+        );
+        // A game cannot be picked onto a Performance report.
+        assert!(!d.pick_session("s1".into()));
+        assert_eq!(d.game_session, None);
+    }
+
+    /// Every start (fresh, crash prompt, each log kind, a game card with
+    /// and without a kind) and every pair of picks: the uploaded kind is
+    /// the last pick.
+    #[test]
+    fn uploaded_kind_matches_the_picked_kind_for_every_combination() {
+        let (_tmp, config) = pick_fixture();
+        let mut starts: Vec<(String, ReportDialog)> =
+            vec![("fresh".into(), ReportDialog::new(None, true))];
+        for category in [
+            LogOnlyCategory::Crash,
+            LogOnlyCategory::Performance,
+            LogOnlyCategory::Other,
+        ] {
+            starts.push((
+                format!("opened on {category:?}"),
+                ReportDialog::new(Some(category), true),
+            ));
+        }
+        let mut card = ReportDialog::for_game(None, true);
+        card.game_session = Some("s1".into());
+        card.game_choices = choices();
+        starts.push(("game card".into(), card));
+        for category in GameCategory::ALL {
+            let mut d = ReportDialog::for_game(Some(category), true);
+            if !category.allows_missing_kit() {
+                d.game_session = Some("s1".into());
+            }
+            d.game_choices = choices();
+            starts.push((format!("game card on {category:?}"), d));
+        }
+
+        let mut checked = 0;
+        for (start, dialog) in &starts {
+            for first in PickedKind::ALL {
+                for second in std::iter::once(None).chain(PickedKind::ALL.map(Some)) {
+                    let ctx = format!("{start}, then {first:?}, then {second:?}");
+                    let mut d = dialog.clone();
+                    click(&mut d, first);
+                    assert_one_row(&d, &ctx);
+                    if let Some(second) = second {
+                        click(&mut d, second);
+                        assert_one_row(&d, &ctx);
+                    }
+                    let expected = second.unwrap_or(first);
+                    assert_sent_kind_is_picked(&mut d, &config, expected, &ctx);
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, starts.len() * 10 * 11);
+    }
+
+    /// Crash and Performance never carry a game or pictures, even when the
+    /// dialog opened on a game with its pictures already shown.
+    #[test]
+    fn a_preselected_game_is_cleared_by_crash_or_performance() {
+        let (_tmp, config) = pick_fixture();
+        for category in [LogOnlyCategory::Crash, LogOnlyCategory::Performance] {
+            for opened_on in std::iter::once(None).chain(GameCategory::ALL.map(Some)) {
+                let ctx = format!("{category:?} on a card opened with {opened_on:?}");
+                let mut d = ReportDialog::for_game(opened_on, true);
+                d.game_session = Some("s1".into());
+                d.game_choices = choices();
+                d.kit_images = kit_images_from_report_images(
+                    stat_tracker::report::bundle::kit_preview_images(
+                        &stat_tracker::report::kit::load(&config.data_dir, "s1"),
+                    ),
+                );
+                assert!(!d.kit_images.is_empty(), "{ctx}");
+                assert_eq!(d.category, None, "{ctx}: top row starts empty");
+                assert!(d.pick_log(category), "{ctx}");
+                assert_one_row(&d, &ctx);
+                assert_eq!(d.game_session, None, "{ctx}");
+                assert!(!d.sends_pictures(), "{ctx}");
+                assert_sent_kind_is_picked(&mut d, &config, PickedKind::Log(category), &ctx);
+            }
+        }
+    }
+
+    /// Reopening Report a problem starts with nothing picked: no chip in
+    /// either row, nothing built, and Send and Save stay off.
+    #[test]
+    fn reopening_starts_with_nothing_picked() {
+        let (_tmp, config) = pick_fixture();
+        let mut d = ReportDialog::new(None, true);
+        click(&mut d, PickedKind::Game(GameCategory::WrongStats));
+        assert_sent_kind_is_picked(
+            &mut d,
+            &config,
+            PickedKind::Game(GameCategory::WrongStats),
+            "before close",
+        );
+        // Close drops the dialog; the menu opens a new one with `Open(None)`.
+        let reopened = ReportDialog::new(None, true);
+        assert_eq!(reopened.picked(), None);
+        assert!(PickedKind::ALL.iter().all(|k| !reopened.is_picked(*k)));
+        assert_eq!(reopened.game_session, None);
+        assert_eq!(reopened.build_plan(), BuildPlan::Nothing);
+        assert!(!reopened.can_send() && !reopened.can_save());
+        assert_eq!(reopened.send_label(), "Send");
+        // A game card opens with the top row empty too.
+        let card = ReportDialog::for_game(None, true);
+        assert_eq!(card.picked(), None);
+        assert_eq!(card.category, None);
+    }
+
+    #[test]
+    fn send_label_names_the_kind_and_the_pictures() {
+        let mut d = ReportDialog::new(Some(LogOnlyCategory::Performance), true);
+        assert_eq!(d.send_label(), "Send Performance report (no pictures)");
+        d.send = SendState::Done(SendOutcome::Failed("x".into()));
+        assert_eq!(
+            d.send_label(),
+            "Send again: Performance report (no pictures)"
+        );
+        d.send = SendState::Sending;
+        assert_eq!(d.send_label(), "Sending...");
+        let mut d = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
+        assert_eq!(d.send_label(), "Send Crash report (no pictures)");
+        d.pick_game(GameCategory::WrongStats, Vec::new());
+        assert_eq!(
+            d.send_label(),
+            "Send game report: Wrong stats (with pictures)"
+        );
+        d.pick_game(GameCategory::MissedGame, Vec::new());
+        assert_eq!(
+            d.send_label(),
+            "Send game report: Missed game (no pictures)"
         );
     }
 }

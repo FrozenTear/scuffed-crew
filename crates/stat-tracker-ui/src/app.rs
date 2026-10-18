@@ -126,10 +126,12 @@ fn only_update_channel_changed(before: &Config, after: &Config) -> bool {
     same == *after
 }
 
-/// True when the save flipped the alpha updates opt-in, so the update check
-/// must run again on the new channel.
-fn update_channel_switched(before: &Config, after: &Config) -> bool {
-    before.wants_prerelease_updates() != after.wants_prerelease_updates()
+/// True when the save changed the channel the update check uses, so it must
+/// run again on the new channel. `installed` matters: on an alpha install an
+/// unset channel is already prerelease, so writing `stable` is a switch.
+fn update_channel_switched(before: &Config, after: &Config, installed: Option<&str>) -> bool {
+    update::prerelease_updates_effective(&before.update_channel, installed)
+        != update::prerelease_updates_effective(&after.update_channel, installed)
 }
 
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
@@ -522,7 +524,8 @@ impl TrackerApp {
             }
             LaunchNotes::Quiet { persist: None } => None,
         };
-        let mut settings = SettingsForm::from_config(&saved_config);
+        let mut settings = SettingsForm::from_config(&saved_config)
+            .with_installed_version(&saved_config, installed_version.as_deref());
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
         let daemon = DaemonView {
@@ -1098,7 +1101,8 @@ impl TrackerApp {
                             &self.settings,
                             &fresh,
                             fresh.shadow_recognizer_control(),
-                        );
+                        )
+                        .with_installed_version(&fresh, self.installed_version.as_deref());
                         self.saved_config = fresh;
                         self.config_unreadable = false;
                         self.health_status = self.health_now();
@@ -1118,12 +1122,20 @@ impl TrackerApp {
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
                         let gui_only = only_update_channel_changed(&self.saved_config, &config);
-                        let recheck = update_channel_switched(&self.saved_config, &config);
+                        let recheck = update_channel_switched(
+                            &self.saved_config,
+                            &config,
+                            self.installed_version.as_deref(),
+                        );
                         self.saved_config = config;
                         self.config_unreadable = false;
                         self.health_status = self.health_now();
                         self.overlay_hotkey = hotkey;
-                        self.settings = SettingsForm::from_config(&self.saved_config);
+                        self.settings = SettingsForm::from_config(&self.saved_config)
+                            .with_installed_version(
+                                &self.saved_config,
+                                self.installed_version.as_deref(),
+                            );
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
                         self.replace_toast(toast_after_successful_save(daemon_up && !gui_only));
@@ -1752,61 +1764,72 @@ impl TrackerApp {
         dialog.kit_images.clear();
         let generation = dialog.bump();
         dialog.kit_loading = None;
-        if dialog.needs_game_category() {
-            // Nothing to build until the member picks a category, but the
-            // game's pictures load now so the dialog shows them at once.
-            dialog.built = None;
-            dialog.building = None;
-            let Some(session_id) = dialog.game_session.clone() else {
-                return Task::none();
-            };
-            dialog.kit_loading = Some(generation);
-            let data_dir = config.data_dir.clone();
-            return Task::perform(
-                crate::report::load_kit_preview(data_dir, session_id),
-                move |images| {
-                    Message::Report(crate::report::ReportMessage::KitLoaded(generation, images))
-                },
-            );
-        }
-        dialog.building = Some(generation);
-        if let Some(category) = dialog.game_category {
-            let req = crate::report::GameBuildRequest {
-                config,
-                session_id: dialog.game_session.clone().unwrap_or_default(),
+        // The zip kind follows the one picked kind: a log pick never builds
+        // a game zip, so Performance and Crash never carry pictures.
+        match dialog.build_plan() {
+            crate::report::BuildPlan::Nothing => {
+                dialog.built = None;
+                dialog.building = None;
+                Task::none()
+            }
+            crate::report::BuildPlan::LoadKit(session_id) => {
+                // Nothing to build until the member picks a category, but
+                // the game's pictures load now so the dialog shows them.
+                dialog.built = None;
+                dialog.building = None;
+                dialog.kit_loading = Some(generation);
+                let data_dir = config.data_dir.clone();
+                Task::perform(
+                    crate::report::load_kit_preview(data_dir, session_id),
+                    move |images| {
+                        Message::Report(crate::report::ReportMessage::KitLoaded(generation, images))
+                    },
+                )
+            }
+            crate::report::BuildPlan::Game {
+                session_id,
                 category,
-                text: dialog.text.clone(),
-                training: dialog.training,
-                capture_backend,
-            };
-            return Task::perform(crate::report::build_game(req), move |result| {
-                Message::Report(crate::report::ReportMessage::Built(generation, result))
-            });
+            } => {
+                dialog.building = Some(generation);
+                let req = crate::report::GameBuildRequest {
+                    config,
+                    session_id,
+                    category,
+                    text: dialog.text.clone(),
+                    training: dialog.training,
+                    capture_backend,
+                };
+                Task::perform(crate::report::build_game(req), move |result| {
+                    Message::Report(crate::report::ReportMessage::Built(generation, result))
+                })
+            }
+            crate::report::BuildPlan::Log(category) => {
+                dialog.building = Some(generation);
+                let req = crate::report::BuildRequest {
+                    config,
+                    category,
+                    text: dialog.text.clone(),
+                    training: dialog.training,
+                    resolution: crate::report::display_resolution(),
+                    capture_backend,
+                };
+                Task::perform(crate::report::build(req), move |result| {
+                    Message::Report(crate::report::ReportMessage::Built(generation, result))
+                })
+            }
         }
-        let req = crate::report::BuildRequest {
-            config,
-            category: dialog.category,
-            text: dialog.text.clone(),
-            training: dialog.training,
-            resolution: crate::report::display_resolution(),
-            capture_backend,
-        };
-        Task::perform(crate::report::build(req), move |result| {
-            Message::Report(crate::report::ReportMessage::Built(generation, result))
-        })
     }
 
     fn on_report(&mut self, message: crate::report::ReportMessage) -> Task<Message> {
-        use crate::report::{
-            GameReportCategory, ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState,
-        };
+        use crate::report::{ReportDialog, ReportMessage, ReportUi, SendOutcome, SendState};
         match message {
             ReportMessage::Open(category) => {
                 if self.report_dialog_mut().is_some_and(|d| d.busy()) {
                     return Task::none();
                 }
                 let linked = self.saved_config.sync.is_some();
-                let category = category.unwrap_or(LogOnlyCategory::Other);
+                // A fresh dialog every time: nothing is picked unless the
+                // caller asked for a kind.
                 self.report = Some(ReportUi::Dialog(Box::new(ReportDialog::new(
                     category, linked,
                 ))));
@@ -1846,7 +1869,7 @@ impl TrackerApp {
             ReportMessage::CrashYes => {
                 let linked = self.saved_config.sync.is_some();
                 self.report = Some(ReportUi::Dialog(Box::new(ReportDialog::new(
-                    LogOnlyCategory::Crash,
+                    Some(LogOnlyCategory::Crash),
                     linked,
                 ))));
                 self.rebuild_report()
@@ -1868,14 +1891,10 @@ impl TrackerApp {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.category == category && !d.is_game() {
+                // Clears the game row, the game, and its pictures.
+                if !d.pick_log(category) {
                     return Task::none();
                 }
-                d.category = category;
-                d.game_report = false;
-                d.game_category = None;
-                d.game_session = None;
-                d.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::GameCategory(category) => {
@@ -1883,29 +1902,19 @@ impl TrackerApp {
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if dialog.busy() || dialog.sent() {
+                // Clears the top row.
+                if !dialog.pick_game(category, choices) {
                     return Task::none();
                 }
-                dialog.game_report = true;
-                dialog.game_category = Some(category);
-                if dialog.game_choices.is_empty() {
-                    dialog.game_choices = choices;
-                }
-                if category.allows_missing_kit() {
-                    dialog.game_session = None;
-                }
-                dialog.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::PickGame(session_id) => {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                if d.busy() || d.sent() {
+                if !d.pick_session(session_id) {
                     return Task::none();
                 }
-                d.game_session = Some(session_id);
-                d.kit_images.clear();
                 self.rebuild_report()
             }
             ReportMessage::ToggleImageScale => {
@@ -1992,7 +2001,7 @@ impl TrackerApp {
                         // accepted them.
                         d.built = None;
                         d.show_log = false;
-                        if let Some(sid) = d.game_session.clone() {
+                        if let Some(sid) = d.game_session.clone().filter(|_| d.is_game()) {
                             stat_tracker::report::kit::remove(&data_dir, &sid);
                         }
                     }
@@ -2920,19 +2929,27 @@ player_name = \"FrozenTear\"
                 .wants_prerelease_updates(),
             "the next update check reads prerelease from disk"
         );
-        assert!(super::update_channel_switched(&snapshot, &written));
+        assert!(super::update_channel_switched(&snapshot, &written, None));
         assert!(super::only_update_channel_changed(&snapshot, &written));
         assert_eq!(super::toast_after_successful_save(false), "Settings saved");
 
         let mut other = written.clone();
         other.debug_ocr = !other.debug_ocr;
         assert!(!super::only_update_channel_changed(&written, &other));
-        assert!(!super::update_channel_switched(&written, &other));
+        assert!(!super::update_channel_switched(&written, &other, None));
         assert!(!super::only_update_channel_changed(&written, &written));
 
         let mut respelled = written.clone();
         respelled.update_channel = "PRERELEASE".into();
-        assert!(!super::update_channel_switched(&written, &respelled));
+        assert!(!super::update_channel_switched(&written, &respelled, None));
+
+        // On an alpha install an unset channel is already prerelease, so
+        // writing `stable` switches and writing `prerelease` does not.
+        let alpha = Some("0.5.0-alpha.3");
+        let mut stable = snapshot.clone();
+        stable.update_channel = "stable".into();
+        assert!(super::update_channel_switched(&snapshot, &stable, alpha));
+        assert!(!super::update_channel_switched(&snapshot, &written, alpha));
     }
 
     #[test]
