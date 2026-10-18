@@ -376,7 +376,7 @@ impl Plane {
 
 /// Neutral (white/grey) brightness: min channel, zeroed where saturated.
 fn neutral_ink(img: &DynamicImage) -> Plane {
-    let rgb = img.to_rgb8();
+    let rgb = crate::perf::to_rgb8(img);
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let mut p = Plane::zeros(w, h);
     for (i, px) in rgb.pixels().enumerate() {

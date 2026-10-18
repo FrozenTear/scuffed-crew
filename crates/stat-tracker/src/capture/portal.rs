@@ -22,7 +22,9 @@ pub async fn capture() -> Result<DynamicImage, Box<dyn std::error::Error + Send 
     // a decode error included, so no screenshot is left behind.
     let file = RemoveOnDrop(path);
 
+    let convert_started = std::time::Instant::now();
     let img = image::open(&file.0).map_err(|e| format!("failed to open portal screenshot: {e}"))?;
+    crate::perf::record_grab_convert(convert_started.elapsed());
     drop(file);
 
     tracing::debug!(

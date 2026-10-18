@@ -385,7 +385,12 @@ fn package_version() -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
-    // First, before any thread, log line or Tesseract use: libgomp reads
+    // Before any thread the runtime would start. Each glibc arena is about
+    // 64 MiB, and Tab captures were leaving about 19 of them resident.
+    // The systemd unit sets MALLOC_ARENA_MAX as well, so a unit start is
+    // capped before the first allocation. This call covers every other start.
+    limit_glibc_arenas();
+    // Before any thread, log line or Tesseract use: libgomp reads
     // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
     // app with no unit installed) is replaced here by the same binary with
     // it set.
@@ -393,9 +398,33 @@ fn main() -> anyhow::Result<()> {
     let omp = stat_tracker::omp::ensure_thread_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        // Short-lived spawn_blocking threads were the arena source. Four
+        // stay up for about a minute instead of exiting after 10 seconds.
+        .max_blocking_threads(4)
+        .thread_keep_alive(std::time::Duration::from_secs(60))
         .build()
         .context("failed to start the async runtime")?
         .block_on(run(omp))
+}
+
+/// `M_ARENA_MAX=2` on glibc. Other libcs ignore the request.
+fn limit_glibc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: mallopt takes two integers and has no pointer arguments.
+        // Called once, before the runtime starts threads.
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+}
+
+/// Return free heap pages after a Tab capture. glibc otherwise keeps them
+/// on the arenas those short-lived threads allocated.
+fn release_glibc_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: malloc_trim(0) walks this process's heap. No pointers.
+        libc::malloc_trim(0);
+    }
 }
 
 async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
@@ -4396,6 +4425,10 @@ async fn run_loop(
                                 .await
                                 // `{:#}` keeps anyhow's context chain in the string.
                                 .map_err(|e| format!("{e:#}"));
+                            // The capture's frames and OCR buffers are dropped
+                            // with `result`. Hand the unused pages back before
+                            // the next Tab.
+                            release_glibc_heap();
                             let _ = tx.send((sid, result));
                         }));
                     }
@@ -4802,6 +4835,46 @@ struct FrameFlags {
     use_new_reader: bool,
 }
 
+/// Wall-clock slices of one [`analyze_frame`], minus RGB copies counted by
+/// [`stat_tracker::perf::to_rgb8`]. Drop stashes them for the following
+/// `TabAnalyze` record.
+struct TabTiming {
+    rgb: stat_tracker::perf::RgbTiming,
+    lap_at: Instant,
+    rgb_mark: u128,
+    samples: [Option<std::time::Duration>; stat_tracker::perf::TAB_STAGES],
+}
+
+impl TabTiming {
+    fn enter() -> Self {
+        Self {
+            rgb: stat_tracker::perf::RgbTiming::enter(),
+            lap_at: Instant::now(),
+            rgb_mark: 0,
+            samples: [None; stat_tracker::perf::TAB_STAGES],
+        }
+    }
+
+    fn lap(&mut self, stage: stat_tracker::perf::TabStage) {
+        let wall = self.lap_at.elapsed();
+        let rgb_now = self.rgb.micros();
+        let rgb_delta = rgb_now.saturating_sub(self.rgb_mark);
+        let rgb = std::time::Duration::from_micros(u64::try_from(rgb_delta).unwrap_or(u64::MAX));
+        self.samples[stage as usize] = Some(wall.saturating_sub(rgb));
+        self.lap_at = Instant::now();
+        self.rgb_mark = rgb_now;
+    }
+}
+
+impl Drop for TabTiming {
+    fn drop(&mut self) {
+        let rgb =
+            std::time::Duration::from_micros(u64::try_from(self.rgb.micros()).unwrap_or(u64::MAX));
+        self.samples[stat_tracker::perf::TabStage::ToRgb as usize] = Some(rgb);
+        stat_tracker::perf::stash_tab_stages(self.samples);
+    }
+}
+
 /// The blocking vision/OCR pass over one Tab frame, extracted from
 /// `handle_capture` so the async orchestration reads as a straight line
 /// (QUAL-001). Pure function of its inputs: decides the outcome, runs the
@@ -4822,6 +4895,7 @@ fn analyze_frame(
         shadow_on,
         use_new_reader,
     } = flags;
+    let mut stages = TabTiming::enter();
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection plus the word reads
     // (only when the caller deems a banner plausible, see
@@ -4852,6 +4926,7 @@ fn analyze_frame(
     } else {
         frame_outcome
     };
+    stages.lap(stat_tracker::perf::TabStage::Outcome);
 
     let scoreboard = Arc::new(ocr::preprocess::crop_scoreboard(&img));
     // Pre-OCR preflight. Row dips or header stat labels accept a board, then
@@ -4861,6 +4936,7 @@ fn analyze_frame(
     // "team size unsure". The OCR gate downstream stays the final check for
     // frames that pass.
     let (preflight, row_scan) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
+    stages.lap(stat_tracker::perf::TabStage::Detect);
     let team_size = match preflight {
         detect::hero_portrait::ScoreboardPreflight::NotAScoreboard => {
             return FrameAnalysisOutcome::NotAScoreboard {
@@ -4991,6 +5067,7 @@ fn analyze_frame(
             tab_heroes.as_ref(),
         )
     });
+    stages.lap(stat_tracker::perf::TabStage::Portraits);
     // The top-bar OCR label is the banner read's fallback (O6). With OCR
     // off there is no fallback: the banner read is the top-bar map or
     // nothing is, and the label is not asked for.
@@ -5011,6 +5088,7 @@ fn analyze_frame(
     );
     let map_from_panel = top_bar.map;
     let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);
+    stages.lap(stat_tracker::perf::TabStage::Map);
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path,
@@ -5054,6 +5132,11 @@ fn analyze_frame(
         );
         rows = read_cells();
     }
+    stages.lap(stat_tracker::perf::TabStage::Digits);
+
+    let shadow_input =
+        shadow::worker::ShadowInput::when(shadow_on, &scoreboard, team_size, img.height());
+    stages.lap(stat_tracker::perf::TabStage::Shadow);
 
     FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
         frame_outcome,
@@ -5067,12 +5150,7 @@ fn analyze_frame(
         map_from_panel,
         map_panel_raw,
         map_from_banner: top_bar.from_banner,
-        shadow_input: shadow::worker::ShadowInput::when(
-            shadow_on,
-            &scoreboard,
-            team_size,
-            img.height(),
-        ),
+        shadow_input,
         scoreboard,
         player_row_idx: row_idx,
         name_match,
@@ -7101,10 +7179,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // was undiagnosable because only rejected frames were ever saved.
             // Only with debug_ocr on: the crop shows other players' names.
             save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img);
+            let frame_for_kit = Arc::new(frame_img);
             record_report_kit(
                 data_dir,
                 &target_session,
-                &frame_img,
+                Arc::clone(&frame_for_kit),
                 team_size,
                 &ocr_parsed,
                 &parsed,
@@ -7135,7 +7214,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let n = ctx.empty_map_reads.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= EMPTY_MAP_DUMP_THRESHOLD {
                     ctx.empty_map_reads.store(0, Ordering::Relaxed);
-                    let region = ocr::preprocess::crop_map_name(&frame_img);
+                    let region = ocr::preprocess::crop_map_name(&frame_for_kit);
                     let dir = data_dir.join("debug").join("mapmiss");
                     tracing::warn!(
                         consecutive = n,
@@ -7322,22 +7401,139 @@ fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImag
 /// Written only while `debug_ocr` is on.
 const BOARD_PIXEL_DEBUG_DIRS: [&str; 2] = ["accepted", "rejected"];
 
+/// One debug image write. A single `debug-save` thread owns the encode so a
+/// Tab capture does not start a short-lived blocking thread per PNG.
+enum DebugSaveKind {
+    Ring {
+        dir: std::path::PathBuf,
+        prefix: String,
+        img: Arc<image::DynamicImage>,
+        keep: usize,
+    },
+    Report(Box<DebugReportSave>),
+    MapCrop(mapcrops::MapcropJob),
+}
+
+struct DebugReportSave {
+    data_dir: std::path::PathBuf,
+    session_id: String,
+    frame: Arc<image::DynamicImage>,
+    team_size: usize,
+    reads: stat_tracker::report::kit::KitReads,
+    tab_at: stat_tracker::report::blank::CaptureTime,
+    board_names: Vec<String>,
+}
+
+struct DebugSaveJob {
+    kind: DebugSaveKind,
+    done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+fn debug_save_sender() -> &'static std::sync::mpsc::SyncSender<DebugSaveJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<DebugSaveJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        std::thread::Builder::new()
+            .name("debug-save".into())
+            .spawn(move || debug_save_loop(rx))
+            .expect("debug-save thread");
+        tx
+    })
+}
+
+fn debug_save_loop(rx: std::sync::mpsc::Receiver<DebugSaveJob>) {
+    while let Ok(job) = rx.recv() {
+        let DebugSaveJob { kind, done } = job;
+        let started = Instant::now();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_debug_save(kind)));
+        stat_tracker::perf::record_debug_save(started.elapsed());
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+    }
+}
+
+fn run_debug_save(kind: DebugSaveKind) {
+    match kind {
+        DebugSaveKind::Ring {
+            dir,
+            prefix,
+            img,
+            keep,
+        } => save_frame_ring(&dir, &prefix, &img, keep),
+        DebugSaveKind::Report(report) => {
+            if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
+                &report.data_dir,
+                &report.session_id,
+                &report.frame,
+                Some(report.team_size),
+                &report.reads,
+                report.tab_at,
+            ) {
+                tracing::debug!(error = %e, "report kit: scoreboard not written");
+            }
+            // The board's names stay on this PC; a report hands them to the
+            // log scrubber.
+            if !report.board_names.is_empty()
+                && let Err(e) = stat_tracker::report::kit::record_names(
+                    &report.data_dir,
+                    &report.session_id,
+                    &report.board_names,
+                )
+            {
+                tracing::debug!(error = %e, "report kit: names not written");
+            }
+        }
+        DebugSaveKind::MapCrop(job) => mapcrops::commit_mapcrop(job),
+    }
+}
+
+/// Queue one debug write. `wait` is for tests: the handle finishes when the
+/// worker has run the job. A full queue (4) drops the job and counts the drop.
+fn enqueue_debug_save(kind: DebugSaveKind, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
+    let (done, wait_rx) = if wait {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    match debug_save_sender().try_send(DebugSaveJob { kind, done }) {
+        Ok(()) => wait_rx.map(|rx| {
+            tokio::spawn(async move {
+                let _ = rx.await;
+            })
+        }),
+        Err(_) => {
+            stat_tracker::perf_log::note_debug_save_drop();
+            tracing::debug!("debug-save queue full, dropping job");
+            None
+        }
+    }
+}
+
 /// Archive a frame whose capture was rejected by a trust gate, for diagnosis.
-/// Only with `debug_ocr` on (`debug`): the frame is unblanked. Runs the PNG
-/// encode off the async runtime; fire-and-forget. The handle is for tests.
+/// Only with `debug_ocr` on (`debug`): the frame is unblanked. The PNG encode
+/// runs on the debug-save thread. The handle is for tests.
 fn save_rejected_frame(
     debug: bool,
     data_dir: &std::path::Path,
-    img: image::DynamicImage,
+    img: impl Into<Arc<image::DynamicImage>>,
     reason: &'static str,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !debug {
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
-    Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
-    }))
+    enqueue_debug_save(
+        DebugSaveKind::Ring {
+            dir,
+            prefix: format!("rejected_{reason}"),
+            img: img.into(),
+            keep: REJECTED_KEEP,
+        },
+        true,
+    )
 }
 
 /// A rank screen's `outcome.png` goes to the active game only when that game
@@ -7355,13 +7551,14 @@ fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
 }
 
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
-/// accepted capture. Written off the capture path; a failure is logged and
-/// never touches the stored match.
+/// accepted capture. Written on the debug-save thread; a failure is logged
+/// and never touches the stored match. `frame` is a refcount clone of the
+/// capture, not a pixel copy.
 #[allow(clippy::too_many_arguments)]
 fn record_report_kit(
     data_dir: &std::path::Path,
     session_id: &str,
-    frame: &image::DynamicImage,
+    frame: Arc<image::DynamicImage>,
     team_size: usize,
     ocr_parsed: &storage::PersonalMatch,
     stored: &storage::PersonalMatch,
@@ -7383,39 +7580,26 @@ fn record_report_kit(
         captured_at,
     )
     .with_confidences(confidences);
-    let (data_dir, session_id, frame) = (
-        data_dir.to_path_buf(),
-        session_id.to_string(),
-        frame.clone(),
-    );
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
-            &data_dir,
-            &session_id,
-            &frame,
-            Some(team_size),
-            &reads,
+    enqueue_debug_save(
+        DebugSaveKind::Report(Box::new(DebugReportSave {
+            data_dir: data_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+            frame,
+            team_size,
+            reads,
             tab_at,
-        ) {
-            tracing::debug!(error = %e, "report kit: scoreboard not written");
-        }
-        // The board's names stay on this PC; a report hands them to the
-        // log scrubber.
-        if !board_names.is_empty()
-            && let Err(e) =
-                stat_tracker::report::kit::record_names(&data_dir, &session_id, &board_names)
-        {
-            tracing::debug!(error = %e, "report kit: names not written");
-        }
-    });
+            board_names,
+        })),
+        false,
+    );
 }
 
 /// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
 /// the only way to retune calibration). Only with `debug_ocr` on (`debug`):
-/// the crop is unblanked and shows other players' names. Fire-and-forget;
-/// encode off-runtime. The handle is for tests.
+/// the crop is unblanked and shows other players' names. The PNG encode runs
+/// on the debug-save thread. The handle is for tests.
 fn save_accepted_frame(
     debug: bool,
     data_dir: &std::path::Path,
@@ -7425,9 +7609,15 @@ fn save_accepted_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("accepted");
-    Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
-    }))
+    enqueue_debug_save(
+        DebugSaveKind::Ring {
+            dir,
+            prefix: "accepted".to_string(),
+            img: board,
+            keep: ACCEPTED_KEEP,
+        },
+        true,
+    )
 }
 
 /// Board-pixel debug folders left over on disk while `debug_ocr` is off.
@@ -7461,9 +7651,7 @@ fn archive_map_label_crop(
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
-    Some(tokio::task::spawn_blocking(move || {
-        mapcrops::commit_mapcrop(job)
-    }))
+    enqueue_debug_save(DebugSaveKind::MapCrop(job), true)
 }
 
 /// [`archive_map_label_crop`] for a capture a trust gate rejected: only with
@@ -11688,6 +11876,79 @@ mod tests {
         assert!(
             rejected.len() == 1 && rejected[0].starts_with("rejected_unreadable_"),
             "rejected={rejected:?}"
+        );
+    }
+
+    /// Release soak for the arena cap. Generated frames only, no captured boards.
+    ///
+    /// `cargo test --release --bin scuffed-stat-tracker -- --ignored --exact ram_plateau_soak --test-threads 1 --nocapture`
+    #[tokio::test]
+    #[ignore = "release soak: synthetic Tab bursts, asserts RssAnon under 400 MB"]
+    async fn ram_plateau_soak() {
+        limit_glibc_arenas();
+        let _off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
+        let portraits = tempfile::tempdir().unwrap();
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
+            portraits.path(),
+        ));
+        let flags = FrameFlags {
+            allow_banner_recovery: false,
+            session_map_known: true,
+            shadow_on: false,
+            use_new_reader: true,
+        };
+        let saves = tempfile::tempdir().unwrap();
+        for _wave in 0..2 {
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let matcher = Arc::clone(&matcher);
+                tasks.push(tokio::task::spawn_blocking(move || {
+                    let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(
+                        2560,
+                        1440,
+                        |x, y| image::Rgb([(x & 255) as u8, (y & 255) as u8, 24]),
+                    ));
+                    let _ = analyze_frame(
+                        frame,
+                        matcher,
+                        None,
+                        detect::MatchOutcome::Unknown,
+                        flags,
+                        Vec::new(),
+                    );
+                }));
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+        }
+        let labelled = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            320,
+            180,
+            image::Rgb([12, 14, 22]),
+        ));
+        if let Some(job) = archive_map_label_crop(saves.path(), "soak", &labelled) {
+            job.await.unwrap();
+        }
+        for _ in 0..4 {
+            let img = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                64,
+                64,
+                image::Rgb([8, 16, 32]),
+            )));
+            save_accepted_frame(true, saves.path(), img)
+                .expect("debug save queued")
+                .await
+                .unwrap();
+        }
+        release_glibc_heap();
+        let Some(rss) = stat_tracker::perf_log::rss_anon_kb() else {
+            eprintln!("RssAnon is not available on this host");
+            return;
+        };
+        assert!(
+            rss < 400 * 1024,
+            "RssAnon {rss} kB after synthetic Tab bursts"
         );
     }
 

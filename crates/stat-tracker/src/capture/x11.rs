@@ -194,6 +194,7 @@ fn capture_blocking_inner(output_name: Option<&str>) -> Result<DynamicImage, Box
             )
         })?;
 
+    let convert_started = std::time::Instant::now();
     let rgba = image_to_rgba8(
         &img,
         layout,
@@ -213,6 +214,7 @@ fn capture_blocking_inner(output_name: Option<&str>) -> Result<DynamicImage, Box
             &visual,
         )
     })?;
+    crate::perf::record_grab_convert(convert_started.elapsed());
 
     tracing::debug!(
         output = %selected.name,

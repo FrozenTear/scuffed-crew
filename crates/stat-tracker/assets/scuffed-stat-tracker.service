@@ -30,6 +30,11 @@ EnvironmentFile=-%h/.config/scuffed-stat-tracker/session.env
 # the binary loads, so it has to be set here and not by the daemon. To
 # use another value, set it in a drop-in (systemctl --user edit).
 Environment=OMP_THREAD_LIMIT=1
+# Cap glibc per-thread arenas. Each arena is about 64 MiB, and short-lived
+# blocking threads were holding about 19 of them (about 750 MB) after Tab
+# captures. 2 is enough for this daemon. The binary also calls mallopt at
+# startup, so a start outside the unit gets the same cap.
+Environment=MALLOC_ARENA_MAX=2
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

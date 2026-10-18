@@ -764,7 +764,7 @@ pub fn top_bar_map(read: &MapRead) -> Option<TopBarMap> {
 fn rgb_of(frame: &DynamicImage) -> Cow<'_, RgbImage> {
     match frame.as_rgb8() {
         Some(rgb) => Cow::Borrowed(rgb),
-        None => Cow::Owned(frame.to_rgb8()),
+        None => Cow::Owned(crate::perf::to_rgb8(frame)),
     }
 }
 

@@ -138,7 +138,7 @@ impl Titles {
         }
         match img.as_rgb8() {
             Some(rgb) => Self::for_rgb_with(true, rgb, words),
-            None => Self::for_rgb_with(true, &img.to_rgb8(), words),
+            None => Self::for_rgb_with(true, &crate::perf::to_rgb8(img), words),
         }
     }
 
@@ -343,7 +343,7 @@ pub fn detect_outcome_with(
     titles: &Titles,
     words: &ResultWords,
 ) -> MatchOutcome {
-    let rgb = img.to_rgb8();
+    let rgb = crate::perf::to_rgb8(img);
     detect_outcome_signal_inner(img, &rgb, None, p4, titles, words)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
@@ -484,7 +484,7 @@ pub fn detect_outcome_text_with(
     if let Titles::Words(read) = titles {
         return end_title_from_words(read);
     }
-    read_end_title(img, &img.to_rgb8(), None, p4, titles)
+    read_end_title(img, &crate::perf::to_rgb8(img), None, p4, titles)
 }
 
 /// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
