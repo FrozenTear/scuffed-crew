@@ -421,19 +421,24 @@ static musl binaries. The runtime base is
 `compose.yml` use a registry host on every image (`docker.io/library/...`
 for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
 `ghcr.io/...` for the site image). A glibc build of those plugins does not
-load there. CI builds this image, seeds one team channel, and walks the
-browser chat path: NIP-42 AUTH on the gate, the group-metadata query the
-app's filter uses, a kind 9 subscription, then a kind 9 publish the way
-`POST /api/chat/send-public` does. The event must come back on that
-subscription.
+load there. CI builds this image, seeds team channel rows the same way
+`ensure_team_channel_rows` does, and walks the site chat path: NIP-42 AUTH
+on the gate, `get_team_channels` (the query behind
+`GET /api/teams/:id/channels`), a kind 9 `#h` subscription, a kind 9 publish
+the way `POST /api/chat/send-public` does, then a kind 1059 gift wrap with a
+`p` tag read back on a `#p` subscription. The kind 9 must come back on the
+`#h` subscription.
 
 Team chat does not need relay-signed group metadata (kinds 39000, 39001,
 and 39002). The site learns the group id from `GET /api/teams/:id/channels`.
 `ensure_team_channel_rows` writes those rows. The browser subscribes to kind
-9 with an `h` tag for that id. `subscribe_group_metadata` has no caller.
-Kind 9 delivery uses the SurrealDB roster and `team_channel` rows. The CI
-metadata query is the same filter as `NostrFilter::group_metadata`. An empty
-EOSE is the live shape, and the check continues with the channel id.
+9 with an `h` tag for that id. Officer chat and DMs are kind 1059 gift wraps
+filtered by `#p`. `subscribe_group_metadata` has no caller. Kind 9 delivery
+uses the SurrealDB roster and `team_channel` rows.
+
+`RELAY_POLICY_ENFORCE_GROUPS` defaults to false. An allowlisted pubkey can
+publish a kind 9 for any `h` group. Restricting writes to roster membership
+is a follow-up. This deploy does not turn that check on.
 
 The relay image has to be rebuilt before this plugin is what a running
 container executes. `./scripts/relay-up.sh` does that (`up --build` recreates

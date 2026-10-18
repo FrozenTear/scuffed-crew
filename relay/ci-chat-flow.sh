@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Build the relay image, seed one team channel, and run the chat flow check.
 #
-# The check authenticates to the read gate, queries group metadata, subscribes
-# to kind 9, publishes one kind 9 straight to strfry, and reads it back.
-# It also requires the allowlist, kind, and rate-limit rejections.
+# The check authenticates to the read gate, loads the public channel from
+# the team_channel rows, subscribes to kind 9 on #h and kind 1059 on #p,
+# publishes one of each straight to strfry, and reads both back.
+# It also requires the allowlist, unrelated-kind, and rate-limit rejections.
 #
 # RELAY_SKIP_BUILD=1 uses $RELAY_IMAGE as-is (for a before/after image).
 # RELAY_POLICY_RATE_LIMIT inside the container is 1 so the second member

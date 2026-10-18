@@ -1,21 +1,24 @@
 //! End-to-end check for the relay image.
 //!
-//! `seed` writes one active member, team, roster edge, and public team channel.
-//! `check` then does what the site chat does:
+//! `seed` writes one active member, team, roster edge, and the public plus
+//! officer `team_channel` rows `ensure_team_channel_rows` writes. `check`
+//! then does what the site chat does:
 //! 1. NIP-42 AUTH on the read gate.
-//! 2. REQ group metadata with the same filter as `NostrFilter::group_metadata`.
-//!    The app helper that sends this filter has no caller. An empty EOSE is
-//!    expected. The group id is the team channel id, which is what
-//!    `GET /api/teams/:id/channels` returns.
+//! 2. Read channels with `get_team_channels`, the query behind
+//!    `GET /api/teams/:id/channels`, and keep the public row a member sees.
 //! 3. REQ kind 9 with `#h` set to that id (`NostrFilter::group_chat`, limit 50).
-//! 4. Publish one kind 9 with a single `h` tag straight to strfry, the same
-//!    shape as `POST /api/chat/send-public`.
-//! 5. Read that event back on the gate subscription.
-//! 6. Refuse a pubkey that is not on the allowlist, a kind that is not
-//!    allowed, and the next event once the rate limit is already full.
+//! 4. REQ kind 1059 with `#p` set to the member (`NostrFilter::gift_wraps`).
+//! 5. Publish one kind 9 with a single `h` tag straight to strfry, the same
+//!    shape as `POST /api/chat/send-public`, and read it back.
+//! 6. Publish one kind 1059 from an ephemeral key with a `p` tag for that
+//!    member, the outer shape of `EncryptionService::build_gift_wraps`, and
+//!    read it back on the `#p` subscription.
+//! 7. Refuse a pubkey that is not on the allowlist, a kind the site never
+//!    publishes, and the next kind 9 once the member rate limit is full.
 //!
-//! The container must be started with `RELAY_POLICY_RATE_LIMIT=1` so step 6
-//! trips on the second member event.
+//! The container must be started with `RELAY_POLICY_RATE_LIMIT=1`. Kind 1059
+//! uses the `gift:` bucket, so the wrap still stores after the kind 9 fills
+//! the member bucket. The second kind 9 is the rate-limit case.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +29,10 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 const CONTENT: &str = "hello from the site chat flow";
+const WRAP_CONTENT: &str = "gift wrap from the site chat flow";
+/// Not a site kind, not NIP-28 channel chat (42), and outside the ephemeral
+/// band 20000-29999 that the policy allows.
+const UNRELATED_KIND: u16 = 12345;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SeedState {
@@ -111,11 +118,16 @@ async fn seed() -> Result<(), String> {
     db.add_to_roster(&member.id, &team.id, scuffed_db::TeamRole::Player)
         .await
         .map_err(|e| format!("roster: {e}"))?;
-    // Same id the site uses for the public channel (`public_group_id`).
+    // Same rows as `ensure_team_channel_rows`: public id is the team id,
+    // officer id is `{team_id}-officers`.
     let group_id = team.id.clone();
+    let officer_id = format!("{group_id}-officers");
     db.create_team_channel(&team.id, &group_id, scuffed_db::GroupType::Public, "")
         .await
-        .map_err(|e| format!("channel: {e}"))?;
+        .map_err(|e| format!("public channel: {e}"))?;
+    db.create_team_channel(&team.id, &officer_id, scuffed_db::GroupType::Officer, "")
+        .await
+        .map_err(|e| format!("officer channel: {e}"))?;
 
     let state = SeedState {
         secret_hex: keys.secret_key().to_secret_hex(),
@@ -181,6 +193,31 @@ fn h_tag(group_id: &str) -> Tag {
 
 fn kind9(keys: &Keys, group_id: &str, content: &str) -> Result<Value, String> {
     signed_event(keys, 9, content, vec![h_tag(group_id)])
+}
+
+fn p_tag(pubkey: &str) -> Tag {
+    Tag::custom(TagKind::custom("p"), vec![pubkey.to_string()])
+}
+
+/// Outer NIP-59 gift wrap: ephemeral author, kind 1059, one `p` tag.
+fn gift_wrap(recipient: &str) -> Result<Value, String> {
+    let ephemeral = Keys::generate();
+    signed_event(&ephemeral, 1059, WRAP_CONTENT, vec![p_tag(recipient)])
+}
+
+/// Public channel a non-officer sees from `GET /api/teams/:id/channels`.
+async fn public_group_id(team_id: &str) -> Result<String, String> {
+    let db = connect_db().await?;
+    let mut channels = db
+        .get_team_channels(team_id)
+        .await
+        .map_err(|e| format!("get_team_channels: {e}"))?;
+    channels.retain(|channel| channel.group_type != scuffed_db::GroupType::Officer);
+    channels
+        .into_iter()
+        .find(|channel| channel.group_type == scuffed_db::GroupType::Public)
+        .map(|channel| channel.group_id)
+        .ok_or_else(|| format!("no public channel for team {team_id}"))
 }
 
 async fn send_text<W>(write: &mut W, text: &str) -> Result<(), String>
@@ -264,6 +301,91 @@ async fn publish_result(url: &str, event: &Value) -> Result<(bool, String, Strin
     }
 }
 
+async fn subscribe_until_eose<W, R, E>(
+    write: &mut W,
+    read: &mut R,
+    sub: &str,
+    filter: Value,
+) -> Result<(), String>
+where
+    W: Sink<Message> + Unpin,
+    W::Error: std::fmt::Display,
+    R: Stream<Item = Result<Message, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    send_text(write, &json!(["REQ", sub, filter]).to_string()).await?;
+    loop {
+        let text = recv_text(read).await?;
+        let value = parse_json(&text)?;
+        match frame_kind(&value) {
+            Some("EOSE") if frame_sub(&value) == Some(sub) => return Ok(()),
+            Some("CLOSED") if frame_sub(&value) == Some(sub) => {
+                return Err(format!("{sub} subscription closed: {text}"));
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn expect_stored(url: &str, event: &Value, label: &str) -> Result<String, String> {
+    let (accepted, message, event_id) = publish_result(url, event).await?;
+    if !accepted {
+        return Err(format!(
+            "{label} publish rejected: {message} (id {event_id})"
+        ));
+    }
+    println!("{label} stored id={event_id}");
+    Ok(event_id)
+}
+
+fn tag_value(body: &Value, name: &str) -> Option<String> {
+    body.get("tags")?.as_array()?.iter().find_map(|tag| {
+        let parts = tag.as_array()?;
+        if parts.first()?.as_str()? == name {
+            parts.get(1)?.as_str().map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+async fn expect_received<R, E>(
+    read: &mut R,
+    sub: &str,
+    event_id: &str,
+    kind: u64,
+    content: &str,
+    tag_name: &str,
+    tag_expected: &str,
+) -> Result<(), String>
+where
+    R: Stream<Item = Result<Message, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    loop {
+        let text = recv_text(read).await?;
+        let value = parse_json(&text)?;
+        if frame_kind(&value) != Some("EVENT") || frame_sub(&value) != Some(sub) {
+            continue;
+        }
+        let body = value
+            .as_array()
+            .and_then(|frame| frame.get(2))
+            .ok_or("EVENT frame has no body")?;
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id != event_id {
+            continue;
+        }
+        let got_kind = body.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+        let got_content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let got_tag = tag_value(body, tag_name);
+        if got_kind != kind || got_content != content || got_tag.as_deref() != Some(tag_expected) {
+            return Err(format!("received event does not match the publish: {text}"));
+        }
+        return Ok(());
+    }
+}
+
 async fn expect_reject(url: &str, event: &Value, needle: &str, label: &str) -> Result<(), String> {
     let (accepted, message, id) = publish_result(url, event).await?;
     if accepted {
@@ -337,107 +459,56 @@ async fn check() -> Result<(), String> {
         break;
     }
 
-    // Same filter as NostrFilter::group_metadata.
-    let meta = json!([
-        "REQ",
-        "meta",
-        {"kinds": [39000, 39001, 39002], "#d": [state.group_id]}
-    ]);
-    send_text(&mut write, &meta.to_string()).await?;
-    let mut meta_events = 0usize;
-    loop {
-        let text = recv_text(&mut read).await?;
-        let value = parse_json(&text)?;
-        match frame_kind(&value) {
-            Some("EVENT") if frame_sub(&value) == Some("meta") => meta_events += 1,
-            Some("EOSE") if frame_sub(&value) == Some("meta") => break,
-            Some("CLOSED") => {
-                return Err(format!("metadata query closed: {text}"));
-            }
-            _ => {}
-        }
-    }
-    println!(
-        "metadata query for group {} EOSE events={meta_events} (group id is the team channel row)",
-        state.group_id
-    );
+    let group_id = public_group_id(&state.team_id).await?;
+    println!("public channel from get_team_channels group_id={group_id}");
 
-    let sub = json!([
-        "REQ",
+    subscribe_until_eose(
+        &mut write,
+        &mut read,
         "group",
-        {"kinds": [9], "#h": [state.group_id], "limit": 50}
-    ]);
-    send_text(&mut write, &sub.to_string()).await?;
-    loop {
-        let text = recv_text(&mut read).await?;
-        let value = parse_json(&text)?;
-        match frame_kind(&value) {
-            Some("EOSE") if frame_sub(&value) == Some("group") => break,
-            Some("CLOSED") => return Err(format!("kind 9 subscription closed: {text}")),
-            _ => {}
-        }
-    }
-    println!("subscribed to kind 9 #h={}", state.group_id);
+        json!({"kinds": [9], "#h": [group_id], "limit": 50}),
+    )
+    .await?;
+    println!("subscribed to kind 9 #h={group_id}");
 
-    let event = kind9(&keys, &state.group_id, CONTENT)?;
-    let (accepted, message, event_id) = publish_result(&strfry, &event).await?;
-    if !accepted {
-        return Err(format!(
-            "kind 9 publish rejected: {message} (id {event_id})"
-        ));
-    }
-    println!("kind 9 stored id={event_id}");
+    subscribe_until_eose(
+        &mut write,
+        &mut read,
+        "wraps",
+        json!({"kinds": [1059], "#p": [state.pubkey], "limit": 50}),
+    )
+    .await?;
+    println!("subscribed to kind 1059 #p={}", state.pubkey);
 
-    loop {
-        let text = recv_text(&mut read).await?;
-        let value = parse_json(&text)?;
-        if frame_kind(&value) != Some("EVENT") || frame_sub(&value) != Some("group") {
-            continue;
-        }
-        let body = value
-            .as_array()
-            .and_then(|a| a.get(2))
-            .ok_or("EVENT frame has no body")?;
-        let id = body
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if id != event_id {
-            continue;
-        }
-        let kind = body.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
-        let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let h = body
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .and_then(|tags| {
-                tags.iter().find_map(|tag| {
-                    let parts = tag.as_array()?;
-                    if parts.first()?.as_str()? == "h" {
-                        parts.get(1)?.as_str().map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
-            });
-        if kind != 9 || content != CONTENT || h.as_deref() != Some(state.group_id.as_str()) {
-            return Err(format!("received event does not match the publish: {text}"));
-        }
-        println!("received kind 9 id={event_id} on the subscription");
-        break;
-    }
+    let event = kind9(&keys, &group_id, CONTENT)?;
+    let event_id = expect_stored(&strfry, &event, "kind 9").await?;
+    expect_received(&mut read, "group", &event_id, 9, CONTENT, "h", &group_id).await?;
+    println!("received kind 9 id={event_id} on the #h subscription");
+
+    // Member bucket is already full when the rate limit is 1. The wrap uses
+    // the gift: bucket, so it still stores.
+    let wrap = gift_wrap(&state.pubkey)?;
+    let wrap_id = expect_stored(&strfry, &wrap, "kind 1059").await?;
+    expect_received(
+        &mut read,
+        "wraps",
+        &wrap_id,
+        1059,
+        WRAP_CONTENT,
+        "p",
+        &state.pubkey,
+    )
+    .await?;
+    println!("received kind 1059 id={wrap_id} on the #p subscription");
 
     let outsider = Keys::generate();
-    let foreign = kind9(&outsider, &state.group_id, "not a member")?;
+    let foreign = kind9(&outsider, &group_id, "not a member")?;
     expect_reject(&strfry, &foreign, "allowlist", "non-member").await?;
 
-    // Kind 42 is not on the site whitelist. Kind numbers above 65535 do not
-    // fit in a Nostr kind.
-    let weird = signed_event(&keys, 42, "nope", vec![])?;
+    let weird = signed_event(&keys, UNRELATED_KIND, "nope", vec![])?;
     expect_reject(&strfry, &weird, "not allowed", "disallowed kind").await?;
 
-    let extra = kind9(&keys, &state.group_id, "over the limit")?;
+    let extra = kind9(&keys, &group_id, "over the limit")?;
     expect_reject(&strfry, &extra, "rate-limited", "rate limit").await?;
 
     println!("chat flow ok");
