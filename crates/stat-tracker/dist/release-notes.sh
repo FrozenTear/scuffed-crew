@@ -142,6 +142,24 @@ EOF
 )"
 no_long_dash "requirements footer" "$FOOTER"
 
+# Every stat-tracker-v* body carries a terminal update, pinned to the tag,
+# for a player whose in-app Update button does not offer this release.
+TERMINAL_UPDATE=""
+if [[ "$TAG" == stat-tracker-v* ]]; then
+  TERMINAL_UPDATE="$(cat <<TERMINAL
+## Update from the terminal
+
+If the Update button in the app does not offer this release, close the app and paste this in a terminal. It installs this release into \`~/.local\` and replaces both the tracker and the app. Afterwards About shows ${NOTES_VERSION}.
+
+\`\`\`sh
+TAG=${TAG}
+curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/\${TAG}/crates/stat-tracker/dist/bootstrap.sh" | STAT_TRACKER_TAG="\$TAG" STAT_TRACKER_PREFIX="\$HOME/.local" bash
+\`\`\`
+TERMINAL
+)"
+  no_long_dash "terminal update" "$TERMINAL_UPDATE"
+fi
+
 INTRO="Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + Iced GUI)."
 no_long_dash "release intro" "$INTRO"
 
@@ -174,6 +192,9 @@ body="$(
   fi
   if [[ -n "$COMMITS_BLOCK" ]]; then
     printf '%s\n\n' "$COMMITS_BLOCK"
+  fi
+  if [[ -n "$TERMINAL_UPDATE" ]]; then
+    printf '%s\n\n' "$TERMINAL_UPDATE"
   fi
   printf '%s\n' "$FOOTER"
 )"

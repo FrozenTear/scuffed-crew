@@ -445,6 +445,7 @@ fn from_github_body(version: &str, body: &str) -> (ReleaseNotes, String) {
         title.eq_ignore_ascii_case("install")
             || title.starts_with("Commits since")
             || title.starts_with("Requirements")
+            || title.eq_ignore_ascii_case("Update from the terminal")
     });
     let stripped =
         drop_leading_paragraph_if(&stripped, |summary| summary.starts_with("Prebuilt Linux"));
@@ -1103,6 +1104,10 @@ curl secret-remote
 
 - some commit
 
+## Update from the terminal
+
+curl terminal-update
+
 ## Requirements & install
 
 Need GTK.
@@ -1144,6 +1149,7 @@ Need GTK.
         assert!(!notes[1].body_markdown.contains("Prebuilt Linux"));
         assert!(!notes[1].body_markdown.contains("curl secret-remote"));
         assert!(!notes[1].body_markdown.contains("some commit"));
+        assert!(!notes[1].body_markdown.contains("curl terminal-update"));
         assert!(!notes[1].body_markdown.contains("Need GTK"));
 
         assert_eq!(notes[2].summary, "Summary for one.");
