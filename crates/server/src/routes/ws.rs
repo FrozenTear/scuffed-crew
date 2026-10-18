@@ -1355,4 +1355,39 @@ mod strategies_gate_tests {
         assert_eq!(body["type"], "error", "{body}");
         assert_eq!(body["message"], "Access denied");
     }
+
+    #[tokio::test]
+    async fn outsider_bearer_with_owner_cookie_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        seed_account(&state, "outsider", "outsider-token", false).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(
+            &state,
+            addr,
+            &id,
+            Some("outsider-token"),
+            Some("owner-token"),
+        )
+        .await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
+    }
+
+    #[tokio::test]
+    async fn other_member_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        seed_account(&state, "other", "other-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, Some("other-token"), None).await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
+    }
 }

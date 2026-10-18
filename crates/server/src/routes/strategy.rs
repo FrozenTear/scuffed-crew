@@ -242,7 +242,7 @@ async fn list_my_strategies(
     Ok(Json(json!({ "data": data })))
 }
 
-/// GET /api/strategy/strategies/:id — get a single strategy.
+/// GET /api/strategy/strategies/:id: get a single strategy.
 ///
 /// Public and unlisted strategies are readable without a session. A private
 /// strategy is readable by its owner. The owner is resolved the same way as
@@ -1473,6 +1473,47 @@ mod tests {
             read_strategy(&state, &id, Some("outsider-token"), Some("owner-token")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_eq!(body["error"], "Strategy not found");
+    }
+
+    fn assert_private_strategy_hidden(status: StatusCode, body: &serde_json::Value) {
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+        assert!(
+            body.get("name").is_none() && body.get("owner_id").is_none(),
+            "anonymous read must not return the strategy: {body}"
+        );
+    }
+
+    /// An unknown bearer is not a session. With or without the owner's cookie
+    /// it stays anonymous and must not read the private strategy.
+    #[tokio::test]
+    async fn unknown_bearer_is_anonymous_on_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, Some("no-such-session"), None).await;
+        assert_private_strategy_hidden(status, &body);
+
+        let (status, body) =
+            read_strategy(&state, &id, Some("no-such-session"), Some("owner-token")).await;
+        assert_private_strategy_hidden(status, &body);
+    }
+
+    /// A garbage bearer value is not a session either, and does not fall
+    /// through to the owner's cookie.
+    #[tokio::test]
+    async fn garbage_bearer_is_anonymous_on_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+        let garbage = "!!!not a token!!!";
+
+        let (status, body) = read_strategy(&state, &id, Some(garbage), None).await;
+        assert_private_strategy_hidden(status, &body);
+
+        let (status, body) = read_strategy(&state, &id, Some(garbage), Some("owner-token")).await;
+        assert_private_strategy_hidden(status, &body);
     }
 
     #[tokio::test]
