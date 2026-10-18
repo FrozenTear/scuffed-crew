@@ -213,7 +213,7 @@ pub fn process_is_running(names: &[String]) -> bool {
 }
 
 /// Fixture mode pretends the game is running so the toggle can open the
-/// overlay for layout shots. Live mode is the configured process scan only
+/// overlay for layout shots. Live mode is the configured process scan only;
 /// a leftover `active_game.json` does not count.
 pub fn detect_game_running(data_dir: &Path, process_names: &[String], fixture: bool) -> bool {
     live_session_key(
