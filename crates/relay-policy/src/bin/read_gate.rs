@@ -58,14 +58,29 @@ fn main() {
         let directory = Arc::new(RwLock::new(ReadDirectory::default()));
         if let Some(db) = db.clone() {
             refresh(&db, &directory).await;
-            let directory = Arc::clone(&directory);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let directory_reload = Arc::clone(&directory);
+            let db_reload = Arc::clone(&db);
+            tokio::spawn(async move {
+                relay_policy::directory::coalesce_reloads(rx, || {
+                    let db = Arc::clone(&db_reload);
+                    let directory = Arc::clone(&directory_reload);
+                    async move { refresh(&db, &directory).await }
+                })
+                .await;
+            });
+            let tx_live = tx.clone();
+            let db_live = Arc::clone(&db);
+            tokio::spawn(async move {
+                relay_policy::directory::watch_writer_tables(db_live, tx_live).await;
+            });
             tokio::spawn(async move {
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(refresh_secs()));
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    refresh(&db, &directory).await;
+                    let _ = tx.send(());
                 }
             });
         }

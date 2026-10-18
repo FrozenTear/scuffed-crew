@@ -406,17 +406,14 @@ podman compose --env-file data/secrets.env up --build -d
 The relay is off until you opt in. Browsers use same-origin `/relay`. That path
 is a read gate: no NIP-42 AUTH means no events, a member only receives kind
 1059 gift wraps `p`-tagged to their own key, team chat only if they are on that
-team, and officer chat only if they are an officer on that team. strfry and
-strfry29 only filter writes, so the gate is a separate process in the same
+team, and officer chat only if they are an officer on that team. The write
+policy plugin is `/usr/local/bin/relay-policy` only. It checks the member
+allowlist, the kind whitelist, and the per-pubkey rate limit. It does not
+filter `REQ` results, so the read gate is a separate process in the same
 container.
 
-`relay/Containerfile` pins strfry29 to fiatjaf/relay29 commit
-`3276594e9d85670af13ba5cf0aad235f9692acd9`. That commit's `go.mod` requires
-Go 1.24.1 or newer. The builder image is
-`docker.io/library/golang:1.24.13-alpine` because it sets `GOTOOLCHAIN=local`
-and will not download a newer toolchain. Change the `RELAY29_COMMIT` build
-arg in that file to move the pin. `relay-policy` and `relay-read-gate` are
-compiled from this repository as static musl binaries. The runtime base is
+`relay-policy` and `relay-read-gate` are compiled from this repository as
+static musl binaries. The runtime base is
 `docker.io/dockurr/strfry` pinned by digest
 `sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d`
 (Alpine 3.18, musl). A short name (`dockurr/strfry@sha256:...`) makes
@@ -424,19 +421,90 @@ compiled from this repository as static musl binaries. The runtime base is
 `compose.yml` use a registry host on every image (`docker.io/library/...`
 for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
 `ghcr.io/...` for the site image). A glibc build of those plugins does not
-load there. `strfry29` is a static Go binary. CI builds the Go stage on
-every pull request. The full image also release-builds those Rust plugins,
-so that step stays out of CI.
+load there. CI builds this image, seeds team channel rows the same way
+`ensure_team_channel_rows` does, and walks the site chat path: NIP-42 AUTH
+on the gate, `get_team_channels` (the query behind
+`GET /api/teams/:id/channels`), a kind 9 `#h` subscription, a kind 9 publish
+the way `POST /api/chat/send-public` does, then a kind 1059 gift wrap with a
+`p` tag read back on a `#p` subscription. The kind 9 must come back on the
+`#h` subscription.
 
-Host `127.0.0.1:7777` is the gate. Container port 7777 is strfry itself, on the
-Compose network only, so site-server still uses `ws://strfry:7777` for publish
-and its own subscriptions. Do not publish `7777:7777`; that would skip the gate.
+Team chat does not need relay-signed group metadata (kinds 39000, 39001,
+and 39002). The site learns the group id from `GET /api/teams/:id/channels`.
+`ensure_team_channel_rows` writes those rows. The browser subscribes to kind
+9 with an `h` tag for that id. Officer chat and DMs are kind 1059 gift wraps
+filtered by `#p`. `subscribe_group_metadata` has no caller. Kind 9 delivery
+uses the SurrealDB roster and `team_channel` rows.
+
+`RELAY_POLICY_ENFORCE_GROUPS` defaults to true, in the image and in
+Compose. An event with an `h` tag is stored only when that id is an active
+`team_channel` and the author may write it. A public channel accepts any
+active roster member of that team (the same rows as
+`GET /api/teams/{id}/channels` and `send_public`). An officer channel
+(`{team}-officers`) accepts only roster members whose org role is officer
+or admin, the same `can_access_officer_channel` check the read gate uses.
+Kind 1059 gift wraps have no `h` tag, so this check does not apply to them.
+Kind 0, kind 7, and kind 34550 are signed with the member key and also have
+no `h` tag. Set the variable to `false` to allow any allowlisted pubkey to
+write any `h` group.
+
+The write plugin and the read gate reload when `plays_on`, `team_channel`,
+or `member` changes, using a SurrealDB LIVE query. Those statements are
+`LIVE SELECT id FROM <table>`. The notice is only a reload trigger.
+`member` holds `nostr_secret_key_encrypted`, and that field must not enter
+the relay process. `plays_on` and `team_channel` have no secret columns.
+They use the same `id` projection so the body is not shipped either.
+Officer permission and the Nostr pubkey live on `member`, so a promotion
+reloads too. A rejected write for an unknown author, an unknown group, or a
+pubkey outside that group's writer set schedules the same reload, debounced
+to at least 2 seconds, as a backup. `RELAY_POLICY_REFRESH_SECS` (default 60)
+is the slow backup if LIVE is down.
+
+Kind 1059 is not one rate bucket per recipient. The plugin keys
+`gift:{sender}:{recipient}`. The sender is strfry's authenticated pubkey
+when that connection completed NIP-42. site-server publishes straight to
+`ws://strfry:7777` with no AUTH. `publish_event_oneshot` is defined in
+`crates/chat/src/nostr/relay.rs`. Kind 1059 DMs call it from
+`crates/site-server/src/routes/nostr.rs` (`POST /api/nostr/dm/send`).
+Officer gift wraps use `RelayClient::publish_event` in
+`crates/server/src/routes/chat.rs` (`send_encrypted`), also with no AUTH.
+The wrap author is ephemeral, so each of those wraps has its own bucket and
+does not consume a member's kind 9 budget. The gate keeps a second bucket,
+`gift:{authed member}:{recipient}`, and refuses the EVENT before forward
+when that member is over `RELAY_POLICY_RATE_LIMIT`. One signed-in member
+cannot use up another member's inbox budget. The gate drops expired
+`gift:` buckets on a 60 second timer. The write plugin does the same for
+its rate buckets, including `gift:` keys.
+
+Gift wraps that the site publishes on `ws://strfry:7777` do not pass
+through the gate. The plugin bucket does not cap them, because each wrap
+author is a new ephemeral key. The gate's
+`gift:{authed member}:{recipient}` limit is the only cap on gift wraps a
+browser can send. That holds only while container port 7777 stays on the
+Compose network and is never published on a host port. `compose.yml` maps
+host `127.0.0.1:7777` to the gate on container port 7779
+(`127.0.0.1:7777:7779`). Publishing `7777:7777` would let a client reach
+strfry directly and skip that cap.
+
+The relay image has to be rebuilt before this plugin is what a running
+container executes. `./scripts/relay-up.sh` does that (`up --build` recreates
+strfry). Restarting a container built from an older image keeps the old
+write plugin.
+
+Host `127.0.0.1:7777` is the gate (container port 7779). Container port 7777
+is strfry itself and stays on the Compose network, so site-server still uses
+`ws://strfry:7777` for publish and its own subscriptions. Do not publish
+`7777:7777`. A published strfry port would skip the gate, and gift wraps on
+that path have no other cap.
 
 The gate does not pipe HTTP through to strfry. A NIP-11 request
 (`Accept: application/nostr+json`) is answered by the gate, then the connection
 is closed. Any other non-upgrade request is `400` with `Connection: close`.
 Only a WebSocket upgrade (`Upgrade` and `Connection` tokens, optional
-whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`.
+whitespace) is forwarded, and it still requires NIP-42 AUTH before a `REQ`
+or an `EVENT`. The AUTH pubkey must be an active member. A publish with no
+member AUTH gets `OK false` and `auth-required:`, and that EVENT is not
+forwarded to strfry.
 
 Kind 4 plain DMs are rejected on write (the relay-policy plugin and the gate)
 as well as on read. DMs are NIP-59 kind 1059 gift wraps. NIP-29 group metadata
@@ -480,9 +548,11 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    to start when that flag is set and the SurrealDB password is missing,
    the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
 
-2. Build and start strfry (the image also starts the read gate). The main
+2. Rebuild and start strfry (the image also starts the read gate). The main
    stack must already be up, so Surreal is the existing container and not a
-   new one:
+   new one. Pull this change first. `relay-up.sh` rebuilds the image and
+   recreates the container. A restart of the previous container does not
+   load the new write plugin:
 
    ```bash
    ./scripts/relay-up.sh

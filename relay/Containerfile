@@ -1,31 +1,9 @@
-# ── Stage 1: Build strfry29 (Go) ──────────────────────────
-# fiatjaf/relay29 commit 3276594 declares `go 1.24.1`. Official golang
-# images set GOTOOLCHAIN=local, so a 1.23 builder stops with
-# `go: ../go.mod requires go >= 1.24.1`. Pin that commit (do not clone
-# HEAD) and a 1.24 patch that satisfies the go line. This stage has no
-# other git clones. Module versions come from that commit's go.sum.
-# Fully qualified so podman build does not prompt for a short-name registry.
-FROM docker.io/library/golang:1.24.13-alpine AS strfry29-builder
-
-RUN apk add --no-cache git ca-certificates
-
-# Full SHA. GitHub accepts a shallow fetch of one commit.
-ARG RELAY29_COMMIT=3276594e9d85670af13ba5cf0aad235f9692acd9
-
-WORKDIR /src
-RUN git init relay29 \
-    && git -C relay29 remote add origin https://github.com/fiatjaf/relay29.git \
-    && git -C relay29 fetch --depth 1 origin "${RELAY29_COMMIT}" \
-    && git -C relay29 checkout --detach FETCH_HEAD \
-    && test "$(git -C relay29 rev-parse HEAD)" = "${RELAY29_COMMIT}" \
-    && cd relay29/strfry29 \
-    && CGO_ENABLED=0 go build -o /usr/local/bin/strfry29 .
-
-# ── Stage 2: Build relay-policy (Rust) ────────────────────
+# ── Stage 1: Build relay-policy (Rust) ────────────────────
 # Full workspace copy so Cargo member paths resolve.
 # The runtime image is Alpine musl. A bookworm (glibc) binary exits 127
 # there because ld-linux-x86-64.so.2 is absent. Build on musl and link
 # statically (crt-static) so both plugins exec on that image.
+# Fully qualified so podman build does not prompt for a short-name registry.
 FROM docker.io/library/rust:1.92-alpine AS relay-policy-builder
 
 RUN apk add --no-cache build-base cmake perl pkgconfig git
@@ -37,6 +15,7 @@ COPY crates/ crates/
 # applied to proc-macro crates, which cannot be dylibs. The musl target
 # still emits static PIE executables (no PT_INTERP, no NEEDED). Alpine ldd
 # mis-reports those, so the check uses readelf.
+# relay-chat-flow is feature-gated and is not part of this image.
 RUN cargo build --release -p relay-policy \
     && cp target/release/relay-policy /usr/local/bin/relay-policy \
     && cp target/release/relay-read-gate /usr/local/bin/relay-read-gate \
@@ -53,13 +32,12 @@ RUN cargo build --release -p relay-policy \
          fi; \
        done
 
-# ── Stage 3: Runtime (strfry + plugins) ───────────────────
+# ── Stage 2: Runtime (strfry + plugins) ───────────────────
 # docker.io/dockurr/strfry:latest on 2026-10-15. OCI index (linux/amd64 and
 # linux/arm64), Alpine 3.18.3. Do not float the tag. The registry host is
 # required: a short name makes podman build wait on an interactive prompt.
 FROM docker.io/dockurr/strfry@sha256:599ab3500dbfbe6cb78c668e1892cd9802c192d066df4660e8e3175034a8344d
 
-COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
 COPY --from=relay-policy-builder /usr/local/bin/relay-policy /usr/local/bin/relay-policy
 COPY --from=relay-policy-builder /usr/local/bin/relay-read-gate /usr/local/bin/relay-read-gate
 

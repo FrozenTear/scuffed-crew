@@ -81,6 +81,9 @@ services:
       RELAY_GATE_CONN_RATE: ${RELAY_GATE_CONN_RATE:-60}
       RELAY_GATE_MSG_RATE: ${RELAY_GATE_MSG_RATE:-240}
       RELAY_GATE_RATE_WINDOW_SECS: ${RELAY_GATE_RATE_WINDOW_SECS:-60}
+      # Default on. An h tag must name an active team channel, and the author
+      # must be on that team's roster. Kind 1059 gift wraps have no h tag.
+      RELAY_POLICY_ENFORCE_GROUPS: ${RELAY_POLICY_ENFORCE_GROUPS:-true}
     volumes:
       - strfry-data:/app/strfry-db
     networks:

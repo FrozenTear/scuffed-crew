@@ -18,7 +18,10 @@
 //! - `RELAY_POLICY_RATE_LIMIT` Max events per pubkey per window (default: 30)
 //! - `RELAY_POLICY_RATE_WINDOW` Rate limit window in seconds (default: 60)
 //! - `RELAY_POLICY_REFRESH_SECS` Allowlist refresh interval (default: 60)
-//! - `RELAY_POLICY_ENFORCE_GROUPS` Set to "true" to enforce NIP-29 group membership
+//! - `RELAY_POLICY_ENFORCE_GROUPS` Default true. An `h` tag must name an active
+//!   team channel, and the author must be on that team's roster. Set to "false"
+//!   to allow any allowlisted pubkey to write any `h` group. Kind 1059 and
+//!   events with no `h` tag are not group-checked.
 //! - `RUST_LOG` Tracing filter (default: `relay_policy=info`)
 
 mod policy;
@@ -55,6 +58,10 @@ struct StrfryInput {
     #[serde(rename = "sourceInfo")]
     #[allow(dead_code)]
     source_info: Option<String>,
+    /// NIP-42 pubkey when this connection to strfry completed AUTH.
+    /// Absent for the read gate and for site-server one-shot publishes.
+    #[serde(default)]
+    authed: Option<String>,
 }
 
 /// A Nostr event as sent by strfry.
@@ -83,6 +90,32 @@ struct StrfryOutput {
     action: String,
     /// Human-readable reason (strfry uses this in NIP-20 OK messages for rejections).
     msg: String,
+}
+
+async fn refresh_writers(db: &scuffed_db::Database, engine: &Mutex<PolicyEngine>) {
+    let allowlist = load_pubkey_allowlist(db).await;
+    let groups = match relay_policy::directory::load_group_writers(db).await {
+        Ok(groups) => Some(groups),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "group writer refresh failed; keeping the previous map"
+            );
+            None
+        }
+    };
+    let mut eng = engine.lock().unwrap_or_else(|err| err.into_inner());
+    eng.update_allowlist(allowlist);
+    if let Some(groups) = groups {
+        let count = groups.len();
+        eng.update_group_members(groups);
+        tracing::info!(
+            allowlist_size = eng.allowlist_size(),
+            groups = count,
+            "refreshed writer list"
+        );
+    }
+    eng.prune_rate_buckets();
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -135,7 +168,8 @@ fn main() {
     let config = PolicyConfig {
         rate_limit_events: env_parse("RELAY_POLICY_RATE_LIMIT", 30),
         rate_limit_window_secs: env_parse("RELAY_POLICY_RATE_WINDOW", 60),
-        enforce_group_membership: env_or("RELAY_POLICY_ENFORCE_GROUPS", "false") == "true",
+        enforce_group_membership: !env_or("RELAY_POLICY_ENFORCE_GROUPS", "true")
+            .eq_ignore_ascii_case("false"),
         ..PolicyConfig::default()
     };
 
@@ -166,7 +200,26 @@ fn main() {
             Ok(database) => {
                 let db = Arc::new(database);
                 let allowlist = load_pubkey_allowlist(&db).await;
-                engine.lock().unwrap().update_allowlist(allowlist);
+                let groups = match relay_policy::directory::load_group_writers(&db).await {
+                    Ok(groups) => {
+                        tracing::info!(
+                            groups = groups.len(),
+                            "loaded group writers from team channels"
+                        );
+                        groups
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to load group writers; rejecting every h-tagged event"
+                        );
+                        std::collections::HashMap::new()
+                    }
+                };
+                let mut eng = engine.lock().unwrap();
+                eng.update_allowlist(allowlist);
+                eng.update_group_members(groups);
+                drop(eng);
                 tracing::info!(url = %db_cfg.url, "connected to SurrealDB");
                 Some(db)
             }
@@ -180,26 +233,57 @@ fn main() {
         }
     });
 
-    // Spawn background allowlist refresh task.
-    if let Some(db) = db.clone() {
+    // Reload writers when roster edges, team channels, or member rows change.
+    // LIVE is the primary signal. A timed tick and a rejected write for an
+    // unknown author or group are the backup. All three share one debounced
+    // reload so a burst cannot hammer SurrealDB.
+    let reload_tx = if let Some(db) = db.clone() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let engine_bg = Arc::clone(&engine);
+        let db_reload = Arc::clone(&db);
+        rt.spawn(async move {
+            relay_policy::directory::coalesce_reloads(rx, || {
+                let db = Arc::clone(&db_reload);
+                let engine = Arc::clone(&engine_bg);
+                async move { refresh_writers(&db, &engine).await }
+            })
+            .await;
+        });
+        let tx_live = tx.clone();
+        let db_live = Arc::clone(&db);
+        rt.spawn(async move {
+            relay_policy::directory::watch_writer_tables(db_live, tx_live).await;
+        });
+        let tx_tick = tx.clone();
         rt.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
-            // Skip the first tick (we already loaded on startup).
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let allowlist = load_pubkey_allowlist(&db).await;
-                let mut eng = engine_bg.lock().unwrap();
-                eng.update_allowlist(allowlist);
-                eng.prune_rate_buckets();
-                tracing::debug!(
-                    allowlist_size = eng.allowlist_size(),
-                    "refreshed allowlist and pruned rate buckets"
-                );
+                let _ = tx_tick.send(());
             }
         });
-    }
+        Some(tx)
+    } else {
+        None
+    };
+
+    // Gift-wrap buckets (`gift:{sender}:{recipient}`) are trimmed inside
+    // evaluate only when that same pair sends again. Sweep them on a timer
+    // so a quiet pair does not keep a map entry. This runs even when
+    // SurrealDB is down and the writer reload never fires.
+    let engine_sweep = Arc::clone(&engine);
+    rt.spawn(async move {
+        let mut interval = tokio::time::interval(policy::RATE_BUCKET_SWEEP);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            engine_sweep
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .prune_rate_buckets();
+        }
+    });
 
     // Main stdin/stdout policy loop.
     let stdin = io::stdin();
@@ -246,9 +330,17 @@ fn main() {
             pubkey: input.event.pubkey.to_lowercase(),
             kind: input.event.kind,
             tags: input.event.tags,
+            authed: input.authed.clone(),
         };
 
         let decision = engine.lock().unwrap().evaluate(&event_info);
+        if let Decision::Reject(reason) = &decision {
+            if policy::reload_on_write_miss(reason) {
+                if let Some(tx) = &reload_tx {
+                    let _ = tx.send(());
+                }
+            }
+        }
 
         let output = match decision {
             Decision::Accept => StrfryOutput {
@@ -358,7 +450,10 @@ mod tests {
         let pubkey = "aa".repeat(32);
         let mut allowlist = HashSet::new();
         allowlist.insert(pubkey.clone());
-        engine.update_allowlist(allowlist);
+        engine.update_allowlist(allowlist.clone());
+        let mut groups = std::collections::HashMap::new();
+        groups.insert("team".to_string(), allowlist);
+        engine.update_group_members(groups);
 
         let input_json = format!(
             r#"{{"type":"new","event":{{"id":"eventid","pubkey":"{pubkey}","kind":9,"tags":[["h","team"]],"content":"hello","sig":"sig","created_at":0}}}}"#
@@ -369,6 +464,7 @@ mod tests {
             pubkey: parsed.event.pubkey.to_lowercase(),
             kind: parsed.event.kind,
             tags: parsed.event.tags,
+            authed: parsed.authed.clone(),
         };
         let decision = engine.evaluate(&event_info);
         assert_eq!(decision, Decision::Accept);
@@ -388,6 +484,7 @@ mod tests {
             pubkey: parsed.event.pubkey.to_lowercase(),
             kind: parsed.event.kind,
             tags: parsed.event.tags,
+            authed: parsed.authed.clone(),
         };
         let decision = engine.evaluate(&event_info);
         assert!(matches!(decision, Decision::Reject(_)));

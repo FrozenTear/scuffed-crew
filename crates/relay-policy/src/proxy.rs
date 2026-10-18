@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::http_gate::{self, HttpClass};
 use crate::limits::{self, GateLimits};
 use crate::read_policy::ReadDirectory;
-use crate::session::{AuthVerifier, GateSession};
+use crate::session::{AuthVerifier, GateSession, GiftBudget, GIFT_BUCKET_SWEEP};
 
 pub async fn serve(
     listen: SocketAddr,
@@ -45,15 +45,26 @@ pub async fn serve_listener(
     verifier: Arc<dyn AuthVerifier>,
     limits: GateLimits,
 ) -> std::io::Result<()> {
+    let gifts = Arc::new(GiftBudget::from_env());
+    let gifts_sweep = Arc::clone(&gifts);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(GIFT_BUCKET_SWEEP);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            gifts_sweep.sweep();
+        }
+    });
     loop {
         let (stream, peer) = listener.accept().await?;
         let upstream = upstream.clone();
         let directory = Arc::clone(&directory);
         let verifier = Arc::clone(&verifier);
         let limits = limits.clone();
+        let gifts = Arc::clone(&gifts);
         tokio::spawn(async move {
             if let Err(err) =
-                handle_conn(stream, peer, &upstream, directory, verifier, limits).await
+                handle_conn(stream, peer, &upstream, directory, verifier, limits, gifts).await
             {
                 tracing::debug!(%peer, error = %err, "read gate connection closed");
             }
@@ -68,6 +79,7 @@ async fn handle_conn(
     directory: Arc<RwLock<ReadDirectory>>,
     verifier: Arc<dyn AuthVerifier>,
     limits: GateLimits,
+    gifts: Arc<GiftBudget>,
 ) -> Result<(), String> {
     let header = read_headers(&mut client).await?;
     let parsed = http_gate::parse_request(&header);
@@ -114,6 +126,7 @@ async fn handle_conn(
                 directory,
                 verifier,
                 limits,
+                gifts,
                 client_ip,
             )
             .await
@@ -169,6 +182,7 @@ async fn pump<C, U>(
     directory: Arc<RwLock<ReadDirectory>>,
     verifier: Arc<dyn AuthVerifier>,
     limits: GateLimits,
+    gifts: Arc<GiftBudget>,
     client_ip: IpAddr,
 ) -> Result<(), String>
 where
@@ -197,7 +211,7 @@ where
                         .await;
                     break;
                 }
-                if !forward_client(msg, &mut session, verifier.as_ref(), &mut client_tx, &mut upstream_tx).await? {
+                if !forward_client(msg, &mut session, verifier.as_ref(), &directory, &gifts, &mut client_tx, &mut upstream_tx).await? {
                     break;
                 }
             }
@@ -224,6 +238,8 @@ async fn forward_client<C, U>(
     msg: Message,
     session: &mut GateSession,
     verifier: &dyn AuthVerifier,
+    directory: &RwLock<ReadDirectory>,
+    gifts: &GiftBudget,
     client_tx: &mut C,
     upstream_tx: &mut U,
 ) -> Result<bool, String>
@@ -235,7 +251,10 @@ where
 {
     match msg {
         Message::Text(text) => {
-            let outcome = session.on_client_text(&text, verifier);
+            let outcome = {
+                let dir = directory.read().unwrap_or_else(|err| err.into_inner());
+                session.on_client_text(&text, verifier, &dir, gifts)
+            };
             for reply in outcome.to_client {
                 client_tx
                     .send(Message::Text(reply.into()))

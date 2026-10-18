@@ -1,7 +1,7 @@
 //! Who may receive a stored event on a subscription.
 //!
-//! strfry and strfry29 only run on the write path (stdin JSON, stdout
-//! accept/reject). They cannot hide an event that is already stored. This
+//! strfry only runs the write-policy plugin on the write path (stdin JSON,
+//! stdout accept/reject). It cannot hide an event that is already stored. This
 //! module is the read rule the WebSocket gate applies to every `EVENT` frame
 //! before it is forwarded to the client.
 //!

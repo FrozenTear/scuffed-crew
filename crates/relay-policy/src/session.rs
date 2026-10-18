@@ -1,20 +1,159 @@
 //! Per-connection Nostr session for the read gate.
 //!
-//! `REQ` is not forwarded until NIP-42 AUTH succeeds. After that, `EVENT`
-//! frames from strfry are still filtered by [`crate::read_policy::allow_event`].
-//! `COUNT` and negentropy are not forwarded: a count or a sync would leak
-//! events the member is not allowed to read. Client `EVENT` publishes are
-//! forwarded so the write-policy plugin can accept or reject them. The site
+//! `REQ` and client `EVENT` are not forwarded until NIP-42 AUTH succeeds and
+//! the pubkey is an active member. After that, `EVENT` frames from strfry are
+//! still filtered by [`crate::read_policy::allow_event`]. `COUNT` and
+//! negentropy are not forwarded: a count or a sync would leak events the
+//! member is not allowed to read. An authenticated member's `EVENT` is
+//! forwarded so the write-policy plugin can accept or reject it. Kind 1059
+//! is also limited per authed pubkey and recipient before forward. The site
 //! server publishes without AUTH on the compose-network strfry port, which
 //! does not pass through this gate.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use serde_json::{json, Value};
 
-use crate::read_policy::{allow_event, EventView, ReadDirectory};
+use crate::read_policy::{allow_event, EventView, ReadDirectory, GIFT_WRAP_KIND};
 
 pub const AUTH_REQUIRED: &str = "auth-required: NIP-42 AUTH required before REQ";
+pub const PUBLISH_AUTH_REQUIRED: &str = "auth-required: NIP-42 AUTH required before publishing";
 pub const COUNT_DISABLED: &str = "restricted: COUNT is disabled";
 pub const NEG_DISABLED: &str = "restricted: negentropy sync is disabled";
+pub const RATE_LIMITED: &str = "rate-limited: too many events";
+
+/// How often the gate drops expired `gift:{sender}:{recipient}` buckets.
+/// `allow` only trims a bucket when that same pair sends again.
+pub const GIFT_BUCKET_SWEEP: Duration = Duration::from_secs(60);
+
+/// Per-sender gift-wrap budget for publishes that come through the gate.
+///
+/// Keyed `gift:{authed pubkey}:{recipient}`. One signed-in member cannot
+/// spend another member's inbox budget. Shared across connections in the
+/// process. site-server does not pass through this gate.
+pub struct GiftBudget {
+    limit: u32,
+    window: Duration,
+    buckets: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+impl GiftBudget {
+    pub fn new(limit: u32, window_secs: u64) -> Self {
+        Self {
+            limit,
+            window: Duration::from_secs(window_secs),
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Same knobs as the write plugin: `RELAY_POLICY_RATE_LIMIT` (default 30)
+    /// and `RELAY_POLICY_RATE_WINDOW` (default 60).
+    pub fn from_env() -> Self {
+        let limit = std::env::var("RELAY_POLICY_RATE_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let window_secs = std::env::var("RELAY_POLICY_RATE_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        Self::new(limit, window_secs)
+    }
+
+    /// Charge one wrap from `authed` to each recipient `p` tag.
+    ///
+    /// Returns false when any pair is already at the limit. Nothing is
+    /// recorded in that case. A wrap with no 64-hex `p` tag is not counted
+    /// here; the write plugin rejects it.
+    pub fn allow(&self, authed: &str, frame: &Value) -> bool {
+        let recipients = recipient_pubkeys(frame);
+        if recipients.is_empty() {
+            return true;
+        }
+        let authed = authed.trim().to_ascii_lowercase();
+        let now = Instant::now();
+        let keys: Vec<String> = recipients
+            .iter()
+            .map(|recipient| format!("gift:{authed}:{recipient}"))
+            .collect();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        for key in &keys {
+            let count = buckets
+                .get(key)
+                .map(|stamps| {
+                    stamps
+                        .iter()
+                        .filter(|stamp| now.duration_since(**stamp) < self.window)
+                        .count()
+                })
+                .unwrap_or(0);
+            if count >= self.limit as usize {
+                return false;
+            }
+        }
+        for key in keys {
+            let stamps = buckets.entry(key).or_default();
+            stamps.retain(|stamp| now.duration_since(*stamp) < self.window);
+            stamps.push(now);
+        }
+        true
+    }
+
+    /// Drop stamps outside the window, and drop buckets that are then empty.
+    ///
+    /// A pair that never sends again would otherwise keep its key forever.
+    /// The read gate calls this on [`GIFT_BUCKET_SWEEP`].
+    pub fn sweep(&self) {
+        self.sweep_at(Instant::now());
+    }
+
+    fn sweep_at(&self, now: Instant) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        let window = self.window;
+        buckets.retain(|_, stamps| {
+            stamps.retain(|stamp| now.saturating_duration_since(*stamp) < window);
+            !stamps.is_empty()
+        });
+    }
+
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
+    }
+}
+
+fn recipient_pubkeys(frame: &Value) -> Vec<String> {
+    let Some(tags) = frame
+        .as_array()
+        .and_then(|items| items.get(1))
+        .and_then(|event| event.get("tags"))
+        .and_then(|tags| tags.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        if parts.first().and_then(|part| part.as_str()) != Some("p") {
+            continue;
+        }
+        let Some(pubkey) = parts.get(1).and_then(|part| part.as_str()) else {
+            continue;
+        };
+        let pubkey = pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.push(pubkey);
+        }
+    }
+    out
+}
 
 pub trait AuthVerifier: Send + Sync {
     fn verify_auth(&self, event: &Value, challenge: &str) -> Result<String, String>;
@@ -51,6 +190,8 @@ impl GateSession {
         &mut self,
         text: &str,
         verifier: &V,
+        directory: &ReadDirectory,
+        gifts: &GiftBudget,
     ) -> ClientOutcome {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return ClientOutcome {
@@ -84,23 +225,7 @@ impl GateSession {
                 to_client: vec![closed(sub_id, NEG_DISABLED)],
                 to_relay: vec![],
             },
-            "EVENT" => {
-                if published_kind(&value) == Some(crate::read_policy::PLAIN_DM_KIND) {
-                    let event_id = published_id(&value);
-                    return ClientOutcome {
-                        to_client: vec![ok(
-                            event_id,
-                            false,
-                            "blocked: kind 4 plain DMs are not accepted",
-                        )],
-                        to_relay: vec![],
-                    };
-                }
-                ClientOutcome {
-                    to_client: vec![],
-                    to_relay: vec![text.to_string()],
-                }
-            }
+            "EVENT" => self.gate_event(text, &value, directory, gifts),
             "CLOSE" => ClientOutcome {
                 to_client: vec![],
                 to_relay: vec![text.to_string()],
@@ -110,6 +235,48 @@ impl GateSession {
                 to_client: vec![],
                 to_relay: vec![],
             },
+        }
+    }
+
+    fn gate_event(
+        &self,
+        text: &str,
+        value: &Value,
+        directory: &ReadDirectory,
+        gifts: &GiftBudget,
+    ) -> ClientOutcome {
+        let event_id = published_id(value);
+        let Some(authed) = self.authed_pubkey.as_deref() else {
+            return ClientOutcome {
+                to_client: vec![ok(event_id, false, PUBLISH_AUTH_REQUIRED)],
+                to_relay: vec![],
+            };
+        };
+        if directory.reader(authed).is_none() {
+            return ClientOutcome {
+                to_client: vec![ok(event_id, false, PUBLISH_AUTH_REQUIRED)],
+                to_relay: vec![],
+            };
+        }
+        if published_kind(value) == Some(crate::read_policy::PLAIN_DM_KIND) {
+            return ClientOutcome {
+                to_client: vec![ok(
+                    event_id,
+                    false,
+                    "blocked: kind 4 plain DMs are not accepted",
+                )],
+                to_relay: vec![],
+            };
+        }
+        if published_kind(value) == Some(GIFT_WRAP_KIND) && !gifts.allow(authed, value) {
+            return ClientOutcome {
+                to_client: vec![ok(event_id, false, RATE_LIMITED)],
+                to_relay: vec![],
+            };
+        }
+        ClientOutcome {
+            to_client: vec![],
+            to_relay: vec![text.to_string()],
         }
     }
 
@@ -212,6 +379,7 @@ mod tests {
     use super::*;
     use crate::read_policy::{GroupAcl, MemberAcl, ReadDirectory, GIFT_WRAP_KIND};
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     struct FixedVerifier {
         pubkey: String,
@@ -230,6 +398,10 @@ mod tests {
 
     fn pk(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    fn talk(session: &mut GateSession, text: &str, verifier: &FixedVerifier) -> ClientOutcome {
+        session.on_client_text(text, verifier, &dir_with_member(), &GiftBudget::new(30, 60))
     }
 
     fn dir_with_member() -> ReadDirectory {
@@ -253,7 +425,8 @@ mod tests {
     #[test]
     fn req_before_auth_is_closed_and_not_forwarded() {
         let mut session = GateSession::new("chal");
-        let outcome = session.on_client_text(
+        let outcome = talk(
+            &mut session,
             r#"["REQ","sub-1",{"kinds":[1,1059]}]"#,
             &FixedVerifier {
                 pubkey: pk(0x11),
@@ -272,7 +445,8 @@ mod tests {
     #[test]
     fn quoted_subscription_id_stays_valid_json() {
         let mut session = GateSession::new("chal");
-        let outcome = session.on_client_text(
+        let outcome = talk(
+            &mut session,
             r#"["REQ","a\"b",{}]"#,
             &FixedVerifier {
                 pubkey: pk(0x11),
@@ -287,7 +461,8 @@ mod tests {
     fn failed_auth_does_not_open_req() {
         let mut session = GateSession::new("chal");
         let auth = r#"["AUTH",{"id":"evt1","pubkey":"aa","kind":22242}]"#;
-        let outcome = session.on_client_text(
+        let outcome = talk(
+            &mut session,
             auth,
             &FixedVerifier {
                 pubkey: pk(0x11),
@@ -301,7 +476,8 @@ mod tests {
         assert_eq!(ok[2], false);
         assert!(session.authed_pubkey().is_none());
 
-        let req = session.on_client_text(
+        let req = talk(
+            &mut session,
             r#"["REQ","s",{}]"#,
             &FixedVerifier {
                 pubkey: pk(0x11),
@@ -319,13 +495,13 @@ mod tests {
             pubkey: pk(0x11),
             fail: false,
         };
-        let auth = session.on_client_text(r#"["AUTH",{"id":"evt1"}]"#, &verifier);
+        let auth = talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
         assert!(auth.to_relay.is_empty());
         let ok: Value = serde_json::from_str(&auth.to_client[0]).unwrap();
         assert_eq!(ok[2], true);
         assert_eq!(session.authed_pubkey(), Some(pk(0x11).as_str()));
 
-        let req = session.on_client_text(r#"["REQ","s",{"kinds":[1059,9]}]"#, &verifier);
+        let req = talk(&mut session, r#"["REQ","s",{"kinds":[1059,9]}]"#, &verifier);
         assert_eq!(
             req.to_relay,
             vec![r#"["REQ","s",{"kinds":[1059,9]}]"#.to_string()]
@@ -384,13 +560,13 @@ mod tests {
             pubkey: pk(0x11),
             fail: false,
         };
-        session.on_client_text(r#"["AUTH",{"id":"evt1"}]"#, &verifier);
+        talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
         for (msg, reason) in [
             (r#"["COUNT","c",{"kinds":[1059]}]"#, COUNT_DISABLED),
             (r#"["NEG-OPEN","n",{}]"#, NEG_DISABLED),
             (r#"["NEG-MSG","n","abcd"]"#, NEG_DISABLED),
         ] {
-            let outcome = session.on_client_text(msg, &verifier);
+            let outcome = talk(&mut session, msg, &verifier);
             assert!(outcome.to_relay.is_empty(), "{msg}");
             let closed: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
             assert_eq!(closed[2], reason);
@@ -400,14 +576,13 @@ mod tests {
     #[test]
     fn kind4_publish_is_rejected_and_not_forwarded() {
         let mut session = GateSession::new("chal");
+        let verifier = FixedVerifier {
+            pubkey: pk(0x11),
+            fail: false,
+        };
+        talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
         let text = r#"["EVENT",{"id":"plain","kind":4,"tags":[["p","aa"]],"content":"secret"}]"#;
-        let outcome = session.on_client_text(
-            text,
-            &FixedVerifier {
-                pubkey: pk(0x11),
-                fail: false,
-            },
-        );
+        let outcome = talk(&mut session, text, &verifier);
         assert!(outcome.to_relay.is_empty());
         let reply: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
         assert_eq!(reply[0], "OK");
@@ -417,18 +592,109 @@ mod tests {
     }
 
     #[test]
-    fn publish_is_forwarded_without_auth() {
+    fn publish_without_auth_is_refused() {
         let mut session = GateSession::new("chal");
+        for text in [
+            r#"["EVENT",{"id":"e9","kind":9}]"#,
+            r#"["EVENT",{"id":"ew","kind":1059,"tags":[["p","aa"]]}]"#,
+        ] {
+            let outcome = talk(
+                &mut session,
+                text,
+                &FixedVerifier {
+                    pubkey: pk(0x11),
+                    fail: true,
+                },
+            );
+            assert!(outcome.to_relay.is_empty(), "{text}");
+            let reply: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
+            assert_eq!(reply[2], false);
+            assert!(reply[3].as_str().unwrap().contains("auth-required:"));
+        }
+    }
+
+    #[test]
+    fn authed_member_publish_is_forwarded() {
+        let mut session = GateSession::new("chal");
+        let verifier = FixedVerifier {
+            pubkey: pk(0x11),
+            fail: false,
+        };
+        talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
         let text = r#"["EVENT",{"id":"e","kind":9}]"#;
-        let outcome = session.on_client_text(
-            text,
-            &FixedVerifier {
-                pubkey: pk(0x11),
-                fail: true,
-            },
-        );
+        let outcome = talk(&mut session, text, &verifier);
         assert_eq!(outcome.to_relay, vec![text.to_string()]);
         assert!(outcome.to_client.is_empty());
+    }
+
+    #[test]
+    fn authed_non_member_publish_is_refused() {
+        let mut session = GateSession::new("chal");
+        let verifier = FixedVerifier {
+            pubkey: pk(0x22),
+            fail: false,
+        };
+        talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
+        let outcome = talk(&mut session, r#"["EVENT",{"id":"e","kind":9}]"#, &verifier);
+        assert!(outcome.to_relay.is_empty());
+        let reply: Value = serde_json::from_str(&outcome.to_client[0]).unwrap();
+        assert_eq!(reply[2], false);
+        assert!(reply[3].as_str().unwrap().contains("auth-required:"));
+    }
+
+    #[test]
+    fn gift_wrap_budget_is_per_authed_sender_and_recipient() {
+        let mut session = GateSession::new("chal");
+        let verifier = FixedVerifier {
+            pubkey: pk(0x11),
+            fail: false,
+        };
+        talk(&mut session, r#"["AUTH",{"id":"evt1"}]"#, &verifier);
+        let gifts = GiftBudget::new(1, 60);
+        let frame = |id: &str, recipient: &str| {
+            format!(r#"["EVENT",{{"id":"{id}","kind":1059,"tags":[["p","{recipient}"]]}}]"#)
+        };
+        let first = session.on_client_text(
+            &frame("w1", &pk(0x22)),
+            &verifier,
+            &dir_with_member(),
+            &gifts,
+        );
+        assert_eq!(first.to_relay.len(), 1);
+        let second = session.on_client_text(
+            &frame("w2", &pk(0x22)),
+            &verifier,
+            &dir_with_member(),
+            &gifts,
+        );
+        assert!(second.to_relay.is_empty());
+        let reply: Value = serde_json::from_str(&second.to_client[0]).unwrap();
+        assert!(reply[3].as_str().unwrap().contains("rate-limited"));
+
+        let other_recipient = session.on_client_text(
+            &frame("w3", &pk(0x33)),
+            &verifier,
+            &dir_with_member(),
+            &gifts,
+        );
+        assert_eq!(other_recipient.to_relay.len(), 1);
+    }
+
+    #[test]
+    fn sweep_removes_expired_gift_buckets() {
+        let gifts = GiftBudget::new(1, 60);
+        let frame: Value = serde_json::from_str(&format!(
+            r#"["EVENT",{{"id":"w1","kind":1059,"tags":[["p","{}"]]}}]"#,
+            pk(0x22)
+        ))
+        .unwrap();
+        assert!(gifts.allow(&pk(0x11), &frame));
+        gifts.sweep();
+        assert_eq!(gifts.bucket_count(), 1);
+        assert!(!gifts.allow(&pk(0x11), &frame));
+        gifts.sweep_at(Instant::now() + Duration::from_secs(61));
+        assert_eq!(gifts.bucket_count(), 0);
+        assert!(gifts.allow(&pk(0x11), &frame));
     }
 
     #[test]
