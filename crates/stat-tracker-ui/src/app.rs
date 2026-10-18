@@ -2599,6 +2599,16 @@ impl TrackerApp {
         }
     }
 
+    /// Site sync has a URL and a token saved.
+    pub fn sync_on(&self) -> bool {
+        sync_on_for(&self.saved_config)
+    }
+
+    /// The hero pack hint under Tracker health, if it applies.
+    pub fn hero_pack_hint(&self) -> Option<&'static str> {
+        hero_pack_hint(self.sync_on(), self.ocr_switch.packs.as_ref())
+    }
+
     fn health_now(&self) -> String {
         health_with_ocr_notice(
             health_status_for(
@@ -2641,6 +2651,32 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
         async move { stat_tracker::ocr_switch::PackReadiness::on_disk(&data_dir) },
         move |packs| Message::ReaderPacksChecked { packs, turn_off },
     )
+}
+
+/// Shown under Tracker health when no hero pack is installed and site sync
+/// is off: the hero pack comes from the site, so heroes read as unknown.
+pub const HERO_PACK_SYNC_HINT: &str = "Hero names need site sync. Your stats still track normally.";
+
+/// Site sync is set up in `config`: a URL and a token, neither blank.
+pub fn sync_on_for(config: &Config) -> bool {
+    config
+        .sync
+        .as_ref()
+        .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
+}
+
+/// [`HERO_PACK_SYNC_HINT`] when site sync is off and the last pack check
+/// found no hero pack. `None` before the first check (and in demo mode,
+/// which never checks), and whenever sync is on: with sync on the tracker
+/// downloads the pack itself.
+pub fn hero_pack_hint(
+    sync_on: bool,
+    packs: Option<&stat_tracker::ocr_switch::PackReadiness>,
+) -> Option<&'static str> {
+    match packs {
+        Some(p) if !sync_on && !p.heroes => Some(HERO_PACK_SYNC_HINT),
+        _ => None,
+    }
 }
 
 const HEALTH_READY: &str = "Ready";
@@ -3291,6 +3327,49 @@ token = \"secret-token-must-stay\"
         let id = window::Id::unique();
         assert_eq!(tray_show_op(None), TrayWindowOp::Open);
         assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
+    }
+
+    #[test]
+    fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
+        use stat_tracker::ocr_switch::PackReadiness;
+        let none = PackReadiness::default();
+        let heroes = PackReadiness {
+            heroes: true,
+            ..PackReadiness::default()
+        };
+        assert_eq!(
+            super::hero_pack_hint(false, Some(&none)),
+            Some(super::HERO_PACK_SYNC_HINT)
+        );
+        assert_eq!(super::hero_pack_hint(true, Some(&none)), None, "sync on");
+        assert_eq!(
+            super::hero_pack_hint(false, Some(&heroes)),
+            None,
+            "pack there"
+        );
+        assert_eq!(super::hero_pack_hint(true, Some(&heroes)), None);
+        assert_eq!(super::hero_pack_hint(false, None), None, "not checked yet");
+        assert_eq!(
+            super::HERO_PACK_SYNC_HINT,
+            "Hero names need site sync. Your stats still track normally."
+        );
+        assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn sync_counts_as_on_only_with_a_url_and_a_token() {
+        use stat_tracker::config::SyncConfig;
+        let with = |url: &str, token: &str| Config {
+            sync: Some(SyncConfig {
+                server_url: url.into(),
+                token: token.into(),
+            }),
+            ..Config::default()
+        };
+        assert!(!super::sync_on_for(&Config::default()));
+        assert!(!super::sync_on_for(&with("", "tok")));
+        assert!(!super::sync_on_for(&with("https://crew.example", "  ")));
+        assert!(super::sync_on_for(&with("https://crew.example", "tok")));
     }
 
     #[test]

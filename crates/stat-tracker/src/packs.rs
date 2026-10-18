@@ -63,6 +63,15 @@ pub const PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// File name of the hero template pack on the pack list.
 pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
+/// File name of the hero portrait pack the new reader reads at 1440p. To
+/// move the tracker to a newer build (say `heroes-v3.tar`), change this
+/// name, [`HEROES_PORTRAIT_1080_PACK_NAME`], and the folders in
+/// `shadow::heroes` (`TEMPLATE_SUBDIR_V2`, `TEMPLATE_SUBDIR_V2_1080`).
+pub const HEROES_PORTRAIT_PACK_NAME: &str = "heroes-v2.tar";
+
+/// File name of the hero portrait pack the new reader reads at 1080p.
+pub const HEROES_PORTRAIT_1080_PACK_NAME: &str = "heroes-v2-1080.tar";
+
 /// What may sit inside one pack. Paths are checked before anything is
 /// written, and a path outside the layout refuses that pack only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,14 +122,14 @@ pub const PACKS: &[PackSpec] = &[
         required: true,
     },
     PackSpec {
-        name: "heroes-v2.tar",
-        dir: |data_dir| data_dir.join("templates").join("heroes-v2"),
+        name: HEROES_PORTRAIT_PACK_NAME,
+        dir: |data_dir| data_dir.join(crate::shadow::heroes::TEMPLATE_SUBDIR_V2),
         layout: PackLayout::Portraits,
         required: false,
     },
     PackSpec {
-        name: "heroes-v2-1080.tar",
-        dir: |data_dir| data_dir.join("templates").join("heroes-v2-1080"),
+        name: HEROES_PORTRAIT_1080_PACK_NAME,
+        dir: |data_dir| data_dir.join(crate::shadow::heroes::TEMPLATE_SUBDIR_V2_1080),
         layout: PackLayout::Portraits,
         required: false,
     },
@@ -2123,6 +2132,32 @@ fn checksum_ok(header: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// The hero pack names the tracker asks the site for, in one place.
+    #[test]
+    fn hero_pack_names_are_the_listed_ones() {
+        assert_eq!(HEROES_PACK_NAME, "heroes-v1.tar");
+        assert_eq!(HEROES_PORTRAIT_PACK_NAME, "heroes-v2.tar");
+        assert_eq!(HEROES_PORTRAIT_1080_PACK_NAME, "heroes-v2-1080.tar");
+        for name in [
+            HEROES_PACK_NAME,
+            HEROES_PORTRAIT_PACK_NAME,
+            HEROES_PORTRAIT_1080_PACK_NAME,
+        ] {
+            assert!(pack_spec(name).is_some(), "{name} is synced");
+        }
+        let data = Path::new("/d");
+        assert_eq!(
+            pack_spec(HEROES_PORTRAIT_PACK_NAME).unwrap().dir_in(data),
+            data.join("templates").join("heroes-v2")
+        );
+        assert_eq!(
+            pack_spec(HEROES_PORTRAIT_1080_PACK_NAME)
+                .unwrap()
+                .dir_in(data),
+            data.join("templates").join("heroes-v2-1080")
+        );
+    }
 
     fn ustar_header(name: &str, size: u64, typeflag: u8) -> [u8; 512] {
         let mut header = [0u8; 512];
