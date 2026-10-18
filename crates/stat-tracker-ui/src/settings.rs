@@ -391,8 +391,13 @@ pub struct SettingsForm {
     pub new_reader: bool,
     /// `ocr = "on"`. False writes `ocr = "off"`. `reader` keeps its value.
     pub classic_ocr: bool,
-    /// `update_channel = "prerelease"`. Read by this app's update check only.
+    /// "Get alpha updates" checkbox. Shows the channel the update check
+    /// uses, so an alpha or rc install with `update_channel` unset shows it
+    /// ticked. Read by this app's update check only.
     pub prerelease_updates: bool,
+    /// What the checkbox showed when the form was loaded. Save writes
+    /// `update_channel` only when `prerelease_updates` differs from this.
+    pub prerelease_updates_shown: bool,
 }
 
 impl Default for SettingsForm {
@@ -445,7 +450,20 @@ impl SettingsForm {
             new_reader: config.reader.is_new(),
             classic_ocr: config.ocr.is_on(),
             prerelease_updates: config.wants_prerelease_updates(),
+            prerelease_updates_shown: config.wants_prerelease_updates(),
         }
+    }
+
+    /// Show the alpha updates checkbox for the installed build. With
+    /// `update_channel` unset, an alpha or rc install is on the prerelease
+    /// channel (see [`crate::update::effective_update_channel`]), so the box
+    /// shows ticked. Ticking or unticking still writes the key, and leaving
+    /// it alone writes nothing.
+    pub fn with_installed_version(mut self, config: &Config, installed: Option<&str>) -> Self {
+        let on = crate::update::prerelease_updates_effective(&config.update_channel, installed);
+        self.prerelease_updates = on;
+        self.prerelease_updates_shown = on;
+        self
     }
 
     /// Checkbox state. The env lock shows the extra reader even when the file is off.
@@ -502,8 +520,8 @@ impl SettingsForm {
     /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
-    /// keeps the file's spelling while the checkbox matches it, and becomes
-    /// `prerelease` or `stable` when the checkbox was flipped.
+    /// keeps the file's value (unset stays unset) unless the checkbox was
+    /// flipped, then it becomes `prerelease` or `stable`.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -532,7 +550,11 @@ impl SettingsForm {
             report_kit_max_mb: base.report_kit_max_mb,
             ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
-            update_channel: update_channel_for(base, self.prerelease_updates),
+            update_channel: update_channel_for(
+                base,
+                self.prerelease_updates_shown,
+                self.prerelease_updates,
+            ),
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
             reader: if self.new_reader {
@@ -549,10 +571,11 @@ impl SettingsForm {
     }
 }
 
-/// `update_channel` to save. An unchanged checkbox keeps `base`'s raw value,
-/// so a save that touches nothing else leaves the file byte for byte.
-pub fn update_channel_for(base: &Config, prerelease: bool) -> String {
-    if prerelease == base.wants_prerelease_updates() {
+/// `update_channel` to save. A checkbox still showing what it showed at load
+/// keeps `base`'s raw value, so a save that touches nothing else leaves the
+/// file byte for byte and never writes `stable` on its own.
+pub fn update_channel_for(base: &Config, shown: bool, prerelease: bool) -> String {
+    if prerelease == shown {
         base.update_channel.clone()
     } else if prerelease {
         "prerelease".to_string()
@@ -1669,6 +1692,7 @@ mod tests {
             new_reader: false,
             classic_ocr: true,
             prerelease_updates: false,
+            prerelease_updates_shown: false,
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());
@@ -2565,6 +2589,79 @@ token = \"not-a-real-token\"
         let form = SettingsForm::from_config_and_shadow(&base, Config::shadow_control(false, None));
         assert!(!form.prerelease_updates, "anything else is stable");
         assert_eq!(form.to_config(&base).update_channel, "beta");
+    }
+
+    fn form_on(config: &Config, installed: Option<&str>) -> SettingsForm {
+        SettingsForm::from_config_and_shadow(config, Config::shadow_control(false, None))
+            .with_installed_version(config, installed)
+    }
+
+    #[test]
+    fn alpha_updates_box_shows_the_channel_an_alpha_install_is_on() {
+        let mut base = base();
+        base.update_channel.clear();
+        for alpha in ["0.5.0-alpha.3", "0.5.0-alpha.11", "0.5.0-rc1"] {
+            assert!(
+                form_on(&base, Some(alpha)).prerelease_updates,
+                "{alpha} with update_channel unset shows ticked"
+            );
+        }
+        for stable in [Some("0.4.24"), Some("0.5.0-test.1"), None] {
+            assert!(
+                !form_on(&base, stable).prerelease_updates,
+                "{stable:?} with update_channel unset shows unticked"
+            );
+        }
+        base.update_channel = "stable".into();
+        assert!(!form_on(&base, Some("0.5.0-alpha.3")).prerelease_updates);
+        base.update_channel = "prerelease".into();
+        assert!(form_on(&base, Some("0.4.24")).prerelease_updates);
+    }
+
+    #[test]
+    fn saving_settings_writes_update_channel_only_when_the_box_was_toggled() {
+        let mut base = base();
+        for (raw, installed) in [
+            ("", Some("0.5.0-alpha.3")),
+            ("", Some("0.4.24")),
+            ("", None),
+            ("stable", Some("0.5.0-alpha.3")),
+            ("prerelease", Some("0.4.24")),
+            ("beta", Some("0.5.0-alpha.3")),
+        ] {
+            base.update_channel = raw.into();
+            let mut form = form_on(&base, installed);
+            assert_eq!(
+                form.to_config(&base).update_channel,
+                raw,
+                "untouched save keeps {raw:?} on {installed:?}"
+            );
+            // Another field changes, the box does not.
+            form.debug_ocr = !form.debug_ocr;
+            assert_eq!(form.to_config(&base).update_channel, raw);
+            // Toggled and toggled back is untouched too.
+            let shown = form.prerelease_updates;
+            form.set_toggle(SettingsToggle::PrereleaseUpdates, !shown);
+            form.set_toggle(SettingsToggle::PrereleaseUpdates, shown);
+            assert_eq!(form.to_config(&base).update_channel, raw);
+        }
+
+        // Alpha install, unset channel: the box shows ticked, and unticking
+        // it is the only way `stable` gets written.
+        base.update_channel.clear();
+        let mut form = form_on(&base, Some("0.5.0-alpha.3"));
+        assert!(form.prerelease_updates);
+        form.set_toggle(SettingsToggle::PrereleaseUpdates, false);
+        let off = form.to_config(&base);
+        assert_eq!(off.update_channel, "stable");
+        let reloaded = form_on(&off, Some("0.5.0-alpha.3"));
+        assert!(!reloaded.prerelease_updates, "stable sticks after reload");
+
+        // Release install, unset channel: ticking writes `prerelease`.
+        let mut form = form_on(&base, Some("0.4.24"));
+        assert!(!form.prerelease_updates);
+        form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
+        assert_eq!(form.to_config(&base).update_channel, "prerelease");
     }
 
     #[test]

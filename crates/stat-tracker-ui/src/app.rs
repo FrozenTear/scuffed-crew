@@ -126,10 +126,12 @@ fn only_update_channel_changed(before: &Config, after: &Config) -> bool {
     same == *after
 }
 
-/// True when the save flipped the alpha updates opt-in, so the update check
-/// must run again on the new channel.
-fn update_channel_switched(before: &Config, after: &Config) -> bool {
-    before.wants_prerelease_updates() != after.wants_prerelease_updates()
+/// True when the save changed the channel the update check uses, so it must
+/// run again on the new channel. `installed` matters: on an alpha install an
+/// unset channel is already prerelease, so writing `stable` is a switch.
+fn update_channel_switched(before: &Config, after: &Config, installed: Option<&str>) -> bool {
+    update::prerelease_updates_effective(&before.update_channel, installed)
+        != update::prerelease_updates_effective(&after.update_channel, installed)
 }
 
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
@@ -522,7 +524,8 @@ impl TrackerApp {
             }
             LaunchNotes::Quiet { persist: None } => None,
         };
-        let mut settings = SettingsForm::from_config(&saved_config);
+        let mut settings = SettingsForm::from_config(&saved_config)
+            .with_installed_version(&saved_config, installed_version.as_deref());
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
         let daemon = DaemonView {
@@ -1098,7 +1101,8 @@ impl TrackerApp {
                             &self.settings,
                             &fresh,
                             fresh.shadow_recognizer_control(),
-                        );
+                        )
+                        .with_installed_version(&fresh, self.installed_version.as_deref());
                         self.saved_config = fresh;
                         self.config_unreadable = false;
                         self.health_status = self.health_now();
@@ -1118,12 +1122,20 @@ impl TrackerApp {
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
                         let gui_only = only_update_channel_changed(&self.saved_config, &config);
-                        let recheck = update_channel_switched(&self.saved_config, &config);
+                        let recheck = update_channel_switched(
+                            &self.saved_config,
+                            &config,
+                            self.installed_version.as_deref(),
+                        );
                         self.saved_config = config;
                         self.config_unreadable = false;
                         self.health_status = self.health_now();
                         self.overlay_hotkey = hotkey;
-                        self.settings = SettingsForm::from_config(&self.saved_config);
+                        self.settings = SettingsForm::from_config(&self.saved_config)
+                            .with_installed_version(
+                                &self.saved_config,
+                                self.installed_version.as_deref(),
+                            );
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
                         self.replace_toast(toast_after_successful_save(daemon_up && !gui_only));
@@ -2920,19 +2932,27 @@ player_name = \"FrozenTear\"
                 .wants_prerelease_updates(),
             "the next update check reads prerelease from disk"
         );
-        assert!(super::update_channel_switched(&snapshot, &written));
+        assert!(super::update_channel_switched(&snapshot, &written, None));
         assert!(super::only_update_channel_changed(&snapshot, &written));
         assert_eq!(super::toast_after_successful_save(false), "Settings saved");
 
         let mut other = written.clone();
         other.debug_ocr = !other.debug_ocr;
         assert!(!super::only_update_channel_changed(&written, &other));
-        assert!(!super::update_channel_switched(&written, &other));
+        assert!(!super::update_channel_switched(&written, &other, None));
         assert!(!super::only_update_channel_changed(&written, &written));
 
         let mut respelled = written.clone();
         respelled.update_channel = "PRERELEASE".into();
-        assert!(!super::update_channel_switched(&written, &respelled));
+        assert!(!super::update_channel_switched(&written, &respelled, None));
+
+        // On an alpha install an unset channel is already prerelease, so
+        // writing `stable` switches and writing `prerelease` does not.
+        let alpha = Some("0.5.0-alpha.3");
+        let mut stable = snapshot.clone();
+        stable.update_channel = "stable".into();
+        assert!(super::update_channel_switched(&snapshot, &stable, alpha));
+        assert!(!super::update_channel_switched(&snapshot, &written, alpha));
     }
 
     #[test]

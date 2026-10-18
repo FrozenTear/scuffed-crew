@@ -619,6 +619,13 @@ fn installed_update_channel(current: &str) -> UpdateChannel {
 /// or rc build stays on the prerelease channel. Otherwise an alpha installed
 /// with a pinned tag only looks at stable releases, which are all older than
 /// it, and is never offered the next alpha.
+/// True when [`effective_update_channel`] is `Prerelease`. `installed` is
+/// `None` when the version could not be read; that counts as a release.
+pub fn prerelease_updates_effective(update_channel: &str, installed: Option<&str>) -> bool {
+    effective_update_channel(update_channel, installed.unwrap_or_default())
+        == UpdateChannel::Prerelease
+}
+
 pub fn effective_update_channel(update_channel: &str, current: &str) -> UpdateChannel {
     let raw = update_channel.trim();
     if raw.eq_ignore_ascii_case("prerelease") {
