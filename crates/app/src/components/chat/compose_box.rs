@@ -20,6 +20,84 @@ fn chat_compose_can_send(raw: &str) -> bool {
     len > 0 && len <= MAX_CHAT_MESSAGE_CHARS
 }
 
+/// Why a compose attempt finished. Only [`ComposeOutcome::Success`] clears the box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposeOutcome {
+    Success,
+    Error,
+    RateLimited,
+}
+
+/// Typed text after the server answers. Errors leave the draft unchanged.
+pub fn draft_after_outcome(typed: &str, outcome: ComposeOutcome) -> String {
+    match outcome {
+        ComposeOutcome::Success => String::new(),
+        ComposeOutcome::Error | ComposeOutcome::RateLimited => typed.to_string(),
+    }
+}
+
+/// Trimmed payload when a send may start.
+///
+/// `pending` blocks a second send. The caller's typed text is not modified.
+pub fn begin_send(typed: &str, pending: bool, blocked: bool) -> Option<String> {
+    if pending || blocked {
+        return None;
+    }
+    let payload = typed.trim().to_string();
+    if !chat_compose_can_send(&payload) {
+        return None;
+    }
+    Some(payload)
+}
+
+/// In-flight compose draft. Tests and the widget share this settle rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerState {
+    pub text: String,
+    pub pending: bool,
+}
+
+impl ComposerState {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            pending: false,
+        }
+    }
+
+    pub fn begin_send(&mut self, blocked: bool) -> Option<String> {
+        let payload = begin_send(&self.text, self.pending, blocked)?;
+        self.pending = true;
+        Some(payload)
+    }
+
+    pub fn settle(&mut self, outcome: ComposeOutcome) {
+        self.text = draft_after_outcome(&self.text, outcome);
+        self.pending = false;
+    }
+}
+
+/// A send the parent must finish. The composer clears only on [`ComposeAttempt::succeed`].
+#[derive(Clone)]
+pub struct ComposeAttempt {
+    pub text: String,
+    finish: EventHandler<ComposeOutcome>,
+}
+
+impl ComposeAttempt {
+    pub fn succeed(&self) {
+        self.finish.call(ComposeOutcome::Success);
+    }
+
+    pub fn fail(&self) {
+        self.finish.call(ComposeOutcome::Error);
+    }
+
+    pub fn rate_limited(&self) {
+        self.finish.call(ComposeOutcome::RateLimited);
+    }
+}
+
 /// Remaining-character label. Hidden until the draft is near the cap.
 fn chat_counter_label(raw: &str) -> Option<String> {
     let len = trimmed_chat_len(raw);
@@ -133,7 +211,7 @@ const COMPOSE_BOX_CSS: &str = r#"
 /// Chat message compose box with text input and send button.
 #[component]
 pub fn ComposeBox(
-    on_send: EventHandler<String>,
+    on_send: EventHandler<ComposeAttempt>,
     #[props(default = false)] disabled: bool,
     #[props(default = "Type a message...".to_string())] placeholder: String,
     #[props(default = false)] encrypted: bool,
@@ -142,18 +220,26 @@ pub fn ComposeBox(
     send_locked: bool,
 ) -> Element {
     let mut draft = use_signal(String::new);
+    let mut pending = use_signal(|| false);
+    let finish = use_callback(move |outcome: ComposeOutcome| {
+        let current = draft();
+        draft.set(draft_after_outcome(&current, outcome));
+        pending.set(false);
+    });
     let draft_text = draft();
     let trimmed_len = trimmed_chat_len(&draft_text);
     let over_limit = trimmed_len > MAX_CHAT_MESSAGE_CHARS;
-    let can_send = !disabled && !send_locked && chat_compose_can_send(&draft_text);
+    let in_flight = pending();
+    let can_send = begin_send(&draft_text, in_flight, disabled || send_locked).is_some();
     let counter = chat_counter_label(&draft_text);
 
     let mut submit = move || {
-        let text = draft.read().trim().to_string();
-        if chat_compose_can_send(&text) && !disabled && !send_locked {
-            on_send.call(text);
-            draft.set(String::new());
-        }
+        let typed = draft();
+        let Some(text) = begin_send(&typed, pending(), disabled || send_locked) else {
+            return;
+        };
+        pending.set(true);
+        on_send.call(ComposeAttempt { text, finish });
     };
 
     rsx! {
@@ -168,7 +254,7 @@ pub fn ComposeBox(
                 class: "chat-compose__input",
                 r#type: "text",
                 placeholder: "{placeholder}",
-                disabled: disabled,
+                disabled: disabled || in_flight,
                 value: "{draft}",
                 oninput: move |evt| draft.set(evt.value()),
                 onkeydown: move |evt| {
@@ -254,6 +340,60 @@ mod tests {
             chat_counter_label(&format!("  {}  ", "a".repeat(MAX_CHAT_MESSAGE_CHARS + 2)))
                 .as_deref(),
             Some("2 characters over the limit")
+        );
+    }
+
+    #[test]
+    fn success_clears_the_typed_text() {
+        let mut state = ComposerState::new("  hello team  ");
+        let payload = state.begin_send(false).expect("send starts");
+        assert_eq!(payload, "hello team");
+        assert_eq!(state.text, "  hello team  ");
+        assert!(state.pending);
+        assert!(
+            state.begin_send(false).is_none(),
+            "a second send waits until the first settles"
+        );
+        state.settle(ComposeOutcome::Success);
+        assert_eq!(state.text, "");
+        assert!(!state.pending);
+    }
+
+    #[test]
+    fn error_keeps_the_typed_text() {
+        let typed = "  not sent yet  ";
+        let mut state = ComposerState::new(typed);
+        assert_eq!(state.begin_send(false).as_deref(), Some("not sent yet"));
+        state.settle(ComposeOutcome::Error);
+        assert_eq!(state.text, typed);
+        assert!(!state.pending);
+        assert_eq!(state.begin_send(false).as_deref(), Some("not sent yet"));
+    }
+
+    #[test]
+    fn rate_limit_keeps_the_typed_text() {
+        let typed = "  slow down  ";
+        let mut state = ComposerState::new(typed);
+        assert_eq!(state.begin_send(false).as_deref(), Some("slow down"));
+        state.settle(ComposeOutcome::RateLimited);
+        assert_eq!(state.text, typed);
+        assert!(!state.pending);
+        assert_eq!(
+            draft_after_outcome(typed, ComposeOutcome::RateLimited),
+            typed
+        );
+        assert_eq!(draft_after_outcome(typed, ComposeOutcome::Success), "");
+    }
+
+    #[test]
+    fn composer_clears_only_through_the_outcome_helper() {
+        let src = include_str!("compose_box.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(prod.contains("draft_after_outcome"));
+        assert!(prod.contains("begin_send"));
+        assert!(
+            !prod.contains("draft.set(String::new())"),
+            "the box must not wipe the draft before the parent settles"
         );
     }
 }

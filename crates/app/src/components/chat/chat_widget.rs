@@ -19,7 +19,7 @@ use crate::state::RelayAvailability;
 use crate::state::nostr::{NostrRelayEvent, NostrRelayManager, RelayConnectionState};
 use crate::state::use_relay_availability_state;
 
-use super::compose_box::ComposeBox;
+use super::compose_box::{ComposeAttempt, ComposeBox};
 use super::message_list::MessageList;
 use super::relay_status::RelayStatus;
 
@@ -886,16 +886,22 @@ pub fn ChatWidget(
                         messages: visible,
                         key_mode: key_mode,
                         loading: is_loading,
-                        on_send: move |text: String| {
+                        on_send: move |attempt: ComposeAttempt| {
                             if sending() {
+                                attempt.fail();
                                 return;
                             }
-                            let Some(ch) = active.clone() else { return };
+                            let Some(ch) = active.clone() else {
+                                attempt.fail();
+                                return;
+                            };
                             sending.set(true);
                             panel_error.set(None);
                             spawn(async move {
                                 let relay_url = auth_relay_url(&ch.relay_url);
-                                match send_officer_message(&ch.group_id, &text, &relay_url).await {
+                                match send_officer_message(&ch.group_id, &attempt.text, &relay_url)
+                                    .await
+                                {
                                     Ok(resp) => {
                                         let now = (js_sys::Date::now() / 1000.0) as u64;
                                         push_unique(
@@ -905,7 +911,7 @@ pub fn ChatWidget(
                                                 pubkey: resp.sender_pubkey,
                                                 display_name: None,
                                                 avatar_url: None,
-                                                content: text,
+                                                content: attempt.text.clone(),
                                                 created_at: now,
                                                 group_id: ch.group_id,
                                                 encrypted: true,
@@ -913,10 +919,12 @@ pub fn ChatWidget(
                                             },
                                         );
                                         toast.show(Toast::success("Message sent"));
+                                        attempt.succeed();
                                     }
                                     Err(e) => {
                                         panel_error.set(Some(e.clone()));
                                         toast.show(Toast::error(e));
+                                        attempt.fail();
                                     }
                                 }
                                 sending.set(false);
@@ -929,19 +937,25 @@ pub fn ChatWidget(
                         loading: is_loading,
                     }
                     ComposeBox {
-                        on_send: move |text: String| {
-                            if sending() {
+                        on_send: move |attempt: ComposeAttempt| {
+                            if sending()
+                                || remaining_hold_secs(send_hold_until_ms(), js_sys::Date::now())
+                                    > 0
+                            {
+                                attempt.fail();
                                 return;
                             }
-                            if remaining_hold_secs(send_hold_until_ms(), js_sys::Date::now()) > 0 {
+                            let Some(ch) = active.clone() else {
+                                attempt.fail();
                                 return;
-                            }
-                            let Some(ch) = active.clone() else { return };
+                            };
                             let relay_url = auth_relay_url(&ch.relay_url);
                             sending.set(true);
                             panel_error.set(None);
                             spawn(async move {
-                                match send_public_message(&ch.group_id, &text, &relay_url).await {
+                                match send_public_message(&ch.group_id, &attempt.text, &relay_url)
+                                    .await
+                                {
                                     Ok(resp) => {
                                         push_unique(
                                             &mut messages.write(),
@@ -950,13 +964,14 @@ pub fn ChatWidget(
                                                 pubkey: resp.sender_pubkey,
                                                 display_name: None,
                                                 avatar_url: None,
-                                                content: text,
+                                                content: attempt.text.clone(),
                                                 created_at: resp.created_at,
                                                 group_id: ch.group_id,
                                                 encrypted: false,
                                                 reply_to: None,
                                             },
                                         );
+                                        attempt.succeed();
                                     }
                                     Err(err) => {
                                         if let Some(secs) = err.retry_after_secs {
@@ -964,9 +979,11 @@ pub fn ChatWidget(
                                                 js_sys::Date::now() + (secs as f64) * 1000.0;
                                             send_hold_until_ms.set(until);
                                             panel_error.set(None);
+                                            attempt.rate_limited();
                                         } else {
                                             panel_error.set(Some(err.message.clone()));
                                             toast.show(Toast::error(err.message));
+                                            attempt.fail();
                                         }
                                     }
                                 }

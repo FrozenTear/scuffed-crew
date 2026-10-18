@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 use scuffed_types::nostr::ChatMessage;
 
-use super::compose_box::ComposeBox;
+use super::compose_box::{ComposeAttempt, ComposeBox};
 use super::message_list::MessageList;
 
 const ENCRYPTED_CHAT_CSS: &str = r#"
@@ -75,7 +75,7 @@ pub enum KeyMode {
 pub fn EncryptedChat(
     messages: Vec<ChatMessage>,
     key_mode: KeyMode,
-    on_send: EventHandler<String>,
+    on_send: EventHandler<ComposeAttempt>,
     #[props(default = false)] loading: bool,
 ) -> Element {
     rsx! {
@@ -104,7 +104,7 @@ pub fn EncryptedChat(
                         loading: loading,
                     }
                     ComposeBox {
-                        on_send: move |text: String| on_send.call(text),
+                        on_send: move |attempt: ComposeAttempt| on_send.call(attempt),
                         disabled: false,
                         encrypted: true,
                     }
