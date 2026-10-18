@@ -213,11 +213,15 @@ if ! groups 2>/dev/null | grep -qw input; then
 fi
 
 # eng.traineddata locations across distros (daemon probes these at runtime too).
+# The release tarball ships tessdata/ next to this installer. That copy is
+# installed a few lines below, so it counts before any system path. Otherwise
+# a machine without a distro model warns, then the bundled file is copied.
 # TESSDATA_SYSTEM_ROOT (empty by default) is put in front of the system
 # paths, so a test can run this on a machine that has the model installed.
 find_eng_traineddata() {
     local sys="${TESSDATA_SYSTEM_ROOT:-}"
     local candidates=(
+        "$PKG_ROOT/tessdata/eng.traineddata"
         "${TESSDATA_PREFIX:-}/eng.traineddata"
         "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata"
         "$sys/usr/share/tessdata/eng.traineddata"
