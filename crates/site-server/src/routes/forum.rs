@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use axum::{
     Json,
@@ -78,6 +78,13 @@ fn enforce_board_access(
 /// A deactivated board is not found for anyone below officer.
 fn board_hidden_from_caller(board: &ForumBoard, role: Option<OrgRole>) -> bool {
     !board.is_active && !role.is_some_and(|r| r.is_at_least(OrgRole::Officer))
+}
+
+/// Whether a thread on `board` may appear in a list for `role`.
+/// Inactive boards stay hidden below officer, and `min_role` matches
+/// [`enforce_board_access`] (anonymous is blocked whenever it is set).
+fn caller_can_list_board(board: &ForumBoard, role: Option<OrgRole>) -> bool {
+    !board_hidden_from_caller(board, role) && enforce_board_access(board, role).is_ok()
 }
 
 /// Resolve the thread's board for ACL. Fail closed when `board_id` is missing
@@ -446,51 +453,52 @@ pub async fn list_threads(
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let role = caller.as_ref().map(|m| m.org_role);
-    let mut board_meta = None;
-    let board_id = if let Some(slug) = query.board.as_deref() {
-        let b = state
+    let limit = query.limit.min(100);
+    let offset = query.offset;
+
+    // Resolve visible boards before LIMIT so hidden rows cannot consume a page.
+    // A slug still 404s or 401/403s before the list, same as before. The legacy
+    // category filter applies only when no board slug was given.
+    let (board_meta, board_ids, category) = if let Some(slug) = query.board.as_deref() {
+        let board = state
             .db
             .get_forum_board_by_slug(slug)
             .await
             .map_err(err_500)?
             .ok_or_else(|| err_404("Board not found"))?;
-        enforce_board_access(&b, role)?;
-        let id = b.id.clone();
-        board_meta = Some(b);
-        Some(id)
+        enforce_board_access(&board, role)?;
+        let id = board.id.clone();
+        (Some(board), vec![id], None)
     } else {
-        None
+        let boards = state.db.list_forum_boards().await.map_err(err_500)?;
+        let ids = boards
+            .iter()
+            .filter(|board| caller_can_list_board(board, role))
+            .map(|board| board.id.clone())
+            .collect();
+        (None, ids, query.category.as_deref())
     };
 
     let threads = state
         .db
-        .list_forum_threads(
-            board_id.as_deref(),
-            query.category.as_deref(),
-            query.limit.min(100),
-            query.offset,
-        )
+        .list_forum_threads_on_boards(&board_ids, category, limit, offset)
+        .await
+        .map_err(err_500)?;
+    let total = state
+        .db
+        .count_forum_threads_on_boards(&board_ids, category)
         .await
         .map_err(err_500)?;
 
-    // F-API-001: unfiltered / category-only lists used to return every thread
-    // row. Drop any thread whose board is missing or whose min_role the caller
-    // does not meet. When `board=` was supplied we already enforced above;
-    // still re-check so a stale board_id cannot leak.
-    let mut board_cache: HashMap<String, Option<ForumBoard>> = HashMap::new();
+    // Fail closed if a row is outside the boards chosen above (missing board
+    // ids never enter `board_ids`, so orphans stay hidden).
+    let allowed: HashSet<&str> = board_ids.iter().map(String::as_str).collect();
     let mut items = Vec::with_capacity(threads.len());
     for thread in threads {
-        let Some(bid) = thread.board_id.as_deref().filter(|s| !s.is_empty()) else {
+        let Some(bid) = thread.board_id.as_deref() else {
             continue;
         };
-        if let std::collections::hash_map::Entry::Vacant(e) = board_cache.entry(bid.to_string()) {
-            let resolved = state.db.get_forum_board(bid).await.map_err(err_500)?;
-            e.insert(resolved);
-        }
-        let Some(Some(board)) = board_cache.get(bid) else {
-            continue;
-        };
-        if board_hidden_from_caller(board, role) || enforce_board_access(board, role).is_err() {
+        if !allowed.contains(bid) {
             continue;
         }
         let reply_count = state.db.count_forum_replies(&thread.id).await.unwrap_or(0);
@@ -500,10 +508,9 @@ pub async fn list_threads(
         });
     }
 
-    let total = items.len();
     Ok(Json(ThreadListResponse {
         threads: items,
-        total,
+        total: usize::try_from(total).unwrap_or(usize::MAX),
         board: board_meta,
     }))
 }
