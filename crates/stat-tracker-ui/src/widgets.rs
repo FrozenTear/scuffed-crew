@@ -648,24 +648,31 @@ pub fn surface_stat_card(
 
 pub fn health_panel(
     status: &str,
+    hint: Option<&str>,
     overlay_showing: bool,
     game_running: bool,
 ) -> Element<'static, Message> {
-    container(
-        column![
-            label_text("Tracker health"),
-            text(status.to_string())
-                .size(SIZE_BODY)
+    let mut col = column![
+        label_text("Tracker health"),
+        text(status.to_string())
+            .size(SIZE_BODY)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2),
+    ]
+    .spacing(8);
+    if let Some(hint) = hint {
+        col = col.push(
+            text(hint.to_string())
+                .size(SIZE_META)
                 .font(FONT_MEDIUM)
-                .color(TEXT_2),
-            overlay_toggle(overlay_showing, game_running),
-        ]
-        .spacing(8),
-    )
-    .padding(PAD_INNER)
-    .width(Fill)
-    .style(theme::surface_panel)
-    .into()
+                .color(TEXT_3),
+        );
+    }
+    container(col.push(overlay_toggle(overlay_showing, game_running)))
+        .padding(PAD_INNER)
+        .width(Fill)
+        .style(theme::surface_panel)
+        .into()
 }
 
 pub fn empty_surface(copy: &str) -> Element<'static, Message> {
