@@ -97,7 +97,8 @@ pub struct Config {
     /// recognizer `ocr-v1`. On every other Tab under `"new"` the six stats
     /// come from the new reader only: a Tab whose board it does not vouch
     /// for is not stored, and a stat cell it is unsure of keeps the game's
-    /// last accepted value and is marked, with no OCR number in its place. A game has no stored row until each of the six stats has
+    /// last accepted value and is marked, with no OCR number in its place.
+    /// A game has no stored row until each of the six stats has
     /// had a sure read on some Tab of it: a stat never read is not stored
     /// or uploaded as 0, and a game that ends that way is not stored at
     /// all. The member's own row is found from the own-name seeds and the
