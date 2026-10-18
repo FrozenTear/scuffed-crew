@@ -42,6 +42,11 @@ pub const CSS: &str = r#"
         background: var(--surface-2);
         vertical-align: middle;
     }
+    .name-field-error {
+        color: var(--danger);
+        font-size: 0.85rem;
+        margin: 0.35rem 0 0;
+    }
     .fetch-error-wrap { text-align: center; }
     .fetch-error {
         color: var(--danger);

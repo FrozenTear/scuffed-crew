@@ -5,6 +5,9 @@ use scuffed_types::{
     homepage_preset_by_id, homepage_presets,
 };
 
+use crate::pages::display_name::{
+    DisplayNameAudience, DisplayNameField, name_field_after_edit, settle_name_field,
+};
 use crate::routes::Route;
 use crate::state::auth::{AuthState, use_auth};
 
@@ -115,6 +118,7 @@ pub fn Setup() -> Element {
     let mut org_name = use_signal(|| "My Clan".to_string());
     let mut homepage_preset = use_signal(|| "neutral".to_string());
     let mut error = use_signal(|| Option::<String>::None);
+    let mut name_error = use_signal(|| Option::<String>::None);
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
     let nav = use_navigator();
@@ -137,7 +141,9 @@ pub fn Setup() -> Element {
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
         error.set(None);
-        let user = username().trim().to_string();
+        name_error.set(None);
+        let typed_at_submit = username();
+        let user = typed_at_submit.trim().to_string();
         let pass = password();
         let conf = confirm();
         if user.is_empty() {
@@ -177,7 +183,18 @@ pub fn Setup() -> Element {
                     nav.replace(Route::AdminDashboard {});
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    let settled = settle_name_field(
+                        &typed_at_submit,
+                        &username(),
+                        &e,
+                        DisplayNameAudience::Editor,
+                    );
+                    username.set(settled.value);
+                    if let Some(message) = settled.error {
+                        name_error.set(Some(message.to_string()));
+                    } else if settled.keep_existing_failure {
+                        error.set(Some(e.to_string()));
+                    }
                     submitting.set(false);
                 }
             }
@@ -242,15 +259,18 @@ pub fn Setup() -> Element {
                             "Packs set homepage layout and starter copy. Edit anytime in Admin → Settings."
                         }
                     }
-                    div { class: "setup-field",
-                        label { r#for: "setup-user", "Username" }
-                        input {
-                            id: "setup-user",
-                            r#type: "text",
-                            autocomplete: "username",
-                            value: "{username}",
-                            oninput: move |e| username.set(e.value()),
-                        }
+                    DisplayNameField {
+                        id: "setup-user".to_string(),
+                        label: "Username".to_string(),
+                        value: username(),
+                        error: name_error(),
+                        autocomplete: "username".to_string(),
+                        field_class: "setup-field".to_string(),
+                        oninput: move |e: FormEvent| {
+                            let (next, cleared) = name_field_after_edit(e.value());
+                            username.set(next);
+                            name_error.set(cleared.map(str::to_string));
+                        },
                     }
                     div { class: "setup-field",
                         label { r#for: "setup-pass", "Password (min 12 characters)" }
