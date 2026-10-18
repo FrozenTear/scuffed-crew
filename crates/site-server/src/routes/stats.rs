@@ -1845,6 +1845,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
+            .without_time()
             .with_max_level(tracing::Level::TRACE)
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -1950,6 +1951,8 @@ mod tests {
             .filter(|line| line.contains("dropped rank-screen field"))
             .collect();
         let drops_text = drops.join("\n");
+        // Compare the message, not the clock. A timestamp such as
+        // 22:04:13.691150Z contains the digits of an out-of-range value.
         for (session, field, reason) in [
             ("sess-delta", "rank_delta_pct", "out of range"),
             ("sess-sr", "hero_sr", "out of range"),
