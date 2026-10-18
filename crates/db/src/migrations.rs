@@ -651,6 +651,22 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Rows already on disk are not rewritten; a missing value is read
         -- back as [].
         DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+        -- Rank screen after a competitive game. Every field is optional so
+        -- rows written before this column set still load. `rank_role` is the
+        -- queue (tank, damage, support). It is not the scoreboard hero role
+        -- stored in `role`. The season-progression number is not a column.
+        -- Ranges are enforced on upload (HTTP 400), not by a schema ASSERT,
+        -- so a rejected value never becomes a 500 from the database.
+        DEFINE FIELD OVERWRITE rank_role ON personal_match TYPE option<string>;
+        DEFINE FIELD OVERWRITE rank_tier ON personal_match TYPE option<string>;
+        DEFINE FIELD OVERWRITE rank_division ON personal_match TYPE option<int>;
+        DEFINE FIELD OVERWRITE rank_progress_pct ON personal_match TYPE option<int>;
+        DEFINE FIELD OVERWRITE rank_delta_pct ON personal_match TYPE option<int>;
+        DEFINE FIELD OVERWRITE rank_modifiers ON personal_match TYPE option<array<string>>;
+        DEFINE FIELD OVERWRITE hero_sr ON personal_match TYPE option<int>;
+        DEFINE FIELD OVERWRITE hero_sr_delta ON personal_match TYPE option<int>;
+        DEFINE FIELD OVERWRITE rank_recognizer ON personal_match TYPE option<string>;
+        DEFINE FIELD OVERWRITE rank_confidence ON personal_match TYPE option<object> FLEXIBLE;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not

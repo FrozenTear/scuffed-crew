@@ -552,6 +552,11 @@ pub struct PersonalMatch {
     /// existed, read as an empty list. Additive on match-list JSON.
     #[serde(default)]
     pub suspect_fields: Vec<String>,
+    /// Rank-screen reads. Flattened onto the match JSON. Empty on rows and
+    /// uploads from before those columns existed. Members see them on
+    /// `GET /api/stats/me/matches`. Public responses do not use this struct.
+    #[serde(default, flatten)]
+    pub rank: scuffed_types::RankScreenFields,
 }
 
 /// Aggregated personal stats for a member.
