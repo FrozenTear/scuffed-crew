@@ -124,6 +124,43 @@ pub struct PersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     pub suspect_fields: Vec<String>,
+    /// The new reader's own number for each held stat cell of this snapshot,
+    /// with its confidence (alpha.12). A held cell keeps the game's last
+    /// accepted value; the app offers this read as a one-click correction.
+    /// Never uploaded and never stored as the stat by itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub reader_held: Vec<HeldRead>,
+}
+
+/// The new reader's read of one stat cell it did not vouch for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+pub struct HeldRead {
+    /// Flat stat name: `e`, `a`, `d`, `dmg`, `h` or `mit`.
+    pub field: String,
+    pub value: u32,
+    /// The reader's confidence, 0 to 1. Below the cutoff, or the cell would
+    /// not have been held.
+    pub confidence: f32,
+}
+
+impl HeldRead {
+    /// The manual edit that stores this read as a correction. `None` for a
+    /// name that is not one of the six stats.
+    pub fn as_edit(&self) -> Option<MatchEdit> {
+        let v = Some(self.value);
+        let mut edit = MatchEdit::default();
+        match self.field.as_str() {
+            "e" => edit.elims = v,
+            "a" => edit.assists = v,
+            "d" => edit.deaths = v,
+            "dmg" => edit.damage = v,
+            "h" => edit.healing = v,
+            "mit" => edit.mitigation = v,
+            _ => return None,
+        }
+        Some(edit)
+    }
 }
 
 /// Identity and payload revision captured when a row was read for upload.
@@ -2159,6 +2196,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
         }
     }
 
@@ -3488,6 +3526,51 @@ mod tests {
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
         let after = store.get_all_matches().await.unwrap();
         assert!(after[0].synced);
+    }
+
+    #[tokio::test]
+    async fn reader_held_reads_survive_reopen_stay_off_uploads_and_accepting_one_edits_the_stat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = LocalStore::open(dir.path()).await.unwrap();
+            let mut row = snap("dorado", 7);
+            row.map_name = "Dorado".into();
+            row.healing = 3143;
+            row.suspect_fields = vec!["h".into()];
+            row.reader_held = vec![HeldRead {
+                field: "h".into(),
+                value: 5298,
+                confidence: 0.344,
+            }];
+            store.insert_match(row).await.unwrap();
+        }
+        let store = reopen_store(dir.path()).await;
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows[0].reader_held.len(), 1);
+        assert_eq!(rows[0].reader_held[0].value, 5298);
+        let json = serde_json::to_string(&crate::sync::upload_request(&rows, &[])).unwrap();
+        assert!(
+            !json.contains("5298"),
+            "a held read is never uploaded: {json}"
+        );
+        assert!(!json.contains("reader_held"), "{json}");
+
+        let edit = rows[0].reader_held[0].as_edit().unwrap();
+        store.edit_match("dorado", &edit).await.unwrap();
+        let edited = store.get_all_matches().await.unwrap();
+        assert_eq!(edited[0].display_healing(), 5298);
+        assert_eq!(
+            edited[0].healing, 3143,
+            "the captured value stays underneath"
+        );
+        assert!(edited[0].edited_fields.iter().any(|f| f == "healing"));
+        assert!(edited[0].suspect_fields.is_empty());
+        let body = crate::sync::upload_request(&edited, &[]);
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains("5298"),
+            "the accepted read uploads as a correction: {json}"
+        );
     }
 
     #[tokio::test]

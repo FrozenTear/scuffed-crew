@@ -7,8 +7,8 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
 use crate::model::{
-    EditField, EditForm, Game, IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, Role, Screen, SeasonSel,
-    UPLOAD_REJECTED_LABEL, display_hero_name, local_hm,
+    EditField, EditForm, Game, IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, ReaderOffer, Role,
+    Screen, SeasonSel, UPLOAD_REJECTED_LABEL, display_hero_name, local_hm,
 };
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
@@ -735,6 +735,13 @@ pub fn expanded_game_card<'a>(
     ]
     .spacing(10);
 
+    if !editing {
+        let offers = game.reader_offers();
+        if !offers.is_empty() {
+            body = body.push(reader_offer_panel(&sid, &offers));
+        }
+    }
+
     if game.needs_review() {
         body = body.push(review_panel(game));
     }
@@ -781,6 +788,50 @@ pub fn expanded_game_card<'a>(
     .width(Fill)
     .clip(true)
     .into()
+}
+
+/// Text for one held cell the reader had its own number for.
+pub fn reader_offer_line(offer: &ReaderOffer) -> String {
+    format!(
+        "{}: kept {}. The reader saw {} ({}% sure).",
+        offer.label,
+        offer.stored,
+        offer.value,
+        (offer.confidence.clamp(0.0, 1.0) * 100.0).round() as u32
+    )
+}
+
+/// Held cells with the reader's own read, each with a button that stores
+/// that read as a correction.
+fn reader_offer_panel(sid: &str, offers: &[ReaderOffer]) -> Element<'static, Message> {
+    let mut block = column![label_text("Reader's reads")].spacing(6);
+    for offer in offers {
+        block = block.push(
+            row![
+                text(reader_offer_line(offer))
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_2)
+                    .width(Fill),
+                button(
+                    text(format!("Use {}", offer.value))
+                        .size(SIZE_META)
+                        .font(FONT_SEMIBOLD)
+                        .color(TEXT),
+                )
+                .padding(Padding::from([6, 14]))
+                .style(theme::ghost_btn())
+                .on_press(Message::AcceptReaderRead {
+                    session_id: sid.to_string(),
+                    field: offer.field.clone(),
+                    value: offer.value,
+                }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    block.into()
 }
 
 fn action_row(
@@ -1348,6 +1399,20 @@ fn card_shell(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reader_offer_line_reads_plainly() {
+        let offer = crate::model::ReaderOffer {
+            field: "h".into(),
+            label: "HEAL",
+            stored: 3143,
+            value: 5298,
+            confidence: 0.344,
+        };
+        let line = super::reader_offer_line(&offer);
+        assert_eq!(line, "HEAL: kept 3143. The reader saw 5298 (34% sure).");
+        assert!(!line.contains('\u{2014}') && !line.contains('\u{2013}'));
+    }
+
     use super::{
         HeaderStatus, HeaderStatusInput, classify_header_status, header_status_color,
         map_stripe_outcome, win_bar_portions,

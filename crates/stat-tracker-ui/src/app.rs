@@ -197,6 +197,12 @@ pub enum Message {
     ToggleEdit,
     EditField(EditField, String),
     SaveEdit,
+    /// Store the reader's own read of a held stat cell as a correction.
+    AcceptReaderRead {
+        session_id: String,
+        field: String,
+        value: u32,
+    },
     PickMap {
         session_id: String,
         map: String,
@@ -941,6 +947,28 @@ impl TrackerApp {
                     }
                 }
                 self.editing = false;
+                Task::none()
+            }
+            Message::AcceptReaderRead {
+                session_id,
+                field,
+                value,
+            } => {
+                match crate::commands::accept_reader_read(
+                    &self.data_dir,
+                    &session_id,
+                    &field,
+                    value,
+                ) {
+                    Ok(()) => {
+                        self.replace_toast("Reader's read saved");
+                        self.arm_training_toast(
+                            &session_id,
+                            crate::report::GameCategory::WrongStats,
+                        );
+                    }
+                    Err(e) => self.replace_toast(format!("Could not save the read: {e}")),
+                }
                 Task::none()
             }
             Message::PickMap { session_id, map } => {

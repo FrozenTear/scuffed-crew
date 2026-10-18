@@ -376,6 +376,34 @@ pub fn own_row_guesses(board: &BoardRead, own: OwnRow) -> [Option<u32>; 6] {
     })
 }
 
+/// The reader's own number for each held stat cell of the own row, with
+/// its confidence (alpha.12). A held cell stores the game's last accepted
+/// value; this is what the reader saw instead, kept so the app can offer it
+/// as a one-click correction. Sure cells, cells with no number, and an
+/// unknown row give nothing.
+pub fn held_reads(board: &BoardRead, own: OwnRow) -> Vec<crate::storage::HeldRead> {
+    let OwnRow::Identified { index, .. } = own else {
+        return Vec::new();
+    };
+    STAT_SUFFIXES
+        .iter()
+        .filter_map(|suffix| {
+            let field = board.get(&format!("r{index}.{suffix}"))?;
+            let Some(Value::Int(n)) = field.value else {
+                return None;
+            };
+            match cell_trust(Some(n), field.suspect) {
+                CellTrust::Sure(_) => None,
+                CellTrust::Held => Some(crate::storage::HeldRead {
+                    field: (*suffix).to_string(),
+                    value: n,
+                    confidence: field.confidence,
+                }),
+            }
+        })
+        .collect()
+}
+
 /// Flat suspect names safe to upload.
 ///
 /// Row names such as `r3.dmg` become `dmg`. Unknown names, duplicates, and
@@ -737,6 +765,94 @@ mod tests {
 
     fn identified(index: usize, team_size: usize) -> OwnRow {
         OwnRow::Identified { index, team_size }
+    }
+
+    // ----- alpha.12: the reader's own read of a held cell -----
+
+    #[test]
+    fn held_reads_keep_the_readers_number_and_confidence_for_held_cells_only() {
+        // The Dorado report: healing held, the reader saw 5298 at 0.344.
+        let mut board = confident_board(5, 2);
+        if let Some(f) = board.fields.iter_mut().find(|f| f.name == "r2.h") {
+            *f = FieldRead {
+                name: "r2.h".into(),
+                value: Some(Value::Int(5298)),
+                confidence: 0.344,
+                suspect: true,
+            };
+        }
+        if let Some(f) = board.fields.iter_mut().find(|f| f.name == "r2.mit") {
+            *f = unread("r2.mit");
+        }
+        let reads = held_reads(&board, identified(2, 5));
+        assert_eq!(
+            reads,
+            vec![crate::storage::HeldRead {
+                field: "h".into(),
+                value: 5298,
+                confidence: 0.344,
+            }],
+            "sure cells and a held cell with no number give nothing"
+        );
+        assert!(held_reads(&board, OwnRow::Uncertain).is_empty());
+        assert!(held_reads(&confident_board(5, 2), identified(2, 5)).is_empty());
+    }
+
+    #[test]
+    fn a_held_read_becomes_an_edit_of_its_own_stat() {
+        let edit = |field: &str| {
+            crate::storage::HeldRead {
+                field: field.into(),
+                value: 5298,
+                confidence: 0.344,
+            }
+            .as_edit()
+        };
+        let e = crate::storage::MatchEdit::default;
+        assert_eq!(
+            edit("e"),
+            Some(crate::storage::MatchEdit {
+                elims: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(
+            edit("a"),
+            Some(crate::storage::MatchEdit {
+                assists: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(
+            edit("d"),
+            Some(crate::storage::MatchEdit {
+                deaths: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(
+            edit("dmg"),
+            Some(crate::storage::MatchEdit {
+                damage: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(
+            edit("h"),
+            Some(crate::storage::MatchEdit {
+                healing: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(
+            edit("mit"),
+            Some(crate::storage::MatchEdit {
+                mitigation: Some(5298),
+                ..e()
+            })
+        );
+        assert_eq!(edit("hero"), None);
+        assert_eq!(edit("r2.h"), None);
     }
 
     // ----- alpha.7 O10: the trust gate and the stats without OCR -----

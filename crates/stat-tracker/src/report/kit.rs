@@ -1514,6 +1514,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: "cv-v5".into(),
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
         }
     }
 

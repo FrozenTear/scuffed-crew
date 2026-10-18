@@ -243,9 +243,34 @@ pub struct Game {
     pub upload_reject: Option<String>,
     /// Flat names the new reader was not sure about.
     pub suspect_fields: Vec<String>,
+    /// The new reader's own read of each held stat cell, offered as a
+    /// one-click correction ([`Game::reader_offers`]).
+    pub reader_held: Vec<stat_tracker::storage::HeldRead>,
     /// True when this row has already been uploaded. A blank map on a
     /// synced row was stored by an older build. It is not a local hold.
     pub synced: bool,
+}
+
+/// Flat stat names with their card labels, in card order.
+const STAT_FIELDS: [(&str, &str); 6] = [
+    ("e", "E"),
+    ("d", "D"),
+    ("a", "A"),
+    ("dmg", "DMG"),
+    ("h", "HEAL"),
+    ("mit", "MIT"),
+];
+
+/// A held stat cell with the reader's own read, offered as a correction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReaderOffer {
+    pub field: String,
+    pub label: &'static str,
+    /// The value stored now (the game's last accepted read).
+    pub stored: u32,
+    /// The reader's own read of the cell.
+    pub value: u32,
+    pub confidence: f32,
 }
 
 /// Label for a game the server refused. The detail line is the server message.
@@ -288,12 +313,48 @@ impl Game {
                 .collect(),
             upload_reject: m.upload_rejection().map(str::to_string),
             suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
+            reader_held: m.reader_held.clone(),
             synced: m.synced,
         }
     }
 
     pub fn field_unsure(&self, name: &str) -> bool {
         self.suspect_fields.iter().any(|field| field == name)
+    }
+
+    /// Held stat cells where the reader had its own number, different from
+    /// the stored one, and the cell is still unsure (an edit clears it).
+    /// Each is offered as a one-click correction. In stat order.
+    pub fn reader_offers(&self) -> Vec<ReaderOffer> {
+        STAT_FIELDS
+            .iter()
+            .filter_map(|(field, label)| {
+                let held = self.reader_held.iter().find(|r| r.field == *field)?;
+                if !self.field_unsure(field) || held.value == self.stat(field)? {
+                    return None;
+                }
+                Some(ReaderOffer {
+                    field: (*field).to_string(),
+                    label,
+                    stored: self.stat(field)?,
+                    value: held.value,
+                    confidence: held.confidence,
+                })
+            })
+            .collect()
+    }
+
+    /// The shown value of one flat stat name.
+    fn stat(&self, field: &str) -> Option<u32> {
+        Some(match field {
+            "e" => self.elims,
+            "a" => self.assists,
+            "d" => self.deaths,
+            "dmg" => self.damage,
+            "h" => self.healing,
+            "mit" => self.mitigation,
+            _ => return None,
+        })
     }
 
     pub fn display_hero(&self) -> String {
@@ -533,6 +594,7 @@ mod tests {
             segments: Vec::new(),
             upload_reject: None,
             suspect_fields: vec!["dmg".into(), "hero".into()],
+            reader_held: Vec::new(),
             synced: false,
         };
         assert!(game.field_unsure("dmg"));
@@ -540,6 +602,67 @@ mod tests {
         assert!(!game.field_unsure("e"));
         game.suspect_fields.clear();
         assert!(!game.field_unsure("dmg"));
+    }
+
+    fn dorado() -> super::Game {
+        super::Game {
+            session_id: "ac471dec82611fcd".into(),
+            hero: "Lifeweaver".into(),
+            map_name: "Dorado".into(),
+            role: super::Role::Support,
+            outcome: super::Outcome::Loss,
+            elims: 7,
+            deaths: 2,
+            assists: 10,
+            damage: 1268,
+            healing: 3143,
+            mitigation: 518,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: vec!["h".into()],
+            reader_held: vec![stat_tracker::storage::HeldRead {
+                field: "h".into(),
+                value: 5298,
+                confidence: 0.344,
+            }],
+            synced: false,
+        }
+    }
+
+    #[test]
+    fn held_cell_with_a_reader_read_is_offered() {
+        let offers = dorado().reader_offers();
+        assert_eq!(offers.len(), 1);
+        let o = &offers[0];
+        assert_eq!(o.field, "h");
+        assert_eq!(o.label, "HEAL");
+        assert_eq!(o.stored, 3143);
+        assert_eq!(o.value, 5298);
+        assert!((o.confidence - 0.344).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_offer_once_the_cell_is_sure_or_edited() {
+        // An edit clears the unsure mark: the offer goes away.
+        let mut game = dorado();
+        game.suspect_fields.clear();
+        assert!(game.reader_offers().is_empty());
+        // The reader's read is already the stored value: nothing to offer.
+        let mut game = dorado();
+        game.healing = 5298;
+        assert!(game.reader_offers().is_empty());
+        // A held cell the reader had no number for gives no offer.
+        let mut game = dorado();
+        game.reader_held.clear();
+        assert!(game.reader_offers().is_empty());
+        // A read for some other cell does not attach to the unsure one.
+        let mut game = dorado();
+        game.reader_held[0].field = "dmg".into();
+        assert!(game.reader_offers().is_empty());
     }
 }
 
@@ -568,6 +691,7 @@ mod review_tests {
             segments: Vec::new(),
             upload_reject: None,
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
             synced: false,
         }
     }

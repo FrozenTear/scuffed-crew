@@ -450,6 +450,7 @@ mod tests {
             segments: Vec::new(),
             upload_reject: None,
             suspect_fields: Vec::new(),
+            reader_held: Vec::new(),
             synced: false,
         }
     }
