@@ -471,7 +471,10 @@ mod tests {
 
     #[test]
     fn flag_off_never_spawns_and_never_builds_input() {
-        let config = crate::config::Config::default();
+        let config = crate::config::Config {
+            reader: crate::config::ReaderSetting::OcrV1,
+            ..crate::config::Config::default()
+        };
         assert!(!config.shadow_recognizer);
         assert!(!config.uses_new_reader());
         assert!(ShadowWorker::start_if_enabled(&config).is_none());
@@ -502,6 +505,7 @@ mod tests {
         let config = crate::config::Config {
             data_dir: dir.path().to_path_buf(),
             ocr: OcrSetting::Off,
+            reader: ReaderSetting::OcrV1,
             ..crate::config::Config::default()
         };
         // `reader` is still ocr-v1 in the file, as the Settings switch leaves it.
