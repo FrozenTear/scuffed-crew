@@ -1,8 +1,11 @@
 name: Stat Tracker Release
 
 # Prebuilt Linux binaries for the stat tracker, published as a GitHub Release.
-# Trigger: push a tag like `stat-tracker-v0.1.0`, or run manually (dispatch
-# builds from the chosen ref and publishes a draft release for inspection).
+# Trigger: push a tag like `stat-tracker-v0.1.0`, or run manually.
+# workflow_dispatch always builds the tarball from the chosen ref. It creates
+# a draft GitHub release and tag only when the publish input is true (default
+# false). Without publish, the tarball and .sha256 are uploaded as the
+# artifact stat-tracker-linux-x86_64-test. Tag pushes publish as before.
 #
 # Portability strategy (release must run on most Linux distros):
 # - Daemon builds on ubuntu-22.04 → glibc floor 2.35 (covers Ubuntu 22.04+,
@@ -29,6 +32,11 @@ on:
     tags:
       - "stat-tracker-v*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: create a draft GitHub release and tag
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -443,7 +451,20 @@ jobs:
           tar czf "${STAGE}.tar.gz" "${STAGE}"
           sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
 
+      - name: Upload test tarball
+        # Manual runs default to no release and no tag. The tarball is still
+        # built above. Tag pushes and publish=true skip this and use gh release.
+        if: ${{ !(startsWith(github.ref, 'refs/tags/stat-tracker-v') || inputs.publish == true) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stat-tracker-linux-x86_64-test
+          path: |
+            ${{ env.STAGE }}.tar.gz
+            ${{ env.STAGE }}.tar.gz.sha256
+          if-no-files-found: error
+
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/stat-tracker-v') || inputs.publish == true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
