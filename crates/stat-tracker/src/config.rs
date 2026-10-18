@@ -94,11 +94,10 @@ pub struct Config {
     /// who switches back stays on it. Under `"new"` with classic OCR on, a
     /// Tab whose board the new reader finds nothing on (not found, team size
     /// unknown, no digit values) is read with ocr-v1 instead and stored with
-    /// recognizer `ocr-v1`. The
-    /// six stats then come from that reader only: a Tab whose board it does
-    /// not vouch for is not stored, and a stat cell it is unsure of keeps
-    /// the game's last accepted value and is marked, with no OCR number in
-    /// its place. A game has no stored row until each of the six stats has
+    /// recognizer `ocr-v1`. On every other Tab under `"new"` the six stats
+    /// come from the new reader only: a Tab whose board it does not vouch
+    /// for is not stored, and a stat cell it is unsure of keeps the game's
+    /// last accepted value and is marked, with no OCR number in its place. A game has no stored row until each of the six stats has
     /// had a sure read on some Tab of it: a stat never read is not stored
     /// or uploaded as 0, and a game that ends that way is not stored at
     /// all. The member's own row is found from the own-name seeds and the

@@ -462,7 +462,6 @@ fn full_fallback_reason(board: &BoardRead, own: OwnRow) -> Option<&'static str> 
     None
 }
 
-/// The board itself is no read: not found, no team size, or no digit value.
 /// Why a Tab under `reader = "new"` is read with ocr-v1 instead, if it is:
 /// the reader found nothing on the board (not found, team size unknown, no
 /// digit values) and classic OCR may run (`ocr_off` false). A board it found
@@ -475,6 +474,8 @@ pub fn ocr_fallback_reason(board: &BoardRead, ocr_off: bool) -> Option<&'static 
     board_fallback_reason(board)
 }
 
+/// Why the board itself gave no read: it was not found, its team size is
+/// unknown, or it has no digit value.
 fn board_fallback_reason(board: &BoardRead) -> Option<&'static str> {
     match board.status {
         BoardStatus::Read => {}

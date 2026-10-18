@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
-use stat_tracker::config::{Config, OcrSetting};
+use stat_tracker::config::{Config, OcrSetting, ReaderSetting};
 use stat_tracker::detect::hero_portrait::ScoreboardPreflight;
 use stat_tracker::detect::{GamePhase, MatchOutcome, match_end, match_start};
 use stat_tracker::ocr::{self, gate};
@@ -77,6 +77,18 @@ fn config(data_dir: &Path, ocr: OcrSetting) -> Config {
         data_dir: data_dir.to_path_buf(),
         ocr,
         ..Config::default()
+    }
+}
+
+/// [`config`] with an explicit `reader = "ocr-v1"`. The gate test below
+/// starts the switch several times in one process and checks the classic
+/// OCR path: under ocr-v1 a refused off loads no process-wide reader, so the
+/// reader the later granted start loads is the one that reads. The new
+/// reader's version of that test is `tests/ocr_switch_new_reader.rs`.
+fn config_ocr_v1(data_dir: &Path, ocr: OcrSetting) -> Config {
+    Config {
+        reader: ReaderSetting::OcrV1,
+        ..config(data_dir, ocr)
     }
 }
 
@@ -288,7 +300,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     words_pack(live.path(), Words::Current);
 
     // Refused for the packs: OCR stays on, and the reason names them.
-    let refused = Switch::start_with(&config(empty.path(), OcrSetting::Off), &[], load);
+    let refused = Switch::start_with(&config_ocr_v1(empty.path(), OcrSetting::Off), &[], load);
     assert!(!refused.is_off());
     assert!(!gate::is_off(), "a refused off leaves OCR on");
     ocr::recognize_cell(&cell).expect("OCR still reads after a refusal");
@@ -321,7 +333,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     // are not loaded, not named and not watched.
     gate::set_mode(gate::OcrMode::Off);
     let refused = Switch::start_with(
-        &config(live.path(), OcrSetting::Off),
+        &config_ocr_v1(live.path(), OcrSetting::Off),
         &[Read::StatCells],
         |_| panic!("a build that refuses off never loads the packs"),
     );
@@ -347,9 +359,11 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
 
     // On: granted without a look at the packs, and the gate is open.
     gate::set_mode(gate::OcrMode::Off);
-    let on = Switch::start_with(&config(live.path(), OcrSetting::On), &Read::ALL, |_| {
-        panic!("OCR on never loads a reader")
-    });
+    let on = Switch::start_with(
+        &config_ocr_v1(live.path(), OcrSetting::On),
+        &Read::ALL,
+        |_| panic!("OCR on never loads a reader"),
+    );
     assert!(!on.is_off());
     assert!(!gate::is_off(), "on opens the gate");
     assert_eq!(ocr_switch::read_status(live.path()).unwrap().packs, None);
@@ -357,7 +371,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     // Granted: every pack, and a build that reads everything without
     // Tesseract. The gate shuts, and the reader that was checked is the one
     // that reads from here on.
-    let mut switch = Switch::start_with(&config(live.path(), OcrSetting::Off), &[], load);
+    let mut switch = Switch::start_with(&config_ocr_v1(live.path(), OcrSetting::Off), &[], load);
     assert!(
         switch.is_off(),
         "every pack is there: {:?}",
@@ -475,7 +489,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
 
     // The real startup step, on this build.
     gate::set_mode(gate::OcrMode::On);
-    let real = Switch::start(&config(live.path(), OcrSetting::Off));
+    let real = Switch::start(&config_ocr_v1(live.path(), OcrSetting::Off));
     let needing = Read::needing_ocr();
     assert_eq!(
         real.is_off(),
