@@ -601,15 +601,45 @@ pub async fn check_for_update() -> Option<UpdateInfo> {
         .json()
         .await
         .ok()?;
-    select_newer_release_on(installed_update_channel(), &current, &releases)
+    select_newer_release_on(installed_update_channel(&current), &current, &releases)
 }
 
-fn installed_update_channel() -> UpdateChannel {
-    stat_tracker::config::Config::read_stored()
-        .ok()
-        .filter(|config| config.wants_prerelease_updates())
-        .map(|_| UpdateChannel::Prerelease)
-        .unwrap_or(UpdateChannel::Stable)
+fn installed_update_channel(current: &str) -> UpdateChannel {
+    let stored = stat_tracker::config::Config::read_stored()
+        .map(|config| config.update_channel)
+        .unwrap_or_default();
+    effective_update_channel(&stored, current)
+}
+
+/// Channel the update check uses for this install.
+///
+/// `update_channel = "prerelease"` in config.toml opts in. Any other value
+/// that is set (the Settings checkbox writes `"stable"`) means stable. When
+/// the key is missing or empty, a release build stays on stable, but an alpha
+/// or rc build stays on the prerelease channel. Otherwise an alpha installed
+/// with a pinned tag only looks at stable releases, which are all older than
+/// it, and is never offered the next alpha.
+/// True when [`effective_update_channel`] is `Prerelease`. `installed` is
+/// `None` when the version could not be read; that counts as a release.
+pub fn prerelease_updates_effective(update_channel: &str, installed: Option<&str>) -> bool {
+    effective_update_channel(update_channel, installed.unwrap_or_default())
+        == UpdateChannel::Prerelease
+}
+
+pub fn effective_update_channel(update_channel: &str, current: &str) -> UpdateChannel {
+    let raw = update_channel.trim();
+    if raw.eq_ignore_ascii_case("prerelease") {
+        return UpdateChannel::Prerelease;
+    }
+    if !raw.is_empty() {
+        return UpdateChannel::Stable;
+    }
+    match parse_semver(current) {
+        Some(ver) if ver.is_prerelease() && ver.is_offered_prerelease() => {
+            UpdateChannel::Prerelease
+        }
+        _ => UpdateChannel::Stable,
+    }
 }
 
 /// Newest stable `stat-tracker-v*` newer than `current`, plus the bodies of
@@ -1411,6 +1441,92 @@ mod tests {
         );
         let from_alpha = select_newer_release("0.5.0-alpha.1", &with_final).expect("upgrade");
         assert_eq!(from_alpha.latest, "0.5.0");
+    }
+
+    #[test]
+    fn alpha_numbers_compare_as_numbers_not_text() {
+        let v = |s: &str| parse_semver(s).unwrap();
+        assert!(v("0.5.0-alpha.3") < v("0.5.0-alpha.10"));
+        assert!(v("0.5.0-alpha.10") < v("0.5.0-alpha.11"));
+        assert!(v("0.5.0-alpha.3") < v("0.5.0-alpha.11"));
+        assert!(v("0.5.0") > v("0.5.0-alpha.11"));
+        assert!(is_newer("0.5.0-alpha.11", "0.5.0-alpha.3"));
+        assert!(!is_newer("0.5.0-alpha.3", "0.5.0-alpha.11"));
+    }
+
+    #[test]
+    fn unset_channel_follows_an_alpha_build() {
+        use UpdateChannel::{Prerelease, Stable};
+        assert_eq!(effective_update_channel("", "0.5.0-alpha.3"), Prerelease);
+        assert_eq!(effective_update_channel("  ", "0.5.0-rc1"), Prerelease);
+        assert_eq!(effective_update_channel("", "0.4.24"), Stable);
+        assert_eq!(effective_update_channel("", "0.5.0-test.1"), Stable);
+        assert_eq!(effective_update_channel("", "garbage"), Stable);
+        assert_eq!(effective_update_channel("stable", "0.5.0-alpha.3"), Stable);
+        assert_eq!(effective_update_channel("prerelease", "0.4.24"), Prerelease);
+        assert_eq!(effective_update_channel("PreRelease", "0.4.24"), Prerelease);
+    }
+
+    #[test]
+    fn alpha_3_on_the_default_channel_is_offered_alpha_11() {
+        // Newest first, the way GitHub lists them, with a site tag and the
+        // last stable release mixed in.
+        let mut releases = vec![
+            gh_release("stat-tracker-v0.5.0-alpha.11", true, "a11"),
+            gh_release("stat-tracker-v0.5.0-alpha.9", true, "a9"),
+            gh_release("stat-tracker-v0.5.0-alpha.10", true, "a10"),
+        ];
+        for n in (4..=8).rev() {
+            releases.push(gh_release(
+                &format!("stat-tracker-v0.5.0-alpha.{n}"),
+                true,
+                &format!("a{n}"),
+            ));
+        }
+        releases.push(gh_release("stat-tracker-v0.5.0-alpha.3", true, "a3"));
+        releases.push(gh_release("stat-tracker-v0.4.24", false, "stable"));
+        releases.push(gh_release("site-2026-10-05-143-145", false, "site"));
+
+        // Before the fix: an unset channel meant stable, every stable release
+        // is older than alpha.3, so nothing was ever offered.
+        assert!(select_newer_release("0.5.0-alpha.3", &releases).is_none());
+
+        let channel = effective_update_channel("", "0.5.0-alpha.3");
+        let info = select_newer_release_on(channel, "0.5.0-alpha.3", &releases)
+            .expect("alpha.3 is offered an update");
+        assert_eq!(info.latest, "0.5.0-alpha.11");
+        assert_eq!(info.current, "0.5.0-alpha.3");
+        let versions: Vec<_> = info
+            .release_bodies
+            .iter()
+            .map(|body| body.version.as_str())
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                "0.5.0-alpha.11",
+                "0.5.0-alpha.10",
+                "0.5.0-alpha.9",
+                "0.5.0-alpha.8",
+                "0.5.0-alpha.7",
+                "0.5.0-alpha.6",
+                "0.5.0-alpha.5",
+                "0.5.0-alpha.4",
+            ]
+        );
+
+        // Already current: nothing to offer.
+        let current = effective_update_channel("", "0.5.0-alpha.11");
+        assert!(select_newer_release_on(current, "0.5.0-alpha.11", &releases).is_none());
+
+        // A player who turned alpha updates off in Settings stays on stable.
+        let off = effective_update_channel("stable", "0.5.0-alpha.3");
+        assert!(select_newer_release_on(off, "0.5.0-alpha.3", &releases).is_none());
+
+        // The final release still wins once it ships.
+        releases.insert(0, gh_release("stat-tracker-v0.5.0", false, "final"));
+        let info = select_newer_release_on(channel, "0.5.0-alpha.3", &releases).expect("final");
+        assert_eq!(info.latest, "0.5.0");
     }
 
     #[test]
