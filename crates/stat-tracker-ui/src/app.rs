@@ -1932,10 +1932,7 @@ impl TrackerApp {
             }
             ReportMessage::Text(value) => {
                 if let Some(d) = self.report_dialog_mut() {
-                    d.text = value
-                        .chars()
-                        .take(stat_tracker::report::bundle::REASON_TEXT_MAX_CHARS)
-                        .collect();
+                    d.text = crate::report::clamp_note(&value);
                     d.text_edited_at = Some(std::time::Instant::now());
                     d.bump();
                 }

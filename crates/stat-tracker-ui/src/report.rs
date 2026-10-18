@@ -57,6 +57,24 @@ const PRIVATE_WARNING: &str = "This is a private report. Give it only to an offi
 
 const NAME_HINT: &str = "Do not type other players' names.";
 
+/// Placeholder of the note box on a Crash or Performance report. The note
+/// is optional and goes into the manifest's `reason.text`.
+pub const LOG_NOTE_HINT: &str = "What did you notice? Stutter, FPS drops, high CPU, which hero?";
+
+/// Placeholder of the note box on every other kind, and before a pick.
+pub const NOTE_HINT: &str = "What happened? (optional)";
+
+/// The note as it is kept and sent: NUL characters dropped, then cut to
+/// [`REASON_TEXT_MAX_CHARS`] characters. The library scrubs it again when
+/// the zip is built (`scrub_reason_text`).
+pub fn clamp_note(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| *c != '\0')
+        .take(REASON_TEXT_MAX_CHARS)
+        .collect()
+}
+
 /// Game-report categories. The manifest ids live in the tracker library.
 pub use stat_tracker::report::GameCategory;
 
@@ -350,6 +368,17 @@ impl ReportDialog {
     /// stale game flag can never turn a log report into a game one.
     pub fn is_game(&self) -> bool {
         self.game_report && self.category.is_none()
+    }
+
+    /// Placeholder of the note box: [`LOG_NOTE_HINT`] while Crash or
+    /// Performance is picked, [`NOTE_HINT`] otherwise.
+    pub fn note_hint(&self) -> &'static str {
+        match self.picked() {
+            Some(PickedKind::Log(LogOnlyCategory::Crash | LogOnlyCategory::Performance)) => {
+                LOG_NOTE_HINT
+            }
+            _ => NOTE_HINT,
+        }
     }
 
     /// The one kind that would be sent, if any.
@@ -1077,7 +1106,7 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
         .color(TEXT_3),
     );
 
-    let mut input = text_input("What happened? (optional)", &d.text)
+    let mut input = text_input(d.note_hint(), &d.text)
         .padding(Padding::from([8, 10]))
         .size(SIZE_BODY)
         .style(theme::text_input_style)
@@ -2256,5 +2285,95 @@ mod tests {
             d.send_label(),
             "Send game report: Missed game (no pictures)"
         );
+    }
+
+    /// The note box asks what the member noticed on Crash and Performance
+    /// reports, and keeps the general hint on every other kind.
+    #[test]
+    fn note_hint_follows_the_picked_kind() {
+        let d = ReportDialog::new(None, true);
+        assert_eq!(d.note_hint(), NOTE_HINT, "nothing picked");
+        for kind in PickedKind::ALL {
+            let mut d = ReportDialog::new(None, true);
+            match kind {
+                PickedKind::Log(category) => assert!(d.pick_log(category)),
+                PickedKind::Game(category) => assert!(d.pick_game(category, Vec::new())),
+            }
+            let want = match kind {
+                PickedKind::Log(LogOnlyCategory::Crash | LogOnlyCategory::Performance) => {
+                    LOG_NOTE_HINT
+                }
+                _ => NOTE_HINT,
+            };
+            assert_eq!(d.note_hint(), want, "{kind:?}");
+        }
+        assert_eq!(
+            LOG_NOTE_HINT,
+            "What did you notice? Stutter, FPS drops, high CPU, which hero?"
+        );
+    }
+
+    #[test]
+    fn clamp_note_strips_nul_and_caps_at_500_characters() {
+        assert_eq!(clamp_note("high\0 CPU\0"), "high CPU");
+        assert_eq!(clamp_note(""), "");
+        let long = "\u{e9}".repeat(REASON_TEXT_MAX_CHARS + 40);
+        let kept = clamp_note(&long);
+        assert_eq!(kept.chars().count(), REASON_TEXT_MAX_CHARS);
+        assert_eq!(REASON_TEXT_MAX_CHARS, 500);
+        // NULs do not count toward the cap.
+        let padded = format!("{}{}", "\0".repeat(10), "a".repeat(REASON_TEXT_MAX_CHARS));
+        assert_eq!(clamp_note(&padded), "a".repeat(REASON_TEXT_MAX_CHARS));
+    }
+
+    /// A Crash or Performance zip carries the note in `reason.text`, with
+    /// NULs dropped and at most 500 characters, also when the text reaches
+    /// the builder without going through the dialog.
+    #[test]
+    fn crash_and_performance_notes_go_into_reason_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let built_at = Utc.with_ymd_and_hms(2026, 10, 18, 12, 0, 0).unwrap();
+        let reason = |category: LogOnlyCategory, text: String| {
+            let input = LogReportInput::from_config(
+                &config,
+                category,
+                text,
+                FALLBACK_RESOLUTION,
+                CaptureBackend::None,
+                false,
+                Vec::new(),
+                built_at,
+            );
+            let zip = stat_tracker::report::build_log_report(&input).unwrap();
+            let manifest: serde_json::Value = serde_json::from_str(&zip.manifest_json).unwrap();
+            assert_eq!(manifest["reason"]["category"], category.as_str());
+            manifest["reason"]["text"].as_str().unwrap().to_string()
+        };
+        for category in [LogOnlyCategory::Crash, LogOnlyCategory::Performance] {
+            let typed = "Stutter on Dorado\0, FPS drops as Lifeweaver";
+            assert_eq!(
+                reason(category, clamp_note(typed)),
+                "Stutter on Dorado, FPS drops as Lifeweaver"
+            );
+            assert_eq!(
+                reason(category, typed.to_string()),
+                "Stutter on Dorado, FPS drops as Lifeweaver",
+                "the builder strips NUL by itself"
+            );
+            let long = "fps ".repeat(200);
+            assert_eq!(
+                reason(category, long.clone()).chars().count(),
+                REASON_TEXT_MAX_CHARS
+            );
+            assert_eq!(
+                reason(category, clamp_note(&long)).chars().count(),
+                REASON_TEXT_MAX_CHARS
+            );
+            assert_eq!(reason(category, String::new()), "", "the note is optional");
+        }
     }
 }
