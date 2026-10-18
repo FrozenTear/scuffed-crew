@@ -568,7 +568,12 @@ async fn ensure_member_for_application(
         .create_member(user_id, &display_name, desired_role)
         .await
         .map_err(|e| {
-            // Fail the request — don't leave accepted apps without membership
+            // Fail the request. Do not leave a trial/accepted app without a member.
+            // A taken or invalid username-as-display-name is the same JSON the
+            // profile editor returns, so the client can show "That name is taken".
+            if let Some(response) = crate::routes::members::display_name_write_error(&e) {
+                return response;
+            }
             internal_err(e, "create_member for application")
         })?;
 
@@ -1193,6 +1198,42 @@ mod tests {
         assert!(
             after.is_active,
             "an unbanned applicant is reactivated on accept"
+        );
+    }
+
+    /// Trial/accept copies the account username into `member.display_name`.
+    /// That is the registration and OAuth signup write. A username that keys
+    /// the same as an existing member is 409 `display_name_taken`.
+    #[tokio::test]
+    async fn provisioning_rejects_a_display_name_taken_username() {
+        let state = test_state().await;
+        seed_user(&state, "holder", "holder").await;
+        state
+            .db
+            .create_member("holder", "Frozen", OrgRole::Member)
+            .await
+            .expect("holder");
+        seed_user(&state, "applicant", "FROZEN").await;
+
+        let (status, Json(body)) = ensure_member_for_application(
+            &state,
+            "applicant",
+            ApplicationStatus::Pending,
+            ApplicationStatus::Trial,
+            "app1",
+        )
+        .await
+        .expect_err("taken name");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "display_name_taken");
+        assert!(
+            state
+                .db
+                .get_member_by_user("applicant")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "a rejected provision must not create a member"
         );
     }
 }

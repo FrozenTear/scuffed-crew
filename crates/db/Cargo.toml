@@ -24,3 +24,5 @@ secp256k1 = { version = "0.30", features = ["rand", "std"] }
 rand = "0.8"
 hex = "0.4"
 zeroize = "1"
+unicode-normalization = "0.1.25"
+icu_casemap = "2"

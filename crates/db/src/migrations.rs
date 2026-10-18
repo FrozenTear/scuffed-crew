@@ -65,6 +65,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE org_role ON member TYPE string
             ASSERT $value IN ['admin', 'officer', 'member', 'recruit'];
         DEFINE FIELD OVERWRITE display_name ON member TYPE string;
+        -- Comparison key for display_name. Optional so a row can be inserted
+        -- before backfill fills it. The UNIQUE index is installed by
+        -- backfill_display_name_keys only after a clash check, so it is not
+        -- defined in this script (a missing key is NONE, and many NONE values
+        -- are allowed, which would hide duplicates).
+        DEFINE FIELD OVERWRITE display_name_key ON member TYPE option<string>;
         DEFINE FIELD OVERWRITE bio ON member TYPE option<string>;
         DEFINE FIELD OVERWRITE joined_at ON member TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE avatar_url ON member TYPE option<string>;
@@ -841,6 +847,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         )
         .await?
         .check()?;
+
+    // Key every display name and install the UNIQUE index. A clash or an
+    // unkeyable stored name fails startup and does not rewrite display_name.
+    crate::display_name::backfill_display_name_keys(client).await?;
 
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement

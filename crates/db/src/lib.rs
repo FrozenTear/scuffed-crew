@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod client;
+mod display_name;
 pub mod migrations;
 pub mod queries;
 pub mod rewrap;
@@ -14,6 +15,7 @@ pub use client::{
     resolve_database_boot_mode, resolve_database_boot_mode_from_env, surrealdb_url_from_env,
     Database, DatabaseBootMode, DbConfig, SurrealAuthMode, PRODUCTION_WITHOUT_DATABASE_URL,
 };
+pub use display_name::{display_name_key, DisplayNameError};
 pub use queries::stat_reports::{retention_deadline, utc_day_start};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;
@@ -36,6 +38,14 @@ pub enum DbError {
     Timeout,
     #[error("Encryption error: {0}")]
     Crypto(#[from] scuffed_auth::crypto::CryptoError),
+    /// Display name is empty after normalization or contains a control character.
+    /// HTTP 400 `{"error":"display_name_invalid"}`.
+    #[error("display_name_invalid")]
+    DisplayNameInvalid,
+    /// Another member already owns this display name key.
+    /// HTTP 409 `{"error":"display_name_taken"}`.
+    #[error("display_name_taken")]
+    DisplayNameTaken,
 }
 
 pub type DbResult<T> = Result<T, DbError>;

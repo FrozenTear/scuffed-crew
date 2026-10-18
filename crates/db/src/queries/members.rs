@@ -27,6 +27,10 @@ struct DbMember {
     user_id: String,
     org_role: String,
     display_name: String,
+    /// Uniqueness key. Omitted from list projections; default keeps those rows decodable.
+    #[serde(default)]
+    #[surreal(default)]
+    display_name_key: Option<String>,
     bio: Option<String>,
     avatar_url: Option<String>,
     timezone: Option<String>,
@@ -169,6 +173,8 @@ impl Database {
         display_name: &str,
         role: OrgRole,
     ) -> DbResult<Member> {
+        let display_name_key = crate::display_name::display_name_key(display_name)
+            .map_err(|_| crate::DbError::DisplayNameInvalid)?;
         // Generate keypair if crypto is available
         let keypair = crate::queries::nostr_keys::generate_encrypted_keypair(self).ok();
 
@@ -187,6 +193,7 @@ impl Database {
                 user_id: user_id.to_string(),
                 org_role: role.to_string(),
                 display_name: display_name.to_string(),
+                display_name_key: Some(display_name_key),
                 bio: None,
                 avatar_url: None,
                 timezone: None,
@@ -201,7 +208,12 @@ impl Database {
                 twitch: None,
                 twitter: None,
             };
-            let created: Option<DbMember> = self.client.create("member").content(db_member).await?;
+            let created: Option<DbMember> =
+                self.client
+                    .create("member")
+                    .content(db_member)
+                    .await
+                    .map_err(crate::display_name::map_display_name_key_conflict)?;
             db_to_member(
                 created
                     .ok_or_else(|| crate::DbError::NotFound("Failed to create member".into()))?,
@@ -462,6 +474,13 @@ impl Database {
         twitch: Option<Option<&str>>,
         twitter: Option<Option<&str>>,
     ) -> DbResult<Member> {
+        let display_name_key = match display_name {
+            Some(name) => Some(
+                crate::display_name::display_name_key(name)
+                    .map_err(|_| crate::DbError::DisplayNameInvalid)?,
+            ),
+            None => None,
+        };
         with_timeout(async {
             // Ensure row exists first for clear NotFound errors.
             let existing: Option<DbMember> = self.client.select(("member", id)).await?;
@@ -473,6 +492,7 @@ impl Database {
             let mut sets = Vec::new();
             if display_name.is_some() {
                 sets.push("display_name = $display_name");
+                sets.push("display_name_key = $display_name_key");
             }
             if bio.is_some() {
                 sets.push("bio = $bio");
@@ -529,6 +549,9 @@ impl Database {
             if let Some(name) = display_name {
                 q = q.bind(("display_name", name.to_string()));
             }
+            if let Some(key) = &display_name_key {
+                q = q.bind(("display_name_key", key.clone()));
+            }
             if let Some(new_bio) = bio {
                 q = q.bind(("bio", new_bio.map(|s| s.to_string())));
             }
@@ -562,8 +585,12 @@ impl Database {
                     .bind(("nostr_key_mode", NostrKeyMode::External.to_string()));
             }
 
-            let mut result = q.await?;
-            let updated: Option<DbMember> = result.take(0)?;
+            let mut result = q
+                .await
+                .map_err(crate::display_name::map_display_name_key_conflict)?;
+            let updated: Option<DbMember> = result
+                .take(0)
+                .map_err(crate::display_name::map_display_name_key_conflict)?;
             db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
             })?)
