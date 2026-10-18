@@ -17,7 +17,6 @@ use dashmap::DashMap;
 use scuffed_site_server::rate_limit::TrustedProxyIpKeyExtractor;
 
 use crate::collab::{JoinError, RoomManager};
-use scuffed_auth::server::HasAuth;
 use scuffed_site_server::state::AppState;
 use scuffed_types::strategy::{
     ClientMessage, CollabUserInfo, ServerMessage, StrategyId, WsRequest, WsResponse,
@@ -175,8 +174,8 @@ pub async fn websocket_handler(
         }
     };
 
-    // Try to get user from session cookie
-    let user = get_user_from_cookie(&state.app, &jar).await;
+    // Same optional session as strategy REST: bearer, then cookie.
+    let user = collab_user_from_request(&state.app, &headers, &jar).await;
 
     ws.max_frame_size(MAX_WS_FRAME_SIZE)
         .max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -204,19 +203,18 @@ fn origin_is_allowed(allowed: &[String], origin: Option<&str>, production: bool)
     }
 }
 
-/// Extract user info from session cookie
-async fn get_user_from_cookie(app: &AppState, jar: &CookieJar) -> Option<CollabUserInfo> {
-    let config = app.session_config();
-    let token = jar.get(&config.cookie_name)?.value().to_string();
-
-    match app.get_session_user(&token).await {
-        Ok(Some(user)) => Some(CollabUserInfo {
-            id: user.id,
-            username: user.username,
-            avatar_url: user.avatar_url,
-        }),
-        _ => None,
-    }
+/// Collab identity from the same optional session as strategy REST.
+async fn collab_user_from_request(
+    app: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Option<CollabUserInfo> {
+    let user = scuffed_site_server::extractors::optional_session_user(app, headers, jar).await?;
+    Some(CollabUserInfo {
+        id: user.id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+    })
 }
 
 /// Drop idle strategy connections after this many seconds without a message.
@@ -1210,5 +1208,186 @@ mod strategies_gate_tests {
             started.elapsed() < Duration::from_secs(2),
             "close took too long for an injected deadline"
         );
+    }
+
+    async fn seed_account(state: &AppState, username: &str, token: &str, member: bool) -> String {
+        let user = state
+            .db
+            .create_local_user(username, "unused-hash")
+            .await
+            .expect("user");
+        if member {
+            state
+                .db
+                .create_member(&user.id, username, scuffed_db::types::OrgRole::Member)
+                .await
+                .expect("member");
+        }
+        state
+            .db
+            .create_session(&user.id, token, 24)
+            .await
+            .expect("session");
+        user.id
+    }
+
+    async fn insert_private(state: &AppState, owner_id: &str) -> String {
+        state
+            .db
+            .create_strategy(
+                "Private plan",
+                None,
+                "kings-row",
+                None,
+                scuffed_types::strategy::GameMode::Hybrid,
+                owner_id,
+                None,
+                scuffed_types::strategy::Visibility::Private,
+            )
+            .await
+            .expect("strategy")
+            .id
+    }
+
+    /// Join a strategy room. `bearer` and `cookie` are raw session tokens.
+    async fn join_room(
+        state: &AppState,
+        addr: SocketAddr,
+        strategy_id: &str,
+        bearer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> serde_json::Value {
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let mut request = format!("ws://{addr}/api/strategy/ws")
+            .into_client_request()
+            .expect("ws request");
+        request
+            .headers_mut()
+            .insert("Origin", "http://localhost:3000".parse().expect("origin"));
+        if let Some(token) = bearer {
+            request.headers_mut().insert(
+                "Authorization",
+                format!("Bearer {token}").parse().expect("bearer"),
+            );
+        }
+        if let Some(token) = cookie {
+            let name = &state.session_config.cookie_name;
+            request
+                .headers_mut()
+                .insert("Cookie", format!("{name}={token}").parse().expect("cookie"));
+        }
+        let (mut socket, response) = connect_async(request).await.expect("connect");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let payload = serde_json::json!({
+            "type": "join_room",
+            "strategy_id": strategy_id,
+        })
+        .to_string();
+        socket
+            .send(Message::Text(payload.into()))
+            .await
+            .expect("send join");
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("join reply timed out")
+            .expect("socket closed")
+            .expect("ws frame");
+        let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
+            panic!("expected text frame, got {frame:?}");
+        };
+        serde_json::from_str(&text).expect("json reply")
+    }
+
+    #[tokio::test]
+    async fn owner_bearer_can_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, Some("owner-token"), None).await;
+        assert_eq!(body["type"], "room_joined", "{body}");
+        assert_eq!(body["strategy"]["name"], "Private plan");
+    }
+
+    #[tokio::test]
+    async fn owner_cookie_can_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, None, Some("owner-token")).await;
+        assert_eq!(body["type"], "room_joined", "{body}");
+        assert_eq!(body["strategy"]["name"], "Private plan");
+    }
+
+    #[tokio::test]
+    async fn anonymous_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, None, None).await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
+    }
+
+    #[tokio::test]
+    async fn non_member_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        seed_account(&state, "outsider", "outsider-token", false).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, Some("outsider-token"), None).await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
+    }
+
+    #[tokio::test]
+    async fn outsider_bearer_with_owner_cookie_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        seed_account(&state, "outsider", "outsider-token", false).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(
+            &state,
+            addr,
+            &id,
+            Some("outsider-token"),
+            Some("owner-token"),
+        )
+        .await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
+    }
+
+    #[tokio::test]
+    async fn other_member_cannot_join_private_strategy() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        seed_account(&state, "other", "other-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let body = join_room(&state, addr, &id, Some("other-token"), None).await;
+        assert_eq!(body["type"], "error", "{body}");
+        assert_eq!(body["message"], "Access denied");
     }
 }

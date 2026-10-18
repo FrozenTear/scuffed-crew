@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, put},
@@ -10,8 +10,8 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_auth::server::{AuthUser, HasAuth};
 use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_site_server::extractors::OfficerUser;
 use scuffed_site_server::routes::audit_log::audit;
@@ -242,14 +242,19 @@ async fn list_my_strategies(
     Ok(Json(json!({ "data": data })))
 }
 
-/// GET /api/strategy/strategies/:id — get a single strategy
+/// GET /api/strategy/strategies/:id: get a single strategy.
+///
+/// Public and unlisted strategies are readable without a session. A private
+/// strategy is readable by its owner. The owner is resolved the same way as
+/// the rest of the API: `Authorization: Bearer` first, then the session cookie.
 async fn get_strategy(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Strategy>, (StatusCode, Json<Value>)> {
-    // Try to extract user optionally (don't require auth for public/unlisted)
-    let user = try_get_user(&state, &jar).await;
+    // Optional: public and unlisted strategies do not require a session.
+    let user = try_get_user(&state, &headers, &jar).await;
     let user_id = user.as_ref().map(|u| u.id.as_str());
 
     let can_access = state
@@ -663,9 +668,14 @@ async fn delete_patch_note(
 
 /// GET /api/strategy/meta — global meta data + personal winrates per hero/map.
 ///
-/// Anonymous: returns the global stub only. Authed org members: also returns
-/// `personal.heroes` and `personal.maps` from their stat-tracker uploads.
-async fn get_meta(State(state): State<AppState>, jar: CookieJar) -> Json<MetaResponse> {
+/// Anonymous: returns the global stub only. Authed org members (session cookie
+/// or `Authorization: Bearer`): also returns `personal.heroes` and
+/// `personal.maps` from their stat-tracker uploads.
+async fn get_meta(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Json<MetaResponse> {
     let mut response = MetaResponse {
         updated: chrono::Utc::now().to_rfc3339(),
         source: "Scuffed Crew".into(),
@@ -673,7 +683,7 @@ async fn get_meta(State(state): State<AppState>, jar: CookieJar) -> Json<MetaRes
         personal: None,
     };
 
-    let Some(user) = try_get_user(&state, &jar).await else {
+    let Some(user) = try_get_user(&state, &headers, &jar).await else {
         return Json(response);
     };
 
@@ -765,11 +775,13 @@ fn parse_visibility_str(s: &str) -> Visibility {
     }
 }
 
-/// Try to extract a user from the request without requiring auth.
-async fn try_get_user(state: &AppState, jar: &CookieJar) -> Option<scuffed_auth::User> {
-    let config = state.session_config();
-    let token = jar.get(&config.cookie_name)?.value().to_string();
-    state.get_session_user(&token).await.ok().flatten()
+/// Optional session, using the same bearer-then-cookie order as [`AuthUser`].
+async fn try_get_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Option<scuffed_auth::User> {
+    scuffed_site_server::extractors::optional_session_user(state, headers, jar).await
 }
 
 #[cfg(test)]
@@ -853,9 +865,27 @@ mod tests {
         token: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        call_auth(app, method, path, token, None, body).await
+    }
+
+    /// `bearer` is sent as `Authorization: Bearer`. `cookie` is the raw session
+    /// token sent as the session cookie. Both may be set so tests can check
+    /// that a bearer credential is not ignored in favor of the cookie.
+    async fn call_auth(
+        app: Router,
+        method: Method,
+        path: &str,
+        bearer: Option<&str>,
+        cookie: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
         let mut builder = Request::builder().method(method).uri(path);
-        if let Some(tok) = token {
+        if let Some(tok) = bearer {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {tok}"));
+        }
+        if let Some(tok) = cookie {
+            let name = SessionConfig::default().cookie_name;
+            builder = builder.header(header::COOKIE, format!("{name}={tok}"));
         }
         if body.is_some() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -872,6 +902,58 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
         };
         (status, value)
+    }
+
+    /// Local account plus a session, with no org membership row.
+    async fn seed_session(state: &AppState, username: &str, token: &str) {
+        let user = state
+            .db
+            .create_local_user(username, "unused-hash")
+            .await
+            .expect("user");
+        state
+            .db
+            .create_session(&user.id, token, 24)
+            .await
+            .expect("session");
+    }
+
+    async fn create_private_strategy(state: &AppState, token: &str) -> String {
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(token),
+            Some(json!({
+                "name": "Private plan",
+                "map_id": "kings-row",
+                "game_mode": "hybrid",
+                "visibility": "private"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        created["id"]
+            .as_str()
+            .expect("created strategy id")
+            .to_string()
+    }
+
+    async fn read_strategy(
+        state: &AppState,
+        id: &str,
+        bearer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        call_auth(
+            strategy_routes(state.clone()),
+            Method::GET,
+            &format!("/api/strategy/strategies/{id}"),
+            bearer,
+            cookie,
+            None,
+        )
+        .await
     }
 
     async fn get_json(app: Router, path: &str) -> (StatusCode, serde_json::Value) {
@@ -1311,5 +1393,214 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         assert_eq!(body["version"], "5.0.0");
+    }
+
+    /// Issue #336: `POST` accepts the session as `Authorization: Bearer`, but
+    /// `GET /api/strategy/strategies/{id}` used to read only the session cookie,
+    /// so the owner who just created a private strategy got 404.
+    #[tokio::test]
+    async fn owner_bearer_can_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, Some("owner-token"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "owner bearer must read the private strategy they just created, got {status} {body}"
+        );
+        assert_eq!(body["name"], "Private plan");
+        assert_eq!(body["visibility"], "private");
+    }
+
+    #[tokio::test]
+    async fn owner_cookie_can_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, None, Some("owner-token")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["name"], "Private plan");
+    }
+
+    #[tokio::test]
+    async fn anonymous_cannot_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, None, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+    }
+
+    #[tokio::test]
+    async fn non_member_cannot_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        seed_session(&state, "outsider", "outsider-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, Some("outsider-token"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+    }
+
+    #[tokio::test]
+    async fn other_member_cannot_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        seed_role(&state, "other", OrgRole::Member, "other-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, Some("other-token"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+    }
+
+    /// A present `Authorization` header is the credential, same as `AuthUser`.
+    /// An outsider bearer must not fall through to the owner's session cookie.
+    #[tokio::test]
+    async fn outsider_bearer_does_not_use_owner_cookie() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        seed_session(&state, "outsider", "outsider-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) =
+            read_strategy(&state, &id, Some("outsider-token"), Some("owner-token")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+    }
+
+    fn assert_private_strategy_hidden(status: StatusCode, body: &serde_json::Value) {
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "Strategy not found");
+        assert!(
+            body.get("name").is_none() && body.get("owner_id").is_none(),
+            "anonymous read must not return the strategy: {body}"
+        );
+    }
+
+    /// An unknown bearer is not a session. With or without the owner's cookie
+    /// it stays anonymous and must not read the private strategy.
+    #[tokio::test]
+    async fn unknown_bearer_is_anonymous_on_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+
+        let (status, body) = read_strategy(&state, &id, Some("no-such-session"), None).await;
+        assert_private_strategy_hidden(status, &body);
+
+        let (status, body) =
+            read_strategy(&state, &id, Some("no-such-session"), Some("owner-token")).await;
+        assert_private_strategy_hidden(status, &body);
+    }
+
+    /// A garbage bearer value is not a session either, and does not fall
+    /// through to the owner's cookie.
+    #[tokio::test]
+    async fn garbage_bearer_is_anonymous_on_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let id = create_private_strategy(&state, "owner-token").await;
+        let garbage = "!!!not a token!!!";
+
+        let (status, body) = read_strategy(&state, &id, Some(garbage), None).await;
+        assert_private_strategy_hidden(status, &body);
+
+        let (status, body) = read_strategy(&state, &id, Some(garbage), Some("owner-token")).await;
+        assert_private_strategy_hidden(status, &body);
+    }
+
+    #[tokio::test]
+    async fn public_strategy_stays_readable_without_auth() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some("owner-token"),
+            Some(json!({
+                "name": "Public plan",
+                "map_id": "kings-row",
+                "game_mode": "hybrid",
+                "visibility": "public"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("id");
+
+        let (status, body) = read_strategy(&state, id, None, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["name"], "Public plan");
+    }
+
+    /// Personal meta is member-only. Bearer and cookie both count; anonymous
+    /// and non-member sessions still get the public stub.
+    #[tokio::test]
+    async fn member_bearer_gets_personal_meta_and_non_members_do_not() {
+        let state = test_state().await;
+        seed_role(&state, "member", OrgRole::Member, "member-token").await;
+        seed_session(&state, "outsider", "outsider-token").await;
+
+        let (status, body) = call_auth(
+            strategy_routes(state.clone()),
+            Method::GET,
+            "/api/strategy/meta",
+            Some("member-token"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.get("personal").is_some(),
+            "member bearer must receive personal meta, got {body}"
+        );
+
+        let (status, cookie_body) = call_auth(
+            strategy_routes(state.clone()),
+            Method::GET,
+            "/api/strategy/meta",
+            None,
+            Some("member-token"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cookie_body}");
+        assert!(cookie_body.get("personal").is_some(), "{cookie_body}");
+
+        let (status, anon) = call_auth(
+            strategy_routes(state.clone()),
+            Method::GET,
+            "/api/strategy/meta",
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{anon}");
+        assert!(anon.get("personal").is_none(), "{anon}");
+
+        let (status, outsider) = call_auth(
+            strategy_routes(state),
+            Method::GET,
+            "/api/strategy/meta",
+            Some("outsider-token"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{outsider}");
+        assert!(
+            outsider.get("personal").is_none(),
+            "non-member bearer must not receive personal meta, got {outsider}"
+        );
     }
 }
