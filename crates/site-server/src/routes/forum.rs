@@ -252,6 +252,15 @@ fn err_404(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+/// A missing thread is 404. Any other database failure stays 500 so a real
+/// outage is not reported as "not found".
+fn thread_lookup_err(err: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    match err {
+        scuffed_db::DbError::NotFound(_) => err_404("Thread not found"),
+        other => err_500(other),
+    }
+}
+
 /// GET /api/forum/tree — category → boards → sub-boards
 /// Restricted boards (min_role set) are hidden unless the caller meets the role.
 pub async fn forum_tree(
@@ -506,14 +515,11 @@ pub async fn get_thread(
     Path(id): Path<String>,
     Query(query): Query<ListRepliesQuery>,
 ) -> Result<Json<ThreadDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let thread = state.db.get_forum_thread(&id).await.map_err(|_e| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    let thread = state
+        .db
+        .get_forum_thread(&id)
+        .await
+        .map_err(thread_lookup_err)?;
 
     // Fail closed: a missing board must not skip min_role (F-API-001).
     let b = require_thread_board(&state, &thread, caller.as_ref().map(|m| m.org_role)).await?;
@@ -634,14 +640,11 @@ pub async fn create_reply(
     }
 
     // Verify thread exists and is not locked
-    let thread = state.db.get_forum_thread(&id).await.map_err(|_e| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    let thread = state
+        .db
+        .get_forum_thread(&id)
+        .await
+        .map_err(thread_lookup_err)?;
 
     if thread.locked {
         return Err((
