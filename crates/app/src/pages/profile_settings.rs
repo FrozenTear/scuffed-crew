@@ -2,6 +2,9 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{Toast, use_toast};
+use crate::pages::display_name::{
+    DisplayNameAudience, DisplayNameField, name_field_after_edit, settle_name_field,
+};
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 use scuffed_types::MeResponse;
@@ -207,6 +210,7 @@ pub fn ProfileSettings() -> Element {
     let mut accounts = use_signal(Vec::<AccountEdit>::new);
     let mut loaded = use_signal(|| false);
     let mut load_error = use_signal(|| None::<String>);
+    let mut name_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
 
     use_future(move || async move {
@@ -252,15 +256,16 @@ pub fn ProfileSettings() -> Element {
     });
 
     let on_save_profile = move |_| {
-        let name = display_name().trim().to_string();
-        if name.is_empty() {
+        let typed_at_submit = display_name();
+        name_error.set(None);
+        if typed_at_submit.trim().is_empty() {
             toast.show(Toast::error("Display name is required."));
             return;
         }
         saving.set(true);
         spawn(async move {
             let body = UpdateProfileBody {
-                display_name: display_name().trim().to_string(),
+                display_name: typed_at_submit.trim().to_string(),
                 bio: none_if_empty(bio()),
                 main_role: none_if_empty(main_role()),
                 twitch: none_if_empty(twitch()),
@@ -272,7 +277,19 @@ pub fn ProfileSettings() -> Element {
                 .await
             {
                 Ok(_) => toast.show(Toast::success("Profile saved.")),
-                Err(e) => toast.show(Toast::error(format!("Save failed: {e}"))),
+                Err(e) => {
+                    let settled = settle_name_field(
+                        &typed_at_submit,
+                        &display_name(),
+                        &e,
+                        DisplayNameAudience::Editor,
+                    );
+                    display_name.set(settled.value);
+                    name_error.set(settled.error.map(str::to_string));
+                    if settled.keep_existing_failure {
+                        toast.show(Toast::error(format!("Save failed: {e}")));
+                    }
+                }
             }
             saving.set(false);
         });
@@ -330,14 +347,18 @@ pub fn ProfileSettings() -> Element {
             } else {
                 div { class: "profile-edit-section",
                     h2 { "Profile" }
-                    div { class: "profile-edit-field",
-                        label { "Display name" }
-                        input {
-                            r#type: "text",
-                            value: display_name(),
-                            maxlength: 64,
-                            oninput: move |e| display_name.set(e.value()),
-                        }
+                    DisplayNameField {
+                        id: "profile-display-name".to_string(),
+                        label: "Display name".to_string(),
+                        value: display_name(),
+                        error: name_error(),
+                        maxlength: 64,
+                        field_class: "profile-edit-field".to_string(),
+                        oninput: move |e: FormEvent| {
+                            let (next, cleared) = name_field_after_edit(e.value());
+                            display_name.set(next);
+                            name_error.set(cleared.map(str::to_string));
+                        },
                     }
                     div { class: "profile-edit-field",
                         label { "Bio" }

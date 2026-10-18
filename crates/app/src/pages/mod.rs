@@ -4,6 +4,7 @@ mod blog_post;
 mod chat;
 mod chat_gate;
 mod community;
+mod display_name;
 mod dm;
 mod events;
 mod feed;

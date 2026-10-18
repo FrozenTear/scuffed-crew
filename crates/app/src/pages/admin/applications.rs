@@ -5,6 +5,10 @@ use crate::components::{
     ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
+use crate::pages::display_name::{
+    ApplicantNameCell, DisplayNameAudience, applicant_name_error_id, described_by_when_error,
+    display_name_error_message,
+};
 use crate::util::format_datetime;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
@@ -296,6 +300,7 @@ pub fn AdminApplications() -> Element {
     // Cursor-paginated list (auto-follows pages via use_api_list).
     let mut applications = use_api_list::<Application>("/api/applications");
     let mut toast = use_toast();
+    let mut accept_name_error = use_signal(|| None::<(String, String)>);
 
     // Reject dialog state
     let mut reject_modal = ModalController::<String>::new();
@@ -307,6 +312,7 @@ pub fn AdminApplications() -> Element {
 
     let accept = move |id: String| {
         spawn(async move {
+            accept_name_error.set(None);
             let body = PatchApplicationRequest {
                 status: "accepted".to_string(),
                 review_notes: None,
@@ -317,10 +323,19 @@ pub fn AdminApplications() -> Element {
                 .await
             {
                 Ok(_) => {
+                    accept_name_error.set(None);
                     toast.show(Toast::success("Application accepted"));
                     applications.refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to accept: {e}"))),
+                Err(e) => {
+                    if let Some(message) =
+                        display_name_error_message(&e, DisplayNameAudience::Accept)
+                    {
+                        accept_name_error.set(Some((id, message.to_string())));
+                    } else {
+                        toast.show(Toast::error(format!("Failed to accept: {e}")));
+                    }
+                }
             }
         });
     };
@@ -376,9 +391,21 @@ pub fn AdminApplications() -> Element {
                                 let can_action = app.status == "pending" || app.status == "trial";
                                 let view_trigger = application_view_trigger_id(&app.id);
                                 let view_app = app.clone();
+                                let row_error = accept_name_error()
+                                    .filter(|(row_id, _)| row_id == &id)
+                                    .map(|(_, message)| message);
+                                let name_error_id = applicant_name_error_id(&id);
+                                let accept_described_by =
+                                    described_by_when_error(row_error.as_deref(), &name_error_id);
                                 rsx! {
                                     tr { key: "{id}",
-                                        td { "{applicant}" }
+                                        td {
+                                            ApplicantNameCell {
+                                                name: applicant,
+                                                error: row_error,
+                                                error_id: name_error_id,
+                                            }
+                                        }
                                         td { "{games}" }
                                         td { "{msg}" }
                                         td { StatusPill { status: app.status.clone() } }
@@ -388,6 +415,7 @@ pub fn AdminApplications() -> Element {
                                                 if can_action {
                                                     button {
                                                         class: "row-btn primary",
+                                                        aria_describedby: accept_described_by.clone(),
                                                         onclick: move |_| accept(id.clone()),
                                                         "Accept"
                                                     }
