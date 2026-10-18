@@ -35,8 +35,17 @@ pub const FIRST_LOCK_SECS: u64 = 30;
 /// past this, so an attacker cannot pin a real user out forever.
 const MAX_LOCK: Duration = Duration::from_secs(15 * 60);
 
-/// Bound the map so a spray of random usernames cannot grow it without limit.
-/// Past the cap, new keys are not tracked (existing accounts keep their state).
+/// Cap on tracked usernames, so a spray cannot grow the map without limit.
+///
+/// A locked account can still be evicted, but only once every slot in this
+/// 8192-entry map holds a locked account. A not-yet-locked account's failure
+/// count can be pushed out by a flood of new usernames.
+///
+/// Idle records are dropped first. If the map is still full, the least-failed
+/// live record is evicted (oldest on a tie, and an unlocked record before a
+/// locked one) so the new username is tracked. A full-map insert scans every
+/// entry while holding the lock, which is acceptable behind the per-IP rate
+/// limit.
 const MAX_TRACKED_ACCOUNTS: usize = 8_192;
 
 struct Tier {
@@ -113,7 +122,7 @@ impl LoginLockout {
         if !map.contains_key(username) && map.len() >= MAX_TRACKED_ACCOUNTS {
             map.retain(|_, rec| !is_idle(rec, now));
             if map.len() >= MAX_TRACKED_ACCOUNTS {
-                return None;
+                evict_least_valuable(&mut map, now);
             }
         }
         let rec = map.entry(username.to_string()).or_default();
@@ -158,6 +167,36 @@ fn is_idle(rec: &Record, now: Instant) -> bool {
             .all(|t| now.saturating_duration_since(*t) >= FAILURE_WINDOW)
 }
 
+/// Drop one live record so a username that is not yet tracked can be inserted.
+///
+/// Unlocked records go before locked ones, then the fewest in-window failures,
+/// then the oldest failure. Callers only use this when the username is absent,
+/// so recording another failure for an existing account does not displace it.
+fn evict_least_valuable(map: &mut HashMap<String, Record>, now: Instant) {
+    let Some(victim) = map
+        .iter()
+        .min_by(|(_, a), (_, b)| eviction_rank(a, now).cmp(&eviction_rank(b, now)))
+        .map(|(key, _)| key.clone())
+    else {
+        return;
+    };
+    map.remove(&victim);
+}
+
+/// Smaller rank is evicted first.
+fn eviction_rank(rec: &Record, now: Instant) -> (bool, usize, Instant) {
+    let locked = remaining(rec, now).is_some();
+    let mut count = 0usize;
+    let mut oldest: Option<Instant> = None;
+    for t in &rec.failures {
+        if now.saturating_duration_since(*t) < FAILURE_WINDOW {
+            count += 1;
+            oldest = Some(oldest.map_or(*t, |prev| prev.min(*t)));
+        }
+    }
+    (locked, count, oldest.unwrap_or(now))
+}
+
 fn retry_secs(dur: Duration) -> u64 {
     let secs = dur.as_secs();
     if dur.subsec_nanos() > 0 {
@@ -173,6 +212,56 @@ mod tests {
 
     fn at(base: Instant, secs: u64) -> Instant {
         base + Duration::from_secs(secs)
+    }
+
+    /// Once the map is full of live usernames, a new username must still be
+    /// recorded and must still lock. Skipping the new key turns the cap into
+    /// a way to disable per-account lockout.
+    #[test]
+    fn full_map_still_locks_a_new_username() {
+        let store = LoginLockout::new();
+        let t0 = Instant::now();
+        for i in 0..MAX_TRACKED_ACCOUNTS {
+            assert_eq!(store.record_failure_at(&format!("filler-{i}"), t0), None);
+        }
+        for _ in 0..FIRST_LOCK_AFTER {
+            store.record_failure_at("newcomer", t0);
+        }
+        assert_eq!(
+            store.retry_after_at("newcomer", t0),
+            Some(FIRST_LOCK_SECS),
+            "a full map must not skip lockout for a username that was not already tracked"
+        );
+        assert!(store.lock().len() <= MAX_TRACKED_ACCOUNTS);
+    }
+
+    /// A username that is already locked stays locked when a new username has
+    /// to take a slot from a full map.
+    #[test]
+    fn full_map_keeps_a_locked_account_while_tracking_a_new_username() {
+        let store = LoginLockout::new();
+        let t0 = Instant::now();
+        for _ in 0..FIRST_LOCK_AFTER {
+            store.record_failure_at("victim", t0);
+        }
+        assert_eq!(store.retry_after_at("victim", t0), Some(FIRST_LOCK_SECS));
+        for i in 0..(MAX_TRACKED_ACCOUNTS - 1) {
+            assert_eq!(store.record_failure_at(&format!("filler-{i}"), t0), None);
+        }
+        for _ in 0..FIRST_LOCK_AFTER {
+            store.record_failure_at("newcomer", t0);
+        }
+        assert_eq!(
+            store.retry_after_at("victim", t0),
+            Some(FIRST_LOCK_SECS),
+            "making room for a new username must not drop an active lock"
+        );
+        assert_eq!(
+            store.retry_after_at("newcomer", t0),
+            Some(FIRST_LOCK_SECS),
+            "a full map must not skip lockout for a username that was not already tracked"
+        );
+        assert!(store.lock().len() <= MAX_TRACKED_ACCOUNTS);
     }
 
     #[test]
