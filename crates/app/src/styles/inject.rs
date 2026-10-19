@@ -9,52 +9,61 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct LiveSheet {
-    text: String,
-    owners: usize,
+thread_local! {
+    static LIVE_OWNERS: RefCell<HashMap<&'static str, usize>> = RefCell::new(HashMap::new());
 }
 
+#[cfg(test)]
 thread_local! {
-    static LIVE_SHEETS: RefCell<HashMap<&'static str, LiveSheet>> =
-        RefCell::new(HashMap::new());
+    static STYLE_CLEARS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static STYLE_ACQUIRES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// One owner for this id. Call once per `StyleLive` instance, not every render.
 fn acquire_live_owner(id: &'static str) {
-    LIVE_SHEETS.with(|sheets| {
-        let mut sheets = sheets.borrow_mut();
-        let sheet = sheets.entry(id).or_default();
-        sheet.owners += 1;
-    });
-}
-
-fn publish_live_css(id: &'static str, css: &str) {
-    LIVE_SHEETS.with(|sheets| {
-        let mut sheets = sheets.borrow_mut();
-        if let Some(sheet) = sheets.get_mut(id)
-            && sheet.text != css
-        {
-            sheet.text = css.to_string();
-        }
+    #[cfg(test)]
+    STYLE_ACQUIRES.with(|count| count.set(count.get() + 1));
+    LIVE_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        *owners.entry(id).or_insert(0) += 1;
     });
 }
 
 /// `true` when this was the last owner and the node should be cleared.
 fn release_live_owner(id: &'static str) -> bool {
-    LIVE_SHEETS.with(|sheets| {
-        let mut sheets = sheets.borrow_mut();
-        let Some(sheet) = sheets.get_mut(id) else {
+    LIVE_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let Some(count) = owners.get_mut(id) else {
             return true;
         };
-        sheet.owners = sheet.owners.saturating_sub(1);
-        if sheet.owners == 0 {
-            sheets.remove(id);
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            owners.remove(id);
             true
         } else {
             false
         }
     })
+}
+
+#[cfg(test)]
+fn live_owner_count(id: &str) -> usize {
+    LIVE_OWNERS.with(|owners| owners.borrow().get(id).copied().unwrap_or(0))
+}
+
+#[cfg(test)]
+fn style_acquire_count() -> u32 {
+    STYLE_ACQUIRES.with(|count| count.get())
+}
+
+#[cfg(test)]
+fn reset_style_acquires() {
+    STYLE_ACQUIRES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn take_style_clears() -> Vec<String> {
+    STYLE_CLEARS.with(|clears| std::mem::take(&mut *clears.borrow_mut()))
 }
 
 /// What to do with the style node that already has `id`.
@@ -76,6 +85,8 @@ pub(crate) fn style_write(exists: bool, current: Option<&str>, next: &str) -> St
 }
 
 fn clear_style(id: &str) {
+    #[cfg(test)]
+    STYLE_CLEARS.with(|clears| clears.borrow_mut().push(id.to_string()));
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
@@ -143,7 +154,6 @@ pub fn StyleOnce(id: &'static str, css: &'static str) -> Element {
 #[component]
 pub fn StyleLive(id: &'static str, css: String) -> Element {
     use_hook(|| acquire_live_owner(id));
-    publish_live_css(id, &css);
     upsert_style(id, &css);
     use_drop(move || {
         if release_live_owner(id) {
@@ -154,16 +164,58 @@ pub fn StyleLive(id: &'static str, css: String) -> Element {
 }
 
 #[cfg(test)]
-fn live_sheet_text(id: &'static str) -> Option<String> {
-    LIVE_SHEETS.with(|sheets| sheets.borrow().get(id).map(|sheet| sheet.text.clone()))
-}
-
-#[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use dioxus::dioxus_core::NoOpMutations;
+    use dioxus::prelude::*;
+
     use super::{
-        StyleWrite, acquire_live_owner, live_sheet_text, publish_live_css, release_live_owner,
-        style_write,
+        StyleLive, StyleWrite, live_owner_count, reset_style_acquires, style_acquire_count,
+        style_write, take_style_clears,
     };
+
+    const SWAP_STYLE_ID: &str = "scuffed-css-home-swap-test";
+
+    #[derive(Clone, Copy)]
+    struct SwapHandles {
+        ready: Signal<bool>,
+        alive: Signal<bool>,
+    }
+
+    thread_local! {
+        static SWAP_HANDLES: Cell<Option<SwapHandles>> = const { Cell::new(None) };
+    }
+
+    fn style_live_swap_probe() -> Element {
+        let ready = use_signal(|| false);
+        let alive = use_signal(|| true);
+        use_hook(move || {
+            SWAP_HANDLES.with(|slot| slot.set(Some(SwapHandles { ready, alive })));
+        });
+        if !alive() {
+            return rsx! {};
+        }
+        if ready() {
+            rsx! {
+                div { class: "ready",
+                    StyleLive { id: SWAP_STYLE_ID, css: "home-layers{}".to_string() }
+                }
+            }
+        } else {
+            rsx! {
+                div { class: "pending",
+                    StyleLive { id: SWAP_STYLE_ID, css: "home-layers{}".to_string() }
+                }
+            }
+        }
+    }
+
+    fn pump(dom: &mut VirtualDom) {
+        for _ in 0..4 {
+            dom.render_immediate(&mut NoOpMutations);
+        }
+    }
 
     #[test]
     fn style_write_creates_once_then_keeps_or_updates() {
@@ -177,23 +229,49 @@ mod tests {
 
     #[test]
     fn pending_ready_swap_keeps_the_home_sheet() {
-        let id = "scuffed-css-home-swap-test";
-        let css = "home-layers{}";
-        // Pending owner, then Ready. Dioxus 0.7.9 replace_inner creates the
-        // new subtree before the old use_drop runs. The text matches, so a
-        // clear from the old owner would leave home unstyled.
-        acquire_live_owner(id);
-        publish_live_css(id, css);
-        acquire_live_owner(id);
-        publish_live_css(id, css);
-        assert!(
-            !release_live_owner(id),
-            "the pending owner must not clear while ready is mounted"
+        let _reset_clears = take_style_clears();
+        reset_style_acquires();
+        let mut dom = VirtualDom::new(style_live_swap_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let pending = dioxus_ssr::render(&dom);
+        assert!(pending.contains("pending"), "{pending}");
+        assert_eq!(live_owner_count(SWAP_STYLE_ID), 1);
+        assert_eq!(style_acquire_count(), 1);
+        assert!(take_style_clears().is_empty());
+
+        // Ready replaces pending. Dioxus 0.7.9 mounts the new StyleLive before
+        // the old use_drop. The text matches, so that drop must not clear.
+        dom.in_runtime(|| {
+            let mut ready = SWAP_HANDLES
+                .with(|slot| slot.get().expect("swap probe mounted"))
+                .ready;
+            ready.set(true);
+        });
+        pump(&mut dom);
+        let ready_html = dioxus_ssr::render(&dom);
+        assert!(ready_html.contains("ready"), "{ready_html}");
+        assert!(!ready_html.contains("pending"), "{ready_html}");
+        assert_eq!(
+            style_acquire_count(),
+            2,
+            "ready must mount its own StyleLive"
         );
-        let text = live_sheet_text(id).expect("sheet still owned");
-        assert_eq!(text, css);
-        assert!(!text.is_empty());
-        assert!(release_live_owner(id));
-        assert!(live_sheet_text(id).is_none());
+        assert_eq!(live_owner_count(SWAP_STYLE_ID), 1);
+        assert!(
+            take_style_clears().is_empty(),
+            "the pending drop must not clear while ready is mounted"
+        );
+
+        dom.in_runtime(|| {
+            let mut alive = SWAP_HANDLES
+                .with(|slot| slot.get().expect("swap probe mounted"))
+                .alive;
+            alive.set(false);
+        });
+        pump(&mut dom);
+        assert_eq!(live_owner_count(SWAP_STYLE_ID), 0);
+        assert_eq!(take_style_clears(), vec![SWAP_STYLE_ID.to_string()]);
+        SWAP_HANDLES.with(|slot| slot.set(None));
     }
 }

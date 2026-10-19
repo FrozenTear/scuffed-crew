@@ -163,26 +163,33 @@ fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
 }
 
-/// User-facing text must not use an em dash. A spaced `" \u{2014} "` or an
-/// unspaced one becomes a sentence break, and the next letter is capitalized.
+/// User-facing text must not use an em dash. A run of them becomes one sentence
+/// break, and `capitalize_next` capitalizes the following letter. The dash is
+/// not itself the character that gets uppercased, so a doubled dash cannot
+/// leak into the sentence.
 fn plain_punctuation(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\u{2014}' {
-            out.push(ch);
+    let mut capitalize_next = false;
+    for ch in text.chars() {
+        if ch == '\u{2014}' {
+            if !capitalize_next {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str(". ");
+                capitalize_next = true;
+            }
             continue;
         }
-        if out.ends_with(' ') {
-            out.pop();
+        if capitalize_next {
+            if ch == ' ' {
+                continue;
+            }
+            out.extend(ch.to_uppercase());
+            capitalize_next = false;
+            continue;
         }
-        out.push_str(". ");
-        if chars.peek() == Some(&' ') {
-            chars.next();
-        }
-        if let Some(next) = chars.next() {
-            out.extend(next.to_uppercase());
-        }
+        out.push(ch);
     }
     out
 }
@@ -339,5 +346,19 @@ mod tests {
         );
         let unspaced = format!("{{\"error\":\"a{}b\"}}", '\u{2014}');
         assert_eq!(chat_api_error_copy(409, &unspaced), "a. B");
+        let doubled = format!("{{\"error\":\"a{}{}b\"}}", '\u{2014}', '\u{2014}');
+        let doubled_msg = chat_api_error_copy(409, &doubled);
+        assert_eq!(doubled_msg, "a. B");
+        assert!(
+            !doubled_msg.contains('\u{2014}'),
+            "a doubled em dash must not survive: {doubled_msg}"
+        );
+        let spaced_doubled = format!("{{\"error\":\"a {} {} b\"}}", '\u{2014}', '\u{2014}');
+        let spaced_msg = chat_api_error_copy(409, &spaced_doubled);
+        assert_eq!(spaced_msg, "a. B");
+        assert!(
+            !spaced_msg.contains('\u{2014}'),
+            "spaced doubled em dashes must not survive: {spaced_msg}"
+        );
     }
 }
