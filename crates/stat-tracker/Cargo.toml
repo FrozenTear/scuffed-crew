@@ -42,7 +42,7 @@ sha2 = "0.10"
 libc = "0.2"
 regex = "1"
 # Same zip crate and features as site-server (report bundles).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lib]
 name = "stat_tracker"

@@ -2114,6 +2114,48 @@ mod tests {
         }
     }
 
+    /// #302 regression pin: on a 16:9 frame the 5v5 board's last row (row 9)
+    /// runs past the bottom of the unpadded scoreboard crop. Measured on the
+    /// 1440p crop: row 9 spans y 928 to 1014 and the crop stops at 1007, so
+    /// 7 px of its portrait are cut (5 px of 65 at 1080p). The hero icon
+    /// reader still reads the visible part of that row. The board here is
+    /// drawn so its last row ends `cut` px below the unpadded crop, through
+    /// the live re-crop path, at 1440p and 1080p. Synthetic board, no game
+    /// art.
+    #[test]
+    fn the_5v5_bottom_row_cut_by_the_crop_is_still_read() {
+        let data = data_dir(true, None, None);
+        let set = HeroSet::load_data_dir(data.path()).unwrap();
+        let ids = [1, 2, 3, 4, 5, 1, 2, 3, 4, 5];
+        for (fw, fh, pitch, cut) in [(2560u32, 1440u32, 88u32, 7i64), (1920, 1080, 66, 5)] {
+            let b = board(&ids, 5, pitch, [PURPLE, YELLOW]);
+            let (cx, cy, _, ch) = crate::ocr::preprocess::crop_scoreboard_rect(fw, fh);
+            // The last row's band ends 2 px above the board's bottom pitch.
+            let row9_bottom = b.height() as i64 - pitch as i64 - 2;
+            let top = ch as i64 + cut - row9_bottom;
+            assert!(top >= 0, "{fh}p: board taller than the crop");
+            let mut f = RgbImage::from_pixel(fw, fh, image::Rgb([12, 14, 24]));
+            let left = (CLIPPED_HEADER_PAD_1440 as i64 * fh as i64 / 1440) / 2;
+            image::imageops::overlay(
+                &mut f,
+                &b,
+                cx as i64 - left - (pitch / 2) as i64,
+                cy as i64 + top,
+            );
+            let frame = DynamicImage::ImageRgb8(f);
+            let sb = crate::ocr::preprocess::crop_scoreboard(&frame);
+            let r = set
+                .read_frame(&frame, &sb, 5, Duration::from_secs(5))
+                .unwrap();
+            assert!(r.pad_px.is_some(), "{fh}p: live re-crop path");
+            let last = &r.board.rows[9];
+            assert_eq!(last.hero.as_deref(), Some("hero-5"), "{fh}p: {last:?}");
+            assert!(!last.suspect, "{fh}p: {last:?}");
+            assert_eq!(last.accepted(), Some("hero-5"), "{fh}p");
+            assert_eq!(five_v_five_right(&r.board.rows), 10, "{fh}p: {r:?}");
+        }
+    }
+
     /// A 5v5 crop whose header starts at its left edge, read with no
     /// re-crop, accepts no row: on real crops those reads named the wrong
     /// hero. Synthetic board, no game art.
