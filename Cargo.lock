@@ -10854,6 +10854,7 @@ name = "scuffed-db"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "hex",
  "icu_casemap",
  "rand 0.8.8",

@@ -508,6 +508,7 @@ impl Database {
             let bootstrap = Self::connect(&url, &root_user, &root_pass, config).await?;
             crate::migrations::run_migrations(&bootstrap.client).await?;
             Self::ensure_database_app_user(&bootstrap.client, &app_user, &app_pass).await?;
+            crate::relay_access::ensure_relay_from_env(&bootstrap.client, &root_pass).await?;
         }
 
         tracing::info!(
@@ -548,6 +549,7 @@ impl Database {
                 }
                 let conn = Self::connect(&url, &root_user, &root_pass, config).await?;
                 crate::migrations::run_migrations(&conn.client).await?;
+                crate::relay_access::ensure_relay_from_env(&conn.client, &root_pass).await?;
                 Ok(conn)
             }
             SurrealAuthMode::Scoped => {
@@ -611,6 +613,18 @@ impl Database {
         })
         .await
     }
+
+    /// Cheap reachability probe for `GET /api/ready`.
+    ///
+    /// `RETURN true` does not read a table. A dead connection, a timed-out
+    /// socket, or a database that is not serving returns an error.
+    pub async fn ping(&self) -> DbResult<()> {
+        crate::with_timeout(async {
+            self.client.query("RETURN true").await?.check()?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -629,6 +643,12 @@ mod app_user_tests {
         Database::ensure_database_app_user(&db.client, "scuffed_app", "test-pass-2")
             .await
             .expect("re-define with new password must not error");
+    }
+
+    #[tokio::test]
+    async fn ping_succeeds_against_the_memory_engine() {
+        let db = Database::connect_memory().await.expect("mem db");
+        db.ping().await.expect("memory engine answers RETURN true");
     }
 }
 

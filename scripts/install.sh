@@ -54,6 +54,7 @@ if [[ ! -f "$SECRETS" ]]; then
     ENCRYPTION_KEY="$(openssl rand -base64 32 | tr -d '\n')"
     NOSTR_CHALLENGE_SECRET="$(openssl rand -base64 32 | tr -d '\n')"
     SURREALDB_APP_PASSWORD="$(openssl rand -base64 32 | tr -d '\n')"
+    SURREALDB_RELAY_PASSWORD="$(openssl rand -base64 32 | tr -d '\n')"
     HOST_PORT="$(pick_host_port)"
     echo "Selected free host port: ${HOST_PORT} (bound to 127.0.0.1 only)"
     if [[ -t 0 ]]; then
@@ -75,6 +76,12 @@ SURREALDB_DB=main
 SURREALDB_AUTH_MODE=scoped
 SURREALDB_APP_USER=scuffed_app
 SURREALDB_APP_PASSWORD=${SURREALDB_APP_PASSWORD}
+# Relay record user. SELECT on member, plays_on, team_channel, and moderation_action.
+# Created when site-server boots. The relay container uses this password and does
+# not receive the root password. Must differ from the root and app passwords
+# when PRODUCTION=1.
+SURREALDB_RELAY_USER=scuffed_relay
+SURREALDB_RELAY_PASSWORD=${SURREALDB_RELAY_PASSWORD}
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
 ENCRYPTION_KEY_VERSION=1
 # Optional rotation: ENCRYPTION_KEY_PREVIOUS=1:oldbase64key
@@ -122,6 +129,13 @@ if [[ -f "$SECRETS" ]]; then
     if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
         # Must be distinct from root password in production (do not reuse SURREALDB_PASSWORD).
         ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
+    fi
+    if ! grep -q '^SURREALDB_RELAY_USER=' "$SECRETS" 2>/dev/null; then
+        ensure_secret_key SURREALDB_RELAY_USER scuffed_relay
+    fi
+    if ! grep -q '^SURREALDB_RELAY_PASSWORD=' "$SECRETS" 2>/dev/null; then
+        # Distinct from root and the app password. The value is not printed.
+        ensure_secret_key SURREALDB_RELAY_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
     fi
     if ! grep -q '^NOSTR_CHALLENGE_SECRET=' "$SECRETS" 2>/dev/null; then
         # MAC key for Nostr login challenge tokens; server refuses to boot without it.

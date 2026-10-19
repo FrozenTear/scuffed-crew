@@ -7,6 +7,7 @@ mod client;
 mod display_name;
 pub mod migrations;
 pub mod queries;
+mod relay_access;
 pub mod rewrap;
 pub mod types;
 
@@ -17,6 +18,10 @@ pub use client::{
 };
 pub use display_name::{display_name_key, DisplayNameError};
 pub use queries::stat_reports::{retention_deadline, utc_day_start};
+pub use relay_access::{
+    ensure_relay_access, ensure_relay_from_env, relay_permission_sql, RELAY_DB_ACCESS,
+    RELAY_DB_USERNAME_DEFAULT, RELAY_PRINCIPAL_TABLE, RELAY_SELECT_TABLES,
+};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;
 pub use types::*;

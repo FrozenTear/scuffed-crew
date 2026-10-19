@@ -310,12 +310,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     let dev_mode = scuffed_db::in_memory_dev_from_env();
 
     let mut router = Router::new()
-        // Health check. Deliberately the one unauthenticated route with no
-        // governor: container/orchestrator liveness probes must never be told
-        // "429" because something else shared their source IP, and a probe that
-        // fails under load is worse than the amplification it would prevent.
-        // The handler touches no database.
-        .route("/api/health", get(routes::health::health));
+        // Liveness and readiness. Both are unauthenticated and have no
+        // governor: a probe must not get 429 because another request shared
+        // its source IP. /api/health does not touch the database.
+        // /api/ready returns 200 only when a short Surreal query succeeds.
+        .route("/api/health", get(routes::health::health))
+        .route("/api/ready", get(routes::health::ready));
 
     if dev_mode {
         // Dev login (sets session cookie for in-memory dev mode) — never registered in prod

@@ -14,7 +14,8 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | Env | Purpose |
 |-----|---------|
 | `SURREALDB_PASSWORD` | Strong **root** password for bootstrap only (install generates) |
-| `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`) — **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
+| `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`). **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
+| `SURREALDB_RELAY_USER` / `SURREALDB_RELAY_PASSWORD` | Relay record login (default `scuffed_relay`). **SELECT** on `member`, `plays_on`, `team_channel`, and `moderation_action` only. No writes. `member.nostr_secret_key_encrypted`, `moderation_action.reason`, and `moderation_action.issued_by` are hidden. **Must differ** from the root and app passwords when `PRODUCTION=1`. Created when site-server boots. |
 | `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
 | `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
 | `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs |
@@ -25,12 +26,27 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | `NOSTR_CHALLENGE_SECRET` | **Required** outside dev — MAC key for Nostr login challenge tokens; boot **refuses** without it (no public dev-key fallback) |
 | `PRODUCTION=1` | **Required** for remote SurrealDB; secure cookies; no plaintext DMs |
 
-`scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root + app passwords.  
+`scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root, app, and relay passwords.  
 Remote boot **refuses** if `PRODUCTION` or `ENCRYPTION_KEY` is missing; the server also **refuses to boot** outside dev if `NOSTR_CHALLENGE_SECRET` is missing/empty.  
 When `PRODUCTION` is set, an unset or blank `SURREALDB_URL` is a hard error (exit 1, clear message). The process does not start an in-memory database, does not seed a dev admin, and does not serve `/api/dev/login`. Local dev leaves both `PRODUCTION` and `SURREALDB_URL` unset.  
-In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback).
+In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback). A relay password equal to the root or app password is also a hard error. A missing relay password does not stop the site: bootstrap logs a warning and skips creating the relay login.
 
-Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
+Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user. The relay uses the record login above, not root. `PRODUCTION=1` refuses a relay sign-in whose username is `root`.
+
+### Relay database user (optional follow-up)
+
+`git pull` and `./scripts/update.sh` keep the running relay as it is. `update.sh` appends `SURREALDB_RELAY_PASSWORD` when the key is missing and recreates site-server. The new process creates the login during bootstrap. The relay container is not rebuilt by `update.sh`, so an existing relay keeps its current environment and keeps serving.
+
+After that boot is healthy, switch the relay off root:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/ready"
+./scripts/relay-up.sh
+```
+
+`/api/ready` must be `200` first. That means site-server has started and the login exists. `relay-up.sh` rebuilds strfry. Compose passes `SURREALDB_RELAY_PASSWORD` and leaves the root password out of that container. If you rebuild the relay before the login exists, the plugin cannot sign in and rejects writes until you run `relay-up.sh` again.
+
+Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then unset it. A normal restart does not rewrite the stored password. The relay signs in when its process starts. That token lasts 3650 days, so a restart is what picks up a new password or a new token.
 
 ### Split migrator vs app (optional multi-container)
 
@@ -67,18 +83,28 @@ cd /path/to/scuffed-crew
 # = git pull --ff-only + harden secrets.env (if needed) + podman pull + recreate site-server
 ```
 
-`update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
+`update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`, `SURREALDB_RELAY_USER`, `SURREALDB_RELAY_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
 Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS` from `REDIRECT_BASE_URL` and a blank `SURREALDB_APP_PASSWORD` from `SURREALDB_PASSWORD`. `compose.yml` uses one substitution level for those. podman-compose 1.5 turns a nested default into the outer value plus a stray `}`, or into literal text when the outer name is unset. A missing app-password key is still generated distinct from the root password. Production still refuses to boot when the two passwords match.
 
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
-Override image pin in `data/secrets.env` if needed:
+### Pinning the site image
+
+Dev hosts leave the image on `:main`. That is the default in `compose.yml`, and it is what `install.sh` / `update.sh` record when `SITE_SERVER_IMAGE` is missing. CI still publishes `main`, `latest`, and `sha-<short>` on every main publish. This repo does not change those tags.
+
+On a production host, set one of these in `data/secrets.env` before `./scripts/update.sh`. `update.sh` does not move a pin forward on its own.
 
 ```bash
+# Tag pin. The tag must already exist. CI writes sha-<short>.
+SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:sha-<short>
+
+# Digest pin. Wins over the tag. 64 hex characters. The sha256: prefix is optional.
 SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:main
-# or a specific sha:  .../scuffed-crew:sha-abc1234
+SITE_SERVER_IMAGE_DIGEST=sha256:<64 hex>
 ```
+
+`scripts/lib/compose-env.sh` turns a digest into `ghcr.io/frozentear/scuffed-crew@sha256:<hex>` and leaves a tag unchanged when the digest is unset. A dev host that sets neither value still pulls `:main`.
 
 ### Build from source (fallback only)
 
@@ -102,9 +128,18 @@ podman compose --env-file data/secrets.env down
 podman compose --env-file data/secrets.env up -d
 ```
 
-### SurrealDB: `is unhealthy` but logs show “Started web server”
+### SurrealDB shows unhealthy
 
-DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
+`compose.yml` probes Surreal with `/surreal is-ready` against `http://127.0.0.1:8000`. The check timeout is 20s. The surreal CLI waits about 5s after it has already answered, so a 5s timeout used to mark a healthy database unhealthy. That probe is gone. An unhealthy status now means `is-ready` failed (the database is not serving), not that the probe is a lie.
+
+`site-server` still uses a plain `depends_on` list (start order, not `service_healthy`). On day-2 hosts, a health condition makes podman-compose start Surreal and can create the underscore twin on the same volume. A fresh `up` can therefore start site-server before RocksDB is serving.
+
+`GET /api/health` is liveness only. It does not touch the database, and it is not rate limited. `GET /api/ready` returns 200 when `RETURN true` succeeds against Surreal and 503 when it does not. It is also unauthenticated and not rate limited. The body is empty either way.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/health"
+curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/ready"
+```
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 
@@ -545,8 +580,14 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    ```
 
    `PRODUCTION=1` must already be set (install.sh writes it). The relay refuses
-   to start when that flag is set and the SurrealDB password is missing,
-   the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
+   to start when that flag is set and the database password is missing,
+   the username would be `root` (including root/root), or `SURREALDB_URL`
+   would fall back to localhost. After `update.sh` has created
+   `SURREALDB_RELAY_PASSWORD` and site-server has booted (`/api/ready` is 200),
+   this container signs in as `scuffed_relay` and does not receive the root password.
+   See "Relay database user" above. A missing relay secret still falls back
+   to `SURREALDB_USER` with a warning, and production then refuses that fallback
+   when the user is root.
 
 2. Rebuild and start strfry (the image also starts the read gate). The main
    stack must already be up, so Surreal is the existing container and not a

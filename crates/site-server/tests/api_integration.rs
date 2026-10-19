@@ -283,6 +283,19 @@ async fn health_check_returns_200() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn ready_check_returns_200_when_the_database_answers() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/ready"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 // ─── Members ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2483,6 +2496,24 @@ async fn health_is_never_rate_limited() {
     assert!(
         !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
         "health must stay outside every governor (liveness probes)"
+    );
+}
+
+/// Readiness is the same exception as liveness. A probe that is told 429
+/// looks like the database is down.
+#[tokio::test]
+async fn ready_is_never_rate_limited() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/api/ready", 80).await;
+    assert!(
+        !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "ready must stay outside every governor"
+    );
+    assert!(
+        seen.iter().all(|status| *status == StatusCode::OK),
+        "in-memory dev database must answer ready: {seen:?}"
     );
 }
 

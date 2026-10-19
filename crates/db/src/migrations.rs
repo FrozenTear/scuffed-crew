@@ -882,6 +882,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         tracing::warn!("officers_can_edit_teams backfill: {e}");
     }
 
+    // Relay record-user permissions. System users are not affected.
+    // Failure here must stop boot: a relay login without these grants
+    // either cannot read, or would be created against the wrong schema.
+    crate::relay_access::apply_relay_read_permissions(client).await?;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

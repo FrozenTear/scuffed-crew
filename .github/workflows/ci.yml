@@ -27,6 +27,8 @@ jobs:
         run: |
           bash scripts/test-backup-secrets.sh
           bash scripts/test-restic-access.sh
+      - name: Compose image pin and relay credential export
+        run: bash scripts/test-compose-env.sh
       - name: Pack publish script checks (fake packs, no server)
         run: bash scripts/test-publish-packs.sh
 

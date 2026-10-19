@@ -53,13 +53,23 @@ services:
     # --no-deps. Start Surreal from the main stack (scripts/update.sh).
     environment:
       SURREALDB_URL: ws://surrealdb:8000
-      SURREALDB_USER: ${SURREALDB_USER:-root}
-      SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD (run scripts/install.sh)}
       SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
       SURREALDB_DB: ${SURREALDB_DB:-main}
+      # Record login created by site-server bootstrap. SELECT on member,
+      # plays_on, team_channel, and moderation_action only. When this
+      # password is set, the root password is not passed into this container.
+      SURREALDB_RELAY_USER: ${SURREALDB_RELAY_USER:-scuffed_relay}
+      SURREALDB_RELAY_PASSWORD: ${SURREALDB_RELAY_PASSWORD:-}
+      # Fallback only. scripts/lib/compose-env.sh leaves these empty when
+      # SURREALDB_RELAY_PASSWORD is set, so `podman inspect` does not show
+      # the root password. When the relay secret is missing, the script
+      # copies SURREALDB_USER / SURREALDB_PASSWORD here and the process logs
+      # a warning. PRODUCTION=1 still refuses username root.
+      SURREALDB_USER: ${SURREALDB_RELAY_FALLBACK_USER:-}
+      SURREALDB_PASSWORD: ${SURREALDB_RELAY_FALLBACK_PASSWORD:-}
       # Same flag as site-server. When it is set, relay-policy and the read
-      # gate refuse to start on a missing password, root/root, or a loopback
-      # SURREALDB_URL. They do not fall back to root/root.
+      # gate refuse to start on a missing password, username root, or a
+      # loopback SURREALDB_URL. They do not sign in as root.
       PRODUCTION: ${PRODUCTION:-}
       # Gate listens here and dials strfry on 127.0.0.1:7777 inside this
       # container. Host 127.0.0.1:7777 is the gate, not raw strfry.
@@ -122,6 +132,11 @@ services:
       # password into secrets.env when the key is missing. Production rejects
       # an app password equal to the root password.
       SURREALDB_APP_PASSWORD: ${SURREALDB_APP_PASSWORD:-}
+      # Relay record user. Bootstrap creates it when the password is set.
+      # The strfry service reads the same keys. A missing password skips
+      # creation and logs a warning. The site still boots.
+      SURREALDB_RELAY_USER: ${SURREALDB_RELAY_USER:-scuffed_relay}
+      SURREALDB_RELAY_PASSWORD: ${SURREALDB_RELAY_PASSWORD:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
