@@ -3365,6 +3365,19 @@ mod tests {
         store.insert_match(snap("keep", 1)).await.unwrap();
         store.insert_match(snap("bad-a", 2)).await.unwrap();
         store.insert_match(snap("bad-b", 3)).await.unwrap();
+        // Same session: one snapshot already uploaded, one still quarantined.
+        // Clearing the flag must not mark the uploaded snapshot unsynced.
+        store.insert_match(snap("shared", 10)).await.unwrap();
+        store.insert_match(snap("shared", 11)).await.unwrap();
+        let shared = store.get_all_matches().await.unwrap();
+        let already = shared.iter().find(|row| row.elims == 10).unwrap().clone();
+        store
+            .mark_synced(&SyncClaim::capture(std::slice::from_ref(&already)))
+            .await
+            .unwrap();
+        let shared = store.get_all_matches().await.unwrap();
+        let held = shared.iter().find(|row| row.elims == 11).unwrap().clone();
+        assert!(!held.synced);
         let rows = store.get_unsynced().await.unwrap();
         for sid in ["bad-a", "bad-b"] {
             let bad: Vec<_> = rows
@@ -3381,16 +3394,36 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
         store
-            .apply_command(&StoreCommand::RetryRejectedUploads)
+            .quarantine_upload(
+                &SyncClaim::capture(std::slice::from_ref(&held)),
+                None,
+                "matches[0]: hero is not allowed",
+            )
             .await
             .unwrap();
+        assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+        store.clear_rejected_uploads().await.unwrap();
         let again = store.get_unsynced().await.unwrap();
-        assert_eq!(again.len(), 3);
+        assert_eq!(again.len(), 4);
         assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+        assert!(again.iter().any(|row| row.elims == 11));
         let stored = store.get_all_matches().await.unwrap();
-        assert!(stored.iter().all(|row| !row.synced));
+        let synced_sibling = stored.iter().find(|row| row.elims == 10).unwrap();
+        let cleared = stored.iter().find(|row| row.elims == 11).unwrap();
+        assert!(
+            synced_sibling.synced,
+            "clearing a quarantine leaves the synced snapshot synced"
+        );
+        assert!(synced_sibling.upload_rejection().is_none());
+        assert!(!cleared.synced);
+        assert!(cleared.upload_rejection().is_none());
+        assert!(
+            stored
+                .iter()
+                .filter(|row| row.session_id != "shared" || row.elims != 10)
+                .all(|row| !row.synced)
+        );
     }
 
     #[tokio::test]
