@@ -6397,6 +6397,7 @@ async fn public_members_hero_scoped_query() {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
             suspect_fields: Vec::new(),
         },
         PersonalMatch {
@@ -6418,6 +6419,7 @@ async fn public_members_hero_scoped_query() {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
             suspect_fields: Vec::new(),
         },
         // Different hero must not count toward Ana-scoped games.
@@ -6440,6 +6442,7 @@ async fn public_members_hero_scoped_query() {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
             suspect_fields: Vec::new(),
         },
     ];
@@ -8174,6 +8177,7 @@ async fn seasons_crud_and_stats_season_filter() {
         uploaded_at: Utc::now(),
         edited: false,
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+        name_recognizer: None,
         suspect_fields: Vec::new(),
     };
     // January game inside season 1, July game outside it.
@@ -8487,6 +8491,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         uploaded_at: Utc::now(),
         edited: false,
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+        name_recognizer: None,
         suspect_fields: Vec::new(),
     };
 
