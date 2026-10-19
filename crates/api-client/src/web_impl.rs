@@ -159,6 +159,14 @@ pub async fn patch_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     json_request("PATCH", base_url, path, body).await
 }
 
+pub async fn delete_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, ClientError> {
+    json_request("DELETE", base_url, path, body).await
+}
+
 pub async fn delete(base_url: &str, path: &str) -> Result<(), ClientError> {
     let url = format!("{base_url}{path}");
     let opts = init_opts("DELETE");

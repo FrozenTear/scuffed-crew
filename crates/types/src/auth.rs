@@ -36,6 +36,13 @@ pub struct MeResponse {
     /// what produced identities pointing at a domain we do not own.
     #[serde(default)]
     pub nip05: Option<String>,
+    /// `Some(true)` when the account has a local password, so account delete
+    /// must send `password`. `Some(false)` for OAuth-only accounts. The
+    /// server sets this on a signed-in `GET /api/auth/me`, at this level
+    /// only, never on `user`. Absent when an older payload omits it. Never a
+    /// hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -116,4 +123,29 @@ pub struct LocalLoginRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OkResponse {
     pub ok: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MeResponse;
+
+    fn me(json: &str) -> MeResponse {
+        serde_json::from_str(json).expect("me json")
+    }
+
+    #[test]
+    fn has_password_is_optional_and_defaults_to_absent() {
+        let absent = me(r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null}"#);
+        assert_eq!(absent.has_password, None);
+
+        let yes = me(
+            r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null,"has_password":true}"#,
+        );
+        assert_eq!(yes.has_password, Some(true));
+
+        let no = me(
+            r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null,"has_password":false}"#,
+        );
+        assert_eq!(no.has_password, Some(false));
+    }
 }

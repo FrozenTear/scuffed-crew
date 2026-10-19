@@ -15,8 +15,9 @@ use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
+use crate::pages::delete_data::{PendingStatsDeletionBanner, present_schedule};
 use crate::routes::Route;
-use crate::state::{AuthState, use_auth};
+use crate::state::{AuthState, StatsViewRefresh, use_auth};
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -28,6 +29,9 @@ struct PersonalStats {
     wins: u32,
     losses: u32,
     draws: u32,
+    /// Pending tracker-token delete. Null or absent means nothing is scheduled.
+    #[serde(default)]
+    stats_delete_scheduled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1071,24 +1075,30 @@ fn member_stats_url(auth: &AuthState, path: String) -> String {
 #[component]
 pub fn Stats() -> Element {
     let auth = use_auth();
+    let views = StatsViewRefresh::current();
     // "Total or per season": one selection drives every tab's fetch.
     // Nothing saved is all time. "Current season" is stored as a sentinel so a
     // rollover follows. Every season row is pinned by id, including the one
     // that is current now, an upcoming season, and a second flagged season.
     let season = use_stats_season();
     let stats = use_api_with::<PersonalStats>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path("/api/stats/me"))
     });
     let heroes = use_api_with::<Vec<HeroStats>>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path("/api/stats/me/heroes"))
     });
     let role_stats = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path(role::my_roles_path()))
     });
     let maps = use_api_with::<Vec<MapStats>>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path("/api/stats/me/maps"))
     });
     let server_settings = use_api_with::<MemberSettingsResponse>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), "/api/stats/settings".to_string())
     });
 
@@ -1149,10 +1159,12 @@ pub fn Stats() -> Element {
             Some(c) => format!("/api/stats/me/matches?limit=25&cursor={c}"),
             None => "/api/stats/me/matches?limit=25".to_string(),
         };
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path(&base))
     });
     // Overview form strip — same endpoint, limit=10, no new backend (Q3).
     let form_matches = use_api_with::<MatchPage>(move || {
+        let _ = views.generation();
         member_stats_url(&auth(), season.fetch_path("/api/stats/me/matches?limit=10"))
     });
 
@@ -1166,13 +1178,19 @@ pub fn Stats() -> Element {
     // chrome collapses to one slim row. Zero-match members keep the full
     // onboarding cards — that's their primary UI. While the summary is still
     // loading (or failed) we show the slim row rather than flashing onboarding.
+    let pending_delete_at = {
+        let data = stats.data.read();
+        data.as_ref()
+            .and_then(|row| row.as_ref())
+            .and_then(|row| present_schedule(row.stats_delete_scheduled_at.as_deref()))
+    };
     let has_matches = stats
         .data
         .read()
         .as_ref()
         .and_then(|d| d.as_ref())
         .map(|s| s.total_matches > 0);
-    let slim_tracker = has_matches != Some(false);
+    let slim_tracker = has_matches != Some(false) || pending_delete_at.is_some();
     let mut setup_open = use_signal(|| false);
     let show_full_setup = !slim_tracker || setup_open();
 
@@ -1233,8 +1251,13 @@ pub fn Stats() -> Element {
                         if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
                     }
                     Link { to: Route::Leaderboards {}, "Leaderboards" }
-                    Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                    Link { to: Route::StatsTokens {}, "Sync Tokens" }
                 }
+            }
+
+            PendingStatsDeletionBanner {
+                scheduled_at: pending_delete_at.clone(),
+                on_refresh: move |_| views.bump(),
             }
 
             if slim_tracker {
@@ -1248,7 +1271,7 @@ pub fn Stats() -> Element {
                             onclick: move |_| setup_open.toggle(),
                             if setup_open() { "Hide instructions" } else { "Reinstall instructions" }
                         }
-                        Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                        Link { to: Route::StatsTokens {}, "Sync Tokens" }
                     }
                 }
             }
@@ -1318,11 +1341,12 @@ pub fn Stats() -> Element {
                 let s = data.as_ref().and_then(|d| d.as_ref());
                 match s {
                     None => member_pending(&auth(), &stats, "stats"),
-                    Some(s) if s.total_matches == 0 => rsx! {
+                    Some(s) if s.total_matches == 0 && pending_delete_at.is_none() => rsx! {
                         p { class: "empty-state",
                             "No matches tracked yet. Install the tracker above and play. Your stats land here automatically."
                         }
                     },
+                    Some(_) if pending_delete_at.is_some() => rsx! {},
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
                         let mut record = format!("{}W–{}L", s.wins, s.losses);

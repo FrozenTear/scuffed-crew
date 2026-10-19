@@ -1,3 +1,4 @@
+pub mod account_data;
 pub mod announcements;
 pub mod applications;
 pub mod articles;
@@ -14,6 +15,7 @@ pub mod stats;
 pub mod teams;
 pub mod tournaments;
 
+pub use account_data::*;
 pub use announcements::*;
 pub use applications::*;
 pub use articles::*;

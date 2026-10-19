@@ -2,6 +2,9 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{Toast, use_toast};
+use crate::pages::delete_data::{
+    DeleteDataSection, account_name_from_session, session_has_password,
+};
 use crate::pages::display_name::{
     DisplayNameAudience, DisplayNameField, name_field_after_edit, settle_name_field,
 };
@@ -212,6 +215,9 @@ pub fn ProfileSettings() -> Element {
     let mut load_error = use_signal(|| None::<String>);
     let mut name_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
+    let mut account_name = use_signal(String::new);
+    let mut username = use_signal(String::new);
+    let mut has_password = use_signal(|| None::<bool>);
 
     use_future(move || async move {
         let me = match ApiClient::web().fetch::<MeResponse>("/api/auth/me").await {
@@ -221,6 +227,9 @@ pub fn ProfileSettings() -> Element {
                 return;
             }
         };
+        account_name.set(account_name_from_session(&me));
+        username.set(me.user.username.trim().to_string());
+        has_password.set(session_has_password(&me));
         let Some(m) = me.member else {
             load_error.set(Some("Only org members have an editable profile.".into()));
             return;
@@ -231,7 +240,10 @@ pub fn ProfileSettings() -> Element {
             .await
         {
             Ok(p) => {
-                display_name.set(p.display_name);
+                display_name.set(p.display_name.clone());
+                if !p.display_name.trim().is_empty() {
+                    account_name.set(p.display_name);
+                }
                 bio.set(p.bio.unwrap_or_default());
                 main_role.set(p.main_role.unwrap_or_default());
                 twitch.set(p.twitch.unwrap_or_default());
@@ -276,7 +288,10 @@ pub fn ProfileSettings() -> Element {
                 .put_json::<_, serde_json::Value>(&path, &body)
                 .await
             {
-                Ok(_) => toast.show(Toast::success("Profile saved.")),
+                Ok(_) => {
+                    account_name.set(typed_at_submit.trim().to_string());
+                    toast.show(Toast::success("Profile saved."));
+                }
                 Err(e) => {
                     let settled = settle_name_field(
                         &typed_at_submit,
@@ -470,6 +485,11 @@ pub fn ProfileSettings() -> Element {
                         to: Route::MemberProfile { id: member_id() },
                         "View your public profile"
                     }
+                }
+                DeleteDataSection {
+                    account_name: account_name(),
+                    username: username(),
+                    has_password: has_password(),
                 }
             }
         }
