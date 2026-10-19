@@ -1353,6 +1353,7 @@ mod game {
                 segment_resolutions: Vec::new(),
                 recognizer: "cv-v7".into(),
                 suspect_fields: Vec::new(),
+                name_recognizer: None,
             }],
             sessions: Vec::new(),
         };
