@@ -24,6 +24,22 @@ pub(crate) fn style_write(exists: bool, current: Option<&str>, next: &str) -> St
     }
 }
 
+fn clear_style(id: &str) {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        if let Some(element) = document.get_element_by_id(id) {
+            element.set_text_content(Some(""));
+        }
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        let _ = id;
+    }
+}
+
 fn upsert_style(id: &str, css: &str) {
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
@@ -68,9 +84,14 @@ pub fn StyleOnce(id: &'static str, css: &'static str) -> Element {
 
 /// Keep one head node for CSS that changes (settings, homepage skin).
 /// An empty string clears the rules without inserting a second tag.
+/// Unmount clears the text too, so a public page background does not stay
+/// on admin or strategy after the owner leaves.
 #[component]
 pub fn StyleLive(id: &'static str, css: String) -> Element {
     upsert_style(id, &css);
+    use_drop(move || {
+        clear_style(id);
+    });
     rsx! {}
 }
 
@@ -84,5 +105,7 @@ mod tests {
         assert_eq!(style_write(true, Some("a"), "a"), StyleWrite::Keep);
         assert_eq!(style_write(true, Some("a"), "b"), StyleWrite::Update);
         assert_eq!(style_write(true, None, "a"), StyleWrite::Update);
+        // Unmount writes an empty sheet. The next mount must replace it.
+        assert_eq!(style_write(true, Some(""), "a"), StyleWrite::Update);
     }
 }

@@ -64,7 +64,7 @@ const HERO_PICKER_CSS: &str = r##"
         gap: 0.25rem;
         padding: 0.5rem;
     }
-    .hero-btn {
+    .hero-picker .hero-btn {
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -77,10 +77,10 @@ const HERO_PICKER_CSS: &str = r##"
         cursor: pointer;
         transition: background 0.12s, border-color 0.12s;
     }
-    .hero-btn:hover {
+    .hero-picker .hero-btn:hover {
         background: var(--surface-2);
     }
-    .hero-btn.selected {
+    .hero-picker .hero-btn.selected {
         background: var(--accent-soft);
         border-color: var(--accent);
     }
@@ -118,7 +118,7 @@ const HERO_PICKER_CSS: &str = r##"
         object-fit: cover;
         background: var(--surface-2);
     }
-    .hero-detail-info h4 {
+    .hero-picker .hero-detail-info h4 {
         margin: 0;
         font-size: 0.9rem;
         color: var(--text);
@@ -157,10 +157,10 @@ const HERO_PICKER_CSS: &str = r##"
         font-weight: 700;
         color: var(--text-3);
     }
-    .ability-name {
+    .hero-picker .ability-name {
         flex: 1;
     }
-    .ability-cooldown {
+    .hero-picker .ability-cooldown {
         color: var(--text-3);
         font-size: 0.65rem;
     }

@@ -105,9 +105,9 @@ const PAGE_CSS: &str = r#"
 .heroes-role-heading { font-family:var(--font-head); font-size:0.75rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; margin:1rem 0 0.5rem; padding-bottom:0.35rem; border-bottom:1px solid var(--border); }
 .heroes-role-heading:first-of-type { margin-top:0; }
 .heroes-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(90px,100%),1fr)); gap:0.5rem; margin-bottom:0.75rem; }
-.hero-btn { display:flex; flex-direction:column; align-items:center; gap:0.25rem; padding:0.5rem 0.25rem; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); cursor:pointer; transition:border-color 0.15s,background 0.15s,transform 0.1s; text-align:center; }
-.hero-btn:hover { border-color:var(--accent-soft); background:var(--surface-2); transform:translateY(-1px); }
-.hero-btn.selected { border-color:var(--accent); background:var(--accent-soft); box-shadow:0 0 0 1px var(--accent); }
+.heroes-page .hero-btn { display:flex; flex-direction:column; align-items:center; gap:0.25rem; padding:0.5rem 0.25rem; border:1px solid var(--border); border-radius:8px; background:var(--surface-2); cursor:pointer; transition:border-color 0.15s,background 0.15s,transform 0.1s; text-align:center; }
+.heroes-page .hero-btn:hover { border-color:var(--accent-soft); background:var(--surface-2); transform:translateY(-1px); }
+.heroes-page .hero-btn.selected { border-color:var(--accent); background:var(--accent-soft); box-shadow:0 0 0 1px var(--accent); }
 .hero-btn-portrait { width:40px; height:40px; border-radius:50%; overflow:hidden; background:var(--surface-2); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .hero-btn-portrait img { width:100%; height:100%; object-fit:cover; }
 .hero-btn-initial { font-family:var(--font-head); font-size:1.1rem; color:var(--text-3); line-height:1; }
@@ -122,7 +122,7 @@ const PAGE_CSS: &str = r#"
 .hero-detail-portrait { width:80px; height:80px; border-radius:12px; overflow:hidden; background:var(--surface-2); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .hero-detail-portrait img { width:100%; height:100%; object-fit:cover; }
 .hero-detail-portrait-initial { font-family:var(--font-head); font-size:2rem; color:var(--text-3); }
-.hero-detail-info { display:flex; flex-direction:column; gap:0.35rem; min-width:0; }
+.heroes-page .hero-detail-info { display:flex; flex-direction:column; gap:0.35rem; min-width:0; }
 .hero-detail-name { font-family:var(--font-head); font-size:2rem; color:var(--text); letter-spacing:2px; line-height:1; }
 .hero-detail-role-badge { display:inline-block; font-size:0.65rem; padding:0.15rem 0.6rem; border-radius:999px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; width:fit-content; }
 
@@ -143,8 +143,8 @@ const PAGE_CSS: &str = r#"
 .ability-key-badge { flex-shrink:0; width:42px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:5px; background:var(--surface-2); border:1px solid var(--border); font-family:var(--font-mono); font-size:0.65rem; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:0.03em; }
 .ability-body { flex:1; min-width:0; }
 .ability-header { display:flex; align-items:baseline; gap:0.5rem; margin-bottom:0.25rem; }
-.ability-name { font-family:var(--font-head); font-size:0.85rem; font-weight:700; color:var(--text); }
-.ability-cooldown { font-family:var(--font-mono); font-size:0.65rem; color:var(--text-3); }
+.heroes-page .ability-name { font-family:var(--font-head); font-size:0.85rem; font-weight:700; color:var(--text); }
+.heroes-page .ability-cooldown { font-family:var(--font-mono); font-size:0.65rem; color:var(--text-3); }
 .ability-desc { font-size:0.8rem; color:var(--text-2); line-height:1.5; }
 
 /* States */

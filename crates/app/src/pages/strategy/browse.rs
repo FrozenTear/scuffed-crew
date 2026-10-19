@@ -113,7 +113,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         margin-bottom: 1.5rem;
     }
-    .filter-chip {
+    .strategy-browse .filter-chip {
         padding: 0.3rem 0.75rem;
         border-radius: 999px;
         border: 1px solid var(--border);
@@ -126,11 +126,11 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
-    .filter-chip:hover {
+    .strategy-browse .filter-chip:hover {
         border-color: var(--accent-soft);
         color: var(--text);
     }
-    .filter-chip.active {
+    .strategy-browse .filter-chip.active {
         background: var(--accent);
         border-color: var(--accent);
         color: white;

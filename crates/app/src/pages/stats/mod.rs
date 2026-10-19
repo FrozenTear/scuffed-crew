@@ -864,7 +864,7 @@ const STATS_CSS: &str = r#"
         color: var(--text-3);
         margin-right: 0.25rem;
     }
-    .filter-chip {
+    .stats-page .filter-chip {
         padding: 0.25rem 0.65rem;
         border-radius: 999px;
         border: 1px solid var(--border);
@@ -873,7 +873,7 @@ const STATS_CSS: &str = r#"
         font-size: 0.75rem;
         cursor: pointer;
     }
-    .filter-chip.active {
+    .stats-page .filter-chip.active {
         border-color: var(--accent);
         color: var(--text);
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
