@@ -641,6 +641,7 @@ mod tests {
                 ],
             }],
             elapsed_ms: 12,
+            header_dimmed: false,
         };
         let board_clone = board.clone();
         let r = compare(&job("s1"), Ok(board), 3);
@@ -764,6 +765,7 @@ mod tests {
         BoardRead {
             rows: vec![RowRead { cells }],
             elapsed_ms: 5,
+            header_dimmed: false,
         }
     }
 

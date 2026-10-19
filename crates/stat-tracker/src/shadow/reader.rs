@@ -116,6 +116,12 @@ pub struct BoardRead {
     pub team_size: Option<usize>,
     pub fields: Vec<FieldRead>,
     pub elapsed_ms: u32,
+    /// The digit reader found the columns only on a dimmed header strip
+    /// ([`digits::header_found_only_dimmed`]). The saved row is marked
+    /// unsure ([`crate::reader_apply::merge_saved_with_authority`]). Left
+    /// out of the log line when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub header_dimmed: bool,
 }
 
 impl BoardRead {
@@ -665,6 +671,7 @@ pub fn not_found(status: BoardStatus) -> BoardRead {
             .map(|s| FieldRead::unread(s.to_string()))
             .collect(),
         elapsed_ms: 0,
+        header_dimmed: false,
     }
 }
 
@@ -802,6 +809,7 @@ pub fn assemble(
             .map(FieldRead::unread)
             .collect(),
         elapsed_ms: 0,
+        header_dimmed: digit_read.is_some_and(|d| d.header_dimmed),
     };
     if let Some(d) = digit_read {
         for (r, row) in d.rows.iter().enumerate().take(2 * team_size) {
@@ -982,6 +990,7 @@ mod tests {
                 })
                 .collect(),
             elapsed_ms: 1,
+            header_dimmed: false,
         }
     }
 

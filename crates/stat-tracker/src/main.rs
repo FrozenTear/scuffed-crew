@@ -12064,6 +12064,7 @@ mod tests {
                 team_size: Some(5),
                 fields,
                 elapsed_ms: 1,
+                header_dimmed: false,
             }
         }
 
@@ -12213,6 +12214,7 @@ mod tests {
             team_size: Some(5),
             fields,
             elapsed_ms: 1,
+            header_dimmed: false,
         };
         let mut stored = Vec::new();
         for use_new_reader in [false, true] {
@@ -13090,6 +13092,7 @@ mod tests {
             team_size: Some(5),
             fields,
             elapsed_ms: 1,
+            header_dimmed: false,
         }
     }
 
@@ -20760,6 +20763,7 @@ mod tests {
                 team_size: Some(5),
                 fields,
                 elapsed_ms: 1,
+                header_dimmed: false,
             }
         };
         let saved = reader_apply::merge_saved(

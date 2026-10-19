@@ -981,7 +981,84 @@ pub fn offset_from_header_groups(groups: &[(u32, u32)], board_w: u32) -> f64 {
 /// column calibration and the pre-OCR scoreboard preflight: brightness-based,
 /// so it still fires on the desaturated endorse-phase board where the
 /// saturation row-dip scan goes blind.
+///
+/// Column calibration (Tesseract) and the preflight use this fixed scan. The
+/// cv digit reader uses [`header_label_groups_scaled`] instead.
 pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
+    label_groups(scoreboard, LabelScan::Fixed)
+}
+
+/// Header labels for the cv digit reader. Same scan as
+/// [`header_label_groups`] with two changes:
+///
+/// * the dark cut ([`HEADER_DARK_CUT`]) scales with the strip's light
+///   background (95th percentile brightness of the stat area, reference
+///   [`HEADER_BG_REF`]), never above the fixed cut, so a dimmed board still
+///   separates its labels from the strip;
+/// * the cluster minimum rounds down instead of to nearest, so a 2 px "H"
+///   label on a board narrower than 1664 px is kept.
+pub fn header_label_groups_scaled(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
+    label_groups(scoreboard, LabelScan::Scaled)
+}
+
+/// [`header_label_groups_scaled`] with the fixed dark cut: what the scaled
+/// scan finds when the strip is not treated as dimmed.
+pub fn header_label_groups_scaled_undimmed(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
+    label_groups(scoreboard, LabelScan::ScaledFixedCut)
+}
+
+/// The scaled scan lowers its dark cut on this board: the header strip's
+/// light background is below [`HEADER_BG_REF`] by enough to move the cut.
+pub fn header_strip_dimmed(scoreboard: &DynamicImage) -> bool {
+    let rgb = header_strip_rgb(scoreboard);
+    header_dark_cut(&rgb, LabelScan::Scaled) < HEADER_DARK_CUT
+}
+
+/// The thin header strip [`header_label_groups`] scans, as RGB.
+fn header_strip_rgb(scoreboard: &DynamicImage) -> image::RgbImage {
+    let (w, h) = (scoreboard.width(), scoreboard.height());
+    let scan_start = (h as f64 * 0.005) as u32;
+    let scan_end = (h as f64 * 0.025).max(15.0) as u32;
+    let scan_h = scan_end.saturating_sub(scan_start).max(1);
+    scoreboard
+        .crop_imm(0, scan_start, w, scan_h.min(h.saturating_sub(scan_start)))
+        .to_rgb8()
+}
+
+/// Brightness below which a header strip pixel counts as label ink.
+pub const HEADER_DARK_CUT: u32 = 150;
+/// Light strip background (p95 brightness) of a normal Tab board header.
+pub const HEADER_BG_REF: u32 = 219;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabelScan {
+    Fixed,
+    Scaled,
+    ScaledFixedCut,
+}
+
+/// The dark cut for a header strip under `scan`.
+fn header_dark_cut(rgb: &image::RgbImage, scan: LabelScan) -> u32 {
+    if scan != LabelScan::Scaled {
+        return HEADER_DARK_CUT;
+    }
+    let w = rgb.width();
+    let mut v: Vec<u32> = Vec::with_capacity((w - w / 4) as usize * rgb.height() as usize);
+    for y in 0..rgb.height() {
+        for x in w / 4..w {
+            let px = rgb.get_pixel(x, y);
+            v.push((px.0[0] as u32 + px.0[1] as u32 + px.0[2] as u32) / 3);
+        }
+    }
+    if v.is_empty() {
+        return HEADER_DARK_CUT;
+    }
+    v.sort_unstable();
+    let bg = v[(v.len() - 1) * 95 / 100].min(HEADER_BG_REF);
+    (HEADER_DARK_CUT * bg + HEADER_BG_REF / 2) / HEADER_BG_REF
+}
+
+fn label_groups(scoreboard: &DynamicImage, scan: LabelScan) -> Vec<(u32, u32)> {
     let (w, h) = (scoreboard.width(), scoreboard.height());
 
     let scan_start = (h as f64 * 0.005) as u32;
@@ -991,6 +1068,7 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
     let header = scoreboard.crop_imm(0, scan_start, w, scan_h.min(h.saturating_sub(scan_start)));
     let rgb = header.to_rgb8();
     let scan_rows = rgb.height().max(1);
+    let dark_cut = header_dark_cut(&rgb, scan);
 
     // Count dark pixels per column in the header area
     let mut col_dark = vec![0u32; w as usize];
@@ -998,7 +1076,7 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
         for x in 0..w {
             let px = rgb.get_pixel(x, y);
             let brightness = (px.0[0] as u32 + px.0[1] as u32 + px.0[2] as u32) / 3;
-            if brightness < 150 {
+            if brightness < dark_cut {
                 col_dark[x as usize] += 1;
             }
         }
@@ -1015,7 +1093,13 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
     // reference value of 3 so it never outgrows the thinnest real label ("H"
     // is ~3px at 1664, ~4.5px at 4K: a proportionally-scaled 5px floor would
     // delete it there, the mirror image of the 1080p failure above).
-    let min_cluster_w = ((w as f64 * 3.0 / 1664.0).round() as u32).clamp(2, 3);
+    let min_w = w as f64 * 3.0 / 1664.0;
+    let min_w = if scan != LabelScan::Fixed {
+        min_w.floor()
+    } else {
+        min_w.round()
+    };
+    let min_cluster_w = (min_w as u32).clamp(2, 3);
     let merge_dist = ((w as f64 * 15.0 / 1664.0).round() as u32).max(4);
     let threshold = (scan_rows / 4).max(1);
     let mut raw_clusters: Vec<(u32, u32)> = Vec::new();
