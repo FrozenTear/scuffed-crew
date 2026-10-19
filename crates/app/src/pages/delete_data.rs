@@ -11,10 +11,10 @@ use dioxus::prelude::*;
 use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::{
     CODE_CONFIRM_MISMATCH, CODE_INVALID_PASSWORD, CODE_LAST_ADMIN, CODE_NO_PENDING_DELETE,
-    CODE_REAUTH_REQUIRED, DELETE_MY_ACCOUNT_PATH, DELETE_MY_STATS_PATH, DeleteMyAccountRequest,
-    DeleteMyAccountResponse, DeleteMyStatsRequest, DeleteMyStatsResponse, MeResponse,
-    RESTORE_MY_STATS_PATH, RestoreMyStatsRequest, RestoreMyStatsResponse, StatsDeleteSchedule,
-    response_code,
+    CODE_REAUTH_REQUIRED, DELETE_MY_ACCOUNT_PATH, DELETE_MY_STATS_CONFIRM, DELETE_MY_STATS_PATH,
+    DeleteMyAccountRequest, DeleteMyAccountResponse, DeleteMyStatsRequest, DeleteMyStatsResponse,
+    MeResponse, RESTORE_MY_STATS_PATH, RestoreMyStatsRequest, RestoreMyStatsResponse,
+    StatsDeleteSchedule, response_code,
 };
 
 use crate::components::{Toast, use_toast};
@@ -72,8 +72,8 @@ struct DeleteDialogCopy {
 const DELETE_LISTS: DeleteDialogCopy = DeleteDialogCopy {
     stats: DeleteLists {
         removes: &[
-            "Tracker stats are hidden now and deleted in 7 days, along with stat reports and their files.",
-            "Every sync token on every PC is revoked now. Undo does not restore them. After you undo, make a new one on the Sync Tokens page.",
+            "Tracker stats, stat reports, and their files are deleted right away. This cannot be undone.",
+            "Every sync token on every PC is revoked right away.",
         ],
         stays: &[
             "Your account",
@@ -356,9 +356,12 @@ fn password_satisfied(prompt: PasswordPrompt, password: &str) -> bool {
     }
 }
 
-/// Stats delete checks the typed name only. The request body has no password.
-pub(crate) fn stats_delete_enabled(typed: &str, account_name: &str) -> bool {
-    confirm_name_matches(typed, account_name)
+const STATS_CONFIRM_HINT: &str = "Type delete my stats to confirm.";
+
+/// Website stats delete sends the fixed phrase. The typed text must match it,
+/// trimmed and case-sensitive. The request body has no password.
+pub(crate) fn stats_delete_enabled(typed: &str) -> bool {
+    typed.trim() == DELETE_MY_STATS_CONFIRM
 }
 
 pub(crate) fn delete_confirm_enabled(
@@ -608,6 +611,7 @@ fn begin_delete(
 
 fn end_delete(
     busy: Signal<bool>,
+    mut password: Signal<String>,
     return_focus: Signal<&'static str>,
     mut dialog: Signal<DeleteKind>,
     mut error: Signal<Option<String>>,
@@ -616,6 +620,7 @@ fn end_delete(
         return;
     }
     let focus = return_focus();
+    password.set(String::new());
     dialog.set(DeleteKind::Closed);
     error.set(None);
     focus_element(focus);
@@ -754,10 +759,7 @@ pub fn DeleteDataSection(
             return;
         }
         evt.prevent_default();
-        let focus = return_focus();
-        dialog.set(DeleteKind::Closed);
-        error.set(None);
-        focus_element(focus);
+        end_delete(busy, password, return_focus, dialog, error);
     });
 
     let scheduled_at = schedule.read().as_ref().and_then(|value| value.clone());
@@ -766,7 +768,7 @@ pub fn DeleteDataSection(
         DeleteKind::Account => {
             account_delete_enabled(&typed(), &account_name, &username, prompt, &password())
         }
-        DeleteKind::Stats | DeleteKind::Closed => stats_delete_enabled(&typed(), &account_name),
+        DeleteKind::Stats | DeleteKind::Closed => stats_delete_enabled(&typed()),
     };
 
     let mut submit = {
@@ -787,9 +789,7 @@ pub fn DeleteDataSection(
                     prompt,
                     &password_now,
                 ),
-                DeleteKind::Stats | DeleteKind::Closed => {
-                    stats_delete_enabled(&typed_now, &account_name)
-                }
+                DeleteKind::Stats | DeleteKind::Closed => stats_delete_enabled(&typed_now),
             };
             if !allowed {
                 return;
@@ -830,6 +830,7 @@ pub fn DeleteDataSection(
                         busy.set(false);
                         match result {
                             Ok(body) if body.deleted => {
+                                password.set(String::new());
                                 arm_account_deleted_notice();
                                 auth.set(AuthState {
                                     user: None,
@@ -918,7 +919,7 @@ pub fn DeleteDataSection(
         if kind != DeleteKind::Closed {
             div {
                 class: "delete-data-backdrop",
-                onclick: move |_| end_delete(busy, return_focus, dialog, error),
+                onclick: move |_| end_delete(busy, password, return_focus, dialog, error),
                 div {
                     id: DIALOG_ID,
                     class: "delete-data-dialog",
@@ -941,7 +942,10 @@ pub fn DeleteDataSection(
                             submit(());
                         },
                         div { class: "delete-data-field",
-                            label { r#for: NAME_INPUT_ID, "Account name" }
+                            label {
+                                r#for: NAME_INPUT_ID,
+                                if kind == DeleteKind::Account { "Account name" } else { "Confirmation" }
+                            }
                             input {
                                 id: NAME_INPUT_ID,
                                 r#type: "text",
@@ -955,7 +959,7 @@ pub fn DeleteDataSection(
                                 if kind == DeleteKind::Account {
                                     "{account_confirm_prompt(&account_name)}"
                                 } else {
-                                    "Type your account name exactly: {account_name}"
+                                    "{STATS_CONFIRM_HINT}"
                                 }
                             }
                         }
@@ -989,7 +993,7 @@ pub fn DeleteDataSection(
                                 id: CANCEL_ID,
                                 class: "delete-data-btn delete-data-btn-quiet",
                                 disabled: busy(),
-                                onclick: move |_| end_delete(busy, return_focus, dialog, error),
+                                onclick: move |_| end_delete(busy, password, return_focus, dialog, error),
                                 "Cancel"
                             }
                             button {
@@ -1224,11 +1228,14 @@ mod tests {
 
     #[test]
     fn stats_delete_ignores_the_password() {
-        assert!(stats_delete_enabled("Ada", "Ada"));
-        assert!(stats_delete_enabled("  Ada  ", "Ada"));
-        assert!(!stats_delete_enabled("ada", "Ada"));
-        assert!(!stats_delete_enabled("", "Ada"));
-        assert!(!stats_delete_enabled("Ada", ""));
+        assert!(stats_delete_enabled("delete my stats"));
+        assert!(stats_delete_enabled("  delete my stats  "));
+        assert!(!stats_delete_enabled("Delete my stats"));
+        assert!(!stats_delete_enabled("delete my stats."));
+        assert!(!stats_delete_enabled(""));
+        assert!(!stats_delete_enabled("Ada"));
+        assert_eq!(STATS_CONFIRM_HINT, "Type delete my stats to confirm.");
+        assert_plain(STATS_CONFIRM_HINT);
         // The same name with a required empty password still blocks account delete.
         assert!(!account_delete_enabled(
             "Ada",
@@ -1426,12 +1433,12 @@ mod tests {
         assert!(DELETE_LISTS.stats.stays.contains(&TRACKER_LOCAL_COPY));
         let stats_removes = DELETE_LISTS.stats.removes.join(" ");
         let stats_stays = DELETE_LISTS.stats.stays.join(" ");
-        assert!(stats_removes.contains("hidden now"));
-        assert!(stats_removes.contains("deleted in 7 days"));
-        assert!(stats_removes.contains("stat reports and their files"));
-        assert!(stats_removes.contains("revoked now"));
-        assert!(stats_removes.contains("Undo does not restore them"));
-        assert!(stats_removes.contains("Sync Tokens page"));
+        assert!(stats_removes.contains("deleted right away"));
+        assert!(stats_removes.contains("cannot be undone"));
+        assert!(stats_removes.contains("stat reports, and their files"));
+        assert!(stats_removes.contains("Every sync token on every PC is revoked right away"));
+        assert!(!stats_removes.contains("7 days"));
+        assert!(!stats_removes.contains("Undo"));
         for phrase in ["forum", "direct message", "wiki", "game account"] {
             assert!(
                 !stats_removes.to_ascii_lowercase().contains(phrase),
@@ -1460,6 +1467,23 @@ mod tests {
         assert_plain(CONFIRM_MISMATCH_COPY);
         assert_plain(&pending_delete_banner_text("not-a-date"));
         assert_eq!(format_deletion_date("not-a-date"), "not-a-date");
+        let src = include_str!("delete_data.rs");
+        let end = src.find("fn end_delete").expect("end_delete");
+        let end_body = &src[end..src[end..]
+            .find("\n///")
+            .map(|i| end + i)
+            .unwrap_or(src.len())];
+        assert!(
+            end_body.contains("password.set(String::new())"),
+            "cancel must clear the password"
+        );
+        let success = src
+            .find("Ok(body) if body.deleted")
+            .expect("account delete success");
+        assert!(
+            src[success..success + 400].contains("password.set(String::new())"),
+            "a successful account delete must clear the password"
+        );
     }
 
     #[test]
