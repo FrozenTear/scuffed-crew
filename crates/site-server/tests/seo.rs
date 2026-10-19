@@ -3,10 +3,12 @@
 //! These hit the router (not the handlers alone) so a regression that lets the
 //! SPA catch-all swallow `/robots.txt` or `/sitemap.xml` fails the test.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -1089,6 +1091,15 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     let (status, headers, body) = exchange(app.clone(), Method::GET, "/api/does-not-exist").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_json_not_found(&headers, &body, "unknown nested path");
+    assert_eq!(body, r#"{"error":"Not found"}"#, "exact 404 body");
+
+    let (status, headers, body) = exchange(app.clone(), Method::GET, "/api/forum/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_json_not_found(&headers, &body, "/api/forum/nope");
+    assert!(
+        !body.contains(SHELL),
+        "/api/forum/nope must not be the SPA shell"
+    );
 
     let (status, headers, body) = exchange(app.clone(), Method::GET, "/api").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1110,10 +1121,39 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     );
     assert!(!body.contains(SHELL));
 
-    let (status, _, body) = exchange(app.clone(), Method::POST, "/api/health").await;
+    let (status, headers, body) = exchange(app.clone(), Method::POST, "/api/health").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_json_method_not_allowed(&headers, &body, "POST /api/health");
+    assert_eq!(
+        headers.get(header::ALLOW).and_then(|v| v.to_str().ok()),
+        Some("GET,HEAD"),
+        "Allow must still list the methods the path registers"
+    );
     assert!(!body.contains(SHELL));
-    assert!(!body.contains("\"error\""));
+
+    // Governed public route: the JSON 405 sits inside that router's limiter,
+    // so the peer address has to be present the same way the listener injects it.
+    let (status, headers, body) = exchange_from(
+        app.clone(),
+        Method::POST,
+        "/api/auth/providers",
+        [203, 0, 113, 9],
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_json_method_not_allowed(&headers, &body, "POST /api/auth/providers");
+
+    let (status, headers, body) = exchange(app.clone(), Method::POST, "/api/forum/tree").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_json_method_not_allowed(&headers, &body, "POST /api/forum/tree");
+
+    let (status, headers, body) = exchange(app.clone(), Method::POST, "/robots.txt").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(
+        body.is_empty(),
+        "non-api wrong method stays an empty 405, got {body:?}"
+    );
+    assert_ne!(content_type(&headers), "application/json");
 
     let (status, _, body) = exchange(app.clone(), Method::GET, "/api/route-probe").await;
     assert_eq!(status, StatusCode::OK);
@@ -1148,10 +1188,43 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
 }
 
 fn assert_json_not_found(headers: &axum::http::HeaderMap, body: &str, label: &str) {
+    assert_json_error(headers, body, "Not found", label);
+}
+
+fn assert_json_method_not_allowed(headers: &axum::http::HeaderMap, body: &str, label: &str) {
+    assert_json_error(headers, body, "Method not allowed", label);
+    assert_eq!(body, r#"{"error":"Method not allowed"}"#, "{label}");
+}
+
+fn assert_json_error(headers: &axum::http::HeaderMap, body: &str, message: &str, label: &str) {
     assert_eq!(content_type(headers), "application/json", "{label}");
     assert_eq!(cache_control(headers), Some("no-store"), "{label}");
     let value: Value = serde_json::from_str(body).unwrap_or_else(|err| {
         panic!("{label}: body is not JSON ({err}): {body}");
     });
-    assert_eq!(value, serde_json::json!({"error": "Not found"}), "{label}");
+    assert_eq!(value, serde_json::json!({"error": message}), "{label}");
+}
+
+async fn exchange_from(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+    peer: [u8; 4],
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(ConnectInfo(SocketAddr::from((peer, 44000))))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    (status, headers, body)
 }

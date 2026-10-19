@@ -43,6 +43,18 @@ pub fn create_router(state: AppState) -> Router {
     create_router_with_dist(state, "dist")
 }
 
+/// JSON 405 for `/api` routes registered so far.
+///
+/// Axum only updates method routers that still use the default empty 405, so
+/// call this again after merging more routes. Put it before layers that should
+/// wrap the 405 (rate limits, CORS). Non-`/api` paths stay an empty 405.
+pub fn apply_api_method_not_allowed<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.method_not_allowed_fallback(routes::seo::api_method_not_allowed)
+}
+
 /// Same router as [`create_router`], with an explicit Dioxus output directory.
 ///
 /// Tests pass a temp dir so cache-header checks do not need a built frontend.
@@ -98,10 +110,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/auth/nostr/verify",
             post(routes::auth::nostr_login_verify),
-        )
-        .layer(
-            GovernorLayer::new(governor_config).error_handler(rate_limit::governor_error_response),
         );
+    let auth_routes = apply_api_method_not_allowed(auth_routes).layer(
+        GovernorLayer::new(governor_config).error_handler(rate_limit::governor_error_response),
+    );
 
     // Per-IP rate limit for the write-heavy upload endpoints: 8-burst, then 1
     // every 10s (≈6/min sustained). Uploads were previously unthrottled, letting
@@ -116,13 +128,15 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid upload governor config"),
     );
-    let upload_routes = Router::new()
-        .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
-        .route("/api/upload/image", post(routes::uploads::upload_image))
-        .layer(
-            GovernorLayer::new(upload_governor_config)
-                .error_handler(rate_limit::governor_error_response),
-        );
+    let upload_routes = apply_api_method_not_allowed(
+        Router::new()
+            .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
+            .route("/api/upload/image", post(routes::uploads::upload_image)),
+    )
+    .layer(
+        GovernorLayer::new(upload_governor_config)
+            .error_handler(rate_limit::governor_error_response),
+    );
 
     // Stat-report bundles are up to 10 MB, read in full before the daily cap
     // is checked, then inflated to validate every PNG. Same per-IP budget as
@@ -151,12 +165,13 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid token-check governor config"),
     );
-    let token_check_routes = Router::new()
-        .route("/api/stats/token-check", get(routes::stats::token_check))
-        .layer(
-            GovernorLayer::new(token_check_governor_config)
-                .error_handler(rate_limit::governor_error_response),
-        );
+    let token_check_routes = apply_api_method_not_allowed(
+        Router::new().route("/api/stats/token-check", get(routes::stats::token_check)),
+    )
+    .layer(
+        GovernorLayer::new(token_check_governor_config)
+            .error_handler(rate_limit::governor_error_response),
+    );
 
     // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
     // 10s). Filling this bucket does not block uploads or token-check.
@@ -169,20 +184,21 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid pack governor config"),
     );
-    let pack_routes = Router::new()
-        .route("/api/tracker/packs", get(routes::packs::list_packs))
-        .route(
-            "/api/tracker/packs/{name}",
-            get(routes::packs::download_pack),
-        )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::packs::require_packs,
-        ))
-        .layer(
-            GovernorLayer::new(pack_governor_config)
-                .error_handler(rate_limit::governor_error_response),
-        );
+    let pack_routes = apply_api_method_not_allowed(
+        Router::new()
+            .route("/api/tracker/packs", get(routes::packs::list_packs))
+            .route(
+                "/api/tracker/packs/{name}",
+                get(routes::packs::download_pack),
+            ),
+    )
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        routes::packs::require_packs,
+    ))
+    .layer(
+        GovernorLayer::new(pack_governor_config).error_handler(rate_limit::governor_error_response),
+    );
 
     // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
     // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
@@ -252,11 +268,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Deliberately here rather than in `auth_routes` (2/s): both are needed
         // before login, and the stricter budget would fight normal first loads.
         .route("/api/auth/setup-status", get(routes::auth::setup_status))
-        .route("/api/auth/providers", get(routes::auth::auth_providers))
-        .layer(
-            GovernorLayer::new(public_governor_config)
-                .error_handler(rate_limit::governor_error_response),
-        );
+        .route("/api/auth/providers", get(routes::auth::auth_providers));
+    let public_routes = apply_api_method_not_allowed(public_routes).layer(
+        GovernorLayer::new(public_governor_config)
+            .error_handler(rate_limit::governor_error_response),
+    );
 
     // Device-link sign-in. Three buckets so a poll loop cannot starve start,
     // and guessing a user code cannot starve the device. Wrong-code guesses
@@ -264,46 +280,50 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // cell per second (see `link_poll`) so three devices can sit on the
     // 5 second interval for the whole code lifetime.
     let link_period = 30;
-    let link_start_routes = Router::new()
-        .route("/api/link/start", post(routes::link::start))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor.clone())
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_START_BURST)
-                    .finish()
-                    .expect("valid device link start governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_poll_routes = Router::new()
-        .route("/api/link/poll", post(routes::link::poll))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::link::limit_link_poll,
+    let link_start_routes = apply_api_method_not_allowed(
+        Router::new().route("/api/link/start", post(routes::link::start)),
+    )
+    .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+    .layer(
+        GovernorLayer::new(std::sync::Arc::new(
+            GovernorConfigBuilder::default()
+                .key_extractor(key_extractor.clone())
+                .per_second(link_period)
+                .burst_size(routes::link::LINK_START_BURST)
+                .finish()
+                .expect("valid device link start governor"),
         ))
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_user_routes = Router::new()
-        .route("/api/link/lookup", post(routes::link::lookup))
-        .route("/api/link/approve", post(routes::link::approve))
-        .route("/api/link/deny", post(routes::link::deny))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor)
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_USER_BURST)
-                    .finish()
-                    .expect("valid device link user governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
+        .error_handler(rate_limit::governor_error_response),
+    )
+    .layer(middleware::from_fn(routes::link::no_store_link));
+    let link_poll_routes = apply_api_method_not_allowed(
+        Router::new().route("/api/link/poll", post(routes::link::poll)),
+    )
+    .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        routes::link::limit_link_poll,
+    ))
+    .layer(middleware::from_fn(routes::link::no_store_link));
+    let link_user_routes = apply_api_method_not_allowed(
+        Router::new()
+            .route("/api/link/lookup", post(routes::link::lookup))
+            .route("/api/link/approve", post(routes::link::approve))
+            .route("/api/link/deny", post(routes::link::deny)),
+    )
+    .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+    .layer(
+        GovernorLayer::new(std::sync::Arc::new(
+            GovernorConfigBuilder::default()
+                .key_extractor(key_extractor)
+                .per_second(link_period)
+                .burst_size(routes::link::LINK_USER_BURST)
+                .finish()
+                .expect("valid device link user governor"),
+        ))
+        .error_handler(rate_limit::governor_error_response),
+    )
+    .layer(middleware::from_fn(routes::link::no_store_link));
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
@@ -762,9 +782,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             uploads::uploads_router(state.upload_dir.clone()),
         )
         // Unmatched `/api` and `/api/*` are a JSON 404 inside the SPA service.
-        // Every other unmatched path is the shell or a static file. Known
-        // routes, including a wrong method on a known path, are resolved
-        // before this fallback.
+        // Every other unmatched path is the shell or a static file. A known
+        // `/api` path with the wrong method is a JSON 405, set on the method
+        // routers above (and again here for routes that still have Axum's
+        // empty 405). Sub-routers that already installed the JSON 405 keep it,
+        // including the layers wrapped around it.
+        .method_not_allowed_fallback(routes::seo::api_method_not_allowed)
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
         // 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB.
         // Stat-report uploads raise only their own POST route to 10 MB.
