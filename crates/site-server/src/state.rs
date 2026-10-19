@@ -27,7 +27,8 @@ pub struct AppState {
     /// `http://localhost:3000` when the variable is unset, and that default
     /// must not become an AUTH relay. Blank and whitespace-only values are
     /// `None`. A path or query on the value is ignored when the allow-list
-    /// builds `/relay`. See [`auth_redirect_base_from_env`].
+    /// builds the websocket `/relay` URL (`wss` for an https base, `ws` for
+    /// an http base). See [`auth_redirect_base_from_env`].
     pub auth_redirect_base: Option<String>,
     pub upload_dir: PathBuf,
     /// Private directory for tracker bug-report zips. Not served over HTTP.

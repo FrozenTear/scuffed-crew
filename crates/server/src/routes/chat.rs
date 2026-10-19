@@ -105,9 +105,10 @@ fn charge_interactive_send(state: &AppState, member_id: &str) -> Result<(), Send
 /// Blank lines are dropped. Configured and extra entries must be `ws` or
 /// `wss`; an `http` or `https` line is ignored. `redirect_base` is
 /// [`AppState::auth_redirect_base`], the raw `REDIRECT_BASE_URL` from
-/// startup, with no localhost default. An https base adds `wss://host/relay`
-/// and `https://host/relay`, and an http base adds the `ws` and `http` pair.
-/// A path or query on the base is dropped. A missing or blank base adds nothing.
+/// startup, with no localhost default. An https base adds only
+/// `wss://host/relay`. An http base adds only `ws://host/relay`. `http` and
+/// `https` relay tags are rejected, the same as configured lines. A path or
+/// query on the base is dropped. A missing or blank base adds nothing.
 fn auth_relay_candidates(
     configured: Option<&str>,
     extra_lines: &str,
@@ -1291,18 +1292,20 @@ mod tests {
             "wss://ow.example.com/relay",
             "wss://ow.example.com/relay/",
             "WSS://OW.Example.com:443/relay/",
+        ] {
+            assert_eq!(
+                scuffed_chat::allowed_auth_relay(requested, refs.iter().copied()).as_deref(),
+                Some("wss://ow.example.com/relay"),
+                "{requested}"
+            );
+        }
+        for requested in [
             "https://ow.example.com/relay",
             "https://ow.example.com/relay/",
             "HTTPS://ow.example.com/relay",
         ] {
-            let expected = if requested.to_ascii_lowercase().starts_with("wss://") {
-                "wss://ow.example.com/relay"
-            } else {
-                "https://ow.example.com/relay"
-            };
-            assert_eq!(
-                scuffed_chat::allowed_auth_relay(requested, refs.iter().copied()).as_deref(),
-                Some(expected),
+            assert!(
+                scuffed_chat::allowed_auth_relay(requested, refs.iter().copied()).is_none(),
                 "{requested}"
             );
         }
@@ -1344,10 +1347,9 @@ mod tests {
                 .as_deref(),
             Some("ws://127.0.0.1:3000/relay")
         );
-        assert_eq!(
+        assert!(
             scuffed_chat::allowed_auth_relay("http://127.0.0.1:3000/relay/", refs.iter().copied())
-                .as_deref(),
-            Some("http://127.0.0.1:3000/relay")
+                .is_none()
         );
         assert_eq!(
             scuffed_chat::allowed_auth_relay("ws://strfry:7777", refs.iter().copied()).as_deref(),
@@ -1377,10 +1379,9 @@ mod tests {
                 .as_deref(),
             Some("ws://127.0.0.1:3000/relay")
         );
-        assert_eq!(
+        assert!(
             scuffed_chat::allowed_auth_relay("http://127.0.0.1:3000/relay", refs.iter().copied())
-                .as_deref(),
-            Some("http://127.0.0.1:3000/relay")
+                .is_none()
         );
 
         state.auth_redirect_base = None;
