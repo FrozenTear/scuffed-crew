@@ -7282,6 +7282,18 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             // Only with debug_ocr on: the crop shows other players' names.
+            // The own-row file is a separate crop of this player's row, widened
+            // left of the name column so the hero portrait is included. A
+            // header clipped at the scoreboard's left edge is cut from the
+            // widened frame crop the hero reader uses.
+            save_own_row_review(
+                ctx.debug_ocr,
+                data_dir,
+                &frame_img,
+                scoreboard_img,
+                player_row_idx,
+                team_size,
+            );
             // The unpadded crop, not the 5v5 recognition image: offline
             // replay places rows from crop height, and these files are the
             // benchmark boards.
@@ -7622,6 +7634,41 @@ fn save_accepted_frame(
     let dir = data_dir.join("debug").join("accepted");
     Some(tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
+    }))
+}
+
+/// Local review PNG of the member's own scoreboard row, under
+/// `debug/accepted/own-row/`. Only with `debug_ocr` on, and only when the
+/// own row was found: the file is that one row, widened left of the name
+/// column so the hero portrait is in it. When the header is clipped, the
+/// cut is [`detect::own_row::own_row_review_image_from`] of `frame` (the
+/// hero reader's widened crop) with the name column shifted by that pad.
+/// Other rows are not written. The name-line seed and the report kit are
+/// untouched. The handle is for tests.
+fn save_own_row_review(
+    debug: bool,
+    data_dir: &std::path::Path,
+    frame: &image::DynamicImage,
+    board: Arc<image::DynamicImage>,
+    row: Option<usize>,
+    team_size: usize,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !debug {
+        return None;
+    }
+    let row = row?;
+    let frame = frame.clone();
+    let dir = data_dir.join("debug").join("accepted").join("own-row");
+    Some(tokio::task::spawn_blocking(move || {
+        let Some(crop) = detect::own_row::own_row_review_image_from(
+            Some(&frame),
+            board.as_ref(),
+            team_size,
+            row,
+        ) else {
+            return;
+        };
+        save_frame_ring(&dir, "ownrow", &crop, ACCEPTED_KEEP);
     }))
 }
 
