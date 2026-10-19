@@ -3,7 +3,7 @@
 //! Stats deletion from a site session or a tracker token is a soft delete: the
 //! deadline is stored on the member, reads hide the rows, and
 //! [`Database::purge_scheduled_stats`] hard-deletes them once the deadline has
-//! passed. [`Database::hard_delete_personal_stats`] is that purge. Account
+//! passed, skipping a member whose deadline was cleared or moved. Account
 //! erasure removes the user immediately and points shared author fields at the
 //! tombstone member ([`crate::DELETED_MEMBER_ID`]).
 
@@ -267,10 +267,11 @@ impl Database {
 
     /// Hard-delete this member's personal stats and revoke tracker tokens.
     ///
-    /// The hourly purge calls this after the 7-day deadline. Account erase
-    /// deletes the same rows inside its own transaction. Hero, role, and map
-    /// figures are aggregates over `personal_match`, so removing those rows
-    /// drops them from leaderboards on the next read.
+    /// No deadline check. The hourly purge uses [`Database::purge_member_if_due`]
+    /// so a restore can still win. Account erase deletes the same rows inside
+    /// its own transaction. Hero, role, and map figures are aggregates over
+    /// `personal_match`, so removing those rows drops them from leaderboards
+    /// on the next read.
     pub async fn hard_delete_personal_stats(&self, member_id: &str) -> DbResult<StatsWipe> {
         if member_id == DELETED_MEMBER_ID {
             return Err(DbError::Config("tombstone member cannot be erased".into()));
@@ -322,9 +323,12 @@ impl Database {
         .await
     }
 
-    /// Hard-delete stats for every member whose deadline is at or before `now`.
-    pub async fn purge_scheduled_stats(&self, now: DateTime<Utc>) -> DbResult<PurgeOutcome> {
-        let due = with_timeout(async {
+    /// Members whose soft-delete deadline is set and at or before `now`.
+    ///
+    /// The tombstone is never included. A restore that lands after this read
+    /// is caught by [`Database::purge_member_if_due`].
+    pub async fn members_due_for_stats_purge(&self, now: DateTime<Utc>) -> DbResult<Vec<String>> {
+        with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct Row {
                 member_id: String,
@@ -342,18 +346,119 @@ impl Database {
                 .bind(("tomb", DELETED_MEMBER_ID.to_string()))
                 .await?;
             let rows: Vec<Row> = result.take(0)?;
-            Ok(rows)
+            Ok(rows.into_iter().map(|row| row.member_id).collect())
+        })
+        .await
+    }
+
+    /// Hard-delete this member's stats only if the deadline is still due.
+    ///
+    /// The deadline is claimed inside the same transaction as the deletes.
+    /// `Ok(None)` means a restore cleared it, or it was moved to after `now`,
+    /// so nothing was deleted. Report ids are read before that transaction and
+    /// returned only when the claim commits, so a lost race does not hand the
+    /// caller files to remove.
+    pub async fn purge_member_if_due(
+        &self,
+        member_id: &str,
+        now: DateTime<Utc>,
+    ) -> DbResult<Option<StatsWipe>> {
+        if member_id == DELETED_MEMBER_ID {
+            return Err(DbError::Config("tombstone member cannot be erased".into()));
+        }
+        let personal_match = count_where(
+            &self.client,
+            "SELECT count() AS count FROM personal_match WHERE member_id = $mid GROUP ALL",
+            member_id,
+        )
+        .await?;
+        let stat_report_ids = string_ids(
+            &self.client,
+            "SELECT id FROM stat_report WHERE member_id = $mid",
+            member_id,
+        )
+        .await?;
+        let tokens_revoked = count_where(
+            &self.client,
+            "SELECT count() AS count FROM daemon_token \
+             WHERE member_id = $mid AND is_active = true GROUP ALL",
+            member_id,
+        )
+        .await?;
+        let wiped = with_timeout(async {
+            let mut response = self
+                .client
+                .query(
+                    "BEGIN TRANSACTION; \
+                     LET $ready = (UPDATE $rid SET stats_delete_scheduled_at = NONE \
+                        WHERE stats_delete_scheduled_at IS NOT NONE \
+                        AND stats_delete_scheduled_at <= $now); \
+                     LET $due = array::len($ready) > 0; \
+                     IF $due { \
+                        DELETE personal_match WHERE member_id = $mid; \
+                        DELETE stat_report WHERE member_id = $mid; \
+                        UPDATE daemon_token SET is_active = false WHERE member_id = $mid; \
+                     }; \
+                     SELECT $due AS wiped FROM $rid; \
+                     COMMIT TRANSACTION;",
+                )
+                .bind(("rid", RecordId::new("member", member_id)))
+                .bind(("mid", member_id.to_string()))
+                .bind(("now", SurrealDatetime::from(now)))
+                .await
+                .map_err(map_erase_error)?;
+            let errors = response.take_errors();
+            if !errors.is_empty() {
+                let _ = self.client.query("CANCEL TRANSACTION").await;
+                let err = errors.into_values().next().unwrap_or_else(|| {
+                    surrealdb::Error::thrown("stats purge transaction failed".into())
+                });
+                return Err(map_erase_error(err));
+            }
+            #[derive(Deserialize, SurrealValue)]
+            struct Wiped {
+                wiped: bool,
+            }
+            for index in 0..8 {
+                if let Ok(rows) = response.take::<Vec<Wiped>>(index) {
+                    if let Some(row) = rows.into_iter().next() {
+                        return Ok(row.wiped);
+                    }
+                }
+            }
+            Err(DbError::Surreal(surrealdb::Error::thrown(
+                "stats purge transaction returned no result".into(),
+            )))
         })
         .await?;
+        if !wiped {
+            return Ok(None);
+        }
+        Ok(Some(StatsWipe {
+            personal_match,
+            stat_report: stat_report_ids.len() as u64,
+            stat_report_ids,
+            tokens_revoked,
+        }))
+    }
 
+    /// Hard-delete stats for every member whose deadline is at or before `now`.
+    ///
+    /// Each member is deleted only when the deadline is still due inside the
+    /// transaction. A restore or a moved deadline returns no wipe for that
+    /// member. Report files are removed by the server after this returns.
+    pub async fn purge_scheduled_stats(&self, now: DateTime<Utc>) -> DbResult<PurgeOutcome> {
+        let due = self.members_due_for_stats_purge(now).await?;
         let mut outcome = PurgeOutcome {
             members: 0,
             personal_match: 0,
             stat_report: 0,
             stat_report_ids: Vec::new(),
         };
-        for row in due {
-            let wipe = self.hard_delete_personal_stats(&row.member_id).await?;
+        for member_id in due {
+            let Some(wipe) = self.purge_member_if_due(&member_id, now).await? else {
+                continue;
+            };
             outcome.members += 1;
             outcome.personal_match += wipe.personal_match;
             outcome.stat_report += wipe.stat_report;
@@ -753,6 +858,64 @@ mod tests {
                 .total_matches,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn restore_between_due_list_and_wipe_deletes_nothing() {
+        let db = test_db().await;
+        let restored = db
+            .create_member("user-restored", "Restored", OrgRole::Member)
+            .await
+            .unwrap();
+        let moved = db
+            .create_member("user-moved", "Moved", OrgRole::Member)
+            .await
+            .unwrap();
+        db.upsert_personal_matches(&restored.id, &[sample_match(&restored.id, "keep-r")])
+            .await
+            .unwrap();
+        db.upsert_personal_matches(&moved.id, &[sample_match(&moved.id, "keep-m")])
+            .await
+            .unwrap();
+        let base = Utc::now();
+        let (restored_deadline, _) = db.schedule_stats_delete(&restored.id, base).await.unwrap();
+        let (moved_deadline, _) = db.schedule_stats_delete(&moved.id, base).await.unwrap();
+        let at = restored_deadline.max(moved_deadline);
+
+        let due = db.members_due_for_stats_purge(at).await.unwrap();
+        assert!(due.contains(&restored.id), "{due:?}");
+        assert!(due.contains(&moved.id), "{due:?}");
+
+        assert!(db.cancel_stats_delete(&restored.id).await.unwrap());
+        db.client
+            .query("UPDATE $rid SET stats_delete_scheduled_at = time::now() + 30d")
+            .bind(("rid", RecordId::new("member", moved.id.as_str())))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let wiped = db.purge_member_if_due(&restored.id, at).await.unwrap();
+        assert!(wiped.is_none(), "a restore after the due list must win");
+        let wiped = db.purge_member_if_due(&moved.id, at).await.unwrap();
+        assert!(wiped.is_none(), "a deadline moved past now must win");
+
+        let matches = super::count_where(
+            &db.client,
+            "SELECT count() AS count FROM personal_match WHERE member_id = $mid GROUP ALL",
+            &restored.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(matches, 1, "restored member rows stay");
+        let matches = super::count_where(
+            &db.client,
+            "SELECT count() AS count FROM personal_match WHERE member_id = $mid GROUP ALL",
+            &moved.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(matches, 1, "moved deadline rows stay");
     }
 
     #[tokio::test]
