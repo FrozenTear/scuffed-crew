@@ -124,6 +124,12 @@ pub struct PersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     pub suspect_fields: Vec<String>,
+    /// Which reader found this player's own scoreboard row.
+    /// `names-v1` or `ocr-v1`. Absent when this capture did not read a name.
+    /// Omitted from JSON when absent so an older server ignores the upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub name_recognizer: Option<String>,
 }
 
 /// Identity and payload revision captured when a row was read for upload.
@@ -471,6 +477,7 @@ impl LocalStore {
             DEFINE INDEX IF NOT EXISTS idx_deleted_sid ON deleted_session FIELDS session_id;
             DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
             DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+            DEFINE FIELD IF NOT EXISTS name_recognizer ON personal_match TYPE option<string>;
         ",
         )
         .await?;
@@ -2159,6 +2166,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            name_recognizer: None,
         }
     }
 
@@ -3500,6 +3508,10 @@ mod tests {
             "a row written before recognizer existed still uploads as ocr-v1"
         );
         assert!(rows[0].suspect_fields.is_empty());
+        assert_eq!(
+            rows[0].name_recognizer, None,
+            "a row written before name_recognizer existed uploads with the field omitted"
+        );
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
         let after = store.get_all_matches().await.unwrap();
         assert!(after[0].synced);

@@ -285,7 +285,10 @@ fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
         vec![named("CAB", 10)]
     });
     assert!(called);
-    assert_eq!(found.map(|m| m.row), Some(0));
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
     assert!(
         off.blocked().is_empty(),
         "the switch off does not call read_names"
@@ -308,7 +311,10 @@ fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
         },
     );
     assert!(called);
-    assert_eq!(found.map(|m| m.row), Some(0));
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
 }
 
 #[test]
@@ -335,6 +341,24 @@ fn the_switch_on_with_no_pack_uses_read_names_and_not_a_second_fallback() {
     assert_eq!(
         blocked[0].site.entry,
         "recognize_scoreboard_names_pre_cropped"
+    );
+
+    // No pack: the rows read_names already returned are Tesseract, so the
+    // upload id is ocr-v1 and tesseract_rows is not called again.
+    let found = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &[named("CAB", 40), blank_row()],
+            min_confidence: None,
+        }),
+        BoardMatch::Cells,
+        || panic!("no pack does not call tesseract_rows"),
+    );
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
     );
 }
 
@@ -376,9 +400,12 @@ fn a_confident_template_name_is_used_and_a_lower_one_falls_back() {
                 vec![named("FALLBACK", 90), named("OTHER", 90)]
             },
         );
-        (found.map(|m| m.row), called)
+        (found.map(|m| (m.name.row, m.recognizer)), called)
     };
-    assert_eq!(pick(lo.params.min_confidence), (Some(0), false));
+    assert_eq!(
+        pick(lo.params.min_confidence),
+        (Some((0, NameRecognizer::NamesV1)), false)
+    );
     assert_eq!(pick(hi.params.min_confidence), (None, true));
 
     // The pack threshold itself passes. One thousandth under it does not.
@@ -396,7 +423,10 @@ fn a_confident_template_name_is_used_and_a_lower_one_falls_back() {
         BoardMatch::FullBoard,
         || panic!("a row at the pack threshold does not need Tesseract"),
     );
-    assert_eq!(on_edge.map(|m| m.row), Some(0));
+    assert_eq!(
+        on_edge.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::NamesV1))
+    );
     let mut called = false;
     let below = choose_player_row(
         "CAB",
@@ -436,7 +466,28 @@ fn a_blank_own_row_falls_back_and_a_sure_board_without_the_player_does_not() {
         },
     );
     assert!(called);
-    assert_eq!(found.map(|m| m.row), Some(0));
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+
+    // A short board still keeps a sure template name on the player's row.
+    let short = [named("CAB", 90)];
+    let kept = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &short,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::Cells,
+        || vec![named("FALLBACK", 40)],
+    );
+    assert_eq!(
+        kept.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::NamesV1))
+    );
 
     let sure = [named("OTHER", 90), named("OTHER", 90)];
     let missed = choose_player_row(
@@ -472,5 +523,8 @@ fn a_loaded_pack_that_abstains_fills_the_row_from_tesseract() {
         vec![named("CAB", 70), named("OTHER", 70)]
     });
     assert!(called);
-    assert_eq!(found.map(|m| m.row), Some(0));
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
 }

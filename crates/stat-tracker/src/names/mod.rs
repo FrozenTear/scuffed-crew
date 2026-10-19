@@ -338,6 +338,21 @@ pub struct ReaderNames<'a> {
     pub min_confidence: Option<f32>,
 }
 
+/// The configured player's row, and which reader produced that row's name.
+///
+/// [`NameRecognizer::NamesV1`] means the name came from the names pack.
+/// [`NameRecognizer::OcrV1`] means it came from Tesseract, including a
+/// per-row fallback. No match means no name was read for the upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerRowMatch {
+    pub name: crate::parse::NameMatch,
+    pub recognizer: NameRecognizer,
+}
+
+fn player_row(name: crate::parse::NameMatch, recognizer: NameRecognizer) -> PlayerRowMatch {
+    PlayerRowMatch { name, recognizer }
+}
+
 /// The row of `player` from the name reader, or from `tesseract_rows`.
 ///
 /// The switch off uses `tesseract_rows` and `policy` and does not look at
@@ -349,6 +364,10 @@ pub struct ReaderNames<'a> {
 /// weak rows are filled from `tesseract_rows` and the match is tried again.
 /// A full board of sure names that does not contain the player does not
 /// call Tesseract.
+///
+/// The recognizer is [`NameRecognizer::NamesV1`] only when the matched row's
+/// name came from the pack. A Tesseract row, including one filled in for a
+/// blank or low-confidence row, is [`NameRecognizer::OcrV1`].
 pub fn choose_player_row(
     player: &str,
     team_size: usize,
@@ -356,15 +375,18 @@ pub fn choose_player_row(
     reader: Option<ReaderNames<'_>>,
     policy: BoardMatch,
     tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
-) -> Option<crate::parse::NameMatch> {
+) -> Option<PlayerRowMatch> {
     if !enabled {
-        return match_named_rows(&tesseract_rows(), player, team_size, policy);
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
     }
     let Some(reader) = reader else {
-        return match_named_rows(&tesseract_rows(), player, team_size, policy);
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
     };
     let Some(min_confidence) = reader.min_confidence else {
-        return match_named_rows(reader.rows, player, team_size, BoardMatch::FullBoard);
+        return match_named_rows(reader.rows, player, team_size, BoardMatch::FullBoard)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
     };
     let full = reader.rows.len() == team_size * 2;
     if full
@@ -375,7 +397,7 @@ pub fn choose_player_row(
             BoardMatch::FullBoard,
         )
     {
-        return Some(found);
+        return Some(player_row(found, NameRecognizer::NamesV1));
     }
     let any_weak = !full
         || reader
@@ -387,8 +409,21 @@ pub fn choose_player_row(
     }
     let tess = tesseract_rows();
     match merge_weak_rows(reader.rows, &tess, min_confidence) {
-        Some(rows) => match_named_rows(&rows, player, team_size, policy),
-        None => match_named_rows(&tess, player, team_size, policy),
+        Some(rows) => {
+            let found = match_named_rows(&rows, player, team_size, policy)?;
+            let from_pack = reader
+                .rows
+                .get(found.row)
+                .is_some_and(|row| row_meets(row, min_confidence));
+            let recognizer = if from_pack {
+                NameRecognizer::NamesV1
+            } else {
+                NameRecognizer::OcrV1
+            };
+            Some(player_row(found, recognizer))
+        }
+        None => match_named_rows(&tess, player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1)),
     }
 }
 
@@ -402,7 +437,7 @@ pub fn match_player_row(
     switch: &NameSwitch,
     policy: BoardMatch,
     tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
-) -> Option<crate::parse::NameMatch> {
+) -> Option<PlayerRowMatch> {
     if !switch.enabled {
         return choose_player_row(player, team_size, false, None, policy, tesseract_rows);
     }

@@ -42,6 +42,13 @@ pub struct StatsUploadEntry {
     /// confident or ocr-v1 row does not add the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suspect_fields: Vec<String>,
+    /// Which reader found this player's own scoreboard row.
+    ///
+    /// `names-v1` when the name came from the names pack. `ocr-v1` when it
+    /// fell back to Tesseract. Omitted when this capture did not read a
+    /// name, so an older server that ignores the field is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_recognizer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,6 +386,7 @@ mod tests {
                 edited: false,
                 recognizer: Some(RECOGNIZER_OCR_V1.into()),
                 suspect_fields: Vec::new(),
+                name_recognizer: None,
             }],
             deleted_sessions: vec![],
         }
@@ -659,5 +667,44 @@ mod tests {
             mixed_body.matches[0].suspect_fields,
             SuspectFieldsInput::NonStringEntry
         );
+    }
+
+    fn entry_with_name_recognizer(name_recognizer: Option<&str>) -> StatsUploadEntry {
+        let mut entry = sample_request().matches.remove(0);
+        entry.name_recognizer = name_recognizer.map(str::to_string);
+        entry
+    }
+
+    fn name_recognizer_json(name_recognizer: Option<&str>) -> String {
+        serde_json::to_string(&entry_with_name_recognizer(name_recognizer)).unwrap()
+    }
+
+    #[test]
+    fn name_recognizer_serializes_names_v1() {
+        let raw = name_recognizer_json(Some("names-v1"));
+        assert!(raw.contains("\"name_recognizer\":\"names-v1\""), "{raw}");
+        let back: StatsUploadEntry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.name_recognizer.as_deref(), Some("names-v1"));
+    }
+
+    #[test]
+    fn name_recognizer_serializes_ocr_v1() {
+        let raw = name_recognizer_json(Some("ocr-v1"));
+        assert!(raw.contains("\"name_recognizer\":\"ocr-v1\""), "{raw}");
+        let back: StatsUploadEntry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.name_recognizer.as_deref(), Some("ocr-v1"));
+    }
+
+    #[test]
+    fn name_recognizer_is_omitted_when_no_name_was_read() {
+        let raw = name_recognizer_json(None);
+        assert!(!raw.contains("name_recognizer"), "{raw}");
+        let back: StatsUploadEntry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.name_recognizer, None);
+        let bare: StatsUploadEntry = serde_json::from_str(
+            r#"{"hero":"Ana","map_name":"Oasis","game_mode":"control","role":"Support","outcome":"victory","played_at":"2026-07-01T20:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.name_recognizer, None);
     }
 }

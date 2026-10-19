@@ -3217,9 +3217,12 @@ struct FrameAnalysis {
     /// when none of them names a row.
     player_row_idx: Option<usize>,
     /// The name match behind `player_row_idx`, with the name window that
-    /// matched. `None` when the row came from the highlight alone, and
-    /// always under the new reader.
+    /// matched. `None` when the row came from the highlight, a seed, or
+    /// the career hero, and no name was read.
     name_match: Option<parse::NameMatch>,
+    /// Which reader produced `name_match`. `None` when this Tab did not
+    /// read a name. `names-v1` is the pack. `ocr-v1` is Tesseract.
+    name_recognizer: Option<names::NameRecognizer>,
     /// `reader = "new"`: how `player_row_idx` was found (seed, highlight,
     /// career hero, name fallback). `None` under ocr-v1.
     own_row: Option<detect::own_row::OwnRow>,
@@ -4931,6 +4934,7 @@ fn analyze_frame(
     let tab_heroes = read_tab_heroes(use_new_reader, || {
         shadow::read_heroes(&img, &scoreboard, team_size)
     });
+    let name_recognizer_slot = std::cell::Cell::new(None);
     let OwnRowChoice {
         row_idx,
         name_match,
@@ -4941,14 +4945,16 @@ fn analyze_frame(
         use_new_reader,
         || {
             player_name_owned.as_deref().and_then(|name| {
-                names::match_player_row(
+                let hit = names::match_player_row(
                     &scoreboard,
                     team_size,
                     name,
                     names,
                     names::BoardMatch::Cells,
                     || rows.iter().map(names::name_only).collect(),
-                )
+                )?;
+                name_recognizer_slot.set(Some(hit.recognizer));
+                Some(hit.name)
             })
         },
         || {
@@ -4961,7 +4967,14 @@ fn analyze_frame(
                 &own_seeds,
             )
         },
-        || own_row_name_fallback(player_name_owned.as_deref(), &scoreboard, team_size, names),
+        || {
+            own_row_name_fallback(player_name_owned.as_deref(), &scoreboard, team_size, names).map(
+                |hit| {
+                    name_recognizer_slot.set(Some(hit.recognizer));
+                    hit.name
+                },
+            )
+        },
         highlight,
         tab_heroes
             .as_ref()
@@ -5092,6 +5105,7 @@ fn analyze_frame(
         player_row_idx: row_idx,
         name_match,
         own_row,
+        name_recognizer: name_recognizer_slot.get(),
         own_name_candidate: own_name_candidate.map(|c| c.candidate),
         own_seed_verdict,
         team_size,
@@ -5197,7 +5211,7 @@ fn own_row_name_fallback(
     scoreboard: &image::DynamicImage,
     team_size: usize,
     names: &names::NameSwitch,
-) -> Option<parse::NameMatch> {
+) -> Option<names::PlayerRowMatch> {
     if ocr::gate::is_off() {
         return None;
     }
@@ -5496,6 +5510,7 @@ async fn store_held_board(
         segment_resolutions: Vec::new(),
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
+        name_recognizer: None,
     };
     storage::append_match_log(data_dir, &row);
     store
@@ -6444,6 +6459,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         player_row_idx,
         name_match,
         own_row,
+        name_recognizer,
         own_name_candidate,
         own_seed_verdict,
         team_size,
@@ -6610,6 +6626,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     };
     match scoreboard_read {
         Ok((mut parsed, trusted_cells, held_cols)) => {
+            // The own-row name reader for this Tab. Absent when the row
+            // came from a highlight, a seed, or the career hero.
+            parsed.name_recognizer = name_recognizer.map(|id| id.as_str().to_string());
             if held_cols.iter().any(|&held| held) {
                 // Until the gate runs, a held column reads as the game's
                 // last accepted value, so the split and reset checks see no
@@ -11861,6 +11880,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            name_recognizer: None,
         }
     }
 
@@ -12049,6 +12069,7 @@ mod tests {
                 scoreboard: std::sync::Arc::new(frame.clone()),
                 player_row_idx: Some(0),
                 name_match: None,
+                name_recognizer: None,
                 own_row: None,
                 own_name_candidate: None,
                 own_seed_verdict: detect::own_row::Verdict::Silent,
@@ -12208,6 +12229,7 @@ mod tests {
                 scoreboard: std::sync::Arc::new(frame.clone()),
                 player_row_idx: Some(0),
                 name_match: None,
+                name_recognizer: None,
                 own_row: None,
                 own_name_candidate: None,
                 own_seed_verdict: detect::own_row::Verdict::Silent,
@@ -13079,6 +13101,7 @@ mod tests {
             scoreboard: std::sync::Arc::new(frame.clone()),
             player_row_idx: Some(0),
             name_match: None,
+            name_recognizer: None,
             own_row: None,
             own_name_candidate: None,
             own_seed_verdict: detect::own_row::Verdict::Silent,
@@ -13795,8 +13818,10 @@ mod tests {
 
         {
             let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
-            let the_fallback =
-                || own_row_name_fallback(Some("PLAYER"), &board, 5, &names::NameSwitch::off());
+            let the_fallback = || {
+                own_row_name_fallback(Some("PLAYER"), &board, 5, &names::NameSwitch::off())
+                    .map(|hit| hit.name)
+            };
 
             let by_hero = find(&icons(Some("ana")), &the_fallback);
             assert_eq!((by_hero.row_idx, by_hero.name_match), (Some(OWN), None));
