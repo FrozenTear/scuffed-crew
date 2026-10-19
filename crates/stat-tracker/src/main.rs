@@ -433,6 +433,11 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         .context("failed to load config")?;
     tracing::info!("Scuffed Stat Tracker starting");
     stat_tracker::report::kit::set_retention(config.report_kit_retention());
+    stat_tracker::bench_crops::install_runtime(
+        config::Config::config_path().ok(),
+        config.keep_benchmark_crops,
+    );
+    stat_tracker::bench_crops::prune_runtime(&config.data_dir, ACCEPTED_KEEP, REJECTED_KEEP);
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
     // ProtectSystem=strict (when the user manager can apply it) makes a
@@ -4496,7 +4501,7 @@ async fn run_loop(
                         let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = tokio::task::spawn_blocking(move || {
                             let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
-                                save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
+                                save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP, u64::MAX);
                             }
                             // One RGBA→RGB conversion shared by banner + phase
                             // detectors (P6); title OCR still uses the original frame.
@@ -4585,6 +4590,7 @@ async fn run_loop(
                                     &poll_debug_prefix(kind, outcome),
                                     &img,
                                     POLL_DUMP_KEEP,
+                                    u64::MAX,
                                 );
                             }
                             // Report kit (spec section 3): the rank screen's
@@ -7102,6 +7108,29 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             // Only with debug_ocr on: the crop shows other players' names.
+            let bench_board = std::sync::Arc::clone(&scoreboard_img);
+            let bench_reads =
+                stat_tracker::bench_crops::reads_from_match(&parsed, &kit_confidences);
+            let bench = stat_tracker::bench_crops::AcceptedCrop {
+                session_id: target_session.clone(),
+                width: frame_img.width(),
+                height: frame_img.height(),
+                map_name: parsed.map_name.clone(),
+                hero: parsed.hero.clone(),
+                recognizer: parsed.recognizer.clone(),
+                team_size: Some(team_size),
+                row_index: player_row_idx,
+                scoreboard: bench_board,
+                reads: bench_reads,
+            };
+            let bench_dir = data_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let opted = stat_tracker::bench_crops::opted_in();
+                if let Err(e) = stat_tracker::bench_crops::record_accepted(&bench_dir, opted, bench)
+                {
+                    tracing::debug!(error = %e, "benchmark crops not written");
+                }
+            });
             save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img);
             record_report_kit(
                 data_dir,
@@ -7144,7 +7173,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         "N consecutive scoreboard captures resolved no map: dumping map region to debug/mapmiss"
                     );
                     tokio::task::spawn_blocking(move || {
-                        save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP);
+                        save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP, u64::MAX);
                     });
                 }
             } else {
@@ -7289,11 +7318,18 @@ fn poll_debug_prefix(hit: PollDebugHit, outcome: detect::MatchOutcome) -> String
 }
 
 /// Save a debug frame into `dir` as `<prefix>_<timestamp>.png`, keeping at
-/// most `keep` PNGs in the directory (oldest by mtime evicted). Each ring gets
-/// a dedicated directory (`debug/poll`, `debug/rejected`), so every PNG there
-/// participates in the same ring regardless of prefix. On-hit names are
+/// most `keep` PNGs in the directory (oldest by mtime evicted) and at most
+/// `max_bytes` of those PNGs. Each ring gets a dedicated directory
+/// (`debug/poll`, `debug/rejected`), so every PNG there participates in the
+/// same ring regardless of prefix. On-hit names are
 /// `poll_confirm_{outcome}_…` / `poll_streak_{outcome}_…`.
-fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImage, keep: usize) {
+fn save_frame_ring(
+    dir: &std::path::Path,
+    prefix: &str,
+    img: &image::DynamicImage,
+    keep: usize,
+    max_bytes: u64,
+) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
@@ -7305,19 +7341,13 @@ fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImag
         tracing::debug!(error = %e, "failed to save debug frame");
         return;
     }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut frames: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
-            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-            .collect();
-        if frames.len() > keep {
-            frames.sort_by_key(|(t, _)| *t);
-            for (_, old) in &frames[..frames.len() - keep] {
-                let _ = std::fs::remove_file(old);
-            }
-        }
-    }
+    let _ = stat_tracker::bench_crops::prune_png_ring(
+        dir,
+        stat_tracker::bench_crops::CropCap {
+            max_items: keep,
+            max_bytes,
+        },
+    );
 }
 
 /// Debug rings that hold unblanked board pixels (other players' names).
@@ -7337,8 +7367,16 @@ fn save_rejected_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
+    let cap =
+        stat_tracker::bench_crops::ring_cap(stat_tracker::bench_crops::opted_in(), REJECTED_KEEP);
     Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
+        save_frame_ring(
+            &dir,
+            &format!("rejected_{reason}"),
+            &img,
+            cap.max_items,
+            cap.max_bytes,
+        );
     }))
 }
 
@@ -7427,8 +7465,10 @@ fn save_accepted_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("accepted");
+    let cap =
+        stat_tracker::bench_crops::ring_cap(stat_tracker::bench_crops::opted_in(), ACCEPTED_KEEP);
     Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
+        save_frame_ring(&dir, "accepted", &board, cap.max_items, cap.max_bytes);
     }))
 }
 
@@ -11727,7 +11767,7 @@ mod tests {
             f.set_modified(base + std::time::Duration::from_secs(60 * i))
                 .unwrap();
         }
-        save_frame_ring(dir.path(), "accepted", &img, ACCEPTED_KEEP);
+        save_frame_ring(dir.path(), "accepted", &img, ACCEPTED_KEEP, u64::MAX);
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
@@ -11754,12 +11794,13 @@ mod tests {
             image::Rgb([8, 16, 32]),
         ));
         let prefix = poll_debug_prefix(PollDebugHit::Confirm, detect::MatchOutcome::Victory);
-        save_frame_ring(dir.path(), &prefix, &img, 2);
+        save_frame_ring(dir.path(), &prefix, &img, 2, u64::MAX);
         save_frame_ring(
             dir.path(),
             &poll_debug_prefix(PollDebugHit::Streak, detect::MatchOutcome::Defeat),
             &img,
             2,
+            u64::MAX,
         );
         let names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -11781,7 +11822,7 @@ mod tests {
         assert_eq!(names.len(), 2);
 
         // Bounded keep: a third write evicts the oldest PNG in the ring.
-        save_frame_ring(dir.path(), "poll_confirm_draw", &img, 2);
+        save_frame_ring(dir.path(), "poll_confirm_draw", &img, 2, u64::MAX);
         let names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()

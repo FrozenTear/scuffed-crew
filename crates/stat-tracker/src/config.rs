@@ -40,6 +40,14 @@ pub struct Config {
     /// unblanked and show other players' names.
     #[serde(default)]
     pub debug_ocr: bool,
+    /// Keep extra local crops for an accuracy benchmark. Off by default.
+    /// While on, the rolling cap rises to 500 games and a disk ceiling
+    /// applies. The next prune after this is turned off uses the usual cap
+    /// again. Crops stay on this machine. The desktop button "Export crops
+    /// for benchmark" is shown only while this is on, and that export is a
+    /// local file only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_benchmark_crops: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
     /// means [`crate::report::kit::DEFAULT_MAX_GAMES`] (50). Oldest go first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1145,6 +1153,7 @@ impl Default for Config {
             finished_game_close_secs: default_finished_game_close_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
+            keep_benchmark_crops: false,
             report_kit_max_games: None,
             report_kit_max_mb: None,
             ocr_threads: None,
@@ -1698,6 +1707,7 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
                 Vec::new()
             },
             debug_ocr: full,
+            keep_benchmark_crops: full,
             report_kit_max_games: full.then_some(80),
             report_kit_max_mb: full.then_some(1000),
             ocr_threads: full.then_some(2),

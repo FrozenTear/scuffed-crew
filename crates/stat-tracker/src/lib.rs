@@ -1,3 +1,4 @@
+pub mod bench_crops;
 pub mod boundary;
 pub mod capture;
 pub mod capture_gate;
