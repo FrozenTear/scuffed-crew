@@ -478,7 +478,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         } else {
             if pause == Some(sync::AuthPauseReason::DeletePending) {
                 tracing::error!(
-                    "{}. Sync resumes in an hour, or when the URL or token changes in Settings.",
+                    "{}. Sync resumes when a new token is saved in Settings.",
                     sync::SYNC_STATS_DELETE_PENDING_STATUS
                 );
             }
@@ -4332,9 +4332,9 @@ async fn run_loop(
                 sync_backoff
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .record_delete_pending(Instant::now());
+                    .record_delete_pending();
                 tracing::error!(
-                    "{}. Sync resumes in an hour, or when the URL or token changes.",
+                    "{}. Sync resumes when a new token is saved.",
                     sync::SYNC_STATS_DELETE_PENDING_STATUS
                 );
             }
@@ -7765,8 +7765,7 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
         }
         sync::SyncAttempt::StatsDeletePending => {
             tracing::warn!(
-                retry_in_secs = clock.retry_after(now).as_secs(),
-                "site stats are scheduled for deletion: backing off before the next upload"
+                "site stats are scheduled for deletion: pausing until a new sync token is saved"
             );
         }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
@@ -7788,8 +7787,10 @@ fn sync_credentials_rejected(
 }
 
 /// While sync is paused on a rejected token or a stats-delete hold, re-read
-/// Settings. A different URL or token clears the pause and updates the
-/// client. The rest of the config is left alone.
+/// Settings. A rejected token clears when the URL or token changes. A
+/// stats-delete hold clears only when the saved token changes, because
+/// undoing the delete does not restore the old token. The rest of the
+/// config is left alone.
 fn maybe_resume_sync_after_settings_change(
     client: Option<&sync::SyncClient>,
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
@@ -7797,7 +7798,7 @@ fn maybe_resume_sync_after_settings_change(
 ) {
     let paused = {
         let clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
-        clock.auth_rejected() || clock.holds_delete_pending()
+        clock.auth_rejected() || clock.delete_pending()
     };
     if !paused {
         return;
@@ -7923,10 +7924,9 @@ async fn upload_once(
     data_dir: &std::path::Path,
     settle_session: Option<String>,
 ) -> sync::SyncAttempt {
-    let now = Instant::now();
     let (rejected, delete_held) = {
         let clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
-        (clock.auth_rejected(), clock.delete_pending(now))
+        (clock.auth_rejected(), clock.delete_pending())
     };
     if rejected {
         tracing::warn!("sync paused, token rejected; skipping this upload");
@@ -8308,7 +8308,7 @@ fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
         sync::SyncAttempt::StatsDeletePending => {
             tracing::warn!(
                 error = %err,
-                "site stats are scheduled for deletion, rows stay queued"
+                "site stats are scheduled for deletion, pausing until a new token is saved"
             );
         }
         _ => tracing::error!(error = %err, "sync upload failed"),
@@ -19435,13 +19435,15 @@ mod tests {
         backoff.observe(attempt, now);
         assert_eq!(backoff.failures(), 0);
         assert!(!backoff.auth_rejected());
-        assert!(backoff.delete_pending(now));
+        assert!(backoff.delete_pending());
         assert!(!backoff.should_attempt(now));
-        assert!(backoff.retry_after(now) >= sync::SYNC_DELETE_PENDING_WAIT);
-        assert!(!backoff.should_attempt(
-            now + sync::SYNC_DELETE_PENDING_WAIT - std::time::Duration::from_secs(1)
-        ));
+        assert_eq!(backoff.retry_after(now), std::time::Duration::ZERO);
+        assert!(
+            !backoff.should_attempt(now + std::time::Duration::from_secs(24 * 60 * 60)),
+            "a stats delete does not retry on its own"
+        );
         backoff.clear_auth_rejected();
+        assert!(!backoff.delete_pending());
         assert!(backoff.should_attempt(now));
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -19491,7 +19493,7 @@ mod tests {
         );
         assert_eq!(
             sync::SYNC_STATS_DELETE_PENDING_STATUS,
-            "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing."
+            "Your site stats are scheduled for deletion. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
         );
         let stored = status_store.get_all_matches().await.unwrap();
         assert_eq!(stored.len(), 1);
@@ -19537,9 +19539,9 @@ mod tests {
         backoff.observe(attempt, now);
         assert_eq!(backoff.failures(), 1);
         assert!(!backoff.auth_rejected());
-        assert!(!backoff.holds_delete_pending());
+        assert!(!backoff.delete_pending());
         assert_eq!(backoff.retry_after(now), sync::SYNC_BACKOFF_BASE);
-        assert!(backoff.retry_after(now) < sync::SYNC_DELETE_PENDING_WAIT);
+        assert!(backoff.should_attempt(now + sync::SYNC_BACKOFF_BASE));
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

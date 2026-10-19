@@ -17,9 +17,9 @@ pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the to
 pub const SYNC_TOKEN_EXPIRED_STATUS: &str = "Sync token expired, relink in Settings";
 
 /// Overview health copy while a stats delete is pending. The GUI shows this
-/// string. Sync stays queued until the member undoes the delete, or until
-/// the saved server URL or token changes.
-pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing.";
+/// string. Automatic sync stays off until a new token is saved. Undoing the
+/// delete does not restore the old token.
+pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are scheduled for deletion. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.";
 
 /// JSON `code` on HTTP 409 while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
@@ -42,7 +42,8 @@ pub enum AuthPauseReason {
     Rejected,
     /// HTTP 401 with code `token_expired`.
     Expired,
-    /// HTTP 409 with code `stats_delete_pending`. Retries after an hour.
+    /// HTTP 409 with code `stats_delete_pending`. No automatic retry.
+    /// Sync resumes when a new token is saved.
     DeletePending,
 }
 
@@ -51,11 +52,6 @@ pub enum AuthPauseReason {
 pub const SYNC_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(15);
 /// Ceiling so a down server is retried, not forgotten, and not hammered.
 pub const SYNC_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-
-/// Minimum wait after HTTP 409 `stats_delete_pending` before the next
-/// automatic upload. A saved URL or token change retries sooner. This wait
-/// is not capped by [`SYNC_BACKOFF_CAP`].
-pub const SYNC_DELETE_PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// How long to wait before the next periodic sync after `consecutive_failures`
 /// server/network errors in a row. Zero when there have been none.
@@ -97,8 +93,8 @@ pub enum SyncAttempt {
     /// Nothing in that request was written. Not a failure streak.
     BatchTooLarge,
     /// HTTP 409 `stats_delete_pending`. Stop this pass and keep every row
-    /// queued. The next automatic attempt waits [`SYNC_DELETE_PENDING_WAIT`],
-    /// or until the saved URL or token changes. Not a failure streak.
+    /// queued. Automatic sync stays off until a new token is saved. Not a
+    /// failure streak.
     StatsDeletePending,
     /// Nothing to upload, or the failure was local. Leave the clock alone.
     NoServerCall,
@@ -135,7 +131,7 @@ impl SyncUploadError {
 
     /// 401 `token_expired` pauses sync with the relink copy. Other 401 and
     /// 403 responses pause with the rejected-token copy. 409
-    /// `stats_delete_pending` stops the pass and waits an hour. 429 is
+    /// `stats_delete_pending` stops the pass until a new token is saved. 429 is
     /// rate-limit backoff and does not grow the failure streak. 413
     /// `batch_too_large` is not a failure streak either: the sync pass
     /// shrinks and resends. 503 may carry `Retry-After` as a wait floor.
@@ -246,8 +242,9 @@ pub struct SyncBackoff {
     /// [`Self::clear_auth_rejected`] (saved URL or token changed).
     auth_rejected: bool,
     /// Set on HTTP 409 `stats_delete_pending`. Periodic sync stays off until
-    /// this instant, or until [`Self::clear_auth_rejected`].
-    delete_pending_until: Option<std::time::Instant>,
+    /// [`Self::clear_auth_rejected`] (a new token was saved). There is no
+    /// timed retry: undoing the delete does not restore the old token.
+    delete_pending: bool,
 }
 
 impl SyncBackoff {
@@ -260,20 +257,15 @@ impl SyncBackoff {
     }
 
     pub fn should_attempt(&self, now: std::time::Instant) -> bool {
-        if self.auth_rejected || self.delete_pending(now) {
+        if self.auth_rejected || self.delete_pending {
             return false;
         }
         self.next_attempt_at.is_none_or(|at| now >= at)
     }
 
-    /// True while the stats-delete hold has not elapsed.
-    pub fn delete_pending(&self, now: std::time::Instant) -> bool {
-        self.delete_pending_until.is_some_and(|at| now < at)
-    }
-
-    /// True while a stats-delete hold is remembered, including after it elapsed.
-    pub fn holds_delete_pending(&self) -> bool {
-        self.delete_pending_until.is_some()
+    /// True while a stats-delete hold is set. It does not expire on its own.
+    pub fn delete_pending(&self) -> bool {
+        self.delete_pending
     }
 
     pub fn record_failure(&mut self, now: std::time::Instant) {
@@ -285,7 +277,7 @@ impl SyncBackoff {
         self.failures = 0;
         self.next_attempt_at = None;
         self.auth_rejected = false;
-        self.delete_pending_until = None;
+        self.delete_pending = false;
     }
 
     /// Pause periodic sync. Does not grow the failure streak and does not
@@ -295,19 +287,22 @@ impl SyncBackoff {
         self.next_attempt_at = None;
     }
 
-    /// A saved URL or token change. Clears an auth pause and a stats-delete
-    /// hold so the next attempt can run immediately.
+    /// A saved credential change. Clears an auth pause and a stats-delete
+    /// hold so the next attempt can run immediately. The caller resumes a
+    /// stats-delete hold only when the saved token changed.
     pub fn clear_auth_rejected(&mut self) {
         self.auth_rejected = false;
-        if self.delete_pending_until.take().is_some() {
+        if self.delete_pending {
+            self.delete_pending = false;
             self.next_attempt_at = None;
         }
     }
 
-    /// HTTP 409 `stats_delete_pending`. Wait [`SYNC_DELETE_PENDING_WAIT`].
-    /// Does not grow the failure streak.
-    pub fn record_delete_pending(&mut self, now: std::time::Instant) {
-        self.delete_pending_until = Some(now + SYNC_DELETE_PENDING_WAIT);
+    /// HTTP 409 `stats_delete_pending`. Stop automatic retries. Does not
+    /// grow the failure streak and does not schedule a later attempt.
+    pub fn record_delete_pending(&mut self) {
+        self.delete_pending = true;
+        self.next_attempt_at = None;
     }
 
     /// HTTP 429. Schedule a wait of at least `retry_after` (the base delay
@@ -341,18 +336,16 @@ impl SyncBackoff {
         self.next_attempt_at = Some(now + wait);
     }
 
-    /// Remaining delay. Zero when an attempt is allowed. A stats-delete hold
-    /// is included and is not capped at [`SYNC_BACKOFF_CAP`].
+    /// Remaining delay. Zero when an attempt is allowed, and also while a
+    /// stats-delete hold is set: that hold is not a timed retry.
     pub fn retry_after(&self, now: std::time::Instant) -> std::time::Duration {
-        let scheduled = match self.next_attempt_at {
+        if self.auth_rejected || self.delete_pending {
+            return std::time::Duration::ZERO;
+        }
+        match self.next_attempt_at {
             Some(at) if at > now => at.saturating_duration_since(now),
             _ => std::time::Duration::ZERO,
-        };
-        let held = match self.delete_pending_until {
-            Some(at) if at > now => at.saturating_duration_since(now),
-            _ => std::time::Duration::ZERO,
-        };
-        scheduled.max(held)
+        }
     }
 
     pub fn observe(&mut self, attempt: SyncAttempt, now: std::time::Instant) {
@@ -364,7 +357,7 @@ impl SyncBackoff {
             }
             SyncAttempt::RateLimited { retry_after } => self.record_rate_limit(now, retry_after),
             SyncAttempt::AuthRejected | SyncAttempt::TokenExpired => self.record_auth_rejected(),
-            SyncAttempt::StatsDeletePending => self.record_delete_pending(now),
+            SyncAttempt::StatsDeletePending => self.record_delete_pending(),
             SyncAttempt::BatchTooLarge | SyncAttempt::NoServerCall => {}
         }
     }
@@ -926,12 +919,18 @@ pub fn clear_auth_pause(data_dir: &Path) {
     let _ = std::fs::remove_file(auth_pause_path(data_dir));
 }
 
-/// True when the on-disk pause was recorded for this exact URL and token.
+/// True when this saved pair is still paused.
+///
+/// A stats-delete pause matches the token alone, because a URL change does
+/// not restore the old token. Other pauses match the URL and the token.
 pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> bool {
     auth_pause_status(data_dir, server_url, token).is_some()
 }
 
-/// Why this URL and token are paused. `None` when sync should keep running.
+/// Why this saved pair is paused. `None` when sync should keep running.
+///
+/// A stats-delete pause stays in force for the same token even if the saved
+/// URL changed. A new token clears it.
 pub fn auth_pause_reason(
     data_dir: &Path,
     server_url: &str,
@@ -939,14 +938,19 @@ pub fn auth_pause_reason(
 ) -> Option<AuthPauseReason> {
     let bytes = std::fs::read(auth_pause_path(data_dir)).ok()?;
     let file = serde_json::from_slice::<AuthPauseFile>(&bytes).ok()?;
-    if file.server_url != server_url || file.token_fingerprint != token_fingerprint(token) {
-        return None;
-    }
-    Some(match file.reason.as_deref() {
+    let token_ok = file.token_fingerprint == token_fingerprint(token);
+    let url_ok = file.server_url == server_url;
+    let reason = match file.reason.as_deref() {
         Some("expired") => AuthPauseReason::Expired,
         Some(STATS_DELETE_PENDING_CODE) => AuthPauseReason::DeletePending,
         _ => AuthPauseReason::Rejected,
-    })
+    };
+    match reason {
+        AuthPauseReason::DeletePending if token_ok => Some(AuthPauseReason::DeletePending),
+        AuthPauseReason::DeletePending => None,
+        other if token_ok && url_ok => Some(other),
+        _ => None,
+    }
 }
 
 /// GUI health line when this URL and token are paused. `None` when sync
@@ -2491,7 +2495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_409_stats_delete_pending_waits_an_hour_without_a_failure_streak() {
+    async fn upload_409_stats_delete_pending_pauses_until_a_new_token() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let body = r#"{"code":"stats_delete_pending"}"#;
@@ -2512,16 +2516,16 @@ mod tests {
         backoff.observe(err.attempt(), t0);
         assert_eq!(backoff.failures(), 0);
         assert!(!backoff.auth_rejected());
-        assert!(backoff.delete_pending(t0));
+        assert!(backoff.delete_pending());
         assert!(!backoff.should_attempt(t0));
-        assert!(backoff.retry_after(t0) >= SYNC_DELETE_PENDING_WAIT);
+        assert_eq!(backoff.retry_after(t0), std::time::Duration::ZERO);
+        let later = t0 + std::time::Duration::from_secs(24 * 60 * 60);
         assert!(
-            !backoff
-                .should_attempt(t0 + SYNC_DELETE_PENDING_WAIT - std::time::Duration::from_secs(1))
+            !backoff.should_attempt(later),
+            "a stats delete does not retry on its own"
         );
-        assert!(backoff.should_attempt(t0 + SYNC_DELETE_PENDING_WAIT));
         backoff.clear_auth_rejected();
-        assert!(!backoff.holds_delete_pending());
+        assert!(!backoff.delete_pending());
         assert!(backoff.should_attempt(t0));
     }
 
@@ -2544,8 +2548,18 @@ mod tests {
             Some(SYNC_STATS_DELETE_PENDING_STATUS)
         );
         assert_eq!(
+            auth_pause_reason(dir.path(), "https://other.example", "old-token"),
+            Some(AuthPauseReason::DeletePending),
+            "a URL change does not clear a stats-delete pause"
+        );
+        assert_eq!(
+            auth_pause_reason(dir.path(), "https://crew.example", "new-token"),
+            None,
+            "a new token clears a stats-delete pause"
+        );
+        assert_eq!(
             SYNC_STATS_DELETE_PENDING_STATUS,
-            "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing."
+            "Your site stats are scheduled for deletion. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
         );
     }
 
