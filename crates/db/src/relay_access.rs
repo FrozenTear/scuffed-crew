@@ -129,9 +129,13 @@ pub fn relay_permission_sql() -> String {
 }
 
 /// Record access rejects `DURATION FOR TOKEN NONE`. Omitting `DURATION`
-/// keeps the server default: token 1 hour, session none. The relay process
-/// signs in again every 20 minutes and exits if that refresh fails, so the
-/// container restarts with a new token.
+/// keeps the server default: token 1 hour, session NONE. An open websocket
+/// does not expire. The surrealdb 3.2 client stores the sign-in as a
+/// replayable command (`engine/remote/mod.rs`, `record_replayable`) and
+/// sends it again after every reconnect (`engine/remote/ws/mod.rs`,
+/// `replay_session`). A periodic re-sign-in is not used. It would repeat
+/// the argon2 check, and every relay would send that check together after
+/// a database restart.
 const DEFINE_RELAY_ACCESS: &str = "\
 DEFINE ACCESS OVERWRITE relay ON DATABASE TYPE RECORD \
     SIGNIN ( \
@@ -354,19 +358,6 @@ impl Database {
             client,
             crypto: None,
         })
-    }
-
-    /// Sign in again on this session. The record token defaults to 1 hour.
-    pub async fn refresh_relay_signin(
-        &self,
-        namespace: &str,
-        database: &str,
-        username: &str,
-        password: &str,
-    ) -> DbResult<()> {
-        let password = normalize_relay_password(password)
-            .ok_or_else(|| DbError::Config("Relay database password must not be empty".into()))?;
-        sign_in_relay_client(&self.client, namespace, database, username, &password).await
     }
 }
 

@@ -48,7 +48,7 @@ Switch the relay only after that:
 
 Compose passes `SURREALDB_RELAY_PASSWORD` into the relay container and does not copy `SURREALDB_PASSWORD` into it. When `PRODUCTION=1`, the relay requires a non-blank relay password and does not fall back to `SURREALDB_USER`.
 
-Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then unset it. Compose passes that variable into site-server. A normal restart does not rewrite the stored password. The record token uses the server default of 1 hour. The relay signs in again every 20 minutes. A failed refresh exits so the container restarts. A new password is used after `relay-up.sh` recreates the relay, once site-server has stored it.
+Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then unset it. Compose passes that variable into site-server. A normal restart does not rewrite the stored password. The record access omits `DURATION`, so the server default applies: token 1 hour, session NONE. An open websocket does not expire. The surrealdb client replays the sign-in after every reconnect, so the relay does not sign in on a timer. A new password is used after `relay-up.sh` recreates the relay, once site-server has stored it.
 
 ### Rolling the site image back
 

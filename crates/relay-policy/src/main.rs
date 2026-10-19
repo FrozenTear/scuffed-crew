@@ -192,7 +192,6 @@ fn main() {
     let db: Option<Arc<scuffed_db::Database>> = rt.block_on(async {
         let database = creds::connect_or_retry(&db_cfg).await;
         let db = Arc::new(database);
-        creds::spawn_record_token_refresh(Arc::clone(&db), db_cfg.clone());
         let allowlist = load_pubkey_allowlist(&db).await;
         let groups = match relay_policy::directory::load_group_writers(&db).await {
             Ok(groups) => {

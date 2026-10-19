@@ -36,9 +36,6 @@ fn main() {
         let connected = creds::connect_or_retry(&db_cfg).await;
         tracing::info!(url = %db_cfg.url, "read gate connected to SurrealDB");
         let db = Some(Arc::new(connected));
-        if let Some(db) = db.clone() {
-            creds::spawn_record_token_refresh(db, db_cfg.clone());
-        }
 
         let directory = Arc::new(RwLock::new(ReadDirectory::default()));
         if let Some(db) = db.clone() {

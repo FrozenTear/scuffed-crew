@@ -313,37 +313,15 @@ pub async fn connect_or_retry(cfg: &RelayDbConfig) -> scuffed_db::Database {
     }
 }
 
-/// Re-sign the record login before the default 1 hour token expires.
-/// A failed refresh exits 1. Dev system logins do not use a record token.
-pub fn spawn_record_token_refresh(db: std::sync::Arc<scuffed_db::Database>, cfg: RelayDbConfig) {
-    if cfg.auth != RelayAuthKind::Record {
-        return;
-    }
-    let namespace = namespace_from_env();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(20 * 60));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            if let Err(err) = db
-                .refresh_relay_signin(
-                    &namespace.namespace,
-                    &namespace.database,
-                    &cfg.username,
-                    &cfg.password,
-                )
-                .await
-            {
-                tracing::error!(error = %err, "relay sign-in refresh failed");
-                eprintln!("error: relay sign-in refresh failed: {err}");
-                std::process::exit(1);
-            }
-            tracing::info!(user = %cfg.username, "refreshed relay sign-in");
-        }
-    });
-}
-
 /// Open the database with the resolved login. Does not load `ENCRYPTION_KEY`.
+///
+/// The surrealdb 3.2 client stores this sign-in as a replayable command
+/// (`engine/remote/mod.rs`, `record_replayable`) and sends it again after
+/// every reconnect (`engine/remote/ws/mod.rs`, `replay_session`). The record
+/// access omits `DURATION`, so the server default applies: token 1 hour,
+/// session NONE. An open websocket does not expire. There is no periodic
+/// re-sign-in. That timer repeated the argon2 check, and after a database
+/// restart every relay sent the check at the same time.
 pub async fn connect_configured(cfg: &RelayDbConfig) -> scuffed_db::DbResult<scuffed_db::Database> {
     let surreal = namespace_from_env();
     match cfg.auth {
