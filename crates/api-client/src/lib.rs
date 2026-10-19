@@ -417,6 +417,10 @@ mod tests {
             format_http_error(404, r#"{"detail":"x"}"#),
             "HTTP error: 404"
         );
+        assert_eq!(
+            ClientError::http(405, r#"{"error":"Method not allowed"}"#, None).to_string(),
+            "HTTP error 405: Method not allowed"
+        );
     }
 
     #[test]

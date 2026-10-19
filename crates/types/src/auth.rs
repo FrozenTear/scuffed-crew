@@ -36,10 +36,9 @@ pub struct MeResponse {
     /// what produced identities pointing at a domain we do not own.
     #[serde(default)]
     pub nip05: Option<String>,
-    /// `GET /api/auth/me` sends `has_password` as a bool.
-    /// `Some(true)`: the delete dialog shows a required password.
-    /// `Some(false)`: the field is hidden and the delete body omits `password`.
-    /// `None`: an older server omitted the field, so the password stays optional.
+    /// `Some(true)` when the account has a local password, so account delete
+    /// must send `password`. `Some(false)` for OAuth-only accounts. `None`
+    /// when the server omits the field. Never a hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_password: Option<bool>,
 }
@@ -49,9 +48,6 @@ pub struct MeUser {
     pub id: String,
     pub username: String,
     pub avatar_url: Option<String>,
-    /// Same meaning as [`MeResponse::has_password`], if the server nests it on the user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -136,10 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn has_password_defaults_when_an_older_server_omits_it() {
+    fn has_password_is_optional_and_defaults_to_absent() {
         let absent = me(r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null}"#);
         assert_eq!(absent.has_password, None);
-        assert_eq!(absent.user.has_password, None);
 
         let yes = me(
             r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null,"has_password":true}"#,

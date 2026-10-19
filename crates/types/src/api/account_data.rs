@@ -57,7 +57,14 @@ pub struct DeleteMyStatsResponse {
     pub tokens_revoked: Option<u64>,
 }
 
-const COUNT_ORDER: &[&str] = &["matches", "heroes", "roles", "maps"];
+const COUNT_ORDER: &[&str] = &[
+    "personal_match",
+    "stat_report",
+    "matches",
+    "heroes",
+    "roles",
+    "maps",
+];
 
 impl DeleteMyStatsResponse {
     /// Token path, or any body that names a schedule time.
@@ -158,6 +165,7 @@ mod tests {
     #[test]
     fn website_stats_delete_body_is_the_confirm_phrase() {
         let body = DeleteMyStatsRequest::website();
+        assert_eq!(DELETE_MY_STATS_PATH, "/api/stats/me");
         assert_eq!(
             serde_json::to_string(&body).unwrap(),
             r#"{"confirm":"delete my stats"}"#

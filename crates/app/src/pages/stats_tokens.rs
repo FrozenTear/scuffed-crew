@@ -3,12 +3,30 @@ use dioxus::prelude::*;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
+use scuffed_types::{StatsDeleteSchedule, response_code};
 
 use crate::components::{DataTable, FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
+use crate::pages::delete_data::present_schedule;
+use crate::routes::Route;
 use crate::state::use_auth;
+
+const TOKEN_EXPIRY_NOTE: &str = "New sync tokens expire after 180 days.";
+
+const PENDING_TOKEN_COPY: &str = "Your tracker stats are set to be deleted. Undo that on your account settings page first, then create a new token.";
+
+fn token_create_is_stats_delete_pending(err: &ClientError) -> bool {
+    err.http_status() == Some(409)
+        && response_code(err.http_body().unwrap_or("")).as_deref() == Some("stats_delete_pending")
+}
+
+fn pending_token_parts() -> (&'static str, &'static str) {
+    PENDING_TOKEN_COPY
+        .split_once("account settings")
+        .unwrap_or((PENDING_TOKEN_COPY, ""))
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonToken {
@@ -33,6 +51,16 @@ const TOKENS_CSS: &str = r#"
         color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
+    }
+    .tokens-note {
+        color: var(--text-2);
+        font-size: 0.85rem;
+        line-height: 1.45;
+        margin: 0 0 1rem;
+    }
+    .tokens-note a {
+        color: var(--accent);
+        font-weight: 600;
     }
     .tracker-setup {
         background: var(--surface);
@@ -207,7 +235,9 @@ fn TrackerSetupBox(
 pub fn StatsTokens() -> Element {
     let auth = use_auth();
     let mut tokens = use_api::<Vec<DaemonToken>>("/api/stats/tokens");
+    let schedule = use_api::<StatsDeleteSchedule>("/api/stats/me");
     let mut toast = use_toast();
+    let mut create_refused = use_signal(|| false);
 
     let mut modal = ModalController::<String>::new();
     let mut form_label = use_signal(|| "default".to_string());
@@ -245,7 +275,12 @@ pub fn StatsTokens() -> Element {
                     tokens.refresh += 1;
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Failed: {e}")));
+                    if token_create_is_stats_delete_pending(&e) {
+                        create_refused.set(true);
+                        modal.close();
+                    } else {
+                        toast.show(Toast::error(format!("Failed: {e}")));
+                    }
                 }
             }
         });
@@ -282,6 +317,16 @@ pub fn StatsTokens() -> Element {
         });
     };
 
+    let pending_delete = {
+        let data = schedule.data.read();
+        data.as_ref()
+            .and_then(|row| row.as_ref())
+            .and_then(|row| present_schedule(row.stats_delete_scheduled_at.as_deref()))
+            .is_some()
+    };
+    let block_create = pending_delete || create_refused();
+    let (pending_before, pending_after) = pending_token_parts();
+
     rsx! {
         style { {TOKENS_CSS} }
         style { {crate::styles::admin::CSS} }
@@ -289,7 +334,20 @@ pub fn StatsTokens() -> Element {
         div { class: "tokens-page",
             div { class: "admin-toolbar",
                 h1 { "Daemon Tokens" }
-                button { class: "btn-add", onclick: open_create, "+ New Token" }
+                button {
+                    class: "btn-add",
+                    disabled: block_create,
+                    onclick: open_create,
+                    "+ New Token"
+                }
+            }
+            p { class: "tokens-note", "{TOKEN_EXPIRY_NOTE}" }
+            if block_create {
+                p { class: "tokens-note", role: "alert",
+                    "{pending_before}"
+                    Link { to: Route::ProfileSettings {}, "account settings" }
+                    "{pending_after}"
+                }
             }
 
             TrackerSetupBox {
@@ -485,5 +543,41 @@ mod tests {
         dom.rebuild_in_place();
         let copied = COPIED_TOKEN.with(|slot| slot.borrow().clone());
         assert_eq!(copied.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn pending_stats_delete_maps_to_the_account_settings_notice() {
+        let pending = ClientError::http(409, r#"{"code":"stats_delete_pending"}"#, None);
+        assert!(token_create_is_stats_delete_pending(&pending));
+        assert!(!token_create_is_stats_delete_pending(&ClientError::http(
+            409,
+            r#"{"code":"other"}"#,
+            None
+        )));
+        assert!(!token_create_is_stats_delete_pending(&ClientError::http(
+            400,
+            r#"{"code":"stats_delete_pending"}"#,
+            None
+        )));
+        assert!(!token_create_is_stats_delete_pending(&ClientError::http(
+            409,
+            r#"{"error":"stats_delete_pending"}"#,
+            None
+        )));
+        assert_eq!(
+            PENDING_TOKEN_COPY,
+            "Your tracker stats are set to be deleted. Undo that on your account settings page first, then create a new token."
+        );
+        let (before, after) = pending_token_parts();
+        assert_eq!(
+            format!("{before}account settings{after}"),
+            PENDING_TOKEN_COPY
+        );
+        assert_plain_copy(PENDING_TOKEN_COPY);
+        assert_eq!(TOKEN_EXPIRY_NOTE, "New sync tokens expire after 180 days.");
+        assert_plain_copy(TOKEN_EXPIRY_NOTE);
+        let src = include_str!("stats_tokens.rs");
+        assert!(src.contains("Route::ProfileSettings"));
+        assert!(src.contains("disabled: block_create"));
     }
 }
