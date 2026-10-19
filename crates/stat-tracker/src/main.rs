@@ -5873,6 +5873,10 @@ fn fill_held_cells(
 /// number that can be minutes old (F266-3). So is every stat that is lower
 /// than on the row before it (`capture_gate::revised_fields`,
 /// `capture_gate::lowered_fields`).
+///
+/// The capture path calls [`hold_new_reader_stats_with_guesses`]; this is
+/// that call with no digit guesses, kept for the gate tests.
+#[cfg(test)]
 fn hold_new_reader_stats(
     parsed: &mut storage::PersonalMatch,
     prior: Option<(capture_gate::GateState, std::time::Duration)>,
@@ -5882,10 +5886,75 @@ fn hold_new_reader_stats(
     trusted: bool,
     carried: Option<(Counters, std::time::Duration)>,
 ) -> capture_gate::GateOutcome {
+    hold_new_reader_stats_with_guesses(
+        parsed,
+        prior,
+        suspect,
+        held_cells,
+        split,
+        trusted,
+        carried,
+        [None; capture_gate::GATE_COLS],
+    )
+}
+
+/// The six gate columns of `c`, in gate order.
+fn gate_cols(c: Counters) -> [u32; capture_gate::GATE_COLS] {
+    [
+        c.elims,
+        c.assists,
+        c.deaths,
+        c.damage,
+        c.healing,
+        c.mitigation,
+    ]
+}
+
+/// [`Counters`] from six values in gate order.
+fn counters_from_cols(a: [u32; capture_gate::GATE_COLS]) -> Counters {
+    Counters {
+        elims: a[0],
+        assists: a[1],
+        deaths: a[2],
+        damage: a[3],
+        healing: a[4],
+        mitigation: a[5],
+    }
+}
+
+/// [`hold_new_reader_stats`] with the digit reader's own read of every cell,
+/// sure or not (`reader_apply::own_row_guesses`).
+///
+/// A held cell used to store the game's last accepted value. When no later
+/// Tab read the cell for sure, that old number was the game's final value:
+/// a healing of 3143 saved under a board that showed 5298 (report a6f3).
+/// Now a held cell whose unsure read the gate would have taken, had the
+/// reader vouched for it ([`fresh_unsure_reads`]), stores that read. It
+/// stays flagged in `suspect_fields`. The gate state is not touched: the
+/// accepted value, the previous raw read and every streak stay as the gate
+/// left them, so the next capture is judged exactly as before. Only the
+/// stored row changes, and the state remembers what that row shows
+/// ([`capture_gate::GateState::unsure_shown`]) so the next row cannot go
+/// below it unflagged. A held cell with no read, or with a read the gate
+/// would hold (lower than the accepted value, a jump, an injected digit,
+/// past the rate cap), keeps the accepted value, flagged, as before.
+#[allow(clippy::too_many_arguments)]
+fn hold_new_reader_stats_with_guesses(
+    parsed: &mut storage::PersonalMatch,
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    split: bool,
+    trusted: bool,
+    carried: Option<(Counters, std::time::Duration)>,
+    guesses: [Option<u32>; capture_gate::GATE_COLS],
+) -> capture_gate::GateOutcome {
     let seed = carried.filter(|_| held_cells.iter().any(|&cell| cell));
     // The row stored just before this one in the same game: the game's last
     // accepted counters once it has a row, or the carried board on the
-    // capture that opens the game with one.
+    // capture that opens the game with one. A column whose stored row
+    // showed an unsure read instead of the accepted value compares with
+    // that read.
     let opens_game = split || prior.is_none();
     let before = if opens_game {
         carried.map(|(board, _)| board)
@@ -5893,7 +5962,15 @@ fn hold_new_reader_stats(
         prior
             .map(|(state, _)| state)
             .filter(|state| state.unread_cols().is_empty())
-            .map(|state| state.accepted)
+            .map(|state| {
+                let mut shown = gate_cols(state.accepted);
+                for (col, value) in shown.iter_mut().enumerate() {
+                    if state.has_unsure_shown[col] {
+                        *value = state.unsure_shown[col];
+                    }
+                }
+                counters_from_cols(shown)
+            })
     };
     let read = capture_gate::Counters {
         elims: parsed.elims,
@@ -5903,21 +5980,52 @@ fn hold_new_reader_stats(
         healing: parsed.healing,
         mitigation: parsed.mitigation,
     };
-    let held =
+    let mut held =
         capture_gate::apply_gate_seeded(prior, read, suspect, held_cells, split, trusted, seed);
-    parsed.elims = held.accepted.elims;
-    parsed.assists = held.accepted.assists;
-    parsed.deaths = held.accepted.deaths;
-    parsed.damage = held.accepted.damage;
-    parsed.healing = held.accepted.healing;
-    parsed.mitigation = held.accepted.mitigation;
+    let fresh = fresh_unsure_reads(
+        prior,
+        read,
+        suspect,
+        held_cells,
+        guesses,
+        split,
+        seed,
+        held.accepted,
+    );
+    let mut stored = gate_cols(held.accepted);
+    for col in 0..capture_gate::GATE_COLS {
+        held.state.has_unsure_shown[col] = false;
+        held.state.unsure_shown[col] = 0;
+        // A column the game has never read stores no row at all (F266-1).
+        if let Some(value) = fresh[col].filter(|_| !held.state.unread[col]) {
+            if value != stored[col] {
+                tracing::info!(
+                    col,
+                    read = value,
+                    kept = stored[col],
+                    "held stat cell stores the reader's unsure read, flagged, not the older accepted value"
+                );
+            }
+            stored[col] = value;
+            held.state.unsure_shown[col] = value;
+            held.state.has_unsure_shown[col] = true;
+        }
+    }
+    let stored = counters_from_cols(stored);
+    parsed.elims = stored.elims;
+    parsed.assists = stored.assists;
+    parsed.deaths = stored.deaths;
+    parsed.damage = stored.damage;
+    parsed.healing = stored.healing;
+    parsed.mitigation = stored.mitigation;
     // Flagged: every cell the gate kept at another value than the read,
     // every cell an un-latch revised down, and any stat lower than on the
     // row before, whatever let it down (R3-1: a stat never goes down
-    // unflagged in a stored row).
+    // unflagged in a stored row). A held cell is a gate hold, so a stored
+    // unsure read is flagged too.
     let mut unsure = capture_gate::held_fields(&held.holds);
     let lowered = before
-        .map(|before| capture_gate::lowered_fields(before, held.accepted))
+        .map(|before| capture_gate::lowered_fields(before, stored))
         .unwrap_or_default();
     for name in capture_gate::revised_fields(&held.unlatches)
         .into_iter()
@@ -5927,8 +6035,66 @@ fn hold_new_reader_stats(
             unsure.push(name);
         }
     }
-    note_gate_suspects(parsed, held.accepted, &unsure);
+    note_gate_suspects(parsed, stored, &unsure);
     held
+}
+
+/// The unsure digit reads of held cells that may be stored in place of the
+/// game's older accepted value (see [`hold_new_reader_stats_with_guesses`]).
+///
+/// A held column gets `Some(read)` only when the reader gave a number for
+/// it, the number is not below `kept` (the accepted value the gate kept),
+/// and the gate, run once more on the same capture with that read as an
+/// untrusted, suspect read, keeps the read: no monotonic, rate-cap, jump or
+/// injected-digit hold, and no refused first read. Every other column is
+/// `None`. This is a dry run; its gate state is thrown away.
+#[allow(clippy::too_many_arguments)]
+fn fresh_unsure_reads(
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    read: Counters,
+    suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    guesses: [Option<u32>; capture_gate::GATE_COLS],
+    split: bool,
+    seed: Option<(Counters, std::time::Duration)>,
+    kept: Counters,
+) -> [Option<u32>; capture_gate::GATE_COLS] {
+    let candidate: [bool; capture_gate::GATE_COLS] =
+        std::array::from_fn(|col| held_cells[col] && guesses[col].is_some());
+    if !candidate.iter().any(|&c| c) {
+        return [None; capture_gate::GATE_COLS];
+    }
+    let mut trial = gate_cols(read);
+    let mut trial_held = held_cells;
+    let mut trial_suspect = suspect;
+    for col in 0..capture_gate::GATE_COLS {
+        if let (true, Some(value)) = (candidate[col], guesses[col]) {
+            trial[col] = value;
+            trial_held[col] = false;
+            trial_suspect[col] = true;
+        }
+    }
+    let dry = capture_gate::apply_gate_seeded(
+        prior,
+        counters_from_cols(trial),
+        trial_suspect,
+        trial_held,
+        split,
+        false,
+        seed,
+    );
+    let kept = gate_cols(kept);
+    let accepted = gate_cols(dry.accepted);
+    std::array::from_fn(|col| {
+        let value = guesses[col]?;
+        let held_again = dry.holds.iter().any(|hold| hold.col == col);
+        (candidate[col]
+            && value >= kept[col]
+            && accepted[col] == value
+            && !held_again
+            && !dry.state.unread[col])
+            .then_some(value)
+    })
 }
 
 /// A gate hold keeps the old number and names the field.
@@ -6987,7 +7153,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ];
                 raw_guess = Some(std::array::from_fn(|col| guesses[col].unwrap_or(held[col])));
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-                staged.gate = hold_new_reader_stats(
+                staged.gate = hold_new_reader_stats_with_guesses(
                     &mut parsed,
                     prior,
                     suspect,
@@ -6995,6 +7161,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     split,
                     trusted_cells && !own_row_suspect,
                     carried_board(staged.carried, staged.carried_at, captured_at),
+                    guesses,
                 );
                 // A held cell has no read of its own: the kit's `ocr_v1`
                 // repeats the stored value there, never a number carried in
@@ -21704,9 +21871,11 @@ mod tests {
         Some((value, false))
     }
 
-    /// The whole point of O10: a cell the digit reader does not vouch for is
-    /// held at the game's last accepted value. The OCR cells of the same Tab
-    /// (`o8_rows`: 10 4 2 3000 800 400) are never the number stored.
+    /// The whole point of O10: a cell the digit reader does not vouch for
+    /// never takes an OCR number. The OCR cells of the same Tab (`o8_rows`:
+    /// 10 4 2 3000 800 400) are never the number stored. A suspect digit
+    /// read the gate would take is stored, flagged; a cell with no number
+    /// keeps the game's last accepted value, flagged.
     #[tokio::test]
     async fn new_reader_holds_a_suspect_cell_and_never_takes_the_ocr_cell() {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
@@ -21758,10 +21927,10 @@ mod tests {
             "{:?}",
             rows[0].suspect_fields
         );
-        // held at the last accepted 700 and 300: not the suspect 750, not
-        // OCR's 800 and 400 (plausible growth, so no other hold would stop
-        // them), and not a 0 written over a good value
-        assert_eq!(o10_stats(&rows[1]), [13, 5, 3, 3700, 700, 300]);
+        // healing stores the reader's own suspect 750 (flagged), not the
+        // older 700; mitigation has no number and keeps 300 (flagged). Never
+        // OCR's 800 and 400, and never a 0 written over a good value.
+        assert_eq!(o10_stats(&rows[1]), [13, 5, 3, 3700, 750, 300]);
         assert_eq!(
             rows[1].suspect_fields,
             vec!["h".to_string(), "mit".to_string()]
@@ -21992,35 +22161,54 @@ mod tests {
         tabs: Vec<(u64, O10Cells, Option<detect::own_row::OwnRow>)>,
     ) -> (SessionState, Vec<O10Tab>) {
         let mut now = test_now();
+        let mut st = o10_session(now);
+        let mut seen = Vec::new();
+        for (gap, cells, own_row) in tabs {
+            seen.push(o10_tab(ctx, &mut st, &mut now, gap, cells, own_row).await);
+        }
+        (st, seen)
+    }
+
+    /// The session [`o10_run_rows`] starts from: a game open as "o10" on
+    /// Busan.
+    fn o10_session(now: Instant) -> SessionState {
         let mut active = game(detect::MatchOutcome::Unknown, None, now);
         active.session_id = "o10".into();
         active.map = Some("Busan".into());
         active.map_source = Some(boundary::MapSource::TopBar);
         active.session_created = false;
-        let mut st = session(Some(active), now);
-        let mut seen = Vec::new();
-        for (gap, cells, own_row) in tabs {
-            now += Duration::from_secs(gap);
-            let mut analysis = o8_analysis(None, Some("ana"));
-            analysis.own_row = own_row;
-            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
-                analysis,
-                board: Some(o10_board(cells)),
-            });
-            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
-            let sid = req.session_id.clone();
-            let report = handle_capture(ctx, req).await.unwrap();
-            seen.push(O10Tab {
-                recorded: report.recorded,
-                pending: report.pending(),
-                split: report.split,
-                deferred: report.armed_reset,
-                refresh_baseline: report.refresh_baseline,
-                session_id: report.session_id.clone(),
-            });
-            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, &sid, Ok(report), now).await;
-        }
-        (st, seen)
+        session(Some(active), now)
+    }
+
+    /// One Tab of [`o10_run_rows`], `gap` seconds after the one before it.
+    async fn o10_tab(
+        ctx: &DaemonCtx,
+        st: &mut SessionState,
+        now: &mut Instant,
+        gap: u64,
+        cells: O10Cells,
+        own_row: Option<detect::own_row::OwnRow>,
+    ) -> O10Tab {
+        *now += Duration::from_secs(gap);
+        let mut analysis = o8_analysis(None, Some("ana"));
+        analysis.own_row = own_row;
+        *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+            analysis,
+            board: Some(o10_board(cells)),
+        });
+        let req = build_capture_request(st.active_game.as_ref().unwrap(), false, *now);
+        let sid = req.session_id.clone();
+        let report = handle_capture(ctx, req).await.unwrap();
+        let tab = O10Tab {
+            recorded: report.recorded,
+            pending: report.pending(),
+            split: report.split,
+            deferred: report.armed_reset,
+            refresh_baseline: report.refresh_baseline,
+            session_id: report.session_id.clone(),
+        };
+        apply_capture_report(st, &ctx.store, &ctx.data_dir, &sid, Ok(report), *now).await;
+        tab
     }
 
     async fn o10_rows(ctx: &DaemonCtx, session_id: &str) -> Vec<[u32; 6]> {
@@ -22035,6 +22223,227 @@ mod tests {
 
     fn all_sure(v: [u32; 6]) -> O10Cells {
         v.map(sure)
+    }
+
+    /// Report a6f3: healing 3143 was read for sure, then the Tab 105 s later
+    /// read 5298 below the suspect line. The game's last accepted 3143 was
+    /// stored under a board that showed 5298 and, with no later Tab, was the
+    /// game's final value. The unsure read is stored now, flagged, and a
+    /// later sure read replaces it.
+    #[tokio::test]
+    async fn a_held_cell_stores_its_unsure_read_not_the_older_value() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let held_h = [
+            sure(7),
+            sure(10),
+            sure(2),
+            sure(1268),
+            Some((5298, true)),
+            sure(518),
+        ];
+        let (st, seen) = o10_run(
+            &ctx,
+            vec![
+                (0, all_sure([4, 6, 2, 900, 3143, 300])),
+                (105, held_h),
+                (9, held_h),
+                (60, all_sure([8, 11, 2, 1400, 5600, 560])),
+            ],
+        )
+        .await;
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        let stats: Vec<[u32; 6]> = rows.iter().map(o10_stats).collect();
+        assert_eq!(
+            stats,
+            vec![
+                [4, 6, 2, 900, 3143, 300],
+                [7, 10, 2, 1268, 5298, 518],
+                [7, 10, 2, 1268, 5298, 518],
+                [8, 11, 2, 1400, 5600, 560],
+            ]
+        );
+        assert!(rows[0].suspect_fields.is_empty());
+        assert_eq!(rows[1].suspect_fields, vec!["h".to_string()]);
+        assert_eq!(rows[2].suspect_fields, vec!["h".to_string()]);
+        assert!(
+            rows[3].suspect_fields.is_empty(),
+            "{:?}",
+            rows[3].suspect_fields
+        );
+        // the gate itself is unchanged: it still holds the last sure read
+        let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+        assert_eq!(gate.accepted.healing, 5600);
+        assert!(!gate.has_unsure_shown.iter().any(|&shown| shown));
+    }
+
+    /// An unsure read the gate would not take keeps the accepted value,
+    /// flagged: one below it (a stat never falls in a game) and one past the
+    /// suspect rate cap (an injected digit).
+    #[tokio::test]
+    async fn a_held_cell_keeps_the_accepted_value_when_the_gate_would_hold_its_read() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let tab = |h: u32| {
+            [
+                sure(7),
+                sure(10),
+                sure(2),
+                sure(1268),
+                Some((h, true)),
+                sure(518),
+            ]
+        };
+        let (_, seen) = o10_run(
+            &ctx,
+            vec![
+                (0, all_sure([4, 6, 2, 900, 3143, 300])),
+                (20, tab(2143)),
+                (20, tab(52980)),
+            ],
+        )
+        .await;
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(o10_stats(&rows[1])[4], 3143, "below the accepted value");
+        assert_eq!(o10_stats(&rows[2])[4], 3143, "past the suspect rate cap");
+        assert_eq!(rows[1].suspect_fields, vec!["h".to_string()]);
+        assert_eq!(rows[2].suspect_fields, vec!["h".to_string()]);
+    }
+
+    /// R3-1 with a stored unsure read: the next row is compared with what
+    /// the stored row showed, so a sure read below the unsure one (still
+    /// above the accepted value) is flagged, not stored as a silent drop.
+    #[tokio::test]
+    async fn a_sure_read_below_a_stored_unsure_read_is_flagged() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let mut now = test_now();
+        let mut st = o10_session(now);
+        let mut seen = Vec::new();
+        seen.push(
+            o10_tab(
+                &ctx,
+                &mut st,
+                &mut now,
+                0,
+                all_sure([4, 6, 2, 900, 3143, 300]),
+                None,
+            )
+            .await,
+        );
+        let held_h = [
+            sure(5),
+            sure(7),
+            sure(2),
+            sure(1000),
+            Some((5298, true)),
+            sure(320),
+        ];
+        seen.push(o10_tab(&ctx, &mut st, &mut now, 60, held_h, None).await);
+        // read 2 stored the unsure 5298, flagged, and the game remembers it
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(o10_stats(&rows[1]), [5, 7, 2, 1000, 5298, 320]);
+        assert_eq!(rows[1].suspect_fields, vec!["h".to_string()]);
+        let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+        assert_eq!(
+            gate.accepted.healing, 3143,
+            "the gate keeps its accepted value"
+        );
+        assert!(gate.has_unsure_shown[4]);
+        assert_eq!(gate.unsure_shown[4], 5298);
+        assert!(!gate.has_unsure_shown[..4].iter().any(|&shown| shown));
+        assert!(!gate.has_unsure_shown[5]);
+        // a restart between reads 2 and 3: the saved game is reloaded with
+        // the shown value
+        let recovered = recover_active_game(dir.path()).expect("the saved game reloads");
+        let gate = recovered.gate.expect("the reloaded game keeps its gate");
+        assert!(gate.has_unsure_shown[4]);
+        assert_eq!(gate.unsure_shown[4], 5298);
+        assert_eq!(gate.accepted.healing, 3143);
+        st.active_game = Some(recovered);
+        // read 3 is all sure, with healing below the stored 5298 (still
+        // above the accepted 3143): stored, and flagged as lowered
+        seen.push(
+            o10_tab(
+                &ctx,
+                &mut st,
+                &mut now,
+                20,
+                all_sure([5, 7, 2, 1050, 5200, 330]),
+                None,
+            )
+            .await,
+        );
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        assert!(seen.iter().all(|tab| !tab.split), "{seen:?}");
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(o10_stats(&rows[2]), [5, 7, 2, 1050, 5200, 330]);
+        assert_eq!(rows[2].suspect_fields, vec!["h".to_string()]);
+        // a sure read clears the mark
+        let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+        assert!(!gate.has_unsure_shown.iter().any(|&shown| shown));
+    }
+
+    /// Unsure reads stored for held deaths and damage sit above the game's
+    /// accepted values. A later sure board below them, still at or above the
+    /// accepted values, is the same game: no split, one session, and the
+    /// sure row names the stats that went down from the stored row.
+    #[tokio::test]
+    async fn a_sure_board_below_stored_unsure_reads_stays_one_game_and_is_flagged() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (st, seen) = o10_run(
+            &ctx,
+            vec![
+                (0, all_sure([4, 6, 2, 900, 3000, 300])),
+                (
+                    60,
+                    [
+                        sure(5),
+                        sure(7),
+                        Some((3, true)),
+                        Some((1500, true)),
+                        sure(3100),
+                        sure(320),
+                    ],
+                ),
+                (20, all_sure([5, 7, 2, 1200, 3150, 330])),
+            ],
+        )
+        .await;
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        assert!(seen.iter().all(|tab| !tab.split), "{seen:?}");
+        assert!(seen.iter().all(|tab| !tab.deferred), "{seen:?}");
+        assert!(seen.iter().all(|tab| tab.session_id == "o10"), "{seen:?}");
+        assert_eq!(
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("o10")
+        );
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        let stats: Vec<[u32; 6]> = rows.iter().map(o10_stats).collect();
+        assert_eq!(
+            stats,
+            vec![
+                [4, 6, 2, 900, 3000, 300],
+                [5, 7, 3, 1500, 3100, 320],
+                [5, 7, 2, 1200, 3150, 330],
+            ]
+        );
+        assert_eq!(
+            rows[1].suspect_fields,
+            vec!["d".to_string(), "dmg".to_string()]
+        );
+        assert_eq!(
+            rows[2].suspect_fields,
+            vec!["d".to_string(), "dmg".to_string()]
+        );
     }
 
     /// F266-1: a stat column the game has never read is a placeholder, and a
