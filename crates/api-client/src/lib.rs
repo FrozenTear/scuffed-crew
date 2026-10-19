@@ -237,6 +237,15 @@ impl ApiClient {
     pub async fn delete(&self, path: &str) -> Result<(), ClientError> {
         self.do_delete(path).await
     }
+
+    /// DELETE with a JSON body, decoding the success JSON.
+    pub async fn delete_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
+        self.do_delete_json(path, body).await
+    }
 }
 
 // Platform-specific implementations
@@ -292,6 +301,14 @@ impl ApiClient {
     async fn do_delete(&self, path: &str) -> Result<(), ClientError> {
         web_impl::delete(&self.base_url, path).await
     }
+    #[cfg(feature = "web")]
+    async fn do_delete_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
+        web_impl::delete_json(&self.base_url, path, body).await
+    }
 
     #[cfg(feature = "native")]
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
@@ -336,6 +353,14 @@ impl ApiClient {
     #[cfg(feature = "native")]
     async fn do_delete(&self, path: &str) -> Result<(), ClientError> {
         native_impl::delete(&self.base_url, path, self.token.as_deref()).await
+    }
+    #[cfg(feature = "native")]
+    async fn do_delete_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
+        native_impl::delete_json(&self.base_url, path, body, self.token.as_deref()).await
     }
 }
 

@@ -58,6 +58,7 @@ fn App() -> Element {
     // Provide auth state to entire app
     let auth = use_signal(AuthState::new);
     use_context_provider(|| auth);
+    state::StatsViewRefresh::provide();
     state::auth::use_auth_init();
 
     // `/link` arms a return flag before sending a signed-out member to login.

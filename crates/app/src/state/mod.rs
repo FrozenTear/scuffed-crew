@@ -7,6 +7,7 @@ pub mod maps;
 pub mod nostr;
 pub mod relay;
 pub mod site_settings;
+pub mod stats_refresh;
 pub mod undo;
 
 pub use auth::*;
@@ -18,3 +19,4 @@ pub use site_settings::set_test_embedded_json;
 pub use site_settings::{
     document_title, loaded_site_settings, provide_site_settings, use_site_settings,
 };
+pub use stats_refresh::StatsViewRefresh;

@@ -10,6 +10,7 @@ use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, org_initials};
 
 use crate::components::fetch_error;
 use crate::hooks::CursorPage;
+use crate::pages::delete_data::account_deleted_notice;
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch};
 use blocks::{
@@ -142,7 +143,10 @@ pub fn Home() -> Element {
     let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
         // A parsed `#sc-settings` block is Ready above and uses that org's
         // shell and skin. Width numbers for this default wrapper are in css.rs.
-        return pending_home(body, site_settings.refresh);
+        return rsx! {
+            {account_deleted_notice()}
+            {pending_home(body, site_settings.refresh)}
+        };
     };
 
     let content = settings.homepage.clone();
@@ -273,6 +277,7 @@ pub fn Home() -> Element {
     };
 
     rsx! {
+        {account_deleted_notice()}
         style { "{css}" }
         div {
             class: "home-wrap",

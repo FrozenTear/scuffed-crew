@@ -36,6 +36,10 @@ pub struct MeResponse {
     /// what produced identities pointing at a domain we do not own.
     #[serde(default)]
     pub nip05: Option<String>,
+    /// `Some(false)` means this account has no password (hide the field).
+    /// `Some(true)` means a password is set. Absent means the server did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,6 +47,9 @@ pub struct MeUser {
     pub id: String,
     pub username: String,
     pub avatar_url: Option<String>,
+    /// Same meaning as [`MeResponse::has_password`], if the server nests it on the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

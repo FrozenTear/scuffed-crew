@@ -175,6 +175,15 @@ pub async fn patch_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     json_request(reqwest::Method::PATCH, base_url, path, body, token).await
 }
 
+pub async fn delete_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+    token: Option<&str>,
+) -> Result<T, ClientError> {
+    json_request(reqwest::Method::DELETE, base_url, path, body, token).await
+}
+
 pub async fn delete(base_url: &str, path: &str, token: Option<&str>) -> Result<(), ClientError> {
     let url = format!("{base_url}{path}");
     let client = client();
