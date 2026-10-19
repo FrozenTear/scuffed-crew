@@ -15,7 +15,7 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 |-----|---------|
 | `SURREALDB_PASSWORD` | Strong **root** password for bootstrap only (install generates) |
 | `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`). **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
-| `SURREALDB_RELAY_USER` / `SURREALDB_RELAY_PASSWORD` | Relay record login (default `scuffed_relay`). **SELECT** where `$access = 'relay'` on `member` (`id`, `org_role`, `nostr_pubkey`, `is_active` only), `plays_on`, `team_channel`, and `moderation_action` (`member_id`, `action_type`, `expires_at`, `is_active` only). No writes. `audit_log` is not readable. **Must differ** from the root and app passwords when `PRODUCTION=1`. Created when site-server boots. |
+| `SURREALDB_RELAY_USER` / `SURREALDB_RELAY_PASSWORD` | Relay record login (default `scuffed_relay`). **SELECT** where `$access = 'relay'` on `relay_member`, `relay_roster`, `relay_moderation`, and `relay_team_channel` only. `member`, `plays_on`, `team_channel`, and `moderation_action` are `PERMISSIONS NONE` for this login. No writes. `audit_log` is not readable. **Must differ** from the root and app passwords when `PRODUCTION=1`. Created when site-server boots. |
 | `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
 | `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
 | `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs |
