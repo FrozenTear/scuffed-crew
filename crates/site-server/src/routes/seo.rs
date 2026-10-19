@@ -50,8 +50,11 @@
 //! leaves its own tags as built. On every shell response, including one with
 //! no settings blob, absolute `og:image`, `og:url`, and the canonical link
 //! are set from the public base and the request path, except paths that
-//! match [`PRIVATE_PREFIXES`]. Those drop `og:url`, `og:image`, and the
-//! canonical instead of publishing them. Crawlers do not run the wasm. With
+//! match [`PRIVATE_PREFIXES`]. The match uses the query-stripped path
+//! before one trailing slash is removed, and a rule that ends in `/` also
+//! covers its bare form (`/profile` as well as `/profile/`). Those drop
+//! `og:url`, `og:image`, and the canonical instead of publishing them.
+//! Crawlers do not run the wasm. With
 //! no public base, `og:url` is removed. A relative canonical and a relative
 //! `og:image` stay as built on public paths. The settings tag is a data
 //! block (`type="application/json"`), not an executed script.
@@ -588,20 +591,21 @@ fn rewrite_tags(html: &str, needle: &str, mut edit: impl FnMut(&str) -> TagChang
 /// `public_base` is a sanitized origin with no trailing slash. `og:url` is
 /// removed when that origin is absent, including a relative `og:url` already
 /// in the shell. A relative `og:image` and a relative canonical stay in that
-/// case. Paths that match [`PRIVATE_PREFIXES`] (the same `starts_with` check
-/// robots.txt uses) drop `og:url`, `og:image`, and the canonical instead of
-/// receiving absolute copies. The request path is not part of the cached
-/// title rewrite.
+/// case. Paths that match [`PRIVATE_PREFIXES`] drop `og:url`, `og:image`,
+/// and the canonical instead of receiving absolute copies. That check uses
+/// the path before the trailing-slash trim, with the same `starts_with`
+/// rule as robots.txt. A rule that ends in `/` also matches its bare form.
+/// The request path is not part of the cached title rewrite.
 fn apply_crawler_urls(head: &str, public_base: Option<&str>, request_path: &str) -> String {
     let head = drop_meta_property(head, "og:url");
     let Some(base) = public_base.filter(|base| !base.is_empty()) else {
         return head;
     };
-    let page_path = canonical_request_path(request_path);
-    if path_is_private(&page_path) {
+    if request_path_is_private(request_path) {
         let head = drop_meta_property(&head, "og:image");
         return drop_link_rel(&head, "canonical");
     }
+    let page_path = canonical_request_path(request_path);
     let page = format!("{base}{page_path}");
     let mut found_image = false;
     let head = rewrite_tags(&head, "<meta", |tag| {
@@ -628,19 +632,27 @@ fn apply_crawler_urls(head: &str, public_base: Option<&str>, request_path: &str)
     upsert_canonical(head, &page)
 }
 
-/// Same prefix match as the `Disallow` lines in [`render_robots`].
+/// `Disallow` match on a path that still has its trailing slash.
+///
+/// Same `starts_with` rule as [`render_robots`]. A prefix that itself ends
+/// in `/` also matches the bare path (`/profile/` covers `/profile`), so
+/// trimming that slash cannot turn the disallowed URL into a public
+/// canonical.
 fn path_is_private(path: &str) -> bool {
-    PRIVATE_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+    PRIVATE_PREFIXES.iter().any(|prefix| {
+        path.starts_with(prefix) || prefix.strip_suffix('/').is_some_and(|bare| path == bare)
+    })
 }
 
-/// Request path used in `og:url` and the canonical.
+fn request_path_is_private(request_path: &str) -> bool {
+    path_is_private(&untrimmed_request_path(request_path))
+}
+
+/// Query-stripped path before the canonical trailing-slash trim.
 ///
-/// Query and fragment are dropped. `/` and `/index.html` stay `/`. One
-/// trailing slash is removed on every other path so `/news/` matches the
-/// sitemap loc and the client route.
-fn canonical_request_path(request_path: &str) -> String {
+/// `/`, empty, and `/index.html` stay `/`. `..`, `.`, `//`, and quote or
+/// control bytes also become `/`.
+fn untrimmed_request_path(request_path: &str) -> String {
     let path = request_path
         .split(['?', '#'])
         .next()
@@ -655,9 +667,25 @@ fn canonical_request_path(request_path: &str) -> String {
             byte < 0x20 || matches!(byte, b'\\' | b'"' | b'\'' | b'<' | b'>' | b' ' | b'`')
         });
     if invalid {
-        return "/".to_string();
+        "/".to_string()
+    } else {
+        path.to_string()
     }
-    path.strip_suffix('/').unwrap_or(path).to_string()
+}
+
+/// Request path used in `og:url` and the canonical.
+///
+/// Query and fragment are dropped. `/` and `/index.html` stay `/`. One
+/// trailing slash is removed on every other path so `/news/` matches the
+/// sitemap loc and the client route. Privacy is decided on the untrimmed
+/// path first.
+fn canonical_request_path(request_path: &str) -> String {
+    let path = untrimmed_request_path(request_path);
+    if path == "/" {
+        path
+    } else {
+        path.strip_suffix('/').unwrap_or(&path).to_string()
+    }
 }
 
 fn absolute_site_url(base: &str, value: &str) -> Option<String> {
@@ -2385,25 +2413,27 @@ mod tests {
 </head><body></body></html>";
         let template = template_with(html);
         let base = Some("https://crew.example.test");
-        let private_paths = [
-            "/admin/settings",
-            "/login",
-            "/setup",
-            "/dm",
-            "/stats",
-            "/api/settings",
-            "/identity",
-            "/profile/member",
-            "/chat",
-            "/polls",
-            "/scrims",
-            "/strategy/my",
-            "/strategy/editor",
-        ];
-        for path in private_paths {
+        let mut private_paths: Vec<String> = Vec::new();
+        for prefix in PRIVATE_PREFIXES {
+            private_paths.push((*prefix).to_string());
+            if let Some(bare) = prefix.strip_suffix('/') {
+                private_paths.push(bare.to_string());
+            } else {
+                private_paths.push(format!("{prefix}/"));
+            }
+        }
+        private_paths.extend([
+            "/profile/".to_string(),
+            "/profile".to_string(),
+            "/profile/someone".to_string(),
+            "/profile/?x=1".to_string(),
+            "/api/".to_string(),
+            "/admin/settings".to_string(),
+        ]);
+        for path in &private_paths {
             assert!(
-                path_is_private(path),
-                "{path} should match PRIVATE_PREFIXES"
+                request_path_is_private(path),
+                "{path} should match PRIVATE_PREFIXES before the slash trim"
             );
             let page = render_shell(&template, None, base, path);
             assert!(!page.contains("og:url"), "{path}");
@@ -2411,13 +2441,22 @@ mod tests {
             assert!(!page.contains("canonical"), "{path}");
             assert!(!page.contains("https://crew.example.test"), "{path}");
         }
+        assert_eq!(canonical_request_path("/profile/"), "/profile");
+        assert!(request_path_is_private("/profile/"));
+        assert!(!request_path_is_private("/profiler"));
+        assert!(request_path_is_private("/administrator"));
         let heroes = render_shell(&template, None, base, "/strategy/heroes");
-        assert!(!path_is_private("/strategy/heroes"));
+        assert!(!request_path_is_private("/strategy/heroes"));
         assert!(heroes.contains("content=\"https://crew.example.test/strategy/heroes\""));
         assert!(heroes.contains("href=\"https://crew.example.test/strategy/heroes\""));
         assert!(
             heroes.contains("content=\"https://crew.example.test/assets/apple-touch-icon.png\"")
         );
+        let news = render_shell(&template, None, base, "/news/");
+        assert!(!request_path_is_private("/news/"));
+        assert!(news.contains("content=\"https://crew.example.test/news\""));
+        assert!(news.contains("href=\"https://crew.example.test/news\""));
+        assert!(!news.contains("https://crew.example.test/news/"));
     }
 
     #[test]
