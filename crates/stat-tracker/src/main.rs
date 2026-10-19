@@ -7627,8 +7627,8 @@ async fn try_sync(
     data_dir: &std::path::Path,
     settle_session: Option<String>,
 ) -> sync::SyncAttempt {
-    let client = client.clone();
-    let outcome = try_sync_with(store, data_dir, settle_session, {
+    let mut caps = client.batch_caps();
+    let outcome = try_sync_with_caps(store, data_dir, settle_session, &mut caps, {
         let client = client.clone();
         move |matches, tombstones| {
             let client = client.clone();
@@ -7636,6 +7636,7 @@ async fn try_sync(
         }
     })
     .await;
+    client.remember_batch_caps(caps);
     let pause = match outcome {
         sync::SyncAttempt::AuthRejected => Some(sync::AuthPauseReason::Rejected),
         sync::SyncAttempt::TokenExpired => Some(sync::AuthPauseReason::Expired),
@@ -7721,7 +7722,9 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
         }
         sync::SyncAttempt::BatchTooLarge => {
             tracing::warn!(
-                "sync batch was still over the server cap after shrinking; rows stay queued"
+                failures = clock.failures(),
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "sync batch was still over the server cap after shrinking; backing off"
             );
         }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
@@ -8293,10 +8296,28 @@ fn claims_covering(
         .collect()
 }
 
+#[cfg(test)]
 async fn try_sync_with<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     settle_session: Option<String>,
+    upload: F,
+) -> sync::SyncAttempt
+where
+    F: FnMut(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
+        >,
+{
+    let mut caps = sync::BatchCaps::default();
+    try_sync_with_caps(store, data_dir, settle_session, &mut caps, upload).await
+}
+
+async fn try_sync_with_caps<F, Fut>(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    settle_session: Option<String>,
+    caps: &mut sync::BatchCaps,
     mut upload: F,
 ) -> sync::SyncAttempt
 where
@@ -8412,6 +8433,7 @@ where
         &claims,
         &to_upload,
         tombstones,
+        caps,
         &mut upload,
     )
     .await
@@ -8420,20 +8442,23 @@ where
 /// Send `to_upload` and `tombstones` in capped requests.
 ///
 /// At most [`sync::SYNC_UPLOAD_MAX_MATCHES`] games and
-/// [`sync::SYNC_UPLOAD_MAX_DELETES`] tombstones go out together. HTTP 400
-/// and 422 still split inside the chunk. HTTP 413 `batch_too_large` lowers
-/// those caps (never below 1) and resends immediately; that request wrote
-/// nothing and is not a failure streak. HTTP 429, 401, 403, and other
-/// errors stop the pass. Tombstones ride on the chunk they were sent with,
-/// including 400 splits of that chunk, and are cleared only after a 2xx.
-/// A deletes-only 400 still backs off like a 5xx: there are no match rows
-/// to isolate, so one bad id keeps that delete chunk retrying.
+/// [`sync::SYNC_UPLOAD_MAX_DELETES`] tombstones go out together, or the
+/// lower caps already learned by this process. HTTP 400 and 422 still split
+/// inside the chunk. HTTP 413 `batch_too_large` lowers those caps (never
+/// below 1, never raised later) and resends immediately; that request wrote
+/// nothing. A 413 that repeats the same caps, or sends none, stops the pass
+/// and counts as a failure. HTTP 429, 401, 403, and other errors stop the
+/// pass. Tombstones ride on the chunk they were sent with, including 400
+/// splits of that chunk, and are cleared only after a 2xx. A deletes-only
+/// 400 still backs off like a 5xx: there are no match rows to isolate, so
+/// one bad id keeps that delete chunk retrying.
 async fn upload_chunked<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     claims: &[storage::SyncClaim],
     to_upload: &[storage::PersonalMatch],
     mut tombstones: Vec<String>,
+    caps: &mut sync::BatchCaps,
     upload: &mut F,
 ) -> sync::SyncAttempt
 where
@@ -8442,8 +8467,8 @@ where
             Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
         >,
 {
-    let mut match_limit = sync::SYNC_UPLOAD_MAX_MATCHES;
-    let mut delete_limit = sync::SYNC_UPLOAD_MAX_DELETES;
+    let mut match_limit = caps.matches.max(1);
+    let mut delete_limit = caps.deletes.max(1);
     let mut remaining: Vec<usize> = (0..to_upload.len()).collect();
     let mut uploaded = 0usize;
     let mut quarantined = 0usize;
@@ -8483,6 +8508,8 @@ where
                         stop = Some(sync_attempt_from_error(&err));
                         break;
                     }
+                    caps.matches = match_limit;
+                    caps.deletes = delete_limit;
                     tracing::info!(
                         max_matches = match_limit,
                         max_deleted_sessions = delete_limit,
@@ -8578,6 +8605,8 @@ where
                     err.max_deleted_sessions,
                 )
             {
+                caps.matches = match_limit;
+                caps.deletes = delete_limit;
                 tracing::info!(
                     max_matches = match_limit,
                     max_deleted_sessions = delete_limit,
@@ -19060,6 +19089,104 @@ mod tests {
             0,
             "a 413 that is resent in the same pass is not a failure streak"
         );
+    }
+
+    #[tokio::test]
+    async fn learned_caps_apply_to_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, 80).await;
+        let mut caps = sync::BatchCaps::default();
+        let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sizes_pass = std::sync::Arc::clone(&sizes);
+        let first = try_sync_with_caps(&store, dir.path(), None, &mut caps, move |matches, _| {
+            let sizes_pass = std::sync::Arc::clone(&sizes_pass);
+            let len = matches.len();
+            async move {
+                sizes_pass.lock().unwrap().push(len);
+                if len > 40 {
+                    Err(batch_too_large(40, sync::SYNC_UPLOAD_MAX_DELETES as u64))
+                } else {
+                    Ok(upload_ok())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(first, sync::SyncAttempt::Uploaded));
+        assert_eq!(caps.matches, 40);
+        assert_eq!(
+            sizes.lock().unwrap()[0],
+            80,
+            "the first pass still probes the old cap"
+        );
+        assert!(sizes.lock().unwrap()[1..].iter().all(|len| *len <= 40));
+
+        for i in 0..80 {
+            let mut row = test_match(&format!("next{i}"), "victory");
+            row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(1000 + i));
+            store.insert_match(row).await.unwrap();
+        }
+        let second_sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let second_pass = std::sync::Arc::clone(&second_sizes);
+        let second = try_sync_with_caps(&store, dir.path(), None, &mut caps, move |matches, _| {
+            let second_pass = std::sync::Arc::clone(&second_pass);
+            let len = matches.len();
+            async move {
+                second_pass.lock().unwrap().push(len);
+                if len > 40 {
+                    panic!("a later pass must not retry the cap the server already refused");
+                }
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(second, sync::SyncAttempt::Uploaded));
+        assert_eq!(*second_sizes.lock().unwrap(), vec![40, 40]);
+        assert_eq!(caps.matches, 40);
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repeated_or_missing_413_caps_back_off() {
+        for missing in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            insert_synced_games(&store, 4).await;
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_pass = std::sync::Arc::clone(&calls);
+            let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+                let calls_pass = std::sync::Arc::clone(&calls_pass);
+                async move {
+                    calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut err = batch_too_large(
+                        sync::SYNC_UPLOAD_MAX_MATCHES as u64,
+                        sync::SYNC_UPLOAD_MAX_DELETES as u64,
+                    );
+                    if missing {
+                        err.max_matches = None;
+                        err.max_deleted_sessions = None;
+                    }
+                    Err(err)
+                }
+            })
+            .await;
+            assert!(
+                matches!(attempt, sync::SyncAttempt::BatchTooLarge),
+                "missing={missing}"
+            );
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "a 413 that does not shrink must not loop"
+            );
+            assert_eq!(store.get_unsynced().await.unwrap().len(), 4);
+            let mut backoff = sync::SyncBackoff::default();
+            let now = std::time::Instant::now();
+            backoff.observe(attempt, now);
+            assert_eq!(backoff.failures(), 1, "missing={missing}");
+            assert!(!backoff.should_attempt(now));
+            assert_eq!(backoff.retry_after(now), sync::SYNC_BACKOFF_BASE);
+        }
     }
 
     #[tokio::test]
