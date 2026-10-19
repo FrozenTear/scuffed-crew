@@ -2731,23 +2731,15 @@ fn uninstall_dialog_escape(
 
 /// A pid that is already gone, or that is not the tracker, is not a running
 /// tracker. Killing it was refused on purpose. Uninstall can continue.
-/// `disable --now` inside [`crate::uninstall::apply`] is what stops a unit
-/// systemd restarted after the old pid exited. Aborting on that new pid
-/// skipped the disable and removed nothing.
-fn uninstall_stop_is_already_stopped(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("not running")
-        || lower.contains("not the tracker")
-        || lower.contains("this window")
-        || lower.contains("no such process")
-}
-
+/// `disable --now` inside [`crate::uninstall::apply`] stops a unit systemd
+/// restarted after the old pid exited. `apply` then refuses to delete files
+/// if a tracker process is still alive.
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
     match daemon::stop_daemon(&req.data_dir).await {
         Ok(()) => {}
-        Err(err) if uninstall_stop_is_already_stopped(&err) => {}
+        Err(err) if err.allows_restart() => {}
         Err(_) => {
             return Err("Could not stop the tracker. Nothing was removed.".into());
         }
@@ -2885,24 +2877,22 @@ mod tests {
 
     #[test]
     fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
-        assert!(super::uninstall_stop_is_already_stopped(
-            "Tracker is not running"
-        ));
-        assert!(super::uninstall_stop_is_already_stopped(
-            "Saved process id is not the tracker, not stopping it"
-        ));
-        assert!(super::uninstall_stop_is_already_stopped(
-            "Refusing to stop this window's process"
-        ));
-        assert!(super::uninstall_stop_is_already_stopped(
-            "Could not stop the tracker: No such process"
-        ));
-        assert!(!super::uninstall_stop_is_already_stopped(
-            "Tracker is still shutting down, not starting another copy"
-        ));
-        assert!(!super::uninstall_stop_is_already_stopped(
-            "Could not stop the tracker: Permission denied"
-        ));
+        use crate::daemon::StopError;
+
+        assert!(StopError::NotRunning.allows_restart());
+        assert!(
+            StopError::Refused("Saved process id is not the tracker, not stopping it")
+                .allows_restart()
+        );
+        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
+        assert!(
+            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Could not stop the tracker: Permission denied".into())
+                .allows_restart()
+        );
     }
 
     #[test]

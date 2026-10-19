@@ -653,6 +653,16 @@ fn manifest_lines(home: &Path, prefix: &Path) -> Vec<PathBuf> {
 }
 
 pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
+    apply_with_tracker_check(req, crate::daemon::is_daemon_running)
+}
+
+/// `tracker_alive` runs after `disable --now`. Production passes
+/// [`crate::daemon::is_daemon_running`], which sees a process the GUI
+/// started itself. Tests pass a stand-in so they do not need a live `/proc`.
+fn apply_with_tracker_check(
+    req: &UninstallRequest,
+    tracker_alive: fn(&Path) -> bool,
+) -> Result<UninstallReport, String> {
     if !home_is_usable(&req.home) {
         return Err("Could not find your home folder. Nothing was removed.".into());
     }
@@ -671,6 +681,11 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
 
     // Stop the service and any timer before any file is unlinked.
     stop_units(&req.systemctl, &req.home)?;
+    // `disable --now` does not stop a tracker the GUI spawned outside the
+    // unit. Leave every file in place while that process is still alive.
+    if tracker_alive(&req.data_dir) {
+        return Err(STILL_RUNNING.into());
+    }
 
     let plan = removal_plan(&req.home, &req.prefix, req.appimage.as_deref());
     let mut removed: Vec<PathBuf> = Vec::new();
@@ -1414,6 +1429,16 @@ mod tests {
         fs::write(path, body).unwrap();
     }
 
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
     fn layout(home: &Path, prefix: &Path) {
         let mut recorded = Vec::new();
         for (spec, path) in expanded_specs(home, prefix) {
@@ -1484,13 +1509,7 @@ mod tests {
                 log.display()
             ),
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&systemctl, perms).unwrap();
-        }
+        make_executable(&systemctl);
         UninstallRequest {
             home: home.to_path_buf(),
             prefix: prefix.to_path_buf(),
@@ -2083,13 +2102,7 @@ mod tests {
         );
         req.appimage = Some(image.clone());
         write(&req.systemctl, "#!/bin/sh\nexit 0\n");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&req.systemctl, perms).unwrap();
-        }
+        make_executable(&req.systemctl);
         apply(&req).unwrap();
         assert!(!image.exists());
     }
@@ -2104,15 +2117,8 @@ mod tests {
         );
         let dpkg = dir.path().join("dpkg");
         write(&dpkg, "#!/bin/sh\nexit 1\n");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for path in [&pacman, &dpkg] {
-                let mut perms = fs::metadata(path).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(path, perms).unwrap();
-            }
-        }
+        make_executable(&pacman);
+        make_executable(&dpkg);
         let target = Path::new("/usr/bin/stat-tracker-gui");
         let owner = probe_package_owner_with(target, &pacman, &dpkg).unwrap();
         assert_eq!(
@@ -2136,16 +2142,39 @@ mod tests {
             decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
         );
         write(&req.systemctl, "#!/bin/sh\necho active\nexit 0\n");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&req.systemctl, perms).unwrap();
-        }
+        make_executable(&req.systemctl);
         let err = apply(&req).unwrap_err();
         assert!(err.contains("still running"), "{err}");
         assert!(prefix.join("bin/stat-tracker-gui").is_file());
+    }
+
+    /// `disable --now` does not see a tracker the GUI started itself.
+    /// Files stay while that process is still alive.
+    #[test]
+    fn a_live_tracker_process_blocks_uninstall_after_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        let err = apply_with_tracker_check(&req, tracker_is_alive).unwrap_err();
+        assert_eq!(err, "The tracker is still running. Nothing was removed.");
+        assert!(prefix.join("bin/stat-tracker-gui").is_file());
+        let log = fs::read_to_string(home.join("systemctl.log")).unwrap();
+        assert!(
+            log.contains("disable"),
+            "the process check runs after disable --now, log={log}"
+        );
+    }
+
+    fn tracker_is_alive(_: &Path) -> bool {
+        true
     }
 
     /// The checkbox test's stand-in used to exit 1 with an empty stderr when
@@ -2190,13 +2219,7 @@ mod tests {
                 count = count.display()
             ),
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&req.systemctl, perms).unwrap();
-        }
+        make_executable(&req.systemctl);
         apply(&req).unwrap();
         let attempts: u32 = fs::read_to_string(&count).unwrap().trim().parse().unwrap();
         assert!(
@@ -2223,13 +2246,7 @@ mod tests {
             &req.systemctl,
             "#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n",
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&req.systemctl, perms).unwrap();
-        }
+        make_executable(&req.systemctl);
         let err = apply(&req).unwrap_err();
         assert!(err.contains("Could not stop the tracker"), "{err}");
         assert!(prefix.join("bin/stat-tracker-gui").is_file());
@@ -2410,13 +2427,7 @@ mod tests {
             &req.systemctl,
             "#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\necho 'System has not been booted with systemd as init system (PID 1). Can\\'t operate.' >&2\nexit 1\n",
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&req.systemctl, perms).unwrap();
-        }
+        make_executable(&req.systemctl);
         apply(&req).unwrap();
         assert!(!prefix.join("bin/stat-tracker-gui").exists());
     }
