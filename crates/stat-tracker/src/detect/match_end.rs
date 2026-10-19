@@ -1,4 +1,5 @@
 use std::cell::OnceCell;
+use std::sync::{Mutex, PoisonError};
 
 use image::{DynamicImage, GrayImage, Luma, RgbImage};
 
@@ -286,12 +287,19 @@ impl ResultWords {
             None => MatchOutcome::Unknown,
         };
         match &read.read {
-            Some(r) if outcome.is_decided() => tracing::info!(
-                score = r.score,
-                margin = r.margin,
-                context = at.context,
-                "result word (words-v1): {outcome:?}"
-            ),
+            Some(r) if outcome.is_decided() => {
+                // The rank screen stays up across many poll ticks. Log the
+                // first value, then only a change. The accolade screen is
+                // short and keeps a line per read.
+                if at.screen != ResultScreen::RankScreen || rank_result_is_new(outcome) {
+                    tracing::info!(
+                        score = r.score,
+                        margin = r.margin,
+                        context = at.context,
+                        "result word (words-v1): {outcome:?}"
+                    );
+                }
+            }
             read => tracing::trace!(
                 ?read,
                 context = at.context,
@@ -300,6 +308,22 @@ impl ResultWords {
         }
         Some(outcome)
     }
+}
+
+/// True the first time `outcome` is seen on the rank screen, and again only
+/// when a later poll reads a different outcome. Repeats stay quiet.
+fn rank_result_should_log(previous: Option<MatchOutcome>, next: MatchOutcome) -> bool {
+    previous != Some(next)
+}
+
+fn rank_result_is_new(outcome: MatchOutcome) -> bool {
+    static LAST: Mutex<Option<MatchOutcome>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    let due = rank_result_should_log(*last, outcome);
+    if due {
+        *last = Some(outcome);
+    }
+    due
 }
 
 /// Under `reader = "new"`, a result word fell back to OCR because the
@@ -1655,7 +1679,11 @@ fn ocr_outcome_word(crop: &DynamicImage, context: &'static str) -> MatchOutcome 
                     MatchOutcome::Draw => "DRAW",
                     MatchOutcome::Unknown => "UNKNOWN",
                 };
-                tracing::info!(text = %text.trim(), context, "result word: {word}");
+                // Same rule as the words-v1 rank read: the screen stays up
+                // for many polls, so a repeat of the same outcome is quiet.
+                if context != RANK_WORD.context || rank_result_is_new(outcome) {
+                    tracing::info!(text = %text.trim(), context, "result word: {word}");
+                }
             } else {
                 tracing::trace!(ocr_text = %text.trim(), context, "no result word in region");
             }
@@ -3563,6 +3591,40 @@ mod tests {
             }
             assert_eq!(ocr_calls(), before, "no OCR under the new reader");
         }
+    }
+
+    /// The rank screen stays up across many poll ticks. The first value is
+    /// logged. A repeat is quiet. A different outcome is logged again.
+    #[test]
+    fn rank_result_is_logged_on_the_first_poll_and_only_again_when_it_changes() {
+        let mut last = None;
+        let mut logged = Vec::new();
+        for outcome in [
+            MatchOutcome::Defeat,
+            MatchOutcome::Defeat,
+            MatchOutcome::Defeat,
+            MatchOutcome::Victory,
+            MatchOutcome::Victory,
+            MatchOutcome::Defeat,
+        ] {
+            if rank_result_should_log(last, outcome) {
+                last = Some(outcome);
+                logged.push(outcome);
+            }
+        }
+        assert_eq!(
+            logged,
+            vec![
+                MatchOutcome::Defeat,
+                MatchOutcome::Victory,
+                MatchOutcome::Defeat,
+            ]
+        );
+        assert!(
+            !rank_result_should_log(Some(MatchOutcome::Draw), MatchOutcome::Draw),
+            "a repeat of the same rank result stays quiet"
+        );
+        assert!(rank_result_should_log(None, MatchOutcome::Draw));
     }
 
     /// Under `reader = "new"`, a result word that falls back to OCR (no
