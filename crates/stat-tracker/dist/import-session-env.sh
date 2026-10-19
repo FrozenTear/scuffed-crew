@@ -33,7 +33,8 @@
 # is written first; import-environment is best-effort and timed out so a
 # stuck user bus cannot wedge the oneshot the daemon is ordered After=.
 #
-# Overrides (tests): SCUFFED_PROC_ROOT, SCUFFED_SYSTEMCTL, SCUFFED_SESSION_ENV_FILE.
+# Overrides (tests): SCUFFED_PROC_ROOT, SCUFFED_SYSTEMCTL, SCUFFED_SESSION_ENV_FILE,
+# SCUFFED_SCAN_LIMIT_SECS.
 set -euo pipefail
 
 PROC_ROOT="${SCUFFED_PROC_ROOT:-/proc}"
@@ -60,6 +61,11 @@ COMPOSITOR_COMMS=(
     cosmic-comp
     weston
     mutter
+    # X11 desktops: the session shell carries DISPLAY and the desktop name,
+    # which the X server itself often does not (Mint Cinnamon, KDE on X11).
+    plasmashell
+    kwin_x11
+    cinnamon
     Xorg
     X
     Xwayland
@@ -117,29 +123,69 @@ read_environ_file() {
     done < "$file"
 }
 
-same_user_pid() {
-    local pid="$1" owner self
-    self="$(id -u)"
-    owner="$(stat -c %u "$PROC_ROOT/$pid" 2>/dev/null)" || return 1
-    [[ "$owner" == "$self" ]]
-}
-
 declare -A FOUND=()
 declare -A FOUND_NOTE=()
+SCANNED=0
+
+# Milliseconds since the epoch, without a command where bash has
+# EPOCHREALTIME (5.0 and later, Mint 21 included).
+now_ms() {
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        local t="${EPOCHREALTIME/[.,]/}"
+        echo $((10#$t / 1000))
+    else
+        echo $((SECONDS * 1000))
+    fi
+}
+
+# The scan gives up after this many seconds and leaves the rest to the
+# process environment. It is one pass with no command per process, so on
+# a normal desktop it takes well under a second.
+SCAN_LIMIT_SECS="${SCUFFED_SCAN_LIMIT_SECS:-5}"
+
+# Index of a compositor name in COMPOSITOR_COMMS.
+declare -A COMM_RANK=()
+for ((i = 0; i < ${#COMPOSITOR_COMMS[@]}; i++)); do
+    COMM_RANK["${COMPOSITOR_COMMS[$i]}"]="$i"
+done
+unset i
 
 scan_compositors() {
-    local i comm pid_dir pid got line k v
+    local i comm pid_dir pid got line k v rank started
+    # pids per rank, filled in one pass over the process table.
+    local -a by_rank=()
+    SCANNED=0
+    started="$SECONDS"
+    # One pass: read each process's comm once with the shell's own `read`
+    # (no `stat` or `tr` per process), and keep only same-user processes
+    # whose name is in COMPOSITOR_COMMS. A process that exits mid-scan, or
+    # one this user cannot read, is skipped without a message. 0.5.0-rc.1
+    # walked the whole table once per name, two commands per process, which
+    # took about a minute on a busy niri desktop.
+    for pid_dir in "$PROC_ROOT"/[0-9]*; do
+        if ((SECONDS - started >= SCAN_LIMIT_SECS)); then
+            log "compositor scan stopped after ${SCAN_LIMIT_SECS}s; using what it found"
+            break
+        fi
+        pid="${pid_dir##*/}"
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        # Owned by this user (the effective uid, as `id -u` gives).
+        [[ -O "$pid_dir" ]] || continue
+        SCANNED=$((SCANNED + 1))
+        got=""
+        { IFS= read -r -d '' got || true; } 2>/dev/null < "$pid_dir/comm" || continue
+        got="${got%%$'\n'*}"
+        [[ -n "$got" ]] || continue
+        rank="${COMM_RANK[$got]:-}"
+        [[ -n "$rank" ]] || continue
+        by_rank[rank]+=" $pid"
+    done
     # Low priority first so a later (higher) match overwrites a key it has
     # and leaves keys it does not (Xwayland's DISPLAY under Sway).
     for ((i = ${#COMPOSITOR_COMMS[@]} - 1; i >= 0; i--)); do
         comm="${COMPOSITOR_COMMS[$i]}"
-        for pid_dir in "$PROC_ROOT"/[0-9]*; do
-            [[ -d "$pid_dir" ]] || continue
-            pid="${pid_dir##*/}"
-            [[ "$pid" =~ ^[0-9]+$ ]] || continue
-            same_user_pid "$pid" || continue
-            got="$(tr -d '\n\0' < "$pid_dir/comm" 2>/dev/null || true)"
-            [[ "$got" == "$comm" ]] || continue
+        for pid in ${by_rank[i]:-}; do
+            pid_dir="$PROC_ROOT/$pid"
             while IFS= read -r line; do
                 [[ -n "$line" ]] || continue
                 k="${line%%=*}"
@@ -224,9 +270,13 @@ import_into_user_manager() {
 }
 
 main() {
-    local key missing=()
+    local key missing=() t0 source
+    t0="$(now_ms)"
     scan_compositors
     fill_from_process_env
+    # One line for QA: where the session came from and how long it took.
+    source="${FOUND_NOTE[WAYLAND_DISPLAY]:-${FOUND_NOTE[DISPLAY]:-none}}"
+    log "session source: $source; scanned $SCANNED processes in $(($(now_ms) - t0)) ms"
     for key in "${SESSION_VARS[@]}"; do
         if [[ -n "${FOUND[$key]:-}" ]]; then
             log "$key=${FOUND[$key]} (${FOUND_NOTE[$key]})"
