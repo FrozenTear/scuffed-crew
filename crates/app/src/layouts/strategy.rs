@@ -195,7 +195,7 @@ pub fn StrategyLayout() -> Element {
     if surface == StrategyPathPolicy::Blocked {
         return rsx! {
             div { "data-accent": "strategy",
-                style { {STRATEGY_CSS} }
+                crate::styles::StyleOnce { id: "scuffed-css-layouts-strategy-strategy-css", css: STRATEGY_CSS }
                 div { class: "strategy-off",
                     h1 { "Strategies unavailable" }
                     p {
@@ -212,7 +212,7 @@ pub fn StrategyLayout() -> Element {
 
     rsx! {
         div { "data-accent": "strategy",
-            style { {STRATEGY_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-layouts-strategy-strategy-css", css: STRATEGY_CSS }
             nav { class: "strategy-nav",
                 span { class: "brand", "Strategy Planner" }
                 div { class: "links",

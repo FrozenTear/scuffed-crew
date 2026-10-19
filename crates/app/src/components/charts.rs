@@ -148,7 +148,7 @@ pub fn DonutChart(
     );
 
     rsx! {
-        style { {CHARTS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-charts-charts-css", css: CHARTS_CSS }
         div { class: "donut-wrap",
             div { class: "donut-outer",
                 div { class: "donut-ring", style: "{ring_style}" }
@@ -212,7 +212,7 @@ pub fn HBarChart(
     let ref_pos = reference.map(|r| (r / scale_max * 100.0).clamp(0.0, 100.0));
 
     rsx! {
-        style { {CHARTS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-charts-charts-css", css: CHARTS_CSS }
         div { class: "hbar-list",
             {entries.iter().map(|entry| {
                 let w = (entry.value / scale_max * 100.0).clamp(0.0, 100.0);

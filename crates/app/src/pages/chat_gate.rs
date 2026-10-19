@@ -29,7 +29,7 @@ const CSS: &str = r#"
 #[component]
 pub fn ChatUnavailable(message: &'static str) -> Element {
     rsx! {
-        style { {CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-chat_gate-css", css: CSS }
         div { class: "chat-unavailable",
             h1 { "{message}" }
         }

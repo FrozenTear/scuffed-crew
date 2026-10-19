@@ -527,7 +527,6 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
         font-size: 0.85rem;
         font-family: var(--font-body);
-        outline: none;
         transition: border-color 0.15s;
     }
     .patch-search::placeholder {
@@ -1106,7 +1105,7 @@ pub fn PatchNotesPage() -> Element {
     let mut open_hero: Signal<HashMap<usize, usize>> = use_signal(HashMap::new);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-patch_notes-page-css", css: PAGE_CSS }
 
         div { class: "patch-page",
             {

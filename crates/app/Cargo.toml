@@ -31,7 +31,7 @@ js-sys = "0.3"
 # Web-only deps
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 web-sys = { version = "0.3", features = [
-    "Window", "Document", "HtmlCanvasElement", "CanvasRenderingContext2d",
+    "Window", "Document", "Node", "HtmlCanvasElement", "CanvasRenderingContext2d",
     "HtmlImageElement", "HtmlElement", "MouseEvent", "WheelEvent", "KeyboardEvent",
     "DomRect", "ImageData", "TextMetrics", "Element",
     "EventTarget", "AddEventListenerOptions",

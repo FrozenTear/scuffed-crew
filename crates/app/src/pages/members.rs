@@ -205,7 +205,7 @@ pub fn Members() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-members-page-css", css: PAGE_CSS }
 
         main { class: "members-page",
             h1 { class: "members-page-title", "Our Crew" }

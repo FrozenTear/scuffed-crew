@@ -463,9 +463,9 @@ const CSS: &str = r#"
     margin: 0 0 1.25rem;
     line-height: 1.45;
 }
-.link-card h2.link-step:focus {
+.link-card h2.link-step:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 3px;
+    outline-offset: 2px;
 }
 .link-field {
     display: flex;
@@ -571,7 +571,7 @@ pub fn LinkDevice() -> Element {
     let gate = link_gate(auth().loading, auth().is_logged_in());
     if gate != LinkGate::Show {
         return rsx! {
-            style { {CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-link-mod-css", css: CSS }
             div { class: "link-page",
                 p { class: "link-wait",
                     if gate == LinkGate::Wait {
@@ -678,7 +678,7 @@ pub fn LinkDevice() -> Element {
     };
 
     rsx! {
-        style { {CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-link-mod-css", css: CSS }
         div { class: "link-page",
             div { class: "link-card",
                 h1 { "Link the stat tracker" }

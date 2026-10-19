@@ -123,7 +123,7 @@ pub fn Feed() -> Element {
     };
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-feed-page-css", css: PAGE_CSS }
 
         main { class: "feed-page",
             h1 { class: "feed-page-title", "Feed" }

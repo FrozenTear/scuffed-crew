@@ -121,7 +121,7 @@ pub fn ConnectionStatus(state: ConnectionState, on_retry: EventHandler<()>) -> E
     );
 
     rsx! {
-        style { {CONNECTION_STATUS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-connection_status-connection-status-css", css: CONNECTION_STATUS_CSS }
         div {
             class: "connection-status connection-status--{modifier}",
             span { class: "connection-status__dot" }

@@ -430,7 +430,7 @@ pub fn AdminPatchNotes() -> Element {
     let editing = modal.get_target().is_some();
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-patch_notes-page-css", css: PAGE_CSS }
 
         div { class: "admin-toolbar",
             h1 { "Patch Notes" }

@@ -153,7 +153,6 @@ const COMPOSE_BOX_CSS: &str = r#"
     font-size: 13px;
     line-height: 1.4;
     resize: none;
-    outline: none;
     transition: border-color 0.15s ease;
 }
 
@@ -253,7 +252,7 @@ pub fn ComposeBox(
     };
 
     rsx! {
-        style { {COMPOSE_BOX_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-compose_box-compose-box-css", css: COMPOSE_BOX_CSS }
         if encrypted {
             div { class: "chat-compose__hint",
                 "Messages in this channel are end-to-end encrypted"

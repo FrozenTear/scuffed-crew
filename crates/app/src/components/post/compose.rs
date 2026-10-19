@@ -41,7 +41,6 @@ const COMPOSE_CSS: &str = r#"
     line-height: 1.6;
 }
 .post-compose textarea:focus {
-    outline: none;
     border-color: var(--accent);
 }
 .post-compose textarea::placeholder {
@@ -61,7 +60,6 @@ const COMPOSE_CSS: &str = r#"
     font-family: var(--font-body);
 }
 .post-compose-tags input:focus {
-    outline: none;
     border-color: var(--accent);
 }
 .post-compose-tags input::placeholder {
@@ -135,7 +133,7 @@ pub fn PostCompose(on_post: EventHandler<FeedPost>) -> Element {
     };
 
     rsx! {
-        style { {COMPOSE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-post-compose-compose-css", css: COMPOSE_CSS }
         div { class: "post-compose",
             p { class: "post-compose-label", "What's on your mind?" }
             textarea {

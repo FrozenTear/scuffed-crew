@@ -266,7 +266,7 @@ pub fn StrategyMy() -> Element {
     let auth_state = auth();
     if auth_state.loading {
         return rsx! {
-            style { {PAGE_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-my_strategies-page-css", css: PAGE_CSS }
             div { class: "my-strategies",
                 p { class: "my-strategies-loading", "Loading..." }
             }
@@ -275,7 +275,7 @@ pub fn StrategyMy() -> Element {
 
     if !auth_state.is_logged_in() {
         return rsx! {
-            style { {PAGE_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-my_strategies-page-css", css: PAGE_CSS }
             div { class: "my-strategies",
                 div { class: "my-strategies-login",
                     h2 { "Log in to view your strategies" }
@@ -321,8 +321,8 @@ pub fn StrategyMy() -> Element {
     // --- Render ---
 
     rsx! {
-        style { {PAGE_CSS} }
-        style { {crate::styles::admin::CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-my_strategies-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
         div { class: "my-strategies",
             // Header

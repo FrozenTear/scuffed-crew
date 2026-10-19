@@ -43,7 +43,7 @@ const REPLY_INPUT_CSS: &str = r#"
     max-height: 160px;
     resize: vertical;
 }
-.dm-reply-textarea:focus { outline: none; border-color: var(--accent); }
+.dm-reply-textarea:focus { border-color: var(--accent); }
 .dm-reply-textarea::placeholder { color: var(--text-3); }
 .dm-reply-send {
     background: var(--accent);
@@ -170,7 +170,7 @@ pub fn ReplyInput(
     };
 
     rsx! {
-        style { {REPLY_INPUT_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-dm-reply_input-reply-input-css", css: REPLY_INPUT_CSS }
         div { class: "dm-reply",
             if needs_server_managed() {
                 div { class: "dm-reply-banner",

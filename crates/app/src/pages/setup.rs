@@ -202,7 +202,7 @@ pub fn Setup() -> Element {
     };
 
     rsx! {
-        style { {CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-setup-css", css: CSS }
         div { class: "setup-page",
             div { class: "setup-card",
                 h1 { "Create admin account" }

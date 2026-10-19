@@ -82,7 +82,7 @@ pub fn News() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-news-page-css", css: PAGE_CSS }
 
         main { class: "news-page",
             h1 { class: "news-page-title", "News & Announcements" }

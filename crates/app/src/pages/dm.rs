@@ -178,7 +178,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
     if auth().loading {
         return rsx! {
-            style { {PAGE_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
             main { class: "dm-page",
                 h1 { class: "dm-page-title", "Direct Messages" }
                 p { class: "dm-loading", "Checking session…" }
@@ -188,7 +188,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
     if !auth().is_logged_in() {
         return rsx! {
-            style { {PAGE_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
             main { class: "dm-page",
                 h1 { class: "dm-page-title", "Direct Messages" }
                 div { class: "dm-login-needed",
@@ -260,7 +260,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         .and_then(|pk| convs.iter().find(|c| c.peer_pubkey == *pk).cloned());
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
         main { class: "dm-page",
             h1 { class: "dm-page-title", "Direct Messages" }
 

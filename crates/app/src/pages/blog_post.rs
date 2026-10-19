@@ -103,7 +103,7 @@ pub fn BlogPost(slug: String) -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-blog_post-page-css", css: PAGE_CSS }
 
         main { class: "blog-post-page",
             Link { to: Route::Blog {}, class: "blog-post-back",

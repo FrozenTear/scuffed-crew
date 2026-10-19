@@ -246,7 +246,7 @@ pub fn HeroPicker(
     let mut expanded_role = use_signal(|| Option::<HeroRole>::None);
 
     rsx! {
-        style { {HERO_PICKER_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-hero_picker-hero-picker-css", css: HERO_PICKER_CSS }
         div { class: "hero-picker",
             h3 { class: "panel-title", "Heroes" }
 

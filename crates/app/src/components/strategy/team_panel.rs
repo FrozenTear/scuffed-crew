@@ -190,7 +190,7 @@ pub fn TeamPanel(
         .and_then(super::hero_catalog::hero_by_id);
 
     rsx! {
-        style { {TEAM_PANEL_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-team_panel-team-panel-css", css: TEAM_PANEL_CSS }
         div { class: "team-panel",
             h3 { class: "panel-title", "Team Composition" }
 

@@ -192,7 +192,6 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .thread-compose-textarea:focus {
-        outline: none;
         border-color: var(--accent);
     }
     .thread-compose-actions {
@@ -257,7 +256,7 @@ pub fn ForumThread(id: String) -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-forum_thread-page-css", css: PAGE_CSS }
 
         main { class: "thread-page",
             {

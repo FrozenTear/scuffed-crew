@@ -224,7 +224,7 @@ pub fn MessageThread(
     };
 
     rsx! {
-        style { {MESSAGE_THREAD_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-dm-message_thread-message-thread-css", css: MESSAGE_THREAD_CSS }
         div { class: "dm-thread",
             div { class: "dm-thread-header",
                 div { class: "dm-thread-avatar", "{initials}" }

@@ -99,7 +99,7 @@ const PAGE_CSS: &str = r#"
 
 /* Left panel */
 .heroes-left { width:340px; min-width:280px; border-right:1px solid var(--border); overflow-y:auto; padding:1.25rem; background:var(--surface); flex-shrink:0; }
-.heroes-search { width:100%; padding:0.5rem 0.75rem; border:1px solid var(--border); border-radius:6px; background:var(--surface-2); color:var(--text); font-family:var(--font-body); font-size:0.85rem; outline:none; margin-bottom:1.25rem; transition:border-color 0.2s; }
+.heroes-search { width:100%; padding:0.5rem 0.75rem; border:1px solid var(--border); border-radius:6px; background:var(--surface-2); color:var(--text); font-family:var(--font-body); font-size:0.85rem; margin-bottom:1.25rem; transition:border-color 0.2s; }
 .heroes-search:focus { border-color:var(--accent); }
 .heroes-search::placeholder { color:var(--text-3); }
 .heroes-role-heading { font-family:var(--font-head); font-size:0.75rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; margin:1rem 0 0.5rem; padding-bottom:0.35rem; border-bottom:1px solid var(--border); }
@@ -176,7 +176,7 @@ pub fn StrategyHeroes() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-heroes-page-css", css: PAGE_CSS }
 
         div { class: "heroes-page",
             // ---- LEFT PANEL: hero grid ----

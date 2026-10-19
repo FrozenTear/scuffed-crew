@@ -131,7 +131,7 @@ pub fn ReactionBar(
     let toasts = use_toast();
 
     rsx! {
-        style { {REACTION_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-reaction_bar-reaction-css", css: REACTION_CSS }
         div { class: "reaction-bar",
             for r in reactions.iter() {
                 {render_pill(

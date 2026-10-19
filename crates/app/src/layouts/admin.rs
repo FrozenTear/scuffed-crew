@@ -70,6 +70,27 @@ const ADMIN_CSS: &str = r#"
         background: var(--surface-2);
         color: var(--text);
     }
+    .admin-nav-group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        margin-top: 0.85rem;
+    }
+    .admin-nav-label {
+        margin: 0;
+        padding: 0.45rem 1.25rem 0.15rem;
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .admin-sidebar nav a.admin-view-site {
+        margin-top: auto;
+        border-top: 1px solid var(--border);
+        color: var(--accent);
+        font-weight: 600;
+    }
     .admin-sidebar .user-info {
         padding: 1rem 1.25rem 0;
         border-top: 1px solid var(--border);
@@ -271,8 +292,8 @@ pub fn AdminLayout() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_CSS} }
-        style { {crate::styles::admin::CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-layouts-admin-admin-css", css: ADMIN_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
         div { class: "admin-layout",
             div { class: "admin-mobile-bar",
                 button {
@@ -312,26 +333,49 @@ pub fn AdminLayout() -> Element {
                 }
                 nav {
                     Link { to: Route::AdminDashboard {}, onclick: close_nav, "Dashboard" }
-                    Link { to: Route::AdminMembers {}, onclick: close_nav, "Members" }
-                    Link { to: Route::AdminGames {}, onclick: close_nav, "Games" }
-                    Link { to: Route::AdminTeams {}, onclick: close_nav, "Teams" }
-                    Link { to: Route::AdminSchedule {}, onclick: close_nav, "Schedule" }
-                    Link { to: Route::AdminApplications {}, onclick: close_nav, "Applications" }
-                    Link { to: Route::AdminMatches {}, onclick: close_nav, "Matches" }
-                    Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
-                    Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
-                    Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
-                    Link { to: Route::AdminPatchNotes {}, onclick: close_nav, "Patch Notes" }
-                    Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
-                    // Moderation is OfficerUser-gated server-side (list/create), so it is
-                    // visible to every officer+ — matching the AdminLayout access tier.
-                    Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
-                    Link { to: Route::AdminReports {}, onclick: close_nav, "Reports" }
+                    div { class: "admin-nav-group",
+                        p { class: "admin-nav-label", "Community" }
+                        Link { to: Route::AdminMembers {}, onclick: close_nav, "Members" }
+                        Link { to: Route::AdminTeams {}, onclick: close_nav, "Teams" }
+                        Link { to: Route::AdminApplications {}, onclick: close_nav, "Applications" }
+                        Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
+                        // Moderation is OfficerUser-gated server-side (list/create), so it is
+                        // visible to every officer+, matching the AdminLayout access tier.
+                        Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
+                    }
+                    div { class: "admin-nav-group",
+                        p { class: "admin-nav-label", "Content" }
+                        Link { to: Route::AdminGames {}, onclick: close_nav, "Games" }
+                        Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
+                        Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
+                        Link { to: Route::AdminPatchNotes {}, onclick: close_nav, "Patch Notes" }
+                    }
+                    div { class: "admin-nav-group",
+                        p { class: "admin-nav-label", "Competition" }
+                        Link { to: Route::AdminSchedule {}, onclick: close_nav, "Schedule" }
+                        Link { to: Route::AdminMatches {}, onclick: close_nav, "Matches" }
+                        Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
+                    }
+                    div { class: "admin-nav-group",
+                        p { class: "admin-nav-label", "Stats" }
+                        Link { to: Route::AdminReports {}, onclick: close_nav, "Reports" }
+                        if is_admin {
+                            Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
+                        }
+                    }
                     if is_admin {
-                        Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
-                        Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
-                        Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
-                        Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }
+                        div { class: "admin-nav-group",
+                            p { class: "admin-nav-label", "Site settings" }
+                            Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
+                            Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
+                            Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }
+                        }
+                    }
+                    Link {
+                        to: Route::Home {},
+                        class: "admin-view-site",
+                        onclick: close_nav,
+                        "View site"
                     }
                 }
                 div { class: "user-info",

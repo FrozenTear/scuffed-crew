@@ -201,8 +201,8 @@ pub fn StatsMember(id: String) -> Element {
     let mut tab = use_signal(|| MemberStatsTab::Overview);
 
     rsx! {
-        style { {MEMBER_STATS_CSS} }
-        style { {crate::styles::admin::CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
         div { class: "stats-page",
             h1 { "Member Stats" }

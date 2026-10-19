@@ -9,7 +9,7 @@ pub const FIELD_CSS: &str = r#"
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3); color: var(--text); }
 .ui-field::placeholder { color: var(--text-3); }
-.ui-field:focus { outline: none; border-color: var(--accent); }
+.ui-field:focus { border-color: var(--accent); }
 .ui-field--invalid { border-color: var(--danger); }
 textarea.ui-field { resize: vertical; min-height: 80px; }
 .ui-field-wrap { display: flex; flex-direction: column; gap: 0.35rem; width: 100%; }

@@ -761,7 +761,6 @@ const STATS_CSS: &str = r#"
         font-family: var(--font-mono);
     }
     .daemon-settings-input:focus {
-        outline: none;
         border-color: var(--accent-soft);
     }
     .daemon-settings-hint {
@@ -1193,7 +1192,7 @@ pub fn Stats() -> Element {
 
     if !auth().loading && !auth().is_logged_in() {
         return rsx! {
-            style { {STATS_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
             div { class: "stats-page",
                 h1 { "My Stats" }
                 {member_pending(&auth(), &stats, "stats")}
@@ -1202,8 +1201,8 @@ pub fn Stats() -> Element {
     }
 
     rsx! {
-        style { {STATS_CSS} }
-        style { {crate::styles::admin::CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
         div { class: "stats-page", "data-density": dens,
             div { class: "stats-header",

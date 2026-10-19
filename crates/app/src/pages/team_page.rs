@@ -344,7 +344,7 @@ pub fn TeamPage(id: String) -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-team_page-page-css", css: PAGE_CSS }
 
         main { class: "team-page",
             {

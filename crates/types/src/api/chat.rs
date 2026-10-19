@@ -135,7 +135,7 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
         403 => "You don't have access to this channel.".into(),
         404 => "This channel isn't provisioned yet.".into(),
         400 if body_mentions(body, &["External key", "NIP-07"]) => {
-            "Your Nostr key is external — use a NIP-07 extension to send.".into()
+            "Your Nostr key is external. Use a NIP-07 extension to send.".into()
         }
         400 if body_mentions(
             body,
@@ -153,7 +153,7 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
             }
             serde_json::from_str::<serde_json::Value>(body)
                 .ok()
-                .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
+                .and_then(|v| v.get("error")?.as_str().map(plain_punctuation))
                 .unwrap_or_else(|| format!("Chat request failed (HTTP {status})"))
         }),
     }
@@ -161,6 +161,22 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
 
 fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
+}
+
+/// User-facing text must not use an em dash. ` — ` becomes a sentence break.
+fn plain_punctuation(text: &str) -> String {
+    let mut parts = text.split(" \u{2014} ");
+    let mut out = parts.next().unwrap_or("").replace('\u{2014}', ".");
+    for part in parts {
+        let part = part.replace('\u{2014}', ".");
+        out.push_str(". ");
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
 }
 
 fn is_rate_limited_code(body: &str) -> bool {
@@ -265,12 +281,19 @@ mod tests {
             )
             .contains("provisioning")
         );
-        assert!(
+        assert_eq!(
             chat_api_error_copy(
                 400,
                 "External key users must encrypt client-side (NIP-07 + NIP-44)"
+            ),
+            "Your Nostr key is external. Use a NIP-07 extension to send."
+        );
+        assert!(
+            !chat_api_error_copy(
+                400,
+                "External key users must encrypt client-side (NIP-07 + NIP-44)"
             )
-            .contains("NIP-07")
+            .contains('\u{2014}')
         );
         assert_eq!(
             chat_api_error_copy(409, r#"{"error":"duplicate"}"#),
@@ -297,14 +320,14 @@ mod tests {
             "Too many requests. Try again later."
         );
         // API PR 209 changes this Nostr limiter 429 to
-        // {"error":"rate_limited","retry_after":N}. This assertion stays on
-        // the old sentence until that PR lands.
+        // {"error":"rate_limited","retry_after":N}. Until that lands, the old
+        // sentence is shown with the em dash rewritten as a sentence break.
         assert_eq!(
             chat_api_error_copy(
                 429,
                 r#"{"error":"Too many Nostr key/message operations — please slow down and retry shortly."}"#
             ),
-            "Too many Nostr key/message operations — please slow down and retry shortly."
+            "Too many Nostr key/message operations. Please slow down and retry shortly."
         );
     }
 }

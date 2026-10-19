@@ -112,7 +112,7 @@ pub fn AdminForum() -> Element {
     let mut board_parent = use_signal(String::new);
 
     rsx! {
-        style { {CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-forum-css", css: CSS }
         div { class: "af-page",
             h1 { class: "af-title", "Forum structure" }
             p { class: "af-hint",

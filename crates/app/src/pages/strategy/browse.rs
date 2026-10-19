@@ -103,7 +103,6 @@ const PAGE_CSS: &str = r#"
         color: var(--text-3);
     }
     .strategy-search-input:focus {
-        outline: none;
         border-color: var(--accent);
     }
 
@@ -265,7 +264,7 @@ pub fn StrategyBrowse() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-browse-page-css", css: PAGE_CSS }
 
         div { class: "strategy-browse",
             // Header

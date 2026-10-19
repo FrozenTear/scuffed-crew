@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 mod canvas;
+mod client_error;
 mod components;
 mod hooks;
 mod keybindings;

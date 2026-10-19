@@ -253,7 +253,7 @@ pub fn Community() -> Element {
     let banner_label = org_name.as_ref().map(|name| name.to_uppercase());
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-community-page-css", css: PAGE_CSS }
 
         main { class: "community-page",
             h1 { class: "community-page-title", "Community" }

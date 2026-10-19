@@ -131,7 +131,7 @@ pub fn PostCard(post: FeedPost, on_tag_click: Option<EventHandler<String>>) -> E
         .collect();
 
     rsx! {
-        style { {CARD_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-post-card-card-css", css: CARD_CSS }
         article { class: "post-card",
             div { class: "post-card-header",
                 div { class: "post-avatar", "{initial}" }

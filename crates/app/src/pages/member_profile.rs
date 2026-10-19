@@ -309,7 +309,7 @@ pub fn MemberProfile(id: String) -> Element {
     let mut show_all_heroes = use_signal(|| false);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-member_profile-page-css", css: PAGE_CSS }
 
         main { class: "profile-page",
             {

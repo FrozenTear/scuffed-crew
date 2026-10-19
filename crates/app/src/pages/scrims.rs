@@ -251,7 +251,6 @@ const PAGE_CSS: &str = r#"
     font-family: inherit;
 }
 .scrim-form-input:focus, .scrim-form-select:focus, .scrim-form-textarea:focus {
-    outline: none;
     border-color: var(--accent);
 }
 .scrim-form-textarea { resize: vertical; min-height: 60px; }
@@ -319,7 +318,7 @@ pub fn Scrims() -> Element {
     let games_list = games_data.as_ref().and_then(|d| d.as_ref());
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-scrims-page-css", css: PAGE_CSS }
 
         main { class: "scrims-page",
             h1 { class: "scrims-page-title", "Scrim Board" }
