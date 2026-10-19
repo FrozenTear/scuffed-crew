@@ -163,7 +163,7 @@ fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
 }
 
-/// User-facing text must not use an em dash. ` — ` becomes a sentence break.
+/// User-facing text must not use an em dash. `" \u{2014} "` becomes a sentence break.
 fn plain_punctuation(text: &str) -> String {
     let mut parts = text.split(" \u{2014} ");
     let mut out = parts.next().unwrap_or("").replace('\u{2014}', ".");

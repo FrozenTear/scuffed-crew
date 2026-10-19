@@ -65,5 +65,29 @@ mod tests {
         );
         assert_eq!(html_page.to_string(), "HTTP error: 404");
         assert_ne!(html_page.to_string(), err.to_string());
+
+        // #377 also answers a wrong method with JSON, not an HTML page.
+        let method_not_allowed = ClientError::http(405, r#"{"error":"Method not allowed"}"#, None);
+        match &method_not_allowed {
+            ClientError::Http {
+                status,
+                body,
+                retry_after,
+            } => {
+                assert_eq!(*status, 405);
+                assert_eq!(body, r#"{"error":"Method not allowed"}"#);
+                assert_eq!(*retry_after, None);
+            }
+            ClientError::Network(message) => {
+                panic!("405 JSON must not become Network: {message}")
+            }
+            ClientError::Deserialize(message) => {
+                panic!("405 JSON must not become Deserialize: {message}")
+            }
+        }
+        assert_eq!(
+            method_not_allowed.to_string(),
+            "HTTP error 405: Method not allowed"
+        );
     }
 }
