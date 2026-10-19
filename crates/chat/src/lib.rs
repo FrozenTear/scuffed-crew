@@ -13,8 +13,8 @@ pub use community::{
     EventAnnouncement, LfgRequest, MatchResult,
 };
 pub use nostr::auth::{
-    allowed_auth_relay, canonical_relay_url, AuthError, AuthTokenRequest, AuthTokenResponse,
-    KeyMode, NostrAuthService, MAX_AUTH_CHALLENGE_BYTES,
+    allowed_auth_relay, canonical_relay_url, site_auth_relay_urls, AuthError, AuthTokenRequest,
+    AuthTokenResponse, KeyMode, NostrAuthService, MAX_AUTH_CHALLENGE_BYTES,
 };
 pub use nostr::encryption::{
     EncryptionError, EncryptionService, GiftWrappedEvent, UnwrappedMessage,

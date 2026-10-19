@@ -99,22 +99,43 @@ fn charge_interactive_send(state: &AppState, member_id: &str) -> Result<(), Send
     }
 }
 
-/// Primary relay plus `site_settings.extra_relay_urls` (one URL per line).
+/// Primary relay, `site_settings.extra_relay_urls` (one URL per line), and
+/// this site's own `/relay` when `redirect_base` is set.
 ///
-/// Blank lines are dropped. Canonicalization happens in
-/// [`scuffed_chat::allowed_auth_relay`], so `http`/`https` lines never match.
-fn auth_relay_candidates(configured: Option<&str>, extra_lines: &str) -> Vec<String> {
+/// Blank lines are dropped. Configured and extra entries must be `ws` or
+/// `wss`; an `http` or `https` line is ignored. `redirect_base` is
+/// `REDIRECT_BASE_URL` with no localhost default: an https base adds
+/// `wss://host/relay` and `https://host/relay`, and an http base adds the
+/// `ws` and `http` pair. A missing or blank base adds nothing.
+fn auth_relay_candidates(
+    configured: Option<&str>,
+    extra_lines: &str,
+    redirect_base: Option<&str>,
+) -> Vec<String> {
     let mut allowed = Vec::new();
     if let Some(url) = configured.map(str::trim).filter(|url| !url.is_empty()) {
-        allowed.push(url.to_string());
+        push_websocket_relay(&mut allowed, url);
     }
     for line in extra_lines.lines() {
         let line = line.trim();
         if !line.is_empty() {
-            allowed.push(line.to_string());
+            push_websocket_relay(&mut allowed, line);
         }
     }
+    if let Some(base) = redirect_base.map(str::trim).filter(|base| !base.is_empty()) {
+        allowed.extend(scuffed_chat::site_auth_relay_urls(base));
+    }
     allowed
+}
+
+/// Keep a configured relay only when it canonicalizes to `ws` or `wss`.
+fn push_websocket_relay(allowed: &mut Vec<String>, raw: &str) {
+    let Some(canonical) = scuffed_chat::canonical_relay_url(raw) else {
+        return;
+    };
+    if canonical.starts_with("ws://") || canonical.starts_with("wss://") {
+        allowed.push(raw.to_string());
+    }
 }
 
 async fn load_auth_relay_candidates(state: &AppState) -> Vec<String> {
@@ -125,14 +146,24 @@ async fn load_auth_relay_candidates(state: &AppState) -> Vec<String> {
             String::new()
         }
     };
-    auth_relay_candidates(state.relay_url.as_deref(), &extras)
+    // Read the env var itself. `OAuthConfig::from_env` substitutes
+    // `http://localhost:3000` when this is unset, and that default must
+    // not become an AUTH relay.
+    let redirect_base = std::env::var("REDIRECT_BASE_URL").ok();
+    auth_relay_candidates(
+        state.relay_url.as_deref(),
+        &extras,
+        redirect_base.as_deref(),
+    )
 }
 
 /// POST /api/chat/auth-token — provision a NIP-42 auth event for relay authentication.
 ///
 /// Flow:
 /// 1. Reject a challenge over 256 bytes, or a relay URL that does not
-///    canonicalize to `state.relay_url` or `site_settings.extra_relay_urls`
+///    canonicalize to `state.relay_url`, a `ws`/`wss` line of
+///    `site_settings.extra_relay_urls`, or this site's `/relay` built from
+///    `REDIRECT_BASE_URL`
 /// 2. If the member has no Nostr keys, generate server-managed keys
 /// 3. If external keys (NIP-07), return an error. The client must sign client-side.
 /// 4. Decrypt member's server-managed key, sign AUTH event, return it
@@ -1218,6 +1249,7 @@ mod tests {
         let allowed = auth_relay_candidates(
             Some("wss://Relay.Example.com:443/"),
             "\nws://backup.example:80/\nhttps://nope.example\n",
+            None,
         );
         let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
 
@@ -1246,6 +1278,98 @@ mod tests {
             scuffed_chat::allowed_auth_relay("https://nope.example", refs.iter().copied())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn auth_token_allowlist_accepts_own_relay_from_redirect_base() {
+        let allowed = auth_relay_candidates(
+            Some("ws://strfry:7777"),
+            "wss://extra.example/\nhttps://ignored.example\n",
+            Some("HTTPS://OW.Example.com:443/"),
+        );
+        let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+
+        for requested in [
+            "wss://ow.example.com/relay",
+            "wss://ow.example.com/relay/",
+            "WSS://OW.Example.com:443/relay/",
+            "https://ow.example.com/relay",
+            "https://ow.example.com/relay/",
+            "HTTPS://ow.example.com/relay",
+        ] {
+            let expected = if requested.to_ascii_lowercase().starts_with("wss://") {
+                "wss://ow.example.com/relay"
+            } else {
+                "https://ow.example.com/relay"
+            };
+            assert_eq!(
+                scuffed_chat::allowed_auth_relay(requested, refs.iter().copied()).as_deref(),
+                Some(expected),
+                "{requested}"
+            );
+        }
+
+        assert!(
+            scuffed_chat::allowed_auth_relay("wss://evil.example/relay", refs.iter().copied())
+                .is_none()
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("https://evil.example/relay", refs.iter().copied())
+                .is_none()
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://strfry:7777", refs.iter().copied()).as_deref(),
+            Some("ws://strfry:7777")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("wss://extra.example/", refs.iter().copied())
+                .as_deref(),
+            Some("wss://extra.example")
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("https://ignored.example", refs.iter().copied())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn auth_token_allowlist_missing_redirect_base_uses_configured_only() {
+        for base in [None, Some("   "), Some("not a url")] {
+            let allowed = auth_relay_candidates(
+                Some("wss://relay.example.com/"),
+                "wss://extra.example\nhttps://ignored.example\n",
+                base,
+            );
+            let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+
+            assert_eq!(
+                scuffed_chat::allowed_auth_relay("wss://relay.example.com", refs.iter().copied())
+                    .as_deref(),
+                Some("wss://relay.example.com"),
+                "{base:?}"
+            );
+            assert_eq!(
+                scuffed_chat::allowed_auth_relay("wss://extra.example/", refs.iter().copied())
+                    .as_deref(),
+                Some("wss://extra.example"),
+                "{base:?}"
+            );
+            assert!(
+                scuffed_chat::allowed_auth_relay("wss://ow.example/relay", refs.iter().copied())
+                    .is_none(),
+                "{base:?}"
+            );
+            assert!(
+                scuffed_chat::allowed_auth_relay("https://ow.example/relay", refs.iter().copied())
+                    .is_none(),
+                "{base:?}"
+            );
+            assert!(
+                scuffed_chat::allowed_auth_relay("https://ignored.example", refs.iter().copied())
+                    .is_none(),
+                "{base:?}"
+            );
+        }
     }
 
     #[test]
