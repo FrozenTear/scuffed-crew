@@ -155,6 +155,13 @@ pub fn relay_permission_sql() -> String {
 /// rejects the row. Binding the select first is the form that server accepts.
 /// The copied columns are the only ones named here. Secrets, display names,
 /// `user_id`, `reason`, and `issued_by` are not on these tables.
+///
+/// The backfill runs before the events are defined. If the events ran first,
+/// a concurrent write could update a projection row and the backfill `UPSERT`
+/// would replace it with the older snapshot. Events are installed only after
+/// the copy, so this script cannot overwrite a newer event write. A write
+/// that lands after its snapshot and before the events exist is copied on
+/// the next boot.
 const RELAY_PROJECTION_SQL: &str = r#"
 DEFINE TABLE OVERWRITE relay_member SCHEMAFULL
     PERMISSIONS FOR select WHERE $access = 'relay'
@@ -198,6 +205,28 @@ DEFINE FIELD OVERWRITE is_active ON relay_team_channel TYPE bool;
 DEFINE FIELD OVERWRITE created_at ON relay_team_channel TYPE datetime;
 DEFINE FIELD OVERWRITE synced_at ON relay_team_channel TYPE option<datetime>;
 
+LET $relay_members = (SELECT id, org_role, nostr_pubkey, is_active FROM member);
+FOR $row IN $relay_members {
+    UPSERT type::record("relay_member", record::id($row.id)) SET org_role = $row.org_role, nostr_pubkey = $row.nostr_pubkey, is_active = $row.is_active;
+};
+LET $relay_edges = (SELECT id, in, out, is_active FROM plays_on);
+FOR $row IN $relay_edges {
+    LET $active_rows = (SELECT VALUE is_active FROM type::record("member", record::id($row.in)));
+    LET $member_active = $active_rows[0] ?? false;
+    UPSERT type::record("relay_roster", record::id($row.id)) SET member_id = <string>record::id($row.in), team_id = <string>record::id($row.out), edge_active = $row.is_active, member_active = $member_active;
+};
+LET $relay_actions = (SELECT id, member_id, action_type, expires_at, is_active FROM moderation_action);
+FOR $row IN $relay_actions {
+    UPSERT type::record("relay_moderation", record::id($row.id)) SET member_id = $row.member_id, action_type = $row.action_type, expires_at = $row.expires_at, is_active = $row.is_active;
+};
+LET $relay_channels = (SELECT id, team_id, group_id, group_type, relay_url, is_active, created_at, synced_at FROM team_channel);
+FOR $row IN $relay_channels {
+    UPSERT type::record("relay_team_channel", record::id($row.id)) SET team_id = $row.team_id, group_id = $row.group_id, group_type = $row.group_type, relay_url = $row.relay_url, is_active = $row.is_active, created_at = $row.created_at, synced_at = $row.synced_at;
+};
+
+-- Sync events are defined after the backfill. If they ran first, a
+-- concurrent write could update a projection row and the UPSERT above
+-- would replace it with the older snapshot.
 DEFINE EVENT OVERWRITE relay_member_write ON TABLE member WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
     UPSERT type::record("relay_member", record::id($after.id)) SET org_role = $after.org_role, nostr_pubkey = $after.nostr_pubkey, is_active = $after.is_active;
     UPDATE relay_roster SET member_active = $after.is_active WHERE member_id = <string>record::id($after.id);
@@ -225,25 +254,6 @@ DEFINE EVENT OVERWRITE relay_team_channel_write ON TABLE team_channel WHEN $even
 };
 DEFINE EVENT OVERWRITE relay_team_channel_delete ON TABLE team_channel WHEN $event = "DELETE" THEN {
     DELETE type::record("relay_team_channel", record::id($before.id));
-};
-
-LET $relay_members = (SELECT id, org_role, nostr_pubkey, is_active FROM member);
-FOR $row IN $relay_members {
-    UPSERT type::record("relay_member", record::id($row.id)) SET org_role = $row.org_role, nostr_pubkey = $row.nostr_pubkey, is_active = $row.is_active;
-};
-LET $relay_edges = (SELECT id, in, out, is_active FROM plays_on);
-FOR $row IN $relay_edges {
-    LET $active_rows = (SELECT VALUE is_active FROM type::record("member", record::id($row.in)));
-    LET $member_active = $active_rows[0] ?? false;
-    UPSERT type::record("relay_roster", record::id($row.id)) SET member_id = <string>record::id($row.in), team_id = <string>record::id($row.out), edge_active = $row.is_active, member_active = $member_active;
-};
-LET $relay_actions = (SELECT id, member_id, action_type, expires_at, is_active FROM moderation_action);
-FOR $row IN $relay_actions {
-    UPSERT type::record("relay_moderation", record::id($row.id)) SET member_id = $row.member_id, action_type = $row.action_type, expires_at = $row.expires_at, is_active = $row.is_active;
-};
-LET $relay_channels = (SELECT id, team_id, group_id, group_type, relay_url, is_active, created_at, synced_at FROM team_channel);
-FOR $row IN $relay_channels {
-    UPSERT type::record("relay_team_channel", record::id($row.id)) SET team_id = $row.team_id, group_id = $row.group_id, group_type = $row.group_type, relay_url = $row.relay_url, is_active = $row.is_active, created_at = $row.created_at, synced_at = $row.synced_at;
 };
 "#;
 
@@ -577,6 +587,16 @@ mod tests {
         }
         assert!(RELAY_PROJECTION_SQL.contains("DEFINE EVENT OVERWRITE relay_member_write"));
         assert!(RELAY_PROJECTION_SQL.contains("UPDATE relay_roster SET member_active"));
+        let backfill_at = RELAY_PROJECTION_SQL
+            .find("LET $relay_members")
+            .expect("projection backfill");
+        let events_at = RELAY_PROJECTION_SQL
+            .find("DEFINE EVENT OVERWRITE relay_member_write")
+            .expect("projection events");
+        assert!(
+            backfill_at < events_at,
+            "backfill must finish before sync events are defined"
+        );
         assert!(!RELAY_PROJECTION_SQL.contains("nostr_secret_key_encrypted"));
         assert!(!RELAY_PROJECTION_SQL.contains("display_name"));
         assert!(!RELAY_PROJECTION_SQL.contains("issued_by"));
