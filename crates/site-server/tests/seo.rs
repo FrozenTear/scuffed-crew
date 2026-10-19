@@ -1131,8 +1131,8 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     );
     assert!(!body.contains(SHELL));
 
-    // Governed public route: the JSON 405 sits inside that router's limiter,
-    // so the peer address has to be present the same way the listener injects it.
+    // Governed public route. The 405 itself does not spend the limiter budget.
+    // The peer is still set the same way the listener injects it.
     let (status, headers, body) = exchange_from(
         app.clone(),
         Method::POST,
@@ -1185,6 +1185,85 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<svg"));
     assert_eq!(cache_control(&headers), Some("public, max-age=86400"));
+}
+
+/// Wrong methods on a governed route stay JSON 405s and do not spend the
+/// per-IP budget, so a later allowed request on the same path still runs.
+#[tokio::test]
+async fn wrong_method_does_not_spend_the_rate_limit() {
+    let tree = TempTree::new("method-budget");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    // Public governor: 40 burst, then one request every 200ms. More wrong
+    // methods than that burst must stay 405, and the following GET must run.
+    let public_peer = [203, 0, 113, 44];
+    for n in 0..45 {
+        let (status, headers, body) = exchange_from(
+            app.clone(),
+            Method::POST,
+            "/api/auth/providers",
+            public_peer,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "public wrong method {n} must stay 405, got {status} {body}"
+        );
+        assert_json_method_not_allowed(&headers, &body, "POST /api/auth/providers");
+        assert_eq!(
+            headers.get(header::ALLOW).and_then(|v| v.to_str().ok()),
+            Some("GET,HEAD"),
+            "public Allow {n}"
+        );
+    }
+    let (status, headers, body) =
+        exchange_from(app.clone(), Method::GET, "/api/auth/providers", public_peer).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/auth/providers after wrong methods: {body}"
+    );
+    assert!(
+        content_type(&headers).starts_with("application/json"),
+        "providers content-type"
+    );
+    let providers: Value = serde_json::from_str(&body).expect("providers json");
+    assert!(providers.get("nostr").is_some(), "{body}");
+
+    // Auth governor: 5 burst, then one request every 2s. A different bucket
+    // from the public routes above.
+    let auth_peer = [203, 0, 113, 45];
+    for n in 0..8 {
+        let (status, headers, body) = exchange_from(
+            app.clone(),
+            Method::POST,
+            "/api/auth/nostr/challenge",
+            auth_peer,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "auth wrong method {n} must stay 405, got {status} {body}"
+        );
+        assert_json_method_not_allowed(&headers, &body, "POST /api/auth/nostr/challenge");
+        assert_eq!(
+            headers.get(header::ALLOW).and_then(|v| v.to_str().ok()),
+            Some("GET,HEAD"),
+            "auth Allow {n}"
+        );
+    }
+    let (status, _, body) =
+        exchange_from(app, Method::GET, "/api/auth/nostr/challenge", auth_peer).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/auth/nostr/challenge after wrong methods: {body}"
+    );
+    let challenge: Value = serde_json::from_str(&body).expect("challenge json");
+    assert!(challenge.get("challenge").is_some(), "{body}");
 }
 
 fn assert_json_not_found(headers: &axum::http::HeaderMap, body: &str, label: &str) {

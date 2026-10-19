@@ -299,8 +299,9 @@ fn unmatched_api_response(method: &Method) -> Response {
 ///
 /// `/api` and `/api/*` use the same JSON envelope as the unmatched-API 404.
 /// Other paths keep Axum's empty 405. Axum still sets `Allow` from the methods
-/// the path does register. Call [`crate::apply_api_method_not_allowed`] on each
-/// router before the layers that should see this response.
+/// the path does register. [`crate::apply_api_method_not_allowed`] replaces
+/// Axum's default 405. A rate-limit governor applied first does not see a
+/// wrong method. A layer applied after this call still wraps the response.
 pub(crate) async fn api_method_not_allowed(method: Method, uri: Uri) -> Response {
     if is_api_path(uri.path()) {
         json_error(
