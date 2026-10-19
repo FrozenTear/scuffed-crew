@@ -1747,14 +1747,16 @@ async fn retire_active_game(
     seal: Option<detect::MatchOutcome>,
     reason: &str,
 ) {
+    // The rank-screen log must not hide the next game's same result. Clear
+    // it before the early return: a Tab-opened game can close while the
+    // rank screen is up even when no game is active.
+    stat_tracker::detect::match_end::clear_rank_result_log();
     let Some(mut g) = st.active_game.take() else {
         return;
     };
-    // The game is over: its unblanked portrait cells leave memory, a
-    // below-floor column calibration must not stick into the next game,
-    // and the rank-screen log must not hide the next game's same result.
+    // The game is over: its unblanked portrait cells leave memory and a
+    // below-floor column calibration must not stick into the next game.
     stat_tracker::ocr::clear_below_floor_column_cache();
-    stat_tracker::detect::match_end::clear_rank_result_log();
     stat_tracker::report::kit::forget_portraits(data_dir, &g.session_id);
     let had_outcome = g.finished();
     if !had_outcome {
@@ -9567,6 +9569,29 @@ mod tests {
             snaps[0].outcome, "unknown",
             "retire with no seal leaves the hint unstored"
         );
+    }
+
+    /// A game close with no active game still clears the rank-screen log,
+    /// so the next game logs its first rank result even when it matches.
+    /// Draw is used because no other test here reads a draw rank screen.
+    #[tokio::test]
+    async fn retire_with_no_active_game_still_clears_the_rank_log() {
+        use stat_tracker::detect::match_end::{clear_rank_result_log, rank_result_is_new};
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut st = session(None, Instant::now());
+        let _ = rank_result_is_new(detect::MatchOutcome::Draw);
+        assert!(
+            !rank_result_is_new(detect::MatchOutcome::Draw),
+            "a repeat of the same rank result stays quiet"
+        );
+        retire_active_game(&mut st, &store, dir.path(), None, "test: no game").await;
+        assert!(st.active_game.is_none());
+        assert!(
+            rank_result_is_new(detect::MatchOutcome::Draw),
+            "the close cleared the rank log with no active game"
+        );
+        clear_rank_result_log();
     }
 
     #[test]

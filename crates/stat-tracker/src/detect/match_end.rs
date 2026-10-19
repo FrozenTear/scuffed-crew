@@ -333,7 +333,9 @@ pub fn clear_rank_result_log() {
     *last = None;
 }
 
-fn rank_result_is_new(outcome: MatchOutcome) -> bool {
+/// Record a rank-screen result and return whether it differs from the last
+/// one logged. Public so the session close can be tested from the binary.
+pub fn rank_result_is_new(outcome: MatchOutcome) -> bool {
     #[cfg(test)]
     let _hold = rank_log_test_guard();
     let mut last = RANK_RESULT_LOG
