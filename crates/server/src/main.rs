@@ -457,6 +457,7 @@ mod compression_shell {
                 redirect_base_url: "https://crew.example.test".into(),
                 allowed_origins: vec!["https://crew.example.test".into()],
             },
+            auth_redirect_base: None,
             upload_dir: root.join("uploads"),
             reports_dir: root.join("reports"),
             reports_enabled: true,
