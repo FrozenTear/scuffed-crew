@@ -19,6 +19,8 @@ mod resize;
 pub use pack::{NamePack, PackError, Params};
 pub use reader::{Abstain, RawRead};
 
+use std::sync::Arc;
+
 use crate::ocr::{self, CellOcrResult, RowOcrResult};
 use image::DynamicImage;
 
@@ -156,6 +158,267 @@ pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack
 /// Load the installed pack under `data_dir`, or say why there is none.
 pub fn load_installed(data_dir: &std::path::Path) -> Result<NamePack, PackError> {
     NamePack::load(&pack::dir_in(data_dir))
+}
+
+/// The name-reader switch for one process. On unless config sets
+/// `name_reader = false`. Independent of the cv reader (`reader = "ocr-v1"`
+/// or `"new"`).
+#[derive(Debug, Clone)]
+pub struct NameSwitch {
+    pub enabled: bool,
+    /// Loaded pack. `None` when the switch is off, or the pack is missing
+    /// or refused. [`read_names`] then uses today's Tesseract path.
+    pub pack: Option<Arc<NamePack>>,
+}
+
+impl NameSwitch {
+    pub const fn off() -> Self {
+        Self {
+            enabled: false,
+            pack: None,
+        }
+    }
+
+    /// Load once at startup. A missing or refused pack is logged here
+    /// (template count and the reason, never a player name) and left empty,
+    /// so later reads do not log it again and do not add their own fallback.
+    pub fn load(enabled: bool, data_dir: &std::path::Path) -> Self {
+        if !enabled {
+            return Self::off();
+        }
+        match load_installed(data_dir) {
+            Ok(pack) => {
+                tracing::info!(templates = pack.templates(), "names-v1 pack loaded");
+                Self {
+                    enabled: true,
+                    pack: Some(Arc::new(pack)),
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    reason = %err,
+                    templates = 0,
+                    "names-v1 pack was not loaded"
+                );
+                Self {
+                    enabled: true,
+                    pack: None,
+                }
+            }
+        }
+    }
+}
+
+/// How a list of name rows is turned into the configured player's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardMatch {
+    /// ocr-v1's cell rows. A short list is still matched.
+    Cells,
+    /// A name-window read. The index picks a row on the digit reader's
+    /// board, so a short list names no row (a crop that fell outside the
+    /// board must not shift every later index).
+    FullBoard,
+}
+
+/// A row reduced to the name reads the player-row matcher looks at.
+pub fn name_only(row: &RowOcrResult) -> RowOcrResult {
+    RowOcrResult {
+        name: row.name.as_ref().map(copy_cell),
+        name_alternates: row
+            .name_alternates
+            .iter()
+            .map(|cell| cell.as_ref().map(copy_cell))
+            .collect(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+fn copy_cell(cell: &CellOcrResult) -> CellOcrResult {
+    CellOcrResult {
+        value: cell.value.clone(),
+        confidence: cell.confidence,
+        suspect: cell.suspect,
+    }
+}
+
+fn blank_name_row() -> RowOcrResult {
+    RowOcrResult {
+        name: None,
+        name_alternates: Vec::new(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+/// Thousandths, the same scale [`read_names`] stores for a template margin.
+fn confidence_millis(min_confidence: f32) -> i32 {
+    (min_confidence * 1000.0).round() as i32
+}
+
+/// `confidence` is the thousandths [`read_names`] writes, and
+/// `min_confidence` is the pack's own [`Params::min_confidence`].
+fn name_meets(cell: &CellOcrResult, min_confidence: f32) -> bool {
+    !cell.value.is_empty() && cell.confidence >= confidence_millis(min_confidence)
+}
+
+fn row_meets(row: &RowOcrResult, min_confidence: f32) -> bool {
+    row.name
+        .as_ref()
+        .is_some_and(|cell| name_meets(cell, min_confidence))
+}
+
+/// Match `rows` against `player`. [`BoardMatch::FullBoard`] refuses a list
+/// that is not both teams.
+pub fn match_named_rows(
+    rows: &[RowOcrResult],
+    player: &str,
+    team_size: usize,
+    policy: BoardMatch,
+) -> Option<crate::parse::NameMatch> {
+    if policy == BoardMatch::FullBoard && rows.len() != team_size * 2 {
+        return None;
+    }
+    crate::parse::match_player_row_by_name(rows, player)
+}
+
+fn sure_rows(rows: &[RowOcrResult], min_confidence: f32) -> Vec<RowOcrResult> {
+    rows.iter()
+        .map(|row| {
+            if row_meets(row, min_confidence) {
+                RowOcrResult {
+                    name: row.name.as_ref().map(copy_cell),
+                    name_alternates: Vec::new(),
+                    stats: Vec::new(),
+                    mean_confidence: 0,
+                }
+            } else {
+                blank_name_row()
+            }
+        })
+        .collect()
+}
+
+/// Keep a template name that meets `min_confidence`. A blank or lower row
+/// takes the Tesseract read of that same row, including its other name
+/// windows. `None` when the two lists are not the same length.
+fn merge_weak_rows(
+    template: &[RowOcrResult],
+    tesseract: &[RowOcrResult],
+    min_confidence: f32,
+) -> Option<Vec<RowOcrResult>> {
+    if template.len() != tesseract.len() {
+        return None;
+    }
+    Some(
+        template
+            .iter()
+            .zip(tesseract)
+            .map(|(temp, tess)| {
+                if row_meets(temp, min_confidence) {
+                    RowOcrResult {
+                        name: temp.name.as_ref().map(copy_cell),
+                        name_alternates: Vec::new(),
+                        stats: Vec::new(),
+                        mean_confidence: 0,
+                    }
+                } else {
+                    name_only(tess)
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Rows [`read_names`] returned for one board, when the switch is on.
+pub struct ReaderNames<'a> {
+    pub rows: &'a [RowOcrResult],
+    /// `None` when no pack loaded: `rows` are already today's Tesseract
+    /// read. `Some` is the pack's own `min_confidence`.
+    pub min_confidence: Option<f32>,
+}
+
+/// The row of `player` from the name reader, or from `tesseract_rows`.
+///
+/// The switch off uses `tesseract_rows` and `policy` and does not look at
+/// `reader`. The switch on with no pack (`min_confidence` is `None`) uses
+/// `reader.rows` as a full board and does not call `tesseract_rows`: that
+/// list is already the Tesseract path inside [`read_names`]. The switch on
+/// with a pack uses a row whose template name meets the pack threshold.
+/// When the player's own row is blank or under that threshold, only the
+/// weak rows are filled from `tesseract_rows` and the match is tried again.
+/// A full board of sure names that does not contain the player does not
+/// call Tesseract.
+pub fn choose_player_row(
+    player: &str,
+    team_size: usize,
+    enabled: bool,
+    reader: Option<ReaderNames<'_>>,
+    policy: BoardMatch,
+    tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
+) -> Option<crate::parse::NameMatch> {
+    if !enabled {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy);
+    }
+    let Some(reader) = reader else {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy);
+    };
+    let Some(min_confidence) = reader.min_confidence else {
+        return match_named_rows(reader.rows, player, team_size, BoardMatch::FullBoard);
+    };
+    let full = reader.rows.len() == team_size * 2;
+    if full
+        && let Some(found) = match_named_rows(
+            &sure_rows(reader.rows, min_confidence),
+            player,
+            team_size,
+            BoardMatch::FullBoard,
+        )
+    {
+        return Some(found);
+    }
+    let any_weak = !full
+        || reader
+            .rows
+            .iter()
+            .any(|row| !row_meets(row, min_confidence));
+    if !any_weak {
+        return None;
+    }
+    let tess = tesseract_rows();
+    match merge_weak_rows(reader.rows, &tess, min_confidence) {
+        Some(rows) => match_named_rows(&rows, player, team_size, policy),
+        None => match_named_rows(&tess, player, team_size, policy),
+    }
+}
+
+/// Find `player` on `board`. `tesseract_rows` is the tracker's current name
+/// read for this cv mode (cell rows under ocr-v1, name windows under the
+/// new reader). See [`choose_player_row`].
+pub fn match_player_row(
+    board: &DynamicImage,
+    team_size: usize,
+    player: &str,
+    switch: &NameSwitch,
+    policy: BoardMatch,
+    tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
+) -> Option<crate::parse::NameMatch> {
+    if !switch.enabled {
+        return choose_player_row(player, team_size, false, None, policy, tesseract_rows);
+    }
+    let read = read_names(board, team_size, switch.pack.as_deref());
+    let min_confidence = switch.pack.as_ref().map(|pack| pack.params.min_confidence);
+    choose_player_row(
+        player,
+        team_size,
+        true,
+        Some(ReaderNames {
+            rows: &read.rows,
+            min_confidence,
+        }),
+        policy,
+        tesseract_rows,
+    )
 }
 
 #[cfg(test)]

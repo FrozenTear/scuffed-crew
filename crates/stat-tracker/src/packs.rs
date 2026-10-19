@@ -15,8 +15,9 @@
 //! over heroes-v1 when complete ([`crate::shadow::heroes::HeroSet`]).
 //! `maps-v1.tar` is the new reader's map banner pack
 //! ([`crate::shadow::banner::MapDirs`]) and `words-v1.tar` its result word
-//! pack ([`crate::shadow::result::ResultDirs`]). The other packs are
-//! downloaded into folders no reader opens yet.
+//! pack ([`crate::shadow::result::ResultDirs`]). `names-v1.tar` is the
+//! name reader's letter pack ([`crate::names::pack::dir_in`]). `bans-v1.tar`
+//! is downloaded into a folder no reader opens yet.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
@@ -72,6 +73,32 @@ pub const HEROES_PORTRAIT_PACK_NAME: &str = "heroes-v2.tar";
 /// File name of the hero portrait pack the new reader reads at 1080p.
 pub const HEROES_PORTRAIT_1080_PACK_NAME: &str = "heroes-v2-1080.tar";
 
+/// Lowercase hex sha256 of the `names-v1.tar` bytes.
+///
+/// TODO: replace this placeholder with the sha256 of the final names-v1
+/// tarball once that hash is posted. Sixty-four zeros is not a hash of any
+/// tarball. While this stays the placeholder, a download is checked only
+/// against the server list (size and sha256), the same way as the hero
+/// packs. Once it is a real hash, the listed sha256 has to equal it or the
+/// pack is refused and the installed folder is left in place.
+pub const NAMES_V1_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The unset value of [`NAMES_V1_SHA256`]. Not a hash of any tarball.
+const NAMES_V1_SHA256_UNSET: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// `true` when `listed` may be installed for names-v1. The placeholder pin
+/// accepts whatever sha256 the server list published. A real pin accepts
+/// only that digest.
+fn names_v1_sha256_allows(listed: &str) -> bool {
+    pinned_sha_allows(NAMES_V1_SHA256, NAMES_V1_SHA256_UNSET, listed)
+}
+
+fn pinned_sha_allows(pinned: &str, unset: &str, listed: &str) -> bool {
+    pinned == unset || listed == pinned
+}
+
 /// What may sit inside one pack. Paths are checked before anything is
 /// written, and a path outside the layout refuses that pack only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +114,9 @@ pub enum PackLayout {
     MapGlyphs,
     /// Word art: top-level `<word_id>.png` and `<name>.json`.
     Words,
+    /// Letter templates: the six files [`crate::names::pack`] loads, and
+    /// nothing else. No subdirectory.
+    Names,
 }
 
 /// One pack the tracker installs.
@@ -112,8 +142,9 @@ impl PackSpec {
 /// first so a rate limit or refused token hits it the way it did in alpha.6.
 /// The hero packs are read by a reader today (heroes-v1 by the shadow log and
 /// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
-/// reader), and so is maps-v1 (the new reader's map banner); the others are
-/// not yet.
+/// reader), and so are maps-v1 (the new reader's map banner), words-v1 (its
+/// result words) and names-v1 (the name reader's letter pack). bans-v1 is
+/// not opened by a reader yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -149,6 +180,12 @@ pub const PACKS: &[PackSpec] = &[
         name: "words-v1.tar",
         dir: |data_dir| data_dir.join("templates").join("words-v1"),
         layout: PackLayout::Words,
+        required: false,
+    },
+    PackSpec {
+        name: crate::names::pack::PACK_NAME,
+        dir: crate::names::pack::dir_in,
+        layout: PackLayout::Names,
         required: false,
     },
 ];
@@ -833,7 +870,8 @@ impl Tried {
 /// [`PACKS`] current, and keep trying while the daemon runs.
 ///
 /// Its first try carries on from [`sync_on_startup`]: with that run's list
-/// it syncs the other packs, so a first install is still seven requests.
+/// it syncs the other packs, so a first install is still eight requests
+/// (the list, then every pack).
 /// If startup did not get that far (busy lock, 429, packs switched off, a
 /// network error, a refused token) nothing is sent now and that outcome
 /// sets the first wait.
@@ -1528,6 +1566,11 @@ fn install_pack(data_dir: &Path, spec: &PackSpec, entry: &PackListEntry, bytes: 
     if bytes.len() as u64 != entry.size || sha256_hex(bytes) != entry.sha256 {
         return PackSync::Failed(PACK_MISMATCH.to_string());
     }
+    // names-v1 also has to match NAMES_V1_SHA256 once that constant is a
+    // real tarball hash. The placeholder does not add a second check.
+    if spec.name == crate::names::pack::PACK_NAME && !names_v1_sha256_allows(&entry.sha256) {
+        return PackSync::Failed(PACK_MISMATCH.to_string());
+    }
     let staging = parent.join(format!(".{}-next-{}", dir_label(&live), unique_suffix()));
     if std::fs::create_dir(&staging).is_err() {
         return PackSync::Failed(PACK_FAILED.to_string());
@@ -1949,6 +1992,14 @@ pub(crate) fn is_word_id(stem: &str) -> bool {
     !stem.is_empty() && stem.len() <= MAX_STEM && stem.bytes().all(is_word_byte)
 }
 
+/// The six files the names-v1 pack loads. No other name is stored.
+fn is_names_v1_file(raw: &str) -> bool {
+    matches!(
+        raw,
+        "glyphs.png" | "glyphs.txt" | "marks.png" | "marks.txt" | "compose.txt" | "whiten.f32"
+    )
+}
+
 /// `g` plus four lowercase hex digits, then `.png`.
 pub(crate) fn is_glyph_name(raw: &str) -> bool {
     raw.strip_prefix('g')
@@ -1984,6 +2035,7 @@ impl PackLayout {
                 is_plain_name(raw, ".png", is_word_byte)
                     || is_plain_name(raw, ".json", is_word_byte)
             }
+            Self::Names => is_names_v1_file(raw),
         };
         if ok {
             Ok(raw.to_string())
@@ -1996,7 +2048,7 @@ impl PackLayout {
     fn allows_dir(self, raw: &str) -> bool {
         match self {
             Self::HeroesV1 | Self::Portraits => safe_rel_path(raw).as_deref() == Some("special"),
-            Self::BanIcons | Self::MapGlyphs | Self::Words => false,
+            Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names => false,
         }
     }
 }
@@ -3174,8 +3226,33 @@ mod tests {
             "bans-v1.tar" => &["ana.png", "soldier-76.png"],
             "maps-v1.tar" => &["atlas.json", "g0041.png", "g003a.png"],
             "words-v1.tar" => &["accolade_victory.png", "end_title_defeat.png", "words.json"],
+            "names-v1.tar" => &[
+                "glyphs.png",
+                "glyphs.txt",
+                "marks.png",
+                "marks.txt",
+                "compose.txt",
+                "whiten.f32",
+            ],
             other => panic!("no sample for {other}"),
         };
+        if name == "names-v1.tar" {
+            // Bytes only have to match the layout. They are not a letter pack.
+            return names
+                .iter()
+                .enumerate()
+                .map(|(index, path)| {
+                    let data = if path.ends_with(".png") {
+                        tiny_png(index as u8)
+                    } else if path.ends_with(".f32") {
+                        vec![index as u8; 16]
+                    } else {
+                        b"A\t0.5\n".to_vec()
+                    };
+                    (path.to_string(), data)
+                })
+                .collect();
+        }
         names
             .iter()
             .enumerate()
@@ -3258,7 +3335,7 @@ mod tests {
     /// The inner files of each synthetic pack, by pack name.
     type PackContents = BTreeMap<String, Vec<(String, Vec<u8>)>>;
 
-    /// The server side of all six packs: list entries plus files.
+    /// The server side of every pack: list entries plus files.
     fn all_packs() -> (Vec<serde_json::Value>, ServedFiles, PackContents) {
         let mut list = Vec::new();
         let mut files = BTreeMap::new();
@@ -3312,6 +3389,7 @@ mod tests {
             ("bans-v1.tar", "templates/bans-v1"),
             ("maps-v1.tar", "templates/maps-v1"),
             ("words-v1.tar", "templates/words-v1"),
+            ("names-v1.tar", "templates/names-v1"),
         ];
         assert_eq!(PACKS.len(), expected.len() + 1);
         for (name, dir) in expected {
@@ -3319,9 +3397,9 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: only the hero packs, maps-v1 and words-v1 land
-        // in a folder a reader opens. The hand-installed maps and result
-        // folders are not pack folders.
+        // Reader neutrality: the hero packs, maps-v1, words-v1 and names-v1
+        // land in a folder a reader opens. bans-v1 does not. The
+        // hand-installed maps and result folders are not pack folders.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
             crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
@@ -3330,6 +3408,7 @@ mod tests {
             crate::shadow::result::WORDS_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR,
             crate::shadow::banner::TEMPLATE_SUBDIR_V1,
+            "templates/names-v1",
         ];
         let mut seen = BTreeSet::new();
         for spec in PACKS {
@@ -3347,6 +3426,7 @@ mod tests {
                         | "heroes-v2-1080.tar"
                         | "maps-v1.tar"
                         | "words-v1.tar"
+                        | "names-v1.tar"
                 ),
                 "{}",
                 spec.name
@@ -3379,6 +3459,12 @@ mod tests {
             (PackLayout::MapGlyphs, "g003a.png"),
             (PackLayout::Words, "accolade_victory.png"),
             (PackLayout::Words, "layouts.json"),
+            (PackLayout::Names, "glyphs.png"),
+            (PackLayout::Names, "glyphs.txt"),
+            (PackLayout::Names, "marks.png"),
+            (PackLayout::Names, "marks.txt"),
+            (PackLayout::Names, "compose.txt"),
+            (PackLayout::Names, "whiten.f32"),
         ];
         for (layout, raw) in ok {
             assert_eq!(
@@ -3411,6 +3497,12 @@ mod tests {
             (PackLayout::Words, "end-title.png"),
             (PackLayout::Words, "sub/words.json"),
             (PackLayout::Words, "words.txt"),
+            (PackLayout::Names, "glyphs.jpg"),
+            (PackLayout::Names, "Glyphs.png"),
+            (PackLayout::Names, "sub/glyphs.png"),
+            (PackLayout::Names, "whiten.f64"),
+            (PackLayout::Names, "compose.json"),
+            (PackLayout::Names, "../glyphs.png"),
         ];
         for (layout, raw) in refused {
             assert_eq!(layout.file_path(raw), Err(PACK_UNSAFE), "{layout:?} {raw}");
@@ -3421,6 +3513,7 @@ mod tests {
             PackLayout::BanIcons,
             PackLayout::MapGlyphs,
             PackLayout::Words,
+            PackLayout::Names,
         ] {
             assert_eq!(
                 layout.file_path("manifest.json").as_deref(),
@@ -3448,6 +3541,29 @@ mod tests {
         assert_eq!(
             read_ustar(&dir, PackLayout::Words).unwrap_err(),
             PACK_UNSAFE
+        );
+        assert_eq!(
+            read_ustar(&dir, PackLayout::Names).unwrap_err(),
+            PACK_UNSAFE
+        );
+    }
+
+    #[test]
+    fn names_v1_sha256_is_a_placeholder_until_the_tarball_hash_is_posted() {
+        assert_eq!(NAMES_V1_SHA256.len(), 64);
+        assert!(NAMES_V1_SHA256.chars().all(|c| c == '0'));
+        assert_eq!(NAMES_V1_SHA256, NAMES_V1_SHA256_UNSET);
+        // The placeholder does not reject the hash the server list published.
+        assert!(names_v1_sha256_allows(&"ab".repeat(32)));
+        let posted = "ab".repeat(32);
+        let other = "cd".repeat(32);
+        assert!(pinned_sha_allows(&posted, NAMES_V1_SHA256_UNSET, &posted));
+        assert!(!pinned_sha_allows(&posted, NAMES_V1_SHA256_UNSET, &other));
+        assert_eq!(
+            pack_spec(crate::names::pack::PACK_NAME)
+                .expect("names-v1")
+                .dir_in(Path::new("/data")),
+            crate::names::pack::dir_in(Path::new("/data"))
         );
     }
 
@@ -3491,10 +3607,10 @@ mod tests {
             .filter(|name| name.starts_with('.') && name != ".pack-sync.lock")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        assert_eq!(report.extras_ready(), (5, 5));
+        assert_eq!(report.extras_ready(), (6, 6));
         assert_eq!(
             report.guide_result(),
-            Ok("Reader pack saved. Extra reader packs ready: 5 of 5.".to_string())
+            Ok("Reader pack saved. Extra reader packs ready: 6 of 6.".to_string())
         );
     }
 
@@ -3526,7 +3642,7 @@ mod tests {
         );
         assert_eq!(
             second.guide_result(),
-            Ok("The reader pack is already installed. Extra reader packs ready: 5 of 5.".into())
+            Ok("The reader pack is already installed. Extra reader packs ready: 6 of 6.".into())
         );
     }
 
@@ -3555,7 +3671,7 @@ mod tests {
         let versions = stored_versions(dir.path());
         assert!(!versions.contains_key("bans-v1.tar"));
         assert_eq!(versions.len(), PACKS.len() - 1);
-        assert_eq!(report.extras_ready(), (4, 5));
+        assert_eq!(report.extras_ready(), (5, 6));
     }
 
     #[tokio::test]
@@ -3953,11 +4069,11 @@ mod tests {
             assert_eq!(outcome(&report, spec.name), &expected, "{}", spec.name);
         }
         assert_eq!(served.downloaded(), vec!["heroes-v2.tar".to_string()]);
-        assert_eq!(report.extras_ready(), (4, 5));
+        assert_eq!(report.extras_ready(), (5, 6));
         assert_eq!(
             report.guide_result(),
             Ok(format!(
-                "The reader pack is already installed. Extra reader packs ready: 4 of 5. {limited}."
+                "The reader pack is already installed. Extra reader packs ready: 5 of 6. {limited}."
             ))
         );
     }
@@ -4008,11 +4124,12 @@ mod tests {
             "heroes-v2-1080.tar",
             "bans-v1.tar",
             "maps-v1.tar",
+            "names-v1.tar",
         ] {
             assert_eq!(outcome(&report, name), &limited, "{name}");
         }
         assert_eq!(outcome(&report, "words-v1.tar"), &PackSync::Missing);
-        assert_eq!(report.extras_ready(), (0, 4));
+        assert_eq!(report.extras_ready(), (0, 5));
     }
 
     fn age_folder(path: &Path, age: std::time::Duration) {
@@ -5207,11 +5324,12 @@ mod tests {
                 secs(10),
                 secs(10),
                 secs(10),
+                secs(10),
                 secs(10)
             ]
         );
         assert_all_installed(dir.path(), &contents);
-        // Startup (2), the refused download, then the five downloads. The
+        // Startup (2), the refused download, then the six downloads. The
         // list is not asked for again.
         let mut expected = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
         expected.extend(tar_paths(&pack_names()[1..]));
@@ -5220,21 +5338,19 @@ mod tests {
         assert_eq!(said.len(), 1, "{logs}");
         assert!(said[0].contains("wait_secs=7"), "{logs}");
         assert!(
-            said[0].contains(
-                "missing=\"heroes-v2.tar, heroes-v2-1080.tar, bans-v1.tar, maps-v1.tar, words-v1.tar\""
-            ),
+            said[0].contains(&format!("missing=\"{}\"", pack_names()[1..].join(", "))),
             "{logs}"
         );
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
-        assert!(done[0].contains("tries=6"), "{logs}");
+        assert!(done[0].contains("tries=7"), "{logs}");
         assert!(
             done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
             "{logs}"
         );
-        // Six installs, the 429 line and the closing line. The paced waits
+        // Seven installs, the 429 line and the closing line. The paced waits
         // are not written for a member.
-        assert_eq!(pack_lines(&logs).len(), 8, "{logs}");
+        assert_eq!(pack_lines(&logs).len(), 9, "{logs}");
         assert_no_secrets(&logs);
     }
 
@@ -5265,9 +5381,9 @@ mod tests {
         // 300 s is cut to 120 s. Then one request per try: the list, and
         // each pack 10 s after the one before.
         let mut expected_waits = vec![secs(120) + TEST_JITTER];
-        expected_waits.extend([secs(10); 6]);
+        expected_waits.extend([secs(10); 7]);
         assert_eq!(waits, expected_waits);
-        assert_eq!(*sent_by_nap.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_all_installed(dir.path(), &contents);
         let mut expected = vec![LIST_PATH.to_string()];
         expected.extend(list_then(&pack_names()));
@@ -5315,7 +5431,7 @@ mod tests {
         );
         assert_eq!(
             lines_with(&logs, "reader pack installed").len(),
-            6,
+            PACKS.len(),
             "{logs}"
         );
         assert!(lines_with(&logs, " WARN ").is_empty(), "{logs}");
@@ -5420,9 +5536,7 @@ mod tests {
         assert_eq!(said.len(), 1, "two failed tries, one line:\n{logs}");
         assert!(said[0].contains(" WARN "), "{logs}");
         assert!(
-            said[0].contains(
-                "missing=\"heroes-v2.tar, heroes-v2-1080.tar, bans-v1.tar, maps-v1.tar, words-v1.tar\""
-            ),
+            said[0].contains(&format!("missing=\"{}\"", pack_names()[1..].join(", "))),
             "{logs}"
         );
         assert!(!said[0].contains(HEROES_PACK_NAME), "{logs}");
@@ -5534,12 +5648,12 @@ mod tests {
         for spec in PACKS {
             assert_eq!(fetched(&format!("/{}", spec.name)), 1, "{}", spec.name);
         }
-        // Startup and the first try are 7 requests. The next try reads the
+        // Startup and the first try are 8 requests. The next try reads the
         // list again, because the download did not match it. After that
         // the list is read only once it is 30 minutes old.
-        assert_eq!(*sent_by_nap.lock().unwrap(), [7, 8, 8, 8, 9]);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [8, 9, 9, 9, 10]);
         assert_eq!(list_requests(&served), 4);
-        assert_eq!(asked.len(), 10);
+        assert_eq!(asked.len(), 11);
         assert!(
             !pack_spec("heroes-v2.tar")
                 .unwrap()
@@ -5608,13 +5722,13 @@ mod tests {
         assert_eq!(waits, [secs(60), secs(300), secs(900), secs(1800)]);
         assert_all_installed(dir.path(), &contents);
         assert_eq!(stored_versions(dir.path())["heroes-v2.tar"], "154088.2");
-        // Startup 2, the first try 5, the list after the mismatch, the
+        // Startup 2, the first try 6, the list after the mismatch, the
         // list at 30 minutes, and the pack again under its new entry.
         let asked = requests(&served);
         let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
         assert_eq!(fetched("/heroes-v2.tar"), 2);
         assert_eq!(list_requests(&served), 3);
-        assert_eq!(asked.len(), 10);
+        assert_eq!(asked.len(), 11);
         assert_eq!(lines_with(&logs, SAID_MISSING).len(), 1, "{logs}");
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
@@ -5685,7 +5799,7 @@ mod tests {
         assert_eq!(requests(&served), list_then(&pack_names()));
         // As before this change: one line per pack, nothing else.
         let lines = pack_lines(&logs);
-        assert_eq!(lines.len(), 6, "{logs}");
+        assert_eq!(lines.len(), PACKS.len(), "{logs}");
         assert!(
             lines
                 .iter()
@@ -6460,7 +6574,7 @@ mod tests {
         assert_eq!(*waits.lock().unwrap(), Vec::<Duration>::new());
         assert_all_installed(dir.path(), &contents);
         assert_eq!(site.paths(), list_then(&pack_names()));
-        assert_eq!(site.statuses(), [200; 7]);
+        assert_eq!(site.statuses(), [200; 8]);
         assert_eq!(clock.now(), Duration::ZERO);
     }
 
@@ -6484,13 +6598,19 @@ mod tests {
         expected.extend(tar_paths(&["bans-v1.tar"]));
         expected.extend(tar_paths(&pack_names()[3..]));
         assert_eq!(site.paths(), expected);
-        assert_eq!(site.statuses(), [200, 200, 200, 200, 429, 200, 200, 200]);
+        assert_eq!(
+            site.statuses(),
+            [200, 200, 200, 200, 429, 200, 200, 200, 200]
+        );
         assert_eq!(
             *waits.lock().unwrap(),
-            [secs(11) + TEST_JITTER, secs(10), secs(10)]
+            [secs(11) + TEST_JITTER, secs(10), secs(10), secs(10)]
         );
-        assert_eq!(site.times()[5..], [ms(11_750), ms(21_750), ms(31_750)]);
-        assert_eq!(clock.now(), ms(31_750));
+        assert_eq!(
+            site.times()[5..],
+            [ms(11_750), ms(21_750), ms(31_750), ms(41_750)]
+        );
+        assert_eq!(clock.now(), ms(41_750));
     }
 
     #[tokio::test]
@@ -6505,13 +6625,13 @@ mod tests {
             site.paths()
         );
         assert_all_installed(dir.path(), &contents);
-        // The refused list, the list, then the six packs.
+        // The refused list, the list, then the seven packs.
         let mut expected = vec![LIST_PATH.to_string()];
         expected.extend(list_then(&pack_names()));
         assert_eq!(site.paths(), expected);
         assert_eq!(site.refused(), 1);
         let mut expected_waits = vec![secs(11) + TEST_JITTER];
-        expected_waits.extend([secs(10); 6]);
+        expected_waits.extend([secs(10); 7]);
         assert_eq!(*waits.lock().unwrap(), expected_waits);
         // One request every 10 s, each 1.75 s after the bucket gave it.
         let times = site.times();
@@ -6521,7 +6641,7 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1] - pair[0] == secs(10))
         );
-        assert_eq!(clock.now(), ms(71_750));
+        assert_eq!(clock.now(), ms(81_750));
     }
 
     #[tokio::test]
@@ -6542,19 +6662,19 @@ mod tests {
         );
         assert_all_installed(dir_a.path(), &contents);
         assert_all_installed(dir_b.path(), &contents);
-        // A takes 7 of the 8. B's list is the eighth, its first download
-        // is refused with 8 s, and its six packs follow 10 s apart.
+        // A takes all 8. B's list is refused with 8 s, then the list and
+        // its seven packs follow 10 s apart.
         assert_eq!(*waits_a.lock().unwrap(), Vec::<Duration>::new());
         let mut expected_waits = vec![secs(8) + TEST_JITTER];
-        expected_waits.extend([secs(10); 5]);
+        expected_waits.extend([secs(10); 7]);
         assert_eq!(*waits_b.lock().unwrap(), expected_waits);
         let mut expected = list_then(&pack_names());
-        expected.extend(list_then(&[HEROES_PACK_NAME]));
-        expected.extend(tar_paths(&pack_names()));
+        expected.push(LIST_PATH.to_string());
+        expected.extend(list_then(&pack_names()));
         assert_eq!(site.paths(), expected);
-        assert_eq!(site.statuses().len(), 15);
+        assert_eq!(site.statuses().len(), 17);
         assert_eq!(site.refused(), 1);
-        assert_eq!(clock.now(), ms(61_750));
+        assert_eq!(clock.now(), ms(81_750));
     }
 
     /// Both trackers want the same refilled request every 10 s. The one
@@ -6584,18 +6704,18 @@ mod tests {
             waits_a.lock().unwrap(),
             waits_b.lock().unwrap()
         );
-        // 14 requests are needed (two lists, twelve packs). A is refused
-        // once and is done after 71.75 s. B comes second three more times,
+        // 16 requests are needed (two lists, fourteen packs). A is refused
+        // once and is done after 81.75 s. B comes second three more times,
         // waits 12.25, 22.25 and 42.25 s, and then has the bucket to
-        // itself: 5 refused requests in all, both done after 150 s.
-        assert_eq!(requests - refused, 14);
+        // itself: 5 refused requests in all, both done after 160 s.
+        assert_eq!(requests - refused, 16);
         assert_eq!(refused, 5);
-        assert_eq!(took, secs(150));
+        assert_eq!(took, secs(160));
         let mut expected_a = vec![ms(11_750)];
-        expected_a.extend([secs(10); 6]);
+        expected_a.extend([secs(10); 7]);
         assert_eq!(*waits_a.lock().unwrap(), expected_a);
         let mut expected_b = vec![ms(13_250), ms(12_250), ms(22_250), ms(42_250)];
-        expected_b.extend([secs(10); 6]);
+        expected_b.extend([secs(10); 7]);
         assert_eq!(*waits_b.lock().unwrap(), expected_b);
     }
 }
