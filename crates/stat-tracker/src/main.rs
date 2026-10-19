@@ -19031,6 +19031,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_refused_chunk_that_hits_429_backs_off_and_honors_retry_after() {
+        let n = 8_i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        for i in 0..n {
+            let mut row = test_match(&format!("s{i}"), "victory");
+            row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(i));
+            store.insert_match(row).await.unwrap();
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let retry_after = std::time::Duration::from_secs(6);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            let retry_after = retry_after;
+            async move {
+                let seen = calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen < 10 {
+                    Err(sync::SyncUploadError {
+                        message: "matches[0]: recognizer is not allowed".into(),
+                        status: Some(422),
+                        ..sync::SyncUploadError::plain("")
+                    })
+                } else {
+                    Err(sync::SyncUploadError {
+                        message: "slow down".into(),
+                        status: Some(429),
+                        retry_after: Some(retry_after),
+                        code: Some("rate_limited".into()),
+                        ..sync::SyncUploadError::plain("")
+                    })
+                }
+            }
+        })
+        .await;
+        let used = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            used > 10,
+            "the 429 lands after row-named refusals, used {used}"
+        );
+        assert!(matches!(
+            attempt,
+            sync::SyncAttempt::ServerError {
+                retry_after: Some(wait)
+            } if wait == retry_after
+        ));
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), n as usize);
+        assert!(
+            rows.iter()
+                .all(|row| !row.synced && row.upload_rejection().is_none())
+        );
+        assert_eq!(store.get_unsynced().await.unwrap().len(), n as usize);
+
+        let now = std::time::Instant::now();
+        let mut backoff = sync::SyncBackoff::default();
+        backoff.observe(attempt, now);
+        assert_eq!(backoff.failures(), 1);
+        assert!(!backoff.should_attempt(now));
+        assert_eq!(
+            backoff.retry_after(now),
+            sync::SYNC_BACKOFF_BASE,
+            "a 6s Retry-After stays under the 15s base"
+        );
+
+        backoff.observe(attempt, now);
+        assert_eq!(backoff.failures(), 2);
+        assert_eq!(backoff.retry_after(now), sync::SYNC_BACKOFF_BASE * 2);
+
+        let long_wait = std::time::Duration::from_secs(120);
+        let mut floored = sync::SyncBackoff::default();
+        floored.observe(
+            sync::SyncAttempt::ServerError {
+                retry_after: Some(long_wait),
+            },
+            now,
+        );
+        assert_eq!(floored.failures(), 1);
+        assert_eq!(floored.retry_after(now), long_wait);
+        floored.observe(
+            sync::SyncAttempt::ServerError {
+                retry_after: Some(long_wait),
+            },
+            now,
+        );
+        assert_eq!(floored.failures(), 2);
+        assert_eq!(
+            floored.retry_after(now),
+            long_wait,
+            "Retry-After is a floor under the doubled delay"
+        );
+    }
+
+    #[tokio::test]
     async fn mixed_batch_quarantines_only_the_refused_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
@@ -19752,7 +19846,12 @@ mod tests {
         server.join().unwrap();
         assert!(matches!(live, sync::SyncAttempt::StatsDeletePending));
         let date = sync::format_local_date(raw).expect("date");
+        let local = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(date, local.format("%B %-d, %Y").to_string());
         assert!(!date.contains(':'), "date only, got {date}");
+        assert!(!date.contains('/'), "full month name, got {date}");
         let status = sync::auth_pause_status(dir.path(), &server_url, "tok").expect("status");
         assert_eq!(status, sync::delete_pending_status(Some(raw)));
         assert!(status.contains(&date));

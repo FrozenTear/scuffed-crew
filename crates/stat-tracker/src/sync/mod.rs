@@ -162,10 +162,12 @@ impl SyncUploadError {
     /// [`SyncAttempt::BatchTooLarge`] and does back off. 503 may carry
     /// `Retry-After` as a wait floor. Other statuses, including a bare 400,
     /// 422, or any other 409, are server errors and ignore `Retry-After`.
-    /// The sync pass does not observe a 400 or 422 that way:
-    /// [`isolate_rejected`] splits the batch. A bad row is quarantined only
-    /// when some other row in that pass was accepted. If none was, the rows
-    /// stay queued and the clock backs off. A 409 is never split.
+    /// A refusal with no HTTP status keeps `Retry-After` as a floor under
+    /// the exponential backoff. The sync pass does not observe a 400 or 422
+    /// that way: [`isolate_rejected`] splits the batch. A bad row is
+    /// quarantined only when some other row in that chunk was accepted. If
+    /// none was, the rows stay queued and the clock backs off. A 409 is
+    /// never split.
     pub fn attempt(&self) -> SyncAttempt {
         if self.is_token_expired() {
             return SyncAttempt::TokenExpired;
@@ -182,6 +184,9 @@ impl SyncUploadError {
                 retry_after: self.retry_after,
             },
             Some(503) => SyncAttempt::ServerError {
+                retry_after: self.retry_after,
+            },
+            None => SyncAttempt::ServerError {
                 retry_after: self.retry_after,
             },
             _ => SyncAttempt::ServerError { retry_after: None },
@@ -768,7 +773,7 @@ pub struct UploadIsolation {
 /// Upload `rows`. On HTTP 400 or 422 that names a row (`matches[n]:`), split
 /// the slice in half and retry each half until the bad singletons are
 /// isolated. A singleton is quarantined only when some other row in the
-/// same pass was accepted. If no row was accepted, nothing is quarantined:
+/// same chunk was accepted. If no row was accepted, nothing is quarantined:
 /// the batch is deferred and [`UploadIsolation::stopped`] is
 /// [`SERVER_REFUSING_UPLOADS`] (backoff, same as a 5xx).
 ///
@@ -776,16 +781,19 @@ pub struct UploadIsolation {
 /// probe is sent. If that row fails with 400 or 422, only that row is
 /// blamed and the rest of the slice is retried, whether or not the body
 /// names a row. A good row after the bad one still uploads. The same end
-/// guard applies: when the pass accepts nothing, blamed rows are deferred
+/// guard applies: when the chunk accepts nothing, blamed rows are deferred
 /// instead of quarantined.
 ///
 /// Request count stays at or under [`isolation_request_budget`]
 /// (about `2 * log2(n) + n`).
 ///
 /// A 5xx, a network error, 401, 403, 409, 413, or 429 does not split. 429
-/// keeps `Retry-After` on [`UploadIsolation::stopped`]. The rest of the pass
-/// stops and those indexes are [`UploadIsolation::deferred`]. 409
-/// `stats_delete_pending` is the same shape: one request, nothing quarantined.
+/// keeps `Retry-After` on [`UploadIsolation::stopped`]. When the chunk
+/// accepted nothing and some rows were already refused, that 429 is reported
+/// as [`SERVER_REFUSING_UPLOADS`] and the wait stays on the error as a
+/// backoff floor. The rest of the chunk stops and those indexes are
+/// [`UploadIsolation::deferred`]. 409 `stats_delete_pending` is the same
+/// shape: one request, nothing quarantined.
 pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
 where
     F: FnMut(&[T]) -> Fut,
@@ -863,13 +871,18 @@ where
     // No accepted row means the 400/422s were not single bad payloads
     // among good ones. A server-wide refusal (unknown recognizer id, for
     // example) refuses every subset. Keep the batch queued and back off.
+    // A 429 that stops the walk is the same refusal: the per-token limit
+    // ran out while every row was still being refused. Count that as a
+    // failure and keep Retry-After as a floor. 401, 403, 409, and 413 stay.
     if accepted.is_empty() && !rejected.is_empty() {
         let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
         queued.append(&mut deferred);
         queued.sort_unstable();
         deferred = queued;
-        if stopped.is_none() {
-            stopped = Some(server_wide_refusal(&rejected[0].message));
+        let rate_limited = stopped.as_ref().is_some_and(|err| err.status == Some(429));
+        if stopped.is_none() || rate_limited {
+            let retry_after = stopped.as_ref().and_then(|err| err.retry_after);
+            stopped = Some(server_wide_refusal(&rejected[0].message, retry_after));
         }
         rejected.clear();
     }
@@ -882,9 +895,10 @@ where
     }
 }
 
-fn server_wide_refusal(detail: &str) -> SyncUploadError {
+fn server_wide_refusal(detail: &str, retry_after: Option<std::time::Duration>) -> SyncUploadError {
     SyncUploadError {
         message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
+        retry_after,
         ..SyncUploadError::plain("")
     }
 }
@@ -1144,13 +1158,14 @@ pub fn delete_pending_status(scheduled_at: Option<&str>) -> String {
     }
 }
 
-/// Calendar date in the machine locale, date only. `None` when `raw` is
-/// not an RFC3339 timestamp.
+/// English calendar date: full month name, day, and year, for example
+/// October 26, 2026. The day is the machine's local calendar day, with no
+/// clock time. `None` when `raw` is not an RFC3339 timestamp.
 pub fn format_local_date(raw: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(raw.trim()).ok()?;
     let formatted = parsed
         .with_timezone(&chrono::Local)
-        .format("%x")
+        .format("%B %-d, %Y")
         .to_string();
     if formatted.is_empty() {
         None
@@ -2890,7 +2905,12 @@ mod tests {
     fn delete_pending_status_uses_the_local_date_only() {
         let raw = "2026-10-19T23:30:00Z";
         let date = format_local_date(raw).expect("rfc3339");
+        let local = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(date, local.format("%B %-d, %Y").to_string());
         assert!(!date.contains(':'), "date only, got {date}");
+        assert!(!date.contains('/'), "full month name, got {date}");
         let status = delete_pending_status(Some(raw));
         assert_eq!(
             status,

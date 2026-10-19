@@ -953,11 +953,17 @@ impl LocalStore {
     pub async fn clear_rejected_uploads(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let rows = self.get_all_matches().await?;
+        let mut result = self
+            .db
+            .query(
+                "SELECT session_id FROM personal_match \
+                 WHERE upload_reject != NONE AND upload_reject != ''",
+            )
+            .await?;
+        let rows: Vec<DeletedSession> = result.take(0)?;
         let mut sessions = Vec::new();
         for row in rows {
-            if row.upload_rejection().is_some() && !sessions.iter().any(|id| id == &row.session_id)
-            {
+            if !sessions.iter().any(|id| id == &row.session_id) {
                 sessions.push(row.session_id);
             }
         }
@@ -965,10 +971,7 @@ impl LocalStore {
             return Ok(());
         }
         self.db
-            .query(
-                "UPDATE personal_match SET upload_reject = '', synced = false \
-                 WHERE session_id IN $sids",
-            )
+            .query("UPDATE personal_match SET upload_reject = '' WHERE session_id IN $sids")
             .bind(("sids", sessions.clone()))
             .await?;
         for session_id in &sessions {
