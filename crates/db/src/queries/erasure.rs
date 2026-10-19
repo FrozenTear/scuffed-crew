@@ -67,6 +67,20 @@ fn count_of(rows: Vec<CountRow>) -> u64 {
     rows.first().map(|row| row.count.max(0) as u64).unwrap_or(0)
 }
 
+fn purge_db_kind(error: &DbError) -> &'static str {
+    match error {
+        DbError::Surreal(_) => "surreal",
+        DbError::NotFound(_) => "not_found",
+        DbError::Conflict(_) => "conflict",
+        DbError::Config(_) => "config",
+        DbError::Timeout => "timeout",
+        DbError::Crypto(_) => "crypto",
+        DbError::DisplayNameInvalid => "display_name_invalid",
+        DbError::DisplayNameTaken => "display_name_taken",
+        DbError::ReservedName => "reserved_name",
+    }
+}
+
 fn map_erase_error(err: surrealdb::Error) -> DbError {
     let msg = err.to_string();
     if msg.contains("last_admin") {
@@ -444,9 +458,9 @@ impl Database {
 
     /// Hard-delete stats for every member whose deadline is at or before `now`.
     ///
-    /// Each member is deleted only when the deadline is still due inside the
-    /// transaction. A restore or a moved deadline returns no wipe for that
-    /// member. Report files are removed by the server after this returns.
+    /// One member's error is logged and skipped. Earlier wipes stay in the
+    /// outcome. This does not remove report files; the server pass does that
+    /// after each committed member.
     pub async fn purge_scheduled_stats(&self, now: DateTime<Utc>) -> DbResult<PurgeOutcome> {
         let due = self.members_due_for_stats_purge(now).await?;
         let mut outcome = PurgeOutcome {
@@ -456,13 +470,22 @@ impl Database {
             stat_report_ids: Vec::new(),
         };
         for member_id in due {
-            let Some(wipe) = self.purge_member_if_due(&member_id, now).await? else {
-                continue;
-            };
-            outcome.members += 1;
-            outcome.personal_match += wipe.personal_match;
-            outcome.stat_report += wipe.stat_report;
-            outcome.stat_report_ids.extend(wipe.stat_report_ids);
+            match self.purge_member_if_due(&member_id, now).await {
+                Ok(Some(wipe)) => {
+                    outcome.members += 1;
+                    outcome.personal_match += wipe.personal_match;
+                    outcome.stat_report += wipe.stat_report;
+                    outcome.stat_report_ids.extend(wipe.stat_report_ids);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        member_id = %member_id,
+                        error_kind = purge_db_kind(&error),
+                        "stats purge member failed"
+                    );
+                }
+            }
         }
         Ok(outcome)
     }
