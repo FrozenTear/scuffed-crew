@@ -4,9 +4,9 @@
 //!
 //! | file | content |
 //! |---|---|
-//! | `manifest.json` | `name` `names-v1.tar`, `format` 1, `version`, `canvas` `[16, 28]`, `mark_canvas` `[16, 8]`, `glyphs`, `marks`, optional `params` (each falls back to [`Params::DEFAULT`]), and `files`: `size` and `sha256` of every file below |
+//! | `manifest.json` | `name` `names-v1.tar`, `format` 1, `version` (required, not empty), `canvas` `[16, 28]`, `mark_canvas` `[16, 8]`, `glyphs`, `marks`, optional `params` (each falls back to [`Params::DEFAULT`]), and `files`: `size` and `sha256` of every file below, either as pack sync's array of `path`, `sha256`, `size` (the release form, as in `docs/tracker-packs.md`) or as a map keyed by file name |
 //! | `glyphs.png` | 8-bit gray, 64 tiles a row, one 16x28 letter tile each, in `glyphs.txt` order |
-//! | `glyphs.txt` | one line per tile: the letter, a tab, its width over the cap height |
+//! | `glyphs.txt` | one line per tile: the letter, a tab, its width over the cap height (a finite number above 0) |
 //! | `marks.png` | 8-bit gray, 64 tiles a row, one 16x8 accent tile each |
 //! | `marks.txt` | one line per mark tile: `U+XXXX` (combining mark), a tab, its part count |
 //! | `compose.txt` | `base`, tab, `U+XXXX`, tab, the composed letter: the only accented letters the reader may give |
@@ -28,6 +28,12 @@ pub const MARK_CANVAS: (usize, usize) = (16, 8);
 pub const DIM: usize = CANVAS.0 * CANVAS.1;
 pub const MARK_DIM: usize = MARK_CANVAS.0 * MARK_CANVAS.1;
 const TILES_PER_ROW: usize = 64;
+/// Largest pack file the loader reads, the same cap pack sync puts on a
+/// whole download (`packs::PACK_MAX_BYTES`). A file's size is checked
+/// against the manifest and this cap before it is read.
+pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+/// Largest `manifest.json` the loader reads.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const FILES: [&str; 6] = [
     "glyphs.png",
     "glyphs.txt",
@@ -76,7 +82,13 @@ pub struct Params {
     /// `space_hi` and wider is a space.
     pub space_lo: f64,
     pub space_hi: f64,
-    /// Lowest confidence (smallest best-vs-second letter margin) a read may have.
+    /// Lowest confidence a read may have. The confidence of a read is its
+    /// smallest letter margin: for each letter, the score of the best letter
+    /// class minus the score of the next class (scores are cosines of
+    /// whitened, unit-length tiles, less a small width term). It runs from 0
+    /// (a tie) up; on the labelled boards half the accepted reads are between
+    /// 0.026 and 0.050.
+    /// It is not a probability and not Tesseract's 0 to 100 scale.
     pub min_confidence: f32,
 }
 
@@ -160,6 +172,27 @@ fn mark_char(s: &str) -> Result<char, PackError> {
         .ok_or_else(|| bad("mark code"))
 }
 
+/// Read `path` only after its size is known to be `want` (when given) and
+/// at most `cap`, so a stray huge file is never pulled into memory.
+fn read_capped(
+    path: &Path,
+    want: Option<u64>,
+    cap: u64,
+    label: &str,
+) -> Result<Vec<u8>, PackError> {
+    let len = std::fs::metadata(path)
+        .map_err(|_| bad(format!("missing {label}")))?
+        .len();
+    if len > cap || want.is_some_and(|w| w != len) {
+        return Err(bad(format!("{label} size")));
+    }
+    let bytes = std::fs::read(path).map_err(|_| bad(format!("missing {label}")))?;
+    if bytes.len() as u64 != len {
+        return Err(bad(format!("{label} size")));
+    }
+    Ok(bytes)
+}
+
 fn one_char(s: &str) -> Result<char, PackError> {
     let mut it = s.chars();
     match (it.next(), it.next()) {
@@ -174,12 +207,22 @@ impl NamePack {
         if !dir.is_dir() {
             return Err(PackError::Missing);
         }
-        let raw = std::fs::read(dir.join("manifest.json")).map_err(|_| bad("no manifest.json"))?;
+        let raw = read_capped(
+            &dir.join("manifest.json"),
+            None,
+            MAX_MANIFEST_BYTES,
+            "manifest.json",
+        )?;
         let m: serde_json::Value =
             serde_json::from_slice(&raw).map_err(|_| bad("manifest.json is not JSON"))?;
         if m["name"] != PACK_NAME || m["format"].as_u64() != Some(FORMAT) {
             return Err(bad("not a names-v1 format 1 pack"));
         }
+        // Required, so a log or bug report can say which pack was loaded.
+        let version = match m["version"].as_str() {
+            Some(v) if !v.trim().is_empty() => v.to_owned(),
+            _ => return Err(bad("no version")),
+        };
         if m["canvas"] != serde_json::json!([CANVAS.0, CANVAS.1])
             || m["mark_canvas"] != serde_json::json!([MARK_CANVAS.0, MARK_CANVAS.1])
         {
@@ -187,11 +230,19 @@ impl NamePack {
         }
         let mut files = BTreeMap::new();
         for f in FILES {
-            let want = &m["files"][f];
-            let bytes = std::fs::read(dir.join(f)).map_err(|_| bad(format!("missing {f}")))?;
-            if want["size"].as_u64() != Some(bytes.len() as u64) {
-                return Err(bad(format!("{f} size")));
-            }
+            // Pack sync's layout: `files` is an array of `path`, `sha256`, `size`.
+            // A map keyed by file name is still read.
+            let want = match &m["files"] {
+                serde_json::Value::Array(list) => list
+                    .iter()
+                    .find(|e| e["path"] == f)
+                    .unwrap_or(&serde_json::Value::Null),
+                other => &other[f],
+            };
+            let size = want["size"]
+                .as_u64()
+                .ok_or_else(|| bad(format!("{f} size")))?;
+            let bytes = read_capped(&dir.join(f), Some(size), MAX_FILE_BYTES, f)?;
             let hash = format!("{:x}", Sha256::digest(&bytes));
             if want["sha256"].as_str() != Some(hash.as_str()) {
                 return Err(bad(format!("{f} sha256")));
@@ -233,7 +284,13 @@ impl NamePack {
                 .split_once('\t')
                 .ok_or_else(|| bad("glyphs.txt line"))?;
             labels.push(one_char(c)?);
-            width.push(r.parse::<f32>().map_err(|_| bad("glyphs.txt width"))?);
+            // `parse` accepts NaN and inf; a width must be a positive number.
+            let w = r
+                .parse::<f32>()
+                .ok()
+                .filter(|w| w.is_finite() && *w > 0.0)
+                .ok_or_else(|| bad("glyphs.txt width"))?;
+            width.push(w);
         }
         if m["glyphs"].as_u64() != Some(labels.len() as u64) || labels.is_empty() {
             return Err(bad("glyph count"));
@@ -295,7 +352,7 @@ impl NamePack {
             compose.insert((one_char(b)?, mark_char(mk)?), one_char(c)?);
         }
         Ok(NamePack {
-            version: m["version"].as_str().unwrap_or("").to_owned(),
+            version,
             params,
             z,
             width,
