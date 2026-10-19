@@ -829,6 +829,8 @@ fn raw_zip_entries(b: &[u8]) -> Vec<String> {
     names
 }
 
+/// Dates, names, and uncompressed hashes. zip 9 can compress differently.
+/// The check is the same files and content hashes.
 #[test]
 fn zip_fixture_dates_entries_hashes_and_bom() {
     let dir = tempfile::tempdir().unwrap();

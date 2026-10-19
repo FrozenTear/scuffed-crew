@@ -462,11 +462,12 @@ mod tests {
         }
     }
 
-    /// A tiny deflate stream whose uncompressed size is over the cap, and an
-    /// entry whose name leaves the archive root. Both are rejected. The caps
-    /// themselves are unchanged: entry count, total uncompressed size, and the
+    /// A tiny deflate stream whose uncompressed size is over the cap, and
+    /// names that leave the archive root. All are rejected. The caps themselves
+    /// are unchanged: entry count, total uncompressed size, and the
     /// compression-ratio bound that follows from refusing to inflate past that
-    /// size.
+    /// size. `../log.txt` fails the leading-dot check. `logs/../log.txt` fails
+    /// the `..` segment check. `/log.txt` fails the absolute-path check.
     #[test]
     fn zip_bomb_and_path_traversal_are_rejected() {
         let payload = vec![b'a'; (MAX_BUNDLE_BYTES as usize) + 1];
@@ -486,18 +487,20 @@ mod tests {
 
         let log = b"synthetic log line\n";
         let manifest = log_manifest(log);
-        let traversal = stored_zip(&[("manifest.json", manifest.as_slice()), ("../log.txt", log)]);
-        let names = entry_names(&traversal);
-        assert!(
-            names.iter().any(|name| name.contains("..")),
-            "fixture must keep the traversal name, got {names:?}"
-        );
-        match accept_bundle(&traversal) {
-            Err(BundleReject::Invalid(reason)) => {
-                assert_eq!(reason, "zip path is not allowed")
+        for bad in ["../log.txt", "logs/../log.txt", "/log.txt"] {
+            let traversal = stored_zip(&[("manifest.json", manifest.as_slice()), (bad, log)]);
+            let names = entry_names(&traversal);
+            assert!(
+                names.iter().any(|name| name == bad),
+                "fixture must keep {bad}, got {names:?}"
+            );
+            match accept_bundle(&traversal) {
+                Err(BundleReject::Invalid(reason)) => {
+                    assert_eq!(reason, "zip path is not allowed", "{bad}")
+                }
+                Err(BundleReject::TooLarge) => panic!("{bad} was too large"),
+                Ok(_) => panic!("{bad} was accepted"),
             }
-            Err(BundleReject::TooLarge) => panic!("path traversal was too large"),
-            Ok(_) => panic!("path traversal was accepted"),
         }
     }
 
