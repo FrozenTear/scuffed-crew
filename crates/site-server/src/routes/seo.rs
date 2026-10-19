@@ -49,10 +49,12 @@
 //! `org_name` and `site_description`. A value that is empty after trimming
 //! leaves its own tags as built. On every shell response, including one with
 //! no settings blob, absolute `og:image`, `og:url`, and the canonical link
-//! are set from the public base and the request path. Crawlers do not run
-//! the wasm. With no public base, `og:url` is removed. A relative canonical
-//! and a relative `og:image` stay as built. The settings tag is a data block
-//! (`type="application/json"`), not an executed script.
+//! are set from the public base and the request path, except paths that
+//! match [`PRIVATE_PREFIXES`]. Those drop `og:url`, `og:image`, and the
+//! canonical instead of publishing them. Crawlers do not run the wasm. With
+//! no public base, `og:url` is removed. A relative canonical and a relative
+//! `og:image` stay as built on public paths. The settings tag is a data
+//! block (`type="application/json"`), not an executed script.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -523,8 +525,8 @@ fn cached_settings(json: &str, org_name: &str, site_description: &str) -> Cached
 /// `</head>` index captured when the template was loaded. That title rewrite
 /// is cached on the settings blob and does not include the request path.
 /// `og:image`, `og:url`, and the canonical link are applied after the cache,
-/// so each path gets its own absolute URL. A template with no `</head>` is
-/// returned as loaded.
+/// so each public path gets its own absolute URL. Private prefixes drop
+/// those tags. A template with no `</head>` is returned as loaded.
 fn render_shell(
     template: &ShellTemplate,
     embed: Option<&CachedPublicSettings>,
@@ -586,13 +588,21 @@ fn rewrite_tags(html: &str, needle: &str, mut edit: impl FnMut(&str) -> TagChang
 /// `public_base` is a sanitized origin with no trailing slash. `og:url` is
 /// removed when that origin is absent, including a relative `og:url` already
 /// in the shell. A relative `og:image` and a relative canonical stay in that
-/// case. The request path is not part of the cached title rewrite.
+/// case. Paths that match [`PRIVATE_PREFIXES`] (the same `starts_with` check
+/// robots.txt uses) drop `og:url`, `og:image`, and the canonical instead of
+/// receiving absolute copies. The request path is not part of the cached
+/// title rewrite.
 fn apply_crawler_urls(head: &str, public_base: Option<&str>, request_path: &str) -> String {
     let head = drop_meta_property(head, "og:url");
     let Some(base) = public_base.filter(|base| !base.is_empty()) else {
         return head;
     };
-    let page = format!("{base}{}", canonical_request_path(request_path));
+    let page_path = canonical_request_path(request_path);
+    if path_is_private(&page_path) {
+        let head = drop_meta_property(&head, "og:image");
+        return drop_link_rel(&head, "canonical");
+    }
+    let page = format!("{base}{page_path}");
     let mut found_image = false;
     let head = rewrite_tags(&head, "<meta", |tag| {
         if !meta_property_is(tag, "og:image") {
@@ -616,6 +626,13 @@ fn apply_crawler_urls(head: &str, public_base: Option<&str>, request_path: &str)
     }
     push_meta(&mut head, "og:url", &page);
     upsert_canonical(head, &page)
+}
+
+/// Same prefix match as the `Disallow` lines in [`render_robots`].
+fn path_is_private(path: &str) -> bool {
+    PRIVATE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 fn canonical_request_path(request_path: &str) -> String {
@@ -646,6 +663,16 @@ fn absolute_site_url(base: &str, value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn drop_link_rel(head: &str, token: &str) -> String {
+    rewrite_tags(head, "<link", |tag| {
+        if link_rel_has(tag, token) {
+            TagChange::Drop
+        } else {
+            TagChange::Keep
+        }
+    })
 }
 
 fn drop_meta_property(head: &str, property: &str) -> String {
@@ -2334,6 +2361,52 @@ mod tests {
         assert!(plain.contains("content=\"/assets/apple-touch-icon.png\""));
         assert!(plain.contains("href=\"/old\""));
         assert!(!plain.contains("https://crew.example.test"));
+    }
+
+    #[test]
+    fn private_prefixes_drop_crawler_urls_when_a_public_base_is_set() {
+        let html = "\
+<html><head>\
+<title>Clan</title>\
+<meta property=\"og:image\" content=\"/assets/apple-touch-icon.png\">\
+<meta property=\"og:url\" content=\"/old\">\
+<link rel=\"canonical\" href=\"/old\">\
+</head><body></body></html>";
+        let template = template_with(html);
+        let base = Some("https://crew.example.test");
+        let private_paths = [
+            "/admin/settings",
+            "/login",
+            "/setup",
+            "/dm",
+            "/stats",
+            "/api/settings",
+            "/identity",
+            "/profile/member",
+            "/chat",
+            "/polls",
+            "/scrims",
+            "/strategy/my",
+            "/strategy/editor",
+        ];
+        for path in private_paths {
+            assert!(
+                path_is_private(path),
+                "{path} should match PRIVATE_PREFIXES"
+            );
+            let page = render_shell(&template, None, base, path);
+            assert!(!page.contains("og:url"), "{path}");
+            assert!(!page.contains("og:image"), "{path}");
+            assert!(!page.contains("canonical"), "{path}");
+            assert!(!page.contains("https://crew.example.test"), "{path}");
+        }
+        let heroes = render_shell(&template, None, base, "/strategy/heroes");
+        assert!(!path_is_private("/strategy/heroes"));
+        assert!(heroes.contains("content=\"https://crew.example.test/strategy/heroes\""));
+        assert!(heroes.contains("href=\"https://crew.example.test/strategy/heroes\""));
+        assert!(
+            heroes.contains("content=\"https://crew.example.test/assets/apple-touch-icon.png\"")
+        );
     }
 
     #[test]
