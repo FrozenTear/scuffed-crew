@@ -259,6 +259,20 @@ pub fn namespace_from_env() -> DbConfig {
     }
 }
 
+/// Startup warning when the dev fallback is still the legacy root password.
+///
+/// The message names that condition. It does not include the password value.
+pub(crate) fn legacy_root_password_warning(cfg: &RelayDbConfig) -> Option<&'static str> {
+    if cfg.fallback && cfg.password == DEV_PASS {
+        Some(
+            "relay database login is still the legacy root password. \
+             Set SURREALDB_RELAY_PASSWORD. This process is using the dev fallback.",
+        )
+    } else {
+        None
+    }
+}
+
 /// Log a clear refusal and exit 1. Call this after tracing is initialized.
 pub fn enforce_or_exit() -> RelayDbConfig {
     match resolve_relay_db_config(scuffed_db::is_production_env(), &DbEnv::from_process()) {
@@ -271,6 +285,9 @@ pub fn enforce_or_exit() -> RelayDbConfig {
                      scripts/install.sh and scripts/update.sh append SURREALDB_RELAY_PASSWORD \
                      when the key is missing."
                 );
+            }
+            if let Some(message) = legacy_root_password_warning(&cfg) {
+                tracing::warn!("{message}");
             }
             cfg
         }
@@ -612,6 +629,35 @@ mod tests {
         assert_eq!(cfg.password, "root");
         assert!(cfg.fallback);
         assert_eq!(cfg.auth, RelayAuthKind::System);
+    }
+
+    #[test]
+    fn legacy_root_fallback_warns_without_the_password_value() {
+        let cfg = resolve_relay_db_config(false, &DbEnv::default()).unwrap();
+        let message = legacy_root_password_warning(&cfg).expect("root fallback warns");
+        assert!(message.contains("legacy root password"));
+        assert!(message.contains("SURREALDB_RELAY_PASSWORD"));
+        assert!(
+            !message.contains("not-the-default"),
+            "the warning must be a fixed sentence, not the configured password"
+        );
+
+        let custom = DbEnv {
+            url: Some("ws://127.0.0.1:8000".into()),
+            user: Some("editor".into()),
+            password: Some("not-the-default".into()),
+            ..DbEnv::default()
+        };
+        let custom = resolve_relay_db_config(false, &custom).unwrap();
+        assert!(custom.fallback);
+        assert!(legacy_root_password_warning(&custom).is_none());
+
+        let record = DbEnv {
+            relay_password: Some("relay-secret".into()),
+            ..DbEnv::default()
+        };
+        let record = resolve_relay_db_config(false, &record).unwrap();
+        assert!(legacy_root_password_warning(&record).is_none());
     }
 
     #[test]
