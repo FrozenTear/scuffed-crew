@@ -93,15 +93,16 @@ fn escape_surreal_string(s: &str) -> String {
 
 /// Quoted SurrealQL literal for a password when a bound parameter is refused.
 ///
-/// Control characters, including newline and NUL, are rejected. They are not
-/// given a lexer escape, because a wrong escape would change the statement.
+/// Control characters, including newline and NUL, and the line separators
+/// U+2028 and U+2029, are rejected. They are not given a lexer escape,
+/// because a wrong escape would change the statement.
 fn quoted_surreal_password(password: &str) -> DbResult<String> {
     if password
         .chars()
         .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
     {
         return Err(DbError::Config(
-            "App database password must not contain control characters".into(),
+            "App database password must not contain control or line-separator characters (U+2028, U+2029)".into(),
         ));
     }
     Ok(format!("'{}'", escape_surreal_string(password)))
@@ -443,7 +444,8 @@ impl Database {
     ///
     /// **Password is a quoted literal, not a bound parameter.** SurrealDB 3
     /// rejects `PASSWORD $param` (`expected a strand`). [`quoted_surreal_password`]
-    /// escapes `\` and `'` and refuses control characters. The username is an
+    /// escapes `\` and `'` and refuses control characters and the line
+    /// separators U+2028 and U+2029. The username is an
     /// identifier, interpolated only after [`assert_safe_sql_ident`] accepts
     /// `[A-Za-z0-9_]{1,64}`.
     pub async fn ensure_database_app_user(
@@ -492,7 +494,7 @@ impl Database {
         // FORCE_APP_PASSWORD_SYNC=1 requested an intentional rotation.
         // Username is an identifier, so it cannot be a bound string. The
         // pattern check above is what makes interpolating it safe. The password
-        // is bound and never concatenated into the statement.
+        // is a quoted literal: SurrealDB 3 rejects a bound password here.
         define_database_user(client, username, password).await?;
         tracing::info!(
             username,
@@ -699,7 +701,7 @@ mod app_user_tests {
     /// A quote or backslash in the password must be the password, not statement
     /// text. Sign-in with that password is the check. A wrong password must fail.
     #[tokio::test]
-    async fn define_user_password_is_not_interpolated() {
+    async fn define_user_password_with_quote_and_backslash_signs_in() {
         let db = Database::connect_memory().await.expect("mem db");
         let password = "p'a\\ss word";
         Database::ensure_database_app_user(&db.client, "app_quote", password)
@@ -736,6 +738,13 @@ mod app_user_tests {
         assert_eq!(quoted_surreal_password("a'b\\c").unwrap(), "'a\\'b\\\\c'");
         assert!(quoted_surreal_password("line\nbreak").is_err());
         assert!(quoted_surreal_password("nul\0").is_err());
+        let separator = quoted_surreal_password("line\u{2028}sep").unwrap_err();
+        let msg = separator.to_string();
+        assert!(
+            msg.contains("line-separator") && msg.contains("U+2028") && msg.contains("U+2029"),
+            "{msg}"
+        );
+        assert!(quoted_surreal_password("para\u{2029}sep").is_err());
     }
 }
 
