@@ -484,7 +484,7 @@ async fn load_account_caller(
     Ok(AccountCaller { user, member })
 }
 
-/// DELETE /api/auth/me — erase the signed-in account. Session only.
+/// DELETE /api/auth/me. Erase the signed-in account. Session only.
 ///
 /// `confirm` must equal the display name or the username after trimming.
 /// The match is case-sensitive. A local account (password hash present)
@@ -1494,8 +1494,9 @@ pub async fn nostr_login_verify(
 #[cfg(test)]
 mod oauth_recruitment_tests {
     use super::{oauth_signup_decision, upsert_oauth_user_if_allowed};
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
     use scuffed_auth::AuthProvider;
+    use tower::ServiceExt;
 
     #[test]
     fn closed_registration_callback_redirects_without_session_cookie() {
@@ -1631,5 +1632,198 @@ mod oauth_recruitment_tests {
         .expect("new discord id allowed when recruitment is open");
         assert_eq!(created.username, "opened");
         assert_eq!(created.provider, AuthProvider::Discord);
+    }
+
+    fn no_session_cookie(response: &axum::response::Response) -> bool {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .is_none_or(|raw| !raw.starts_with("sc_session="))
+            })
+    }
+
+    async fn login(app: &axum::Router, username: &str, password: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/local/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "username": username, "password": password })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Password, OAuth link, and daemon token all fail closed for Deleted member.
+    #[tokio::test]
+    async fn tombstone_cannot_log_in_by_password_oauth_or_token() {
+        use http_body_util::BodyExt;
+        use scuffed_auth::crypto::hash_session_token;
+        use scuffed_auth::password::hash_password;
+        use scuffed_db::{DELETED_USER_ID, DbError};
+
+        let state = crate::test_support::test_state().await;
+        scuffed_db::queries::erasure::ensure_deleted_member(&state.db.client)
+            .await
+            .unwrap();
+        let app = crate::create_router(state.clone());
+
+        let reserved = login(&app, "deleteduser", "correct-horse").await;
+        assert_eq!(reserved.status(), StatusCode::UNAUTHORIZED);
+        assert!(no_session_cookie(&reserved));
+
+        let hash = hash_password("correct-horse").unwrap();
+        state
+            .db
+            .client
+            .query("UPDATE user:deleteduser SET username = 'ghostmember', password_hash = $hash")
+            .bind(("hash", hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let matched = login(&app, "ghostmember", "correct-horse").await;
+        assert_eq!(matched.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            no_session_cookie(&matched),
+            "a matching password on the tombstone user must not set a session"
+        );
+
+        state
+            .db
+            .client
+            .query(
+                "UPDATE user:deleteduser SET provider = 'discord', provider_id = 'discord-tomb', \
+                 provider_id_hash = NONE",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let linked = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "discord-tomb".into(),
+            "someone".into(),
+            None,
+        )
+        .await
+        .expect_err("oauth link of the tombstone provider id");
+        assert_eq!(linked.0, StatusCode::FORBIDDEN);
+        assert_eq!(linked.1, "tombstone");
+        let refusal = super::oauth_callback_refusal(linked.0, linked.1);
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+        assert!(no_session_cookie(&refusal));
+        let session_err = state
+            .db
+            .create_session(DELETED_USER_ID, "should-not-mint", 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(session_err, DbError::Conflict(ref code) if code == "tombstone"),
+            "{session_err}"
+        );
+
+        let reserved_name = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "brand-new-tomb".into(),
+            " DeletedUser ".into(),
+            None,
+        )
+        .await
+        .expect_err("reserved oauth username");
+        assert_eq!(reserved_name.0, StatusCode::BAD_REQUEST);
+        assert_eq!(reserved_name.1, "reserved_name");
+
+        let token_hash = hash_session_token("tomb-daemon");
+        state
+            .db
+            .client
+            .query(
+                "CREATE daemon_token SET member_id = 'deleted', token_hash = $hash, \
+                 label = 'forged', is_active = true, created_at = time::now(), expires_at = NONE",
+            )
+            .bind(("hash", token_hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let upload = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/stats/upload")
+                    .header(header::AUTHORIZATION, "Bearer tomb-daemon")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::from(r#"{"matches":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), StatusCode::UNAUTHORIZED);
+        assert!(no_session_cookie(&upload));
+        let bytes = upload.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "Invalid or revoked daemon token");
+        assert!(body.get("code").is_none(), "{body}");
+
+        let session_hash = hash_session_token("forged-session");
+        state
+            .db
+            .client
+            .query(
+                "CREATE session SET user_id = 'deleteduser', token = $hash, \
+                 expires_at = time::now() + 1d, created_at = time::now()",
+            )
+            .bind(("hash", session_hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            state
+                .db
+                .get_session("forged-session")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(DELETED_USER_ID)
+        );
+        let me = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, "sc_session=forged-session")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
     }
 }

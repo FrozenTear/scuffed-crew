@@ -407,7 +407,7 @@ pub async fn delete_my_stats(
     }
 }
 
-/// POST /api/stats/me/restore — session only. Tokens stay revoked.
+/// POST /api/stats/me/restore. Session only. Tokens stay revoked.
 pub async fn restore_my_stats(State(state): State<AppState>, member: OrgMember) -> Response {
     let restored = match state.db.cancel_stats_delete(&member.member.id).await {
         Ok(restored) => restored,

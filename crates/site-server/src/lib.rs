@@ -83,6 +83,17 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid governor config"),
     );
+    // Stats delete and restore. Same burst and period as login, separate
+    // bucket, so guessing a confirm string cannot spend the login quota.
+    // Applied only to DELETE /api/stats/me and POST /api/stats/me/restore.
+    let stats_erasure_governor = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(2)
+            .burst_size(5)
+            .finish()
+            .expect("valid stats erasure governor config"),
+    );
     let auth_routes = Router::new()
         .route("/api/auth/{provider}/login", get(routes::auth::login))
         .route("/api/auth/{provider}/callback", get(routes::auth::callback))
@@ -101,7 +112,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             post(routes::auth::nostr_login_verify),
         )
         .layer(
-            GovernorLayer::new(governor_config).error_handler(rate_limit::governor_error_response),
+            GovernorLayer::new(governor_config.clone())
+                .error_handler(rate_limit::governor_error_response),
         );
 
     // Per-IP rate limit for the write-heavy upload endpoints: 8-burst, then 1
@@ -335,9 +347,17 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .merge(link_start_routes)
         .merge(link_poll_routes)
         .merge(link_user_routes)
+        // DELETE shares the login governor (same Arc, same per-IP bucket) so a
+        // stolen session cannot brute-force the account password any faster
+        // than login. GET is registered after the layer: the SPA polls it.
         .route(
             "/api/auth/me",
-            get(routes::auth::me).delete(routes::auth::delete_account),
+            delete(routes::auth::delete_account)
+                .layer(
+                    GovernorLayer::new(governor_config)
+                        .error_handler(rate_limit::governor_error_response),
+                )
+                .get(routes::auth::me),
         )
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
@@ -475,11 +495,19 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/stats/upload", post(routes::stats::upload_stats))
         .route(
             "/api/stats/me",
-            get(routes::stats::my_stats).delete(routes::stats::delete_my_stats),
+            delete(routes::stats::delete_my_stats)
+                .layer(
+                    GovernorLayer::new(stats_erasure_governor.clone())
+                        .error_handler(rate_limit::governor_error_response),
+                )
+                .get(routes::stats::my_stats),
         )
         .route(
             "/api/stats/me/restore",
-            post(routes::stats::restore_my_stats),
+            post(routes::stats::restore_my_stats).layer(
+                GovernorLayer::new(stats_erasure_governor)
+                    .error_handler(rate_limit::governor_error_response),
+            ),
         )
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))

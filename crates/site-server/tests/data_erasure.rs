@@ -841,6 +841,122 @@ async fn pending_delete_rejects_garbage_uploads_revoked_tokens_and_new_tokens() 
     assert!(minted["token"].as_str().is_some(), "{minted}");
 }
 
+/// The governor lives on the `Router`. One router per request would reset the bucket.
+async fn oneshot(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    cookie: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value, Option<u64>) {
+    let mut builder =
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                40000,
+            ))));
+    if let Some(token) = cookie {
+        builder = builder.header(header::COOKIE, format!("sc_session={token}"));
+    }
+    let req = if let Some(body) = body {
+        builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    } else {
+        builder.body(Body::empty()).unwrap()
+    };
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, parsed, retry_after)
+}
+
+#[tokio::test]
+async fn repeated_wrong_account_delete_passwords_hit_429() {
+    let state = test_state().await;
+    let hash = hash_password("correct-horse").unwrap();
+    let user = state.db.create_local_user("pwuser", &hash).await.unwrap();
+    state
+        .db
+        .create_member(&user.id, "Pw User", OrgRole::Member)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(&user.id, "pw-session", 24)
+        .await
+        .unwrap();
+    let app = create_router(state);
+
+    let mut invalid = 0;
+    for _ in 0..5 {
+        let (status, body, _) = oneshot(
+            &app,
+            "DELETE",
+            "/api/auth/me",
+            Some("pw-session"),
+            Some(json!({ "password": "wrong-password", "confirm": "Pw User" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["code"], "invalid_password");
+        invalid += 1;
+    }
+    let (status, body, retry_after) = oneshot(
+        &app,
+        "DELETE",
+        "/api/auth/me",
+        Some("pw-session"),
+        Some(json!({ "password": "wrong-password", "confirm": "Pw User" })),
+    )
+    .await;
+    assert_eq!(invalid, 5);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "rate_limited");
+    assert!(retry_after.unwrap_or(0) >= 1, "{body}");
+    assert!(body["retry_after"].as_u64().unwrap_or(0) >= 1, "{body}");
+
+    // GET stays off the login governor, so a full bucket does not 429 the poll.
+    let (status, body, _) = oneshot(&app, "GET", "/api/auth/me", Some("pw-session"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["has_password"], true);
+}
+
+#[tokio::test]
+async fn stats_delete_and_restore_share_a_rate_limit() {
+    let state = test_state().await;
+    let app = create_router(state);
+    for _ in 0..5 {
+        let (status, body, _) = oneshot(
+            &app,
+            "DELETE",
+            "/api/stats/me",
+            None,
+            Some(json!({ "confirm": "delete my stats" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+    let (status, body, retry_after) =
+        oneshot(&app, "POST", "/api/stats/me/restore", None, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "rate_limited");
+    assert!(retry_after.unwrap_or(0) >= 1, "{body}");
+
+    let (status, body, _) = oneshot(&app, "GET", "/api/stats/me", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_ne!(body["error"], "rate_limited");
+}
+
 fn sample(member_id: &str, session_id: &str) -> scuffed_db::PersonalMatch {
     scuffed_db::PersonalMatch {
         id: String::new(),
