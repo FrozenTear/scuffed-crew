@@ -63,7 +63,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let command = std::env::args()
         .nth(1)
-        .ok_or("usage: relay-chat-flow <seed|check|relay-login>")?;
+        .ok_or("usage: relay-chat-flow <seed|check|relay-login|index-perms>")?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -72,6 +72,7 @@ fn run() -> Result<(), String> {
         "seed" => rt.block_on(seed()),
         "check" => rt.block_on(check()),
         "relay-login" => rt.block_on(relay_login()),
+        "index-perms" => rt.block_on(index_perms()),
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -182,6 +183,115 @@ async fn relay_login() -> Result<(), String> {
         return Err("relay login read audit_log".to_string());
     }
     println!("relay record login kept hidden fields and audit_log hidden");
+    Ok(())
+}
+
+/// Indexed selects against the real server. SurrealDB 3.0.5 can serve a
+/// SELECT from a BTree index without field permissions. This fails if a
+/// hidden value comes back.
+async fn index_perms() -> Result<(), String> {
+    let password = env_or("SURREALDB_RELAY_PASSWORD", "relay-ci-record-login");
+    let password = password.trim();
+    if password.is_empty() || password == "root" {
+        return Err(
+            "index-perms needs SURREALDB_RELAY_PASSWORD set to a non-root value".to_string(),
+        );
+    }
+    let db = connect_db().await?;
+    scuffed_db::migrations::run_migrations(&db.client)
+        .await
+        .map_err(|e| format!("migrations: {e}"))?;
+    scuffed_db::ensure_relay_access(&db.client, "scuffed_relay", password, true)
+        .await
+        .map_err(|e| format!("ensure relay access: {e}"))?;
+
+    let secret = "index-secret-marker";
+    let reason = "index-reason-marker";
+    let issued_by = "index-officer-marker";
+    let display_name = "IndexLeakName";
+    let name_key = "indexleakname";
+    let user_id = "user:indexleak";
+    db.client
+        .query(
+            "CREATE member:indexleak SET user_id = $user_id, org_role = 'member', \
+             display_name = $display_name, display_name_key = $name_key, is_active = true, \
+             nostr_pubkey = 'ab', nostr_secret_key_encrypted = { marker: $secret };
+             CREATE moderation_action:indexleak SET member_id = 'indexleak', \
+             action_type = 'ban', reason = $reason, issued_by = $issued_by, is_active = true",
+        )
+        .bind(("secret", secret))
+        .bind(("reason", reason))
+        .bind(("issued_by", issued_by))
+        .bind(("display_name", display_name))
+        .bind(("name_key", name_key))
+        .bind(("user_id", user_id))
+        .await
+        .map_err(|e| format!("seed indexed rows: {e}"))?
+        .check()
+        .map_err(|e| format!("seed indexed rows: {e}"))?;
+
+    let url = env_or("SURREALDB_URL", "ws://127.0.0.1:8000");
+    let ns = env_or("SURREALDB_NS", "scuffed_crew");
+    let database = env_or("SURREALDB_DB", "main");
+    let relay =
+        scuffed_db::Database::connect_relay_record(&url, &ns, &database, "scuffed_relay", password)
+            .await
+            .map_err(|e| format!("relay sign-in: {e}"))?;
+
+    let queries = [
+        (
+            "member_user_idx",
+            "SELECT * FROM member WHERE user_id = 'user:indexleak'",
+        ),
+        (
+            "member_display_name_key_idx",
+            "SELECT * FROM member WHERE display_name_key = 'indexleakname'",
+        ),
+        (
+            "member_active_name_idx",
+            "SELECT * FROM member WHERE is_active = true AND display_name = 'IndexLeakName'",
+        ),
+        (
+            "member_nostr_pubkey_idx",
+            "SELECT * FROM member WHERE nostr_pubkey = 'ab'",
+        ),
+        (
+            "mod_member_idx",
+            "SELECT * FROM moderation_action WHERE member_id = 'indexleak'",
+        ),
+        (
+            "mod_active_idx",
+            "SELECT * FROM moderation_action WHERE member_id = 'indexleak' AND action_type = 'ban' AND is_active = true",
+        ),
+    ];
+    let hidden = [secret, reason, issued_by, display_name, name_key, user_id];
+    let mut leaked = Vec::new();
+    for (label, sql) in queries {
+        let response = relay
+            .client
+            .query(sql)
+            .await
+            .map_err(|e| format!("{label}: {e}"))?;
+        let rendered = format!("{response:?}");
+        let hits: Vec<&str> = hidden
+            .iter()
+            .copied()
+            .filter(|marker| rendered.contains(marker))
+            .collect();
+        if hits.is_empty() {
+            eprintln!("{label}: no hidden field");
+        } else {
+            eprintln!("{label}: hidden fields returned ({})", hits.len());
+            leaked.push(label);
+        }
+    }
+    if !leaked.is_empty() {
+        return Err(format!(
+            "indexed select returned hidden fields: {}",
+            leaked.join(", ")
+        ));
+    }
+    println!("indexed selects did not return hidden fields");
     Ok(())
 }
 

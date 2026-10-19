@@ -90,6 +90,9 @@ export SURREALDB_RELAY_USER=scuffed_relay
 export SURREALDB_RELAY_PASSWORD="${SURREALDB_RELAY_PASSWORD:-relay-ci-record-login}"
 cargo run -p relay-policy --features chat-flow --bin relay-chat-flow -- relay-login
 
+echo "indexed selects against surreal"
+cargo run -p relay-policy --features chat-flow --bin relay-chat-flow -- index-perms
+
 echo "starting relay"
 # strfry calls setrlimit(NOFILE, 1000000) and exits when the hard limit is lower.
 # mkdir covers images whose entrypoint does not create strfry-db.

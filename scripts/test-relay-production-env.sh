@@ -39,6 +39,7 @@ if grep -q 'surrealdb:v3.0' "${ROOT}/relay/ci-chat-flow.sh"; then
 fi
 grep -q 'surreal_image_from_compose' "${ROOT}/relay/ci-chat-flow.sh" || fail "relay CI does not read the compose digest"
 grep -q 'relay-chat-flow -- relay-login' "${ROOT}/relay/ci-chat-flow.sh" || fail "relay CI does not run the record login"
+grep -q 'relay-chat-flow -- index-perms' "${ROOT}/relay/ci-chat-flow.sh" || fail "relay CI does not run indexed permission selects"
 
 # The helper refuses anything that is not the compose digest pin.
 # shellcheck source=../relay/ci-chat-flow.sh
