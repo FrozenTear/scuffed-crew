@@ -603,7 +603,7 @@ inside `PACKS_DIR`.
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
-| `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32` | name reader. Optional. Single-letter templates only, no member data. Picked up after startup the same way as the map pack; until that load finishes, names fall back to Tesseract |
+| `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32` | name reader. Optional. Single-letter templates only, no member data. Loaded once at startup or when the folder first appears, then kept. Until that load finishes, names fall back to Tesseract |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -652,11 +652,13 @@ stored).
 
 The name reader reads the player's own row from `names-v1.tar` when that
 pack is loaded. The pack is optional and holds single-letter templates
-only, never a member's name. Daemon startup does not wait for it. When the
-background sync swaps `templates/names-v1/` in, the next name read starts a
-reload and still uses Tesseract; the read after that load finishes uses the
-pack. A folder that changes while it loads is not used. With the switch off,
-or before the pack has loaded, the name read is Tesseract.
+only, never a member's name. It is loaded once, at startup when the folder
+is already there, or once in the background when sync installs it later.
+That load is kept for the rest of the run. Daemon startup does not wait
+for it. The name read that notices a newly installed folder still uses
+Tesseract; the next read uses the cached pack. A folder swapped in after
+that load is left until the next tracker start. With the switch off, or
+before the pack has loaded, the name read is Tesseract.
 
 The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
 at the end of a match) from the end-title templates of `words-v1.tar`:

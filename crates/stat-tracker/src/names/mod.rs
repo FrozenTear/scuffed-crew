@@ -160,27 +160,14 @@ pub fn load_installed(data_dir: &std::path::Path) -> Result<NamePack, PackError>
     NamePack::load(&pack::dir_in(data_dir))
 }
 
-/// Identity of the names-v1 folder: device, inode and mtime, or `None`
-/// when it is missing. Pack sync swaps the folder in with `rename`, so a
-/// new pack gives the live path a new inode.
-type DirStamp = Option<(u64, u64, i64, i64)>;
-
-fn dir_stamp(dir: &std::path::Path) -> DirStamp {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(dir).ok()?;
-    meta.is_dir()
-        .then(|| (meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec()))
-}
-
-/// The name reader's pack, re-loaded when `templates/names-v1/` changes.
+/// The name reader's pack, loaded once and then kept.
 ///
-/// The same rules as [`crate::shadow::banner::LiveMaps`]: pack sync installs
-/// names-v1 in the background after startup. Each name read checks the
-/// folder stamp. On a change it starts one background load and keeps
-/// reading with the pack it has, so capture never waits. Until that load
-/// finishes, [`NameSwitch::pack`] is `None` and [`read_names`] stays on
-/// Tesseract. A load that saw the folder change while it ran is thrown
-/// away and retried on a later read.
+/// A names-v1 pack is about 29 MB and takes about 250 ms to load, so a name
+/// read must not load it again. Startup loads the folder when it is already
+/// there. When pack sync installs it later, the next name read starts one
+/// background load and still uses Tesseract; after that load the cached
+/// pack is what every later read uses. A folder swapped in after that is
+/// left for the next tracker start.
 #[derive(Debug, Clone)]
 pub struct LiveNames {
     inner: Arc<LiveInner>,
@@ -189,134 +176,113 @@ pub struct LiveNames {
 #[derive(Debug)]
 struct LiveInner {
     dir: std::path::PathBuf,
-    current: std::sync::RwLock<(Option<Arc<NamePack>>, DirStamp)>,
+    cached: std::sync::RwLock<Option<Arc<NamePack>>>,
+    /// `true` once a pack is cached, or the one late load has finished.
+    /// Further reads do not look at the folder.
+    settled: std::sync::atomic::AtomicBool,
+    /// The one late load. `Some` means it has been started, finished or not.
     loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     #[cfg(test)]
-    hooks: TestHooks,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct TestHooks {
     spawns: std::sync::atomic::AtomicUsize,
-    delay_ms: std::sync::atomic::AtomicU64,
-    during: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-#[cfg(test)]
-impl std::fmt::Debug for TestHooks {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TestHooks")
-    }
 }
 
 impl LiveInner {
-    fn before_load(&self) -> impl FnOnce() + use<> {
-        #[cfg(test)]
-        {
-            use std::sync::atomic::Ordering;
-            let ms = self.hooks.delay_ms.load(Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            let during = self.hooks.during.lock().unwrap().take();
-            move || {
-                if let Some(step) = during {
-                    step();
-                }
-            }
-        }
-        #[cfg(not(test))]
-        || {}
+    fn cache(&self, pack: NamePack) {
+        tracing::info!(templates = pack.templates(), "names-v1 pack loaded");
+        *self.cached.write().unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(pack));
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn load_stable(
-        &self,
-        during: impl FnOnce(),
-    ) -> Option<(Result<NamePack, PackError>, DirStamp)> {
-        let before = dir_stamp(&self.dir);
-        during();
-        let loaded = NamePack::load(&self.dir);
-        (dir_stamp(&self.dir) == before).then_some((loaded, before))
-    }
-
-    fn install(&self, (loaded, stamp): (Result<NamePack, PackError>, DirStamp)) {
-        match &loaded {
-            Ok(pack) => {
-                tracing::info!(templates = pack.templates(), "names-v1 pack loaded");
-            }
-            Err(err) => {
-                tracing::warn!(reason = %err, templates = 0, "names-v1 pack was not loaded");
-            }
-        }
-        *self.current.write().unwrap_or_else(|err| err.into_inner()) =
-            (loaded.ok().map(Arc::new), stamp);
+    fn give_up(&self, err: &PackError) {
+        tracing::warn!(reason = %err, templates = 0, "names-v1 pack was not loaded");
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl LiveNames {
-    /// Load now. A folder that keeps changing during the first tries leaves
-    /// the reader empty; the next read loads it again.
+    /// Load now when the folder is already installed. A missing folder stays
+    /// empty until [`Self::current`] sees it once.
     pub fn load(dir: std::path::PathBuf) -> Self {
         let inner = LiveInner {
             dir,
-            current: std::sync::RwLock::new((None, None)),
+            cached: std::sync::RwLock::new(None),
+            settled: std::sync::atomic::AtomicBool::new(false),
             loader: std::sync::Mutex::new(None),
             #[cfg(test)]
-            hooks: TestHooks::default(),
+            spawns: std::sync::atomic::AtomicUsize::new(0),
         };
-        let first = (0..3).find_map(|_| inner.load_stable(|| {}));
-        // An all-zero stamp never matches a real one: the next read reloads.
-        inner.install(first.unwrap_or((Err(PackError::Missing), Some((0, 0, 0, 0)))));
+        match NamePack::load(&inner.dir) {
+            Ok(pack) => inner.cache(pack),
+            Err(err) => {
+                tracing::warn!(reason = %err, templates = 0, "names-v1 pack was not loaded");
+            }
+        }
         Self {
             inner: Arc::new(inner),
         }
     }
 
-    /// The pack for this read. Starts a background reload when the folder
-    /// changed since this pack was loaded.
+    /// The cached pack. When startup found no folder, the first call that
+    /// sees `templates/names-v1/` starts the one late load and returns
+    /// `None` for that call. Later calls use the cache and do not load again.
     pub fn current(&self) -> Option<Arc<NamePack>> {
-        let (pack, stamp) = self
-            .inner
-            .current
-            .read()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone();
-        if dir_stamp(&self.inner.dir) != stamp {
-            self.start_reload();
+        if self.inner.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.cached();
         }
-        pack
+        if self.inner.dir.is_dir() && self.start_late_load() {
+            return None;
+        }
+        self.cached()
     }
 
-    fn start_reload(&self) {
+    fn cached(&self) -> Option<Arc<NamePack>> {
+        self.inner
+            .cached
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Start the one background load. `true` when this call started it.
+    fn start_late_load(&self) -> bool {
         let Ok(mut loader) = self.inner.loader.try_lock() else {
-            return;
+            return false;
         };
-        if loader.as_ref().is_some_and(|handle| !handle.is_finished()) {
-            return;
+        if loader.is_some() {
+            return false;
         }
         let inner = Arc::clone(&self.inner);
         let spawned = std::thread::Builder::new()
             .name("name-pack-reload".into())
-            .spawn(move || {
-                let during = inner.before_load();
-                match inner.load_stable(during) {
-                    Some(loaded) => inner.install(loaded),
-                    None => tracing::debug!("names-v1 changed while loading, retry later"),
-                }
+            .spawn(move || match NamePack::load(&inner.dir) {
+                Ok(pack) => inner.cache(pack),
+                Err(err) => inner.give_up(&err),
             });
         match spawned {
             Ok(handle) => {
                 #[cfg(test)]
                 self.inner
-                    .hooks
                     .spawns
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 *loader = Some(handle);
+                true
             }
-            Err(err) => tracing::warn!(error = %err, "names-v1 reload not started"),
+            Err(err) => {
+                tracing::warn!(error = %err, "names-v1 reload not started");
+                false
+            }
         }
     }
 
-    /// Wait for a reload in flight (tests).
+    /// How many late loads have been started (tests).
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.inner.spawns.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait for the late load (tests).
     #[cfg(test)]
     pub(crate) fn wait_reload(&self) {
         let handle = self.inner.loader.lock().unwrap().take();
@@ -332,8 +298,8 @@ impl LiveNames {
 #[derive(Debug, Clone)]
 pub struct NameSwitch {
     pub enabled: bool,
-    /// Shared pack. `None` when the switch is off. A missing folder stays
-    /// empty until names-v1 is swapped in, then the next read reloads it.
+    /// Shared pack. `None` when the switch is off. Loaded once at startup,
+    /// or once when the folder appears later.
     live: Option<LiveNames>,
 }
 
@@ -347,8 +313,9 @@ impl NameSwitch {
 
     /// Load at startup. A missing or refused pack is logged here (template
     /// count and the reason, never a player name). A pack that lands later
-    /// is picked up by [`Self::pack`] without a restart. Until that load
-    /// finishes, [`read_names`] stays on Tesseract.
+    /// is loaded once by [`Self::pack`]. Until that load finishes,
+    /// [`read_names`] stays on Tesseract. A pack that is already cached is
+    /// not loaded again.
     pub fn load(enabled: bool, data_dir: &std::path::Path) -> Self {
         if !enabled {
             return Self::off();
@@ -359,14 +326,23 @@ impl NameSwitch {
         }
     }
 
-    /// The pack for this read. `None` when the switch is off, the folder is
-    /// missing or refused, or a reload of a pack that just landed has not
-    /// finished. [`read_names`] then uses today's Tesseract path.
+    /// The cached pack. `None` when the switch is off, the folder is missing
+    /// or refused, or the one late load has not finished. [`read_names`]
+    /// then uses today's Tesseract path.
     pub fn pack(&self) -> Option<Arc<NamePack>> {
         self.live.as_ref().and_then(LiveNames::current)
     }
 
-    /// Wait for a reload in flight (tests).
+    /// Late loads started so far (tests). Startup does not count.
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.live
+            .as_ref()
+            .map(LiveNames::reload_spawns)
+            .unwrap_or(0)
+    }
+
+    /// Wait for the late load (tests).
     #[cfg(test)]
     pub(crate) fn wait_reload(&self) {
         if let Some(live) = &self.live {

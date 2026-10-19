@@ -562,7 +562,23 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
     drop(off);
 
     switch.wait_reload();
-    assert!(switch.pack().is_some(), "the landed pack is loaded");
+    let loaded = switch.pack().expect("the landed pack is loaded");
+    assert_eq!(switch.reload_spawns(), 1, "the late load runs once");
+    for _ in 0..20 {
+        assert!(std::sync::Arc::ptr_eq(
+            &loaded,
+            &switch.pack().expect("cached")
+        ));
+    }
+    assert_eq!(switch.reload_spawns(), 1, "later reads do not load again");
+    let again = tmp.path().join("templates").join(".names-v1-again");
+    write_pack(&again, &["CAB"]);
+    crate::packs::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&loaded, &switch.pack().expect("still cached")),
+        "a pack swapped in after the first load waits for the next start"
+    );
+    assert_eq!(switch.reload_spawns(), 1);
     let mut called = false;
     let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
         called = true;
@@ -576,4 +592,30 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
         found.map(|m| (m.name.row, m.recognizer)),
         Some((0, NameRecognizer::OcrV1))
     );
+}
+
+/// A pack that is already installed at startup is loaded then, and a later
+/// read does not load it again.
+#[test]
+fn a_names_pack_loaded_at_startup_is_cached() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    let loaded = switch.pack().expect("startup load");
+    assert_eq!(switch.reload_spawns(), 0, "startup is not a late load");
+    for _ in 0..20 {
+        assert!(std::sync::Arc::ptr_eq(
+            &loaded,
+            &switch.pack().expect("cached")
+        ));
+    }
+    assert_eq!(switch.reload_spawns(), 0);
+    let staging = tmp.path().join("templates").join(".names-v1-next");
+    write_pack(&staging, &["CAB"]);
+    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded,
+        &switch.pack().expect("still the startup pack")
+    ));
+    assert_eq!(switch.reload_spawns(), 0);
 }

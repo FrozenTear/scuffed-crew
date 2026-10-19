@@ -38,8 +38,10 @@
 //! re-loads its hero set once heroes-v2 or heroes-v2-1080 is swapped in
 //! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
 //! once it lands ([`crate::shadow::banner::LiveMaps`]). The name reader
-//! loads names-v1 the same way ([`crate::names::LiveNames`]), however late
-//! that is, and reads with Tesseract until that load finishes. The setup
+//! loads names-v1 once ([`crate::names::LiveNames`]), at startup or the
+//! first time the folder is there, and keeps that pack. It reads with
+//! Tesseract until that load finishes, and does not load the pack again
+//! on later reads. The setup
 //! guide ([`sync_reader_packs`]) syncs all of them. Every run
 //! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
 //! at the same time is [`PackSync::Busy`] and sends no request.
