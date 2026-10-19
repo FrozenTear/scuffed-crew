@@ -12,7 +12,52 @@ use scuffed_types::api::{
 /// The GUI shows this string; the hint is the Settings path.
 pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the token in Settings";
 
+/// Overview health copy when the server says the bearer token has expired.
+/// The GUI shows this string; the member relinks from Settings.
+pub const SYNC_TOKEN_EXPIRED_STATUS: &str = "Sync token expired, relink in Settings";
+
+/// Matches per stats upload. The server rejects a larger body with HTTP 413
+/// `batch_too_large`. This client stays at or under the cap, and shrinks
+/// further when a 413 names a smaller one.
+///
+/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_MATCHES` once that PR is
+/// on main, so this cap cannot drift from the server.
+pub const SYNC_UPLOAD_MAX_MATCHES: usize = 200;
+
+/// Deleted session ids per stats upload. Same 413 path as
+/// [`SYNC_UPLOAD_MAX_MATCHES`].
+///
+/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_DELETED_SESSIONS` once
+/// that PR is on main.
+pub const SYNC_UPLOAD_MAX_DELETES: usize = 500;
+
+/// Upload chunk sizes for one process. Starts at the client caps and only
+/// falls, for the life of the [`SyncClient`] that holds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchCaps {
+    pub matches: usize,
+    pub deletes: usize,
+}
+
+impl Default for BatchCaps {
+    fn default() -> Self {
+        Self {
+            matches: SYNC_UPLOAD_MAX_MATCHES,
+            deletes: SYNC_UPLOAD_MAX_DELETES,
+        }
+    }
+}
+
 const AUTH_PAUSE_FILE: &str = "sync_auth.json";
+
+/// Why periodic sync is paused for this URL and token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPauseReason {
+    /// HTTP 401 or 403, other than `token_expired`.
+    Rejected,
+    /// HTTP 401 with code `token_expired`.
+    Expired,
+}
 
 /// First wait after a server/network upload failure. Doubles each consecutive
 /// failure until [`SYNC_BACKOFF_CAP`].
@@ -53,6 +98,13 @@ pub enum SyncAttempt {
     /// HTTP 401 or 403 from upload or daemon-config. Stop periodic retries
     /// until the saved server URL or token changes.
     AuthRejected,
+    /// HTTP 401 with code `token_expired`. Same pause as [`Self::AuthRejected`].
+    /// The GUI copy is [`SYNC_TOKEN_EXPIRED_STATUS`].
+    TokenExpired,
+    /// HTTP 413 `batch_too_large` that the pass could not shrink below
+    /// (the server repeated the same caps, or sent none). Nothing in that
+    /// request was written. Counts as a failure so the next pass waits.
+    BatchTooLarge,
     /// Nothing to upload, or the failure was local. Leave the clock alone.
     NoServerCall,
 }
@@ -64,6 +116,13 @@ pub struct SyncUploadError {
     pub message: String,
     pub status: Option<u16>,
     pub retry_after: Option<std::time::Duration>,
+    /// Machine code from the JSON body: the `code` field, or `error` when
+    /// that string is `batch_too_large`, `token_expired`, or `rate_limited`.
+    pub code: Option<String>,
+    /// `max_matches` from a 413 `batch_too_large` body.
+    pub max_matches: Option<u64>,
+    /// `max_deleted_sessions` from a 413 `batch_too_large` body.
+    pub max_deleted_sessions: Option<u64>,
 }
 
 impl SyncUploadError {
@@ -72,16 +131,29 @@ impl SyncUploadError {
             message: message.into(),
             status: None,
             retry_after: None,
+            code: None,
+            max_matches: None,
+            max_deleted_sessions: None,
         }
     }
 
-    /// 401 and 403 pause sync. 429 is rate-limit backoff. 503 is a server
-    /// error that may carry `Retry-After` as a wait floor. Other statuses,
-    /// including a bare 400 or 422 from one request, are server errors and
-    /// ignore `Retry-After`. The sync pass does not observe a 400 or 422
-    /// that way: [`isolate_rejected`] splits the batch and quarantines the
-    /// bad rows instead.
+    /// 401 `token_expired` pauses sync with the relink copy. Other 401 and
+    /// 403 responses pause with the rejected-token copy. 429 is rate-limit
+    /// backoff and does not grow the failure streak. A 413 `batch_too_large`
+    /// that names a smaller cap is shrunk and resent inside the pass, so
+    /// the clock never sees it. One the pass cannot shrink is
+    /// [`SyncAttempt::BatchTooLarge`] and does back off. 503 may carry
+    /// `Retry-After` as a wait floor. Other statuses, including a bare 400
+    /// or 422, are server errors and ignore `Retry-After`. The sync pass
+    /// does not observe a 400 or 422 that way: [`isolate_rejected`] splits
+    /// the batch and quarantines the bad rows instead.
     pub fn attempt(&self) -> SyncAttempt {
+        if self.is_token_expired() {
+            return SyncAttempt::TokenExpired;
+        }
+        if self.is_batch_too_large() {
+            return SyncAttempt::BatchTooLarge;
+        }
         match self.status {
             Some(401) | Some(403) => SyncAttempt::AuthRejected,
             Some(429) => SyncAttempt::RateLimited {
@@ -94,8 +166,21 @@ impl SyncUploadError {
         }
     }
 
+    /// HTTP 401 whose JSON code is `token_expired`.
+    pub fn is_token_expired(&self) -> bool {
+        self.status == Some(401) && self.code.as_deref() == Some("token_expired")
+    }
+
+    /// HTTP 413 whose JSON code is `batch_too_large`. The server wrote nothing
+    /// for that request.
+    pub fn is_batch_too_large(&self) -> bool {
+        self.status == Some(413) && self.code.as_deref() == Some("batch_too_large")
+    }
+
     /// HTTP 400 or 422: the payload was refused. Splitting the batch can
-    /// isolate the bad rows. 5xx, transport errors, 401, 403, and 429 are not.
+    /// isolate the bad rows. 413 `batch_too_large` is not one of these; the
+    /// sync pass shrinks the chunk and resends. 5xx, transport errors, 401,
+    /// 403, and 429 are not either.
     pub fn is_payload_reject(&self) -> bool {
         matches!(self.status, Some(400) | Some(422))
     }
@@ -242,7 +327,8 @@ impl SyncBackoff {
                 self.extend_for_retry_after(now, retry_after);
             }
             SyncAttempt::RateLimited { retry_after } => self.record_rate_limit(now, retry_after),
-            SyncAttempt::AuthRejected => self.record_auth_rejected(),
+            SyncAttempt::AuthRejected | SyncAttempt::TokenExpired => self.record_auth_rejected(),
+            SyncAttempt::BatchTooLarge => self.record_failure(now),
             SyncAttempt::NoServerCall => {}
         }
     }
@@ -252,6 +338,8 @@ impl SyncBackoff {
 pub struct SyncClient {
     config: Arc<Mutex<SyncConfig>>,
     http: reqwest::Client,
+    /// Caps learned from HTTP 413. Shared by clones. Never raised.
+    batch_caps: Arc<Mutex<BatchCaps>>,
 }
 
 impl SyncClient {
@@ -269,6 +357,23 @@ impl SyncClient {
         Self {
             http,
             config: Arc::new(Mutex::new(config)),
+            batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+        }
+    }
+
+    /// Chunk sizes for the next upload. Lowered caps stick for this process.
+    pub fn batch_caps(&self) -> BatchCaps {
+        *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep `caps` when either limit fell. A higher value is ignored.
+    pub fn remember_batch_caps(&self, caps: BatchCaps) {
+        let mut slot = self.batch_caps.lock().unwrap_or_else(|e| e.into_inner());
+        if caps.matches < slot.matches {
+            slot.matches = caps.matches.max(1);
+        }
+        if caps.deletes < slot.deletes {
+            slot.deletes = caps.deletes.max(1);
         }
     }
 
@@ -280,9 +385,17 @@ impl SyncClient {
     }
 
     /// Swap the URL and token after Settings saved a different pair.
-    /// The HTTP client (timeout, redirect policy) stays.
+    /// The HTTP client (timeout, redirect policy) stays. A different server
+    /// URL drops caps learned from the previous host. A token-only change
+    /// keeps them.
     pub fn replace_credentials(&self, config: SyncConfig) {
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
+        let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        let url_changed = slot.server_url != config.server_url;
+        *slot = config;
+        drop(slot);
+        if url_changed {
+            *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
+        }
     }
 
     /// `new`, but refuse an unsafe server URL before a client exists.
@@ -366,11 +479,92 @@ async fn error_from_response(resp: reqwest::Response, what: &str) -> SyncUploadE
     let status = resp.status();
     let retry_after = retry_after_from_response(&resp);
     let body = resp.text().await.unwrap_or_default();
+    let parsed = parse_upload_error_body(&body);
     SyncUploadError {
         message: server_error_text(what, status.as_u16(), &body),
         status: Some(status.as_u16()),
         retry_after,
+        code: parsed.code,
+        max_matches: parsed.max_matches,
+        max_deleted_sessions: parsed.max_deleted_sessions,
     }
+}
+
+struct ParsedUploadError {
+    code: Option<String>,
+    max_matches: Option<u64>,
+    max_deleted_sessions: Option<u64>,
+}
+
+/// Pull `code` / `max_matches` / `max_deleted_sessions` out of an error body.
+/// `error` is used as the code only for the three machine codes the sync
+/// pass branches on. A validation message stays in the display text.
+fn parse_upload_error_body(body: &str) -> ParsedUploadError {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return ParsedUploadError {
+            code: None,
+            max_matches: None,
+            max_deleted_sessions: None,
+        };
+    };
+    let code = value
+        .get("code")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|code| {
+                    matches!(*code, "batch_too_large" | "token_expired" | "rate_limited")
+                })
+                .map(str::to_string)
+        });
+    ParsedUploadError {
+        code,
+        max_matches: json_u64(value.get("max_matches")),
+        max_deleted_sessions: json_u64(value.get("max_deleted_sessions")),
+    }
+}
+
+fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_i64() {
+        return Some(u64::try_from(n.max(0)).unwrap_or(u64::MAX));
+    }
+    value.as_str().and_then(|text| text.trim().parse().ok())
+}
+
+/// Drop the in-pass caps to the server's 413 values. A missing field keeps
+/// the current cap. Values below 1 become 1. The cap never rises. Returns
+/// whether either cap actually fell, so the caller can retry once and stop
+/// when the server repeats the same limits.
+pub fn lower_batch_limits(
+    match_limit: &mut usize,
+    delete_limit: &mut usize,
+    max_matches: Option<u64>,
+    max_deleted_sessions: Option<u64>,
+) -> bool {
+    let next_matches = lowered_cap(*match_limit, max_matches);
+    let next_deletes = lowered_cap(*delete_limit, max_deleted_sessions);
+    let progress = next_matches < *match_limit || next_deletes < *delete_limit;
+    *match_limit = next_matches;
+    *delete_limit = next_deletes;
+    progress
+}
+
+fn lowered_cap(current: usize, server_max: Option<u64>) -> usize {
+    let Some(raw) = server_max else {
+        return current;
+    };
+    let asked = usize::try_from(raw).unwrap_or(usize::MAX).max(1);
+    asked.min(current)
 }
 
 /// Text to store and show for a non-2xx body. A JSON `error` field is the
@@ -516,8 +710,7 @@ where
 fn server_wide_refusal(detail: &str) -> SyncUploadError {
     SyncUploadError {
         message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
-        status: None,
-        retry_after: None,
+        ..SyncUploadError::plain("")
     }
 }
 
@@ -557,6 +750,10 @@ fn token_fingerprint(token: &str) -> String {
 struct AuthPauseFile {
     server_url: String,
     token_fingerprint: String,
+    /// `"expired"` for [`AuthPauseReason::Expired`]. Absent on older files
+    /// and on a plain rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// True when this row must stay on the machine until the member picks
@@ -622,6 +819,16 @@ pub fn upload_request(
 
 /// Remember that this URL + token was refused (401/403). Mode 0600.
 pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::io::Result<()> {
+    write_auth_pause_reason(data_dir, server_url, token, AuthPauseReason::Rejected)
+}
+
+/// [`write_auth_pause`], with the GUI copy selected by `reason`.
+pub fn write_auth_pause_reason(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+    reason: AuthPauseReason,
+) -> std::io::Result<()> {
     if let Some(parent) = auth_pause_path(data_dir).parent() {
         std::fs::create_dir_all(parent)?;
         crate::fs_mode::tighten_private_dir(parent);
@@ -629,6 +836,10 @@ pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::
     let file = AuthPauseFile {
         server_url: server_url.to_string(),
         token_fingerprint: token_fingerprint(token),
+        reason: match reason {
+            AuthPauseReason::Rejected => None,
+            AuthPauseReason::Expired => Some("expired".to_string()),
+        },
     };
     let path = auth_pause_path(data_dir);
     let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
@@ -646,13 +857,21 @@ pub fn clear_auth_pause(data_dir: &Path) {
 
 /// True when the on-disk pause was recorded for this exact URL and token.
 pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> bool {
-    let Ok(bytes) = std::fs::read(auth_pause_path(data_dir)) else {
-        return false;
-    };
-    let Ok(file) = serde_json::from_slice::<AuthPauseFile>(&bytes) else {
-        return false;
-    };
-    file.server_url == server_url && file.token_fingerprint == token_fingerprint(token)
+    auth_pause_status(data_dir, server_url, token).is_some()
+}
+
+/// GUI health line when this URL and token are paused. `None` when sync
+/// should keep running.
+pub fn auth_pause_status(data_dir: &Path, server_url: &str, token: &str) -> Option<&'static str> {
+    let bytes = std::fs::read(auth_pause_path(data_dir)).ok()?;
+    let file = serde_json::from_slice::<AuthPauseFile>(&bytes).ok()?;
+    if file.server_url != server_url || file.token_fingerprint != token_fingerprint(token) {
+        return None;
+    }
+    Some(match file.reason.as_deref() {
+        Some("expired") => SYNC_TOKEN_EXPIRED_STATUS,
+        _ => SYNC_TOKEN_REJECTED_STATUS,
+    })
 }
 
 fn token_safe_redirects() -> reqwest::redirect::Policy {
@@ -1546,7 +1765,7 @@ mod tests {
         SyncUploadError {
             message: "matches[0]: hero is not allowed".into(),
             status: Some(status),
-            retry_after: None,
+            ..SyncUploadError::plain("")
         }
     }
 
@@ -1609,7 +1828,7 @@ mod tests {
                 Err(SyncUploadError {
                     message: "nope".into(),
                     status: Some(422),
-                    retry_after: None,
+                    ..SyncUploadError::plain("")
                 })
             }
         })
@@ -1736,6 +1955,7 @@ mod tests {
                         message: "unavailable".into(),
                         status: Some(503),
                         retry_after: Some(wait),
+                        ..SyncUploadError::plain("")
                     })
                 } else {
                     panic!("request after 503 must not be sent, got {first}..+{len}");
@@ -1854,7 +2074,7 @@ mod tests {
                     Err(SyncUploadError {
                         message: "down".into(),
                         status: code,
-                        retry_after: None,
+                        ..SyncUploadError::plain("")
                     })
                 }
             })
@@ -1880,5 +2100,206 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn batch_limits_fall_to_the_server_values_and_stay_at_least_one() {
+        let mut matches = SYNC_UPLOAD_MAX_MATCHES;
+        let mut deletes = SYNC_UPLOAD_MAX_DELETES;
+        assert!(lower_batch_limits(
+            &mut matches,
+            &mut deletes,
+            Some(50),
+            Some(100)
+        ));
+        assert_eq!(matches, 50);
+        assert_eq!(deletes, 100);
+        assert!(
+            !lower_batch_limits(&mut matches, &mut deletes, Some(50), Some(100)),
+            "the same caps are not progress"
+        );
+        assert!(lower_batch_limits(
+            &mut matches,
+            &mut deletes,
+            Some(0),
+            None
+        ));
+        assert_eq!(matches, 1, "a zero cap is bounded to 1");
+        assert_eq!(deletes, 100, "a missing field keeps the current cap");
+        assert!(!lower_batch_limits(
+            &mut matches,
+            &mut deletes,
+            Some(500),
+            Some(500)
+        ));
+        assert_eq!(matches, 1);
+        assert_eq!(deletes, 100, "a higher server value does not raise the cap");
+    }
+
+    #[test]
+    fn expired_pause_uses_the_relink_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_auth_pause_reason(
+            dir.path(),
+            "https://crew.example",
+            "old-token",
+            AuthPauseReason::Expired,
+        )
+        .unwrap();
+        assert_eq!(
+            auth_pause_status(dir.path(), "https://crew.example", "old-token"),
+            Some(SYNC_TOKEN_EXPIRED_STATUS)
+        );
+        assert!(auth_pause_matches(
+            dir.path(),
+            "https://crew.example",
+            "old-token"
+        ));
+        assert_eq!(
+            SYNC_TOKEN_EXPIRED_STATUS,
+            "Sync token expired, relink in Settings"
+        );
+        write_auth_pause(dir.path(), "https://crew.example", "old-token").unwrap();
+        assert_eq!(
+            auth_pause_status(dir.path(), "https://crew.example", "old-token"),
+            Some(SYNC_TOKEN_REJECTED_STATUS)
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_413_batch_too_large_carries_the_server_caps() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"code":"batch_too_large","error":"batch too large","max_matches":50,"max_deleted_sessions":100}"#;
+        let response = format!(
+            "HTTP/1.1 413 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("413");
+        let _ = server.join().expect("server");
+        assert!(err.is_batch_too_large());
+        assert_eq!(err.max_matches, Some(50));
+        assert_eq!(err.max_deleted_sessions, Some(100));
+        assert!(matches!(err.attempt(), SyncAttempt::BatchTooLarge));
+        let t0 = std::time::Instant::now();
+        let mut backoff = SyncBackoff::default();
+        backoff.observe(err.attempt(), t0);
+        assert_eq!(
+            backoff.failures(),
+            1,
+            "a 413 the pass cannot shrink backs off"
+        );
+        assert!(!backoff.should_attempt(t0));
+        assert_eq!(backoff.retry_after(t0), SYNC_BACKOFF_BASE);
+        assert!(!backoff.auth_rejected());
+    }
+
+    #[test]
+    fn learned_batch_caps_only_fall() {
+        let c = client("https://crew.example");
+        assert_eq!(c.batch_caps(), BatchCaps::default());
+        c.remember_batch_caps(BatchCaps {
+            matches: 50,
+            deletes: 100,
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 100,
+            }
+        );
+        c.remember_batch_caps(BatchCaps {
+            matches: 200,
+            deletes: 80,
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 80,
+            },
+            "a later pass cannot raise a learned cap"
+        );
+        assert_eq!(c.clone().batch_caps().matches, 50);
+    }
+
+    #[test]
+    fn replace_credentials_resets_learned_caps_when_the_server_url_changes() {
+        let c = client("https://crew.example");
+        c.remember_batch_caps(BatchCaps {
+            matches: 50,
+            deletes: 100,
+        });
+        c.replace_credentials(SyncConfig {
+            server_url: "https://crew.example".into(),
+            token: "other-token".into(),
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 100,
+            },
+            "a new token on the same server keeps the learned caps"
+        );
+        c.replace_credentials(SyncConfig {
+            server_url: "https://other.example".into(),
+            token: "other-token".into(),
+        });
+        assert_eq!(c.batch_caps(), BatchCaps::default());
+        assert_eq!(c.batch_caps().matches, SYNC_UPLOAD_MAX_MATCHES);
+        assert_eq!(c.batch_caps().deletes, SYNC_UPLOAD_MAX_DELETES);
+    }
+
+    #[tokio::test]
+    async fn upload_401_token_expired_pauses_without_a_failure_streak() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"code":"token_expired","error":"token expired"}"#;
+        let response = format!(
+            "HTTP/1.1 401 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("401");
+        let _ = server.join().expect("server");
+        assert!(err.is_token_expired());
+        assert!(matches!(err.attempt(), SyncAttempt::TokenExpired));
+        let t0 = std::time::Instant::now();
+        let mut backoff = SyncBackoff::default();
+        backoff.observe(err.attempt(), t0);
+        assert!(backoff.auth_rejected());
+        assert_eq!(backoff.failures(), 0);
+        assert!(!backoff.should_attempt(t0));
+    }
+
+    #[tokio::test]
+    async fn upload_429_rate_limited_keeps_retry_after() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"error":"rate_limited","retry_after":30}"#;
+        let response = format!(
+            "HTTP/1.1 429 no\r\nRetry-After: 45\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("429");
+        let _ = server.join().expect("server");
+        assert_eq!(err.code.as_deref(), Some("rate_limited"));
+        assert_eq!(err.retry_after, Some(std::time::Duration::from_secs(45)));
+        assert!(matches!(
+            err.attempt(),
+            SyncAttempt::RateLimited {
+                retry_after: Some(wait)
+            } if wait == std::time::Duration::from_secs(45)
+        ));
     }
 }

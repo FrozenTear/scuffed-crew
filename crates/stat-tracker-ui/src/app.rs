@@ -2857,8 +2857,10 @@ fn health_status_for(
         {
             return format!("Sync paused: {}", e.message());
         }
-        if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
-            return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
+        if !url.is_empty()
+            && let Some(status) = stat_tracker::sync::auth_pause_status(data_dir, url, token)
+        {
+            return status.to_string();
         }
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
@@ -3453,6 +3455,24 @@ token = \"secret-token-must-stay\"
             super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
             "Ready",
             "a changed URL clears the rejected state"
+        );
+        stat_tracker::sync::write_auth_pause_reason(
+            &dir,
+            "https://crew.example",
+            "expired-token",
+            stat_tracker::sync::AuthPauseReason::Expired,
+        )
+        .unwrap();
+        let expired =
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "expired-token")));
+        assert_eq!(expired, stat_tracker::sync::SYNC_TOKEN_EXPIRED_STATUS);
+        assert_eq!(expired, "Sync token expired, relink in Settings");
+        assert!(expired.contains("relink"), "{expired}");
+        assert!(expired.contains("Settings"), "{expired}");
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "other-token"))),
+            "Ready",
+            "a changed token clears the expired state"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
