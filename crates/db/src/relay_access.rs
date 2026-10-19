@@ -910,4 +910,147 @@ mod tests {
             }
         }
     }
+
+    /// The text of one SurrealQL statement in `migrations.rs`, not a copy.
+    fn migration_statement(marker: &str) -> String {
+        let src = include_str!("migrations.rs");
+        let start = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("migrations.rs is missing {marker}"));
+        let rest = &src[start..];
+        let end = rest
+            .find(';')
+            .unwrap_or_else(|| panic!("migrations.rs statement has no semicolon after {marker}"));
+        rest[..=end].trim().to_string()
+    }
+
+    /// DEFINE FIELD OVERWRITE on the secret columns, and the audit_log table
+    /// define, used to omit permissions. A later failure then left those
+    /// columns readable. Re-running the statements from `migrations.rs` must
+    /// keep the relay from seeing them.
+    #[tokio::test]
+    async fn define_field_overwrite_does_not_reopen_hidden_columns() {
+        let secret_define =
+            migration_statement("DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member");
+        let reason_define =
+            migration_statement("DEFINE FIELD OVERWRITE reason ON moderation_action");
+        let issued_define =
+            migration_statement("DEFINE FIELD OVERWRITE issued_by ON moderation_action");
+        let audit_define = migration_statement("DEFINE TABLE OVERWRITE audit_log");
+        for statement in [&secret_define, &reason_define, &issued_define] {
+            assert!(
+                statement.contains("PERMISSIONS FOR select NONE"),
+                "hidden field define lost its permissions: {statement}"
+            );
+        }
+        assert!(
+            audit_define.contains("PERMISSIONS NONE"),
+            "audit_log define lost PERMISSIONS NONE: {audit_define}"
+        );
+        let src = include_str!("migrations.rs");
+        let apply_at = src
+            .find("apply_relay_read_permissions")
+            .expect("migrations call apply_relay_read_permissions");
+        for marker in [
+            "DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member",
+            "DEFINE FIELD OVERWRITE reason ON moderation_action",
+            "DEFINE FIELD OVERWRITE issued_by ON moderation_action",
+            "DEFINE TABLE OVERWRITE audit_log",
+        ] {
+            let at = src.find(marker).expect(marker);
+            assert!(
+                at < apply_at,
+                "{marker} is defined after apply_relay_read_permissions"
+            );
+        }
+
+        let owner = owner("relay-access-redefine").await;
+        crate::migrations::run_migrations(&owner.client)
+            .await
+            .expect("migrations");
+        ensure_relay_access(&owner.client, "scuffed_relay", "relay-pass-1", false)
+            .await
+            .expect("relay user");
+        let secret = "redefine-secret-marker";
+        let reason = "redefine-reason-marker";
+        owner
+            .client
+            .query(
+                "CREATE member:redefine SET user_id = 'user:redefine', org_role = 'member', \
+                 display_name = 'Redefine', is_active = true, nostr_pubkey = 'ef', \
+                 nostr_secret_key_encrypted = { marker: $secret };
+                 CREATE moderation_action:redefine SET member_id = 'redefine', \
+                 action_type = 'ban', reason = $reason, issued_by = 'officer-redefine', \
+                 is_active = true;
+                 CREATE audit_log SET actor_id = 'officer-redefine', \
+                 action = 'redefine-audit-marker', target_type = 'member', target_id = 'redefine'",
+            )
+            .bind(("secret", secret))
+            .bind(("reason", reason))
+            .await
+            .expect("seed")
+            .check()
+            .expect("seed check");
+
+        owner
+            .client
+            .query(format!(
+                "{secret_define}\n{reason_define}\n{issued_define}\n{audit_define}"
+            ))
+            .await
+            .expect("replay defines")
+            .check()
+            .expect("replay defines check");
+
+        let relay = relay_session(&owner, "relay-pass-1")
+            .await
+            .expect("relay sign-in");
+        let member = relay
+            .client
+            .query("SELECT * FROM member:redefine")
+            .await
+            .expect("relay member");
+        let member_dbg = format!("{member:?}");
+        assert!(
+            !member_dbg.contains(secret),
+            "replaying the field define reopened nostr_secret_key_encrypted: {member_dbg}"
+        );
+        let action = relay
+            .client
+            .query("SELECT * FROM moderation_action:redefine")
+            .await
+            .expect("relay moderation");
+        let action_dbg = format!("{action:?}");
+        assert!(
+            !action_dbg.contains(reason),
+            "replaying the field define reopened reason: {action_dbg}"
+        );
+        assert!(
+            !action_dbg.contains("officer-redefine"),
+            "replaying the field define reopened issued_by: {action_dbg}"
+        );
+        let audit = relay
+            .client
+            .query("SELECT * FROM audit_log")
+            .await
+            .expect("relay audit");
+        let audit_dbg = format!("{audit:?}");
+        assert!(
+            audit.check().is_err() || !audit_dbg.contains("redefine-audit-marker"),
+            "replaying the table define reopened audit_log: {audit_dbg}"
+        );
+
+        let mut info = owner.client.query("INFO FOR DB").await.expect("info");
+        let info_value: surrealdb_types::Value = info.take(0).expect("info value");
+        let definition = info_value
+            .into_json_value()
+            .get("tables")
+            .and_then(|value| value.get("audit_log"))
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        assert!(
+            definition.contains("PERMISSIONS NONE"),
+            "audit_log is not PERMISSIONS NONE after the real define: {definition}"
+        );
+    }
 }
