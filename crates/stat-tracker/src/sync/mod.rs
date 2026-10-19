@@ -24,14 +24,37 @@ pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are schedule
 /// JSON `code` on HTTP 409 while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
 
-/// Matches per stats upload. The server's `STATS_UPLOAD_BATCH_CAP` rejects
-/// a larger body with HTTP 413 `batch_too_large`. This client stays at or
-/// under the cap, and shrinks further when a 413 names a smaller one.
+/// Matches per stats upload. The server rejects a larger body with HTTP 413
+/// `batch_too_large`. This client stays at or under the cap, and shrinks
+/// further when a 413 names a smaller one.
+///
+/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_MATCHES` once that PR is
+/// on main, so this cap cannot drift from the server.
 pub const SYNC_UPLOAD_MAX_MATCHES: usize = 200;
 
 /// Deleted session ids per stats upload. Same 413 path as
 /// [`SYNC_UPLOAD_MAX_MATCHES`].
+///
+/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_DELETED_SESSIONS` once
+/// that PR is on main.
 pub const SYNC_UPLOAD_MAX_DELETES: usize = 500;
+
+/// Upload chunk sizes for one process. Starts at the client caps and only
+/// falls, for the life of the [`SyncClient`] that holds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchCaps {
+    pub matches: usize,
+    pub deletes: usize,
+}
+
+impl Default for BatchCaps {
+    fn default() -> Self {
+        Self {
+            matches: SYNC_UPLOAD_MAX_MATCHES,
+            deletes: SYNC_UPLOAD_MAX_DELETES,
+        }
+    }
+}
 
 const AUTH_PAUSE_FILE: &str = "sync_auth.json";
 
@@ -89,8 +112,9 @@ pub enum SyncAttempt {
     /// HTTP 401 with code `token_expired`. Same pause as [`Self::AuthRejected`].
     /// The GUI copy is [`SYNC_TOKEN_EXPIRED_STATUS`].
     TokenExpired,
-    /// HTTP 413 `batch_too_large` that the pass could not shrink below.
-    /// Nothing in that request was written. Not a failure streak.
+    /// HTTP 413 `batch_too_large` that the pass could not shrink below
+    /// (the server repeated the same caps, or sent none). Nothing in that
+    /// request was written. Counts as a failure so the next pass waits.
     BatchTooLarge,
     /// HTTP 409 `stats_delete_pending`. Stop this pass and keep every row
     /// queued. Automatic sync stays off until a new token is saved. Not a
@@ -132,13 +156,15 @@ impl SyncUploadError {
     /// 401 `token_expired` pauses sync with the relink copy. Other 401 and
     /// 403 responses pause with the rejected-token copy. 409
     /// `stats_delete_pending` stops the pass until a new token is saved. 429 is
-    /// rate-limit backoff and does not grow the failure streak. 413
-    /// `batch_too_large` is not a failure streak either: the sync pass
-    /// shrinks and resends. 503 may carry `Retry-After` as a wait floor.
-    /// Other statuses, including a bare 400, 422, or any other 409, are
-    /// server errors and ignore `Retry-After`. The sync pass does not
-    /// observe a 400 or 422 that way: [`isolate_rejected`] splits the batch
-    /// and quarantines the bad rows instead. A 409 is never split.
+    /// rate-limit backoff and does not grow the failure streak. A 413
+    /// `batch_too_large` that names a smaller cap is shrunk and resent inside
+    /// the pass, so the clock never sees it. One the pass cannot shrink is
+    /// [`SyncAttempt::BatchTooLarge`] and does back off. 503 may carry
+    /// `Retry-After` as a wait floor. Other statuses, including a bare 400,
+    /// 422, or any other 409, are server errors and ignore `Retry-After`.
+    /// The sync pass does not observe a 400 or 422 that way:
+    /// [`isolate_rejected`] splits the batch and quarantines the bad rows
+    /// instead. A 409 is never split.
     pub fn attempt(&self) -> SyncAttempt {
         if self.is_token_expired() {
             return SyncAttempt::TokenExpired;
@@ -358,7 +384,8 @@ impl SyncBackoff {
             SyncAttempt::RateLimited { retry_after } => self.record_rate_limit(now, retry_after),
             SyncAttempt::AuthRejected | SyncAttempt::TokenExpired => self.record_auth_rejected(),
             SyncAttempt::StatsDeletePending => self.record_delete_pending(),
-            SyncAttempt::BatchTooLarge | SyncAttempt::NoServerCall => {}
+            SyncAttempt::BatchTooLarge => self.record_failure(now),
+            SyncAttempt::NoServerCall => {}
         }
     }
 }
@@ -367,6 +394,8 @@ impl SyncBackoff {
 pub struct SyncClient {
     config: Arc<Mutex<SyncConfig>>,
     http: reqwest::Client,
+    /// Caps learned from HTTP 413. Shared by clones. Never raised.
+    batch_caps: Arc<Mutex<BatchCaps>>,
 }
 
 impl SyncClient {
@@ -384,6 +413,23 @@ impl SyncClient {
         Self {
             http,
             config: Arc::new(Mutex::new(config)),
+            batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+        }
+    }
+
+    /// Chunk sizes for the next upload. Lowered caps stick for this process.
+    pub fn batch_caps(&self) -> BatchCaps {
+        *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep `caps` when either limit fell. A higher value is ignored.
+    pub fn remember_batch_caps(&self, caps: BatchCaps) {
+        let mut slot = self.batch_caps.lock().unwrap_or_else(|e| e.into_inner());
+        if caps.matches < slot.matches {
+            slot.matches = caps.matches.max(1);
+        }
+        if caps.deletes < slot.deletes {
+            slot.deletes = caps.deletes.max(1);
         }
     }
 
@@ -2460,14 +2506,45 @@ mod tests {
         assert!(matches!(err.attempt(), SyncAttempt::BatchTooLarge));
         let t0 = std::time::Instant::now();
         let mut backoff = SyncBackoff::default();
-        backoff.record_failure(t0);
         backoff.observe(err.attempt(), t0);
         assert_eq!(
             backoff.failures(),
             1,
-            "413 must not grow the failure streak"
+            "a 413 the pass cannot shrink backs off"
         );
+        assert!(!backoff.should_attempt(t0));
+        assert_eq!(backoff.retry_after(t0), SYNC_BACKOFF_BASE);
         assert!(!backoff.auth_rejected());
+    }
+
+    #[test]
+    fn learned_batch_caps_only_fall() {
+        let c = client("https://crew.example");
+        assert_eq!(c.batch_caps(), BatchCaps::default());
+        c.remember_batch_caps(BatchCaps {
+            matches: 50,
+            deletes: 100,
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 100,
+            }
+        );
+        c.remember_batch_caps(BatchCaps {
+            matches: 200,
+            deletes: 80,
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 80,
+            },
+            "a later pass cannot raise a learned cap"
+        );
+        assert_eq!(c.clone().batch_caps().matches, 50);
     }
 
     #[tokio::test]
