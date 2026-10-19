@@ -6,10 +6,10 @@
 //! `web_sys` (`Document::set_title` does not eval a string, which the site CSP
 //! forbids). Desktop still uses `document::Title` for the window title.
 //!
-//! Open Graph URL and canonical are absolute only when settings (or a
-//! `sc-public-base` meta tag) name a public http(s) origin. Otherwise the
-//! href is the route path, which the browser resolves against the current
-//! document. No deploy host is baked in.
+//! `og:url` is absolute only when settings name a public http(s) origin
+//! under `public_base_url`. Without that origin the tag is left out.
+//! Canonical stays on the route path, which the browser resolves against
+//! the current document. No deploy host is baked in.
 
 use dioxus::prelude::*;
 
@@ -30,7 +30,6 @@ pub const FONT_STYLESHEET: &str = "https://fonts.googleapis.com/css2?family=Inte
 
 const OG_IMAGE_PATH: &str = "/assets/apple-touch-icon.png";
 const TITLE_SEP: &str = " | ";
-const SETTINGS_BASE_KEYS: &[&str] = &["public_base_url", "public_url", "canonical_base"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocumentHead {
@@ -145,8 +144,12 @@ pub fn document_head(
     };
     let (og_url, og_image, canonical) = if is_public_route(route) {
         let path = route_path(route);
+        // A relative og:url is dropped. Crawlers that do not run wasm only
+        // see the shell, and a relative og:url is not a document URL.
+        // Canonical may stay on the path.
+        let og_url = base.as_ref().map(|origin| format!("{origin}{path}"));
         (
-            Some(join_base(base.as_deref(), &path)),
+            og_url,
             Some(join_base(base.as_deref(), OG_IMAGE_PATH)),
             Some(join_base(base.as_deref(), &path)),
         )
@@ -212,20 +215,13 @@ pub fn apply_plan(mut slots: HeadSlots, plan: &HeadPlan) -> HeadSlots {
 
 /// Public origin from anonymous settings JSON.
 ///
-/// `SiteSettings` has no base field today. A string under `public_base_url`,
-/// `public_url`, or `canonical_base` is honored when it is a public http(s)
-/// origin with no path. Loopback and anything else fall through.
+/// `SiteSettings` has no base field today. Only `public_base_url` is read,
+/// and only when it is a public http(s) origin with no path. Loopback and
+/// anything else fall through.
 pub fn public_base_from_settings_json(json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let object = value.as_object()?;
-    for key in SETTINGS_BASE_KEYS {
-        if let Some(raw) = object.get(*key).and_then(serde_json::Value::as_str)
-            && let Some(base) = sanitize_public_base(Some(raw))
-        {
-            return Some(base);
-        }
-    }
-    None
+    let raw = value.get("public_base_url")?.as_str()?;
+    sanitize_public_base(Some(raw))
 }
 
 pub fn sanitize_public_base(raw: Option<&str>) -> Option<String> {
@@ -442,21 +438,8 @@ fn configured_public_base() -> Option<String> {
         {
             return Some(base);
         }
-        if let Some(base) = meta_public_base() {
-            return Some(base);
-        }
     }
     None
-}
-
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-fn meta_public_base() -> Option<String> {
-    let document = web_sys::window()?.document()?;
-    let el = document
-        .query_selector("meta[name='sc-public-base']")
-        .ok()
-        .flatten()?;
-    sanitize_public_base(el.get_attribute("content").as_deref())
 }
 
 fn install_document_head(head: &DocumentHead) {
@@ -746,7 +729,7 @@ mod tests {
             assert_eq!(head.og_type, "website");
             assert_eq!(head.og_site_name, "Owls");
             assert_eq!(head.canonical.as_deref(), Some(path.as_str()));
-            assert_eq!(head.og_url.as_deref(), Some(path.as_str()));
+            assert!(head.og_url.is_none(), "no relative og:url without a base");
             assert_eq!(head.og_image.as_deref(), Some(OG_IMAGE_PATH));
             assert!(!head.canonical.as_deref().unwrap().contains("://"));
             titles.push(head.title);
@@ -796,6 +779,7 @@ mod tests {
         ] {
             let head = document_head(&Route::News {}, Some("Owls"), "d", Some(bad));
             assert_eq!(head.canonical.as_deref(), Some("/news"), "{bad}");
+            assert!(head.og_url.is_none(), "{bad}");
         }
     }
 
@@ -805,13 +789,17 @@ mod tests {
         assert!(public_base_from_settings_json("[]").is_none());
         assert!(public_base_from_settings_json(r#"{"org_name":"Owls"}"#).is_none());
         assert!(
-            public_base_from_settings_json(r#"{"canonical_base":"http://localhost"}"#).is_none()
+            public_base_from_settings_json(r#"{"public_base_url":"http://localhost"}"#).is_none()
+        );
+        assert!(
+            public_base_from_settings_json(r#"{"public_url":"https://example.com/"}"#).is_none()
+        );
+        assert!(
+            public_base_from_settings_json(r#"{"canonical_base":"https://example.com"}"#).is_none()
         );
         assert_eq!(
-            public_base_from_settings_json(
-                r#"{"public_base_url":"http://127.0.0.1:3030","public_url":"https://example.com/"}"#
-            )
-            .as_deref(),
+            public_base_from_settings_json(r#"{"public_base_url":"https://example.com/"}"#)
+                .as_deref(),
             Some("https://example.com")
         );
     }
@@ -867,6 +855,10 @@ mod tests {
         assert_eq!(slots.title, vec!["Members | Owls".to_string()]);
         assert_eq!(slots.description, vec!["Members. Night games.".to_string()]);
         assert_eq!(slots.canonical, vec!["/members".to_string()]);
+        assert!(
+            slots.og_url.is_empty(),
+            "a public page with no base clears og:url"
+        );
         assert!(slots.title.iter().all(|value| !value.contains("STALE")));
         assert!(
             slots
