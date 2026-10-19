@@ -43,6 +43,8 @@ libc = "0.2"
 regex = "1"
 # Same zip crate and features as site-server (report bundles).
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Local benchmark crop archives (.tar.gz). Nothing in this crate uploads them.
+flate2 = "1.1"
 
 [lib]
 name = "stat_tracker"

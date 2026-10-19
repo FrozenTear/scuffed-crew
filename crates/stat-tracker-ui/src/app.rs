@@ -49,6 +49,29 @@ fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
 }
 
+/// Local `.tar.gz` only. The toast is a count, never a crop or a name.
+async fn export_benchmark_crops(
+    opted_in: bool,
+    data_dir: PathBuf,
+    dest: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = {
+            let trimmed = dest.trim();
+            if trimmed.is_empty() {
+                stat_tracker::bench_crops::default_export_path()
+            } else {
+                PathBuf::from(trimmed)
+            }
+        };
+        stat_tracker::bench_crops::export_benchmark_crops(opted_in, &data_dir, &path)
+            .map(|counts| format!("Exported {} games, {} files", counts.games, counts.files))
+    })
+    .await
+    .map_err(|_| "could not write the benchmark export".to_string())?
+    .map_err(|err| err.to_string())
+}
+
 /// Every Save re-reads the file. `Err` means it still does not parse.
 fn reread_config_for_save(path: &std::path::Path) -> Result<Config, &'static str> {
     Config::read_at(path).map_err(|_| SETTINGS_SAVE_REFUSED)
@@ -215,6 +238,9 @@ pub enum Message {
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
     SaveSettings,
+    /// Write the local benchmark crop archive. Shown only while the setting is on.
+    ExportBenchmarkCrops,
+    BenchmarkExportReady(Result<String, String>),
     Daemon(DaemonVerb),
     DaemonDone(Result<String, String>),
     ToggleAutostart,
@@ -1039,6 +1065,29 @@ impl TrackerApp {
             }
             Message::SelectOutput(name) => {
                 self.settings.capture_output = name.unwrap_or_default();
+                Task::none()
+            }
+            Message::ExportBenchmarkCrops => {
+                if self.fixture.is_some()
+                    || !stat_tracker::bench_crops::export_button_visible(
+                        self.settings.keep_benchmark_crops,
+                    )
+                {
+                    return Task::none();
+                }
+                let opted_in = self.settings.keep_benchmark_crops;
+                let data_dir = self.data_dir.clone();
+                let dest = self.settings.benchmark_export_path.clone();
+                Task::perform(
+                    export_benchmark_crops(opted_in, data_dir, dest),
+                    Message::BenchmarkExportReady,
+                )
+            }
+            Message::BenchmarkExportReady(result) => {
+                self.replace_toast(match result {
+                    Ok(message) => message,
+                    Err(message) => message,
+                });
                 Task::none()
             }
             Message::SaveSettings => {

@@ -2,7 +2,7 @@
 //!
 //! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
 //! Stored data spanning the pane, Save as a full-width footer strip. Does
-//! not invent daemon config keys.
+//! not invent daemon config keys other than `keep_benchmark_crops`.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
 //! The new reader switch writes `reader`. The classic OCR switch writes `ocr`.
@@ -66,6 +66,8 @@ pub enum SettingsField {
     SyncUrl,
     SyncToken,
     OverlayHotkey,
+    /// Path for "Export crops for benchmark". Not written to config.toml.
+    BenchmarkExportPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub enum SettingsToggle {
     /// it lets this go off ([`classic_ocr_toggle`]).
     ClassicOcr,
     PrereleaseUpdates,
+    /// "Keep crops for the accuracy benchmark".
+    BenchmarkCrops,
 }
 
 /// Scoreboard number reader the Settings control can select.
@@ -398,6 +402,11 @@ pub struct SettingsForm {
     /// What the checkbox showed when the form was loaded. Save writes
     /// `update_channel` only when `prerelease_updates` differs from this.
     pub prerelease_updates_shown: bool,
+    /// `keep_benchmark_crops`. Off unless the file sets it.
+    pub keep_benchmark_crops: bool,
+    /// Where "Export crops for benchmark" writes. Empty uses the home default.
+    /// Not saved.
+    pub benchmark_export_path: String,
 }
 
 impl Default for SettingsForm {
@@ -451,6 +460,8 @@ impl SettingsForm {
             classic_ocr: config.ocr.is_on(),
             prerelease_updates: config.wants_prerelease_updates(),
             prerelease_updates_shown: config.wants_prerelease_updates(),
+            keep_benchmark_crops: config.keep_benchmark_crops,
+            benchmark_export_path: String::new(),
         }
     }
 
@@ -499,6 +510,7 @@ impl SettingsForm {
             SettingsField::SyncUrl => self.sync_url = value,
             SettingsField::SyncToken => self.sync_token = value,
             SettingsField::OverlayHotkey => self.overlay_hotkey = value,
+            SettingsField::BenchmarkExportPath => self.benchmark_export_path = value,
         }
     }
 
@@ -513,6 +525,7 @@ impl SettingsForm {
             SettingsToggle::NewReader => self.new_reader = value,
             SettingsToggle::ClassicOcr => self.classic_ocr = value,
             SettingsToggle::PrereleaseUpdates => self.prerelease_updates = value,
+            SettingsToggle::BenchmarkCrops => self.keep_benchmark_crops = value,
         }
     }
 
@@ -546,6 +559,7 @@ impl SettingsForm {
             finished_game_close_secs: base.finished_game_close_secs,
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
+            keep_benchmark_crops: self.keep_benchmark_crops,
             report_kit_max_games: base.report_kit_max_games,
             report_kit_max_mb: base.report_kit_max_mb,
             ocr_threads: base.ocr_threads,
@@ -646,9 +660,10 @@ pub(crate) fn field_max_width(field: SettingsField) -> f32 {
             FIELD_NUMERIC
         }
         SettingsField::PlayerName | SettingsField::OverlayHotkey => FIELD_SHORT,
-        SettingsField::ProcessNames | SettingsField::SyncUrl | SettingsField::SyncToken => {
-            FIELD_TEXT
-        }
+        SettingsField::ProcessNames
+        | SettingsField::SyncUrl
+        | SettingsField::SyncToken
+        | SettingsField::BenchmarkExportPath => FIELD_TEXT,
     }
 }
 
@@ -1339,8 +1354,12 @@ const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4
 /// show and where they stay.
 const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
-fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
-    let body = column![
+const BENCHMARK_CROPS_HINT: &str = "Keeps more crops on this PC for an accuracy check (up to 500, with a size limit). Turning it off uses the usual cap the next time crops are pruned. Nothing is uploaded.";
+
+const BENCHMARK_EXPORT_HINT: &str = "Writes a .tar.gz on this PC. Leave the path empty to use your home folder. The file is not uploaded.";
+
+fn diagnostics_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let mut body = column![
         checkbox(app.settings.debug_ocr)
             .label("Save debug images from each capture")
             .on_toggle(|v| Message::SettingsToggle(SettingsToggle::DebugOcr, v))
@@ -1348,8 +1367,32 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
             .text_size(SIZE_BODY)
             .style(checkbox_style),
         hint(DEBUG_IMAGES_HELP),
+        checkbox(app.settings.keep_benchmark_crops)
+            .label(stat_tracker::bench_crops::SETTING_LABEL)
+            .on_toggle(|v| Message::SettingsToggle(SettingsToggle::BenchmarkCrops, v))
+            .size(16)
+            .text_size(SIZE_BODY)
+            .style(checkbox_style),
+        hint(BENCHMARK_CROPS_HINT),
     ]
     .spacing(6);
+    if stat_tracker::bench_crops::export_button_visible(app.settings.keep_benchmark_crops) && !demo
+    {
+        body = body.push(field_input(
+            "Export path",
+            "Home folder when empty",
+            &app.settings.benchmark_export_path,
+            SettingsField::BenchmarkExportPath,
+            false,
+            demo,
+            Some(BENCHMARK_EXPORT_HINT),
+        ));
+        body = body.push(action_btn(
+            stat_tracker::bench_crops::EXPORT_BUTTON_LABEL,
+            false,
+            Message::ExportBenchmarkCrops,
+        ));
+    }
     settings_card("Diagnostics", body.into())
 }
 
@@ -1674,6 +1717,36 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_crops_are_off_until_the_member_opts_in() {
+        let base = base();
+        assert!(!base.keep_benchmark_crops);
+        let mut form = SettingsForm::from_config(&base);
+        assert!(!form.keep_benchmark_crops);
+        assert!(!stat_tracker::bench_crops::export_button_visible(
+            form.keep_benchmark_crops
+        ));
+        form.set_toggle(SettingsToggle::BenchmarkCrops, true);
+        assert!(form.keep_benchmark_crops);
+        assert!(stat_tracker::bench_crops::export_button_visible(
+            form.keep_benchmark_crops
+        ));
+        let saved = form.to_config(&base);
+        assert!(saved.keep_benchmark_crops);
+        let raw = toml::to_string_pretty(&saved).unwrap();
+        assert!(raw.contains("keep_benchmark_crops = true"));
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert!(SettingsForm::from_config(&back).keep_benchmark_crops);
+        assert_eq!(
+            stat_tracker::bench_crops::SETTING_LABEL,
+            "Keep crops for the accuracy benchmark"
+        );
+        assert_eq!(
+            stat_tracker::bench_crops::EXPORT_BUTTON_LABEL,
+            "Export crops for benchmark"
+        );
+    }
+
+    #[test]
     fn empty_optional_fields_become_none() {
         let form = SettingsForm {
             capture_output: "  ".into(),
@@ -1693,6 +1766,8 @@ mod tests {
             classic_ocr: true,
             prerelease_updates: false,
             prerelease_updates_shown: false,
+            keep_benchmark_crops: false,
+            benchmark_export_path: String::new(),
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());

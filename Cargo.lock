@@ -10994,6 +10994,7 @@ dependencies = [
  "chrono",
  "dirs",
  "evdev",
+ "flate2",
  "image",
  "leptess",
  "libc",
