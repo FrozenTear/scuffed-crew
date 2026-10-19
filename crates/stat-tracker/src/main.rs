@@ -468,9 +468,17 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         let creds = client.credentials();
         let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
-            tracing::error!(
-                "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
-            );
+            match sync::auth_pause_status(&config.data_dir, Some((&creds.server_url, &creds.token)))
+            {
+                Some(line) if line.contains("scheduled for deletion") => {
+                    tracing::error!("sync paused: {line}");
+                }
+                _ => {
+                    tracing::error!(
+                        "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
+                    );
+                }
+            }
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
             pack_startup = Some(

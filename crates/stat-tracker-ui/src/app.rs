@@ -1426,6 +1426,7 @@ impl TrackerApp {
                                 self.delete_data.offer_retry = false;
                                 if *unlinked {
                                     self.forget_sync_link();
+                                    self.health_status = self.health_now();
                                 }
                             }
                         }
@@ -2994,9 +2995,11 @@ fn health_status_for(
         {
             return format!("Sync paused: {}", e.message());
         }
-        if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
-            return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
+        if let Some(line) = stat_tracker::sync::auth_pause_status(data_dir, Some((url, token))) {
+            return line;
         }
+    } else if let Some(line) = stat_tracker::sync::auth_pause_status(data_dir, None) {
+        return line;
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
         HEALTH_READY.into()
@@ -3570,6 +3573,29 @@ token = \"secret-token-must-stay\"
             super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
             "Ready",
             "a changed URL clears the rejected state"
+        );
+        stat_tracker::sync::write_stats_delete_pending(
+            &dir,
+            "https://crew.example",
+            "old-token",
+            Some("2026-10-26T15:04:05Z"),
+        )
+        .unwrap();
+        let when = stat_tracker::sync::scheduled_delete_local_date("2026-10-26T15:04:05Z");
+        let deletion = stat_tracker::sync::stats_delete_pending_status(when.as_deref());
+        assert_eq!(
+            super::health_status_for(&dir, &[], None),
+            deletion,
+            "an unlinked app shows the deletion line without waiting for an upload"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
+            deletion
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "new-token"))),
+            "Ready",
+            "a new token does not keep the deletion line"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

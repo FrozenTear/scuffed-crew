@@ -52,8 +52,12 @@ pub fn wiped_with_site(when: Option<&str>) -> String {
 pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
 
 /// Shown in the confirm step while the site checkbox is ticked.
+///
+/// Removed and kept lines match the site account page: forum threads and
+/// replies stay, with the author shown as "Deleted member", and direct
+/// messages the member sent are deleted. The account itself stays.
 pub const SITE_CONFIRM_COPY: &str = "\
-Stats on the site from every PC are deleted. Your account stays.";
+Stats on the site from every PC are scheduled for deletion. Direct messages you sent are deleted. Forum posts (threads and replies) stay up, with the author shown as \"Deleted member\". Your account stays.";
 
 /// 401 or 403 from `DELETE /api/stats/me`. Local data stays.
 pub const SITE_REJECTED: &str = "\
@@ -218,14 +222,21 @@ pub async fn wipe_local_data(req: WipeRequest) -> Result<String, WipeFailure> {
     ensure_store_unlocked(&req.data_dir)
         .await
         .map_err(WipeFailure::local)?;
-    // `Some` means the site returned 200 and revoked every token. The inner
-    // value is the local calendar date, or `None` when the body had no usable
-    // timestamp.
+    // `Some` means the site returned 200 and revoked every token. `pending`
+    // is the `scheduled: true` flag. `when` is the local calendar date.
+    // `at` is the raw RFC3339 timestamp for the sync pause file.
     let scheduled = if req.also_delete_site {
         match delete_site_stats(&req.server_url, &req.sync_token).await? {
-            SiteCall::Scheduled { when } => {
+            SiteCall::Scheduled { pending, when, at } => {
+                // Write before the daemon stop and before the wipe, so the
+                // status line updates without waiting for the next upload.
+                // `purge_saved_games` deletes this file, so it is written
+                // again after that.
+                if pending {
+                    remember_stats_delete(&req, at.as_deref());
+                }
                 clear_sync_token(&req.config_dir).map_err(WipeFailure::local)?;
-                Some(when)
+                Some(SiteSchedule { pending, when, at })
             }
             SiteCall::NotFound => None,
         }
@@ -240,18 +251,43 @@ pub async fn wipe_local_data(req: WipeRequest) -> Result<String, WipeFailure> {
         .await
         .map_err(|msg| local_after_site(site_scheduled, msg))?;
     if let Err(still) = crate::uninstall::purge_saved_games(&req.data_dir, &req.home, &req.prefix) {
+        if let Some(scheduled) = scheduled.as_ref().filter(|scheduled| scheduled.pending) {
+            remember_stats_delete(&req, scheduled.at.as_deref());
+        }
         return Err(local_after_site(
             site_scheduled,
             format!("Delete stopped. Still there: {}.", still.display()),
         ));
     }
+    if let Some(scheduled) = scheduled.as_ref().filter(|scheduled| scheduled.pending) {
+        remember_stats_delete(&req, scheduled.at.as_deref());
+    }
     crate::uninstall::remove_own_name_seed(&req.data_dir, &req.home, &req.prefix);
     apply_settings(&req).map_err(|msg| local_after_site(site_scheduled, msg))?;
     Ok(match scheduled {
-        Some(when) => wiped_with_site(when.as_deref()),
+        Some(scheduled) => wiped_with_site(scheduled.when.as_deref()),
         None if req.also_delete_site => wiped_with_site(None),
         None => WIPED_COPY.to_string(),
     })
+}
+
+/// `sync_auth.json` state for a scheduled stats delete. The raw token is not
+/// written. A failed write does not undo the site call or the local wipe.
+fn remember_stats_delete(req: &WipeRequest, scheduled_at: Option<&str>) {
+    if let Err(err) = stat_tracker::sync::write_stats_delete_pending(
+        &req.data_dir,
+        &req.server_url,
+        &req.sync_token,
+        scheduled_at,
+    ) {
+        tracing::warn!(error = %err, "could not record stats delete pause");
+    }
+}
+
+struct SiteSchedule {
+    pending: bool,
+    when: Option<String>,
+    at: Option<String>,
 }
 
 fn local_after_site(site_scheduled: bool, msg: String) -> WipeFailure {
@@ -275,8 +311,14 @@ fn preflight(req: &WipeRequest) -> Result<(), String> {
 /// Result of `DELETE /api/stats/me` when the local wipe should continue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SiteCall {
-    /// 200. Every token is revoked. `when` is the local date to show.
-    Scheduled { when: Option<String> },
+    /// JSON 200. Every token is revoked. `pending` is set only when
+    /// `scheduled` is true. `when` is the local date. `at` is the raw
+    /// RFC3339 timestamp.
+    Scheduled {
+        pending: bool,
+        when: Option<String>,
+        at: Option<String>,
+    },
     /// 404. Nothing was scheduled, and tokens were not revoked.
     NotFound,
 }
@@ -323,9 +365,23 @@ async fn delete_site_stats(server_url: &str, token: &str) -> Result<SiteCall, Wi
 fn interpret_site_response(status: u16, body: &str) -> Result<SiteCall, WipeFailure> {
     match status {
         200 => match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(value) => Ok(SiteCall::Scheduled {
-                when: scheduled_local_date(&value),
-            }),
+            Ok(value) => {
+                let pending = value
+                    .get("scheduled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let at = value
+                    .get("stats_delete_scheduled_at")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|raw| !raw.is_empty())
+                    .map(str::to_string);
+                Ok(SiteCall::Scheduled {
+                    pending,
+                    when: at.as_deref().and_then(scheduled_local_date),
+                    at,
+                })
+            }
             Err(_) => Err(WipeFailure::SiteRetry(SITE_RETRY.into())),
         },
         404 => Ok(SiteCall::NotFound),
@@ -336,15 +392,8 @@ fn interpret_site_response(status: u16, body: &str) -> Result<SiteCall, WipeFail
 
 /// `stats_delete_scheduled_at` as a local calendar date. Missing, non-string,
 /// and unparseable values return `None` so the caller can use the fallback.
-fn scheduled_local_date(value: &serde_json::Value) -> Option<String> {
-    let raw = value.get("stats_delete_scheduled_at")?.as_str()?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
-    Some(
-        parsed
-            .with_timezone(&chrono::Local)
-            .format("%d %b %Y")
-            .to_string(),
-    )
+fn scheduled_local_date(raw: &str) -> Option<String> {
+    stat_tracker::sync::scheduled_delete_local_date(raw)
 }
 
 async fn stop_capture(data_dir: &Path, systemctl: &Path) -> Result<(), String> {
@@ -638,7 +687,6 @@ token = \"synthetic-token-value\"
             "daemon.log",
             "daemon.log.1",
             "shadow",
-            "sync_auth.json",
             "daemon.pid",
         ];
         for name in gone {
@@ -688,6 +736,10 @@ token = \"synthetic-token-value\"
         }
         assert!(SITE_CONFIRM_COPY.contains("every PC"));
         assert!(SITE_CONFIRM_COPY.contains("account stays"));
+        assert!(SITE_CONFIRM_COPY.contains("Direct messages you sent are deleted"));
+        assert!(SITE_CONFIRM_COPY.contains(
+            "Forum posts (threads and replies) stay up, with the author shown as \"Deleted member\""
+        ));
         assert_eq!(
             SITE_DELETE_SUCCESS,
             "Your stats on the site will be deleted on {date}. To undo, go to your account page on the website before then, then make a new sync token there and paste it into the app."
@@ -712,31 +764,43 @@ token = \"synthetic-token-value\"
     #[test]
     fn site_response_reads_the_schedule_and_keeps_data_otherwise() {
         let body = r#"{"scheduled":true,"stats_delete_scheduled_at":"2026-10-26T15:04:05Z","tokens_revoked":2,"unexpected":true}"#;
-        let SiteCall::Scheduled { when } = interpret_site_response(200, body).unwrap() else {
+        let SiteCall::Scheduled { pending, when, at } = interpret_site_response(200, body).unwrap()
+        else {
             panic!("200 should schedule");
         };
-        let expected = scheduled_local_date(
-            &serde_json::json!({"stats_delete_scheduled_at": "2026-10-26T15:04:05Z"}),
-        );
+        let expected = scheduled_local_date("2026-10-26T15:04:05Z");
+        assert!(pending);
         assert_eq!(when, expected);
+        assert_eq!(at.as_deref(), Some("2026-10-26T15:04:05Z"));
         assert!(when.unwrap().contains("2026"));
 
-        let SiteCall::Scheduled { when } =
+        let SiteCall::Scheduled { pending, when, at } =
             interpret_site_response(200, r#"{"scheduled":true,"tokens_revoked":0,"extra":1}"#)
                 .unwrap()
         else {
             panic!("missing date");
         };
+        assert!(pending);
         assert!(when.is_none());
+        assert!(at.is_none());
 
-        let SiteCall::Scheduled { when } = interpret_site_response(
+        let SiteCall::Scheduled { pending, when, at } = interpret_site_response(
             200,
             r#"{"scheduled":true,"stats_delete_scheduled_at":"not-a-date","tokens_revoked":1}"#,
         )
         .unwrap() else {
             panic!("bad date");
         };
+        assert!(pending);
         assert!(when.is_none());
+        assert_eq!(at.as_deref(), Some("not-a-date"));
+
+        let SiteCall::Scheduled { pending, .. } =
+            interpret_site_response(200, r#"{"scheduled":false,"tokens_revoked":1}"#).unwrap()
+        else {
+            panic!("200 without a schedule still continues the wipe");
+        };
+        assert!(!pending);
 
         assert!(matches!(
             interpret_site_response(404, "missing"),
@@ -783,6 +847,7 @@ token = \"synthetic-token-value\"
             .expect("wipe");
         assert_eq!(copy, WIPED_COPY);
         assert_member_data_gone(&fix);
+        assert_sync_auth_gone(&fix);
         assert_packs_and_app(&fix);
         assert!(!fix.config.exists(), "settings directory was kept");
         let log = fs::read_to_string(&fix.log).unwrap();
@@ -805,6 +870,7 @@ token = \"synthetic-token-value\"
             .expect("wipe");
         assert_eq!(copy, WIPED_COPY);
         assert_member_data_gone(&fix);
+        assert_sync_auth_gone(&fix);
         assert_packs_and_app(&fix);
         let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
         assert!(config.contains("KeptName"), "{config}");
@@ -962,10 +1028,19 @@ token = \"synthetic-token-value\"
         assert_eq!(body, SITE_DELETE_BODY);
     }
 
+    fn assert_sync_auth_gone(fix: &Fixture) {
+        assert!(
+            !fix.data.join("sync_auth.json").exists(),
+            "sync pause file was kept"
+        );
+    }
+
     fn assert_local_kept(fix: &Fixture) {
         assert!(fix.data.join("debug/accepted/board.png").is_file());
         assert!(fix.data.join("gui.log").is_file());
-        assert!(fix.data.join("sync_auth.json").is_file());
+        let pause = fs::read_to_string(fix.data.join("sync_auth.json")).unwrap();
+        assert!(pause.contains("synthetic-token-value"), "{pause}");
+        assert!(!pause.contains("stats_delete_pending"), "{pause}");
         assert!(fix.data.join("stats.surrealkv.pre-vacuum-9").exists());
         let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
         assert!(config.contains("synthetic-token-value"), "{config}");
@@ -995,17 +1070,110 @@ token = \"synthetic-token-value\"
         req.also_delete_site = true;
         req.server_url = base;
         req.sync_token = "synthetic-token-value".into();
+        // The stop runs after the 200 and before the local purge. Record the
+        // pause file at that moment so the test sees it was written immediately.
+        fs::write(
+            &fix.systemctl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat '{}/sync_auth.json' >> '{}'\nexit 0\n",
+                fix.log.display(),
+                fix.data.display(),
+                fix.log.display()
+            ),
+        )
+        .unwrap();
 
         let copy = wipe_local_data(req).await.expect("wipe");
-        let when = scheduled_local_date(
-            &serde_json::json!({"stats_delete_scheduled_at": "2026-10-26T15:04:05Z"}),
-        );
+        let when = scheduled_local_date("2026-10-26T15:04:05Z");
         assert_eq!(copy, wiped_with_site(when.as_deref()));
+        let stop_log = fs::read_to_string(&fix.log).unwrap();
+        assert!(
+            stop_log.contains("stats_delete_pending"),
+            "pause was not written before the daemon stop: {stop_log}"
+        );
+        assert!(
+            stop_log.contains("2026-10-26T15:04:05Z"),
+            "schedule timestamp was not written before the daemon stop: {stop_log}"
+        );
         assert_member_data_gone(&fix);
         assert_packs_and_app(&fix);
+        let pause = fs::read_to_string(fix.data.join("sync_auth.json")).unwrap();
+        assert!(pause.contains("stats_delete_pending"), "{pause}");
+        assert!(pause.contains("2026-10-26T15:04:05Z"), "{pause}");
+        assert!(!pause.contains("synthetic-token-value"), "{pause}");
+        let status = stat_tracker::sync::auth_pause_status(&fix.data, None).unwrap();
+        assert_eq!(
+            status,
+            stat_tracker::sync::stats_delete_pending_status(when.as_deref())
+        );
+        assert!(status.contains("scheduled for deletion on "));
+        assert!(status.contains("make a new sync token"));
+        assert_eq!(
+            stat_tracker::sync::auth_pause_status(
+                &fix.data,
+                Some(("https://example.test", "synthetic-token-value"))
+            )
+            .as_deref(),
+            Some(status.as_str())
+        );
+        assert_eq!(
+            stat_tracker::sync::auth_pause_status(
+                &fix.data,
+                Some(("https://example.test", "a-different-token"))
+            ),
+            None
+        );
         let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
         assert!(config.contains("KeptName"), "{config}");
         assert!(!config.contains("synthetic-token-value"), "{config}");
+    }
+
+    #[tokio::test]
+    async fn site_delete_without_a_date_still_pauses_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        let base = spawn_mock(|raw| {
+            assert_site_delete(raw);
+            (200, r#"{"scheduled":true,"tokens_revoked":1}"#)
+        });
+        let mut req = request(&fix, "DELETE", false);
+        req.also_delete_site = true;
+        req.server_url = base;
+        req.sync_token = "synthetic-token-value".into();
+
+        let copy = wipe_local_data(req).await.expect("wipe");
+        assert_eq!(copy, wiped_with_site(None));
+        assert_member_data_gone(&fix);
+        let status = stat_tracker::sync::auth_pause_status(&fix.data, None).unwrap();
+        assert_eq!(
+            status,
+            "Your site stats are scheduled for deletion in 7 days. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+        );
+        let pause = fs::read_to_string(fix.data.join("sync_auth.json")).unwrap();
+        assert!(pause.contains("stats_delete_pending"), "{pause}");
+        assert!(!pause.contains("synthetic-token-value"), "{pause}");
+        assert!(!pause.contains("stats_delete_scheduled_at"), "{pause}");
+    }
+
+    #[tokio::test]
+    async fn site_delete_without_scheduled_true_does_not_pause_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        let base = spawn_mock(|raw| {
+            assert_site_delete(raw);
+            (200, r#"{"scheduled":false,"tokens_revoked":0}"#)
+        });
+        let mut req = request(&fix, "DELETE", false);
+        req.also_delete_site = true;
+        req.server_url = base;
+        req.sync_token = "synthetic-token-value".into();
+
+        let copy = wipe_local_data(req).await.expect("wipe");
+        assert_eq!(copy, wiped_with_site(None));
+        assert_member_data_gone(&fix);
+        assert_sync_auth_gone(&fix);
     }
 
     #[tokio::test]
@@ -1026,6 +1194,7 @@ token = \"synthetic-token-value\"
         let copy = wipe_local_data(req).await.expect("wipe");
         assert_eq!(copy, wiped_with_site(None));
         assert_member_data_gone(&fix);
+        assert_sync_auth_gone(&fix);
         assert!(!fix.config.exists());
         assert_packs_and_app(&fix);
     }

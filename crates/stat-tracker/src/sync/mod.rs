@@ -12,6 +12,19 @@ use scuffed_types::api::{
 /// The GUI shows this string; the hint is the Settings path.
 pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the token in Settings";
 
+/// Overview health copy while a stats delete is pending. `{date}` is the
+/// local calendar date. A missing date replaces `on {date}` with
+/// [`SYNC_STATS_DELETE_FALLBACK_WHEN`]. Undo is on the website and does not
+/// restore the old token.
+pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "\
+Your site stats are scheduled for deletion on {date}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.";
+
+/// Used when a pending stats delete has no usable timestamp.
+pub const SYNC_STATS_DELETE_FALLBACK_WHEN: &str = "in 7 days";
+
+/// JSON `code` / pause `reason` while a stats delete is pending.
+const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
+
 const AUTH_PAUSE_FILE: &str = "sync_auth.json";
 
 /// First wait after a server/network upload failure. Doubles each consecutive
@@ -557,6 +570,34 @@ fn token_fingerprint(token: &str) -> String {
 struct AuthPauseFile {
     server_url: String,
     token_fingerprint: String,
+    /// `"stats_delete_pending"` while a stats delete is scheduled. Absent on
+    /// a plain 401/403 rejection, including files written before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// RFC3339 `stats_delete_scheduled_at` from `DELETE /api/stats/me`.
+    /// Absent when the 200 had no usable timestamp. Older readers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stats_delete_scheduled_at: Option<String>,
+}
+
+/// `stats_delete_scheduled_at` as a local calendar date (`26 Oct 2026`).
+pub fn scheduled_delete_local_date(raw: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Local)
+            .format("%d %b %Y")
+            .to_string(),
+    )
+}
+
+/// Health line for a pending stats delete. `when` is a local calendar date.
+pub fn stats_delete_pending_status(when: Option<&str>) -> String {
+    match when {
+        Some(date) if !date.is_empty() => SYNC_STATS_DELETE_PENDING_STATUS.replace("{date}", date),
+        _ => SYNC_STATS_DELETE_PENDING_STATUS.replace("on {date}", SYNC_STATS_DELETE_FALLBACK_WHEN),
+    }
 }
 
 /// True when this row must stay on the machine until the member picks
@@ -620,18 +661,13 @@ pub fn upload_request(
     }
 }
 
-/// Remember that this URL + token was refused (401/403). Mode 0600.
-pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::io::Result<()> {
+fn write_auth_pause_file(data_dir: &Path, file: &AuthPauseFile) -> std::io::Result<()> {
     if let Some(parent) = auth_pause_path(data_dir).parent() {
         std::fs::create_dir_all(parent)?;
         crate::fs_mode::tighten_private_dir(parent);
     }
-    let file = AuthPauseFile {
-        server_url: server_url.to_string(),
-        token_fingerprint: token_fingerprint(token),
-    };
     let path = auth_pause_path(data_dir);
-    let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(file).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes)?;
     crate::fs_mode::tighten_private_file(&tmp);
@@ -640,19 +676,100 @@ pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::
     Ok(())
 }
 
+/// Remember that this URL + token was refused (401/403). Mode 0600.
+pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::io::Result<()> {
+    write_auth_pause_file(
+        data_dir,
+        &AuthPauseFile {
+            server_url: server_url.to_string(),
+            token_fingerprint: token_fingerprint(token),
+            reason: None,
+            stats_delete_scheduled_at: None,
+        },
+    )
+}
+
+/// Same file as [`write_auth_pause`], with reason `stats_delete_pending`.
+///
+/// `scheduled_at` is the raw RFC3339 timestamp, or `None` when the 200 had
+/// no usable value. A stats-delete pause matches the token alone: a URL
+/// change does not clear it, and a new token does. The raw token is not
+/// stored.
+pub fn write_stats_delete_pending(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+    scheduled_at: Option<&str>,
+) -> std::io::Result<()> {
+    let scheduled_at = scheduled_at
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_string);
+    write_auth_pause_file(
+        data_dir,
+        &AuthPauseFile {
+            server_url: server_url.to_string(),
+            token_fingerprint: token_fingerprint(token),
+            reason: Some(STATS_DELETE_PENDING_CODE.to_string()),
+            stats_delete_scheduled_at: scheduled_at,
+        },
+    )
+}
+
 pub fn clear_auth_pause(data_dir: &Path) {
     let _ = std::fs::remove_file(auth_pause_path(data_dir));
 }
 
-/// True when the on-disk pause was recorded for this exact URL and token.
+fn read_auth_pause(data_dir: &Path) -> Option<AuthPauseFile> {
+    let bytes = std::fs::read(auth_pause_path(data_dir)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn pause_matches_saved(file: &AuthPauseFile, server_url: &str, token: &str) -> bool {
+    let token_ok = file.token_fingerprint == token_fingerprint(token);
+    if file.reason.as_deref() == Some(STATS_DELETE_PENDING_CODE) {
+        return token_ok;
+    }
+    token_ok && file.server_url == server_url
+}
+
+/// True when sync should stay paused for this saved pair.
+///
+/// A stats-delete pause matches the token alone. A rejection matches the
+/// URL and the token.
 pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> bool {
-    let Ok(bytes) = std::fs::read(auth_pause_path(data_dir)) else {
-        return false;
-    };
-    let Ok(file) = serde_json::from_slice::<AuthPauseFile>(&bytes) else {
-        return false;
-    };
-    file.server_url == server_url && file.token_fingerprint == token_fingerprint(token)
+    read_auth_pause(data_dir).is_some_and(|file| pause_matches_saved(&file, server_url, token))
+}
+
+/// GUI health line when sync is paused. `None` when it should keep running.
+///
+/// `saved` is the linked URL and token. With no link, a stats-delete pause
+/// still produces the deletion line so the status updates before the next
+/// upload. A different token does not match that pause.
+pub fn auth_pause_status(data_dir: &Path, saved: Option<(&str, &str)>) -> Option<String> {
+    let file = read_auth_pause(data_dir)?;
+    let delete_pending = file.reason.as_deref() == Some(STATS_DELETE_PENDING_CODE);
+    match saved {
+        Some((server_url, token)) if pause_matches_saved(&file, server_url, token) => {
+            if delete_pending {
+                let when = file
+                    .stats_delete_scheduled_at
+                    .as_deref()
+                    .and_then(scheduled_delete_local_date);
+                Some(stats_delete_pending_status(when.as_deref()))
+            } else {
+                Some(SYNC_TOKEN_REJECTED_STATUS.to_string())
+            }
+        }
+        None if delete_pending => {
+            let when = file
+                .stats_delete_scheduled_at
+                .as_deref()
+                .and_then(scheduled_delete_local_date);
+            Some(stats_delete_pending_status(when.as_deref()))
+        }
+        _ => None,
+    }
 }
 
 fn token_safe_redirects() -> reqwest::redirect::Policy {
@@ -1456,6 +1573,9 @@ mod tests {
     fn auth_pause_matches_only_the_rejected_url_and_token() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_auth_pause(dir.path(), "https://crew.example", "old-token").unwrap();
+        let raw = std::fs::read_to_string(dir.path().join(AUTH_PAUSE_FILE)).unwrap();
+        assert!(!raw.contains("reason"), "{raw}");
+        assert!(!raw.contains("stats_delete"), "{raw}");
         assert!(auth_pause_matches(
             dir.path(),
             "https://crew.example",
@@ -1485,6 +1605,71 @@ mod tests {
             "https://crew.example",
             "old-token"
         ));
+        let rejected = std::fs::read_to_string(dir.path().join(AUTH_PAUSE_FILE));
+        assert!(rejected.is_err(), "clear removes the pause file");
+    }
+
+    #[test]
+    fn stats_delete_pending_matches_the_token_and_names_the_date() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_stats_delete_pending(
+            dir.path(),
+            "https://crew.example",
+            "old-token",
+            Some("2026-10-26T15:04:05Z"),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join(AUTH_PAUSE_FILE)).unwrap();
+        assert!(raw.contains("stats_delete_pending"), "{raw}");
+        assert!(raw.contains("2026-10-26T15:04:05Z"), "{raw}");
+        assert!(!raw.contains("old-token"), "{raw}");
+        let when = scheduled_delete_local_date("2026-10-26T15:04:05Z");
+        let expected = stats_delete_pending_status(when.as_deref());
+        assert_eq!(
+            expected,
+            format!(
+                "Your site stats are scheduled for deletion on {}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.",
+                when.as_deref().unwrap()
+            )
+        );
+        assert!(!expected.contains('\u{2014}'));
+        assert_eq!(
+            auth_pause_status(dir.path(), Some(("https://crew.example", "old-token"))).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            auth_pause_status(dir.path(), Some(("https://other.example", "old-token"))).as_deref(),
+            Some(expected.as_str()),
+            "a URL change does not clear a stats-delete pause"
+        );
+        assert_eq!(
+            auth_pause_status(dir.path(), None).as_deref(),
+            Some(expected.as_str()),
+            "an unlinked app still shows the deletion line"
+        );
+        assert!(auth_pause_matches(
+            dir.path(),
+            "https://other.example",
+            "old-token"
+        ));
+        assert!(!auth_pause_matches(
+            dir.path(),
+            "https://crew.example",
+            "new-token"
+        ));
+        assert_eq!(
+            auth_pause_status(dir.path(), Some(("https://crew.example", "new-token"))),
+            None,
+            "a new token clears the deletion line"
+        );
+
+        write_stats_delete_pending(dir.path(), "https://crew.example", "old-token", None).unwrap();
+        let fallback = auth_pause_status(dir.path(), None).unwrap();
+        assert_eq!(
+            fallback,
+            "Your site stats are scheduled for deletion in 7 days. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+        );
+        assert!(!fallback.contains('\u{2014}'), "{fallback}");
     }
 
     #[test]
