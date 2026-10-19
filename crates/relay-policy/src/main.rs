@@ -11,11 +11,11 @@
 //!
 //! - `SURREALDB_URL` SurrealDB connection URL (default outside production: `ws://127.0.0.1:8000`)
 //! - `SURREALDB_RELAY_USER` Relay record user (default: `scuffed_relay`)
-//! - `SURREALDB_RELAY_PASSWORD` Password for that user. When it is unset, the
-//!   process falls back to `SURREALDB_USER` / `SURREALDB_PASSWORD` and logs a
-//!   warning. `SURREALDB_PASS` is a fallback alias for the password.
-//!   When `PRODUCTION` is set, a missing password, username `root`, or a
-//!   loopback URL refuses startup. There is no root sign-in in production.
+//! - `SURREALDB_RELAY_PASSWORD` Password for that user. Outside production, a
+//!   missing value falls back to `SURREALDB_USER` / `SURREALDB_PASSWORD`
+//!   (`SURREALDB_PASS` is an alias) and logs a warning. When `PRODUCTION` is
+//!   set, the relay requires a non-blank `SURREALDB_RELAY_PASSWORD` and does
+//!   not sign in with `SURREALDB_USER`. Site bootstrap still uses root.
 //! - `SURREALDB_NS` / `SURREALDB_DB` namespace and database (default `scuffed_crew` / `main`)
 //! - `RELAY_POLICY_RATE_LIMIT` Max events per pubkey per window (default: 30)
 //! - `RELAY_POLICY_RATE_WINDOW` Rate limit window in seconds (default: 60)
@@ -133,7 +133,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 /// Load the set of active member hex pubkeys from SurrealDB.
 async fn load_pubkey_allowlist(db: &scuffed_db::Database) -> HashSet<String> {
-    match db.list_nostr_identities().await {
+    match db.list_relay_member_keys().await {
         Ok(members) => {
             let pubkeys: HashSet<String> = members
                 .into_iter()
@@ -185,51 +185,42 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    // Refuse production boot on a missing password, username root, or a
+    // Refuse production boot on a missing relay password, username root, or a
     // loopback URL before any default credential is applied.
     let db_cfg = creds::enforce_or_exit();
 
     let db: Option<Arc<scuffed_db::Database>> = rt.block_on(async {
-        match creds::connect_configured(&db_cfg).await {
-            Ok(database) => {
-                let db = Arc::new(database);
-                let allowlist = load_pubkey_allowlist(&db).await;
-                let groups = match relay_policy::directory::load_group_writers(&db).await {
-                    Ok(groups) => {
-                        tracing::info!(
-                            groups = groups.len(),
-                            "loaded group writers from team channels"
-                        );
-                        groups
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            "failed to load group writers; rejecting every h-tagged event"
-                        );
-                        std::collections::HashMap::new()
-                    }
-                };
-                let mut eng = engine.lock().unwrap();
-                eng.update_allowlist(allowlist);
-                eng.update_group_members(groups);
-                drop(eng);
+        let database = creds::connect_or_retry(&db_cfg).await;
+        let db = Arc::new(database);
+        creds::spawn_record_token_refresh(Arc::clone(&db), db_cfg.clone());
+        let allowlist = load_pubkey_allowlist(&db).await;
+        let groups = match relay_policy::directory::load_group_writers(&db).await {
+            Ok(groups) => {
                 tracing::info!(
-                    url = %db_cfg.url,
-                    user = %db_cfg.username,
-                    auth = ?db_cfg.auth,
-                    "connected to SurrealDB"
+                    groups = groups.len(),
+                    "loaded group writers from team channels"
                 );
-                Some(db)
+                groups
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to connect to SurrealDB; running without allowlist (rejecting all)"
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to load group writers; rejecting every h-tagged event"
                 );
-                None
+                std::collections::HashMap::new()
             }
-        }
+        };
+        let mut eng = engine.lock().unwrap();
+        eng.update_allowlist(allowlist);
+        eng.update_group_members(groups);
+        drop(eng);
+        tracing::info!(
+            url = %db_cfg.url,
+            user = %db_cfg.username,
+            auth = ?db_cfg.auth,
+            "connected to SurrealDB"
+        );
+        Some(db)
     });
 
     // Reload writers when roster edges, team channels, or member rows change.
@@ -311,10 +302,12 @@ fn main() {
             }
         };
 
-        // `new` and `lookback` both go through the write policy. strfry sends
-        // `lookback` when it replays stored events (import or sync). Negentropy
-        // is off in the shipped config. The same allow-list, kind check,
-        // officer writer map, and gift-wrap recipient check still apply.
+        // strfry labels an event lookback when the write plugin is shown an
+        // event already stored (plugin startup replay and import). Accept or
+        // reject uses the same allow-list, kind check, officer writer map, and
+        // gift-wrap recipient check as a new event. `negentropy.enabled` is
+        // false in relay/strfry.conf, and the read gate rejects NEG frames.
+        // That is a different path.
         let step = policy_step(&engine, &input);
         if step.reload {
             if let Some(tx) = &reload_tx {

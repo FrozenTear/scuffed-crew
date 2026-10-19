@@ -1,9 +1,11 @@
 //! SurrealDB credentials for the relay processes.
 //!
 //! Prefer `SURREALDB_RELAY_USER` / `SURREALDB_RELAY_PASSWORD`. That login is
-//! a record user limited to the tables the relay reads. `SURREALDB_PASSWORD`
-//! (and `SURREALDB_PASS`) is only a fallback when the relay secret is missing
-//! or blank. `PRODUCTION=1` refuses to sign in as `root`.
+//! a record user limited to the tables the relay reads. Outside production,
+//! a missing relay password falls back to `SURREALDB_USER` /
+//! `SURREALDB_PASSWORD` (`SURREALDB_PASS` is an alias). When `PRODUCTION=1`,
+//! a missing or blank relay password is an error. There is no fallback to
+//! `SURREALDB_USER` or `SURREALDB_PASSWORD`.
 
 use scuffed_db::DbConfig;
 
@@ -16,12 +18,14 @@ const DEV_PASS: &str = "root";
 pub enum RelayAuthKind {
     /// Record access `relay`. SELECT on the tables the relay reads.
     Record,
-    /// System user (`Root` or database role). Dev fallback only when the
-    /// relay secret is unset. Production still refuses username `root`.
+    /// Dev-only system user. `Database::connect_plaintext` signs in with
+    /// `surrealdb::opt::auth::Root`. This is not a database role. Production
+    /// never reaches this variant: it requires `SURREALDB_RELAY_PASSWORD`.
     System,
 }
 
 /// Resolved connection settings. The password is redacted in `Debug`.
+#[derive(Clone)]
 pub struct RelayDbConfig {
     pub url: String,
     pub username: String,
@@ -61,16 +65,12 @@ impl std::fmt::Display for CredError {
             CredError::MissingPassword => write!(
                 f,
                 "Refusing to start: PRODUCTION is set and SURREALDB_RELAY_PASSWORD is missing \
-                 or blank, and SURREALDB_PASSWORD is also missing or blank \
-                 (SURREALDB_PASS is only a fallback alias). \
-                 The relay will not fall back to root/root."
+                 or blank. The relay does not fall back to SURREALDB_USER or SURREALDB_PASSWORD."
             ),
             CredError::RootUser => write!(
                 f,
-                "Refusing to start: PRODUCTION is set and the relay would sign in as the \
-                 SurrealDB root user. Set SURREALDB_RELAY_PASSWORD \
-                 (scripts/install.sh and scripts/update.sh append one when the key is missing). \
-                 The relay does not sign in as root, including root/root."
+                "Refusing to start: PRODUCTION is set and SURREALDB_RELAY_USER is root. \
+                 Set a non-root SURREALDB_RELAY_USER (the default is scuffed_relay)."
             ),
             CredError::LocalUrl => write!(
                 f,
@@ -190,13 +190,28 @@ fn finish(
 /// Resolve the database URL, user, password, and sign-in kind.
 ///
 /// `SURREALDB_RELAY_PASSWORD` selects the record login (`scuffed_relay` unless
-/// `SURREALDB_RELAY_USER` is set). When that secret is missing, the relay uses
+/// `SURREALDB_RELAY_USER` is set). Whitespace is trimmed on the user and the
+/// password. Outside production, a missing relay password uses
 /// `SURREALDB_USER` / `SURREALDB_PASSWORD` and [`RelayDbConfig::fallback`] is
-/// true. Outside production, missing values keep the local defaults (`root` /
-/// `root` and `ws://127.0.0.1:8000`). When `production` is true, a missing
-/// password, username `root`, or a loopback URL is an error before any default
-/// password is applied.
+/// true. A fully unset environment keeps the local defaults (`root` / `root`
+/// and `ws://127.0.0.1:8000`). When `production` is true, the relay password
+/// must be non-blank. There is no fallback, including a non-root system user.
+/// Username `root` or a loopback URL is still an error.
 pub fn resolve_relay_db_config(production: bool, env: &DbEnv) -> Result<RelayDbConfig, CredError> {
+    if production {
+        let password = nonempty(env.relay_password.as_deref()).ok_or(CredError::MissingPassword)?;
+        let username = nonempty(env.relay_user.as_deref())
+            .unwrap_or_else(|| scuffed_db::RELAY_DB_USERNAME_DEFAULT.to_string());
+        return finish(
+            production,
+            env,
+            username,
+            password,
+            RelayAuthKind::Record,
+            false,
+        );
+    }
+
     if let Some(password) = nonempty(env.relay_password.as_deref()) {
         let username = nonempty(env.relay_user.as_deref())
             .unwrap_or_else(|| scuffed_db::RELAY_DB_USERNAME_DEFAULT.to_string());
@@ -267,6 +282,67 @@ pub fn enforce_or_exit() -> RelayDbConfig {
     }
 }
 
+const CONNECT_ATTEMPTS: u32 = 8;
+
+/// Backoff after a failed attempt. Attempt 1 sleeps 500ms, then doubles, capped at 15s.
+pub(crate) fn connect_delay(attempt: u32) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    let millis = 500u64.saturating_mul(1u64 << shift);
+    std::time::Duration::from_millis(millis.min(15_000))
+}
+
+/// Open the database, retrying with backoff. Exit 1 after the last failure
+/// so the container restart policy connects again. Does not log the password.
+pub async fn connect_or_retry(cfg: &RelayDbConfig) -> scuffed_db::Database {
+    let mut attempt = 1u32;
+    loop {
+        match connect_configured(cfg).await {
+            Ok(db) => return db,
+            Err(err) => {
+                tracing::warn!(attempt, error = %err, "database connect failed");
+                if attempt >= CONNECT_ATTEMPTS {
+                    eprintln!(
+                        "error: database connect failed after {CONNECT_ATTEMPTS} attempts: {err}"
+                    );
+                    std::process::exit(1);
+                }
+                tokio::time::sleep(connect_delay(attempt)).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Re-sign the record login before the default 1 hour token expires.
+/// A failed refresh exits 1. Dev system logins do not use a record token.
+pub fn spawn_record_token_refresh(db: std::sync::Arc<scuffed_db::Database>, cfg: RelayDbConfig) {
+    if cfg.auth != RelayAuthKind::Record {
+        return;
+    }
+    let namespace = namespace_from_env();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(20 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(err) = db
+                .refresh_relay_signin(
+                    &namespace.namespace,
+                    &namespace.database,
+                    &cfg.username,
+                    &cfg.password,
+                )
+                .await
+            {
+                tracing::error!(error = %err, "relay sign-in refresh failed");
+                eprintln!("error: relay sign-in refresh failed: {err}");
+                std::process::exit(1);
+            }
+            tracing::info!(user = %cfg.username, "refreshed relay sign-in");
+        }
+    });
+}
+
 /// Open the database with the resolved login. Does not load `ENCRYPTION_KEY`.
 pub async fn connect_configured(cfg: &RelayDbConfig) -> scuffed_db::DbResult<scuffed_db::Database> {
     let surreal = namespace_from_env();
@@ -326,10 +402,8 @@ mod tests {
         let err = resolve_relay_db_config(true, &env).expect_err("missing password must reject");
         assert_eq!(err, CredError::MissingPassword);
         let rendered = err.to_string();
-        assert!(rendered.contains("SURREALDB_PASSWORD"));
-        assert!(rendered.contains("will not fall back to root/root"));
-        // The old plugin did `SURREALDB_PASS` default `"root"` plus user `root`.
-        // That pair must not come out of the production resolver.
+        assert!(rendered.contains("SURREALDB_RELAY_PASSWORD"));
+        assert!(rendered.contains("does not fall back to SURREALDB_USER"));
         assert!(resolve_relay_db_config(true, &env).ok().is_none());
     }
 
@@ -361,7 +435,7 @@ mod tests {
         };
         assert_eq!(
             resolve_relay_db_config(true, &env).unwrap_err(),
-            CredError::RootUser
+            CredError::MissingPassword
         );
     }
 
@@ -400,8 +474,8 @@ mod tests {
             ..prod_base()
         };
         let err = resolve_relay_db_config(true, &env).unwrap_err();
-        assert_eq!(err, CredError::RootUser);
-        assert!(err.to_string().contains("root/root"));
+        assert_eq!(err, CredError::MissingPassword);
+        assert!(err.to_string().contains("SURREALDB_RELAY_PASSWORD"));
     }
 
     #[test]
@@ -416,7 +490,7 @@ mod tests {
         };
         assert_eq!(
             resolve_relay_db_config(true, &env).unwrap_err(),
-            CredError::RootUser
+            CredError::MissingPassword
         );
     }
 
@@ -448,18 +522,65 @@ mod tests {
     }
 
     #[test]
-    fn production_non_root_fallback_keeps_working() {
+    fn production_non_root_fallback_is_refused() {
         let env = DbEnv {
             user: Some("scuffed_legacy".into()),
             password: Some("legacy-secret".into()),
             relay_password: None,
             ..prod_base()
         };
+        assert_eq!(
+            resolve_relay_db_config(true, &env).unwrap_err(),
+            CredError::MissingPassword
+        );
+    }
+
+    #[test]
+    fn production_only_relay_password_no_root_password() {
+        let env = DbEnv {
+            url: Some("ws://surrealdb:8000".into()),
+            user: None,
+            password: None,
+            pass_alias: None,
+            relay_user: None,
+            relay_password: Some("only-relay".into()),
+        };
         let cfg = resolve_relay_db_config(true, &env).unwrap();
-        assert!(cfg.fallback);
-        assert_eq!(cfg.auth, RelayAuthKind::System);
-        assert_eq!(cfg.username, "scuffed_legacy");
-        assert_eq!(cfg.password, "legacy-secret");
+        assert_eq!(cfg.auth, RelayAuthKind::Record);
+        assert!(!cfg.fallback);
+        assert_eq!(cfg.username, "scuffed_relay");
+        assert_eq!(cfg.password, "only-relay");
+        assert_ne!(cfg.password, "root");
+    }
+
+    #[test]
+    fn production_trims_relay_password_and_rejects_blank() {
+        let trimmed = DbEnv {
+            relay_password: Some("  relay-secret  ".into()),
+            relay_user: Some("  scuffed_relay  ".into()),
+            ..prod_relay()
+        };
+        let cfg = resolve_relay_db_config(true, &trimmed).unwrap();
+        assert_eq!(cfg.password, "relay-secret");
+        assert_eq!(cfg.username, "scuffed_relay");
+        let blank = DbEnv {
+            relay_password: Some("   ".into()),
+            password: Some("generated-secret".into()),
+            ..prod_base()
+        };
+        assert_eq!(
+            resolve_relay_db_config(true, &blank).unwrap_err(),
+            CredError::MissingPassword
+        );
+    }
+
+    #[test]
+    fn connect_delay_backs_off_and_caps() {
+        assert_eq!(connect_delay(1), std::time::Duration::from_millis(500));
+        assert_eq!(connect_delay(2), std::time::Duration::from_secs(1));
+        assert_eq!(connect_delay(3), std::time::Duration::from_secs(2));
+        assert_eq!(connect_delay(6), std::time::Duration::from_secs(15));
+        assert_eq!(connect_delay(8), std::time::Duration::from_secs(15));
     }
 
     #[test]
