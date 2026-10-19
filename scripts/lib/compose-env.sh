@@ -10,10 +10,9 @@
 # before this runs; production refuses to boot if the two passwords match.
 #
 # The relay container reads SURREALDB_RELAY_USER / SURREALDB_RELAY_PASSWORD.
-# When that password is set, SURREALDB_RELAY_FALLBACK_PASSWORD is empty so
-# the root password is not copied into the relay environment. When it is
-# unset, the fallback user and password are exported and the relay process
-# logs a warning. PRODUCTION=1 still refuses username root.
+# SURREALDB_RELAY_FALLBACK_USER and SURREALDB_RELAY_FALLBACK_PASSWORD are
+# always empty. This script does not copy SURREALDB_PASSWORD into the relay
+# container. A missing relay password logs a warning and does not print it.
 #
 # SITE_SERVER_IMAGE defaults to ghcr.io/frozentear/scuffed-crew:main.
 # SITE_SERVER_IMAGE_DIGEST, when set, replaces the tag with @sha256:<hex>.
@@ -29,13 +28,14 @@ export_compose_fallbacks() {
     if [[ -z "${SURREALDB_APP_PASSWORD:-}" ]]; then
         SURREALDB_APP_PASSWORD="${SURREALDB_PASSWORD:-}"
     fi
-    if [[ -n "${SURREALDB_RELAY_PASSWORD:-}" ]]; then
-        SURREALDB_RELAY_FALLBACK_USER=""
-        SURREALDB_RELAY_FALLBACK_PASSWORD=""
-    else
-        SURREALDB_RELAY_FALLBACK_USER="${SURREALDB_USER:-root}"
-        SURREALDB_RELAY_FALLBACK_PASSWORD="${SURREALDB_PASSWORD:-}"
-        echo "warning: SURREALDB_RELAY_PASSWORD is unset. Relay containers use the fallback database user. PRODUCTION=1 refuses root." >&2
+    SURREALDB_RELAY_FALLBACK_USER=""
+    SURREALDB_RELAY_FALLBACK_PASSWORD=""
+    local relay_pw
+    relay_pw="${SURREALDB_RELAY_PASSWORD:-}"
+    relay_pw="${relay_pw#"${relay_pw%%[![:space:]]*}"}"
+    relay_pw="${relay_pw%"${relay_pw##*[![:space:]]}"}"
+    if [[ -z "$relay_pw" ]]; then
+        echo "warning: SURREALDB_RELAY_PASSWORD is unset or blank. The relay container does not receive SURREALDB_PASSWORD. PRODUCTION=1 refuses to start the relay until the relay password is set." >&2
     fi
     resolve_site_server_image
     export REDIRECT_BASE_URL ALLOWED_ORIGINS SURREALDB_APP_PASSWORD \

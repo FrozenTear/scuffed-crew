@@ -75,16 +75,15 @@ rm -f "${warn_file}"
 [[ "$SITE_SERVER_IMAGE" == "ghcr.io/frozentear/scuffed-crew:main" ]] \
     || fail "export changed the dev image to ${SITE_SERVER_IMAGE}"
 
-# Relay secret missing: fallback is the existing user, and the warning names
-# the variable rather than the password.
+# Relay secret missing: still do not copy the root password into the relay env.
 unset SURREALDB_RELAY_PASSWORD
 warn_file="$(mktemp)"
 export_compose_fallbacks 2>"${warn_file}"
 warn="$(cat "${warn_file}")"
 rm -f "${warn_file}"
-[[ "${SURREALDB_RELAY_FALLBACK_USER}" == "root" ]] || fail "fallback user ${SURREALDB_RELAY_FALLBACK_USER}"
-[[ "${SURREALDB_RELAY_FALLBACK_PASSWORD}" == "root-password-must-not-leak" ]] \
-    || fail "fallback password was not the existing database password"
+[[ -z "${SURREALDB_RELAY_FALLBACK_USER}" ]] || fail "fallback user was set: ${SURREALDB_RELAY_FALLBACK_USER}"
+[[ -z "${SURREALDB_RELAY_FALLBACK_PASSWORD}" ]] \
+    || fail "fallback password was copied"
 [[ "$warn" == *"SURREALDB_RELAY_PASSWORD is unset"* ]] || fail "missing warning: ${warn}"
 [[ "$warn" != *"root-password-must-not-leak"* ]] || fail "unset warning printed the root password"
 

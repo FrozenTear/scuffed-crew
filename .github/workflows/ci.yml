@@ -29,6 +29,19 @@ jobs:
           bash scripts/test-restic-access.sh
       - name: Compose image pin and relay credential export
         run: bash scripts/test-compose-env.sh
+      - name: Secrets file mode and blank keys
+        run: bash scripts/test-secrets-file.sh
+      - name: Relay switch preflight
+        run: bash scripts/test-relay-preflight.sh
+
+  relay-production-env:
+    name: Relay production env
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: PRODUCTION=1 relay env has no root password
+        run: bash scripts/test-relay-production-env.sh
       - name: Pack publish script checks (fake packs, no server)
         run: bash scripts/test-publish-packs.sh
 

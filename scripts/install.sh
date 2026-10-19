@@ -110,40 +110,39 @@ else
 fi
 
 
-# Harden existing secrets.env (idempotent appends)
+# Harden existing secrets.env. Generated keys that are missing or blank are
+# replaced. ALLOWED_ORIGINS is only appended when the key is absent: a blank
+# value is intentional. ENCRYPTION_KEY and SURREALDB_PASSWORD are not regenerated.
+# shellcheck source=lib/secrets-file.sh
+source "$ROOT/scripts/lib/secrets-file.sh"
 ensure_secret_key() {
     local key="$1" val="$2"
     if ! grep -q "^${key}=" "$SECRETS" 2>/dev/null; then
         echo "${key}=${val}" >> "$SECRETS"
+        chmod 600 "$SECRETS"
         echo "Appended ${key} to $SECRETS"
     fi
 }
 if [[ -f "$SECRETS" ]]; then
-    ensure_secret_key PRODUCTION 1
-    if ! grep -q '^SURREALDB_AUTH_MODE=' "$SECRETS" 2>/dev/null; then
-        ensure_secret_key SURREALDB_AUTH_MODE scoped
+    upsert_generated_secret "$SECRETS" PRODUCTION 1
+    upsert_generated_secret "$SECRETS" SURREALDB_AUTH_MODE scoped
+    upsert_generated_secret "$SECRETS" SURREALDB_APP_USER scuffed_app
+    # Distinct from the root password. Generate only when missing or blank.
+    if secret_needs_value "$SECRETS" SURREALDB_APP_PASSWORD; then
+        upsert_generated_secret "$SECRETS" SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
     fi
-    if ! grep -q '^SURREALDB_APP_USER=' "$SECRETS" 2>/dev/null; then
-        ensure_secret_key SURREALDB_APP_USER scuffed_app
+    upsert_generated_secret "$SECRETS" SURREALDB_RELAY_USER scuffed_relay
+    if secret_needs_value "$SECRETS" SURREALDB_RELAY_PASSWORD; then
+        upsert_generated_secret "$SECRETS" SURREALDB_RELAY_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
     fi
-    if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
-        # Must be distinct from root password in production (do not reuse SURREALDB_PASSWORD).
-        ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
-    fi
-    if ! grep -q '^SURREALDB_RELAY_USER=' "$SECRETS" 2>/dev/null; then
-        ensure_secret_key SURREALDB_RELAY_USER scuffed_relay
-    fi
-    if ! grep -q '^SURREALDB_RELAY_PASSWORD=' "$SECRETS" 2>/dev/null; then
-        # Distinct from root and the app password. The value is not printed.
-        ensure_secret_key SURREALDB_RELAY_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
-    fi
-    if ! grep -q '^NOSTR_CHALLENGE_SECRET=' "$SECRETS" 2>/dev/null; then
-        # MAC key for Nostr login challenge tokens; server refuses to boot without it.
-        ensure_secret_key NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
+    # MAC key for Nostr login challenge tokens; server refuses to boot without it.
+    if secret_needs_value "$SECRETS" NOSTR_CHALLENGE_SECRET; then
+        upsert_generated_secret "$SECRETS" NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
     fi
     # Older secrets.env from before ALLOWED_ORIGINS was written. Blank values
-    # are left as-is — the server now treats blank as unset (F-API-004).
+    # are left as-is. The server treats blank as unset (F-API-004).
     ensure_secret_key ALLOWED_ORIGINS "${REDIRECT_BASE_URL:-http://127.0.0.1:${HOST_PORT:-3000}}"
+    chmod 600 "$SECRETS"
 fi
 
 # Reload so a password just appended is in the shell, then fill blanks.

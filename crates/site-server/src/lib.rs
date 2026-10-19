@@ -313,7 +313,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Liveness and readiness. Both are unauthenticated and have no
         // governor: a probe must not get 429 because another request shared
         // its source IP. /api/health does not touch the database.
-        // /api/ready returns 200 only when a short Surreal query succeeds.
+        // /api/ready returns 200 when a cached RETURN true succeeded. The
+        // cache is 2 seconds. A 200 does not mean the relay login exists.
         .route("/api/health", get(routes::health::health))
         .route("/api/ready", get(routes::health::ready));
 
