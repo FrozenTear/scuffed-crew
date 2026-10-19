@@ -247,6 +247,19 @@ pub struct GateState {
     /// save means none.
     #[serde(default)]
     pub refused_first_read: [bool; GATE_COLS],
+    /// The number the last stored row shows in this column when that is not
+    /// [`Self::accepted`]: the digit reader's own unsure read of a cell it
+    /// did not vouch for, stored flagged in place of the older accepted
+    /// value (`reader = "new"`, set by the capture path after the gate, never
+    /// by the gate). Only valid where [`Self::has_unsure_shown`] is set. The
+    /// gate never reads it; the capture path compares the next row with it,
+    /// so a stat never goes down unflagged from one stored row to the next.
+    /// Missing on an older save means the stored row showed `accepted`.
+    #[serde(default)]
+    pub unsure_shown: [u32; GATE_COLS],
+    /// Which columns have [`Self::unsure_shown`] set.
+    #[serde(default)]
+    pub has_unsure_shown: [bool; GATE_COLS],
 }
 
 impl GateState {
@@ -1101,6 +1114,9 @@ pub fn apply_gate_seeded(
             unread,
             held_secs,
             refused_first_read,
+            // Set by the capture path after the gate, not here.
+            unsure_shown: [0; GATE_COLS],
+            has_unsure_shown: [false; GATE_COLS],
         },
         holds,
         unlatches,

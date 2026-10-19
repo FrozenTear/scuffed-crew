@@ -74,10 +74,14 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 ///   strip's background brightness and a 2 px "H" label is kept on boards
 ///   narrower than 1664 px. Downscaled and dimmed boards now find their
 ///   columns; boards that already found them read the same.
-pub const RECOGNIZER_ID: &str = "cv-v7";
+/// * `cv-v8`: the digit reads are the same as `cv-v7`. A held own-row cell
+///   now stores the reader's unsure read, flagged, when the capture gate
+///   would take that read, instead of the game's older accepted value
+///   (report a6f3). Stored stats can differ from `cv-v7` rows.
+pub const RECOGNIZER_ID: &str = "cv-v8";
 
 /// [`RECOGNIZER_ID`] for a run with OCR off.
-pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v7-noocr";
+pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v8-noocr";
 
 /// The reader id for a run with OCR on or off.
 pub fn recognizer_id(ocr_on: bool) -> &'static str {
@@ -2777,8 +2781,8 @@ mod tests {
     /// as `params`.
     #[test]
     fn the_reader_id_says_when_ocr_was_off() {
-        assert_eq!(recognizer_id(true), "cv-v7");
-        assert_eq!(recognizer_id(false), "cv-v7-noocr");
+        assert_eq!(recognizer_id(true), "cv-v8");
+        assert_eq!(recognizer_id(false), "cv-v8-noocr");
         for id in [RECOGNIZER_ID, RECOGNIZER_ID_NO_OCR] {
             assert!(scuffed_types::api::stats::is_recognizer_id(id), "{id}");
         }
@@ -2792,6 +2796,7 @@ mod tests {
         ("cv-v5", 0xa751_b3dc_413b_764a),
         ("cv-v6", 0x3533_9fdc_9a40_b16f),
         ("cv-v7", 0xad1f_8150_9f8a_9963),
+        ("cv-v8", 0x0776_09a9_bccc_0662),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,

@@ -938,15 +938,15 @@ mod tests {
         }
         assert_eq!(matches[0]["recognizer"], "ocr-v1");
         assert!(matches[0].get("suspect_fields").is_none());
-        assert_eq!(matches[1]["recognizer"], "cv-v7");
+        assert_eq!(matches[1]["recognizer"], "cv-v8");
         assert_eq!(matches[1]["suspect_fields"], serde_json::json!(["map"]));
         assert_eq!(matches[1]["hero"], "Wrecking Ball");
-        assert_eq!(matches[2]["recognizer"], "cv-v7");
+        assert_eq!(matches[2]["recognizer"], "cv-v8");
         assert!(matches[2].get("suspect_fields").is_none());
         let raw = serde_json::to_string(&request).unwrap();
         assert!(!raw.contains("\"recognizer\":null"));
         assert!(raw.contains("\"recognizer\":\"ocr-v1\""));
-        assert!(raw.contains("\"recognizer\":\"cv-v7\""));
+        assert!(raw.contains("\"recognizer\":\"cv-v8\""));
 
         // The same agreeing board, with the header found only on the dimmed
         // strip. The upload carries that mark as own-row suspects. A clean
@@ -1078,7 +1078,7 @@ mod tests {
         let json = serde_json::to_value(&request).unwrap();
         let matches = json["matches"].as_array().expect("matches array");
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0]["recognizer"], "cv-v7");
+        assert_eq!(matches[0]["recognizer"], "cv-v8");
         assert_eq!(matches[0]["elims"], 21);
         assert_eq!(matches[0]["deaths"], policy.deaths);
         assert_eq!(matches[0]["hero"], "Ana");
