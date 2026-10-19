@@ -14,13 +14,18 @@ COPY Cargo.toml Cargo.lock ./
 COPY Dioxus.toml ./
 COPY crates/ crates/
 
-# Build the Dioxus app bundle (Dioxus.toml at monorepo root supplies title/meta)
-RUN cd crates/app && dx build --release
+# Build the Dioxus app bundle (Dioxus.toml at monorepo root supplies title/meta).
+# `--debug-symbols false` lets wasm-opt strip DWARF. The CLI default keeps it
+# and wasm-opt aborts, which ships the unoptimized wasm.
+RUN cd crates/app && dx build --release --debug-symbols false
 
 # Stage the web bundle where the server's SPA fallback expects it.
 # index.html links /assets/favicon.svg; the dx bundle must already contain it.
 RUN cp -r target/dx/scuffed-app/release/web/public dist \
- && test -f dist/assets/favicon.svg
+ && test -f dist/assets/favicon.svg \
+ && test -f dist/assets/favicon-32.png \
+ && test -f dist/assets/favicon.ico \
+ && test -f dist/assets/apple-touch-icon.png
 
 # Build the unified server binary (REST + strategy WebSocket + chat)
 RUN cargo build --release -p scuffed-server

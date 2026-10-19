@@ -1,11 +1,15 @@
 use dioxus::prelude::*;
 
+use crate::head::HeadLayout;
 use crate::layouts::{AdminLayout, PublicLayout, StrategyLayout};
 use crate::pages::*;
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
+    // One head for every route. It rewrites the existing title and meta tags
+    // so navigation does not leave a stale or second copy.
+    #[layout(HeadLayout)]
     // First-boot + login (minimal chrome via public layout)
     #[layout(PublicLayout)]
         #[route("/setup")]

@@ -10,6 +10,15 @@ app = "crates/app"
 # Used by dx for <title> in the SPA shell. Containerfile must COPY this file.
 title = "Community"
 
+# Release bundles run wasm-opt. `z` optimizes for size. `debug` here is
+# overridden by the CLI `--debug-symbols` flag (default true). App-bundle
+# builds pass `--debug-symbols false` so wasm-opt strips DWARF instead of
+# aborting on it.
+[web.wasm_opt]
+level = "z"
+debug = false
+keep_names = false
+
 [web.watcher]
 reload_html = true
 watch_path = ["crates/app/src", "crates/types/src", "assets"]
