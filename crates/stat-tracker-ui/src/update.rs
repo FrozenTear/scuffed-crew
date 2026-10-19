@@ -1455,6 +1455,54 @@ mod tests {
     }
 
     #[test]
+    fn rc_sorts_between_the_alphas_and_the_release_and_stays_off_stable() {
+        let v = |s: &str| parse_semver(s).unwrap();
+        assert!(v("0.5.0-alpha.12") < v("0.5.0-rc.1"));
+        assert!(v("0.5.0-alpha.13") < v("0.5.0-rc.1"));
+        assert!(v("0.5.0-rc.1") < v("0.5.0-rc.2"));
+        assert!(v("0.5.0-rc.1") < v("0.5.0"));
+        assert!(is_newer("0.5.0-rc.1", "0.5.0-alpha.12"));
+        assert!(!is_newer("0.5.0-rc.1", "0.5.0"));
+        assert!(v("0.5.0-rc.1").is_offered_prerelease());
+
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-rc.1", true, "rc1"),
+            gh_release("stat-tracker-v0.5.0-alpha.12", true, "a12"),
+            gh_release("stat-tracker-v0.4.24", false, "stable"),
+        ];
+        assert!(
+            select_newer_release("0.4.24", &releases).is_none(),
+            "stable must not be offered rc.1"
+        );
+        let unflagged = vec![gh_release("stat-tracker-v0.5.0-rc.1", false, "rc1")];
+        assert!(
+            select_newer_release("0.4.24", &unflagged).is_none(),
+            "an rc suffix is skipped on stable even without the github flag"
+        );
+        assert_eq!(
+            effective_update_channel("stable", "0.5.0-alpha.12"),
+            UpdateChannel::Stable
+        );
+        let from_alpha = select_newer_release_on(
+            effective_update_channel("", "0.5.0-alpha.12"),
+            "0.5.0-alpha.12",
+            &releases,
+        )
+        .expect("an alpha install on the default channel is offered rc.1");
+        assert_eq!(from_alpha.latest, "0.5.0-rc.1");
+        let opted = select_newer_release_on(UpdateChannel::Prerelease, "0.4.24", &releases)
+            .expect("prerelease channel");
+        assert_eq!(opted.latest, "0.5.0-rc.1");
+        let with_final = vec![
+            gh_release("stat-tracker-v0.5.0", false, "final"),
+            gh_release("stat-tracker-v0.5.0-rc.1", true, "rc1"),
+        ];
+        let from_rc = select_newer_release("0.5.0-rc.1", &with_final).expect("final");
+        assert_eq!(from_rc.latest, "0.5.0");
+        assert!(select_newer_release_on(UpdateChannel::Prerelease, "0.5.0", &with_final).is_none());
+    }
+
+    #[test]
     fn unset_channel_follows_an_alpha_build() {
         use UpdateChannel::{Prerelease, Stable};
         assert_eq!(effective_update_channel("", "0.5.0-alpha.3"), Prerelease);

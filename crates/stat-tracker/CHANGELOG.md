@@ -15,16 +15,21 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## 0.5.0-alpha.13
+## 0.5.0-rc.1
 
-Release builds now ship Tesseract 5 for classic OCR. The game-font model is the same one as before. Updating removes the old bundled OCR library, so an older install does not keep both.
+This is the first release candidate for 0.5.0. The name reader is on by default and is used once the `names-v1` pack has downloaded from the site; until then the tracker keeps using the current reader. Syncing sends a big backlog in smaller batches. If the site refuses one game, only that game is set aside, marked "Upload rejected by server" on its card with a Retry button, and the rest still upload (#386, #370, #378).
 
 ### Highlights
 
-- Classic OCR in the downloaded Linux release uses Tesseract 5.5.3. Linux Mint 21 and other systems with glibc 2.35 still run it.
-- An update or uninstall removes a leftover libtesseract.so.4 from an older install.
+- Classic OCR in the downloaded Linux release uses Tesseract 5.5.3, and Linux Mint 21 and other systems with glibc 2.35 still run it. An update or uninstall removes a leftover libtesseract.so.4 from an older install (#360).
+- Uninstall in the app no longer removes anything while the tracker is still running, and says so (#395).
+- Better reads: header labels are found on smaller and dimmed scoreboards (cv-v7), an unsure stat now saves what the board showed, flagged, instead of an older number (cv-v8), and the last hero portrait on 5v5 boards is no longer cut off (#363, #391, #382).
 
-The release is still built on Ubuntu 22.04. Tesseract 5.5.3 is compiled on that runner with OpenMP on, without -march=native, and without libcurl or libarchive. Leptonica stays Ubuntu 22.04's 1.82. The daemon loads the bundled libtesseract.so.5. The koverwatch model is still trained with Ubuntu's Tesseract 4.1.1 tools, and the same size check still applies. How this library reads that model has not been measured yet.
+Technical detail. Name reader (#371, #386): `name_reader` is on unless `config.toml` sets `name_reader = false`. Once a `names-v1` pack has downloaded (an optional pack sync entry, installed to `templates/names-v1/` and checked against the sha256 in the server's pack list), it supplies the configured player's row when that row meets the pack's own `min_confidence`. A blank or low-confidence row falls back to Tesseract for that row only. With no pack loaded, the match keeps the Tesseract rows already in hand and is tagged `ocr-v1`. The match stores `name_recognizer` (`names-v1` or `ocr-v1`) and sends it on every upload and resend; the server stores it from #373. Sync caps (#370, #396): each upload carries at most 200 matches and 500 deleted sessions, now taken from the shared `scuffed_types` caps added in #372. HTTP 413 `batch_too_large` shrinks the caps and resends in the same pass, a 429 stops the rest of the chunks and keeps `Retry-After`, and 401 `token_expired` pauses sync and asks the app to relink. Learned caps reset when the server URL changes. Quarantine (#378): a 400 or 422 whose body names a row bisects that chunk until the bad rows are sent alone. A row that fails alone is quarantined only when another row in that chunk was accepted; if the chunk accepts nothing, every row stays queued and sync backs off. Editing the game, the per-row Retry button, or **Retry rejected uploads** on the Games page clears the flag and queues the game again. A future 409 `stats_delete_pending` does no splits, pauses upload, and keeps every row queued locally; automatic sync stays off until a new token is saved.
+
+Release build (#360). The release is still built on Ubuntu 22.04. Tesseract 5.5.3 is compiled on that runner with OpenMP on, without -march=native, and without libcurl or libarchive. Leptonica stays Ubuntu 22.04's 1.82. The daemon loads the bundled libtesseract.so.5. The koverwatch model is still trained with Ubuntu's Tesseract 4.1.1 tools, and the same size check still applies. How this library reads that model has not been measured yet.
+
+Also since alpha.12: the saved own-row review crop now includes the hero portrait (#379). Dimmed headers mark own-row suspects on the ocr-v1 fallback as well as the cv reader, rank results are logged on the first value and again only when it changes, and a report uses the stored defeat when the kit result is unknown (#383). Tests pin the icon reader on a cut 5v5 last row and the ocr-v1 own-row name match on a synthetic board (#384, #364). Uninstall retries transient stop errors and treats a missing unit or an already-stopped process as stopped (#395). Report bundles use zip 9.0.5, and rustls and ammonia are patched for current advisories (#374, #365).
 
 ## 0.5.0-alpha.12
 
