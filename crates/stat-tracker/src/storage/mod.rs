@@ -945,7 +945,42 @@ impl LocalStore {
                     .await
             }
             StoreCommand::RetryUpload { session_id } => self.clear_upload_reject(session_id).await,
+            StoreCommand::RetryRejectedUploads => self.clear_rejected_uploads().await,
         }
+    }
+
+    /// Clear every quarantined upload and put those rows back on the queue.
+    pub async fn clear_rejected_uploads(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let rows = self.get_all_matches().await?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            if row.upload_rejection().is_some() && !sessions.iter().any(|id| id == &row.session_id)
+            {
+                sessions.push(row.session_id);
+            }
+        }
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .query(
+                "UPDATE personal_match SET upload_reject = '', synced = false \
+                 WHERE session_id IN $sids",
+            )
+            .bind(("sids", sessions.clone()))
+            .await?;
+        for session_id in &sessions {
+            rewrite_match_log_session(
+                &self.data_dir,
+                session_id,
+                Some(&|row| {
+                    row.upload_reject = None;
+                }),
+            );
+        }
+        Ok(())
     }
 
     /// MANUAL repair helper: stamp a hero/role onto a session and ALL its
@@ -1718,6 +1753,8 @@ pub enum StoreCommand {
     },
     /// Clear a quarantined upload error and queue the session again.
     RetryUpload { session_id: String },
+    /// Clear every quarantined upload and queue those sessions again.
+    RetryRejectedUploads,
 }
 
 /// A manual correction to a game's stats. Only `Some(_)` fields are applied;
@@ -3316,6 +3353,41 @@ mod tests {
         let again = store.get_unsynced().await.unwrap();
         assert_eq!(again.len(), 2);
         assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+    }
+
+    #[tokio::test]
+    async fn retry_rejected_uploads_clears_every_quarantine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(snap("keep", 1)).await.unwrap();
+        store.insert_match(snap("bad-a", 2)).await.unwrap();
+        store.insert_match(snap("bad-b", 3)).await.unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        for sid in ["bad-a", "bad-b"] {
+            let bad: Vec<_> = rows
+                .iter()
+                .filter(|row| row.session_id == sid)
+                .cloned()
+                .collect();
+            store
+                .quarantine_upload(
+                    &SyncClaim::capture(&bad),
+                    None,
+                    "matches[0]: hero is not allowed",
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+        store
+            .apply_command(&StoreCommand::RetryRejectedUploads)
+            .await
+            .unwrap();
+        let again = store.get_unsynced().await.unwrap();
+        assert_eq!(again.len(), 3);
+        assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+        let stored = store.get_all_matches().await.unwrap();
+        assert!(stored.iter().all(|row| !row.synced));
     }
 
     #[tokio::test]

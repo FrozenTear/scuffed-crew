@@ -54,6 +54,10 @@ pub fn retry_upload(data_dir: &Path, session_id: &str) -> Result<(), String> {
     )
 }
 
+pub fn retry_rejected_uploads(data_dir: &Path) -> Result<(), String> {
+    queue(data_dir, &StoreCommand::RetryRejectedUploads)
+}
+
 pub fn resolve_segment(
     data_dir: &Path,
     session_id: &str,
@@ -233,6 +237,22 @@ mod tests {
             &cmds[0],
             StoreCommand::RetryUpload { session_id } if session_id == "sess-t1"
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_rejected_uploads_queues_a_bulk_command() {
+        let dir = tmp();
+        retry_rejected_uploads(&dir).unwrap();
+        let raw = std::fs::read_dir(dir.join("commands"))
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .unwrap();
+        let parsed: StoreCommand = serde_json::from_str(&raw).unwrap();
+        assert!(matches!(parsed, StoreCommand::RetryRejectedUploads));
+        assert!(raw.contains("\"op\":\"retry_rejected_uploads\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

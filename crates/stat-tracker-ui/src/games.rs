@@ -1,5 +1,5 @@
-use iced::widget::{column, row, space, text};
-use iced::{Alignment, Element, Fill};
+use iced::widget::{button, column, row, space, text};
+use iced::{Alignment, Element, Fill, Padding};
 
 use crate::aggregate::{
     DEFAULT_SESSION_GAP, distinct_heroes, distinct_maps, filter_games, group_by_session_gap,
@@ -7,7 +7,7 @@ use crate::aggregate::{
 use crate::app::{Message, TrackerApp};
 use crate::layout::games_columns;
 use crate::model::{Game, Outcome, game_card_in_progress};
-use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
+use crate::theme::{self, FONT_BOLD, FONT_SEMIBOLD, GRID_GAP, SIZE_META, SIZE_TITLE, TEXT};
 use crate::widgets;
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -19,12 +19,13 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
     let cols = games_columns(content_width);
 
-    let mut col = column![
-        text("Games").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
-        filter_bar(app, &heroes, &maps),
-    ]
-    .spacing(GRID_GAP)
-    .width(Fill);
+    let mut col = column![text("Games").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT)]
+        .spacing(GRID_GAP)
+        .width(Fill);
+    if app.games.iter().any(|game| game.upload_reject.is_some()) {
+        col = col.push(retry_rejected_uploads_button());
+    }
+    col = col.push(filter_bar(app, &heroes, &maps));
 
     if groups.is_empty() {
         col = col.push(widgets::empty_surface("No games match these filters"));
@@ -94,6 +95,19 @@ fn flush_compact(
         pair = pair.push(space().width(Fill));
     }
     pair.into()
+}
+
+fn retry_rejected_uploads_button() -> Element<'static, Message> {
+    button(
+        text("Retry rejected uploads")
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT),
+    )
+    .padding(Padding::from([6, 14]))
+    .style(theme::ghost_btn())
+    .on_press(Message::RetryRejectedUploads)
+    .into()
 }
 
 fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'static, Message> {
