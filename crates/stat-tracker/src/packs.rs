@@ -37,8 +37,10 @@
 //! it refused for a fixed reason once. The new reader starts on heroes-v1 and
 //! re-loads its hero set once heroes-v2 or heroes-v2-1080 is swapped in
 //! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
-//! once it lands ([`crate::shadow::banner::LiveMaps`]), however late that
-//! is. The setup guide ([`sync_reader_packs`]) syncs all of them. Every run
+//! once it lands ([`crate::shadow::banner::LiveMaps`]). The name reader
+//! loads names-v1 the same way ([`crate::names::LiveNames`]), however late
+//! that is, and reads with Tesseract until that load finishes. The setup
+//! guide ([`sync_reader_packs`]) syncs all of them. Every run
 //! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
 //! at the same time is [`PackSync::Busy`] and sends no request.
 
@@ -72,32 +74,6 @@ pub const HEROES_PORTRAIT_PACK_NAME: &str = "heroes-v2.tar";
 
 /// File name of the hero portrait pack the new reader reads at 1080p.
 pub const HEROES_PORTRAIT_1080_PACK_NAME: &str = "heroes-v2-1080.tar";
-
-/// Lowercase hex sha256 of the `names-v1.tar` bytes.
-///
-/// TODO: replace this placeholder with the sha256 of the final names-v1
-/// tarball once that hash is posted. Sixty-four zeros is not a hash of any
-/// tarball. While this stays the placeholder, a download is checked only
-/// against the server list (size and sha256), the same way as the hero
-/// packs. Once it is a real hash, the listed sha256 has to equal it or the
-/// pack is refused and the installed folder is left in place.
-pub const NAMES_V1_SHA256: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-
-/// The unset value of [`NAMES_V1_SHA256`]. Not a hash of any tarball.
-const NAMES_V1_SHA256_UNSET: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-
-/// `true` when `listed` may be installed for names-v1. The placeholder pin
-/// accepts whatever sha256 the server list published. A real pin accepts
-/// only that digest.
-fn names_v1_sha256_allows(listed: &str) -> bool {
-    pinned_sha_allows(NAMES_V1_SHA256, NAMES_V1_SHA256_UNSET, listed)
-}
-
-fn pinned_sha_allows(pinned: &str, unset: &str, listed: &str) -> bool {
-    pinned == unset || listed == pinned
-}
 
 /// What may sit inside one pack. Paths are checked before anything is
 /// written, and a path outside the layout refuses that pack only.
@@ -1566,11 +1542,6 @@ fn install_pack(data_dir: &Path, spec: &PackSpec, entry: &PackListEntry, bytes: 
     if bytes.len() as u64 != entry.size || sha256_hex(bytes) != entry.sha256 {
         return PackSync::Failed(PACK_MISMATCH.to_string());
     }
-    // names-v1 also has to match NAMES_V1_SHA256 once that constant is a
-    // real tarball hash. The placeholder does not add a second check.
-    if spec.name == crate::names::pack::PACK_NAME && !names_v1_sha256_allows(&entry.sha256) {
-        return PackSync::Failed(PACK_MISMATCH.to_string());
-    }
     let staging = parent.join(format!(".{}-next-{}", dir_label(&live), unique_suffix()));
     if std::fs::create_dir(&staging).is_err() {
         return PackSync::Failed(PACK_FAILED.to_string());
@@ -1992,7 +1963,8 @@ pub(crate) fn is_word_id(stem: &str) -> bool {
     !stem.is_empty() && stem.len() <= MAX_STEM && stem.bytes().all(is_word_byte)
 }
 
-/// The six files the names-v1 pack loads. No other name is stored.
+/// Template files of names-v1, besides `manifest.json`. Those six plus the
+/// manifest are the seven names this layout stores. No other name is stored.
 fn is_names_v1_file(raw: &str) -> bool {
     matches!(
         raw,
@@ -3549,22 +3521,42 @@ mod tests {
     }
 
     #[test]
-    fn names_v1_sha256_is_a_placeholder_until_the_tarball_hash_is_posted() {
-        assert_eq!(NAMES_V1_SHA256.len(), 64);
-        assert!(NAMES_V1_SHA256.chars().all(|c| c == '0'));
-        assert_eq!(NAMES_V1_SHA256, NAMES_V1_SHA256_UNSET);
-        // The placeholder does not reject the hash the server list published.
-        assert!(names_v1_sha256_allows(&"ab".repeat(32)));
-        let posted = "ab".repeat(32);
-        let other = "cd".repeat(32);
-        assert!(pinned_sha_allows(&posted, NAMES_V1_SHA256_UNSET, &posted));
-        assert!(!pinned_sha_allows(&posted, NAMES_V1_SHA256_UNSET, &other));
+    fn names_v1_is_optional_and_allows_its_seven_files() {
+        let spec = pack_spec(crate::names::pack::PACK_NAME).expect("names-v1");
+        assert!(
+            !spec.required,
+            "a missing names pack must not fail the hero install"
+        );
+        assert_eq!(spec.layout, PackLayout::Names);
         assert_eq!(
-            pack_spec(crate::names::pack::PACK_NAME)
-                .expect("names-v1")
-                .dir_in(Path::new("/data")),
+            spec.dir_in(Path::new("/data")),
+            Path::new("/data/templates/names-v1")
+        );
+        assert_eq!(
+            spec.dir_in(Path::new("/data")),
             crate::names::pack::dir_in(Path::new("/data"))
         );
+        // manifest.json plus the six files NamePack::load reads.
+        let allowed = [
+            "manifest.json",
+            "glyphs.png",
+            "glyphs.txt",
+            "marks.png",
+            "marks.txt",
+            "compose.txt",
+            "whiten.f32",
+        ];
+        assert_eq!(allowed.len(), 7);
+        for name in allowed {
+            assert_eq!(
+                PackLayout::Names.file_path(name).as_deref(),
+                Ok(name),
+                "{name}"
+            );
+        }
+        assert_eq!(PackLayout::Names.file_path("letters.png"), Err(PACK_UNSAFE));
+        assert_eq!(PackLayout::Names.file_path("Glyphs.png"), Err(PACK_UNSAFE));
+        assert!(!PackLayout::Names.allows_dir("special"));
     }
 
     #[tokio::test]

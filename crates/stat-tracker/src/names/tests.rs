@@ -322,10 +322,10 @@ fn the_switch_on_with_no_pack_uses_read_names_and_not_a_second_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     let loaded = NameSwitch::load(false, tmp.path());
     assert!(!loaded.enabled);
-    assert!(loaded.pack.is_none());
+    assert!(loaded.pack().is_none());
     let missing = NameSwitch::load(true, tmp.path());
     assert!(missing.enabled);
-    assert!(missing.pack.is_none());
+    assert!(missing.pack().is_none());
 
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
     let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
@@ -510,7 +510,7 @@ fn a_loaded_pack_that_abstains_fills_the_row_from_tesseract() {
     let dir = tmp.path().join("templates").join("names-v1");
     write_pack(&dir, &["ABC"]);
     let switch = NameSwitch::load(true, tmp.path());
-    assert!(switch.pack.is_some());
+    assert!(switch.pack().is_some());
     // Flat colour: no letter line, so every row is blank.
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         64,
@@ -523,6 +523,55 @@ fn a_loaded_pack_that_abstains_fills_the_row_from_tesseract() {
         vec![named("CAB", 70), named("OTHER", 70)]
     });
     assert!(called);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+}
+
+/// Pack sync can land names-v1 after the reader has started. The read that
+/// notices the new folder still uses Tesseract. The next read uses the pack.
+#[test]
+fn a_names_pack_that_lands_after_startup_is_reloaded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let switch = NameSwitch::load(true, tmp.path());
+    assert!(switch.pack().is_none(), "startup has no pack");
+
+    let staging = tmp.path().join("templates").join(".names-v1-staging");
+    write_pack(&staging, &["ABC"]);
+    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        64,
+        64,
+        image::Rgb([12, 12, 18]),
+    ));
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut called = false;
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        called = true;
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert!(!called, "the in-flight reload is not a second fallback");
+    assert!(found.is_none());
+    assert_eq!(
+        off.blocked().len(),
+        1,
+        "until the load finishes, read_names is the Tesseract path"
+    );
+    drop(off);
+
+    switch.wait_reload();
+    assert!(switch.pack().is_some(), "the landed pack is loaded");
+    let mut called = false;
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        called = true;
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert!(
+        called,
+        "the loaded pack abstains and fills the row from Tesseract"
+    );
     assert_eq!(
         found.map(|m| (m.name.row, m.recognizer)),
         Some((0, NameRecognizer::OcrV1))
