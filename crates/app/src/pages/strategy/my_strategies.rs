@@ -75,7 +75,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 2px;
     }
-    .btn-create {
+    .my-strategies .btn-create {
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
@@ -92,7 +92,7 @@ const PAGE_CSS: &str = r#"
         text-decoration: none;
         transition: all 0.2s;
     }
-    .btn-create:hover {
+    .my-strategies .btn-create:hover {
         filter: brightness(1.15);
         box-shadow: 0 0 15px var(--accent-soft);
     }

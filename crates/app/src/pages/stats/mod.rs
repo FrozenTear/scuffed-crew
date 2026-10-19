@@ -217,7 +217,7 @@ pub(crate) fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> 
 }
 
 const STATS_CSS: &str = r#"
-    .stats-page {
+    .my-stats.stats-page {
         max-width: 1100px;
         margin: 0 auto;
         padding: 2rem 1.5rem;
@@ -225,7 +225,7 @@ const STATS_CSS: &str = r#"
         --history-pad-x: 0.85rem;
         --history-border: 1px;
     }
-    .stats-page h1 {
+    .my-stats.stats-page h1 {
         font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
@@ -263,14 +263,14 @@ const STATS_CSS: &str = r#"
         color: var(--text);
         border-color: var(--accent-soft);
     }
-    .stats-tabs {
+    .my-stats .stats-tabs {
         display: flex;
         gap: 0.25rem;
         margin-bottom: 1.5rem;
         border-bottom: 1px solid var(--border);
         padding-bottom: 0;
     }
-    .stats-tab {
+    .my-stats .stats-tab {
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
@@ -285,23 +285,23 @@ const STATS_CSS: &str = r#"
         margin-bottom: -1px;
         transition: color 0.15s, border-color 0.15s;
     }
-    .stats-tab:hover {
+    .my-stats .stats-tab:hover {
         color: var(--text);
     }
-    .stats-tab.active {
+    .my-stats .stats-tab.active {
         color: var(--accent);
         border-bottom-color: var(--accent);
     }
     /* Win-rate text values: plain text tokens, muted below the min-games gate.
        No traffic light — polarity lives in the bar vs the 50% hairline. */
-    .stats-wr {
+    .my-stats .stats-wr {
         display: inline-block;
         font-size: 0.8rem;
         font-weight: 600;
         color: var(--text);
         font-variant-numeric: tabular-nums;
     }
-    .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .my-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .stats-gate-note {
         font-size: 0.7rem;
         color: var(--text-3);
@@ -504,13 +504,13 @@ const STATS_CSS: &str = r#"
     .stats-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* Summary: win-rate lead tile + secondary tiles */
-    .stats-summary {
+    .my-stats .stats-summary {
         display: grid;
         grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr);
         gap: 1rem;
         margin-bottom: 2rem;
     }
-    .stat-tile {
+    .my-stats .stat-tile {
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -520,25 +520,25 @@ const STATS_CSS: &str = r#"
         flex-direction: column;
         justify-content: center;
     }
-    .stat-tile-value {
+    .my-stats .stat-tile-value {
         font-family: var(--font-head);
         font-size: 1.9rem;
         color: var(--text);
         letter-spacing: 2px;
         line-height: 1;
     }
-    .stat-tile-hero .stat-tile-value {
+    .my-stats .stat-tile-hero .stat-tile-value {
         font-size: 2.8rem;
         color: var(--accent);
     }
-    .stat-tile-label {
+    .my-stats .stat-tile-label {
         font-size: 0.75rem;
         color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-top: 0.35rem;
     }
-    .stat-tile-record {
+    .my-stats .stat-tile-record {
         font-size: 0.9rem;
         color: var(--text-2);
         margin-top: 0.4rem;
@@ -658,7 +658,7 @@ const STATS_CSS: &str = r#"
         .overview-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
-        .stats-summary { grid-template-columns: 1fr; }
+        .my-stats .stats-summary { grid-template-columns: 1fr; }
     }
 
     /* Slim tracker row (shown once matches exist) */
@@ -864,7 +864,7 @@ const STATS_CSS: &str = r#"
         color: var(--text-3);
         margin-right: 0.25rem;
     }
-    .stats-page .filter-chip {
+    .my-stats.stats-page .filter-chip {
         padding: 0.25rem 0.65rem;
         border-radius: 999px;
         border: 1px solid var(--border);
@@ -873,7 +873,7 @@ const STATS_CSS: &str = r#"
         font-size: 0.75rem;
         cursor: pointer;
     }
-    .stats-page .filter-chip.active {
+    .my-stats.stats-page .filter-chip.active {
         border-color: var(--accent);
         color: var(--text);
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
@@ -884,7 +884,7 @@ const STATS_CSS: &str = r#"
         margin: 0;
         width: 100%;
     }
-    .stats-row-muted { opacity: 0.55; }
+    .my-stats .stats-row-muted { opacity: 0.55; }
     .density-toggle {
         font-size: 0.75rem;
         padding: 0.3rem 0.65rem;
@@ -958,17 +958,17 @@ const STATS_CSS: &str = r#"
     .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
 
     /* W4 polish: tables, mobile, hold layout */
-    .stats-page .data-table th:not(:first-child),
-    .stats-page .data-table td:not(:first-child) {
+    .my-stats.stats-page .data-table th:not(:first-child),
+    .my-stats.stats-page .data-table td:not(:first-child) {
         text-align: right;
         font-variant-numeric: tabular-nums;
     }
-    .stats-page .data-table-scroll {
+    .my-stats.stats-page .data-table-scroll {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
         max-width: 100%;
     }
-    .stats-page .match-stat {
+    .my-stats.stats-page .match-stat {
         font-variant-numeric: tabular-nums;
     }
     @media (max-width: 900px) {
@@ -977,7 +977,7 @@ const STATS_CSS: &str = r#"
         .match-list-head { display: none; }
     }
     @media (max-width: 720px) {
-        .stats-page { padding: 1.25rem 1rem; }
+        .my-stats.stats-page { padding: 1.25rem 1rem; }
         /* Phone widths: the season select takes the full actions row so the
            closed control is wide enough to show "Current season". */
         .stats-header { align-items: stretch; }
@@ -994,7 +994,7 @@ const STATS_CSS: &str = r#"
             max-width: 100%;
         }
         .overview-grid { grid-template-columns: 1fr; }
-        .stats-summary { grid-template-columns: 1fr; }
+        .my-stats .stats-summary { grid-template-columns: 1fr; }
         /* W5b mobile: row1 outcome | identity | date; row2 equal stats strip.
            Compact E/D/A/DMG/HEAL labels sit on that same five-column track.
            The 900px rule hides the wide header; this block shows it again. */
@@ -1044,8 +1044,8 @@ const STATS_CSS: &str = r#"
         .match-hero-line .tracker-badge {
             flex-shrink: 1;
         }
-        .stats-tabs { overflow-x: auto; flex-wrap: nowrap; }
-        .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
+        .my-stats .stats-tabs { overflow-x: auto; flex-wrap: nowrap; }
+        .my-stats .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
         .map-callouts { flex-direction: column; }
     }
 "#;
@@ -1193,7 +1193,7 @@ pub fn Stats() -> Element {
     if !auth().loading && !auth().is_logged_in() {
         return rsx! {
             crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
-            div { class: "stats-page",
+            div { class: "stats-page my-stats",
                 h1 { "My Stats" }
                 {member_pending(&auth(), &stats, "stats")}
             }
@@ -1204,7 +1204,7 @@ pub fn Stats() -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "stats-page", "data-density": dens,
+        div { class: "stats-page my-stats", "data-density": dens,
             div { class: "stats-header",
                 h1 { "My Stats" }
                 div { class: "stats-header-actions",
@@ -1599,7 +1599,7 @@ mod header_layout_tests {
             !STATS_CSS.contains("0.85rem + 1px"),
             "header inset must use the same pad as the cards"
         );
-        let page = block_after(STATS_CSS, ".stats-page {");
+        let page = block_after(STATS_CSS, ".my-stats.stats-page {");
         let page_block = page.split('}').next().unwrap();
         assert!(
             has_declaration(page_block, "--history-pad-x: 0.85rem"),

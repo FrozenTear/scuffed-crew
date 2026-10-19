@@ -70,12 +70,12 @@ enum MemberStatsTab {
 }
 
 const MEMBER_STATS_CSS: &str = r#"
-    .stats-page {
+    .member-stats.stats-page {
         max-width: 1100px;
         margin: 0 auto;
         padding: 2rem 1.5rem;
     }
-    .stats-page h1 {
+    .member-stats.stats-page h1 {
         font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
@@ -83,14 +83,14 @@ const MEMBER_STATS_CSS: &str = r#"
         letter-spacing: 0.04em;
         margin-bottom: 1.5rem;
     }
-    .stats-tabs {
+    .member-stats .stats-tabs {
         display: flex;
         gap: 0.25rem;
         margin-bottom: 1.5rem;
         border-bottom: 1px solid var(--border);
         overflow-x: auto;
     }
-    .stats-tab {
+    .member-stats .stats-tab {
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
@@ -106,18 +106,18 @@ const MEMBER_STATS_CSS: &str = r#"
         transition: color 0.15s, border-color 0.15s;
         white-space: nowrap;
     }
-    .stats-tab:hover { color: var(--text); }
-    .stats-tab.active {
+    .member-stats .stats-tab:hover { color: var(--text); }
+    .member-stats .stats-tab.active {
         color: var(--accent);
         border-bottom-color: var(--accent);
     }
-    .stats-summary {
+    .member-stats .stats-summary {
         display: grid;
         grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr);
         gap: 1rem;
         margin-bottom: 2rem;
     }
-    .stat-tile {
+    .member-stats .stat-tile {
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -127,46 +127,46 @@ const MEMBER_STATS_CSS: &str = r#"
         flex-direction: column;
         justify-content: center;
     }
-    .stat-tile-value {
+    .member-stats .stat-tile-value {
         font-family: var(--font-head);
         font-size: 1.9rem;
         color: var(--text);
         letter-spacing: 2px;
         line-height: 1;
     }
-    .stat-tile-hero .stat-tile-value {
+    .member-stats .stat-tile-hero .stat-tile-value {
         font-size: 2.8rem;
         color: var(--accent);
     }
-    .stat-tile-label {
+    .member-stats .stat-tile-label {
         font-size: 0.75rem;
         color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-top: 0.35rem;
     }
-    .stat-tile-record {
+    .member-stats .stat-tile-record {
         font-size: 0.9rem;
         color: var(--text-2);
         margin-top: 0.4rem;
     }
-    .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
-    .stats-wr.muted { color: var(--text-3); font-weight: 400; }
-    .stats-row-muted { opacity: 0.55; }
-    .stats-page .data-table th:not(:first-child),
-    .stats-page .data-table td:not(:first-child) {
+    .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+    .member-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .member-stats .stats-row-muted { opacity: 0.55; }
+    .member-stats.stats-page .data-table th:not(:first-child),
+    .member-stats.stats-page .data-table td:not(:first-child) {
         text-align: right;
         font-variant-numeric: tabular-nums;
     }
-    .stats-page .data-table-scroll {
+    .member-stats.stats-page .data-table-scroll {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
         max-width: 100%;
     }
-    .stats-season-row { max-width: 280px; margin-bottom: 1.25rem; }
+    .member-stats .stats-season-row { max-width: 280px; margin-bottom: 1.25rem; }
     @media (max-width: 720px) {
-        .stats-page { padding: 1.25rem 1rem; }
-        .stats-summary { grid-template-columns: 1fr; }
+        .member-stats.stats-page { padding: 1.25rem 1rem; }
+        .member-stats .stats-summary { grid-template-columns: 1fr; }
     }
 "#;
 
@@ -204,7 +204,7 @@ pub fn StatsMember(id: String) -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "stats-page",
+        div { class: "stats-page member-stats",
             h1 { "Member Stats" }
             div { class: "stats-season-row",
                 SeasonSelect {

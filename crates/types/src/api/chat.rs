@@ -163,18 +163,25 @@ fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
 }
 
-/// User-facing text must not use an em dash. A spaced `" \u{2014} "` becomes a
-/// sentence break. An unspaced one becomes `". "`.
+/// User-facing text must not use an em dash. A spaced `" \u{2014} "` or an
+/// unspaced one becomes a sentence break, and the next letter is capitalized.
 fn plain_punctuation(text: &str) -> String {
-    let mut parts = text.split(" \u{2014} ");
-    let mut out = parts.next().unwrap_or("").replace('\u{2014}', ". ");
-    for part in parts {
-        let part = part.replace('\u{2014}', ". ");
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{2014}' {
+            out.push(ch);
+            continue;
+        }
+        if out.ends_with(' ') {
+            out.pop();
+        }
         out.push_str(". ");
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            out.extend(first.to_uppercase());
-            out.push_str(chars.as_str());
+        if chars.peek() == Some(&' ') {
+            chars.next();
+        }
+        if let Some(next) = chars.next() {
+            out.extend(next.to_uppercase());
         }
     }
     out
@@ -331,6 +338,6 @@ mod tests {
             "Too many Nostr key/message operations. Please slow down and retry shortly."
         );
         let unspaced = format!("{{\"error\":\"a{}b\"}}", '\u{2014}');
-        assert_eq!(chat_api_error_copy(409, &unspaced), "a. b");
+        assert_eq!(chat_api_error_copy(409, &unspaced), "a. B");
     }
 }
