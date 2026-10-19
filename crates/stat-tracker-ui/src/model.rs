@@ -541,6 +541,38 @@ mod tests {
         game.suspect_fields.clear();
         assert!(!game.field_unsure("dmg"));
     }
+
+    /// A game read off a sure own row stores no suspect field, so neither
+    /// the card header (hero, result) nor any stat box shows unsure.
+    #[test]
+    fn a_game_from_a_sure_own_row_shows_nothing_unsure() {
+        let game = super::Game {
+            session_id: "s".into(),
+            hero: "Wrecking Ball".into(),
+            map_name: "Ilios".into(),
+            role: super::Role::Tank,
+            outcome: super::Outcome::Win,
+            elims: 28,
+            deaths: 5,
+            assists: 11,
+            damage: 10083,
+            healing: 1647,
+            mitigation: 3425,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: Vec::new(),
+            synced: false,
+        };
+        for field in [
+            "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
+        ] {
+            assert!(!game.field_unsure(field), "{field}");
+        }
+    }
 }
 
 #[cfg(test)]

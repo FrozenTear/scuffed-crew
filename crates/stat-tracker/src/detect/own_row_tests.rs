@@ -537,14 +537,28 @@ fn read_own_row_combines_the_seed_with_the_highlight() {
 #[test]
 fn a_candidate_is_cut_only_from_a_clearly_highlighted_unmatched_row() {
     let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 2));
-    // a clear highlight and no seed: a candidate from that row
-    let c = read(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD)), &[])
+    let live = icons(&TEAM, &ENEMY, Some("juno"));
+    // a clear highlight with the career hero on it and no seed: sure, and a
+    // candidate from that row
+    let c = read_with(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD)), Some(&live), &[])
         .candidate
         .expect("candidate");
     assert_eq!(c.row, 2);
     assert!(c.row_bottom > row_top(5, 88, 2));
+    // a clear highlight alone (no career panel): not sure, no candidate
+    assert!(
+        read(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD)), &[])
+            .candidate
+            .is_none()
+    );
     // two rows could be lit (a hover, a party tint): no candidate
-    let dim = read(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD - 0.01)), &[]);
+    let dim = read_with(
+        &img,
+        5,
+        Some((2, SEED_HIGHLIGHT_LEAD - 0.01)),
+        Some(&live),
+        &[],
+    );
     assert!(dim.candidate.is_none());
     assert_eq!(
         (dim.own.row, dim.own.trust),
@@ -1430,8 +1444,16 @@ fn the_career_hero_speaks_only_where_seed_and_highlight_are_silent() {
             for row in [0, 2] {
                 for seeded in [false, true] {
                     for hero in [None, Some(0), Some(2), Some(4)] {
+                        let got = combine_with_hero(seed, lit(row, lead), hero, seeded);
+                        // except that a strong highlight no seed matched is
+                        // sure when the career hero is read on its row
+                        if seed.is_none() && lead >= strong && hero == Some(row) {
+                            assert_eq!(got, own(Some(row), Trust::Sure, Source::HighlightAndHero));
+                            assert!(!got.suspect());
+                            continue;
+                        }
                         assert_eq!(
-                            combine_with_hero(seed, lit(row, lead), hero, seeded),
+                            got,
                             combine(seed, lit(row, lead), seeded),
                             "seed {seed:?} highlight {row} at {lead} hero {hero:?}"
                         );
@@ -1451,15 +1473,16 @@ fn the_career_hero_speaks_only_where_seed_and_highlight_are_silent() {
     }
     assert_eq!(Source::CareerHero.label(), "career_hero");
     assert_eq!(Source::SeedAndHero.label(), "seed_and_hero");
+    assert_eq!(Source::HighlightAndHero.label(), "highlight_and_hero");
 }
 
 #[test]
-fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it() {
+fn a_board_without_a_highlight_takes_the_career_heros_row_and_seeds_only_from_a_sure_row() {
     let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 2));
     let live = icons(&TEAM, &ENEMY, Some("juno"));
     let weak_lead = SEED_HIGHLIGHT_LEAD - 0.01;
-    // no seed, no highlight: the career hero's row, marked, and its name
-    // line cut with the weaker proof and the hero it was seen on
+    // no seed, no highlight: the career hero's row, marked. One voice named
+    // it, so its name line is not cut
     let by_hero = read_with(&img, 5, None, Some(&live), &[]);
     assert_eq!(
         (by_hero.own.row, by_hero.own.trust, by_hero.own.source),
@@ -1467,8 +1490,17 @@ fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it()
     );
     assert_eq!((by_hero.hero_row, by_hero.seeded), (Some(2), false));
     assert_eq!(by_hero.verdict, Verdict::Silent);
-    let c = by_hero.candidate.expect("candidate");
-    assert_eq!((c.row, c.candidate.proof()), (2, Proof::CareerHero));
+    assert!(by_hero.candidate.is_none());
+    // a strong highlight on the career hero's row: sure, and cut with the
+    // highlight's proof and the hero it was seen on
+    let strong = read_with(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD)), Some(&live), &[]);
+    assert_eq!(
+        (strong.own.row, strong.own.trust, strong.own.source),
+        (Some(2), Trust::Sure, Source::HighlightAndHero)
+    );
+    assert_eq!(strong.verdict, Verdict::Silent);
+    let c = strong.candidate.expect("candidate");
+    assert_eq!((c.row, c.candidate.proof()), (2, Proof::Highlight));
     assert_eq!(c.candidate.hero.as_deref(), Some("juno"));
     assert!(c.row_bottom > row_top(5, 88, 2));
     assert!(seed_gate(
@@ -1490,16 +1522,13 @@ fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it()
     assert_eq!((none.own.row, none.own.source), (None, Source::Neither));
     assert!(none.candidate.is_none() && none.hero_row.is_none());
     // a weak highlight on that same row: the highlight's row as before
-    // (marked), and now its crop may seed, with the career hero's proof
+    // (marked), and no crop: the row is not sure
     let weak = read_with(&img, 5, Some((2, weak_lead)), Some(&live), &[]);
     assert_eq!(
         (weak.own.row, weak.own.trust, weak.own.source),
         (Some(2), Trust::Suspect, Source::HighlightOnly)
     );
-    assert_eq!(
-        weak.candidate.expect("crop").candidate.proof(),
-        Proof::CareerHero
-    );
+    assert!(weak.candidate.is_none());
     // a weak highlight on another row: as before, and no crop from either
     let other = read_with(&img, 5, Some((0, weak_lead)), Some(&live), &[]);
     assert_eq!(
@@ -1507,13 +1536,13 @@ fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it()
         (Some(0), Trust::Suspect, Source::HighlightOnly)
     );
     assert!(other.candidate.is_none());
-    // a strong highlight keeps the stronger proof
-    let strong = read_with(&img, 5, Some((2, SEED_HIGHLIGHT_LEAD)), Some(&live), &[]);
-    let c = strong.candidate.expect("crop").candidate;
+    // a strong highlight with the career hero on another row: marked, no crop
+    let elsewhere = read_with(&img, 5, Some((0, SEED_HIGHLIGHT_LEAD)), Some(&live), &[]);
     assert_eq!(
-        (c.proof(), c.hero.as_deref()),
-        (Proof::Highlight, Some("juno"))
+        (elsewhere.own.row, elsewhere.own.trust),
+        (Some(0), Trust::Unconfirmed)
     );
+    assert!(elsewhere.candidate.is_none());
     // with a trusted seed: seed and career hero on one row is sure
     let store = seeded(5, 88);
     let sure = read_with(&img, 5, None, Some(&live), store.trusted());
@@ -1535,16 +1564,31 @@ fn a_board_without_a_highlight_takes_the_career_heros_row_and_may_seed_from_it()
     );
     assert_eq!(alone.verdict, Verdict::Silent);
     // seeds exist but match no row (another account name): the career
-    // hero's row, marked, and the new name line is cut
+    // hero's row, marked, and nothing cut from it
     let renamed = named_board(5, 88, [TEAL, PURPLE], &other_names(10));
     let new_name = read_with(&renamed, 5, None, Some(&live), store.trusted());
     assert_eq!(
         (new_name.own.row, new_name.own.source, new_name.seeded),
         (Some(2), Source::CareerHero, true)
     );
+    assert!(new_name.candidate.is_none());
+    // the same account with a strong highlight on the career hero's row:
+    // sure, and its name line is cut, so another of the member's accounts
+    // is learned as its own group
+    let lit_new = read_with(
+        &renamed,
+        5,
+        Some((2, SEED_HIGHLIGHT_LEAD)),
+        Some(&live),
+        store.trusted(),
+    );
     assert_eq!(
-        new_name.candidate.expect("crop").candidate.proof(),
-        Proof::CareerHero
+        (lit_new.own.row, lit_new.own.trust, lit_new.own.source),
+        (Some(2), Trust::Sure, Source::HighlightAndHero)
+    );
+    assert_eq!(
+        lit_new.candidate.expect("crop").candidate.proof(),
+        Proof::Highlight
     );
     // a board that cannot be measured: the career hero's row, no crop
     let blank = RgbImage::from_pixel(600, 400, Rgb([10, 10, 10]));
@@ -1874,11 +1918,11 @@ fn career_hero_crops_wait_in_memory_and_only_trusted_ones_are_written() {
     assert_eq!(again.trusted().len(), PROMOTE);
 }
 
-/// The whole path for a member whose highlight is never found: the career
-/// hero names the row (marked), its crops are learned over three games and
-/// a hero swap, and from then on seed and career hero make the row sure.
+/// A member whose highlight is never found: the career hero names the row,
+/// marked, on every board. One voice named it, so nothing is learned from
+/// it: a seed is cut only from a sure row.
 #[test]
-fn a_member_who_is_never_highlighted_is_found_learned_and_then_sure() {
+fn a_member_who_is_never_highlighted_is_found_and_marked_but_not_learned() {
     let mut store = SeedStore::in_memory(None);
     let base = [
         Some("mercy"),
@@ -1892,56 +1936,27 @@ fn a_member_who_is_never_highlighted_is_found_learned_and_then_sure() {
         team[own] = Some(hero);
         icons(&team, &ENEMY, Some(hero))
     };
-    for (i, (session, own, hero)) in [
-        ("g1", 2, "juno"),
-        ("g2", 4, "juno"),
-        ("g3", 1, "ana"),
-        ("g3", 0, "ana"),
-    ]
-    .into_iter()
-    .enumerate()
+    for (i, (own, hero)) in [(2, "juno"), (4, "juno"), (1, "ana"), (0, "ana")]
+        .into_iter()
+        .enumerate()
     {
         let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, own));
-        let heroes = live(own, hero);
-        let read = read_with(&img, 5, None, Some(&heroes), store.trusted());
+        let read = read_with(&img, 5, None, Some(&live(own, hero)), store.trusted());
         assert_eq!(
             (read.own.row, read.own.trust, read.own.source),
             (Some(own), Trust::Suspect, Source::CareerHero),
             "board {i}"
         );
-        let c = read.candidate.expect("crop");
-        assert!(seed_gate(
-            c.row,
-            c.row_bottom,
-            img.height(),
-            Chat::None,
-            Some(&heroes)
-        ));
-        let offer = store.offer(c.candidate, &game(session));
-        assert_eq!(offer == Offer::Promoted, i == 3, "board {i}: {offer:?}");
+        assert!(read.candidate.is_none(), "board {i}");
     }
-    assert_eq!(store.trusted().len(), PROMOTE);
-    // the next board: sure, nothing more to learn
-    let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 3));
-    let read = read_with(&img, 5, None, Some(&live(3, "kiriko")), store.trusted());
-    assert_eq!(
-        (read.own.row, read.own.trust, read.own.source),
-        (Some(3), Trust::Sure, Source::SeedAndHero)
-    );
-    assert!(read.candidate.is_none());
-    // dead on the board (own icon unread): the career hero cannot name the
-    // row, the learned name still does, marked
-    let mut team = base;
-    team[3] = None;
-    let dead = icons(&team, &ENEMY, Some("kiriko"));
-    let read = read_with(&img, 5, None, Some(&dead), store.trusted());
-    assert_eq!(
-        (read.own.row, read.own.trust, read.own.source),
-        (Some(3), Trust::Suspect, Source::SeedOnly)
-    );
-    // and without seeds that same board is held: nothing names a row
-    let read = read_with(&img, 5, None, Some(&dead), &[]);
-    assert_eq!((read.own.row, read.own.source), (None, Source::Neither));
+    assert!(store.trusted().is_empty());
+    // the stricter career-hero group rule still holds for crops that carry
+    // that proof
+    for (session, own, hero) in [("g1", 2, "juno"), ("g2", 4, "juno"), ("g3", 1, "ana")] {
+        let c = candidate(&named_board(5, 88, [TEAL, PURPLE], &roster(5, own)), 5, own)
+            .proved(Proof::CareerHero, Some(hero));
+        assert_eq!(store.offer(c, &game(session)), Offer::Pending);
+    }
 }
 
 /// 1440p scoreboard crop height (`1440 * 0.70` truncates to 1007) and the
@@ -2199,4 +2214,123 @@ fn the_6v6_review_crop_stays_on_the_scoreboard_when_the_header_is_inside() {
     assert_eq!(from_frame.dimensions(), from_board.dimensions());
     assert_eq!(from_frame.as_raw(), from_board.as_raw());
     assert!(plain.x > 0, "6v6 crop clamped");
+}
+
+/// The second made-up name of the member: another of their accounts.
+const ALT: [usize; 7] = [9, 4, 9, 2, 7, 7, 1];
+
+/// A store that trusts two of the member's names at 88 px, [`OWN`] and
+/// [`ALT`], as two groups.
+fn seeded_twice() -> SeedStore {
+    let mut store = seeded(5, 88);
+    for (i, session) in ["g3", "g3", "g4"].into_iter().enumerate() {
+        let mut names = other_names(10);
+        names[i] = ALT.to_vec();
+        let img = named_board(5, 88, [TEAL, PURPLE], &names);
+        store.offer(candidate(&img, 5, i), &game(session));
+    }
+    assert_eq!(store.trusted().len(), 2 * PROMOTE, "two groups trusted");
+    store
+}
+
+/// 2026-10-19: two of the member's accounts in one lobby (a friend playing
+/// one). Each row matches its own seeds, so the seeds name no row. The
+/// strong highlight with the career hero on it decides, and the row is
+/// sure: no field is flagged. Before, the board fell back to the highlight
+/// alone and every field was marked.
+#[test]
+fn two_of_the_members_accounts_in_one_lobby_resolve_by_highlight_and_hero() {
+    let store = seeded_twice();
+    let mut names = other_names(10);
+    names[0] = OWN.to_vec();
+    names[2] = ALT.to_vec();
+    let img = named_board(5, 88, [TEAL, PURPLE], &names);
+    let mut team = TEAM;
+    team[0] = Some("wrecking_ball");
+    team[2] = Some("lucio");
+    let live = icons(&team, &ENEMY, Some("wrecking_ball"));
+    let strong = SEED_HIGHLIGHT_LEAD;
+    // tonight's shape: both rows match, neither leads by the margin
+    let scores = measure(&img, 5).scores(store.trusted());
+    assert!(
+        scores[0] >= MATCH_FLOOR && scores[2] >= MATCH_FLOOR,
+        "{scores:?}"
+    );
+    assert_eq!(seed_row(&scores), None);
+    assert_eq!(seed_rows_matched(&scores), Some(vec![0, 2]));
+    let sure = read_with(&img, 5, Some((0, strong)), Some(&live), store.trusted());
+    assert_eq!(
+        (sure.own.row, sure.own.trust, sure.own.source),
+        (Some(0), Trust::Sure, Source::HighlightAndHero)
+    );
+    assert!(!sure.own.suspect(), "no field is flagged");
+    assert_eq!(
+        sure.verdict,
+        Verdict::Silent,
+        "no strike against either group"
+    );
+    // the row's name is already trusted: nothing new to learn
+    if let Some(c) = sure.candidate {
+        let mut learner = seeded_twice();
+        assert_eq!(learner.offer(c.candidate, &game("g9")), Offer::Known);
+    }
+    // the same lobby with the member on the other account
+    let mut swapped = team;
+    swapped[0] = Some("lucio");
+    swapped[2] = Some("wrecking_ball");
+    let other = icons(&swapped, &ENEMY, Some("wrecking_ball"));
+    let alt = read_with(&img, 5, Some((2, strong)), Some(&other), store.trusted());
+    assert_eq!(
+        (alt.own.row, alt.own.trust, alt.own.source),
+        (Some(2), Trust::Sure, Source::HighlightAndHero)
+    );
+    // a weak highlight: marked
+    let weak = read_with(
+        &img,
+        5,
+        Some((0, strong - 0.01)),
+        Some(&live),
+        store.trusted(),
+    );
+    assert_eq!((weak.own.row, weak.own.trust), (Some(0), Trust::Suspect));
+    assert!(weak.candidate.is_none());
+    // the career hero on the other matched row: marked
+    let disagree = read_with(&img, 5, Some((0, strong)), Some(&other), store.trusted());
+    assert_eq!(
+        (disagree.own.row, disagree.own.trust),
+        (Some(0), Trust::Suspect)
+    );
+    assert!(disagree.candidate.is_none());
+    // no career panel: marked
+    let no_panel = read_with(&img, 5, Some((0, strong)), None, store.trusted());
+    assert_eq!(no_panel.own.trust, Trust::Suspect);
+    // a highlighted row that is neither matched row, career hero on it:
+    // the seeds point elsewhere, so it is marked and nothing is cut
+    let mut third = TEAM;
+    third[3] = Some("wrecking_ball");
+    let on_three = icons(&third, &ENEMY, Some("wrecking_ball"));
+    let stray = read_with(&img, 5, Some((3, strong)), Some(&on_three), store.trusted());
+    assert_eq!(
+        (stray.own.row, stray.own.trust, stray.own.source),
+        (Some(3), Trust::Suspect, Source::HighlightOnly)
+    );
+    assert!(stray.candidate.is_none());
+}
+
+/// A seed is never cut from a marked row, so a wrong row is not learned.
+#[test]
+fn no_seed_is_cut_from_a_marked_row() {
+    let img = named_board(5, 88, [TEAL, PURPLE], &roster(5, 2));
+    let live = icons(&TEAM, &ENEMY, Some("juno"));
+    let weak = SEED_HIGHLIGHT_LEAD - 0.01;
+    for (highlight, heroes) in [
+        (None, Some(&live)),
+        (Some((2, weak)), Some(&live)),
+        (Some((0, SEED_HIGHLIGHT_LEAD)), Some(&live)),
+        (Some((2, SEED_HIGHLIGHT_LEAD)), None),
+    ] {
+        let read = read_with(&img, 5, highlight, heroes, &[]);
+        assert_ne!(read.own.trust, Trust::Sure, "{highlight:?}");
+        assert!(read.candidate.is_none(), "{highlight:?}");
+    }
 }

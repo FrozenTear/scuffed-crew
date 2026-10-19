@@ -35,8 +35,9 @@
 //!   of the member's team whose icon is read as that hero is the member's
 //!   ([`career_hero_row`]). It names the row when seed and highlight name
 //!   none, marked ([`Source::CareerHero`]); it confirms a seed that has no
-//!   highlight beside it ([`Source::SeedAndHero`]); and its row may seed,
-//!   under a stricter rule than a highlighted row ([`Proof::CareerHero`]).
+//!   highlight beside it ([`Source::SeedAndHero`]) and a strong highlight
+//!   no seed matched ([`Source::HighlightAndHero`]). Only that last, sure
+//!   row is cut as a seed: a row the career hero alone named is not.
 //!   This module reads no name. When nothing names a row, the daemon may
 //!   still ask ocr-v1's name read for that one board
 //!   ([`Source::NameFallback`]).
@@ -820,6 +821,56 @@ pub fn seed_row(scores: &[f32]) -> Option<usize> {
     (best >= MATCH_FLOOR && best - next >= MATCH_MARGIN).then_some(row)
 }
 
+/// The rows that reach [`MATCH_FLOOR`] against the seeds, when there are
+/// two or more. The trusted seeds may hold several of the member's own
+/// names (one per account), and two of those accounts can be in one lobby
+/// (a friend playing one): each row then matches its own seeds, and the
+/// seeds alone cannot say which row is the member's.
+pub fn seed_rows_matched(scores: &[f32]) -> Option<Vec<usize>> {
+    let rows: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s >= MATCH_FLOOR)
+        .map(|(row, _)| row)
+        .collect();
+    (rows.len() >= 2).then_some(rows)
+}
+
+/// [`combine_with_hero`] from a board's seed scores.
+///
+/// When two or more rows match the seeds ([`seed_rows_matched`]) the seeds
+/// name no row by themselves. If one of those rows is the strongly
+/// highlighted row the career hero is read on, it is the member's, sure
+/// ([`Source::HighlightAndHero`]). A weak highlight, a career hero on
+/// another row, or a highlighted row that is not one of the matched rows
+/// leaves the row marked, as a highlight alone is.
+pub fn combine_scores(
+    scores: &[f32],
+    highlight: Option<Highlight>,
+    hero: Option<usize>,
+    seeded: bool,
+) -> OwnRow {
+    let matched = seed_rows_matched(scores);
+    let seed = if matched.is_some() {
+        None
+    } else {
+        seed_row(scores)
+    };
+    let own = combine_with_hero(seed, highlight, hero, seeded);
+    match (&matched, own.row) {
+        (Some(rows), Some(row))
+            if own.source == Source::HighlightAndHero && !rows.contains(&row) =>
+        {
+            OwnRow {
+                row: own.row,
+                trust: Trust::Suspect,
+                source: Source::HighlightOnly,
+            }
+        }
+        _ => own,
+    }
+}
+
 // ----------------------------------------------------------------- combine
 
 /// How far the own row can be trusted.
@@ -856,6 +907,9 @@ pub enum Source {
     NameFallback,
     /// No highlight, and the seed names the row the career hero is read on.
     SeedAndHero,
+    /// No seed named a row (none matched, or two rows tied), and a strong
+    /// highlight names the row the career hero is read on.
+    HighlightAndHero,
     /// Neither seed nor highlight spoke: the row the career hero is read on
     /// ([`career_hero_row`]).
     CareerHero,
@@ -872,6 +926,7 @@ impl Source {
             Source::Neither => "none",
             Source::NameFallback => "name",
             Source::SeedAndHero => "seed_and_hero",
+            Source::HighlightAndHero => "highlight_and_hero",
             Source::CareerHero => "career_hero",
         }
     }
@@ -938,13 +993,15 @@ pub fn combine(seed: Option<usize>, highlight: Option<Highlight>, seeded: bool) 
 /// * different rows, weak highlight: the seed's row, suspect;
 /// * the seed alone: its row. Sure when the career hero is read on that
 ///   row, else suspect;
-/// * the highlight alone: its row. Suspect when a seed exists or the
-///   highlight is weak, unconfirmed when it is strong and no seed exists;
+/// * the highlight alone: its row. Sure when it is strong and the career
+///   hero is read on that row ([`Source::HighlightAndHero`]); else suspect
+///   when a seed exists or the highlight is weak, unconfirmed when it is
+///   strong and no seed exists;
 /// * neither: the career hero's row, suspect. Without one, no row.
 ///
 /// The career hero never overrules a seed or a highlight: it speaks only
-/// where they are silent, and it can only raise a lone seed to sure. No
-/// case reads a name.
+/// where they are silent, and it can only raise a lone seed or a lone
+/// strong highlight to sure. No case reads a name.
 pub fn combine_with_hero(
     seed: Option<usize>,
     highlight: Option<Highlight>,
@@ -957,6 +1014,9 @@ pub fn combine_with_hero(
         (Some(s), Some(_)) => (Some(s), Trust::Suspect, Source::SeedOverWeakHighlight),
         (Some(s), None) if hero == Some(s) => (Some(s), Trust::Sure, Source::SeedAndHero),
         (Some(s), None) => (Some(s), Trust::Suspect, Source::SeedOnly),
+        (None, Some(h)) if h.strong() && hero == Some(h.row) => {
+            (Some(h.row), Trust::Sure, Source::HighlightAndHero)
+        }
         (None, Some(h)) if seeded || !h.strong() => {
             (Some(h.row), Trust::Suspect, Source::HighlightOnly)
         }
@@ -1039,10 +1099,10 @@ pub struct OwnRowRead {
     /// Best and next best row score against the seeds (`-1` without one).
     pub best: f32,
     pub next: f32,
-    /// The name line of a row no seed matched: a strongly highlighted row
-    /// ([`Proof::Highlight`]), or the career hero's row where there is no
-    /// highlight or a weak one on that same row ([`Proof::CareerHero`]). The
-    /// caller still has to pass [`seed_gate`].
+    /// The name line of a sure row no seed matched: a strongly highlighted
+    /// row with the career hero read on it ([`Source::HighlightAndHero`],
+    /// [`Proof::Highlight`]). A row one voice named is never cut. The caller
+    /// still has to pass [`seed_gate`].
     pub candidate: Option<RowCandidate>,
     pub verdict: Verdict,
     /// A seed that could be compared with this board exists.
@@ -1095,13 +1155,13 @@ pub fn read_own_row(
     let mut sorted = scores.clone();
     sorted.sort_by(|a, b| b.total_cmp(a));
     let seeded = board.seeded(seeds);
-    let own = combine_with_hero(seed_row(&scores), highlight, hero_row, seeded);
-    let cut = match (own.source, highlight) {
-        (Source::HighlightOnly, Some(h)) if h.strong() => Some((h.row, Proof::Highlight)),
-        (Source::HighlightOnly, Some(h)) if hero_row == Some(h.row) => {
-            Some((h.row, Proof::CareerHero))
-        }
-        (Source::CareerHero, _) => own.row.map(|row| (row, Proof::CareerHero)),
+    let own = combine_scores(&scores, highlight, hero_row, seeded);
+    // A seed is cut only from a sure row no seed matched: a strong highlight
+    // with the career hero read on it. A row one voice named (a highlight
+    // alone, a weak highlight, the career hero alone) may be another
+    // player's, and a seed learned from it would follow that player.
+    let cut = match own.source {
+        Source::HighlightAndHero => own.row.map(|row| (row, Proof::Highlight)),
         _ => None,
     };
     let panel = heroes.and_then(|heroes| heroes.panel_hero());
