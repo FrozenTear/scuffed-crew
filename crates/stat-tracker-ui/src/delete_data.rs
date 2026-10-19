@@ -26,9 +26,18 @@ pub const CONFIRM_WORD: &str = "DELETE";
 pub const WIPED_COPY: &str = "\
 Everything on this PC is deleted. Stats already synced to the site stay there until you delete them on the site.";
 
-/// Shown after a wipe that also deleted site stats.
-pub const WIPED_WITH_SITE: &str = "\
-Everything on this PC is deleted. Stats on the site from every PC are deleted. Your account stays.";
+/// Shown after the site accepts the delete. One sentence so the undo wording
+/// can change in one place.
+pub const SITE_DELETE_SCHEDULED: &str = "\
+Your stats on the site are scheduled for deletion. You can undo this from your account page on the website for a few days.";
+
+/// JSON body for `DELETE /api/stats/me`.
+const SITE_DELETE_BODY: &str = r#"{"confirm":"delete my stats"}"#;
+
+/// Local wipe line plus [`SITE_DELETE_SCHEDULED`].
+pub fn wiped_with_site() -> String {
+    format!("Everything on this PC is deleted. {SITE_DELETE_SCHEDULED}")
+}
 
 /// Label for the site checkbox. Shown only while a sync token is linked.
 pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
@@ -167,7 +176,7 @@ pub fn request_for_app(
 /// When `also_delete_site` is set, the site call finishes before the daemon
 /// is stopped and before any local file or token is removed. A rejected or
 /// unreachable site leaves the local data in place.
-pub async fn wipe_local_data(req: WipeRequest) -> Result<&'static str, WipeFailure> {
+pub async fn wipe_local_data(req: WipeRequest) -> Result<String, WipeFailure> {
     if !confirmation_accepted(&req.confirmation) {
         return Err(WipeFailure::Local(
             "Type DELETE to confirm. Nothing was removed.".into(),
@@ -198,9 +207,9 @@ pub async fn wipe_local_data(req: WipeRequest) -> Result<&'static str, WipeFailu
     crate::uninstall::remove_own_name_seed(&req.data_dir, &req.home, &req.prefix);
     apply_settings(&req).map_err(|msg| local_after_site(site_deleted, msg))?;
     Ok(if site_deleted {
-        WIPED_WITH_SITE
+        wiped_with_site()
     } else {
-        WIPED_COPY
+        WIPED_COPY.to_string()
     })
 }
 
@@ -222,7 +231,8 @@ fn preflight(req: &WipeRequest) -> Result<(), String> {
     ensure_settings_ready(req)
 }
 
-/// `DELETE {base}/api/stats/me` with the tracker sync token.
+/// `DELETE {base}/api/stats/me` with the tracker sync token and
+/// [`SITE_DELETE_BODY`].
 ///
 /// 200 with a JSON body, and 404, continue the local wipe. Any other result
 /// returns before the caller touches local files. The token is not logged.
@@ -242,6 +252,8 @@ async fn delete_site_stats(server_url: &str, token: &str) -> Result<(), WipeFail
     let response = client
         .delete(&url)
         .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(SITE_DELETE_BODY)
         .send()
         .await
         .map_err(|_| WipeFailure::SiteRetry(SITE_RETRY.into()))?;
@@ -591,9 +603,11 @@ token = \"synthetic-token-value\"
             token: "synthetic-token-value".into(),
         })));
         assert_eq!(WipeFailure::SiteRejected.message(), SITE_REJECTED);
+        let with_site = wiped_with_site();
         for copy in [
             WIPED_COPY,
-            WIPED_WITH_SITE,
+            with_site.as_str(),
+            SITE_DELETE_SCHEDULED,
             SITE_DELETE_LABEL,
             SITE_CONFIRM_COPY,
             SITE_REJECTED,
@@ -603,9 +617,13 @@ token = \"synthetic-token-value\"
         }
         assert!(SITE_CONFIRM_COPY.contains("every PC"));
         assert!(SITE_CONFIRM_COPY.contains("account stays"));
-        assert!(WIPED_WITH_SITE.contains("every PC"));
-        assert!(WIPED_WITH_SITE.contains("account stays"));
-        assert!(!WIPED_WITH_SITE.contains("stay there"));
+        assert_eq!(
+            with_site,
+            format!("Everything on this PC is deleted. {SITE_DELETE_SCHEDULED}")
+        );
+        assert!(with_site.contains(SITE_DELETE_SCHEDULED));
+        assert!(!with_site.contains("stay there"));
+        assert_eq!(SITE_DELETE_BODY, r#"{"confirm":"delete my stats"}"#);
     }
 
     #[test]
@@ -788,8 +806,7 @@ token = \"synthetic-token-value\"
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&tmp[..n]);
-                            let text = String::from_utf8_lossy(&buf);
-                            if text.contains("\r\n\r\n") {
+                            if request_complete(&buf) {
                                 break;
                             }
                         }
@@ -808,13 +825,35 @@ token = \"synthetic-token-value\"
         format!("http://127.0.0.1:{port}")
     }
 
-    fn assert_bearer(raw: &str) {
+    fn request_complete(buf: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(buf);
+        let Some(split) = text.find("\r\n\r\n") else {
+            return false;
+        };
+        let headers = &text[..split];
+        let body = &text[split + 4..];
+        let length = headers
+            .lines()
+            .find_map(|line| {
+                let rest = line
+                    .strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))?;
+                rest.trim().parse::<usize>().ok()
+            })
+            .unwrap_or(0);
+        body.len() >= length
+    }
+
+    fn assert_site_delete(raw: &str) {
         let lower = raw.to_ascii_lowercase();
         assert!(
             lower.contains("authorization: bearer synthetic-token-value"),
             "{raw}"
         );
         assert!(raw.starts_with("DELETE /api/stats/me "), "{raw}");
+        assert!(lower.contains("content-type: application/json"), "{raw}");
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert_eq!(body, SITE_DELETE_BODY);
     }
 
     fn assert_local_kept(fix: &Fixture) {
@@ -835,7 +874,7 @@ token = \"synthetic-token-value\"
         seed_packs_and_app(&fix);
         let config_path = fix.config.join("config.toml");
         let base = spawn_mock(move |raw| {
-            assert_bearer(raw);
+            assert_site_delete(raw);
             let on_disk = fs::read_to_string(&config_path).unwrap();
             assert!(
                 on_disk.contains("synthetic-token-value"),
@@ -852,7 +891,7 @@ token = \"synthetic-token-value\"
         req.sync_token = "synthetic-token-value".into();
 
         let copy = wipe_local_data(req).await.expect("wipe");
-        assert_eq!(copy, WIPED_WITH_SITE);
+        assert_eq!(copy, wiped_with_site());
         assert_member_data_gone(&fix);
         assert_packs_and_app(&fix);
         let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
@@ -867,7 +906,7 @@ token = \"synthetic-token-value\"
         seed_member_data(&fix);
         seed_packs_and_app(&fix);
         let base = spawn_mock(|raw| {
-            assert_bearer(raw);
+            assert_site_delete(raw);
             (404, "nothing")
         });
         let mut req = request(&fix, "DELETE", false);
@@ -876,7 +915,7 @@ token = \"synthetic-token-value\"
         req.sync_token = "synthetic-token-value".into();
 
         let copy = wipe_local_data(req).await.expect("wipe");
-        assert_eq!(copy, WIPED_WITH_SITE);
+        assert_eq!(copy, wiped_with_site());
         assert_member_data_gone(&fix);
         assert!(!fix.config.exists());
         assert_packs_and_app(&fix);
@@ -890,7 +929,7 @@ token = \"synthetic-token-value\"
             seed_member_data(&fix);
             seed_packs_and_app(&fix);
             let base = spawn_mock(move |raw| {
-                assert_bearer(raw);
+                assert_site_delete(raw);
                 (status, "rejected")
             });
             let mut req = request(&fix, "DELETE", false);
@@ -913,7 +952,7 @@ token = \"synthetic-token-value\"
         seed_member_data(&fix);
         seed_packs_and_app(&fix);
         let base = spawn_mock(|raw| {
-            assert_bearer(raw);
+            assert_site_delete(raw);
             (500, "down")
         });
         let mut req = request(&fix, "DELETE", false);

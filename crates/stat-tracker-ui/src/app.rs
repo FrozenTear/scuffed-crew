@@ -1372,9 +1372,10 @@ impl TrackerApp {
                 };
                 self.delete_data.busy = true;
                 self.delete_data.offer_retry = false;
-                Task::perform(crate::delete_data::wipe_local_data(req), |result| {
-                    Message::DeleteDataFinished(result.map(|copy| copy.to_string()))
-                })
+                Task::perform(
+                    crate::delete_data::wipe_local_data(req),
+                    Message::DeleteDataFinished,
+                )
             }
             Message::DeleteDataFinished(result) => {
                 self.delete_data.busy = false;
