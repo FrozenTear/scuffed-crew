@@ -4880,9 +4880,20 @@ fn analyze_frame(
         }
         detect::hero_portrait::ScoreboardPreflight::Ready(team_size) => team_size,
     };
+    // 5v5's bottom portrait ends 7 px past the 1440p crop (y 1014 on a
+    // 1007 px image), so the slot code skips that row. The portrait match
+    // and the hero icon read use a crop extended downward, scaled from
+    // 1440p and clamped to the frame. Stat rows, the row scan and the
+    // digit reader keep `scoreboard`: they place rows from its height.
+    // 6v6 uses the same unpadded crop for both.
+    let portrait_board = if team_size == 5 {
+        Arc::new(ocr::preprocess::crop_scoreboard_for(&img, team_size))
+    } else {
+        Arc::clone(&scoreboard)
+    };
     // Pass team_size into portrait match + cell OCR so neither re-detects
     // size or re-crops the full scoreboard (P7).
-    let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
+    let player_match = matcher.match_player_hero_with_team_size(&portrait_board, team_size);
     let portrait_match = player_match
         .as_ref()
         .map(|(name, conf, _)| (name.clone(), *conf));
@@ -4923,7 +4934,7 @@ fn analyze_frame(
     // career hero's row is one of the own row's voices, and the same read
     // is the hero authority below. Never read under ocr-v1.
     let tab_heroes = read_tab_heroes(use_new_reader, || {
-        shadow::read_heroes(&img, &scoreboard, team_size)
+        shadow::read_heroes(&img, &portrait_board, team_size)
     });
     let OwnRowChoice {
         row_idx,
@@ -5075,7 +5086,7 @@ fn analyze_frame(
             team_size,
             img.height(),
         ),
-        scoreboard,
+        scoreboard: portrait_board,
         player_row_idx: row_idx,
         name_match,
         own_row,
@@ -11113,9 +11124,10 @@ mod tests {
         );
         // the icons are read once, behind the switch, before the own row
         // (O9b: the career hero's row is one of its voices), and that one
-        // read is the hero authority
+        // read is the hero authority. The image is the portrait crop: the
+        // 5v5 bottom pad, or the unpadded crop for 6v6.
         assert!(body.contains(
-            "let tab_heroes = read_tab_heroes(use_new_reader, || { shadow::read_heroes(&img, &scoreboard, team_size) });"
+            "let tab_heroes = read_tab_heroes(use_new_reader, || { shadow::read_heroes(&img, &portrait_board, team_size) });"
         ));
         assert!(body.contains("tab_heroes, row_idx, );"));
         assert!(

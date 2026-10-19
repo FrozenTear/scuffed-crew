@@ -1044,7 +1044,13 @@ impl HeroSet {
         let view = view_of(scoreboard, &mut owned);
         let hdr = find_header(view).ok_or(HeroError::NoHeader)?;
         if let Some(pad) = clipped_header_pad(frame.width(), frame.height(), scoreboard, hdr.0) {
-            let wide = hero_crop(frame, pad);
+            // A 5v5 crop may already include the bottom pad. The wide
+            // re-crop keeps those rows. A 6v6 crop is the unpadded height,
+            // so this adds nothing.
+            let (_, _, _, ch) =
+                crate::ocr::preprocess::crop_scoreboard_rect(frame.width(), frame.height());
+            let bottom = scoreboard.height().saturating_sub(ch);
+            let wide = hero_crop_bottom(frame, pad, bottom);
             let mut wide_owned = None;
             let wide_view = view_of(&wide, &mut wide_owned);
             let read = find_header(wide_view)
@@ -1130,8 +1136,13 @@ impl HeroSet {
         let t0 = Instant::now();
         let (pack, t) = self.set_for(scoreboard.height())?;
         let (fw, fh) = (frame.width(), frame.height());
-        let (cx, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(fw, fh);
-        if (scoreboard.width(), scoreboard.height()) != (cw, ch) {
+        let (cx, _, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(fw, fh);
+        if !crate::ocr::preprocess::is_frame_scoreboard_crop(
+            fw,
+            fh,
+            scoreboard.width(),
+            scoreboard.height(),
+        ) {
             return Err(HeroError::Unsupported(
                 "scoreboard is not this frame's crop",
             ));
@@ -1226,8 +1237,15 @@ pub fn clipped_header_pad(
     if header_x0 != 0 {
         return None;
     }
-    let (x, _, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(frame_w, frame_h);
-    if x == 0 || (scoreboard.width(), scoreboard.height()) != (cw, ch) {
+    let (x, _, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(frame_w, frame_h);
+    if x == 0
+        || !crate::ocr::preprocess::is_frame_scoreboard_crop(
+            frame_w,
+            frame_h,
+            scoreboard.width(),
+            scoreboard.height(),
+        )
+    {
         return None;
     }
     let (_, _, _, gh) = crate::ocr::preprocess::game_rect_16_9(frame_w, frame_h);
@@ -1236,12 +1254,22 @@ pub fn clipped_header_pad(
 }
 
 /// `crop_scoreboard` widened `pad` px to the left: same top, height and
-/// right edge.
+/// right edge. This is the 6v6 height. A 5v5 read whose crop already
+/// carries the bottom pad keeps those rows on its wide re-crop.
 pub fn hero_crop(frame: &DynamicImage, pad: u32) -> DynamicImage {
+    hero_crop_bottom(frame, pad, 0)
+}
+
+/// [`hero_crop`] with `bottom` extra rows under the unpadded crop, clamped
+/// to the frame. `bottom` is 0 for a 6v6 crop.
+fn hero_crop_bottom(frame: &DynamicImage, pad: u32, bottom: u32) -> DynamicImage {
     let (x, y, cw, ch) =
         crate::ocr::preprocess::crop_scoreboard_rect(frame.width(), frame.height());
     let x0 = x.saturating_sub(pad);
-    frame.crop_imm(x0, y, cw + (x - x0), ch)
+    let height = ch
+        .saturating_add(bottom)
+        .min(frame.height().saturating_sub(y));
+    frame.crop_imm(x0, y, cw + (x - x0), height)
 }
 
 // ---------------------------------------------------------------- live set

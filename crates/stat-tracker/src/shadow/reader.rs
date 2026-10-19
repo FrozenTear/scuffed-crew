@@ -467,12 +467,22 @@ impl Reader {
         // Heroes from the scoreboard crop, or a wider re-crop of the frame
         // when the board's header is clipped at the crop's left edge. A read
         // the capture path already made with this team size is reused.
+        // Digits above stay on the unpadded crop: their rows are a fraction
+        // of that height. 5v5 heroes use the taller crop so row 9's portrait
+        // is whole. 6v6 is the same image.
+        let hero_owned;
+        let hero_board = if team_size == 5 {
+            hero_owned = crate::ocr::preprocess::crop_scoreboard_for(frame, 5);
+            &hero_owned
+        } else {
+            &scoreboard
+        };
         let hero_read = match heroes {
             Some(given) if given.team_size == team_size => given.read,
             _ => self
                 .heroes
                 .current()
-                .and_then(|h| h.read_frame(frame, &scoreboard, team_size, budget).ok()),
+                .and_then(|h| h.read_frame(frame, hero_board, team_size, budget).ok()),
         };
         if let Some(h) = &hero_read {
             tracing::debug!(
