@@ -4,47 +4,50 @@
 //! Settings go back to defaults unless the member keeps them. The sync token
 //! and site link are removed either way.
 //!
+//! When the member also asks to delete site stats, `DELETE /api/stats/me`
+//! runs with the tracker sync token before any local file or token is
+//! removed. The account on the site stays.
+//!
 //! File removal is [`crate::uninstall::purge_saved_games`] and
 //! [`crate::uninstall::purge_settings`]. The capture daemon is stopped with
 //! the same checks as uninstall ([`crate::daemon::stop_before_file_removal`]).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use stat_tracker::config::Config;
+use stat_tracker::config::{Config, SyncConfig};
 
 use crate::daemon::SYSTEMD_UNIT;
 
 /// The member must type this before anything is deleted.
 pub const CONFIRM_WORD: &str = "DELETE";
 
-/// Shown after a wipe. Stats already on the site are left there.
+/// Shown after a local wipe that left site stats in place.
 pub const WIPED_COPY: &str = "\
 Everything on this PC is deleted. Stats already synced to the site stay there until you delete them on the site.";
 
-/// Label for the site button. Hidden until [`SITE_STATS_DELETE_READY`].
+/// Shown after a wipe that also deleted site stats.
+pub const WIPED_WITH_SITE: &str = "\
+Everything on this PC is deleted. Stats on the site from every PC are deleted. Your account stays.";
+
+/// Label for the site checkbox. Shown only while a sync token is linked.
 pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
 
-/// The site button stays hidden until this is true.
-///
-/// TODO: awaits the server endpoint that deletes synced stats for this
-/// account. Do not call any server endpoint from this screen.
-pub const SITE_STATS_DELETE_READY: bool = false;
+/// Shown in the confirm step while the site checkbox is ticked.
+pub const SITE_CONFIRM_COPY: &str = "\
+Stats on the site from every PC are deleted. Your account stays.";
 
-/// Reply when the site button is pressed. No request is sent.
-pub const SITE_DELETE_UNAVAILABLE: &str = "Deleting stats on the site is not available yet.";
+/// 401 or 403 from `DELETE /api/stats/me`. Local data stays.
+pub const SITE_REJECTED: &str = "\
+The site did not accept this PC's sign-in. Delete your stats on the website account page instead.";
 
-/// True only while [`SITE_STATS_DELETE_READY`] is set. The button is omitted
-/// from Settings until then.
-pub fn site_delete_button_visible() -> bool {
-    SITE_STATS_DELETE_READY
-}
+/// Network error or 5xx from `DELETE /api/stats/me`. Local data stays.
+pub const SITE_RETRY: &str = "\
+Could not delete stats on the site. Local data was kept. Try again.";
 
-/// The site action. This does not build a client and does not call a server.
-///
-/// TODO: awaits the server endpoint. Wire that here when it exists, and
-/// only then set [`SITE_STATS_DELETE_READY`].
-pub fn refuse_site_delete() -> &'static str {
-    SITE_DELETE_UNAVAILABLE
+/// The checkbox is shown when saved settings hold a sync token and a site URL.
+pub fn site_delete_checkbox_visible(sync: Option<&SyncConfig>) -> bool {
+    sync.is_some_and(|sync| !sync.token.trim().is_empty() && !sync.server_url.trim().is_empty())
 }
 
 /// `typed` is the confirmation field, with surrounding spaces ignored.
@@ -58,8 +61,38 @@ pub struct DeleteDataForm {
     pub armed: bool,
     pub typed: String,
     pub keep_settings: bool,
+    /// Ticked only while [`site_delete_checkbox_visible`] is true.
+    pub also_delete_site: bool,
     pub busy: bool,
     pub notice: Option<String>,
+    /// Set after a network error or 5xx. The confirm step offers Try again.
+    pub offer_retry: bool,
+}
+
+/// Why a wipe stopped. Site failures leave every local file in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WipeFailure {
+    /// Network error, 5xx, or a 200 body that was not JSON. Offer retry.
+    SiteRetry(String),
+    /// 401 or 403. [`SITE_REJECTED`] is the only copy.
+    SiteRejected,
+    /// Confirmation, lock, or file error. The message says what happened.
+    Local(String),
+}
+
+impl WipeFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::SiteRetry(msg) | Self::Local(msg) => msg,
+            Self::SiteRejected => SITE_REJECTED,
+        }
+    }
+}
+
+impl std::fmt::Display for WipeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
 }
 
 /// What to wipe. `systemctl` is the binary used to stop the user unit.
@@ -73,12 +106,21 @@ pub struct WipeRequest {
     pub keep_settings: bool,
     pub confirmation: String,
     pub systemctl: PathBuf,
+    /// When set, `DELETE /api/stats/me` runs before any local file changes.
+    pub also_delete_site: bool,
+    pub server_url: String,
+    pub sync_token: String,
 }
 
 /// Paths the running app wipes. `data_dir` is the folder this window uses.
+///
+/// `sync` is the saved link. The site call uses that token, not an unsaved
+/// settings field.
 pub fn request_for_app(
     data_dir: &Path,
     keep_settings: bool,
+    also_delete_site: bool,
+    sync: Option<&SyncConfig>,
     confirmation: String,
 ) -> Result<WipeRequest, String> {
     let home = dirs::home_dir()
@@ -93,6 +135,16 @@ pub fn request_for_app(
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| home.join(".config").join("scuffed-stat-tracker"));
+    let (server_url, sync_token) = if also_delete_site {
+        let sync = sync
+            .filter(|sync| site_delete_checkbox_visible(Some(sync)))
+            .ok_or_else(|| {
+                "This PC is not signed in to the site. Nothing was removed.".to_string()
+            })?;
+        (sync.server_url.clone(), sync.token.clone())
+    } else {
+        (String::new(), String::new())
+    };
     Ok(WipeRequest {
         data_dir: data_dir.to_path_buf(),
         home,
@@ -101,6 +153,9 @@ pub fn request_for_app(
         keep_settings,
         confirmation,
         systemctl: PathBuf::from("systemctl"),
+        also_delete_site,
+        server_url,
+        sync_token,
     })
 }
 
@@ -108,22 +163,108 @@ pub fn request_for_app(
 ///
 /// A confirmation other than [`CONFIRM_WORD`] deletes nothing. A store lock
 /// held by another open deletes nothing, including logs and the sync token.
-pub async fn wipe_local_data(req: WipeRequest) -> Result<&'static str, String> {
+///
+/// When `also_delete_site` is set, the site call finishes before the daemon
+/// is stopped and before any local file or token is removed. A rejected or
+/// unreachable site leaves the local data in place.
+pub async fn wipe_local_data(req: WipeRequest) -> Result<&'static str, WipeFailure> {
     if !confirmation_accepted(&req.confirmation) {
-        return Err("Type DELETE to confirm. Nothing was removed.".into());
+        return Err(WipeFailure::Local(
+            "Type DELETE to confirm. Nothing was removed.".into(),
+        ));
     }
-    stop_capture(&req.data_dir, &req.systemctl).await?;
+    if let Err(msg) = preflight(&req) {
+        return Err(WipeFailure::Local(msg));
+    }
+    ensure_store_unlocked(&req.data_dir)
+        .await
+        .map_err(WipeFailure::Local)?;
+    if req.also_delete_site {
+        delete_site_stats(&req.server_url, &req.sync_token).await?;
+    }
+    let site_deleted = req.also_delete_site;
+    stop_capture(&req.data_dir, &req.systemctl)
+        .await
+        .map_err(|msg| local_after_site(site_deleted, msg))?;
+    ensure_store_unlocked(&req.data_dir)
+        .await
+        .map_err(|msg| local_after_site(site_deleted, msg))?;
+    if let Err(still) = crate::uninstall::purge_saved_games(&req.data_dir, &req.home, &req.prefix) {
+        return Err(local_after_site(
+            site_deleted,
+            format!("Delete stopped. Still there: {}.", still.display()),
+        ));
+    }
+    crate::uninstall::remove_own_name_seed(&req.data_dir, &req.home, &req.prefix);
+    apply_settings(&req).map_err(|msg| local_after_site(site_deleted, msg))?;
+    Ok(if site_deleted {
+        WIPED_WITH_SITE
+    } else {
+        WIPED_COPY
+    })
+}
+
+fn local_after_site(site_deleted: bool, msg: String) -> WipeFailure {
+    if site_deleted {
+        let msg = msg.replace("Nothing was removed.", "Local data is still on this PC.");
+        WipeFailure::Local(format!(
+            "{msg} Stats on the site from every PC were deleted. Your account stays."
+        ))
+    } else {
+        WipeFailure::Local(msg)
+    }
+}
+
+fn preflight(req: &WipeRequest) -> Result<(), String> {
     if !crate::uninstall::confined_path(&req.data_dir, &req.home, &req.prefix) {
         return Err("Saved games are outside your home folder. Nothing was removed.".into());
     }
-    ensure_settings_ready(&req)?;
-    ensure_store_unlocked(&req.data_dir).await?;
-    if let Err(still) = crate::uninstall::purge_saved_games(&req.data_dir, &req.home, &req.prefix) {
-        return Err(format!("Delete stopped. Still there: {}.", still.display()));
+    ensure_settings_ready(req)
+}
+
+/// `DELETE {base}/api/stats/me` with the tracker sync token.
+///
+/// 200 with a JSON body, and 404, continue the local wipe. Any other result
+/// returns before the caller touches local files. The token is not logged.
+async fn delete_site_stats(server_url: &str, token: &str) -> Result<(), WipeFailure> {
+    if token.trim().is_empty() || server_url.trim().is_empty() {
+        return Err(WipeFailure::Local(
+            "This PC is not signed in to the site. Nothing was removed.".into(),
+        ));
     }
-    crate::uninstall::remove_own_name_seed(&req.data_dir, &req.home, &req.prefix);
-    apply_settings(&req)?;
-    Ok(WIPED_COPY)
+    let base = crate::setup_guide::normalize_base(server_url)
+        .map_err(|err| WipeFailure::Local(format!("{err} Nothing was removed.")))?;
+    let url = format!("{base}/api/stats/me");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| WipeFailure::SiteRetry(SITE_RETRY.into()))?;
+    let response = client
+        .delete(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| WipeFailure::SiteRetry(SITE_RETRY.into()))?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    interpret_site_response(status, &body)
+}
+
+/// Contract for `DELETE /api/stats/me`.
+///
+/// 200 must be JSON. Extra fields are ignored. 404 means there was nothing
+/// to delete. 401 and 403 are [`WipeFailure::SiteRejected`]. 5xx, other
+/// statuses, and a non-JSON 200 are [`WipeFailure::SiteRetry`].
+fn interpret_site_response(status: u16, body: &str) -> Result<(), WipeFailure> {
+    match status {
+        200 => match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(WipeFailure::SiteRetry(SITE_RETRY.into())),
+        },
+        404 => Ok(()),
+        401 | 403 => Err(WipeFailure::SiteRejected),
+        _ => Err(WipeFailure::SiteRetry(SITE_RETRY.into())),
+    }
 }
 
 async fn stop_capture(data_dir: &Path, systemctl: &Path) -> Result<(), String> {
@@ -356,6 +497,9 @@ token = \"synthetic-token-value\"
             keep_settings,
             confirmation: confirmation.to_string(),
             systemctl: fix.systemctl.clone(),
+            also_delete_site: false,
+            server_url: String::new(),
+            sync_token: String::new(),
         }
     }
 
@@ -432,14 +576,72 @@ token = \"synthetic-token-value\"
     }
 
     #[test]
-    fn site_delete_stays_hidden_and_sends_nothing() {
-        const {
-            assert!(!SITE_STATS_DELETE_READY);
+    fn site_checkbox_needs_a_linked_token_and_copy_has_no_em_dash() {
+        assert!(!site_delete_checkbox_visible(None));
+        assert!(!site_delete_checkbox_visible(Some(&SyncConfig {
+            server_url: "https://example.test".into(),
+            token: "  ".into(),
+        })));
+        assert!(!site_delete_checkbox_visible(Some(&SyncConfig {
+            server_url: String::new(),
+            token: "synthetic-token-value".into(),
+        })));
+        assert!(site_delete_checkbox_visible(Some(&SyncConfig {
+            server_url: "https://example.test".into(),
+            token: "synthetic-token-value".into(),
+        })));
+        assert_eq!(WipeFailure::SiteRejected.message(), SITE_REJECTED);
+        for copy in [
+            WIPED_COPY,
+            WIPED_WITH_SITE,
+            SITE_DELETE_LABEL,
+            SITE_CONFIRM_COPY,
+            SITE_REJECTED,
+            SITE_RETRY,
+        ] {
+            assert!(!copy.contains('\u{2014}'), "{copy}");
         }
-        assert!(!site_delete_button_visible());
-        assert_eq!(refuse_site_delete(), SITE_DELETE_UNAVAILABLE);
-        assert!(!WIPED_COPY.contains('\u{2014}'));
-        assert!(!SITE_DELETE_LABEL.contains('\u{2014}'));
+        assert!(SITE_CONFIRM_COPY.contains("every PC"));
+        assert!(SITE_CONFIRM_COPY.contains("account stays"));
+        assert!(WIPED_WITH_SITE.contains("every PC"));
+        assert!(WIPED_WITH_SITE.contains("account stays"));
+        assert!(!WIPED_WITH_SITE.contains("stay there"));
+    }
+
+    #[test]
+    fn site_response_accepts_json_counts_and_keeps_data_otherwise() {
+        assert!(
+            interpret_site_response(
+                200,
+                r#"{"deleted_matches":2,"deleted_sessions":1,"unexpected":true}"#
+            )
+            .is_ok()
+        );
+        assert!(interpret_site_response(404, "missing").is_ok());
+        assert_eq!(
+            interpret_site_response(401, "no"),
+            Err(WipeFailure::SiteRejected)
+        );
+        assert_eq!(
+            interpret_site_response(403, "no"),
+            Err(WipeFailure::SiteRejected)
+        );
+        assert_eq!(
+            interpret_site_response(200, "not-json"),
+            Err(WipeFailure::SiteRetry(SITE_RETRY.into()))
+        );
+        assert_eq!(
+            interpret_site_response(500, "down"),
+            Err(WipeFailure::SiteRetry(SITE_RETRY.into()))
+        );
+        assert_eq!(
+            interpret_site_response(503, "down"),
+            Err(WipeFailure::SiteRetry(SITE_RETRY.into()))
+        );
+        assert_eq!(
+            interpret_site_response(400, "bad"),
+            Err(WipeFailure::SiteRetry(SITE_RETRY.into()))
+        );
     }
 
     #[tokio::test]
@@ -501,7 +703,10 @@ token = \"synthetic-token-value\"
             let err = wipe_local_data(request(&fix, typed, false))
                 .await
                 .expect_err(typed);
-            assert!(err.contains("Nothing was removed"), "{typed}: {err}");
+            assert!(
+                err.message().contains("Nothing was removed"),
+                "{typed}: {err}"
+            );
         }
         assert!(fix.data.join("debug/accepted/board.png").is_file());
         assert!(fix.data.join("gui.log").is_file());
@@ -527,7 +732,8 @@ token = \"synthetic-token-value\"
             .await
             .expect_err("locked store");
         assert!(
-            err.contains("Stop the tracker") && err.contains("Nothing was removed"),
+            err.message().contains("Stop the tracker")
+                && err.message().contains("Nothing was removed"),
             "{err}"
         );
         assert!(
@@ -558,7 +764,236 @@ token = \"synthetic-token-value\"
         let mut req = request(&fix, "DELETE", false);
         req.data_dir = outside.clone();
         let err = wipe_local_data(req).await.expect_err("outside");
-        assert!(err.contains("Nothing was removed"), "{err}");
+        assert!(err.message().contains("Nothing was removed"), "{err}");
         assert!(outside.join("debug/crop.png").is_file());
+    }
+
+    fn spawn_mock(handler: impl Fn(&str) -> (u16, &'static str) + Send + Sync + 'static) -> String {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handler = Arc::new(handler);
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            let text = String::from_utf8_lossy(&buf);
+                            if text.contains("\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let (status, body) = handler(&text);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn assert_bearer(raw: &str) {
+        let lower = raw.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer synthetic-token-value"),
+            "{raw}"
+        );
+        assert!(raw.starts_with("DELETE /api/stats/me "), "{raw}");
+    }
+
+    fn assert_local_kept(fix: &Fixture) {
+        assert!(fix.data.join("debug/accepted/board.png").is_file());
+        assert!(fix.data.join("gui.log").is_file());
+        assert!(fix.data.join("sync_auth.json").is_file());
+        assert!(fix.data.join("stats.surrealkv.pre-vacuum-9").exists());
+        let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
+        assert!(config.contains("synthetic-token-value"), "{config}");
+        assert!(!fix.log.exists(), "daemon was stopped");
+    }
+
+    #[tokio::test]
+    async fn site_delete_runs_before_the_local_token_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        seed_packs_and_app(&fix);
+        let config_path = fix.config.join("config.toml");
+        let base = spawn_mock(move |raw| {
+            assert_bearer(raw);
+            let on_disk = fs::read_to_string(&config_path).unwrap();
+            assert!(
+                on_disk.contains("synthetic-token-value"),
+                "token was wiped before the site call: {on_disk}"
+            );
+            (
+                200,
+                r#"{"deleted_matches":2,"deleted_sessions":1,"unexpected":true}"#,
+            )
+        });
+        let mut req = request(&fix, "DELETE", true);
+        req.also_delete_site = true;
+        req.server_url = base;
+        req.sync_token = "synthetic-token-value".into();
+
+        let copy = wipe_local_data(req).await.expect("wipe");
+        assert_eq!(copy, WIPED_WITH_SITE);
+        assert_member_data_gone(&fix);
+        assert_packs_and_app(&fix);
+        let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
+        assert!(config.contains("KeptName"), "{config}");
+        assert!(!config.contains("synthetic-token-value"), "{config}");
+    }
+
+    #[tokio::test]
+    async fn site_not_found_still_wipes_this_pc() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        seed_packs_and_app(&fix);
+        let base = spawn_mock(|raw| {
+            assert_bearer(raw);
+            (404, "nothing")
+        });
+        let mut req = request(&fix, "DELETE", false);
+        req.also_delete_site = true;
+        req.server_url = base;
+        req.sync_token = "synthetic-token-value".into();
+
+        let copy = wipe_local_data(req).await.expect("wipe");
+        assert_eq!(copy, WIPED_WITH_SITE);
+        assert_member_data_gone(&fix);
+        assert!(!fix.config.exists());
+        assert_packs_and_app(&fix);
+    }
+
+    #[tokio::test]
+    async fn site_rejection_keeps_local_data() {
+        for status in [401, 403] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = fixture(dir.path());
+            seed_member_data(&fix);
+            seed_packs_and_app(&fix);
+            let base = spawn_mock(move |raw| {
+                assert_bearer(raw);
+                (status, "rejected")
+            });
+            let mut req = request(&fix, "DELETE", false);
+            req.also_delete_site = true;
+            req.server_url = base;
+            req.sync_token = "synthetic-token-value".into();
+
+            let err = wipe_local_data(req).await.expect_err("rejected");
+            assert_eq!(err, WipeFailure::SiteRejected, "{status}");
+            assert_eq!(err.message(), SITE_REJECTED);
+            assert_local_kept(&fix);
+            assert_packs_and_app(&fix);
+        }
+    }
+
+    #[tokio::test]
+    async fn site_server_error_keeps_local_data_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        seed_packs_and_app(&fix);
+        let base = spawn_mock(|raw| {
+            assert_bearer(raw);
+            (500, "down")
+        });
+        let mut req = request(&fix, "DELETE", false);
+        req.also_delete_site = true;
+        req.server_url = base;
+        req.sync_token = "synthetic-token-value".into();
+
+        let err = wipe_local_data(req).await.expect_err("retry");
+        assert_eq!(err, WipeFailure::SiteRetry(SITE_RETRY.into()));
+        assert_local_kept(&fix);
+        assert_packs_and_app(&fix);
+    }
+
+    #[tokio::test]
+    async fn site_network_error_keeps_local_data_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        seed_packs_and_app(&fix);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut req = request(&fix, "DELETE", false);
+        req.also_delete_site = true;
+        req.server_url = format!("http://127.0.0.1:{port}");
+        req.sync_token = "synthetic-token-value".into();
+
+        let err = wipe_local_data(req).await.expect_err("network");
+        assert_eq!(err, WipeFailure::SiteRetry(SITE_RETRY.into()));
+        assert_local_kept(&fix);
+        assert_packs_and_app(&fix);
+    }
+
+    #[tokio::test]
+    async fn site_call_waits_for_confirmation_and_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = fixture(dir.path());
+        seed_member_data(&fix);
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_handler = hits.clone();
+        let base = spawn_mock(move |_| {
+            hits_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (200, "{}")
+        });
+
+        let mut unconfirmed = request(&fix, "delete", false);
+        unconfirmed.also_delete_site = true;
+        unconfirmed.server_url = base.clone();
+        unconfirmed.sync_token = "synthetic-token-value".into();
+        let err = wipe_local_data(unconfirmed).await.expect_err("confirm");
+        assert!(err.message().contains("Nothing was removed"), "{err}");
+
+        let mut unsigned = request(&fix, "DELETE", false);
+        unsigned.also_delete_site = true;
+        unsigned.server_url = base;
+        unsigned.sync_token.clear();
+        let err = wipe_local_data(unsigned).await.expect_err("token");
+        assert!(err.message().contains("Nothing was removed"), "{err}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
+        assert!(config.contains("synthetic-token-value"), "{config}");
+    }
+
+    #[test]
+    fn request_for_app_refuses_site_delete_without_a_saved_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            request_for_app(dir.path(), false, true, None, "DELETE".into()).expect_err("unlinked");
+        assert!(err.contains("not signed in"), "{err}");
+        let err = request_for_app(
+            dir.path(),
+            false,
+            true,
+            Some(&SyncConfig {
+                server_url: "https://example.test".into(),
+                token: String::new(),
+            }),
+            "DELETE".into(),
+        )
+        .expect_err("empty token");
+        assert!(err.contains("not signed in"), "{err}");
     }
 }

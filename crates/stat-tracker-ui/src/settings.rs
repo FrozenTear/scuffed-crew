@@ -1482,19 +1482,31 @@ fn delete_my_data_section(app: &TrackerApp, demo: bool) -> Element<'_, Message> 
     }
 
     if !demo {
+        let site_linked =
+            crate::delete_data::site_delete_checkbox_visible(app.saved_config.sync.as_ref());
         if form.busy {
             body = body.push(
-                text("Deleting local data.")
-                    .size(SIZE_META)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_3),
+                text(if form.also_delete_site {
+                    "Deleting site stats, then local data."
+                } else {
+                    "Deleting local data."
+                })
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
             );
         } else if !form.armed {
-            body = body.push(action_btn(
+            let mut actions = row![action_btn(
                 "Delete everything on this PC",
                 false,
                 Message::ArmDeleteData,
-            ));
+            )]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if site_linked {
+                actions = actions.push(site_stats_checkbox(form.also_delete_site));
+            }
+            body = body.push(actions);
         } else {
             body = body.push(
                 text("Type DELETE to confirm.")
@@ -1517,6 +1529,14 @@ fn delete_my_data_section(app: &TrackerApp, demo: bool) -> Element<'_, Message> 
                     .text_size(SIZE_BODY)
                     .style(checkbox_style),
             );
+            if site_linked && form.also_delete_site {
+                body = body.push(
+                    text(crate::delete_data::SITE_CONFIRM_COPY)
+                        .size(SIZE_META)
+                        .font(FONT_MEDIUM)
+                        .color(theme::DANGER),
+                );
+            }
             let mut actions = row![action_btn("Cancel", false, Message::CancelDeleteData)]
                 .spacing(8)
                 .align_y(Alignment::Center);
@@ -1533,30 +1553,37 @@ fn delete_my_data_section(app: &TrackerApp, demo: bool) -> Element<'_, Message> 
                     .on_press(Message::ConfirmDeleteData),
                 );
             }
+            if site_linked {
+                actions = actions.push(site_stats_checkbox(form.also_delete_site));
+            }
+            if form.offer_retry && crate::delete_data::confirmation_accepted(&form.typed) {
+                actions = actions.push(
+                    button(
+                        text("Try again")
+                            .size(SIZE_META)
+                            .font(FONT_SEMIBOLD)
+                            .color(TEXT),
+                    )
+                    .padding(Padding::from([8, 16]))
+                    .style(theme::danger_btn(true))
+                    .on_press(Message::ConfirmDeleteData),
+                );
+            }
             body = body.push(actions);
-        }
-
-        // Hidden until the site can delete synced stats.
-        // TODO: awaits the server endpoint. Do not call any server endpoint from here.
-        if crate::delete_data::site_delete_button_visible() {
-            body = body.push(site_delete_button());
         }
     }
 
     settings_card("Delete my data", body.into())
 }
 
-fn site_delete_button() -> Element<'static, Message> {
-    button(
-        text(crate::delete_data::SITE_DELETE_LABEL)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(theme::DANGER),
-    )
-    .padding(Padding::from([8, 16]))
-    .style(theme::danger_btn(false))
-    .on_press(Message::DeleteSiteStats)
-    .into()
+fn site_stats_checkbox(checked: bool) -> Element<'static, Message> {
+    checkbox(checked)
+        .label(crate::delete_data::SITE_DELETE_LABEL)
+        .on_toggle(Message::ToggleDeleteSite)
+        .size(16)
+        .text_size(SIZE_BODY)
+        .style(checkbox_style)
+        .into()
 }
 
 fn uninstall_row() -> Element<'static, Message> {

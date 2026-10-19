@@ -244,10 +244,9 @@ pub enum Message {
     CancelDeleteData,
     DeleteDataTyped(String),
     ToggleKeepSettings(bool),
+    ToggleDeleteSite(bool),
     ConfirmDeleteData,
-    DeleteDataFinished(Result<String, String>),
-    /// Hidden until the site endpoint exists. The handler sends no request.
-    DeleteSiteStats,
+    DeleteDataFinished(Result<String, crate::delete_data::WipeFailure>),
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
@@ -1317,6 +1316,8 @@ impl TrackerApp {
                 if !self.delete_data.busy {
                     self.delete_data.armed = false;
                     self.delete_data.typed.clear();
+                    self.delete_data.offer_retry = false;
+                    self.delete_data.notice = None;
                 }
                 Task::none()
             }
@@ -1332,6 +1333,16 @@ impl TrackerApp {
                 }
                 Task::none()
             }
+            Message::ToggleDeleteSite(on) => {
+                if !self.delete_data.busy
+                    && crate::delete_data::site_delete_checkbox_visible(
+                        self.saved_config.sync.as_ref(),
+                    )
+                {
+                    self.delete_data.also_delete_site = on;
+                }
+                Task::none()
+            }
             Message::ConfirmDeleteData => {
                 if self.fixture.is_some() || self.delete_data.busy {
                     return Task::none();
@@ -1341,9 +1352,15 @@ impl TrackerApp {
                     self.toast_shown_at = Some(SystemTime::now());
                     return Task::none();
                 }
+                let also_delete_site = self.delete_data.also_delete_site
+                    && crate::delete_data::site_delete_checkbox_visible(
+                        self.saved_config.sync.as_ref(),
+                    );
                 let req = match crate::delete_data::request_for_app(
                     &self.data_dir,
                     self.delete_data.keep_settings,
+                    also_delete_site,
+                    self.saved_config.sync.as_ref(),
                     self.delete_data.typed.clone(),
                 ) {
                     Ok(req) => req,
@@ -1354,6 +1371,7 @@ impl TrackerApp {
                     }
                 };
                 self.delete_data.busy = true;
+                self.delete_data.offer_retry = false;
                 Task::perform(crate::delete_data::wipe_local_data(req), |result| {
                     Message::DeleteDataFinished(result.map(|copy| copy.to_string()))
                 })
@@ -1365,6 +1383,8 @@ impl TrackerApp {
                         let keep = self.delete_data.keep_settings;
                         self.delete_data.armed = false;
                         self.delete_data.typed.clear();
+                        self.delete_data.also_delete_site = false;
+                        self.delete_data.offer_retry = false;
                         self.delete_data.notice = Some(copy.clone());
                         self.games.clear();
                         self.sessions_with_kit.clear();
@@ -1392,16 +1412,24 @@ impl TrackerApp {
                         self.toast_shown_at = Some(SystemTime::now());
                     }
                     Err(err) => {
-                        self.replace_toast(err);
+                        match &err {
+                            crate::delete_data::WipeFailure::SiteRetry(msg) => {
+                                self.delete_data.offer_retry = true;
+                                self.delete_data.notice = Some(msg.clone());
+                            }
+                            crate::delete_data::WipeFailure::SiteRejected => {
+                                self.delete_data.offer_retry = false;
+                                self.delete_data.notice =
+                                    Some(crate::delete_data::SITE_REJECTED.to_string());
+                            }
+                            crate::delete_data::WipeFailure::Local(_) => {
+                                self.delete_data.offer_retry = false;
+                            }
+                        }
+                        self.replace_toast(err.message());
                         self.toast_shown_at = Some(SystemTime::now());
                     }
                 }
-                Task::none()
-            }
-            // TODO: awaits the server endpoint. This sends no request.
-            Message::DeleteSiteStats => {
-                self.replace_toast(crate::delete_data::refuse_site_delete());
-                self.toast_shown_at = Some(SystemTime::now());
                 Task::none()
             }
             Message::UpdateChecked(info) => {
