@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -21,7 +21,7 @@ use scuffed_types::{
     role_for_hero_name,
 };
 
-use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{DaemonUser, LimitedUploadDaemon, OpaqueDaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -80,16 +80,9 @@ fn batch_too_large() -> UploadReject {
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 pub(crate) async fn upload_stats(
     State(state): State<AppState>,
-    Extension(governor): Extension<crate::stats_upload_limits::StatsUploadGovernor>,
-    daemon: DaemonUser,
+    daemon: LimitedUploadDaemon,
     Json(body): Json<StatsUploadBody>,
 ) -> Result<Json<StatsUploadResponse>, UploadReject> {
-    if let Err(secs) = governor.allow(&daemon.token_id) {
-        return Err(UploadReject(Box::new(
-            crate::stats_upload_limits::token_rate_limited_response(secs),
-        )));
-    }
-
     if crate::stats_upload_limits::stats_upload_batch_cap_enabled() && batch_over_cap(&body) {
         return Err(batch_too_large());
     }
@@ -1804,6 +1797,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn over_limit_token_malformed_json_is_429_not_400() {
+        let (state, _member_id, token) = daemon().await;
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 60);
+        for i in 0..scuffed_types::STATS_UPLOAD_TOKEN_BURST {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                &token,
+                matches_body(&format!("ok{i}"), 1),
+                peer,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+        }
+
+        let resp = app
+            .oneshot(upload_request(&token, b"{".to_vec(), peer))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        assert_eq!(text, r#"{"code":"rate_limited"}"#);
+    }
+
+    #[tokio::test]
     async fn fake_bearers_leave_the_token_limiter_empty() {
         let (state, _member_id, live, _session) = member_reader().await;
         let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
@@ -1838,28 +1858,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_tokens_on_one_ip_send_twenty_uploads_without_ip_limit() {
+        let (state, member_id, token_a) = daemon().await;
+        let token_b = "rec-daemon-token-b";
+        state
+            .db
+            .create_daemon_token(&member_id, token_b, "second")
+            .await
+            .unwrap();
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 41);
+
+        for (token, prefix) in [(token_a.as_str(), "a"), (token_b, "b")] {
+            for i in 0..scuffed_types::STATS_UPLOAD_TOKEN_BURST {
+                let (status, _, text) = post_text_from(
+                    app.clone(),
+                    token,
+                    matches_body(&format!("{prefix}{i}"), 1),
+                    peer,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{prefix}{i}: {text}");
+            }
+        }
+
+        let (status, _, text) =
+            post_text_from(app, &token_a, matches_body("a-over", 1), peer).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        assert_eq!(text, r#"{"code":"rate_limited"}"#);
+    }
+
+    #[tokio::test]
     async fn upload_ip_limit_returns_governor_429() {
-        let (state, _member_id, token) = daemon().await;
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-ip", "ipplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        let tokens = ["ip-a", "ip-b", "ip-c", "ip-d", "ip-e"];
+        for token in tokens {
+            state
+                .db
+                .create_daemon_token(&member.id, token, token)
+                .await
+                .unwrap();
+        }
         let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
         crate::stats_upload_limits::override_stats_upload_governor(governor.clone());
         let app = create_router(state);
         let peer = Ipv4Addr::new(203, 0, 113, 40);
+        let burst = scuffed_types::STATS_UPLOAD_IP_BURST;
+        assert!(
+            burst / (tokens.len() as u32) < scuffed_types::STATS_UPLOAD_TOKEN_BURST,
+            "each token must stay under its own burst while the IP bucket fills"
+        );
 
-        for i in 0..8 {
-            let (status, _, text) = post_text_from(
-                app.clone(),
-                &token,
-                matches_body(&format!("ip{i}"), 1),
-                peer,
-            )
-            .await;
+        for i in 0..burst {
+            let token = tokens[(i as usize) % tokens.len()];
+            let (status, _, text) =
+                post_text_from(app.clone(), token, matches_body(&format!("ip{i}"), 1), peer).await;
             assert_eq!(status, StatusCode::OK, "request {i}: {text}");
         }
 
         let (status, headers, text) =
-            post_text_from(app, &token, matches_body("ip-blocked", 1), peer).await;
+            post_text_from(app, tokens[0], matches_body("ip-blocked", 1), peer).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
         let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["code"], "rate_limited");
         assert_eq!(body["error"], "rate_limited");
         let retry = body["retry_after"].as_u64().expect("retry_after");
         assert!(retry >= 1, "retry_after={retry}");
@@ -1875,7 +1941,7 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("no-store")
         );
-        assert_eq!(governor.len(), 1);
+        assert_eq!(governor.len(), tokens.len());
     }
 
     #[tokio::test]

@@ -158,15 +158,15 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
-    // Same budget and the same trusted-proxy key extractor as the upload
-    // routes above, on its own bucket. A client cannot spray bearers faster
-    // than this. After the token is validated, the route also spends a
-    // per-token cell keyed by token id.
+    // Own per-IP budget for POST /api/stats/upload, looser than the per-token
+    // limit. Avatar and image uploads keep burst 8 / 10s. The key is still
+    // TrustedProxyIpKeyExtractor. After the token is validated, the route
+    // also spends a per-token cell keyed by token id.
     let stats_upload_ip_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_second(10)
-            .burst_size(8)
+            .per_second(scuffed_types::STATS_UPLOAD_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::STATS_UPLOAD_IP_BURST)
             .finish()
             .expect("valid stats upload ip governor config"),
     );

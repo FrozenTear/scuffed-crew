@@ -10,12 +10,13 @@
 //! way as `PRODUCTION` ([`scuffed_auth::production_value_enabled`]).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::Mutex;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
 
 use axum::Json;
 use axum::extract::Request;
@@ -93,48 +94,76 @@ fn token_quota() -> Quota {
         .allow_burst(burst)
 }
 
+struct GovernorInner {
+    limiter: DefaultKeyedRateLimiter<String>,
+    prune_started: AtomicBool,
+}
+
 /// Keyed governor for validated daemon tokens. Cloned cheaply; buckets are shared.
 #[derive(Clone)]
 pub struct StatsUploadGovernor {
-    limiter: Arc<DefaultKeyedRateLimiter<String>>,
+    inner: Arc<GovernorInner>,
 }
 
 impl StatsUploadGovernor {
     pub fn new() -> Self {
-        let limiter = Arc::new(RateLimiter::keyed(token_quota()));
-        spawn_prune(Arc::downgrade(&limiter));
-        Self { limiter }
+        let governor = Self {
+            inner: Arc::new(GovernorInner {
+                limiter: RateLimiter::keyed(token_quota()),
+                prune_started: AtomicBool::new(false),
+            }),
+        };
+        governor.ensure_prune();
+        governor
     }
 
     /// Spend one cell for a token id that has already been validated.
     pub(crate) fn allow(&self, token_id: &str) -> Result<(), u64> {
+        self.ensure_prune();
         let key = token_id.to_owned();
-        match self.limiter.check_key(&key) {
+        match self.inner.limiter.check_key(&key) {
             Ok(_) => Ok(()),
             Err(not_until) => {
-                let wait = not_until.wait_time_from(self.limiter.clock().now());
+                let wait = not_until.wait_time_from(self.inner.limiter.clock().now());
                 Err(retry_after_secs(wait))
             }
         }
     }
 
+    /// Start the idle-key prune when a Tokio runtime is current.
+    ///
+    /// Building a router before the runtime exists must not panic. The first
+    /// `allow` inside a runtime starts the task if `new` could not.
+    fn ensure_prune(&self) {
+        if self.inner.prune_started.load(Ordering::Acquire) {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        if self.inner.prune_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        spawn_prune(Arc::downgrade(&self.inner));
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.limiter.len()
+        self.inner.limiter.len()
     }
 }
 
-fn spawn_prune(limiter: std::sync::Weak<DefaultKeyedRateLimiter<String>>) {
+fn spawn_prune(inner: std::sync::Weak<GovernorInner>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PRUNE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let Some(limiter) = limiter.upgrade() else {
+            let Some(inner) = inner.upgrade() else {
                 break;
             };
-            limiter.retain_recent();
-            limiter.shrink_to_fit();
+            inner.limiter.retain_recent();
+            inner.limiter.shrink_to_fit();
         }
     });
 }
@@ -168,10 +197,10 @@ fn retry_after_secs(wait: Duration) -> u64 {
     rounded.max(1)
 }
 
-/// Puts the per-token governor on the request for [`crate::routes::stats::upload_stats`].
+/// Puts the per-token governor on the request for the upload extractor.
 ///
-/// This does not spend a cell. The handler spends one only after the bearer
-/// has been validated, keyed by token id.
+/// This does not spend a cell. The extractor spends one after the bearer
+/// has been validated, and before the body is read.
 pub async fn attach_stats_upload_governor(
     axum::extract::State(governor): axum::extract::State<StatsUploadGovernor>,
     mut request: Request,
@@ -239,5 +268,12 @@ mod tests {
         limiter.retain_recent();
         limiter.shrink_to_fit();
         assert_eq!(limiter.len(), 0, "an idle key is dropped");
+    }
+
+    #[test]
+    fn governor_builds_outside_a_runtime() {
+        let governor = super::StatsUploadGovernor::new();
+        assert!(governor.allow("outside").is_ok());
+        assert_eq!(governor.len(), 1);
     }
 }

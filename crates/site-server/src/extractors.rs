@@ -360,6 +360,45 @@ async fn authenticate_daemon(
     Ok(DaemonUser { member, token_id })
 }
 
+/// Upload daemon auth plus the per-token governor.
+///
+/// `FromRequestParts`, so it runs before the JSON body is read. An over-limit
+/// token is 429 even when the body is not valid JSON.
+pub struct LimitedUploadDaemon {
+    pub member: Member,
+}
+
+impl FromRequestParts<AppState> for LimitedUploadDaemon {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let governor = parts
+            .extensions
+            .get::<crate::stats_upload_limits::StatsUploadGovernor>()
+            .cloned()
+            .ok_or_else(|| *internal_error())?;
+        let daemon = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Distinct,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
+        if let Err(secs) = governor.allow(&daemon.token_id) {
+            return Err(crate::stats_upload_limits::token_rate_limited_response(
+                secs,
+            ));
+        }
+        Ok(Self {
+            member: daemon.member,
+        })
+    }
+}
+
 impl FromRequestParts<AppState> for DaemonUser {
     type Rejection = Response;
 

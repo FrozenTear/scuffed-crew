@@ -16,5 +16,14 @@ pub const STATS_UPLOAD_TOKEN_BURST: u32 = 10;
 /// Seconds until the upload governor replenishes one request for a token.
 pub const STATS_UPLOAD_TOKEN_REPLENISH_SECS: u64 = 6;
 
+/// Requests one client IP may send to `POST /api/stats/upload` before waiting.
+///
+/// Looser than [`STATS_UPLOAD_TOKEN_BURST`] times a few devices, so two PCs
+/// on one home IP, or a short backlog of batches, hit the token limit first.
+pub const STATS_UPLOAD_IP_BURST: u32 = 40;
+
+/// Seconds until the stats-upload per-IP governor replenishes one request.
+pub const STATS_UPLOAD_IP_REPLENISH_SECS: u64 = 2;
+
 /// Lifetime of a daemon token created from now on, in days.
 pub const DAEMON_TOKEN_TTL_DAYS: i64 = 180;

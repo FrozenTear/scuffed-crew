@@ -209,6 +209,7 @@ fn assert_governor_rate_limit(headers: &axum::http::HeaderMap, body: &[u8]) {
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry:?}"));
     assert!(secs >= 1, "Retry-After must be at least 1, got {secs}");
     let expected = serde_json::to_vec(&json!({
+        "code": "rate_limited",
         "error": "rate_limited",
         "retry_after": secs,
     }))
