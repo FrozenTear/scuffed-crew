@@ -1032,6 +1032,7 @@ mod tests {
         let empty = channel(true, "");
         assert!(relay_dial(RelayAvailability::Off, std::slice::from_ref(&empty)).is_none());
         assert!(relay_dial(RelayAvailability::Unknown, std::slice::from_ref(&empty)).is_none());
+        assert!(relay_dial(RelayAvailability::Failed, std::slice::from_ref(&empty)).is_none());
         assert_eq!(
             relay_dial(RelayAvailability::On, std::slice::from_ref(&empty)),
             Some(RelayDial::SameOrigin("/relay".into()))

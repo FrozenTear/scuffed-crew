@@ -3,11 +3,17 @@
 //! `NOSTR_RELAY_URL` is server env, not a `site_settings` column.
 //! `strategies_enabled` gates Strategies only. The admin Relay page already
 //! reads `configured` from `GET /api/nostr/health`. The public shell uses that
-//! same flag. A missing or failed check is treated as off so the client does
-//! not open `wss://<host>/relay` against an HTML page.
+//! same response. `configured: false` hides Chat and DMs. A failed fetch is
+//! not that answer: links stay up, the socket stays closed, and the check
+//! retries a few times. The client does not open `wss://<host>/relay` until
+//! `configured` is true.
+//!
+//! `tracker_latest` rides on this response for the `/stats` install note.
+//! Blank, null, and a missing field are absent. The stats page formats a
+//! present value into the same sentence as its pinned fallback.
 
 use dioxus::prelude::*;
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use serde::Deserialize;
 
 /// Settled answer of `GET /api/nostr/health` field `configured`.
@@ -15,21 +21,24 @@ use serde::Deserialize;
 pub enum RelayAvailability {
     /// The health request has not finished.
     Unknown,
-    /// `configured` is false, or the request failed.
+    /// `configured` is false.
     Off,
     /// `configured` is true.
     On,
+    /// The health request failed. Distinct from [`Self::Off`].
+    Failed,
 }
 
 impl RelayAvailability {
-    /// WebSocket dial and DM sync. Unknown stays closed so a slow health
-    /// check cannot start the reconnect loop.
+    /// WebSocket dial and DM sync. Unknown and Failed stay closed so a slow
+    /// or failed health check cannot start the reconnect loop.
     pub fn allows_connection(self) -> bool {
         matches!(self, Self::On)
     }
 
     /// Chat and DM links. They stay up until health says the relay is off,
-    /// matching a configured site on the first paint.
+    /// matching a configured site on the first paint. A fetch error keeps
+    /// them, the same as [`Self::Unknown`].
     pub fn shows_chat_links(self) -> bool {
         !matches!(self, Self::Off)
     }
@@ -38,27 +47,137 @@ impl RelayAvailability {
 #[derive(Clone, Copy)]
 pub struct RelayAvailabilityState {
     availability: Memo<RelayAvailability>,
+    tracker_latest: Memo<Option<String>>,
+    resource: Resource<Result<RelayHealthSnapshot, String>>,
+    fixed: Signal<Option<RelayAvailability>>,
+    manual_retry: Signal<bool>,
 }
 
 impl RelayAvailabilityState {
     pub fn current(self) -> RelayAvailability {
         *self.availability.read()
     }
+
+    /// Bare `tracker_latest` from the last successful health response.
+    /// `None` while the check is in flight, after a fetch error, or when the
+    /// field was missing, null, or blank.
+    pub fn tracker_latest(self) -> Option<String> {
+        self.tracker_latest.read().clone()
+    }
+
+    /// Run the health check again after [`RelayAvailability::Failed`].
+    /// The shell shows the checking state until the new response settles.
+    pub fn retry(self) {
+        let mut manual_retry = self.manual_retry;
+        manual_retry.set(true);
+        let mut fixed = self.fixed;
+        fixed.set(None);
+        let mut resource = self.resource;
+        resource.clear();
+        resource.restart();
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelayHealthSnapshot {
+    pub configured: bool,
+    pub tracker_latest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct RelayHealthConfigured {
     configured: bool,
+    #[serde(default)]
+    tracker_latest: Option<String>,
+}
+
+/// How many health fetches to try before [`RelayAvailability::Failed`].
+pub(crate) const HEALTH_FETCH_ATTEMPTS: u32 = 3;
+/// Pause between those tries. Short, so a blip does not sit on the check.
+pub(crate) const HEALTH_RETRY_BACKOFF_MS: u32 = 400;
+/// Shortest wait taken from a 429 `Retry-After` header, in seconds.
+pub(crate) const HEALTH_RETRY_AFTER_FLOOR_SECS: u64 = 1;
+/// Longest wait taken from a 429 `Retry-After` header, in seconds.
+/// A larger header is clamped here so chat does not sit on the check.
+pub(crate) const HEALTH_RETRY_AFTER_CAP_SECS: u64 = 60;
+
+/// Clamp a `Retry-After` delay-seconds value to the floor and the cap.
+pub(crate) fn clamped_retry_after_ms(seconds: u64) -> u32 {
+    let secs = seconds.clamp(HEALTH_RETRY_AFTER_FLOOR_SECS, HEALTH_RETRY_AFTER_CAP_SECS);
+    u32::try_from(secs.saturating_mul(1_000)).unwrap_or(60_000)
+}
+
+/// Milliseconds before another health fetch. `None` means stop.
+///
+/// `failed_attempts` counts this failure. Network errors and HTTP 5xx use
+/// the short pause. HTTP 429 waits for the `Retry-After` delay-seconds
+/// header, clamped to [`HEALTH_RETRY_AFTER_FLOOR_SECS`] through
+/// [`HEALTH_RETRY_AFTER_CAP_SECS`], and never the short pause. Other 4xx
+/// responses, a parse error, and a 429 with no usable `Retry-After` stop
+/// on the first failure.
+pub(crate) fn health_retry_delay_ms(error: &ClientError, failed_attempts: u32) -> Option<u32> {
+    if failed_attempts == 0 || failed_attempts >= HEALTH_FETCH_ATTEMPTS {
+        return None;
+    }
+    match error {
+        ClientError::Network(_) => Some(HEALTH_RETRY_BACKOFF_MS),
+        ClientError::Http {
+            status: 429,
+            retry_after,
+            ..
+        } => {
+            let seconds = (*retry_after)?;
+            Some(clamped_retry_after_ms(seconds))
+        }
+        ClientError::Http { status, .. } if (500..600).contains(status) => {
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        }
+        _ => None,
+    }
+}
+
+/// What the shell shows for a health result, including a manual retry.
+///
+/// A retry in flight with no settled response is [`RelayAvailability::Unknown`]
+/// again, so the failure screen does not stay up while the new check runs.
+pub(crate) fn displayed_availability(
+    fixed: Option<RelayAvailability>,
+    fetched: Option<&Result<bool, String>>,
+    manual_retry: bool,
+) -> RelayAvailability {
+    if manual_retry && fetched.is_none() {
+        return RelayAvailability::Unknown;
+    }
+    if !manual_retry && let Some(value) = fixed {
+        return value;
+    }
+    availability_from_health(fetched)
+}
+
+/// Drop null, missing, empty, and whitespace-only `tracker_latest` values.
+pub(crate) fn normalize_tracker_latest(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn snapshot_from_body(body: RelayHealthConfigured) -> RelayHealthSnapshot {
+    RelayHealthSnapshot {
+        configured: body.configured,
+        tracker_latest: normalize_tracker_latest(body.tracker_latest.as_deref()),
+    }
 }
 
 /// Map a health fetch to the gate. `None` is still in flight.
+/// A transport error is [`RelayAvailability::Failed`], not off.
 pub(crate) fn availability_from_health(
     fetched: Option<&Result<bool, String>>,
 ) -> RelayAvailability {
     match fetched {
         None => RelayAvailability::Unknown,
         Some(Ok(true)) => RelayAvailability::On,
-        Some(Ok(false)) | Some(Err(_)) => RelayAvailability::Off,
+        Some(Ok(false)) => RelayAvailability::Off,
+        Some(Err(_)) => RelayAvailability::Failed,
     }
 }
 
@@ -82,12 +201,36 @@ fn test_fixed() -> Option<RelayAvailability> {
     TEST_FIXED.with(|slot| slot.get())
 }
 
-async fn load_relay_configured() -> Result<bool, String> {
+async fn pause_health_retry(delay_ms: u32) {
+    #[cfg(target_arch = "wasm32")]
+    gloo_timers::future::TimeoutFuture::new(delay_ms).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = delay_ms;
+        std::future::ready(()).await;
+    }
+}
+
+async fn fetch_relay_health_once() -> Result<RelayHealthConfigured, ClientError> {
     ApiClient::web()
         .fetch::<RelayHealthConfigured>("/api/nostr/health")
         .await
-        .map(|body| body.configured)
-        .map_err(|err| err.to_string())
+}
+
+async fn load_relay_health() -> Result<RelayHealthSnapshot, String> {
+    let mut failed_attempts = 0u32;
+    loop {
+        match fetch_relay_health_once().await {
+            Ok(body) => return Ok(snapshot_from_body(body)),
+            Err(err) => {
+                failed_attempts += 1;
+                let Some(delay_ms) = health_retry_delay_ms(&err, failed_attempts) else {
+                    return Err(err.to_string());
+                };
+                pause_health_retry(delay_ms).await;
+            }
+        }
+    }
 }
 
 /// Call once from [`crate::layouts::PublicLayout`], above the routed page.
@@ -98,23 +241,45 @@ pub fn provide_relay_availability() -> RelayAvailabilityState {
     let fixed = use_signal(test_fixed);
     #[cfg(not(test))]
     let fixed = use_signal(|| Option::<RelayAvailability>::None);
+    let manual_retry = use_signal(|| false);
 
     let resource = use_resource(move || {
         let skip = fixed().is_some();
         async move {
             if skip {
-                return Ok(false);
+                return Ok(RelayHealthSnapshot {
+                    configured: false,
+                    tracker_latest: None,
+                });
             }
-            load_relay_configured().await
+            load_relay_health().await
         }
     });
     let availability = use_memo(move || {
-        if let Some(value) = fixed() {
-            return value;
-        }
-        availability_from_health(resource.read().as_ref())
+        let read = resource.read();
+        let mapped = match read.as_ref() {
+            None => None,
+            Some(Ok(body)) => Some(Ok(body.configured)),
+            Some(Err(err)) => Some(Err(err.clone())),
+        };
+        displayed_availability(fixed(), mapped.as_ref(), manual_retry())
     });
-    let state = RelayAvailabilityState { availability };
+    let tracker_latest = use_memo(move || {
+        if fixed().is_some() && !manual_retry() {
+            return None;
+        }
+        match resource.read().as_ref() {
+            Some(Ok(body)) => body.tracker_latest.clone(),
+            _ => None,
+        }
+    });
+    let state = RelayAvailabilityState {
+        availability,
+        tracker_latest,
+        resource,
+        fixed,
+        manual_retry,
+    };
     use_context_provider(|| state);
     state
 }
@@ -140,21 +305,133 @@ mod tests {
         );
         assert_eq!(
             availability_from_health(Some(&Err("offline".into()))),
-            RelayAvailability::Off
+            RelayAvailability::Failed
         );
 
         assert!(!RelayAvailability::Unknown.allows_connection());
         assert!(!RelayAvailability::Off.allows_connection());
         assert!(RelayAvailability::On.allows_connection());
+        assert!(!RelayAvailability::Failed.allows_connection());
 
         assert!(RelayAvailability::Unknown.shows_chat_links());
         assert!(!RelayAvailability::Off.shows_chat_links());
         assert!(RelayAvailability::On.shows_chat_links());
+        assert!(RelayAvailability::Failed.shows_chat_links());
 
         assert!(!dm_may_sync(RelayAvailability::Off, true));
         assert!(!dm_may_sync(RelayAvailability::Unknown, true));
+        assert!(!dm_may_sync(RelayAvailability::Failed, true));
         assert!(!dm_may_sync(RelayAvailability::On, false));
         assert!(dm_may_sync(RelayAvailability::On, true));
+    }
+
+    fn network_blip() -> ClientError {
+        ClientError::Network("offline".into())
+    }
+
+    #[test]
+    fn health_fetch_retries_a_few_times_then_stops() {
+        let mut failures = 0u32;
+        let mut pauses = Vec::new();
+        let blip = network_blip();
+        loop {
+            failures += 1;
+            match health_retry_delay_ms(&blip, failures) {
+                Some(ms) => pauses.push(ms),
+                None => break,
+            }
+        }
+        assert_eq!(failures, HEALTH_FETCH_ATTEMPTS);
+        assert_eq!(pauses.len(), (HEALTH_FETCH_ATTEMPTS - 1) as usize);
+        assert!(pauses.iter().all(|ms| *ms == HEALTH_RETRY_BACKOFF_MS));
+    }
+
+    #[test]
+    fn health_retry_skips_4xx_and_honors_retry_after_on_429() {
+        let server = |status, retry_after| ClientError::http(status, "nope", retry_after);
+
+        assert_eq!(
+            health_retry_delay_ms(&network_blip(), 1),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(500, None), 1),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(503, Some("9")), 2),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+
+        for status in [400u16, 401, 403, 404, 409, 422] {
+            assert_eq!(
+                health_retry_delay_ms(&server(status, Some("5")), 1),
+                None,
+                "HTTP {status} is not retried"
+            );
+        }
+
+        let limited = health_retry_delay_ms(&server(429, Some("12")), 1);
+        assert_eq!(limited, Some(12_000));
+        assert_ne!(limited, Some(HEALTH_RETRY_BACKOFF_MS));
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("1")), 2),
+            Some(1_000)
+        );
+        assert_eq!(health_retry_delay_ms(&server(429, None), 1), None);
+        assert_eq!(health_retry_delay_ms(&server(429, Some("0")), 1), None);
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("Thu, 24 Sep 2026 08:02:00 GMT")), 1),
+            None
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("12")), HEALTH_FETCH_ATTEMPTS),
+            None
+        );
+        assert_eq!(
+            health_retry_delay_ms(&ClientError::Deserialize("bad json".into()), 1),
+            None
+        );
+    }
+
+    #[test]
+    fn health_retry_after_is_clamped_between_one_second_and_sixty() {
+        assert_eq!(clamped_retry_after_ms(0), 1_000);
+        assert_eq!(clamped_retry_after_ms(1), 1_000);
+        assert_eq!(clamped_retry_after_ms(12), 12_000);
+        assert_eq!(clamped_retry_after_ms(60), 60_000);
+        assert_eq!(clamped_retry_after_ms(61), 60_000);
+        assert_eq!(clamped_retry_after_ms(3600), 60_000);
+
+        let huge = ClientError::http(429, "slow", Some("3600"));
+        assert_eq!(health_retry_delay_ms(&huge, 1), Some(60_000));
+        assert_ne!(health_retry_delay_ms(&huge, 1), Some(3_600_000));
+    }
+
+    #[test]
+    fn manual_retry_leaves_the_failure_screen_until_the_check_settles() {
+        let failed = Some(RelayAvailability::Failed);
+        let offline = Err("offline".into());
+        assert_eq!(
+            displayed_availability(failed, Some(&offline), false),
+            RelayAvailability::Failed
+        );
+        assert_eq!(
+            displayed_availability(failed, None, true),
+            RelayAvailability::Unknown
+        );
+        assert_eq!(
+            displayed_availability(None, Some(&offline), true),
+            RelayAvailability::Failed
+        );
+        assert_eq!(
+            displayed_availability(Some(RelayAvailability::Off), None, false),
+            RelayAvailability::Off
+        );
+        assert_eq!(
+            displayed_availability(None, None, false),
+            RelayAvailability::Unknown
+        );
     }
 
     #[test]
@@ -164,12 +441,52 @@ mod tests {
         )
         .expect("unconfigured health JSON");
         assert!(!off.configured);
+        assert_eq!(off.tracker_latest, None);
         let on: RelayHealthConfigured =
             serde_json::from_str(r#"{"configured":true,"reachable":false}"#).expect("configured");
         assert!(on.configured);
+        assert_eq!(on.tracker_latest, None);
         assert!(
             serde_json::from_str::<RelayHealthConfigured>(r#"{"reachable":true}"#).is_err(),
             "a body without configured is not a relay"
+        );
+    }
+
+    #[test]
+    fn health_json_reads_tracker_latest_full_null_missing_and_empty() {
+        let full: RelayHealthConfigured =
+            serde_json::from_str(r#"{"configured":true,"tracker_latest":"0.5.0-alpha.12"}"#)
+                .expect("full tracker_latest");
+        assert_eq!(full.tracker_latest.as_deref(), Some("0.5.0-alpha.12"));
+        assert_eq!(
+            snapshot_from_body(full).tracker_latest.as_deref(),
+            Some("0.5.0-alpha.12")
+        );
+
+        let null_field: RelayHealthConfigured =
+            serde_json::from_str(r#"{"configured":true,"tracker_latest":null}"#)
+                .expect("null tracker_latest");
+        assert_eq!(null_field.tracker_latest, None);
+        assert_eq!(snapshot_from_body(null_field).tracker_latest, None);
+
+        let missing: RelayHealthConfigured =
+            serde_json::from_str(r#"{"configured":false,"reachable":true}"#)
+                .expect("missing tracker_latest");
+        assert_eq!(missing.tracker_latest, None);
+        assert_eq!(snapshot_from_body(missing).tracker_latest, None);
+
+        let empty: RelayHealthConfigured =
+            serde_json::from_str(r#"{"configured":true,"tracker_latest":""}"#)
+                .expect("empty tracker_latest");
+        assert_eq!(empty.tracker_latest.as_deref(), Some(""));
+        assert_eq!(snapshot_from_body(empty).tracker_latest, None);
+
+        let blank: RelayHealthConfigured =
+            serde_json::from_str(r#"{"configured":true,"tracker_latest":"  "}"#)
+                .expect("blank tracker_latest");
+        assert_eq!(
+            normalize_tracker_latest(blank.tracker_latest.as_deref()),
+            None
         );
     }
 }
