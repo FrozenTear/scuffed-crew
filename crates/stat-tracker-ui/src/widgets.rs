@@ -742,7 +742,7 @@ pub fn expanded_game_card<'a>(
     ]
     .spacing(10);
 
-    if game.needs_review() {
+    if game.review_notice().is_some() {
         body = body.push(review_panel(game));
     }
 
