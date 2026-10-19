@@ -2023,9 +2023,25 @@ fn write_manifests(data_dir: &Path, manifests: &BTreeMap<String, String>) -> Res
 /// sha256, when both are recorded. `None` for a pack installed by hand or
 /// by a tracker older than this record. Blocking (two small reads).
 pub fn installed_manifest(data_dir: &Path, name: &str) -> Option<(String, String)> {
+    let (version, sha) = installed_record(data_dir, name)?;
+    Some((version, sha?))
+}
+
+/// The stored version of `name`, and the manifest sha256 when one is
+/// recorded (a tracker before 0.5.0-rc.2 stored the version only). `None`
+/// when no version is stored. Blocking (two small reads).
+pub fn installed_record(data_dir: &Path, name: &str) -> Option<(String, Option<String>)> {
     let version = read_versions(data_dir).remove(name)?;
-    let sha = read_manifests(data_dir).remove(name)?;
-    is_sha256(&sha).then_some((version, sha))
+    let sha = read_manifests(data_dir)
+        .remove(name)
+        .filter(|sha| is_sha256(sha));
+    Some((version, sha))
+}
+
+/// The two record files sync writes after every install, last of all.
+/// A reader watching for another process's install waits for them.
+pub fn record_paths(data_dir: &Path) -> [PathBuf; 2] {
+    [versions_path(data_dir), manifests_path(data_dir)]
 }
 
 /// Write `map` as JSON to `path` through a tmp file named `<prefix><n>`.

@@ -663,11 +663,18 @@ load. A name read before the load finishes reuses the Tesseract rows
 already in hand (ocr-v1's cell rows, or the new reader's one name window
 read) and tags them `ocr-v1`. It does not start a second Tesseract name
 read. When the desktop app's setup guide installs names-v1 while the
-daemon runs, the daemon's next name read sees the new `manifest.json` and
-runs the same checked reload against what sync recorded in
+daemon runs, the daemon's next name read sees the change: it looks at the
+live folder's `manifest.json` and the two record files only, never at a
+`.names-v1-next-*` staging or `-prev-` backup folder. It starts the same
+checked reload once the install is complete: the live manifest's version
+is the one in `pack-versions.json` and, when sync recorded one in
 `templates/pack-manifests.json` (pack name to manifest sha256, written
-next to `pack-versions.json`). A folder changed by hand has no such record
-and is left until the next tracker start. With the switch off, the name
+right after `pack-versions.json`), the live manifest hashes to it. Between
+the swap and those writes nothing reloads. A record with the version only
+(written by a tracker before 0.5.0-rc.2) is checked with every file
+against the folder's manifest and the version. A pack that fails a check
+keeps the current one. A folder changed by hand with no matching record
+is left until the next tracker start. With the switch off, the name
 read is those same Tesseract rows.
 
 Unlike the other packs, names-v1 keeps its inner `manifest.json` in

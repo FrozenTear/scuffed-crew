@@ -930,18 +930,45 @@ fn the_switch_off_ignores_an_install() {
 /// The records pack sync writes next to the packs, as the app's setup
 /// guide would after installing names-v1 from its own process.
 fn record_install(data_dir: &std::path::Path, installed: &InstalledNames) {
+    record_version(data_dir, &installed.version);
+    write_record(
+        data_dir,
+        "pack-manifests.json",
+        serde_json::json!({ "names-v1.tar": installed.manifest_sha256 }),
+    );
+}
+
+/// The version record alone, as a tracker before 0.5.0-rc.2 wrote it.
+fn record_version(data_dir: &std::path::Path, version: &str) {
+    write_record(
+        data_dir,
+        "pack-versions.json",
+        serde_json::json!({ "names-v1.tar": version }),
+    );
+}
+
+/// Write a record the way sync does: a new file renamed into place.
+fn write_record(data_dir: &std::path::Path, name: &str, value: serde_json::Value) {
     let templates = data_dir.join("templates");
-    std::fs::write(
-        templates.join("pack-versions.json"),
-        serde_json::to_vec(&serde_json::json!({ "names-v1.tar": installed.version })).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        templates.join("pack-manifests.json"),
-        serde_json::to_vec(&serde_json::json!({ "names-v1.tar": installed.manifest_sha256 }))
-            .unwrap(),
-    )
-    .unwrap();
+    std::fs::create_dir_all(&templates).unwrap();
+    let tmp = templates.join(format!("{name}.tmp-test"));
+    std::fs::write(&tmp, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::rename(&tmp, templates.join(name)).unwrap();
+}
+
+/// A started daemon on pack A (`["ABC"]`, 3 templates), with A's records.
+fn daemon_on_pack_a(data_dir: &std::path::Path) -> (NameSwitch, std::sync::Arc<NamePack>) {
+    write_pack(&crate::names::pack::dir_in(data_dir), &["ABC"]);
+    record_install(
+        data_dir,
+        &installed(&crate::names::pack::dir_in(data_dir), "test"),
+    );
+    let switch = NameSwitch::load(true, data_dir);
+    switch.wait_reload();
+    let a = switch.pack().expect("startup pack");
+    assert_eq!(a.templates(), 3);
+    assert_eq!(switch.reload_spawns(), 1);
+    (switch, a)
 }
 
 /// The setup guide installs a newer names-v1 while the daemon runs. The
@@ -974,27 +1001,118 @@ fn a_pack_the_app_installs_while_the_daemon_runs_is_picked_up() {
     );
 }
 
-/// A folder change the record does not vouch for keeps the current pack,
-/// and is not retried on every read.
+/// The app's sync stages the new pack in `.names-v1-next-*` before the
+/// swap. The watcher looks at the live folder only, so a staged pack with
+/// records already naming it is not loaded.
 #[test]
-fn an_app_install_that_fails_its_check_keeps_the_current_pack() {
+fn a_staging_folder_is_ignored() {
     let tmp = tempfile::tempdir().unwrap();
-    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
-    let switch = NameSwitch::load(true, tmp.path());
-    switch.wait_reload();
-    let before = switch.pack().unwrap();
+    let (switch, a) = daemon_on_pack_a(tmp.path());
+    let staging = tmp.path().join("templates").join(".names-v1-next-123-456");
+    write_pack(&staging, &["ABC", "CBA"]);
+    let backup = tmp.path().join("templates").join(".names-v1-prev-123-456");
+    write_pack(&backup, &["ABC", "CBA", "BAC"]);
+    record_install(tmp.path(), &installed(&staging, "test"));
+    for _ in 0..5 {
+        assert!(std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()));
+    }
+    assert_eq!(switch.reload_spawns(), 1, "no reload for a staged folder");
+}
 
-    let mut installed = install_synthetic(tmp.path(), "app-bad", &["ABC", "CBA"]);
-    installed.manifest_sha256 = "a".repeat(64);
-    record_install(tmp.path(), &installed);
-    let _ = switch.pack();
-    switch.wait_reload();
-    for _ in 0..10 {
-        assert!(std::sync::Arc::ptr_eq(&before, &switch.pack().unwrap()));
+/// Between the swap and the record writes the live folder is new but the
+/// records still describe the old install: no reload. Once both records
+/// are written, the next read starts the checked reload.
+#[test]
+fn mid_swap_does_not_reload_and_the_record_write_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (switch, a) = daemon_on_pack_a(tmp.path());
+    let b = install_synthetic(tmp.path(), "b", &["ABC", "CBA"]);
+    for _ in 0..5 {
+        assert!(std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()));
     }
     assert_eq!(
         switch.reload_spawns(),
-        2,
-        "the refused folder is tried once"
+        1,
+        "swapped, records not written: no reload"
     );
+
+    // Sync writes the version first, then the manifest record.
+    record_version(tmp.path(), &b.version);
+    assert!(std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()));
+    assert_eq!(
+        switch.reload_spawns(),
+        1,
+        "the manifest record is still A's"
+    );
+
+    record_install(tmp.path(), &b);
+    assert!(std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()));
+    assert_eq!(
+        switch.reload_spawns(),
+        2,
+        "both records written: one reload"
+    );
+    switch.wait_reload();
+    assert_eq!(switch.pack().unwrap().templates(), 6);
+}
+
+/// A complete install whose file was changed after sync checked it: the
+/// reload's own check refuses it and the current pack stays, without a
+/// retry on every read.
+#[test]
+fn a_tampered_file_keeps_the_current_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (switch, a) = daemon_on_pack_a(tmp.path());
+    let b = install_synthetic(tmp.path(), "b", &["ABC", "CBA"]);
+    let live = crate::names::pack::dir_in(tmp.path());
+    let mut glyphs = std::fs::read(live.join("glyphs.txt")).unwrap();
+    glyphs[0] ^= 1;
+    std::fs::write(live.join("glyphs.txt"), glyphs).unwrap();
+    record_install(tmp.path(), &b);
+    let _ = switch.pack();
+    switch.wait_reload();
+    for _ in 0..10 {
+        assert!(std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()));
+    }
+    assert_eq!(switch.reload_spawns(), 2, "tried once, then kept");
+}
+
+/// A record with the version only (a tracker before rc.2 wrote the app's
+/// install): the reload still checks every file against the folder's
+/// manifest and the version. A good folder loads, a tampered one is kept out.
+#[test]
+fn a_version_only_record_is_checked_with_the_folder_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    record_version(tmp.path(), "test");
+    let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
+    let a = switch.pack().unwrap();
+
+    install_synthetic(tmp.path(), "b", &["ABC", "CBA"]);
+    let live = crate::names::pack::dir_in(tmp.path());
+    let mut whiten = std::fs::read(live.join("whiten.f32")).unwrap();
+    whiten[0] ^= 1;
+    std::fs::write(live.join("whiten.f32"), whiten).unwrap();
+    record_version(tmp.path(), "test");
+    let _ = switch.pack();
+    switch.wait_reload();
+    assert!(
+        std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()),
+        "tampered: kept"
+    );
+
+    install_synthetic(tmp.path(), "c", &["ABC", "CBA"]);
+    record_version(tmp.path(), "test");
+    let _ = switch.pack();
+    switch.wait_reload();
+    assert_eq!(switch.pack().unwrap().templates(), 6, "a good folder loads");
+
+    // Another version than the stored one is not loaded.
+    install_synthetic(tmp.path(), "d", &["ABC", "CBA", "BAC"]);
+    record_version(tmp.path(), "full-20990101");
+    let spawns = switch.reload_spawns();
+    let _ = switch.pack();
+    assert_eq!(switch.reload_spawns(), spawns);
+    assert_eq!(switch.pack().unwrap().templates(), 6);
 }
