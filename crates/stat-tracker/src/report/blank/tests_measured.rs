@@ -133,6 +133,72 @@ fn generated_post_match_boards_keep_every_number() {
     }
 }
 
+/// alpha.12: a board that keeps its numbers keeps the stat label span of the
+/// header strip too, pixel for pixel; the name side of the header, every
+/// portrait cell and the world stay fill.
+#[test]
+fn a_kept_board_keeps_its_stat_header_labels_and_nothing_else_of_the_header() {
+    for (name, img) in [
+        ("1440", synth::baseline_postgame_1440()),
+        ("1080", synth::baseline_postgame_1080()),
+    ] {
+        let b = super::blank_crop(&img, Some(6), super::Chat::None);
+        assert_eq!(b.digit_rows(), 12, "{name}:\n{}", verdicts(&b));
+        let m = board::measure(&img, 6).unwrap();
+        let r = super::header_label_rect(&img, &m).expect("header span");
+        assert!(r.y + r.h == m.hb && r.h > 0, "{name}: {r:?}");
+        let mut label_ink = 0;
+        for y in r.y..r.y + r.h {
+            for x in r.x..r.x + r.w {
+                assert_eq!(
+                    b.image.get_pixel(x, y),
+                    img.get_pixel(x, y),
+                    "{name} ({x},{y})"
+                );
+                if !board::header_light(img.get_pixel(x, y).0) {
+                    label_ink += 1;
+                }
+            }
+        }
+        assert!(label_ink > 0, "{name}: the span holds the label glyphs");
+        // the span is the six stat labels only: it starts right of the
+        // name column and ends inside the table
+        assert!(r.x >= m.name.1, "{name}: {r:?} vs name {:?}", m.name);
+        assert!(r.x + r.w <= m.r, "{name}");
+        // the header left of the span (over the names) stays fill
+        for y in r.y..r.y + r.h {
+            for x in m.l..r.x {
+                assert_eq!(*b.image.get_pixel(x, y), super::FILL, "{name} ({x},{y})");
+            }
+        }
+        assert_eq!(b.portraits(), 0, "{name}: portraits still never copied");
+    }
+}
+
+/// Chat that may reach the header, or a board that keeps nothing, keeps no
+/// header pixel.
+#[test]
+fn no_header_is_kept_under_chat_or_on_a_board_that_keeps_nothing() {
+    let img = synth::baseline_postgame_1440();
+    let m = board::measure(&img, 6).unwrap();
+    let r = super::header_label_rect(&img, &m).unwrap();
+    let all_fill = |b: &super::BlankedBoard| {
+        (r.y..r.y + r.h).all(|y| (r.x..r.x + r.w).all(|x| *b.image.get_pixel(x, y) == super::FILL))
+    };
+    let chat = super::blank_crop(&img, Some(6), super::Chat::ReachesY(0));
+    assert!(all_fill(&chat), "chat reaching the top keeps no header");
+    let mut out = image::RgbImage::from_pixel(img.width(), img.height(), super::FILL);
+    super::keep_header_labels(&img, &m, super::Chat::ReachesY(m.hb - 1), &mut out);
+    assert!(out.pixels().all(|p| *p == super::FILL));
+    // a blank crop of the same size: no board, nothing kept, no header
+    let none = super::blank_crop(
+        &image::RgbImage::from_pixel(img.width(), img.height(), image::Rgb([90, 90, 90])),
+        Some(6),
+        super::Chat::None,
+    );
+    assert!(none.image.pixels().all(|p| *p == super::FILL));
+}
+
 /// The committed post-match boards (synthetic 1440p and 1080p): every row
 /// keeps all six numbers, read back exactly.
 #[test]

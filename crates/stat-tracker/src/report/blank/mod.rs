@@ -12,8 +12,12 @@
 //!   well-formed numbers and every glyph gate accepts, on one flat colour per
 //!   cell that equals no source pixel ([`cells`]).
 //!
-//! Names, titles, badges, the header, the hero card, notices, nameplates and
-//! the world all stay fill. A measurement that fails keeps nothing of the
+//! On a board that keeps anything, the stat label part of the header strip
+//! (E A D DMG H MIT, the span the label check verified) is copied too, so the
+//! columns can be told apart ([`keep_header_labels`]).
+//!
+//! Names, titles, badges, the rest of the header, the hero card, notices,
+//! nameplates and the world all stay fill. A measurement that fails keeps nothing of the
 //! board, the row, or the portrait it belongs to. Every kept row is read back
 //! from the output before it is accepted.
 //!
@@ -56,7 +60,9 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 /// * 11: no portrait is copied ([`COPY_PORTRAITS`] off).
 /// * 12: 5v5 boards are measured and blanked (header at x 0 on one of the
 ///   four measured 5v5 layouts); 6v6 output unchanged.
-pub const BLANK_TABLE_VERSION: u32 = 12;
+/// * 13: the stat label span of the header strip is kept on a board that
+///   keeps anything (alpha.12); portraits still never copied.
+pub const BLANK_TABLE_VERSION: u32 = 13;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -780,7 +786,59 @@ fn blank_crop_inner(
     if !blanked.kept_anything() {
         name_column_fallback(src, &b, chat, &mut blanked);
     }
+    if blanked.kept_anything() {
+        keep_header_labels(src, &b, chat, &mut blanked.image);
+    }
     blanked
+}
+
+/// Margin (1664 px crop units) each side of the E and MIT label centres that
+/// the label check holds free of any other label: the kept header span.
+pub(crate) const HEADER_MARGIN: f64 = 30.0;
+
+/// The kept part of the header strip, `[x0, x1) x [y0, y1)`: from 30 `s`
+/// left of the E column to 30 `s` right of the MIT column (clipped to the
+/// table), over the strip's light rows. That span is what
+/// `board::check_labels` verified holds the six stat labels and nothing
+/// else. `None` when the strip has no light row there.
+fn header_label_rect(src: &RgbImage, b: &board::Board) -> Option<Rect> {
+    let m = HEADER_MARGIN * b.s;
+    let x0 = (b.cols[0] - m).floor().max(f64::from(b.l)) as u32;
+    let x1 = ((b.cols[5] + m).ceil() as u32).min(b.r).min(src.width());
+    if x1 <= x0 {
+        return None;
+    }
+    let lit = |y: u32| {
+        let n = (x0..x1)
+            .filter(|&x| board::header_light(src.get_pixel(x, y).0))
+            .count();
+        2 * n >= (x1 - x0) as usize
+    };
+    let y1 = b.hb.min(src.height());
+    let y0 = (0..y1).find(|&y| lit(y))?;
+    Some(Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
+/// Copy the stat label span of the header strip ([`header_label_rect`]),
+/// unless chat may reach it. The name side of the header, the portraits and
+/// everything else stay as they are.
+fn keep_header_labels(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut RgbImage) {
+    if chat.covers(b.hb, src.height()) {
+        return;
+    }
+    let Some(r) = header_label_rect(src, b) else {
+        return;
+    };
+    for y in r.y..r.y + r.h {
+        for x in r.x..r.x + r.w {
+            out.put_pixel(x, y, *src.get_pixel(x, y));
+        }
+    }
 }
 
 /// Name column of a row, from the table's left edge `L`, in 1664 px crop
@@ -938,7 +996,8 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 12 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 13 for this revision)",
+            "30 `s` left of the E column to 30 `s` right of the MIT column",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
@@ -948,7 +1007,8 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 12);
+        assert_eq!(BLANK_TABLE_VERSION, 13);
+        assert_eq!(HEADER_MARGIN, 30.0);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 
