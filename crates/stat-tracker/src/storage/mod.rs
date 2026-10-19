@@ -42,9 +42,10 @@ pub struct PersonalMatch {
     #[surreal(default)]
     pub sync_rev: u64,
     /// Server refused this row with HTTP 400 or 422. The row stays
-    /// `synced = false` and is left out of later uploads until a retry
-    /// clears it. The string is the server's error message. Missing on
-    /// rows written before this field existed.
+    /// `synced = false` and is left out of automatic uploads until the
+    /// member edits the game or retries the upload. The string is the
+    /// game-list line (`Upload rejected by server: <message>`), including
+    /// the server code when the body sent one. Missing on older rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub upload_reject: Option<String>,
@@ -684,15 +685,19 @@ impl LocalStore {
     }
 
     /// Remember that the server rejected these rows. `synced` stays false
-    /// so a later retry can upload them, and [`Self::get_unsynced`] skips
-    /// them until then. A row whose `sync_rev` changed during the upload
-    /// is left alone: the local edit is the payload that should be retried.
+    /// so a later edit or retry can upload them, and [`Self::get_unsynced`]
+    /// skips them until then. `code` is the JSON `code` when the body sent
+    /// one. The stored text is the game-list line from
+    /// [`format_upload_rejection`]. A row whose `sync_rev` changed during
+    /// the upload is left alone: the local edit is the payload that should
+    /// be retried.
     pub async fn quarantine_upload(
         &self,
         claims: &[SyncClaim],
+        code: Option<&str>,
         message: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let message = clip_reject_message(message);
+        let message = format_upload_rejection(code, message);
         let mut touched = std::collections::HashSet::new();
         for claim in claims {
             let mut response = self
@@ -970,7 +975,45 @@ impl LocalStore {
                     .await
             }
             StoreCommand::RetryUpload { session_id } => self.clear_upload_reject(session_id).await,
+            StoreCommand::RetryRejectedUploads => self.clear_rejected_uploads().await,
         }
+    }
+
+    /// Clear every quarantined upload and put those rows back on the queue.
+    pub async fn clear_rejected_uploads(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT session_id FROM personal_match \
+                 WHERE upload_reject != NONE AND upload_reject != ''",
+            )
+            .await?;
+        let rows: Vec<DeletedSession> = result.take(0)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            if !sessions.iter().any(|id| id == &row.session_id) {
+                sessions.push(row.session_id);
+            }
+        }
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .query("UPDATE personal_match SET upload_reject = '' WHERE session_id IN $sids")
+            .bind(("sids", sessions.clone()))
+            .await?;
+        for session_id in &sessions {
+            rewrite_match_log_session(
+                &self.data_dir,
+                session_id,
+                Some(&|row| {
+                    row.upload_reject = None;
+                }),
+            );
+        }
+        Ok(())
     }
 
     /// MANUAL repair helper: stamp a hero/role onto a session and ALL its
@@ -1583,6 +1626,10 @@ struct SessionStamp {
     last_capture_at: SurrealDatetime,
 }
 
+/// Game-list line for a row the server refused. The desktop list shows this
+/// text next to the rejected flag.
+pub const UPLOAD_REJECTED_BY_SERVER: &str = "Upload rejected by server";
+
 /// Drop a leading `matches[<n>]: ` from the server's batch error. The index
 /// is the position inside one HTTP body, which changes every time the batch
 /// is split, so it is not a stable description of the row.
@@ -1600,21 +1647,41 @@ fn strip_match_index_prefix(message: &str) -> &str {
     rest[end + 2..].trim_start()
 }
 
-fn clip_reject_message(message: &str) -> String {
-    let message = strip_match_index_prefix(message.trim());
-    const MAX: usize = 400;
-    if message.is_empty() {
-        return "Upload rejected".to_string();
+/// Plain wording stored on a quarantined row and shown in the game list.
+/// A batch index is dropped. A server `code` is kept in front of the message
+/// when the body sent one and the message does not already contain it.
+pub fn format_upload_rejection(code: Option<&str>, message: &str) -> String {
+    let mut detail = strip_match_index_prefix(message.trim()).trim().to_string();
+    if let Some(rest) = detail.strip_prefix(UPLOAD_REJECTED_BY_SERVER) {
+        detail = rest.trim().trim_start_matches(':').trim().to_string();
     }
-    if message.chars().count() <= MAX {
-        return message.to_string();
+    if let Some(code) = code.map(str::trim).filter(|code| !code.is_empty())
+        && !detail.contains(code)
+    {
+        detail = if detail.is_empty() {
+            code.to_string()
+        } else {
+            format!("{code}: {detail}")
+        };
     }
-    let end = message
+    let text = if detail.is_empty() {
+        UPLOAD_REJECTED_BY_SERVER.to_string()
+    } else {
+        format!("{UPLOAD_REJECTED_BY_SERVER}: {detail}")
+    };
+    clip_chars(&text, 400)
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let end = text
         .char_indices()
-        .nth(MAX)
+        .nth(max)
         .map(|(index, _)| index)
-        .unwrap_or(message.len());
-    format!("{}...", &message[..end])
+        .unwrap_or(text.len());
+    format!("{}...", &text[..end])
 }
 
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply
@@ -1719,6 +1786,8 @@ pub enum StoreCommand {
     },
     /// Clear a quarantined upload error and queue the session again.
     RetryUpload { session_id: String },
+    /// Clear every quarantined upload and queue those sessions again.
+    RetryRejectedUploads,
 }
 
 /// A manual correction to a game's stats. Only `Some(_)` fields are applied;
@@ -3327,7 +3396,11 @@ mod tests {
             .cloned()
             .collect();
         store
-            .quarantine_upload(&SyncClaim::capture(&bad), "matches[0]: hero is not allowed")
+            .quarantine_upload(
+                &SyncClaim::capture(&bad),
+                None,
+                "matches[0]: hero is not allowed",
+            )
             .await
             .unwrap();
         let pending = store.get_unsynced().await.unwrap();
@@ -3336,7 +3409,10 @@ mod tests {
         let stored = store.get_all_matches().await.unwrap();
         let bad_row = stored.iter().find(|row| row.session_id == "bad").unwrap();
         assert!(!bad_row.synced);
-        assert_eq!(bad_row.upload_rejection(), Some("hero is not allowed"));
+        assert_eq!(
+            bad_row.upload_rejection(),
+            Some("Upload rejected by server: hero is not allowed")
+        );
         store
             .apply_command(&StoreCommand::RetryUpload {
                 session_id: "bad".into(),
@@ -3349,6 +3425,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_rejected_uploads_clears_every_quarantine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(snap("keep", 1)).await.unwrap();
+        store.insert_match(snap("bad-a", 2)).await.unwrap();
+        store.insert_match(snap("bad-b", 3)).await.unwrap();
+        // Same session: one snapshot already uploaded, one still quarantined.
+        // Clearing the flag must not mark the uploaded snapshot unsynced.
+        store.insert_match(snap("shared", 10)).await.unwrap();
+        store.insert_match(snap("shared", 11)).await.unwrap();
+        let shared = store.get_all_matches().await.unwrap();
+        let already = shared.iter().find(|row| row.elims == 10).unwrap().clone();
+        store
+            .mark_synced(&SyncClaim::capture(std::slice::from_ref(&already)))
+            .await
+            .unwrap();
+        let shared = store.get_all_matches().await.unwrap();
+        let held = shared.iter().find(|row| row.elims == 11).unwrap().clone();
+        assert!(!held.synced);
+        let rows = store.get_unsynced().await.unwrap();
+        for sid in ["bad-a", "bad-b"] {
+            let bad: Vec<_> = rows
+                .iter()
+                .filter(|row| row.session_id == sid)
+                .cloned()
+                .collect();
+            store
+                .quarantine_upload(
+                    &SyncClaim::capture(&bad),
+                    None,
+                    "matches[0]: hero is not allowed",
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .quarantine_upload(
+                &SyncClaim::capture(std::slice::from_ref(&held)),
+                None,
+                "matches[0]: hero is not allowed",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+        store
+            .apply_command(&StoreCommand::RetryRejectedUploads)
+            .await
+            .unwrap();
+        let again = store.get_unsynced().await.unwrap();
+        assert_eq!(again.len(), 4);
+        assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+        assert!(again.iter().any(|row| row.elims == 11));
+        let stored = store.get_all_matches().await.unwrap();
+        let synced_sibling = stored.iter().find(|row| row.elims == 10).unwrap();
+        let cleared = stored.iter().find(|row| row.elims == 11).unwrap();
+        assert!(
+            synced_sibling.synced,
+            "clearing a quarantine leaves the synced snapshot synced"
+        );
+        assert!(synced_sibling.upload_rejection().is_none());
+        assert!(!cleared.synced);
+        assert!(cleared.upload_rejection().is_none());
+        assert!(
+            stored
+                .iter()
+                .filter(|row| row.session_id != "shared" || row.elims != 10)
+                .all(|row| !row.synced)
+        );
+    }
+
+    #[tokio::test]
     async fn editing_a_quarantined_row_queues_it_again() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::open(dir.path()).await.unwrap();
@@ -3357,6 +3504,7 @@ mod tests {
         store
             .quarantine_upload(
                 &SyncClaim::capture(&rows),
+                None,
                 "matches[0]: hero is not allowed",
             )
             .await
@@ -3384,11 +3532,19 @@ mod tests {
             (
                 "a",
                 "matches[0]: hero is not allowed",
-                "hero is not allowed",
+                "Upload rejected by server: hero is not allowed",
             ),
-            ("b", "matches[12]: map is unknown", "map is unknown"),
-            ("c", "hero is not allowed", "hero is not allowed"),
-            ("d", "matches[0]: ", "Upload rejected"),
+            (
+                "b",
+                "matches[12]: map is unknown",
+                "Upload rejected by server: map is unknown",
+            ),
+            (
+                "c",
+                "hero is not allowed",
+                "Upload rejected by server: hero is not allowed",
+            ),
+            ("d", "matches[0]: ", "Upload rejected by server"),
         ];
         let dir = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::open(dir.path()).await.unwrap();
@@ -3400,7 +3556,7 @@ mod tests {
                 .find(|row| row.session_id == *sid)
                 .expect("row");
             store
-                .quarantine_upload(&SyncClaim::capture(std::slice::from_ref(&row)), raw)
+                .quarantine_upload(&SyncClaim::capture(std::slice::from_ref(&row)), None, raw)
                 .await
                 .unwrap();
         }
@@ -3421,6 +3577,7 @@ mod tests {
             store
                 .quarantine_upload(
                     &SyncClaim::capture(&rows),
+                    Some("invalid_hero"),
                     "matches[3]: hero is not allowed",
                 )
                 .await
@@ -3430,7 +3587,10 @@ mod tests {
         let rows = store.get_all_matches().await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].synced);
-        assert_eq!(rows[0].upload_rejection(), Some("hero is not allowed"));
+        assert_eq!(
+            rows[0].upload_rejection(),
+            Some("Upload rejected by server: invalid_hero: hero is not allowed")
+        );
         assert!(store.get_unsynced().await.unwrap().is_empty());
     }
 

@@ -211,6 +211,7 @@ pub enum Message {
         confirm: bool,
     },
     RetryUpload(String),
+    RetryRejectedUploads,
     SettingsText(SettingsField, String),
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
@@ -971,6 +972,15 @@ impl TrackerApp {
                     match crate::commands::retry_upload(&self.data_dir, &session_id) {
                         Ok(()) => "Upload queued again".into(),
                         Err(e) => format!("Could not retry upload: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::RetryRejectedUploads => {
+                self.replace_toast(
+                    match crate::commands::retry_rejected_uploads(&self.data_dir) {
+                        Ok(()) => "Rejected uploads queued again".into(),
+                        Err(e) => format!("Could not retry uploads: {e}"),
                     },
                 );
                 Task::none()

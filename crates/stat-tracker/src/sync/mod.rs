@@ -16,6 +16,14 @@ pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the to
 /// The GUI shows this string; the member relinks from Settings.
 pub const SYNC_TOKEN_EXPIRED_STATUS: &str = "Sync token expired, relink in Settings";
 
+/// Overview health copy while a stats delete is pending. The GUI shows this
+/// string. Automatic sync stays off until a new token is saved. Undoing the
+/// delete does not restore the old token.
+pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are scheduled for deletion. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.";
+
+/// JSON `code` on HTTP 409 while a stats delete is pending.
+const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
+
 /// Matches per stats upload. The server rejects a larger body with HTTP 413
 /// `batch_too_large`. This client stays at or under the cap, and shrinks
 /// further when a 413 names a smaller one. Same value as
@@ -53,6 +61,9 @@ pub enum AuthPauseReason {
     Rejected,
     /// HTTP 401 with code `token_expired`.
     Expired,
+    /// HTTP 409 with code `stats_delete_pending`. No automatic retry.
+    /// Sync resumes when a new token is saved.
+    DeletePending,
 }
 
 /// First wait after a server/network upload failure. Doubles each consecutive
@@ -101,6 +112,10 @@ pub enum SyncAttempt {
     /// (the server repeated the same caps, or sent none). Nothing in that
     /// request was written. Counts as a failure so the next pass waits.
     BatchTooLarge,
+    /// HTTP 409 `stats_delete_pending`. Stop this pass and keep every row
+    /// queued. Automatic sync stays off until a new token is saved. Not a
+    /// failure streak.
+    StatsDeletePending,
     /// Nothing to upload, or the failure was local. Leave the clock alone.
     NoServerCall,
 }
@@ -113,7 +128,8 @@ pub struct SyncUploadError {
     pub status: Option<u16>,
     pub retry_after: Option<std::time::Duration>,
     /// Machine code from the JSON body: the `code` field, or `error` when
-    /// that string is `batch_too_large`, `token_expired`, or `rate_limited`.
+    /// that string is `batch_too_large`, `token_expired`, `rate_limited`,
+    /// or `stats_delete_pending`.
     pub code: Option<String>,
     /// `max_matches` from a 413 `batch_too_large` body.
     pub max_matches: Option<u64>,
@@ -134,15 +150,20 @@ impl SyncUploadError {
     }
 
     /// 401 `token_expired` pauses sync with the relink copy. Other 401 and
-    /// 403 responses pause with the rejected-token copy. 429 is rate-limit
-    /// backoff and does not grow the failure streak. A 413 `batch_too_large`
-    /// that names a smaller cap is shrunk and resent inside the pass, so
-    /// the clock never sees it. One the pass cannot shrink is
+    /// 403 responses pause with the rejected-token copy. 409
+    /// `stats_delete_pending` stops the pass until a new token is saved. 429 is
+    /// rate-limit backoff and does not grow the failure streak. A 413
+    /// `batch_too_large` that names a smaller cap is shrunk and resent inside
+    /// the pass, so the clock never sees it. One the pass cannot shrink is
     /// [`SyncAttempt::BatchTooLarge`] and does back off. 503 may carry
-    /// `Retry-After` as a wait floor. Other statuses, including a bare 400
-    /// or 422, are server errors and ignore `Retry-After`. The sync pass
-    /// does not observe a 400 or 422 that way: [`isolate_rejected`] splits
-    /// the batch and quarantines the bad rows instead.
+    /// `Retry-After` as a wait floor. Other statuses, including a bare 400,
+    /// 422, or any other 409, are server errors and ignore `Retry-After`.
+    /// A refusal with no HTTP status keeps `Retry-After` as a floor under
+    /// the exponential backoff. The sync pass does not observe a 400 or 422
+    /// that way: [`isolate_rejected`] splits the batch. A bad row is
+    /// quarantined only when some other row in that chunk was accepted. If
+    /// none was, the rows stay queued and the clock backs off. A 409 is
+    /// never split.
     pub fn attempt(&self) -> SyncAttempt {
         if self.is_token_expired() {
             return SyncAttempt::TokenExpired;
@@ -150,12 +171,18 @@ impl SyncUploadError {
         if self.is_batch_too_large() {
             return SyncAttempt::BatchTooLarge;
         }
+        if self.is_stats_delete_pending() {
+            return SyncAttempt::StatsDeletePending;
+        }
         match self.status {
             Some(401) | Some(403) => SyncAttempt::AuthRejected,
             Some(429) => SyncAttempt::RateLimited {
                 retry_after: self.retry_after,
             },
             Some(503) => SyncAttempt::ServerError {
+                retry_after: self.retry_after,
+            },
+            None => SyncAttempt::ServerError {
                 retry_after: self.retry_after,
             },
             _ => SyncAttempt::ServerError { retry_after: None },
@@ -173,10 +200,16 @@ impl SyncUploadError {
         self.status == Some(413) && self.code.as_deref() == Some("batch_too_large")
     }
 
+    /// HTTP 409 whose JSON code is `stats_delete_pending`. The server wrote
+    /// nothing. The rows stay queued.
+    pub fn is_stats_delete_pending(&self) -> bool {
+        self.status == Some(409) && self.code.as_deref() == Some(STATS_DELETE_PENDING_CODE)
+    }
+
     /// HTTP 400 or 422: the payload was refused. Splitting the batch can
     /// isolate the bad rows. 413 `batch_too_large` is not one of these; the
     /// sync pass shrinks the chunk and resends. 5xx, transport errors, 401,
-    /// 403, and 429 are not either.
+    /// 403, 409, and 429 are not either.
     pub fn is_payload_reject(&self) -> bool {
         matches!(self.status, Some(400) | Some(422))
     }
@@ -236,6 +269,10 @@ pub struct SyncBackoff {
     /// Set on HTTP 401/403. Periodic sync stays off until
     /// [`Self::clear_auth_rejected`] (saved URL or token changed).
     auth_rejected: bool,
+    /// Set on HTTP 409 `stats_delete_pending`. Periodic sync stays off until
+    /// [`Self::clear_auth_rejected`] (a new token was saved). There is no
+    /// timed retry: undoing the delete does not restore the old token.
+    delete_pending: bool,
 }
 
 impl SyncBackoff {
@@ -248,10 +285,15 @@ impl SyncBackoff {
     }
 
     pub fn should_attempt(&self, now: std::time::Instant) -> bool {
-        if self.auth_rejected {
+        if self.auth_rejected || self.delete_pending {
             return false;
         }
         self.next_attempt_at.is_none_or(|at| now >= at)
+    }
+
+    /// True while a stats-delete hold is set. It does not expire on its own.
+    pub fn delete_pending(&self) -> bool {
+        self.delete_pending
     }
 
     pub fn record_failure(&mut self, now: std::time::Instant) {
@@ -263,6 +305,7 @@ impl SyncBackoff {
         self.failures = 0;
         self.next_attempt_at = None;
         self.auth_rejected = false;
+        self.delete_pending = false;
     }
 
     /// Pause periodic sync. Does not grow the failure streak and does not
@@ -272,8 +315,22 @@ impl SyncBackoff {
         self.next_attempt_at = None;
     }
 
+    /// A saved credential change. Clears an auth pause and a stats-delete
+    /// hold so the next attempt can run immediately. The caller resumes a
+    /// stats-delete hold only when the saved token changed.
     pub fn clear_auth_rejected(&mut self) {
         self.auth_rejected = false;
+        if self.delete_pending {
+            self.delete_pending = false;
+            self.next_attempt_at = None;
+        }
+    }
+
+    /// HTTP 409 `stats_delete_pending`. Stop automatic retries. Does not
+    /// grow the failure streak and does not schedule a later attempt.
+    pub fn record_delete_pending(&mut self) {
+        self.delete_pending = true;
+        self.next_attempt_at = None;
     }
 
     /// HTTP 429. Schedule a wait of at least `retry_after` (the base delay
@@ -307,8 +364,12 @@ impl SyncBackoff {
         self.next_attempt_at = Some(now + wait);
     }
 
-    /// Remaining delay. Zero when an attempt is allowed.
+    /// Remaining delay. Zero when an attempt is allowed, and also while a
+    /// stats-delete hold is set: that hold is not a timed retry.
     pub fn retry_after(&self, now: std::time::Instant) -> std::time::Duration {
+        if self.auth_rejected || self.delete_pending {
+            return std::time::Duration::ZERO;
+        }
         match self.next_attempt_at {
             Some(at) if at > now => at.saturating_duration_since(now),
             _ => std::time::Duration::ZERO,
@@ -324,6 +385,7 @@ impl SyncBackoff {
             }
             SyncAttempt::RateLimited { retry_after } => self.record_rate_limit(now, retry_after),
             SyncAttempt::AuthRejected | SyncAttempt::TokenExpired => self.record_auth_rejected(),
+            SyncAttempt::StatsDeletePending => self.record_delete_pending(),
             SyncAttempt::BatchTooLarge => self.record_failure(now),
             SyncAttempt::NoServerCall => {}
         }
@@ -336,6 +398,9 @@ pub struct SyncClient {
     http: reqwest::Client,
     /// Caps learned from HTTP 413. Shared by clones. Never raised.
     batch_caps: Arc<Mutex<BatchCaps>>,
+    /// `stats_delete_scheduled_at` from the latest 409 `stats_delete_pending`.
+    /// Kept off [`SyncUploadError`] so that error stays small. Shared by clones.
+    delete_scheduled_at: Arc<Mutex<Option<String>>>,
 }
 
 impl SyncClient {
@@ -354,7 +419,23 @@ impl SyncClient {
             http,
             config: Arc::new(Mutex::new(config)),
             batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+            delete_scheduled_at: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Take the deletion timestamp from the latest 409, if the body sent one.
+    pub fn take_delete_scheduled_at(&self) -> Option<String> {
+        self.delete_scheduled_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn remember_delete_scheduled_at(&self, scheduled_at: Option<String>) {
+        *self
+            .delete_scheduled_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = scheduled_at;
     }
 
     /// Chunk sizes for the next upload. Lowered caps stick for this process.
@@ -425,7 +506,7 @@ impl SyncClient {
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(error_from_response(resp, "daemon-config fetch").await);
+            return Err(error_from_response(resp, "daemon-config fetch").await.0);
         }
 
         resp.json::<DaemonConfigResponse>()
@@ -433,6 +514,13 @@ impl SyncClient {
             .map_err(|e| SyncUploadError::plain(e.to_string()))
     }
 
+    /// POST `/api/stats/upload`.
+    ///
+    /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
+    /// ([`isolate_rejected`], called from `try_sync_with`) bisects those
+    /// batches. This function sends one request. 413, 401, 403, 409, and 429
+    /// are not payload rejects. 429 and 503 keep `Retry-After`. 409
+    /// `stats_delete_pending` stops the pass without a split.
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],
@@ -452,7 +540,11 @@ impl SyncClient {
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(error_from_response(resp, "Upload").await);
+            let (err, scheduled_at) = error_from_response(resp, "Upload").await;
+            if err.is_stats_delete_pending() {
+                self.remember_delete_scheduled_at(scheduled_at);
+            }
+            return Err(err);
         }
 
         let result: StatsUploadResponse = resp
@@ -471,36 +563,45 @@ impl SyncClient {
 
 /// Honor `Retry-After` only on 429 and 503, the statuses the API uses for
 /// rate limits and "try later". Other errors keep the plain exponential clock.
-async fn error_from_response(resp: reqwest::Response, what: &str) -> SyncUploadError {
+async fn error_from_response(
+    resp: reqwest::Response,
+    what: &str,
+) -> (SyncUploadError, Option<String>) {
     let status = resp.status();
     let retry_after = retry_after_from_response(&resp);
     let body = resp.text().await.unwrap_or_default();
     let parsed = parse_upload_error_body(&body);
-    SyncUploadError {
-        message: server_error_text(what, status.as_u16(), &body),
-        status: Some(status.as_u16()),
-        retry_after,
-        code: parsed.code,
-        max_matches: parsed.max_matches,
-        max_deleted_sessions: parsed.max_deleted_sessions,
-    }
+    let scheduled_at = parsed.stats_delete_scheduled_at;
+    (
+        SyncUploadError {
+            message: server_error_text(what, status.as_u16(), &body),
+            status: Some(status.as_u16()),
+            retry_after,
+            code: parsed.code,
+            max_matches: parsed.max_matches,
+            max_deleted_sessions: parsed.max_deleted_sessions,
+        },
+        scheduled_at,
+    )
 }
 
 struct ParsedUploadError {
     code: Option<String>,
     max_matches: Option<u64>,
     max_deleted_sessions: Option<u64>,
+    stats_delete_scheduled_at: Option<String>,
 }
 
 /// Pull `code` / `max_matches` / `max_deleted_sessions` out of an error body.
-/// `error` is used as the code only for the three machine codes the sync
-/// pass branches on. A validation message stays in the display text.
+/// `error` is used as the code only for the machine codes the sync pass
+/// branches on. A validation message stays in the display text.
 fn parse_upload_error_body(body: &str) -> ParsedUploadError {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return ParsedUploadError {
             code: None,
             max_matches: None,
             max_deleted_sessions: None,
+            stats_delete_scheduled_at: None,
         };
     };
     let code = value
@@ -515,7 +616,13 @@ fn parse_upload_error_body(body: &str) -> ParsedUploadError {
                 .and_then(|item| item.as_str())
                 .map(str::trim)
                 .filter(|code| {
-                    matches!(*code, "batch_too_large" | "token_expired" | "rate_limited")
+                    matches!(
+                        *code,
+                        "batch_too_large"
+                            | "token_expired"
+                            | "rate_limited"
+                            | "stats_delete_pending"
+                    )
                 })
                 .map(str::to_string)
         });
@@ -523,6 +630,16 @@ fn parse_upload_error_body(body: &str) -> ParsedUploadError {
         code,
         max_matches: json_u64(value.get("max_matches")),
         max_deleted_sessions: json_u64(value.get("max_deleted_sessions")),
+        stats_delete_scheduled_at: json_text(value.get("stats_delete_scheduled_at")),
+    }
+}
+
+fn json_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let text = value?.as_str()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
     }
 }
 
@@ -597,7 +714,8 @@ fn clip_text(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
-/// Logged when every probed row in a pass comes back 400 or 422.
+/// Logged when a pass accepts no row. The rows stay queued and the clock
+/// backs off, the same shape as a 5xx.
 pub const SERVER_REFUSING_UPLOADS: &str = "Server is refusing uploads";
 
 /// How many HTTP calls one sync pass may spend isolating 400/422 rows.
@@ -610,11 +728,29 @@ pub fn isolation_request_budget(n: usize) -> usize {
     2 * (log2 as usize) + n
 }
 
+/// True when the server named one row of this request (`matches[<digits>]:`).
+/// The index is only valid for that body, so a named row is bisected rather
+/// than trusted as a stable id. A 400 or 422 without this prefix is a refusal
+/// of the request as a whole.
+pub fn payload_names_a_row(message: &str) -> bool {
+    let Some(rest) = message.trim().strip_prefix("matches[") else {
+        return false;
+    };
+    let Some(end) = rest.find("]:") else {
+        return false;
+    };
+    let index = &rest[..end];
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One row the server refused while splitting a batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedUpload {
     pub index: usize,
+    /// Server message, still carrying a `matches[n]:` prefix when the body had one.
     pub message: String,
+    /// JSON `code` when the body sent one. Absent for a plain validation message.
+    pub code: Option<String>,
 }
 
 /// Result of [`isolate_rejected`]. Indices are into the batch that was passed in.
@@ -623,22 +759,37 @@ pub struct UploadIsolation {
     pub accepted: Vec<usize>,
     pub rejected: Vec<RejectedUpload>,
     pub deferred: Vec<usize>,
-    /// 5xx, network, 401, 403, 429, or a server-wide 400/422 (every probed
-    /// row refused, so nothing was quarantined). Splitting stops. Already
-    /// accepted indexes stay accepted.
+    /// 5xx, network, 401, 403, 409, 429, 413, or a server-wide 400/422 (no
+    /// row in the pass was accepted, so nothing was quarantined). Splitting
+    /// stops. Already accepted indexes stay accepted. A 409 never quarantines.
     pub stopped: Option<SyncUploadError>,
     pub requests: usize,
 }
 
-/// Upload `rows`. On HTTP 400 or 422, split the slice in half and retry
-/// each half until a singleton is refused or the request budget runs out.
-/// A singleton is quarantined only when some other row in the same pass
-/// was accepted. If both halves of the first split are fully refused, or
-/// every probed row comes back 400 or 422, nothing is quarantined: the
-/// whole batch is deferred and [`UploadIsolation::stopped`] is
+/// Upload `rows`. On HTTP 400 or 422 that names a row (`matches[n]:`), split
+/// the slice in half and retry each half until the bad singletons are
+/// isolated. A singleton is quarantined only when some other row in the
+/// same chunk was accepted. If no row was accepted, nothing is quarantined:
+/// the batch is deferred and [`UploadIsolation::stopped`] is
 /// [`SERVER_REFUSING_UPLOADS`] (backoff, same as a 5xx).
-/// A 5xx, a network error, 401, 403, or 429 does not split: the rest of
-/// the pass stops and those indexes are [`UploadIsolation::deferred`].
+///
+/// A 400 or 422 that does not name a row is not bisected. One single-row
+/// probe is sent. If that row fails with 400 or 422, only that row is
+/// blamed and the rest of the slice is retried, whether or not the body
+/// names a row. A good row after the bad one still uploads. The same end
+/// guard applies: when the chunk accepts nothing, blamed rows are deferred
+/// instead of quarantined.
+///
+/// Request count stays at or under [`isolation_request_budget`]
+/// (about `2 * log2(n) + n`).
+///
+/// A 5xx, a network error, 401, 403, 409, 413, or 429 does not split. 429
+/// keeps `Retry-After` on [`UploadIsolation::stopped`]. When the chunk
+/// accepted nothing and some rows were already refused, that 429 is reported
+/// as [`SERVER_REFUSING_UPLOADS`] and the wait stays on the error as a
+/// backoff floor. The rest of the chunk stops and those indexes are
+/// [`UploadIsolation::deferred`]. 409 `stats_delete_pending` is the same
+/// shape: one request, nothing quarantined.
 pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
 where
     F: FnMut(&[T]) -> Fut,
@@ -663,16 +814,48 @@ where
         requests += 1;
         match upload(&rows[range.start..range.end]).await {
             Ok(_) => accepted.extend(range),
-            Err(err) if err.is_payload_reject() && range.len() > 1 => {
+            Err(err)
+                if err.is_payload_reject()
+                    && range.len() > 1
+                    && payload_names_a_row(&err.message) =>
+            {
                 let mid = range.start + range.len() / 2;
                 stack.push(mid..range.end);
                 stack.push(range.start..mid);
             }
+            Err(err) if err.is_payload_reject() && range.len() > 1 => {
+                if requests >= budget {
+                    deferred.extend(range);
+                    continue;
+                }
+                // One single-row send. A 400/422 blames only that row.
+                // The rest of the slice is retried.
+                requests += 1;
+                let probe = range.start..range.start + 1;
+                match upload(&rows[probe]).await {
+                    Err(one) if one.is_payload_reject() => {
+                        rejected.push(rejected_upload(range.start, &one));
+                        let rest = range.start + 1..range.end;
+                        if !rest.is_empty() {
+                            stack.push(rest);
+                        }
+                    }
+                    Ok(_) => {
+                        accepted.push(range.start);
+                        let rest = range.start + 1..range.end;
+                        if !rest.is_empty() {
+                            stack.push(rest);
+                        }
+                    }
+                    Err(other) => {
+                        deferred.extend(range);
+                        stopped = Some(other);
+                        halt = true;
+                    }
+                }
+            }
             Err(err) if err.is_payload_reject() => {
-                rejected.push(RejectedUpload {
-                    index: range.start,
-                    message: err.message,
-                });
+                rejected.push(rejected_upload(range.start, &err));
             }
             Err(err) => {
                 deferred.extend(range);
@@ -681,16 +864,21 @@ where
             }
         }
     }
-    // No accepted row means the 400/422s were not single bad payloads.
-    // A validator change refuses every subset, including both halves of
-    // the first split. Keep the batch queued and back off.
+    // No accepted row means the 400/422s were not single bad payloads
+    // among good ones. A server-wide refusal (unknown recognizer id, for
+    // example) refuses every subset. Keep the batch queued and back off.
+    // A 429 that stops the walk is the same refusal: the per-token limit
+    // ran out while every row was still being refused. Count that as a
+    // failure and keep Retry-After as a floor. 401, 403, 409, and 413 stay.
     if accepted.is_empty() && !rejected.is_empty() {
         let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
         queued.append(&mut deferred);
         queued.sort_unstable();
         deferred = queued;
-        if stopped.is_none() {
-            stopped = Some(server_wide_refusal(&rejected[0].message));
+        let rate_limited = stopped.as_ref().is_some_and(|err| err.status == Some(429));
+        if stopped.is_none() || rate_limited {
+            let retry_after = stopped.as_ref().and_then(|err| err.retry_after);
+            stopped = Some(server_wide_refusal(&rejected[0].message, retry_after));
         }
         rejected.clear();
     }
@@ -703,10 +891,19 @@ where
     }
 }
 
-fn server_wide_refusal(detail: &str) -> SyncUploadError {
+fn server_wide_refusal(detail: &str, retry_after: Option<std::time::Duration>) -> SyncUploadError {
     SyncUploadError {
         message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
+        retry_after,
         ..SyncUploadError::plain("")
+    }
+}
+
+fn rejected_upload(index: usize, err: &SyncUploadError) -> RejectedUpload {
+    RejectedUpload {
+        index,
+        message: err.message.clone(),
+        code: err.code.clone(),
     }
 }
 
@@ -746,10 +943,15 @@ fn token_fingerprint(token: &str) -> String {
 struct AuthPauseFile {
     server_url: String,
     token_fingerprint: String,
-    /// `"expired"` for [`AuthPauseReason::Expired`]. Absent on older files
-    /// and on a plain rejection.
+    /// `"expired"` for [`AuthPauseReason::Expired`]. `"stats_delete_pending"`
+    /// for [`AuthPauseReason::DeletePending`]. Absent on older files and on
+    /// a plain rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Raw `stats_delete_scheduled_at` from the 409 body. Formatted when the
+    /// status line is read, so the date follows the machine's locale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stats_delete_scheduled_at: Option<String>,
 }
 
 /// True when this row must stay on the machine until the member picks
@@ -832,17 +1034,53 @@ pub fn write_auth_pause_reason(
     token: &str,
     reason: AuthPauseReason,
 ) -> std::io::Result<()> {
+    write_auth_pause_file(data_dir, server_url, token, reason, None)
+}
+
+/// [`write_auth_pause_reason`] for a stats delete, keeping the server's
+/// `stats_delete_scheduled_at` so the status line can show the local date.
+pub fn write_delete_pending_pause(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+    scheduled_at: Option<&str>,
+) -> std::io::Result<()> {
+    write_auth_pause_file(
+        data_dir,
+        server_url,
+        token,
+        AuthPauseReason::DeletePending,
+        scheduled_at,
+    )
+}
+
+fn write_auth_pause_file(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+    reason: AuthPauseReason,
+    scheduled_at: Option<&str>,
+) -> std::io::Result<()> {
     if let Some(parent) = auth_pause_path(data_dir).parent() {
         std::fs::create_dir_all(parent)?;
         crate::fs_mode::tighten_private_dir(parent);
     }
+    let scheduled_at = match reason {
+        AuthPauseReason::DeletePending => scheduled_at
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        AuthPauseReason::Rejected | AuthPauseReason::Expired => None,
+    };
     let file = AuthPauseFile {
         server_url: server_url.to_string(),
         token_fingerprint: token_fingerprint(token),
         reason: match reason {
             AuthPauseReason::Rejected => None,
             AuthPauseReason::Expired => Some("expired".to_string()),
+            AuthPauseReason::DeletePending => Some(STATS_DELETE_PENDING_CODE.to_string()),
         },
+        stats_delete_scheduled_at: scheduled_at,
     };
     let path = auth_pause_path(data_dir);
     let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
@@ -858,23 +1096,85 @@ pub fn clear_auth_pause(data_dir: &Path) {
     let _ = std::fs::remove_file(auth_pause_path(data_dir));
 }
 
-/// True when the on-disk pause was recorded for this exact URL and token.
+/// True when this saved pair is still paused.
+///
+/// A stats-delete pause matches the token alone, because a URL change does
+/// not restore the old token. Other pauses match the URL and the token.
 pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> bool {
     auth_pause_status(data_dir, server_url, token).is_some()
 }
 
-/// GUI health line when this URL and token are paused. `None` when sync
-/// should keep running.
-pub fn auth_pause_status(data_dir: &Path, server_url: &str, token: &str) -> Option<&'static str> {
+/// Why this saved pair is paused. `None` when sync should keep running.
+///
+/// A stats-delete pause stays in force for the same token even if the saved
+/// URL changed. A new token clears it.
+pub fn auth_pause_reason(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+) -> Option<AuthPauseReason> {
     let bytes = std::fs::read(auth_pause_path(data_dir)).ok()?;
     let file = serde_json::from_slice::<AuthPauseFile>(&bytes).ok()?;
-    if file.server_url != server_url || file.token_fingerprint != token_fingerprint(token) {
-        return None;
+    let token_ok = file.token_fingerprint == token_fingerprint(token);
+    let url_ok = file.server_url == server_url;
+    let reason = match file.reason.as_deref() {
+        Some("expired") => AuthPauseReason::Expired,
+        Some(STATS_DELETE_PENDING_CODE) => AuthPauseReason::DeletePending,
+        _ => AuthPauseReason::Rejected,
+    };
+    match reason {
+        AuthPauseReason::DeletePending if token_ok => Some(AuthPauseReason::DeletePending),
+        AuthPauseReason::DeletePending => None,
+        other if token_ok && url_ok => Some(other),
+        _ => None,
     }
-    Some(match file.reason.as_deref() {
-        Some("expired") => SYNC_TOKEN_EXPIRED_STATUS,
-        _ => SYNC_TOKEN_REJECTED_STATUS,
+}
+
+/// GUI health line when this URL and token are paused. `None` when sync
+/// should keep running. A stats-delete pause includes the local calendar
+/// date when the pause file stored `stats_delete_scheduled_at`.
+pub fn auth_pause_status(data_dir: &Path, server_url: &str, token: &str) -> Option<String> {
+    let reason = auth_pause_reason(data_dir, server_url, token)?;
+    let scheduled_at = match reason {
+        AuthPauseReason::DeletePending => std::fs::read(auth_pause_path(data_dir))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<AuthPauseFile>(&bytes).ok())
+            .and_then(|file| file.stats_delete_scheduled_at),
+        AuthPauseReason::Rejected | AuthPauseReason::Expired => None,
+    };
+    Some(match reason {
+        AuthPauseReason::Rejected => SYNC_TOKEN_REJECTED_STATUS.to_string(),
+        AuthPauseReason::Expired => SYNC_TOKEN_EXPIRED_STATUS.to_string(),
+        AuthPauseReason::DeletePending => delete_pending_status(scheduled_at.as_deref()),
     })
+}
+
+/// Status sentence for a pending stats delete. `scheduled_at` is the raw
+/// server timestamp. A missing or unparseable value keeps the sentence
+/// without a date.
+pub fn delete_pending_status(scheduled_at: Option<&str>) -> String {
+    match scheduled_at.and_then(format_local_date) {
+        Some(date) => format!(
+            "Your site stats are scheduled for deletion on {date}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+        ),
+        None => SYNC_STATS_DELETE_PENDING_STATUS.to_string(),
+    }
+}
+
+/// English calendar date: full month name, day, and year, for example
+/// October 26, 2026. The day is the machine's local calendar day, with no
+/// clock time. `None` when `raw` is not an RFC3339 timestamp.
+pub fn format_local_date(raw: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw.trim()).ok()?;
+    let formatted = parsed
+        .with_timezone(&chrono::Local)
+        .format("%B %-d, %Y")
+        .to_string();
+    if formatted.is_empty() {
+        None
+    } else {
+        Some(formatted)
+    }
 }
 
 fn token_safe_redirects() -> reqwest::redirect::Policy {
@@ -1907,31 +2207,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_reject_split_stays_inside_the_request_budget() {
-        let n = 32usize;
+    async fn all_bad_batch_defers_every_row_and_backs_off() {
+        let n = 7usize;
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let rows: Vec<u32> = (0..n as u32).collect();
-        let isolation = isolate_rejected(&rows, |_| {
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |_batch| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async {
-                Err(SyncUploadError {
-                    message: "nope".into(),
-                    status: Some(422),
-                    ..SyncUploadError::plain("")
-                })
-            }
+            async { Err(payload_reject(422)) }
         })
         .await;
         let budget = isolation_request_budget(n);
-        assert!(isolation.requests <= budget);
+        assert!(
+            isolation.requests <= budget,
+            "used {} requests, budget {budget}",
+            isolation.requests
+        );
         assert_eq!(
             isolation.requests,
             calls.load(std::sync::atomic::Ordering::SeqCst)
         );
-        assert!(
-            isolation.requests > 1,
-            "the batch is split before giving up"
-        );
+        assert!(isolation.requests > 1, "the batch is split");
         assert!(isolation.accepted.is_empty());
         assert!(
             isolation.rejected.is_empty(),
@@ -1940,11 +2235,212 @@ mod tests {
         assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
         let stopped = isolation.stopped.expect("server-wide refusal");
         assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
-        assert!(stopped.message.contains("nope"), "{}", stopped.message);
+        assert!(stopped.message.contains("hero is not allowed"));
         assert!(matches!(
             stopped.attempt(),
             SyncAttempt::ServerError { retry_after: None }
         ));
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_quarantines_only_the_refused_rows() {
+        let n = 6usize;
+        let bad = [1usize, 4];
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let bad_here = batch.iter().any(|index| bad.contains(index));
+            let inserted = batch.len() as u32;
+            async move {
+                if bad_here {
+                    Err(payload_reject(422))
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        let mut rejected: Vec<usize> = isolation.rejected.iter().map(|row| row.index).collect();
+        rejected.sort_unstable();
+        assert_eq!(rejected, vec![1, 4]);
+        let mut accepted = isolation.accepted.clone();
+        accepted.sort_unstable();
+        assert_eq!(accepted, vec![0, 2, 3, 5]);
+        assert!(isolation.deferred.is_empty());
+        assert!(isolation.stopped.is_none());
+        assert!(isolation.requests <= isolation_request_budget(n));
+    }
+
+    #[tokio::test]
+    async fn whole_request_400_defers_when_every_row_fails() {
+        for status in [400_u16, 422] {
+            let n = 4usize;
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let rows: Vec<u32> = (0..n as u32).collect();
+            let isolation = isolate_rejected(&rows, |_batch| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    Err(SyncUploadError {
+                        message: "schema mismatch".into(),
+                        status: Some(status),
+                        code: Some("invalid_body".into()),
+                        ..SyncUploadError::plain("")
+                    })
+                }
+            })
+            .await;
+            let used = calls.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                used > 2,
+                "status {status} blames one row and keeps walking the rest"
+            );
+            assert_eq!(isolation.requests, used);
+            assert!(isolation.requests <= isolation_request_budget(n));
+            assert!(isolation.accepted.is_empty());
+            assert!(
+                isolation.rejected.is_empty(),
+                "an all-bad pass quarantines nothing"
+            );
+            assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
+            let stopped = isolation.stopped.expect("server-wide refusal");
+            assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
+            assert!(matches!(
+                stopped.attempt(),
+                SyncAttempt::ServerError { retry_after: None }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn nonspecific_400_blames_only_the_failed_row() {
+        let rows: Vec<usize> = (0..5).collect();
+        let bad = 1usize;
+        let isolation = isolate_rejected(&rows, |batch| {
+            let ids = batch.to_vec();
+            async move {
+                if ids.len() > 1 || ids[0] == bad {
+                    Err(SyncUploadError {
+                        message: "schema mismatch".into(),
+                        status: Some(400),
+                        code: Some("invalid_body".into()),
+                        ..SyncUploadError::plain("")
+                    })
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: 1,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        assert_eq!(isolation.accepted, vec![0, 2, 3, 4]);
+        assert_eq!(isolation.rejected.len(), 1);
+        assert_eq!(isolation.rejected[0].index, bad);
+        assert_eq!(isolation.rejected[0].message, "schema mismatch");
+        assert!(isolation.deferred.is_empty());
+        assert!(isolation.stopped.is_none());
+        assert!(isolation.requests <= isolation_request_budget(5));
+    }
+
+    #[tokio::test]
+    async fn nonspecific_400_still_uploads_a_row_that_succeeds_alone() {
+        let rows: Vec<usize> = (0..4).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let ids = batch.to_vec();
+            async move {
+                if ids.len() > 1 {
+                    Err(SyncUploadError {
+                        message: "schema mismatch".into(),
+                        status: Some(400),
+                        ..SyncUploadError::plain("")
+                    })
+                } else if ids[0] == 2 {
+                    Err(payload_reject(422))
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: 1,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        assert_eq!(isolation.accepted, vec![0, 1, 3]);
+        assert_eq!(isolation.rejected.len(), 1);
+        assert_eq!(isolation.rejected[0].index, 2);
+        assert!(isolation.deferred.is_empty());
+        assert!(isolation.stopped.is_none());
+        assert!(isolation.requests <= isolation_request_budget(4));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_mid_split_keeps_retry_after_and_does_not_quarantine() {
+        let rows: Vec<usize> = (0..4).collect();
+        let retry = std::time::Duration::from_secs(12);
+        let isolation = isolate_rejected(&rows, |batch| {
+            let len = batch.len();
+            let wait = retry;
+            async move {
+                if len == 4 {
+                    Err(payload_reject(400))
+                } else {
+                    Err(SyncUploadError {
+                        message: "slow down".into(),
+                        status: Some(429),
+                        retry_after: Some(wait),
+                        code: Some("rate_limited".into()),
+                        ..SyncUploadError::plain("")
+                    })
+                }
+            }
+        })
+        .await;
+        assert_eq!(isolation.requests, 2);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let stopped = isolation.stopped.expect("429 stops the pass");
+        assert_eq!(stopped.status, Some(429));
+        assert_eq!(stopped.retry_after, Some(retry));
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::RateLimited {
+                retry_after: Some(wait)
+            } if wait == retry
+        ));
+    }
+
+    #[tokio::test]
+    async fn row_specific_split_stays_inside_the_request_budget() {
+        let n = 32usize;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows: Vec<u32> = (0..n as u32).collect();
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Err(payload_reject(400)) }
+        })
+        .await;
+        let budget = isolation_request_budget(n);
+        assert!(isolation.requests <= budget);
+        assert_eq!(
+            isolation.requests,
+            calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(isolation.requests > 1, "the batch is split");
+        assert!(isolation.accepted.is_empty());
+        assert!(
+            isolation.rejected.is_empty(),
+            "a pass that accepts nothing quarantines nothing"
+        );
+        assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
+        let stopped = isolation.stopped.expect("server-wide refusal");
+        assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
     }
 
     #[tokio::test]
@@ -2082,6 +2578,7 @@ mod tests {
                 .message
                 .starts_with(SERVER_REFUSING_UPLOADS)
         );
+        assert_eq!(alone.requests, 1);
 
         let one_ok = isolate_case(1, &[]).await;
         assert_eq!(one_ok.accepted, vec![0]);
@@ -2096,12 +2593,13 @@ mod tests {
         assert_eq!(pair.rejected[0].index, 1);
         assert!(pair.stopped.is_none());
 
-        // N=2, both refused.
+        // N=2, both refused. Nothing is quarantined.
         let both = isolate_case(2, &[0, 1]).await;
         assert!(both.accepted.is_empty());
         assert!(both.rejected.is_empty());
         assert_eq!(both.deferred, vec![0, 1]);
         assert!(both.stopped.is_some());
+        assert!(both.requests <= isolation_request_budget(2));
 
         // Odd length, one bad row in the longer half.
         let odd = isolate_case(5, &[2]).await;
@@ -2152,6 +2650,7 @@ mod tests {
             Some(401),
             Some(403),
             Some(429),
+            Some(409),
         ];
         for status in cases {
             let calls = std::sync::atomic::AtomicUsize::new(0);
@@ -2189,6 +2688,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stats_delete_pending_409_does_not_split_or_quarantine() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows = ["a", "b", "c", "d"];
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Err(SyncUploadError {
+                    message: "stats delete pending".into(),
+                    status: Some(409),
+                    code: Some("stats_delete_pending".into()),
+                    ..SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let err = isolation.stopped.expect("stopped");
+        assert!(err.is_stats_delete_pending());
+        assert!(matches!(err.attempt(), SyncAttempt::StatsDeletePending));
+    }
+
+    #[tokio::test]
+    async fn unknown_409_does_not_split_and_stays_a_server_error() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows = ["a", "b", "c", "d"];
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Err(SyncUploadError {
+                    message: "conflict".into(),
+                    status: Some(409),
+                    code: Some("not_a_known_conflict".into()),
+                    ..SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let err = isolation.stopped.expect("stopped");
+        assert!(!err.is_stats_delete_pending());
+        assert!(matches!(
+            err.attempt(),
+            SyncAttempt::ServerError { retry_after: None }
+        ));
     }
 
     #[test]
@@ -2236,7 +2788,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            auth_pause_status(dir.path(), "https://crew.example", "old-token"),
+            auth_pause_status(dir.path(), "https://crew.example", "old-token").as_deref(),
             Some(SYNC_TOKEN_EXPIRED_STATUS)
         );
         assert!(auth_pause_matches(
@@ -2250,7 +2802,7 @@ mod tests {
         );
         write_auth_pause(dir.path(), "https://crew.example", "old-token").unwrap();
         assert_eq!(
-            auth_pause_status(dir.path(), "https://crew.example", "old-token"),
+            auth_pause_status(dir.path(), "https://crew.example", "old-token").as_deref(),
             Some(SYNC_TOKEN_REJECTED_STATUS)
         );
     }
@@ -2366,6 +2918,118 @@ mod tests {
         assert!(backoff.auth_rejected());
         assert_eq!(backoff.failures(), 0);
         assert!(!backoff.should_attempt(t0));
+    }
+
+    #[tokio::test]
+    async fn upload_409_stats_delete_pending_pauses_until_a_new_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"code":"stats_delete_pending"}"#;
+        let response = format!(
+            "HTTP/1.1 409 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("409");
+        let _ = server.join().expect("server");
+        assert_eq!(err.code.as_deref(), Some("stats_delete_pending"));
+        assert!(c.take_delete_scheduled_at().is_none());
+        assert!(err.is_stats_delete_pending());
+        assert!(matches!(err.attempt(), SyncAttempt::StatsDeletePending));
+        let t0 = std::time::Instant::now();
+        let mut backoff = SyncBackoff::default();
+        backoff.observe(err.attempt(), t0);
+        assert_eq!(backoff.failures(), 0);
+        assert!(!backoff.auth_rejected());
+        assert!(backoff.delete_pending());
+        assert!(!backoff.should_attempt(t0));
+        assert_eq!(backoff.retry_after(t0), std::time::Duration::ZERO);
+        let later = t0 + std::time::Duration::from_secs(24 * 60 * 60);
+        assert!(
+            !backoff.should_attempt(later),
+            "a stats delete does not retry on its own"
+        );
+        backoff.clear_auth_rejected();
+        assert!(!backoff.delete_pending());
+        assert!(backoff.should_attempt(t0));
+    }
+
+    #[test]
+    fn delete_pending_pause_uses_the_account_page_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_auth_pause_reason(
+            dir.path(),
+            "https://crew.example",
+            "old-token",
+            AuthPauseReason::DeletePending,
+        )
+        .unwrap();
+        assert_eq!(
+            auth_pause_reason(dir.path(), "https://crew.example", "old-token"),
+            Some(AuthPauseReason::DeletePending)
+        );
+        assert_eq!(
+            auth_pause_status(dir.path(), "https://crew.example", "old-token").as_deref(),
+            Some(SYNC_STATS_DELETE_PENDING_STATUS)
+        );
+        assert_eq!(
+            auth_pause_reason(dir.path(), "https://other.example", "old-token"),
+            Some(AuthPauseReason::DeletePending),
+            "a URL change does not clear a stats-delete pause"
+        );
+        assert_eq!(
+            auth_pause_reason(dir.path(), "https://crew.example", "new-token"),
+            None,
+            "a new token clears a stats-delete pause"
+        );
+        assert_eq!(
+            SYNC_STATS_DELETE_PENDING_STATUS,
+            "Your site stats are scheduled for deletion. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+        );
+    }
+
+    #[test]
+    fn delete_pending_status_uses_the_local_date_only() {
+        let raw = "2026-10-19T23:30:00Z";
+        let date = format_local_date(raw).expect("rfc3339");
+        let local = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(date, local.format("%B %-d, %Y").to_string());
+        assert!(!date.contains(':'), "date only, got {date}");
+        assert!(!date.contains('/'), "full month name, got {date}");
+        let status = delete_pending_status(Some(raw));
+        assert_eq!(
+            status,
+            format!(
+                "Your site stats are scheduled for deletion on {date}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+            )
+        );
+        assert_eq!(
+            delete_pending_status(None),
+            SYNC_STATS_DELETE_PENDING_STATUS
+        );
+        assert_eq!(
+            delete_pending_status(Some("not-a-date")),
+            SYNC_STATS_DELETE_PENDING_STATUS
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_delete_pending_pause(dir.path(), "https://crew.example", "old-token", Some(raw))
+            .unwrap();
+        assert_eq!(
+            auth_pause_status(dir.path(), "https://crew.example", "old-token").as_deref(),
+            Some(status.as_str())
+        );
+        let parsed = parse_upload_error_body(
+            r#"{"code":"stats_delete_pending","stats_delete_scheduled_at":"2026-10-19T23:30:00Z"}"#,
+        );
+        assert_eq!(parsed.code.as_deref(), Some("stats_delete_pending"));
+        assert_eq!(
+            parsed.stats_delete_scheduled_at.as_deref(),
+            Some("2026-10-19T23:30:00Z")
+        );
     }
 
     #[tokio::test]
