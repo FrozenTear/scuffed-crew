@@ -63,7 +63,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let command = std::env::args()
         .nth(1)
-        .ok_or("usage: relay-chat-flow <seed|check>")?;
+        .ok_or("usage: relay-chat-flow <seed|check|relay-login>")?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -71,6 +71,7 @@ fn run() -> Result<(), String> {
     match command.as_str() {
         "seed" => rt.block_on(seed()),
         "check" => rt.block_on(check()),
+        "relay-login" => rt.block_on(relay_login()),
         other => Err(format!("unknown command {other}")),
     }
 }
@@ -103,6 +104,85 @@ async fn connect_db() -> Result<scuffed_db::Database, String> {
         }
     }
     Err(format!("surreal did not accept a connection: {last}"))
+}
+
+/// Sign in as the relay record user against the server this process already
+/// reached as root. Proves the login, and that the secret column and
+/// `audit_log` stay hidden, on a real SurrealDB rather than `mem://`.
+async fn relay_login() -> Result<(), String> {
+    let password = env_or("SURREALDB_RELAY_PASSWORD", "relay-ci-record-login");
+    let password = password.trim();
+    if password.is_empty() || password == "root" {
+        return Err(
+            "relay-login needs SURREALDB_RELAY_PASSWORD set to a non-root value".to_string(),
+        );
+    }
+    let db = connect_db().await?;
+    scuffed_db::migrations::run_migrations(&db.client)
+        .await
+        .map_err(|e| format!("migrations: {e}"))?;
+    scuffed_db::ensure_relay_access(&db.client, "scuffed_relay", password, true)
+        .await
+        .map_err(|e| format!("ensure relay access: {e}"))?;
+
+    let secret = "relay-login-secret-marker";
+    let reason = "relay-login-reason-marker";
+    let audit = "relay-login-audit-marker";
+    db.client
+        .query(
+            "CREATE member:relaylogin SET user_id = 'user:relaylogin', org_role = 'member', \
+             display_name = 'RelayLogin', is_active = true, nostr_pubkey = 'cd', \
+             nostr_secret_key_encrypted = { marker: $secret };
+             CREATE moderation_action:relaylogin SET member_id = 'relaylogin', \
+             action_type = 'ban', reason = $reason, issued_by = 'officer-1', is_active = true;
+             CREATE audit_log SET actor_id = 'officer-1', action = $audit, \
+             target_type = 'member', target_id = 'relaylogin'",
+        )
+        .bind(("secret", secret))
+        .bind(("reason", reason))
+        .bind(("audit", audit))
+        .await
+        .map_err(|e| format!("seed hidden rows: {e}"))?
+        .check()
+        .map_err(|e| format!("seed hidden rows: {e}"))?;
+
+    let url = env_or("SURREALDB_URL", "ws://127.0.0.1:8000");
+    let ns = env_or("SURREALDB_NS", "scuffed_crew");
+    let database = env_or("SURREALDB_DB", "main");
+    let relay =
+        scuffed_db::Database::connect_relay_record(&url, &ns, &database, "scuffed_relay", password)
+            .await
+            .map_err(|e| format!("relay sign-in: {e}"))?;
+
+    let member = relay
+        .client
+        .query("SELECT * FROM member:relaylogin")
+        .await
+        .map_err(|e| format!("relay member select: {e}"))?;
+    let member_dbg = format!("{member:?}");
+    if member_dbg.contains(secret) {
+        return Err("relay login read nostr_secret_key_encrypted".to_string());
+    }
+    let actions = relay
+        .client
+        .query("SELECT * FROM moderation_action:relaylogin")
+        .await
+        .map_err(|e| format!("relay moderation select: {e}"))?;
+    let actions_dbg = format!("{actions:?}");
+    if actions_dbg.contains(reason) {
+        return Err("relay login read moderation reason".to_string());
+    }
+    let audits = relay
+        .client
+        .query("SELECT * FROM audit_log")
+        .await
+        .map_err(|e| format!("relay audit select: {e}"))?;
+    let audits_dbg = format!("{audits:?}");
+    if audits_dbg.contains(audit) {
+        return Err("relay login read audit_log".to_string());
+    }
+    println!("relay record login kept hidden fields and audit_log hidden");
+    Ok(())
 }
 
 async fn seed() -> Result<(), String> {
