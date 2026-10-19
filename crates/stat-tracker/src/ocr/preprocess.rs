@@ -6,6 +6,13 @@ const SCOREBOARD_Y_RATIO: f64 = 0.15;
 const SCOREBOARD_W_RATIO: f64 = 0.65;
 const SCOREBOARD_H_RATIO: f64 = 0.70;
 
+/// Height of [`crop_scoreboard`] on a 1440p 16:9 frame.
+///
+/// `1440 * SCOREBOARD_H_RATIO` truncates to 1007. Callers that scale a
+/// 1440p pixel distance by board height divide by this, so the reference
+/// is not copied as a second literal.
+pub const SCOREBOARD_CROP_H_1440: u32 = 1007;
+
 /// Stat columns: E, A, D, DMG, HLG, MIT
 const STAT_COLUMNS: usize = 6;
 

@@ -43,8 +43,10 @@
 //!
 //! The saved review crop of the member's own row ([`own_row_review_image`])
 //! is a different cut from the seed. It is the row band, widened left of the
-//! name column so the hero portrait is in the file. It is not a seed, and
-//! nothing here writes it into the seed file.
+//! name column so the hero portrait is in the file. When the header bar is
+//! clipped at the scoreboard crop's left edge, that cut comes from the same
+//! widened frame crop the hero reader uses. It is not a seed, and nothing
+//! here writes it into the seed file.
 //!
 //! The trusted seeds live in `<data_dir>/private/own-name/seeds.json` (dir
 //! 0700, file 0600, written atomically). Only crops confirmed as the member's
@@ -1170,17 +1172,27 @@ pub struct OwnRowReview {
     pub h: u32,
 }
 
-/// How far left of the name column the saved own-row crop reaches.
+/// How far left of the name column the board-height pad reaches.
 ///
-/// [`heroes::CLIPPED_HEADER_PAD_1440`] on a 1440p scoreboard. The 1440p
-/// `crop_scoreboard` height is 1007 (`1440 * 0.70`, truncated), and the pad
-/// scales by this board's height the way [`heroes::clipped_header_pad`]
-/// scales [`heroes::CLIPPED_HEADER_PAD_1440`] by the 16:9 frame height. A
-/// 1440p board widens by 120 px and a 1080p board (756 px) by 90.
+/// [`heroes::CLIPPED_HEADER_PAD_1440`] scaled by this board's height over
+/// [`crate::ocr::preprocess::SCOREBOARD_CROP_H_1440`] (the 1440p
+/// `crop_scoreboard` height). A 1440p board widens by 120 px and a 1080p
+/// board (756 px) by 90. The portrait's left edge follows row pitch, about
+/// one row height left of the name column, not this board height.
+/// [`review_reach`] keeps whichever of the two is wider.
 pub fn own_row_review_pad(board_h: u32) -> u32 {
-    /// 1440p scoreboard crop height.
-    const BOARD_H_1440: f64 = 1007.0;
-    (heroes::CLIPPED_HEADER_PAD_1440 as f64 * f64::from(board_h) / BOARD_H_1440).round() as u32
+    let reference = f64::from(crate::ocr::preprocess::SCOREBOARD_CROP_H_1440);
+    (heroes::CLIPPED_HEADER_PAD_1440 as f64 * f64::from(board_h) / reference).round() as u32
+}
+
+/// Left inset of the saved crop, in px.
+///
+/// The portrait sits about `1.0 * row_h` left of the name column. The
+/// board-height pad ([`own_row_review_pad`]) is wider than that on the
+/// 1080p and 1440p crops, and that extra is the margin. A row taller than
+/// the pad still reaches its portrait.
+fn review_reach(board_h: u32, row_h: u32) -> u32 {
+    own_row_review_pad(board_h).max(row_h)
 }
 
 /// Name-area left and row bands. `None` on a board the name reader would
@@ -1211,10 +1223,10 @@ fn review_layout(rgb: &RgbImage, team_size: usize) -> Option<(usize, Vec<(usize,
 /// The saved debug/review crop of `row` on a scoreboard image.
 ///
 /// The left edge is the name column ([`SEARCH_X0`]), shifted left by
-/// [`own_row_review_pad`] and clamped to x = 0. The right edge stays the
-/// right edge of the scoreboard. The vertical span is that row's band, so
-/// the crop is the member's row and not the rest of the Tab. `None` when
-/// the row is missing or the board has no measurable name area.
+/// [`review_reach`] and clamped to x = 0. The right edge stays the right
+/// edge of the image. The vertical span is that row's band, so the crop is
+/// the member's row and not the rest of the Tab. `None` when the row is
+/// missing or the board has no measurable name area.
 pub fn own_row_review_rect(
     scoreboard: &DynamicImage,
     team_size: usize,
@@ -1222,13 +1234,18 @@ pub fn own_row_review_rect(
 ) -> Option<OwnRowReview> {
     let mut owned = None;
     let rgb = rgb_of(scoreboard, &mut owned);
+    review_rect_on(rgb, team_size, row)
+}
+
+fn review_rect_on(rgb: &RgbImage, team_size: usize, row: usize) -> Option<OwnRowReview> {
     let (name_x, bands) = review_layout(rgb, team_size)?;
     let &(top, bot) = bands.get(row)?;
     let (width, height) = (rgb.width(), rgb.height());
     let y = (top as u32).min(height);
     let y1 = (bot as u32).min(height);
     let h = y1.saturating_sub(y);
-    let x = (name_x as u32).saturating_sub(own_row_review_pad(height));
+    let row_h = bands[0].1.saturating_sub(bands[0].0) as u32 + 2;
+    let x = (name_x as u32).saturating_sub(review_reach(height, row_h));
     let w = width.saturating_sub(x);
     if h == 0 || w == 0 {
         return None;
@@ -1242,8 +1259,81 @@ pub fn own_row_review_image(
     team_size: usize,
     row: usize,
 ) -> Option<DynamicImage> {
-    let rect = own_row_review_rect(scoreboard, team_size, row)?;
-    Some(scoreboard.crop_imm(rect.x, rect.y, rect.w, rect.h))
+    own_row_review_image_from(None, scoreboard, team_size, row)
+}
+
+/// [`own_row_review_image`] with the capture frame.
+///
+/// When [`heroes::clipped_header_pad`] is `Some`, the crop is cut from
+/// [`heroes::hero_crop`] and the name column is measured on that wider
+/// image, which shifts it by the pad. Otherwise this is
+/// [`own_row_review_image`].
+pub fn own_row_review_image_from(
+    frame: Option<&DynamicImage>,
+    scoreboard: &DynamicImage,
+    team_size: usize,
+    row: usize,
+) -> Option<DynamicImage> {
+    own_row_review_cut(frame, scoreboard, team_size, row).map(|cut| cut.image)
+}
+
+/// The saved own-row crop, and the rectangle it was cut from.
+///
+/// `widened` means `rect` is in [`heroes::hero_crop`] of the frame (the
+/// same widened cut the hero reader uses), not in the scoreboard crop.
+/// That crop prepends [`heroes::clipped_header_pad`] px, so a column that
+/// sat at `x` on the scoreboard sits at `x + pad` there. The name column
+/// is measured on the wide image, which applies that shift, including the
+/// part of the header the scoreboard crop had cut off. `image` is `rect`'s
+/// pixels. When the header is not clipped, `rect` is in the scoreboard and
+/// a 6v6 board is unchanged.
+pub(crate) struct OwnRowReviewCut {
+    /// Read by the review-crop tests. The saved file is `image`.
+    #[allow(dead_code)]
+    pub rect: OwnRowReview,
+    pub image: DynamicImage,
+    /// Pixels [`heroes::hero_crop`] added on the left. `0` when `widened`
+    /// is false. Read by the review-crop tests.
+    #[allow(dead_code)]
+    pub pad: u32,
+    /// Read by the review-crop tests.
+    #[allow(dead_code)]
+    pub widened: bool,
+}
+
+pub(crate) fn own_row_review_cut(
+    frame: Option<&DynamicImage>,
+    scoreboard: &DynamicImage,
+    team_size: usize,
+    row: usize,
+) -> Option<OwnRowReviewCut> {
+    let mut owned = None;
+    let rgb = rgb_of(scoreboard, &mut owned);
+    let hdr = heroes::find_header(View::rgb(rgb))?;
+    if let Some(frame) = frame
+        && let Some(pad) =
+            heroes::clipped_header_pad(frame.width(), frame.height(), scoreboard, hdr.0)
+    {
+        let wide = heroes::hero_crop(frame, pad);
+        let wide_rgb = wide.to_rgb8();
+        if let Some(rect) = review_rect_on(&wide_rgb, team_size, row) {
+            let image = wide.crop_imm(rect.x, rect.y, rect.w, rect.h);
+            return Some(OwnRowReviewCut {
+                rect,
+                image,
+                pad,
+                widened: true,
+            });
+        }
+    }
+    let rect = review_rect_on(rgb, team_size, row)?;
+    let image = scoreboard.crop_imm(rect.x, rect.y, rect.w, rect.h);
+    Some(OwnRowReviewCut {
+        rect,
+        image,
+        pad: 0,
+        widened: false,
+    })
 }
 
 // ------------------------------------------------------------------- store
