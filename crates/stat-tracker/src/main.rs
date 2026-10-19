@@ -467,11 +467,21 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(client) = &sync_client {
         let creds = client.credentials();
         let mut pack_startup = None;
-        if let Some(status) =
-            sync::auth_pause_status(&config.data_dir, &creds.server_url, &creds.token)
-        {
+        let pause = sync::auth_pause_reason(&config.data_dir, &creds.server_url, &creds.token);
+        if matches!(
+            pause,
+            Some(sync::AuthPauseReason::Rejected | sync::AuthPauseReason::Expired)
+        ) {
+            let status = sync::auth_pause_status(&config.data_dir, &creds.server_url, &creds.token)
+                .unwrap_or(sync::SYNC_TOKEN_REJECTED_STATUS);
             tracing::error!("{status}. Sync resumes when the URL or token changes in Settings.");
         } else {
+            if pause == Some(sync::AuthPauseReason::DeletePending) {
+                tracing::error!(
+                    "{}. Sync resumes in an hour, or when the URL or token changes in Settings.",
+                    sync::SYNC_STATS_DELETE_PENDING_STATUS
+                );
+            }
             fetch_player_name_if_needed(&mut config, client).await;
             pack_startup = Some(
                 stat_tracker::packs::sync_on_startup(
@@ -860,8 +870,9 @@ fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncC
 /// client's pair at that moment. The daemon swaps that pair only while sync
 /// is paused on a rejected token (`maybe_resume_sync_after_settings_change`
 /// then re-reads Settings); until then a pair saved in Settings waits for
-/// a restart, for the job as for uploads. `None` while sync is paused: the
-/// rejected token is not sent again.
+/// a restart, for the job as for uploads. `None` while sync is paused on a
+/// rejected or expired token: that token is not sent again. A stats-deletion
+/// hold still sends it.
 fn pack_credentials(
     data_dir: &std::path::Path,
     client: &sync::SyncClient,
@@ -4314,12 +4325,32 @@ async fn run_loop(
     // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
     let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
-    if let Some(status) = sync_pause_status(data_dir, sync_client) {
-        sync_backoff
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record_auth_rejected();
-        tracing::error!("{status}. Sync resumes when the URL or token changes.");
+    if let Some(client) = sync_client {
+        let creds = client.credentials();
+        match sync::auth_pause_reason(data_dir, &creds.server_url, &creds.token) {
+            Some(sync::AuthPauseReason::DeletePending) => {
+                sync_backoff
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_delete_pending(Instant::now());
+                tracing::error!(
+                    "{}. Sync resumes in an hour, or when the URL or token changes.",
+                    sync::SYNC_STATS_DELETE_PENDING_STATUS
+                );
+            }
+            Some(sync::AuthPauseReason::Rejected | sync::AuthPauseReason::Expired) => {
+                sync_backoff
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_auth_rejected();
+                if let Some(status) =
+                    sync::auth_pause_status(data_dir, &creds.server_url, &creds.token)
+                {
+                    tracing::error!("{status}. Sync resumes when the URL or token changes.");
+                }
+            }
+            None => {}
+        }
     }
 
     // Startup drops a stale skeleton and schedules the upload on `sync_task`.
@@ -7636,18 +7667,26 @@ async fn try_sync(
         }
     })
     .await;
+    let creds = client.credentials();
     let pause = match outcome {
         sync::SyncAttempt::AuthRejected => Some(sync::AuthPauseReason::Rejected),
         sync::SyncAttempt::TokenExpired => Some(sync::AuthPauseReason::Expired),
+        sync::SyncAttempt::StatsDeletePending => Some(sync::AuthPauseReason::DeletePending),
+        sync::SyncAttempt::Uploaded => {
+            if sync::auth_pause_reason(data_dir, &creds.server_url, &creds.token)
+                == Some(sync::AuthPauseReason::DeletePending)
+            {
+                sync::clear_auth_pause(data_dir);
+            }
+            None
+        }
         _ => None,
     };
-    if let Some(reason) = pause {
-        let creds = client.credentials();
-        if let Err(e) =
+    if let Some(reason) = pause
+        && let Err(e) =
             sync::write_auth_pause_reason(data_dir, &creds.server_url, &creds.token, reason)
-        {
-            tracing::warn!(error = %e, "could not record sync auth pause");
-        }
+    {
+        tracing::warn!(error = %e, "could not record sync auth pause");
     }
     outcome
 }
@@ -7724,6 +7763,12 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
                 "sync batch was still over the server cap after shrinking; rows stay queued"
             );
         }
+        sync::SyncAttempt::StatsDeletePending => {
+            tracing::warn!(
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "site stats are scheduled for deletion: backing off before the next upload"
+            );
+        }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
     }
 }
@@ -7732,30 +7777,28 @@ fn sync_credentials_rejected(
     data_dir: &std::path::Path,
     client: Option<&sync::SyncClient>,
 ) -> bool {
-    sync_pause_status(data_dir, client).is_some()
-}
-
-fn sync_pause_status(
-    data_dir: &std::path::Path,
-    client: Option<&sync::SyncClient>,
-) -> Option<&'static str> {
-    let client = client?;
+    let Some(client) = client else {
+        return false;
+    };
     let creds = client.credentials();
-    sync::auth_pause_status(data_dir, &creds.server_url, &creds.token)
+    matches!(
+        sync::auth_pause_reason(data_dir, &creds.server_url, &creds.token),
+        Some(sync::AuthPauseReason::Rejected | sync::AuthPauseReason::Expired)
+    )
 }
 
-/// While sync is paused on a rejected token, re-read Settings. A different
-/// URL or token clears the pause and updates the client. The rest of the
-/// config is left alone.
+/// While sync is paused on a rejected token or a stats-delete hold, re-read
+/// Settings. A different URL or token clears the pause and updates the
+/// client. The rest of the config is left alone.
 fn maybe_resume_sync_after_settings_change(
     client: Option<&sync::SyncClient>,
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
     data_dir: &std::path::Path,
 ) {
-    let paused = backoff
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .auth_rejected();
+    let paused = {
+        let clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
+        clock.auth_rejected() || clock.holds_delete_pending()
+    };
     if !paused {
         return;
     }
@@ -7871,8 +7914,8 @@ async fn archive_stale_hold(
     }
 }
 
-/// One upload. Auth rejection skips the HTTP call. The caller feeds the
-/// result to [`apply_sync_backoff`].
+/// One upload. Auth rejection and an open stats-delete hold skip the HTTP
+/// call. The caller feeds the result to [`apply_sync_backoff`].
 async fn upload_once(
     client: Option<&sync::SyncClient>,
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
@@ -7880,12 +7923,17 @@ async fn upload_once(
     data_dir: &std::path::Path,
     settle_session: Option<String>,
 ) -> sync::SyncAttempt {
-    let rejected = backoff
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .auth_rejected();
+    let now = Instant::now();
+    let (rejected, delete_held) = {
+        let clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
+        (clock.auth_rejected(), clock.delete_pending(now))
+    };
     if rejected {
         tracing::warn!("sync paused, token rejected; skipping this upload");
+        return sync::SyncAttempt::NoServerCall;
+    }
+    if delete_held {
+        tracing::warn!("sync paused, site stats are scheduled for deletion; skipping this upload");
         return sync::SyncAttempt::NoServerCall;
     }
     match client {
@@ -8257,6 +8305,12 @@ fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
                 "sync batch was too large and the server cap did not shrink"
             );
         }
+        sync::SyncAttempt::StatsDeletePending => {
+            tracing::warn!(
+                error = %err,
+                "site stats are scheduled for deletion, rows stay queued"
+            );
+        }
         _ => tracing::error!(error = %err, "sync upload failed"),
     }
     attempt
@@ -8423,8 +8477,9 @@ where
 /// send and then the slice is quarantined, with no further splits. HTTP 413
 /// `batch_too_large` lowers those caps (never below 1) and resends
 /// immediately; that request wrote nothing and is not a failure streak.
-/// HTTP 429, 401, 403, and other errors stop the pass. 429 keeps
-/// `Retry-After`. Tombstones ride on the chunk they were sent with,
+/// HTTP 429, 401, 403, 409, and other errors stop the pass. 429 keeps
+/// `Retry-After`. 409 `stats_delete_pending` keeps every row queued and does
+/// not quarantine. Tombstones ride on the chunk they were sent with,
 /// including 400 splits of that chunk, and are cleared only after a 2xx.
 /// A deletes-only 400 still backs off like a 5xx: there are no match rows
 /// to isolate, so one bad id keeps that delete chunk retrying.
@@ -19344,6 +19399,204 @@ mod tests {
             "Sync token expired, relink in Settings"
         );
         assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stats_delete_pending_stops_without_split_or_quarantine_and_sets_the_status() {
+        let n = 4i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                let seen = calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(seen, 0, "stats_delete_pending must not split the batch");
+                assert_eq!(matches.len(), n as usize);
+                Err(sync::SyncUploadError {
+                    message: "stats delete pending".into(),
+                    status: Some(409),
+                    code: Some("stats_delete_pending".into()),
+                    ..sync::SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::StatsDeletePending));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(rows.iter().all(|row| !row.synced));
+        assert!(rows.iter().all(|row| row.upload_rejection().is_none()));
+        assert_eq!(store.get_unsynced().await.unwrap().len(), n as usize);
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.observe(attempt, now);
+        assert_eq!(backoff.failures(), 0);
+        assert!(!backoff.auth_rejected());
+        assert!(backoff.delete_pending(now));
+        assert!(!backoff.should_attempt(now));
+        assert!(backoff.retry_after(now) >= sync::SYNC_DELETE_PENDING_WAIT);
+        assert!(!backoff.should_attempt(
+            now + sync::SYNC_DELETE_PENDING_WAIT - std::time::Duration::from_secs(1)
+        ));
+        backoff.clear_auth_rejected();
+        assert!(backoff.should_attempt(now));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = br#"{"code":"stats_delete_pending"}"#;
+        let response = format!(
+            "HTTP/1.1 409 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut bytes = response.into_bytes();
+        bytes.extend_from_slice(body);
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 8192];
+            let mut got = Vec::new();
+            loop {
+                match std::io::Read::read(&mut sock, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        got.extend_from_slice(&buf[..n]);
+                        if got.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = std::io::Write::write_all(&mut sock, &bytes);
+        });
+        let server_url = format!("http://127.0.0.1:{port}");
+        let client = sync::SyncClient::new(config::SyncConfig {
+            server_url: server_url.clone(),
+            token: "tok".into(),
+        });
+        let status_dir = tempfile::tempdir().unwrap();
+        let status_store = storage::LocalStore::open(status_dir.path()).await.unwrap();
+        status_store
+            .insert_match(test_match("pending", "victory"))
+            .await
+            .unwrap();
+        let live = try_sync(&status_store, &client, status_dir.path(), None).await;
+        server.join().unwrap();
+        assert!(matches!(live, sync::SyncAttempt::StatsDeletePending));
+        assert_eq!(
+            sync::auth_pause_status(status_dir.path(), &server_url, "tok"),
+            Some(sync::SYNC_STATS_DELETE_PENDING_STATUS)
+        );
+        assert_eq!(
+            sync::SYNC_STATS_DELETE_PENDING_STATUS,
+            "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing."
+        );
+        let stored = status_store.get_all_matches().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(!stored[0].synced);
+        assert!(stored[0].upload_rejection().is_none());
+        assert_eq!(status_store.get_unsynced().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_409_falls_back_to_the_generic_server_error() {
+        let n = 4i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                let seen = calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(seen, 0, "an unknown 409 must not split the batch");
+                assert_eq!(matches.len(), n as usize);
+                Err(sync::SyncUploadError {
+                    message: "conflict".into(),
+                    status: Some(409),
+                    code: Some("not_a_known_conflict".into()),
+                    ..sync::SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert!(matches!(
+            attempt,
+            sync::SyncAttempt::ServerError { retry_after: None }
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(rows.iter().all(|row| !row.synced));
+        assert!(rows.iter().all(|row| row.upload_rejection().is_none()));
+        assert_eq!(store.get_unsynced().await.unwrap().len(), n as usize);
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.observe(attempt, now);
+        assert_eq!(backoff.failures(), 1);
+        assert!(!backoff.auth_rejected());
+        assert!(!backoff.holds_delete_pending());
+        assert_eq!(backoff.retry_after(now), sync::SYNC_BACKOFF_BASE);
+        assert!(backoff.retry_after(now) < sync::SYNC_DELETE_PENDING_WAIT);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = br#"{"code":"not_a_known_conflict"}"#;
+        let response = format!(
+            "HTTP/1.1 409 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut bytes = response.into_bytes();
+        bytes.extend_from_slice(body);
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 8192];
+            let mut got = Vec::new();
+            loop {
+                match std::io::Read::read(&mut sock, &mut buf) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        got.extend_from_slice(&buf[..read]);
+                        if got.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = std::io::Write::write_all(&mut sock, &bytes);
+        });
+        let server_url = format!("http://127.0.0.1:{port}");
+        let client = sync::SyncClient::new(config::SyncConfig {
+            server_url: server_url.clone(),
+            token: "tok".into(),
+        });
+        let status_dir = tempfile::tempdir().unwrap();
+        let status_store = storage::LocalStore::open(status_dir.path()).await.unwrap();
+        status_store
+            .insert_match(test_match("conflict", "victory"))
+            .await
+            .unwrap();
+        let live = try_sync(&status_store, &client, status_dir.path(), None).await;
+        server.join().unwrap();
+        assert!(matches!(
+            live,
+            sync::SyncAttempt::ServerError { retry_after: None }
+        ));
+        assert_eq!(
+            sync::auth_pause_status(status_dir.path(), &server_url, "tok"),
+            None
+        );
+        assert!(
+            status_store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.upload_rejection().is_none() && !row.synced)
+        );
     }
 
     #[tokio::test]

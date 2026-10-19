@@ -16,6 +16,14 @@ pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the to
 /// The GUI shows this string; the member relinks from Settings.
 pub const SYNC_TOKEN_EXPIRED_STATUS: &str = "Sync token expired, relink in Settings";
 
+/// Overview health copy while a stats delete is pending. The GUI shows this
+/// string. Sync stays queued until the member undoes the delete, or until
+/// the saved server URL or token changes.
+pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing.";
+
+/// JSON `code` on HTTP 409 while a stats delete is pending.
+const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
+
 /// Matches per stats upload. The server's `STATS_UPLOAD_BATCH_CAP` rejects
 /// a larger body with HTTP 413 `batch_too_large`. This client stays at or
 /// under the cap, and shrinks further when a 413 names a smaller one.
@@ -34,6 +42,8 @@ pub enum AuthPauseReason {
     Rejected,
     /// HTTP 401 with code `token_expired`.
     Expired,
+    /// HTTP 409 with code `stats_delete_pending`. Retries after an hour.
+    DeletePending,
 }
 
 /// First wait after a server/network upload failure. Doubles each consecutive
@@ -41,6 +51,11 @@ pub enum AuthPauseReason {
 pub const SYNC_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(15);
 /// Ceiling so a down server is retried, not forgotten, and not hammered.
 pub const SYNC_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Minimum wait after HTTP 409 `stats_delete_pending` before the next
+/// automatic upload. A saved URL or token change retries sooner. This wait
+/// is not capped by [`SYNC_BACKOFF_CAP`].
+pub const SYNC_DELETE_PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// How long to wait before the next periodic sync after `consecutive_failures`
 /// server/network errors in a row. Zero when there have been none.
@@ -81,6 +96,10 @@ pub enum SyncAttempt {
     /// HTTP 413 `batch_too_large` that the pass could not shrink below.
     /// Nothing in that request was written. Not a failure streak.
     BatchTooLarge,
+    /// HTTP 409 `stats_delete_pending`. Stop this pass and keep every row
+    /// queued. The next automatic attempt waits [`SYNC_DELETE_PENDING_WAIT`],
+    /// or until the saved URL or token changes. Not a failure streak.
+    StatsDeletePending,
     /// Nothing to upload, or the failure was local. Leave the clock alone.
     NoServerCall,
 }
@@ -93,7 +112,8 @@ pub struct SyncUploadError {
     pub status: Option<u16>,
     pub retry_after: Option<std::time::Duration>,
     /// Machine code from the JSON body: the `code` field, or `error` when
-    /// that string is `batch_too_large`, `token_expired`, or `rate_limited`.
+    /// that string is `batch_too_large`, `token_expired`, `rate_limited`,
+    /// or `stats_delete_pending`.
     pub code: Option<String>,
     /// `max_matches` from a 413 `batch_too_large` body.
     pub max_matches: Option<u64>,
@@ -114,19 +134,24 @@ impl SyncUploadError {
     }
 
     /// 401 `token_expired` pauses sync with the relink copy. Other 401 and
-    /// 403 responses pause with the rejected-token copy. 429 is rate-limit
-    /// backoff and does not grow the failure streak. 413 `batch_too_large`
-    /// is not a failure streak either: the sync pass shrinks and resends.
-    /// 503 may carry `Retry-After` as a wait floor. Other statuses, including
-    /// a bare 400 or 422, are server errors and ignore `Retry-After`. The
-    /// sync pass does not observe a 400 or 422 that way: [`isolate_rejected`]
-    /// splits the batch and quarantines the bad rows instead.
+    /// 403 responses pause with the rejected-token copy. 409
+    /// `stats_delete_pending` stops the pass and waits an hour. 429 is
+    /// rate-limit backoff and does not grow the failure streak. 413
+    /// `batch_too_large` is not a failure streak either: the sync pass
+    /// shrinks and resends. 503 may carry `Retry-After` as a wait floor.
+    /// Other statuses, including a bare 400, 422, or any other 409, are
+    /// server errors and ignore `Retry-After`. The sync pass does not
+    /// observe a 400 or 422 that way: [`isolate_rejected`] splits the batch
+    /// and quarantines the bad rows instead. A 409 is never split.
     pub fn attempt(&self) -> SyncAttempt {
         if self.is_token_expired() {
             return SyncAttempt::TokenExpired;
         }
         if self.is_batch_too_large() {
             return SyncAttempt::BatchTooLarge;
+        }
+        if self.is_stats_delete_pending() {
+            return SyncAttempt::StatsDeletePending;
         }
         match self.status {
             Some(401) | Some(403) => SyncAttempt::AuthRejected,
@@ -151,10 +176,16 @@ impl SyncUploadError {
         self.status == Some(413) && self.code.as_deref() == Some("batch_too_large")
     }
 
+    /// HTTP 409 whose JSON code is `stats_delete_pending`. The server wrote
+    /// nothing. The rows stay queued.
+    pub fn is_stats_delete_pending(&self) -> bool {
+        self.status == Some(409) && self.code.as_deref() == Some(STATS_DELETE_PENDING_CODE)
+    }
+
     /// HTTP 400 or 422: the payload was refused. Splitting the batch can
     /// isolate the bad rows. 413 `batch_too_large` is not one of these; the
     /// sync pass shrinks the chunk and resends. 5xx, transport errors, 401,
-    /// 403, and 429 are not either.
+    /// 403, 409, and 429 are not either.
     pub fn is_payload_reject(&self) -> bool {
         matches!(self.status, Some(400) | Some(422))
     }
@@ -214,6 +245,9 @@ pub struct SyncBackoff {
     /// Set on HTTP 401/403. Periodic sync stays off until
     /// [`Self::clear_auth_rejected`] (saved URL or token changed).
     auth_rejected: bool,
+    /// Set on HTTP 409 `stats_delete_pending`. Periodic sync stays off until
+    /// this instant, or until [`Self::clear_auth_rejected`].
+    delete_pending_until: Option<std::time::Instant>,
 }
 
 impl SyncBackoff {
@@ -226,10 +260,20 @@ impl SyncBackoff {
     }
 
     pub fn should_attempt(&self, now: std::time::Instant) -> bool {
-        if self.auth_rejected {
+        if self.auth_rejected || self.delete_pending(now) {
             return false;
         }
         self.next_attempt_at.is_none_or(|at| now >= at)
+    }
+
+    /// True while the stats-delete hold has not elapsed.
+    pub fn delete_pending(&self, now: std::time::Instant) -> bool {
+        self.delete_pending_until.is_some_and(|at| now < at)
+    }
+
+    /// True while a stats-delete hold is remembered, including after it elapsed.
+    pub fn holds_delete_pending(&self) -> bool {
+        self.delete_pending_until.is_some()
     }
 
     pub fn record_failure(&mut self, now: std::time::Instant) {
@@ -241,6 +285,7 @@ impl SyncBackoff {
         self.failures = 0;
         self.next_attempt_at = None;
         self.auth_rejected = false;
+        self.delete_pending_until = None;
     }
 
     /// Pause periodic sync. Does not grow the failure streak and does not
@@ -250,8 +295,19 @@ impl SyncBackoff {
         self.next_attempt_at = None;
     }
 
+    /// A saved URL or token change. Clears an auth pause and a stats-delete
+    /// hold so the next attempt can run immediately.
     pub fn clear_auth_rejected(&mut self) {
         self.auth_rejected = false;
+        if self.delete_pending_until.take().is_some() {
+            self.next_attempt_at = None;
+        }
+    }
+
+    /// HTTP 409 `stats_delete_pending`. Wait [`SYNC_DELETE_PENDING_WAIT`].
+    /// Does not grow the failure streak.
+    pub fn record_delete_pending(&mut self, now: std::time::Instant) {
+        self.delete_pending_until = Some(now + SYNC_DELETE_PENDING_WAIT);
     }
 
     /// HTTP 429. Schedule a wait of at least `retry_after` (the base delay
@@ -285,12 +341,18 @@ impl SyncBackoff {
         self.next_attempt_at = Some(now + wait);
     }
 
-    /// Remaining delay. Zero when an attempt is allowed.
+    /// Remaining delay. Zero when an attempt is allowed. A stats-delete hold
+    /// is included and is not capped at [`SYNC_BACKOFF_CAP`].
     pub fn retry_after(&self, now: std::time::Instant) -> std::time::Duration {
-        match self.next_attempt_at {
+        let scheduled = match self.next_attempt_at {
             Some(at) if at > now => at.saturating_duration_since(now),
             _ => std::time::Duration::ZERO,
-        }
+        };
+        let held = match self.delete_pending_until {
+            Some(at) if at > now => at.saturating_duration_since(now),
+            _ => std::time::Duration::ZERO,
+        };
+        scheduled.max(held)
     }
 
     pub fn observe(&mut self, attempt: SyncAttempt, now: std::time::Instant) {
@@ -302,6 +364,7 @@ impl SyncBackoff {
             }
             SyncAttempt::RateLimited { retry_after } => self.record_rate_limit(now, retry_after),
             SyncAttempt::AuthRejected | SyncAttempt::TokenExpired => self.record_auth_rejected(),
+            SyncAttempt::StatsDeletePending => self.record_delete_pending(now),
             SyncAttempt::BatchTooLarge | SyncAttempt::NoServerCall => {}
         }
     }
@@ -387,8 +450,9 @@ impl SyncClient {
     ///
     /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
     /// ([`isolate_rejected`], called from `try_sync_with`) bisects those
-    /// batches. This function sends one request. 413, 401, 403, and 429 are
-    /// not payload rejects. 429 and 503 keep `Retry-After`.
+    /// batches. This function sends one request. 413, 401, 403, 409, and 429
+    /// are not payload rejects. 429 and 503 keep `Retry-After`. 409
+    /// `stats_delete_pending` stops the pass without a split.
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],
@@ -449,8 +513,8 @@ struct ParsedUploadError {
 }
 
 /// Pull `code` / `max_matches` / `max_deleted_sessions` out of an error body.
-/// `error` is used as the code only for the three machine codes the sync
-/// pass branches on. A validation message stays in the display text.
+/// `error` is used as the code only for the machine codes the sync pass
+/// branches on. A validation message stays in the display text.
 fn parse_upload_error_body(body: &str) -> ParsedUploadError {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return ParsedUploadError {
@@ -471,7 +535,13 @@ fn parse_upload_error_body(body: &str) -> ParsedUploadError {
                 .and_then(|item| item.as_str())
                 .map(str::trim)
                 .filter(|code| {
-                    matches!(*code, "batch_too_large" | "token_expired" | "rate_limited")
+                    matches!(
+                        *code,
+                        "batch_too_large"
+                            | "token_expired"
+                            | "rate_limited"
+                            | "stats_delete_pending"
+                    )
                 })
                 .map(str::to_string)
         });
@@ -594,9 +664,9 @@ pub struct UploadIsolation {
     pub accepted: Vec<usize>,
     pub rejected: Vec<RejectedUpload>,
     pub deferred: Vec<usize>,
-    /// 5xx, network, 401, 403, 429, or 413. Splitting stops. Already accepted
-    /// indexes stay accepted. A 400 or 422 does not land here: those rows are
-    /// quarantined.
+    /// 5xx, network, 401, 403, 409, 429, or 413. Splitting stops. Already
+    /// accepted indexes stay accepted. A 400 or 422 does not land here: those
+    /// rows are quarantined. A 409 never quarantines.
     pub stopped: Option<SyncUploadError>,
     pub requests: usize,
 }
@@ -613,9 +683,10 @@ pub struct UploadIsolation {
 /// split is sent. If the single row is accepted, the rest of the slice is
 /// retried, so a good row still uploads.
 ///
-/// A 5xx, a network error, 401, 403, 413, or 429 does not split. 429 keeps
-/// `Retry-After` on [`UploadIsolation::stopped`]. The rest of the pass stops
-/// and those indexes are [`UploadIsolation::deferred`].
+/// A 5xx, a network error, 401, 403, 409, 413, or 429 does not split. 429
+/// keeps `Retry-After` on [`UploadIsolation::stopped`]. The rest of the pass
+/// stops and those indexes are [`UploadIsolation::deferred`]. 409
+/// `stats_delete_pending` is the same shape: one request, nothing quarantined.
 pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
 where
     F: FnMut(&[T]) -> Fut,
@@ -748,8 +819,9 @@ fn token_fingerprint(token: &str) -> String {
 struct AuthPauseFile {
     server_url: String,
     token_fingerprint: String,
-    /// `"expired"` for [`AuthPauseReason::Expired`]. Absent on older files
-    /// and on a plain rejection.
+    /// `"expired"` for [`AuthPauseReason::Expired`]. `"stats_delete_pending"`
+    /// for [`AuthPauseReason::DeletePending`]. Absent on older files and on
+    /// a plain rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -837,6 +909,7 @@ pub fn write_auth_pause_reason(
         reason: match reason {
             AuthPauseReason::Rejected => None,
             AuthPauseReason::Expired => Some("expired".to_string()),
+            AuthPauseReason::DeletePending => Some(STATS_DELETE_PENDING_CODE.to_string()),
         },
     };
     let path = auth_pause_path(data_dir);
@@ -858,17 +931,31 @@ pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> boo
     auth_pause_status(data_dir, server_url, token).is_some()
 }
 
-/// GUI health line when this URL and token are paused. `None` when sync
-/// should keep running.
-pub fn auth_pause_status(data_dir: &Path, server_url: &str, token: &str) -> Option<&'static str> {
+/// Why this URL and token are paused. `None` when sync should keep running.
+pub fn auth_pause_reason(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+) -> Option<AuthPauseReason> {
     let bytes = std::fs::read(auth_pause_path(data_dir)).ok()?;
     let file = serde_json::from_slice::<AuthPauseFile>(&bytes).ok()?;
     if file.server_url != server_url || file.token_fingerprint != token_fingerprint(token) {
         return None;
     }
     Some(match file.reason.as_deref() {
-        Some("expired") => SYNC_TOKEN_EXPIRED_STATUS,
-        _ => SYNC_TOKEN_REJECTED_STATUS,
+        Some("expired") => AuthPauseReason::Expired,
+        Some(STATS_DELETE_PENDING_CODE) => AuthPauseReason::DeletePending,
+        _ => AuthPauseReason::Rejected,
+    })
+}
+
+/// GUI health line when this URL and token are paused. `None` when sync
+/// should keep running.
+pub fn auth_pause_status(data_dir: &Path, server_url: &str, token: &str) -> Option<&'static str> {
+    Some(match auth_pause_reason(data_dir, server_url, token)? {
+        AuthPauseReason::Rejected => SYNC_TOKEN_REJECTED_STATUS,
+        AuthPauseReason::Expired => SYNC_TOKEN_EXPIRED_STATUS,
+        AuthPauseReason::DeletePending => SYNC_STATS_DELETE_PENDING_STATUS,
     })
 }
 
@@ -2192,6 +2279,7 @@ mod tests {
             Some(401),
             Some(403),
             Some(429),
+            Some(409),
         ];
         for status in cases {
             let calls = std::sync::atomic::AtomicUsize::new(0);
@@ -2229,6 +2317,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stats_delete_pending_409_does_not_split_or_quarantine() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows = ["a", "b", "c", "d"];
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Err(SyncUploadError {
+                    message: "stats delete pending".into(),
+                    status: Some(409),
+                    code: Some("stats_delete_pending".into()),
+                    ..SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let err = isolation.stopped.expect("stopped");
+        assert!(err.is_stats_delete_pending());
+        assert!(matches!(err.attempt(), SyncAttempt::StatsDeletePending));
+    }
+
+    #[tokio::test]
+    async fn unknown_409_does_not_split_and_stays_a_server_error() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows = ["a", "b", "c", "d"];
+        let isolation = isolate_rejected(&rows, |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Err(SyncUploadError {
+                    message: "conflict".into(),
+                    status: Some(409),
+                    code: Some("not_a_known_conflict".into()),
+                    ..SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let err = isolation.stopped.expect("stopped");
+        assert!(!err.is_stats_delete_pending());
+        assert!(matches!(
+            err.attempt(),
+            SyncAttempt::ServerError { retry_after: None }
+        ));
     }
 
     #[test]
@@ -2347,6 +2488,65 @@ mod tests {
         assert!(backoff.auth_rejected());
         assert_eq!(backoff.failures(), 0);
         assert!(!backoff.should_attempt(t0));
+    }
+
+    #[tokio::test]
+    async fn upload_409_stats_delete_pending_waits_an_hour_without_a_failure_streak() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = r#"{"code":"stats_delete_pending"}"#;
+        let response = format!(
+            "HTTP/1.1 409 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let response_bytes = response.into_bytes();
+        let server = std::thread::spawn(move || exchange_http(listener, &response_bytes));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("409");
+        let _ = server.join().expect("server");
+        assert_eq!(err.code.as_deref(), Some("stats_delete_pending"));
+        assert!(err.is_stats_delete_pending());
+        assert!(matches!(err.attempt(), SyncAttempt::StatsDeletePending));
+        let t0 = std::time::Instant::now();
+        let mut backoff = SyncBackoff::default();
+        backoff.observe(err.attempt(), t0);
+        assert_eq!(backoff.failures(), 0);
+        assert!(!backoff.auth_rejected());
+        assert!(backoff.delete_pending(t0));
+        assert!(!backoff.should_attempt(t0));
+        assert!(backoff.retry_after(t0) >= SYNC_DELETE_PENDING_WAIT);
+        assert!(
+            !backoff
+                .should_attempt(t0 + SYNC_DELETE_PENDING_WAIT - std::time::Duration::from_secs(1))
+        );
+        assert!(backoff.should_attempt(t0 + SYNC_DELETE_PENDING_WAIT));
+        backoff.clear_auth_rejected();
+        assert!(!backoff.holds_delete_pending());
+        assert!(backoff.should_attempt(t0));
+    }
+
+    #[test]
+    fn delete_pending_pause_uses_the_account_page_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_auth_pause_reason(
+            dir.path(),
+            "https://crew.example",
+            "old-token",
+            AuthPauseReason::DeletePending,
+        )
+        .unwrap();
+        assert_eq!(
+            auth_pause_reason(dir.path(), "https://crew.example", "old-token"),
+            Some(AuthPauseReason::DeletePending)
+        );
+        assert_eq!(
+            auth_pause_status(dir.path(), "https://crew.example", "old-token"),
+            Some(SYNC_STATS_DELETE_PENDING_STATUS)
+        );
+        assert_eq!(
+            SYNC_STATS_DELETE_PENDING_STATUS,
+            "Your site stats are scheduled for deletion. Undo it on the website account page to resume syncing."
+        );
     }
 
     #[tokio::test]
