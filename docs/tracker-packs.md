@@ -652,13 +652,15 @@ stored).
 
 The name reader reads the player's own row from `names-v1.tar` when that
 pack is loaded. The pack is optional and holds single-letter templates
-only, never a member's name. It is loaded once, at startup when the folder
-is already there, or once in the background when sync installs it later.
-That load is kept for the rest of the run. Daemon startup does not wait
-for it. The name read that notices a newly installed folder still uses
-Tesseract; the next read uses the cached pack. A folder swapped in after
-that load is left until the next tracker start. With the switch off, or
-before the pack has loaded, the name read is Tesseract.
+only, never a member's name. It is loaded once, on a background thread:
+at startup when the folder is already there, or when sync installs it
+later. That load is kept for the rest of the run. Daemon startup does not
+wait for it. A name read before the load finishes reuses the Tesseract
+rows already in hand (ocr-v1's cell rows, or the new reader's one name
+window read) and tags them `ocr-v1`. It does not start a second Tesseract
+name read. The next read after the load uses the cached pack. A folder
+swapped in after that load is left until the next tracker start. With the
+switch off, the name read is those same Tesseract rows.
 
 The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
 at the end of a match) from the end-title templates of `words-v1.tar`:

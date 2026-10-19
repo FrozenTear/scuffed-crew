@@ -181,12 +181,13 @@ pub fn load_installed(data_dir: &std::path::Path) -> Result<NamePack, PackError>
 
 /// The name reader's pack, loaded once and then kept.
 ///
-/// A names-v1 pack is about 29 MB and takes about 250 ms to load, so a name
-/// read must not load it again. Startup loads the folder when it is already
-/// there. When pack sync installs it later, the next name read starts one
-/// background load and still uses Tesseract; after that load the cached
-/// pack is what every later read uses. A folder swapped in after that is
-/// left for the next tracker start.
+/// In memory a loaded pack is about 29 MB. The tar on disk is 1,966,080
+/// bytes. The load takes about 250 ms, so a name read must not load it
+/// again. Startup starts that load on a background thread and does not
+/// wait. When pack sync installs the folder later, the next name read
+/// starts the same one load and still uses the Tesseract rows already in
+/// hand; after that load the cached pack is what every later read uses.
+/// A folder swapped in after that is left for the next tracker start.
 #[derive(Debug, Clone)]
 pub struct LiveNames {
     inner: Arc<LiveInner>,
@@ -203,6 +204,32 @@ struct LiveInner {
     loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     #[cfg(test)]
     spawns: std::sync::atomic::AtomicUsize,
+    /// When set, the background load waits until the test releases it.
+    #[cfg(test)]
+    gate: std::sync::Mutex<Option<std::sync::Arc<LoadGate>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct LoadGate {
+    go: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl LoadGate {
+    fn closed() -> Self {
+        Self {
+            go: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn release(&self) {
+        let mut go = self.go.lock().unwrap();
+        *go = true;
+        self.cv.notify_all();
+    }
 }
 
 impl LiveInner {
@@ -220,26 +247,65 @@ impl LiveInner {
     }
 }
 
-impl LiveNames {
-    /// Load now when the folder is already installed. A missing folder stays
-    /// empty until [`Self::current`] sees it once.
-    pub fn load(dir: std::path::PathBuf) -> Self {
-        let inner = LiveInner {
-            dir,
-            cached: std::sync::RwLock::new(None),
-            settled: std::sync::atomic::AtomicBool::new(false),
-            loader: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            spawns: std::sync::atomic::AtomicUsize::new(0),
-        };
-        match NamePack::load(&inner.dir) {
-            Ok(pack) => inner.cache(pack),
-            Err(err) => {
-                tracing::warn!(reason = %err, templates = 0, "names-v1 pack was not loaded");
+impl LiveInner {
+    fn wait_for_test_gate(&self) {
+        #[cfg(test)]
+        {
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                let mut go = gate.go.lock().unwrap();
+                while !*go {
+                    go = gate.cv.wait(go).unwrap();
+                }
             }
         }
+    }
+}
+
+impl LiveNames {
+    fn empty(dir: std::path::PathBuf) -> Self {
         Self {
-            inner: Arc::new(inner),
+            inner: Arc::new(LiveInner {
+                dir,
+                cached: std::sync::RwLock::new(None),
+                settled: std::sync::atomic::AtomicBool::new(false),
+                loader: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                spawns: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                gate: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Start loading and return. When the folder is already installed, one
+    /// background thread loads it. A missing folder stays empty until
+    /// [`Self::current`] sees it once. Neither path blocks the caller.
+    pub fn load(dir: std::path::PathBuf) -> Self {
+        let live = Self::empty(dir);
+        live.kick();
+        live
+    }
+
+    /// Like [`Self::load`], but the background load waits until `release`.
+    #[cfg(test)]
+    pub(crate) fn load_held(dir: std::path::PathBuf) -> (Self, impl FnOnce()) {
+        let gate = std::sync::Arc::new(LoadGate::closed());
+        let live = Self::empty(dir);
+        *live.inner.gate.lock().unwrap() = Some(std::sync::Arc::clone(&gate));
+        live.kick();
+        (live, move || gate.release())
+    }
+
+    fn kick(&self) {
+        if self.inner.dir.is_dir() {
+            self.start_late_load();
+        } else {
+            tracing::warn!(
+                reason = %PackError::Missing,
+                templates = 0,
+                "names-v1 pack was not loaded"
+            );
         }
     }
 
@@ -275,9 +341,12 @@ impl LiveNames {
         let inner = Arc::clone(&self.inner);
         let spawned = std::thread::Builder::new()
             .name("name-pack-reload".into())
-            .spawn(move || match NamePack::load(&inner.dir) {
-                Ok(pack) => inner.cache(pack),
-                Err(err) => inner.give_up(&err),
+            .spawn(move || {
+                inner.wait_for_test_gate();
+                match NamePack::load(&inner.dir) {
+                    Ok(pack) => inner.cache(pack),
+                    Err(err) => inner.give_up(&err),
+                }
             });
         match spawned {
             Ok(handle) => {
@@ -330,11 +399,12 @@ impl NameSwitch {
         }
     }
 
-    /// Load at startup. A missing or refused pack is logged here (template
-    /// count and the reason, never a player name). A pack that lands later
-    /// is loaded once by [`Self::pack`]. Until that load finishes,
-    /// [`read_names`] stays on Tesseract. A pack that is already cached is
-    /// not loaded again.
+    /// Start the load and return. A missing or refused pack is logged (template
+    /// count and the reason, never a player name) on the background thread,
+    /// or here when the folder is not there yet. A pack that lands later is
+    /// loaded once by [`Self::pack`]. Until that load finishes, name reads
+    /// use the Tesseract rows already in hand. A cached pack is not loaded
+    /// again.
     pub fn load(enabled: bool, data_dir: &std::path::Path) -> Self {
         if !enabled {
             return Self::off();
@@ -345,14 +415,28 @@ impl NameSwitch {
         }
     }
 
+    /// [`Self::load`] with the background load held until `release` (tests).
+    #[cfg(test)]
+    pub(crate) fn load_held(data_dir: &std::path::Path) -> (Self, impl FnOnce()) {
+        let (live, release) = LiveNames::load_held(pack::dir_in(data_dir));
+        (
+            Self {
+                enabled: true,
+                live: Some(live),
+            },
+            release,
+        )
+    }
+
     /// The cached pack. `None` when the switch is off, the folder is missing
-    /// or refused, or the one late load has not finished. [`read_names`]
-    /// then uses today's Tesseract path.
+    /// or refused, or the one load has not finished. [`match_player_row`]
+    /// then reuses the Tesseract rows already in hand.
     pub fn pack(&self) -> Option<Arc<NamePack>> {
         self.live.as_ref().and_then(LiveNames::current)
     }
 
-    /// Late loads started so far (tests). Startup does not count.
+    /// Background loads started so far (tests), including the one startup
+    /// starts when the folder is already there.
     #[cfg(test)]
     pub(crate) fn reload_spawns(&self) -> usize {
         self.live
@@ -517,10 +601,11 @@ fn player_row(name: crate::parse::NameMatch, recognizer: NameRecognizer) -> Play
 /// The row of `player` from the name reader, or from `tesseract_rows`.
 ///
 /// The switch off uses `tesseract_rows` and `policy` and does not look at
-/// `reader`. The switch on with no pack (`min_confidence` is `None`) uses
-/// `reader.rows` as a full board and does not call `tesseract_rows`: that
-/// list is already the Tesseract path inside [`read_names`]. The switch on
-/// with a pack uses a row whose template name meets the pack threshold.
+/// `reader`. [`match_player_row`] does the same when the switch is on and
+/// no pack is loaded, so this function is not asked to treat a missing pack
+/// as a full board. `min_confidence: None` still matches `reader.rows` as a
+/// full board. The switch on with a pack uses a row whose template name
+/// meets the pack threshold.
 /// When the player's own row is blank or under that threshold, only the
 /// weak rows are filled from `tesseract_rows` and the match is tried again.
 /// A full board of sure names that does not contain the player does not
@@ -591,6 +676,13 @@ pub fn choose_player_row(
 /// Find `player` on `board`. `tesseract_rows` is the tracker's current name
 /// read for this cv mode (cell rows under ocr-v1, name windows under the
 /// new reader). See [`choose_player_row`].
+///
+/// With the switch on and no pack loaded (sync off, before install, or the
+/// read that notices a late install), this does not call [`read_names`].
+/// That would be a second Tesseract name read under ocr-v1, and it would
+/// match the new rows as a full board instead of the cell rows already in
+/// `tesseract_rows`. Those rows are matched with `policy` and tagged
+/// [`NameRecognizer::OcrV1`].
 pub fn match_player_row(
     board: &DynamicImage,
     team_size: usize,
@@ -602,16 +694,18 @@ pub fn match_player_row(
     if !switch.enabled {
         return choose_player_row(player, team_size, false, None, policy, tesseract_rows);
     }
-    let pack = switch.pack();
-    let read = read_names(board, team_size, pack.as_deref());
-    let min_confidence = pack.as_ref().map(|pack| pack.params.min_confidence);
+    let Some(pack) = switch.pack() else {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
+    };
+    let read = read_names(board, team_size, Some(pack.as_ref()));
     choose_player_row(
         player,
         team_size,
         true,
         Some(ReaderNames {
             rows: &read.rows,
-            min_confidence,
+            min_confidence: Some(pack.params.min_confidence),
         }),
         policy,
         tesseract_rows,

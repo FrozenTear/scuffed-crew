@@ -324,7 +324,7 @@ fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
 }
 
 #[test]
-fn the_switch_on_with_no_pack_uses_read_names_and_not_a_second_fallback() {
+fn the_switch_on_with_no_pack_reuses_the_cell_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let loaded = NameSwitch::load(false, tmp.path());
     assert!(!loaded.enabled);
@@ -333,38 +333,30 @@ fn the_switch_on_with_no_pack_uses_read_names_and_not_a_second_fallback() {
     assert!(missing.enabled);
     assert!(missing.pack().is_none());
 
+    // ocr-v1 already read these cell rows. A second Tesseract name read
+    // would show up on the OCR gate, and a full-board match would refuse
+    // this short list (4 rows, team size 5).
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
     let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
-    let mut called = false;
-    let found = match_player_row(&board, 5, "CAB", &missing, BoardMatch::FullBoard, || {
-        called = true;
-        (0..10).map(|_| named("CAB", 90)).collect()
+    let mut calls = 0;
+    let found = match_player_row(&board, 5, "CAB", &missing, BoardMatch::Cells, || {
+        calls += 1;
+        vec![
+            named("OTHER", 80),
+            named("OTHER", 80),
+            named("CAB", 40),
+            named("OTHER", 70),
+        ]
     });
-    assert!(!called, "no pack: read_names is the Tesseract path");
-    assert!(found.is_none(), "OCR off leaves that path with no rows");
-    let blocked = off.blocked();
-    assert_eq!(blocked.len(), 1, "{blocked:?}");
-    assert_eq!(
-        blocked[0].site.entry,
-        "recognize_scoreboard_names_pre_cropped"
-    );
-
-    // No pack: the rows read_names already returned are Tesseract, so the
-    // upload id is ocr-v1 and tesseract_rows is not called again.
-    let found = choose_player_row(
-        "CAB",
-        1,
-        true,
-        Some(ReaderNames {
-            rows: &[named("CAB", 40), blank_row()],
-            min_confidence: None,
-        }),
-        BoardMatch::Cells,
-        || panic!("no pack does not call tesseract_rows"),
-    );
+    assert_eq!(calls, 1, "the cell rows are used once");
     assert_eq!(
         found.map(|m| (m.name.row, m.recognizer)),
-        Some((0, NameRecognizer::OcrV1))
+        Some((2, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "no pack does not start a second Tesseract name read: {:?}",
+        off.blocked()
     );
 }
 
@@ -516,6 +508,7 @@ fn a_loaded_pack_that_abstains_fills_the_row_from_tesseract() {
     let dir = tmp.path().join("templates").join("names-v1");
     write_pack(&dir, &["ABC"]);
     let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
     assert!(switch.pack().is_some());
     // Flat colour: no letter line, so every row is blank.
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
@@ -558,12 +551,15 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
         called = true;
         vec![named("CAB", 70), named("OTHER", 70)]
     });
-    assert!(!called, "the in-flight reload is not a second fallback");
-    assert!(found.is_none());
+    assert!(called, "the noticing read reuses the Tesseract rows");
     assert_eq!(
-        off.blocked().len(),
-        1,
-        "until the load finishes, read_names is the Tesseract path"
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "that read does not start a second Tesseract name read: {:?}",
+        off.blocked()
     );
     drop(off);
 
@@ -607,15 +603,20 @@ fn a_names_pack_loaded_at_startup_is_cached() {
     let tmp = tempfile::tempdir().unwrap();
     write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
     let switch = NameSwitch::load(true, tmp.path());
+    assert_eq!(
+        switch.reload_spawns(),
+        1,
+        "startup starts one background load"
+    );
+    switch.wait_reload();
     let loaded = switch.pack().expect("startup load");
-    assert_eq!(switch.reload_spawns(), 0, "startup is not a late load");
     for _ in 0..20 {
         assert!(std::sync::Arc::ptr_eq(
             &loaded,
             &switch.pack().expect("cached")
         ));
     }
-    assert_eq!(switch.reload_spawns(), 0);
+    assert_eq!(switch.reload_spawns(), 1);
     let staging = tmp.path().join("templates").join(".names-v1-next");
     write_pack(&staging, &["CAB"]);
     crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
@@ -623,7 +624,47 @@ fn a_names_pack_loaded_at_startup_is_cached() {
         &loaded,
         &switch.pack().expect("still the startup pack")
     ));
-    assert_eq!(switch.reload_spawns(), 0);
+    assert_eq!(switch.reload_spawns(), 1);
+}
+
+/// Startup returns before the pack is loaded. A name read in that window
+/// keeps ocr-v1's cell-row match and does not read names again.
+#[test]
+fn startup_returns_before_the_pack_load_and_keeps_the_cell_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let (switch, release) = NameSwitch::load_held(tmp.path());
+    assert!(
+        switch.pack().is_none(),
+        "startup returned before the load finished"
+    );
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut calls = 0;
+    let found = match_player_row(&board, 5, "CAB", &switch, BoardMatch::Cells, || {
+        calls += 1;
+        vec![
+            named("OTHER", 80),
+            named("OTHER", 80),
+            named("CAB", 40),
+            named("OTHER", 70),
+        ]
+    });
+    assert_eq!(calls, 1);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((2, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "the in-flight startup load does not read names again: {:?}",
+        off.blocked()
+    );
+    drop(off);
+    release();
+    switch.wait_reload();
+    assert!(switch.pack().is_some(), "the one startup load is cached");
+    assert_eq!(switch.reload_spawns(), 1);
 }
 
 /// Rewrite a test pack's manifest `files` map into pack sync's array form.

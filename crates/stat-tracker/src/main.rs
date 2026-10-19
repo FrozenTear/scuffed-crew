@@ -655,6 +655,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         shadow: shadow::worker::ShadowWorker::start_for_reader(&config, reader),
         use_new_reader,
         own_name: open_own_name_seeds(use_new_reader, &config),
+        // Returns immediately. The names-v1 load, when the folder is already
+        // there, runs on one background thread. Reads before it finishes
+        // reuse the Tesseract rows already in hand.
         names: names::NameSwitch::load(config.name_reader, &config.data_dir),
     });
     // Watches the reader packs while OCR is asked off: a pack that goes away
@@ -5196,10 +5199,11 @@ struct OwnRowChoice {
 /// `name_reader` on asks [`names::match_player_row`]. A loaded names-v1
 /// pack supplies a row when that row's confidence meets the pack's own
 /// threshold. A blank row, or one under the threshold, is filled from
-/// Tesseract for that row. With the switch on and no pack,
-/// [`names::read_names`] is already that Tesseract read, so this function
-/// does not read the board a second time. With the switch off, the
-/// Tesseract read is the one this fallback used before the name reader.
+/// Tesseract for that row. With the switch on and no pack, the match uses
+/// this function's one name-window read and does not call
+/// [`names::read_names`], so the board is not read a second time. With the
+/// switch off, the Tesseract read is the one this fallback used before the
+/// name reader.
 ///
 /// With classic OCR off there is no such read: it returns `None` before
 /// anything of OCR is touched (no crop, no OCR pool, no call at the gate).
