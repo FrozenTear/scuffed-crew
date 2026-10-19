@@ -26,10 +26,11 @@ pub const CONFIRM_WORD: &str = "DELETE";
 pub const WIPED_COPY: &str = "\
 Everything on this PC is deleted. Stats already synced to the site stay there until you delete them on the site.";
 
-/// Shared ending of the site success line. Undo is on the website only.
-/// This app does not call a restore endpoint.
-pub const SITE_DELETE_UNDO: &str =
-    "You can undo this from your account page on the website until then.";
+/// Site half of the success line. `{date}` is the local calendar date.
+/// Undo does not restore the old token, so this one sentence names both
+/// steps. This app does not call a restore endpoint.
+pub const SITE_DELETE_SUCCESS: &str = "\
+Your stats on the site will be deleted on {date}. To undo, go to your account page on the website before then, then make a new sync token there and paste it into the app.";
 
 /// Used when a 200 body has no usable `stats_delete_scheduled_at`.
 pub const SITE_DELETE_FALLBACK_WHEN: &str = "in 7 days";
@@ -37,16 +38,14 @@ pub const SITE_DELETE_FALLBACK_WHEN: &str = "in 7 days";
 /// JSON body for `DELETE /api/stats/me`. Exact and case-sensitive.
 const SITE_DELETE_BODY: &str = r#"{"confirm":"delete my stats"}"#;
 
-/// Local wipe line plus the site schedule. `when` is a local calendar date.
-/// `None` uses [`SITE_DELETE_FALLBACK_WHEN`].
+/// Local wipe line plus [`SITE_DELETE_SUCCESS`]. `when` is a local calendar
+/// date. `None` replaces `on {date}` with [`SITE_DELETE_FALLBACK_WHEN`].
 pub fn wiped_with_site(when: Option<&str>) -> String {
-    let when = match when {
-        Some(date) => format!("on {date}"),
-        None => SITE_DELETE_FALLBACK_WHEN.to_string(),
+    let site = match when {
+        Some(date) => SITE_DELETE_SUCCESS.replace("{date}", date),
+        None => SITE_DELETE_SUCCESS.replace("on {date}", SITE_DELETE_FALLBACK_WHEN),
     };
-    format!(
-        "Everything on this PC is deleted. Your stats on the site will be deleted {when}. {SITE_DELETE_UNDO}"
-    )
+    format!("Everything on this PC is deleted. {site}")
 }
 
 /// Label for the site checkbox. Shown only while a sync token is linked.
@@ -678,7 +677,7 @@ token = \"synthetic-token-value\"
             WIPED_COPY,
             dated.as_str(),
             fallback.as_str(),
-            SITE_DELETE_UNDO,
+            SITE_DELETE_SUCCESS,
             SITE_DELETE_FALLBACK_WHEN,
             SITE_DELETE_LABEL,
             SITE_CONFIRM_COPY,
@@ -690,11 +689,22 @@ token = \"synthetic-token-value\"
         assert!(SITE_CONFIRM_COPY.contains("every PC"));
         assert!(SITE_CONFIRM_COPY.contains("account stays"));
         assert_eq!(
-            dated,
-            "Everything on this PC is deleted. Your stats on the site will be deleted on 26 Oct 2026. You can undo this from your account page on the website until then."
+            SITE_DELETE_SUCCESS,
+            "Your stats on the site will be deleted on {date}. To undo, go to your account page on the website before then, then make a new sync token there and paste it into the app."
         );
+        assert_eq!(
+            dated,
+            format!(
+                "Everything on this PC is deleted. {}",
+                SITE_DELETE_SUCCESS.replace("{date}", "26 Oct 2026")
+            )
+        );
+        assert!(dated.contains("make a new sync token"));
+        assert!(dated.contains("paste it into the app"));
         assert!(fallback.contains("will be deleted in 7 days"));
-        assert!(fallback.contains(SITE_DELETE_UNDO));
+        assert!(fallback.contains("make a new sync token"));
+        assert!(fallback.contains("paste it into the app"));
+        assert!(!fallback.contains("on in 7 days"));
         assert!(!dated.contains("stay there"));
         assert_eq!(SITE_DELETE_BODY, r#"{"confirm":"delete my stats"}"#);
     }
