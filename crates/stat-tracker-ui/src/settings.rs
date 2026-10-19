@@ -517,7 +517,8 @@ impl SettingsForm {
     }
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
-    /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
+    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`, and
+    /// `name_reader` (Settings has no control for it yet).
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
     /// keeps the file's value (unset stays unset) unless the checkbox was
@@ -557,6 +558,7 @@ impl SettingsForm {
             ),
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
+            name_reader: base.name_reader,
             reader: if self.new_reader {
                 stat_tracker::config::ReaderSetting::New
             } else {
@@ -2381,6 +2383,26 @@ cooldown_secs = 60
         assert!(out.shadow_recognizer);
         let raw = toml::to_string_pretty(&out).unwrap();
         assert!(raw.contains("shadow_recognizer = true"), "{raw}");
+    }
+
+    #[test]
+    fn save_keeps_name_reader_off_from_the_file() {
+        let base: Config =
+            toml::from_str("data_dir = \"/tmp/sst-name-reader\"\nname_reader = false\n")
+                .expect("config with name_reader = false must parse");
+        assert!(!base.name_reader);
+        let form = SettingsForm::from_config_and_shadow(
+            &base,
+            Config::shadow_control(base.shadow_recognizer, None),
+        );
+        let out = form.to_config(&base);
+        assert!(
+            !out.name_reader,
+            "Settings has no control for it, so the file value stays"
+        );
+        let raw = toml::to_string_pretty(&out).unwrap();
+        assert!(raw.contains("name_reader = false"), "{raw}");
+        assert!(form.to_config(&Config::default()).name_reader);
     }
 
     #[test]
