@@ -21,6 +21,14 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub session_config: SessionConfig,
     pub oauth_config: OAuthConfig,
+    /// Raw `REDIRECT_BASE_URL` captured once at startup.
+    ///
+    /// No localhost default. [`OAuthConfig::redirect_base_url`] substitutes
+    /// `http://localhost:3000` when the variable is unset, and that default
+    /// must not become an AUTH relay. Blank and whitespace-only values are
+    /// `None`. A path or query on the value is ignored when the allow-list
+    /// builds `/relay`. See [`auth_redirect_base_from_env`].
+    pub auth_redirect_base: Option<String>,
     pub upload_dir: PathBuf,
     /// Private directory for tracker bug-report zips. Not served over HTTP.
     pub reports_dir: PathBuf,
@@ -485,6 +493,19 @@ pub fn normalize_relay_url(url: Option<String>) -> Option<String> {
 /// Load primary relay URL from `NOSTR_RELAY_URL`, ignoring empty values.
 pub fn relay_url_from_env() -> Option<String> {
     normalize_relay_url(std::env::var("NOSTR_RELAY_URL").ok())
+}
+
+/// `REDIRECT_BASE_URL` as set in the process environment, without the
+/// localhost default applied by [`OAuthConfig::from_env`].
+///
+/// Call this once at startup and store the result on
+/// [`AppState::auth_redirect_base`]. Blank and whitespace-only values are
+/// `None`.
+pub fn auth_redirect_base_from_env() -> Option<String> {
+    std::env::var("REDIRECT_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Validate a candidate NIP-05 domain, returning it normalized or `None`.

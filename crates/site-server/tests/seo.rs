@@ -84,6 +84,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
             redirect_base_url: PUBLIC_BASE.into(),
             allowed_origins: vec![PUBLIC_BASE.into()],
         },
+        auth_redirect_base: None,
         upload_dir,
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,

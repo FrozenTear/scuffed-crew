@@ -104,9 +104,10 @@ fn charge_interactive_send(state: &AppState, member_id: &str) -> Result<(), Send
 ///
 /// Blank lines are dropped. Configured and extra entries must be `ws` or
 /// `wss`; an `http` or `https` line is ignored. `redirect_base` is
-/// `REDIRECT_BASE_URL` with no localhost default: an https base adds
-/// `wss://host/relay` and `https://host/relay`, and an http base adds the
-/// `ws` and `http` pair. A missing or blank base adds nothing.
+/// [`AppState::auth_redirect_base`], the raw `REDIRECT_BASE_URL` from
+/// startup, with no localhost default. An https base adds `wss://host/relay`
+/// and `https://host/relay`, and an http base adds the `ws` and `http` pair.
+/// A path or query on the base is dropped. A missing or blank base adds nothing.
 fn auth_relay_candidates(
     configured: Option<&str>,
     extra_lines: &str,
@@ -146,14 +147,10 @@ async fn load_auth_relay_candidates(state: &AppState) -> Vec<String> {
             String::new()
         }
     };
-    // Read the env var itself. `OAuthConfig::from_env` substitutes
-    // `http://localhost:3000` when this is unset, and that default must
-    // not become an AUTH relay.
-    let redirect_base = std::env::var("REDIRECT_BASE_URL").ok();
     auth_relay_candidates(
         state.relay_url.as_deref(),
         &extras,
-        redirect_base.as_deref(),
+        state.auth_redirect_base.as_deref(),
     )
 }
 
@@ -972,6 +969,7 @@ mod tests {
                 redirect_base_url: "http://localhost:3000".into(),
                 allowed_origins: vec!["http://localhost:3000".into()],
             },
+            auth_redirect_base: None,
             upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
             reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
             reports_enabled: true,
@@ -1329,6 +1327,72 @@ mod tests {
         assert!(
             scuffed_chat::allowed_auth_relay("https://ignored.example", refs.iter().copied())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn auth_token_allowlist_accepts_own_relay_from_http_base() {
+        let allowed = auth_relay_candidates(
+            Some("ws://strfry:7777"),
+            "wss://extra.example/\n",
+            Some("http://127.0.0.1:3000/app?x=1"),
+        );
+        let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://127.0.0.1:3000/relay", refs.iter().copied())
+                .as_deref(),
+            Some("ws://127.0.0.1:3000/relay")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("http://127.0.0.1:3000/relay/", refs.iter().copied())
+                .as_deref(),
+            Some("http://127.0.0.1:3000/relay")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://strfry:7777", refs.iter().copied()).as_deref(),
+            Some("ws://strfry:7777")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("wss://extra.example/", refs.iter().copied())
+                .as_deref(),
+            Some("wss://extra.example")
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("wss://evil.example/relay", refs.iter().copied())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_auth_relay_candidates_reads_redirect_base_from_state() {
+        let mut state = test_state().await;
+        state.relay_url = Some("ws://strfry:7777".into());
+        state.auth_redirect_base = Some("http://127.0.0.1:3000".into());
+
+        let allowed = load_auth_relay_candidates(&state).await;
+        let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://127.0.0.1:3000/relay/", refs.iter().copied())
+                .as_deref(),
+            Some("ws://127.0.0.1:3000/relay")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("http://127.0.0.1:3000/relay", refs.iter().copied())
+                .as_deref(),
+            Some("http://127.0.0.1:3000/relay")
+        );
+
+        state.auth_redirect_base = None;
+        let allowed = load_auth_relay_candidates(&state).await;
+        let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        assert!(
+            scuffed_chat::allowed_auth_relay("ws://127.0.0.1:3000/relay", refs.iter().copied())
+                .is_none()
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://strfry:7777", refs.iter().copied()).as_deref(),
+            Some("ws://strfry:7777")
         );
     }
 
