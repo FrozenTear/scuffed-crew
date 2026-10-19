@@ -203,8 +203,16 @@ pub struct InstalledNames {
 /// reload checks the folder against what sync installed before it swaps
 /// the pack in, and a pack that fails leaves the current one in use. The
 /// swap replaces one `Arc` under a lock: a read in flight keeps the pack it
-/// started with. Nothing else reloads: a folder changed by hand waits for
-/// the next start.
+/// started with.
+///
+/// The desktop app's setup guide installs packs from another process, so
+/// the daemon gets no call for those. Each name read also looks at the
+/// folder's `manifest.json` (one `stat`). When it changed since the last
+/// load and pack sync recorded that install (`pack-versions.json` and
+/// `pack-manifests.json`, see [`crate::packs::installed_manifest`]), the
+/// same checked reload runs in the background, and that read keeps the pack
+/// it has. A folder changed by hand has no record and waits for the next
+/// start.
 #[derive(Debug, Clone)]
 pub struct LiveNames {
     inner: Arc<LiveInner>,
@@ -223,6 +231,9 @@ struct LiveInner {
     /// Held for the whole of every load, so two loads never interleave and
     /// the last one to run is the one that reflects the folder.
     loading: std::sync::Mutex<()>,
+    /// `manifest.json`'s stamp when the latest load started. A name read
+    /// that sees another stamp starts a checked reload.
+    seen: std::sync::Mutex<Option<Stamp>>,
     #[cfg(test)]
     spawns: std::sync::atomic::AtomicUsize,
     /// When set, the background load waits until the test releases it.
@@ -273,6 +284,11 @@ impl LiveInner {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Remember the manifest's stamp as this load starts.
+    fn note_stamp(&self) {
+        *self.seen.lock().unwrap_or_else(|err| err.into_inner()) = manifest_stamp(&self.dir);
+    }
+
     fn cached_templates(&self) -> usize {
         self.cached
             .read()
@@ -286,6 +302,7 @@ impl LiveInner {
     /// reason only, never a letter or a name.
     fn reload(&self, expected: &InstalledNames) {
         let _loading = self.loading.lock().unwrap_or_else(|err| err.into_inner());
+        self.note_stamp();
         match load_checked(&self.dir, expected) {
             Ok(pack) => {
                 tracing::info!(
@@ -308,6 +325,16 @@ impl LiveInner {
             }
         }
     }
+}
+
+/// Inode, size and mtime of a folder's `manifest.json`. A pack swap makes a
+/// new file, so any install changes it.
+type Stamp = (u64, u64, i64, i64);
+
+fn manifest_stamp(dir: &std::path::Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(dir.join("manifest.json")).ok()?;
+    Some((meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()))
 }
 
 /// sha256 of the `manifest.json` in `dir`, read with the loader's cap.
@@ -373,6 +400,7 @@ impl LiveNames {
                 settled: std::sync::atomic::AtomicBool::new(false),
                 loader: std::sync::Mutex::new(None),
                 loading: std::sync::Mutex::new(()),
+                seen: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 spawns: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
@@ -417,6 +445,7 @@ impl LiveNames {
     /// `None` for that call. Later calls use the cache and do not load again.
     pub fn current(&self) -> Option<Arc<NamePack>> {
         if self.inner.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.watch();
             return self.cached();
         }
         if self.inner.dir.is_dir() && self.start_late_load() {
@@ -447,6 +476,7 @@ impl LiveNames {
             .spawn(move || {
                 inner.wait_for_test_gate();
                 let _loading = inner.loading.lock().unwrap_or_else(|err| err.into_inner());
+                inner.note_stamp();
                 match NamePack::load(&inner.dir) {
                     Ok(pack) => inner.cache(pack),
                     Err(err) => inner.give_up(&err),
@@ -464,6 +494,60 @@ impl LiveNames {
             Err(err) => {
                 tracing::warn!(error = %err, "names-v1 reload not started");
                 false
+            }
+        }
+    }
+
+    /// A pack installed by another process (the app's setup guide): when
+    /// `manifest.json` changed since the latest load and pack sync recorded
+    /// the install, start the checked reload. Never blocks on a load.
+    fn watch(&self) {
+        let now = manifest_stamp(&self.inner.dir);
+        if now.is_none() {
+            return;
+        }
+        {
+            let seen = self
+                .inner
+                .seen
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if *seen == now {
+                return;
+            }
+        }
+        let busy = self
+            .inner
+            .loader
+            .try_lock()
+            .map(|loader| loader.as_ref().is_some_and(|handle| !handle.is_finished()))
+            .unwrap_or(true);
+        if busy {
+            return;
+        }
+        let record = self
+            .inner
+            .dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(|data_dir| crate::packs::installed_manifest(data_dir, pack::PACK_NAME));
+        match record {
+            Some((version, manifest_sha256)) => {
+                tracing::info!("names-v1 folder changed; reloading the checked pack");
+                self.reload_installed(InstalledNames {
+                    version,
+                    manifest_sha256,
+                });
+            }
+            None => {
+                tracing::debug!(
+                    "names-v1 folder changed with no install record; kept until restart"
+                );
+                *self
+                    .inner
+                    .seen
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = now;
             }
         }
     }

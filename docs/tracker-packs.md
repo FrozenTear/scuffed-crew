@@ -662,9 +662,13 @@ check leaves the current one in use. Daemon startup does not wait for a
 load. A name read before the load finishes reuses the Tesseract rows
 already in hand (ocr-v1's cell rows, or the new reader's one name window
 read) and tags them `ocr-v1`. It does not start a second Tesseract name
-read. A folder changed by hand, or by the desktop app's setup guide while
-the daemon runs, is left until the next tracker start. With the switch
-off, the name read is those same Tesseract rows.
+read. When the desktop app's setup guide installs names-v1 while the
+daemon runs, the daemon's next name read sees the new `manifest.json` and
+runs the same checked reload against what sync recorded in
+`templates/pack-manifests.json` (pack name to manifest sha256, written
+next to `pack-versions.json`). A folder changed by hand has no such record
+and is left until the next tracker start. With the switch off, the name
+read is those same Tesseract rows.
 
 Unlike the other packs, names-v1 keeps its inner `manifest.json` in
 `templates/names-v1/`: the name reader reads the canvas, the glyph and

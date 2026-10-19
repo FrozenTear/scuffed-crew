@@ -1251,6 +1251,7 @@ async fn run_sync(
     };
     // Read under the lock, so a run never writes back a stale map.
     let mut versions = read_versions(data_dir);
+    let mut manifests = read_manifests(data_dir);
     let mut packs = Vec::new();
     // A refused token, a rate limit, or packs switched off applies to every
     // download, so the packs after it are not tried. Their folders stay.
@@ -1306,10 +1307,30 @@ async fn run_sync(
                     // Keep the other packs' versions, including an alpha.6
                     // file that only names heroes-v1.tar.
                     versions.insert(spec.name.to_string(), entry.version.clone());
+                    // The manifest a reader can check the folder against,
+                    // for a layout that keeps one. The daemon's name reader
+                    // uses it when the app installed the pack.
+                    let manifest_sha = installed
+                        .last()
+                        .filter(|done: &&InstalledPack| done.name == spec.name)
+                        .map(|done| done.manifest_sha256.clone());
+                    let record = match manifest_sha {
+                        Some(sha) if spec.layout.keeps_manifest() => {
+                            manifests.insert(spec.name.to_string(), sha);
+                            Some(manifests.clone())
+                        }
+                        _ => None,
+                    };
                     let (dir, snapshot) = (data_dir.to_path_buf(), versions.clone());
-                    let written = off_runtime(move || write_versions(&dir, &snapshot))
-                        .await
-                        .unwrap_or_else(|| Err("version write did not finish".to_string()));
+                    let written = off_runtime(move || {
+                        write_versions(&dir, &snapshot)?;
+                        match record {
+                            Some(map) => write_manifests(&dir, &map),
+                            None => Ok(()),
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|| Err("version write did not finish".to_string()));
                     if let Err(message) = written {
                         tracing::warn!(
                             pack = spec.name,
@@ -1483,7 +1504,7 @@ fn sweep_stale_staging(data_dir: &Path) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let path = entry.path();
-        if name.starts_with(VERSIONS_TMP_PREFIX) {
+        if name.starts_with(VERSIONS_TMP_PREFIX) || name.starts_with(MANIFESTS_TMP_PREFIX) {
             // Only a run holding this lock writes one, so this one is left.
             if path.symlink_metadata().is_ok_and(|meta| meta.is_file())
                 && let Err(err) = std::fs::remove_file(&path)
@@ -1972,13 +1993,49 @@ const VERSIONS_TMP_PREFIX: &str = "pack-versions.json.tmp-";
 fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
-    let path = versions_path(data_dir);
+    write_map(&versions_path(data_dir), VERSIONS_TMP_PREFIX, versions)
+}
+
+/// `templates/pack-manifests.json`: pack name to the sha256 of the inner
+/// manifest that install checked every file against, for the layouts that
+/// keep their manifest ([`PackLayout::keeps_manifest`]). Written under the
+/// sync lock right after the versions file, by the daemon and the app alike.
+fn manifests_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("templates").join("pack-manifests.json")
+}
+
+fn read_manifests(data_dir: &Path) -> BTreeMap<String, String> {
+    let Ok(bytes) = std::fs::read(manifests_path(data_dir)) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Start of every tmp file [`write_manifests`] makes; swept like
+/// [`VERSIONS_TMP_PREFIX`].
+const MANIFESTS_TMP_PREFIX: &str = "pack-manifests.json.tmp-";
+
+fn write_manifests(data_dir: &Path, manifests: &BTreeMap<String, String>) -> Result<(), String> {
+    write_map(&manifests_path(data_dir), MANIFESTS_TMP_PREFIX, manifests)
+}
+
+/// What sync last installed for `name`: the version and the manifest
+/// sha256, when both are recorded. `None` for a pack installed by hand or
+/// by a tracker older than this record. Blocking (two small reads).
+pub fn installed_manifest(data_dir: &Path, name: &str) -> Option<(String, String)> {
+    let version = read_versions(data_dir).remove(name)?;
+    let sha = read_manifests(data_dir).remove(name)?;
+    is_sha256(&sha).then_some((version, sha))
+}
+
+/// Write `map` as JSON to `path` through a tmp file named `<prefix><n>`.
+fn write_map(path: &Path, prefix: &str, map: &BTreeMap<String, String>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     // A name of its own, so two writers never share one tmp file.
-    let tmp = path.with_file_name(format!("{VERSIONS_TMP_PREFIX}{}", unique_suffix()));
-    let bytes = serde_json::to_vec(versions).map_err(|err| err.to_string())?;
+    let tmp = path.with_file_name(format!("{prefix}{}", unique_suffix()));
+    let bytes = serde_json::to_vec(map).map_err(|err| err.to_string())?;
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -1986,7 +2043,7 @@ fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Resul
             .open(&tmp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&tmp, &path)
+        std::fs::rename(&tmp, path)
     })();
     if let Err(err) = written {
         let _ = std::fs::remove_file(&tmp);
@@ -4829,7 +4886,10 @@ mod tests {
             })
             .unwrap_or_default();
         left.retain(|name| {
-            !live.contains(name) && name != "pack-versions.json" && name != ".pack-sync.lock"
+            !live.contains(name)
+                && name != "pack-versions.json"
+                && name != "pack-manifests.json"
+                && name != ".pack-sync.lock"
         });
         left.sort();
         left
@@ -6885,6 +6945,26 @@ mod tests {
         let pack = switch.pack().expect("the installed names-v1 loads");
         assert_eq!(pack.version, "full-20261019");
         assert_eq!(pack.templates(), 9);
+    }
+
+    /// Sync records the names-v1 manifest sha256 next to its version, so a
+    /// daemon can check a pack the app installed. Packs that do not keep a
+    /// manifest are not recorded.
+    #[tokio::test]
+    async fn sync_records_the_names_v1_manifest_for_other_processes() {
+        let (list, files, manifest) = all_packs_with_real_names("full-20261019");
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        sync(&served, dir.path()).await;
+        assert_eq!(
+            installed_manifest(dir.path(), crate::names::pack::PACK_NAME),
+            Some(("full-20261019".to_string(), sha256_hex(&manifest)))
+        );
+        assert_eq!(installed_manifest(dir.path(), HEROES_PACK_NAME), None);
+        assert_eq!(
+            read_manifests(dir.path()).keys().collect::<Vec<_>>(),
+            vec![crate::names::pack::PACK_NAME]
+        );
     }
 
     /// A folder rc.1 left behind (the six files, no manifest, the version

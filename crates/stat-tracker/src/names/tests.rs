@@ -926,3 +926,75 @@ fn the_switch_off_ignores_an_install() {
     switch.reload_installed(expected);
     assert!(switch.pack().is_none());
 }
+
+/// The records pack sync writes next to the packs, as the app's setup
+/// guide would after installing names-v1 from its own process.
+fn record_install(data_dir: &std::path::Path, installed: &InstalledNames) {
+    let templates = data_dir.join("templates");
+    std::fs::write(
+        templates.join("pack-versions.json"),
+        serde_json::to_vec(&serde_json::json!({ "names-v1.tar": installed.version })).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        templates.join("pack-manifests.json"),
+        serde_json::to_vec(&serde_json::json!({ "names-v1.tar": installed.manifest_sha256 }))
+            .unwrap(),
+    )
+    .unwrap();
+}
+
+/// The setup guide installs a newer names-v1 while the daemon runs. The
+/// daemon gets no call, but the next name read sees the new manifest and
+/// starts the checked reload; that read keeps the pack it has.
+#[test]
+fn a_pack_the_app_installs_while_the_daemon_runs_is_picked_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
+    let before = switch.pack().expect("startup pack");
+    assert_eq!(switch.reload_spawns(), 1);
+
+    let installed = install_synthetic(tmp.path(), "app", &["ABC", "CBA"]);
+    record_install(tmp.path(), &installed);
+    let noticing = switch.pack().expect("the noticing read keeps its pack");
+    assert!(std::sync::Arc::ptr_eq(&before, &noticing));
+    assert_eq!(switch.reload_spawns(), 2, "one checked reload started");
+    switch.wait_reload();
+    let after = switch.pack().unwrap();
+    assert_eq!(after.templates(), 6);
+    for _ in 0..10 {
+        assert!(std::sync::Arc::ptr_eq(&after, &switch.pack().unwrap()));
+    }
+    assert_eq!(
+        switch.reload_spawns(),
+        2,
+        "an unchanged folder does not reload"
+    );
+}
+
+/// A folder change the record does not vouch for keeps the current pack,
+/// and is not retried on every read.
+#[test]
+fn an_app_install_that_fails_its_check_keeps_the_current_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
+    let before = switch.pack().unwrap();
+
+    let mut installed = install_synthetic(tmp.path(), "app-bad", &["ABC", "CBA"]);
+    installed.manifest_sha256 = "a".repeat(64);
+    record_install(tmp.path(), &installed);
+    let _ = switch.pack();
+    switch.wait_reload();
+    for _ in 0..10 {
+        assert!(std::sync::Arc::ptr_eq(&before, &switch.pack().unwrap()));
+    }
+    assert_eq!(
+        switch.reload_spawns(),
+        2,
+        "the refused folder is tried once"
+    );
+}
