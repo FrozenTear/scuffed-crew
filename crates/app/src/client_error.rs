@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(html_page.to_string(), "HTTP error: 404");
         assert_ne!(html_page.to_string(), err.to_string());
 
-        // #377 also answers a wrong method with JSON, not an HTML page.
+        // PR 377 also answers a wrong method with JSON, not an HTML page.
         let method_not_allowed = ClientError::http(405, r#"{"error":"Method not allowed"}"#, None);
         match &method_not_allowed {
             ClientError::Http {
