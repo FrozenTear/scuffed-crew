@@ -33,6 +33,7 @@ async fn test_state() -> AppState {
             redirect_base_url: "http://localhost:3000".into(),
             allowed_origins: vec!["http://localhost:3000".into()],
         },
+        auth_redirect_base: None,
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
@@ -1062,6 +1063,7 @@ fn sample(member_id: &str, session_id: &str) -> scuffed_db::PersonalMatch {
         uploaded_at: Utc::now(),
         edited: false,
         recognizer: "ocr-v1".into(),
+        name_recognizer: None,
         suspect_fields: Vec::new(),
     }
 }

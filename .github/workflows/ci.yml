@@ -166,10 +166,16 @@ jobs:
 
       - name: Build app
         working-directory: crates/app
-        run: dx build --release
+        # `--debug-symbols` defaults to true. wasm-opt then keeps DWARF and
+        # aborts on current rustc debug info, so the shipped wasm stays huge.
+        run: dx build --release --debug-symbols false
 
       - name: Favicon is in the dx bundle
-        run: test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg
+        run: |
+          test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg
+          test -f target/dx/scuffed-app/release/web/public/assets/favicon-32.png
+          test -f target/dx/scuffed-app/release/web/public/assets/favicon.ico
+          test -f target/dx/scuffed-app/release/web/public/assets/apple-touch-icon.png
 
   # Builds the relay image and walks the site chat path against it.
   # A write plugin that exits (the old strfry29 command) fails this job:

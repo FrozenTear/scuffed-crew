@@ -546,6 +546,7 @@ async fn main() {
         db: db.clone(),
         session_config: SessionConfig::default(),
         oauth_config,
+        auth_redirect_base: scuffed_site_server::state::auth_redirect_base_from_env(),
         upload_dir,
         reports_dir: reports_dir.clone(),
         reports_enabled,

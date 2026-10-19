@@ -45,6 +45,10 @@ struct DbPersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     recognizer: Option<String>,
+    /// Absent when the upload omitted the reader, or the row predates the column.
+    #[serde(default)]
+    #[surreal(default)]
+    name_recognizer: Option<String>,
     /// Absent on rows written before the column existed (NONE / missing).
     #[serde(default)]
     #[surreal(default)]
@@ -76,8 +80,15 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
         edited: db.edited,
         recognizer: scuffed_types::effective_recognizer(db.recognizer.as_deref().unwrap_or(""))
             .to_string(),
+        name_recognizer: stored_name_recognizer(db.name_recognizer),
         suspect_fields: db.suspect_fields.unwrap_or_default(),
     }
+}
+
+/// Empty is unknown. The upload route never stores `""`, and a missing column
+/// is NONE. Either one reads as `None` (JSON null on the member's own matches).
+fn stored_name_recognizer(value: Option<String>) -> Option<String> {
+    value.filter(|id| !id.is_empty())
 }
 
 /// Stable session id for uploads from pre-session daemons. Derived from the
@@ -230,7 +241,8 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
+    edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
+    suspect_fields = $suspect_fields,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -239,7 +251,8 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
+    edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
+    suspect_fields = $suspect_fields,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -351,6 +364,10 @@ impl Database {
                 .bind((
                     "recognizer",
                     scuffed_types::effective_recognizer(&m.recognizer).to_string(),
+                ))
+                .bind((
+                    "name_recognizer",
+                    stored_name_recognizer(m.name_recognizer.clone()),
                 ))
                 .bind(("suspect_fields", m.suspect_fields.clone()))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
@@ -1024,7 +1041,7 @@ const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
 
 const PERSONAL_MATCH_MIGRATION_COLS: &str =
     "id, member_id, session_id, hero, map_name, game_mode, \
-     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, suspect_fields, played_at, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, name_recognizer, suspect_fields, played_at, \
      uploaded_at";
 
 #[cfg(test)]
@@ -1552,7 +1569,8 @@ async fn relocate_personal_match(
                 role = $role, outcome = $outcome,
                 elims = $elims, deaths = $deaths, assists = $assists,
                 damage = $damage, healing = $healing, mitigation = $mit,
-                edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
+                edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
+                suspect_fields = $suspect_fields,
                 played_at = $played, uploaded_at = $uploaded"#,
         )
         .bind(("rid", rid))
@@ -1574,6 +1592,10 @@ async fn relocate_personal_match(
             "recognizer",
             scuffed_types::effective_recognizer(row.recognizer.as_deref().unwrap_or(""))
                 .to_string(),
+        ))
+        .bind((
+            "name_recognizer",
+            stored_name_recognizer(row.name_recognizer.clone()),
         ))
         .bind((
             "suspect_fields",
@@ -1619,6 +1641,7 @@ mod tests {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
             suspect_fields: Vec::new(),
         }
     }
@@ -1745,6 +1768,73 @@ mod tests {
         let stats = db.get_personal_stats("m-legacy").await.unwrap();
         assert_eq!(stats.total_matches, 2);
         assert_eq!(stats.wins, 2);
+    }
+
+    /// A row inserted before `name_recognizer` existed reads back as None.
+    /// An explicit id round-trips. A later upload that omits it stores NONE.
+    #[tokio::test]
+    async fn missing_name_recognizer_reads_as_none_and_ids_round_trip() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS name_recognizer ON personal_match;
+                   CREATE personal_match SET
+                       member_id = 'm-legacy',
+                       session_id = 'legacy-name',
+                       hero = 'Ana',
+                       map_name = 'Oasis',
+                       game_mode = 'control',
+                       role = 'Support',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 1,
+                       assists = 1,
+                       damage = 1,
+                       healing = 1,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE name_recognizer ON personal_match TYPE option<string> DEFAULT NONE;"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let legacy = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].name_recognizer, None);
+        assert_eq!(legacy[0].recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+
+        let mut uploaded = entry("s-names", "victory", 9);
+        uploaded.member_id = "m-legacy".into();
+        uploaded.name_recognizer = Some("names-v1".into());
+        db.upsert_personal_matches("m-legacy", &[uploaded])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        let named = rows.iter().find(|r| r.session_id == "s-names").unwrap();
+        assert_eq!(named.name_recognizer.as_deref(), Some("names-v1"));
+
+        let mut again = entry("s-names", "victory", 9);
+        again.member_id = "m-legacy".into();
+        again.name_recognizer = Some("ocr-v1".into());
+        db.upsert_personal_matches("m-legacy", &[again])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        let named = rows.iter().find(|r| r.session_id == "s-names").unwrap();
+        assert_eq!(named.name_recognizer.as_deref(), Some("ocr-v1"));
+
+        let cleared = entry("s-names", "victory", 4);
+        db.upsert_personal_matches("m-legacy", &[cleared])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        let named = rows.iter().find(|r| r.session_id == "s-names").unwrap();
+        assert_eq!(named.name_recognizer, None);
+        assert_eq!(named.elims, 4);
     }
 
     /// A row inserted before `suspect_fields` existed reads back as [].

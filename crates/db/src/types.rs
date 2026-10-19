@@ -582,6 +582,17 @@ pub struct PersonalMatch {
     /// field, are `ocr-v1`. Additive on match-list JSON.
     #[serde(default = "default_recognizer")]
     pub recognizer: String,
+    /// Which reader found this player's own scoreboard row.
+    ///
+    /// `None` is unknown: the upload omitted `name_recognizer`, sent null, or
+    /// the row was written before the column existed. JSON is null in that
+    /// case. The check is format only (`[a-z0-9.-]`, 1 to 32 characters).
+    /// Capitals and spaces are rejected, but a short lowercase token such as
+    /// `player1` passes, so clients must send only reader ids such as
+    /// `names-v1` or `ocr-v1`. Returned on the member's own match list, beside
+    /// `recognizer`.
+    #[serde(default)]
+    pub name_recognizer: Option<String>,
     /// Names the tracker flagged as unsure on this player's own row.
     /// Uploads that omit the field, and rows written before the column
     /// existed, read as an empty list. Additive on match-list JSON.

@@ -33,6 +33,18 @@ license = "MIT OR Apache-2.0"
 [profile.release]
 lto = "thin"
 
+# dx `build --release` selects this name for the WASM app (`wasm-release`).
+# Native `cargo build --release` stays on `[profile.release]` above.
+# dx forces `strip=false` during rustc so the asset pass can see symbols,
+# then wasm-opt `--strip-debug` strips the shipped bundle.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

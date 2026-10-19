@@ -356,7 +356,7 @@ pub fn merge_saved_with_authority(
         } else {
             RECOGNIZER_OCR_V1
         },
-        suspect_fields: dimmed_board_suspects(board, used_cv, suspect),
+        suspect_fields: dimmed_board_suspects(board, suspect),
     }
 }
 
@@ -364,10 +364,12 @@ pub fn merge_saved_with_authority(
 /// found only on a dimmed header strip ([`BoardRead::header_dimmed`]) still
 /// saves its numbers, but every own-row field is listed, the same mark
 /// [`mark_own_row_suspect`] gives a row only one signal named: the read must
-/// not look as solid as a clean one. A clean board's list is unchanged.
-fn dimmed_board_suspects(board: &BoardRead, used_cv: bool, suspect: Vec<String>) -> Vec<String> {
+/// not look as solid as a clean one. The mark applies when the stored row
+/// came from this reader and when every field fell back to ocr-v1. A clean
+/// board's list is unchanged.
+fn dimmed_board_suspects(board: &BoardRead, suspect: Vec<String>) -> Vec<String> {
     let mut fields = order_suspects(suspect);
-    if board.header_dimmed && used_cv {
+    if board.header_dimmed {
         mark_own_row_suspect(&mut fields);
     }
     fields
@@ -883,6 +885,36 @@ mod tests {
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].elims, 22);
         assert_eq!(games[0].suspect_fields, vec!["map".to_string()]);
+    }
+
+    /// A dimmed header whose cells all fell back to the policy row (ocr-v1)
+    /// still lists every own-row field. An unread hero is not an attempted
+    /// read, so only the dimmed mark puts `hero` on the list.
+    #[test]
+    fn a_dimmed_header_marks_the_row_when_ocr_v1_kept_every_field() {
+        let mut board = confident_board(5, 2);
+        board.header_dimmed = true;
+        for field in &mut board.fields {
+            if field.name == "r2.hero" {
+                *field = unread("r2.hero");
+            } else if is_stat_field(&field.name) || field.name == "result" {
+                field.suspect = true;
+            }
+        }
+        let saved = merge_saved(&ocr(), identified(2, 5), Some(&board));
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
+        assert_eq!(saved.hero, "Ana", "the unread hero stays on the policy row");
+        assert!(
+            !board.get("r2.hero").is_some_and(field_attempted),
+            "the hero cell was not a cv read"
+        );
+        for name in ["hero", "e", "a", "d", "dmg", "h", "mit"] {
+            assert!(
+                saved.suspect_fields.iter().any(|f| f == name),
+                "{name} missing from {:?}",
+                saved.suspect_fields
+            );
+        }
     }
 
     // ----- alpha.7 O10: the trust gate and the stats without OCR -----

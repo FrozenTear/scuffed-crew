@@ -21,6 +21,8 @@ docs
 crates/stat-tracker/portraits
 crates/stat-tracker/captures
 *.png
+!crates/app/assets/favicon-32.png
+!crates/app/assets/apple-touch-icon.png
 *.jpeg
 cachyos-repo.tar.xz
 .env

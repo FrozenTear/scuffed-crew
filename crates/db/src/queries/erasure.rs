@@ -819,6 +819,7 @@ mod tests {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: "ocr-v1".into(),
+            name_recognizer: None,
             suspect_fields: Vec::new(),
         }
     }

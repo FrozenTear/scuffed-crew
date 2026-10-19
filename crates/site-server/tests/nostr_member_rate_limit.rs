@@ -32,6 +32,7 @@ async fn test_state() -> AppState {
             redirect_base_url: "http://localhost:3000".into(),
             allowed_origins: vec!["http://localhost:3000".into()],
         },
+        auth_redirect_base: None,
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
@@ -142,6 +143,11 @@ fn assert_rate_limited(headers: &axum::http::HeaderMap, body: &[u8]) -> u64 {
     }))
     .unwrap();
     assert_eq!(body, expected);
+    let text = std::str::from_utf8(body).expect("utf-8 429 body");
+    assert!(
+        !text.contains('\u{2014}'),
+        "429 body must not contain an em dash: {text}"
+    );
     secs
 }
 

@@ -2729,18 +2729,20 @@ fn uninstall_dialog_escape(
     notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
 }
 
+/// A pid that is already gone, or that is not the tracker, is not a running
+/// tracker. Killing it was refused on purpose. Uninstall can continue.
+/// `disable --now` inside [`crate::uninstall::apply`] stops a unit systemd
+/// restarted after the old pid exited. `apply` then refuses to delete files
+/// if a tracker process is still alive.
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
     match daemon::stop_daemon(&req.data_dir).await {
         Ok(()) => {}
-        Err(err) if err == "Tracker is not running" => {}
+        Err(err) if err.allows_restart() => {}
         Err(_) => {
             return Err("Could not stop the tracker. Nothing was removed.".into());
         }
-    }
-    if daemon::daemon_running(&req.data_dir).is_some() {
-        return Err("The tracker is still running. Nothing was removed.".into());
     }
     crate::uninstall::apply(&req)
 }
@@ -2855,8 +2857,10 @@ fn health_status_for(
         {
             return format!("Sync paused: {}", e.message());
         }
-        if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
-            return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
+        if !url.is_empty()
+            && let Some(status) = stat_tracker::sync::auth_pause_status(data_dir, url, token)
+        {
+            return status.to_string();
         }
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
@@ -2872,6 +2876,26 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
+        use crate::daemon::StopError;
+
+        assert!(StopError::NotRunning.allows_restart());
+        assert!(
+            StopError::Refused("Saved process id is not the tracker, not stopping it")
+                .allows_restart()
+        );
+        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
+        assert!(
+            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Could not stop the tracker: Permission denied".into())
+                .allows_restart()
+        );
+    }
 
     #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {
@@ -3431,6 +3455,24 @@ token = \"secret-token-must-stay\"
             super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
             "Ready",
             "a changed URL clears the rejected state"
+        );
+        stat_tracker::sync::write_auth_pause_reason(
+            &dir,
+            "https://crew.example",
+            "expired-token",
+            stat_tracker::sync::AuthPauseReason::Expired,
+        )
+        .unwrap();
+        let expired =
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "expired-token")));
+        assert_eq!(expired, stat_tracker::sync::SYNC_TOKEN_EXPIRED_STATUS);
+        assert_eq!(expired, "Sync token expired, relink in Settings");
+        assert!(expired.contains("relink"), "{expired}");
+        assert!(expired.contains("Settings"), "{expired}");
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "other-token"))),
+            "Ready",
+            "a changed token clears the expired state"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
