@@ -2169,6 +2169,21 @@ mod tests {
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
     }
 
+    /// cv-v7 reads Tab boards with a dimmed header (a dimmed scene, or the
+    /// board behind an overlay). Such a read is a snapshot like any other
+    /// Tab: a clean board read later in the same game is newer and wins, so
+    /// the dimmed read is the game's row only when no later Tab was read.
+    #[test]
+    fn a_later_clean_board_replaces_a_dimmed_read_in_the_same_game() {
+        let mut dimmed = snap("g", 9);
+        dimmed.suspect_fields = vec!["deaths".into()];
+        let clean = snap("g", 12);
+        let games = latest_per_game(vec![clean, dimmed]);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].elims, 12);
+        assert!(games[0].suspect_fields.is_empty());
+    }
+
     #[test]
     fn latest_per_game_keeps_final_snapshot_per_session() {
         // Newest-first input: the first snapshot per session is the final one.

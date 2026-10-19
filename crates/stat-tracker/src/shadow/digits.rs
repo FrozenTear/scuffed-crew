@@ -69,10 +69,15 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 ///   picked group inside the cell forces suspect.
 /// * `cv-v6`: alpha.8 reader. Written as [`RECOGNIZER_ID_NO_OCR`] when the
 ///   tracker runs with OCR off, so those rows and reports can be told apart.
-pub const RECOGNIZER_ID: &str = "cv-v6";
+/// * `cv-v7`: header labels are found with
+///   [`preprocess::header_label_groups_scaled`]: the dark cut follows the
+///   strip's background brightness and a 2 px "H" label is kept on boards
+///   narrower than 1664 px. Downscaled and dimmed boards now find their
+///   columns; boards that already found them read the same.
+pub const RECOGNIZER_ID: &str = "cv-v7";
 
 /// [`RECOGNIZER_ID`] for a run with OCR off.
-pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v6-noocr";
+pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v7-noocr";
 
 /// The reader id for a run with OCR on or off.
 pub fn recognizer_id(ocr_on: bool) -> &'static str {
@@ -391,10 +396,11 @@ fn neutral_ink(img: &DynamicImage) -> Plane {
 
 // ---------------------------------------------------------------- geometry
 
-/// Header label centres (px) of E A D DMG H MIT, filtered like columns_from_header_groups.
+/// Header label centres (px) of E A D DMG H MIT from
+/// [`preprocess::header_label_groups_scaled`], filtered like columns_from_header_groups.
 fn column_centres(board: &DynamicImage) -> Result<[f64; 6], ShadowError> {
     let w = board.width() as f64;
-    let labels: Vec<f64> = preprocess::header_label_groups(board)
+    let labels: Vec<f64> = preprocess::header_label_groups_scaled(board)
         .into_iter()
         .filter(|&(s, e)| (e - s) as f64 / w <= 0.05)
         .map(|(s, e)| (s + e) as f64 / 2.0)
@@ -1760,6 +1766,170 @@ mod tests {
         }
     }
 
+    /// A header-only board: a light strip with dark label blocks at the given
+    /// (centre ratio, width px), dark rows below. Every pixel is then scaled
+    /// by `dim`. No digits, names or hero pixels.
+    fn header_board(w: u32, h: u32, labels: &[(f64, u32)], dim: f64) -> DynamicImage {
+        let strip = (h as f64 * 0.03) as u32;
+        let mut img = RgbImage::from_pixel(w, h, Rgb([18, 20, 32]));
+        for y in 0..strip {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([219, 219, 219]));
+            }
+            for &(c, lw) in labels {
+                let x0 = (c * w as f64).round() as u32 - lw / 2;
+                for x in x0..x0 + lw {
+                    img.put_pixel(x, y, Rgb([30, 30, 30]));
+                }
+            }
+        }
+        for px in img.pixels_mut() {
+            *px = Rgb(px.0.map(|v| (v as f64 * dim).round() as u8));
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// E A D DMG H MIT at real Tab header spacing; `h_w` is the H label width.
+    fn tab_labels(h_w: u32) -> [(f64, u32); 6] {
+        [
+            (0.300, 6),
+            (0.335, 6),
+            (0.370, 6),
+            (0.424, 32),
+            (0.485, h_w),
+            (0.547, 12),
+        ]
+    }
+
+    fn assert_centres(board: &DynamicImage, labels: &[(f64, u32); 6]) {
+        let got = column_centres(board).expect("columns found");
+        let w = board.width() as f64;
+        for (k, (g, &(c, _))) in got.iter().zip(labels).enumerate() {
+            assert!(
+                (g - c * w).abs() <= 1.5,
+                "{} centre {g} vs {}",
+                FIELDS[k],
+                c * w
+            );
+        }
+    }
+
+    /// The 0.85x downscale of a 1440p board: 1414 px wide, so the old
+    /// round-to-nearest cluster minimum is 3 px and a 2 px "H" label vanished.
+    #[test]
+    fn downscaled_header_keeps_a_2px_h_label() {
+        let labels = tab_labels(2);
+        let board = header_board(1414, 856, &labels, 1.0);
+        assert_eq!(
+            preprocess::header_label_groups(&board).len(),
+            5,
+            "fixed scan drops H"
+        );
+        assert_eq!(preprocess::header_label_groups_scaled(&board).len(), 6);
+        assert!(stat_columns_found(&board));
+        assert_centres(&board, &labels);
+    }
+
+    /// A header strip dimmed to 0.6: the whole strip sits under the fixed
+    /// dark cut of 150, so the fixed scan finds no label at all.
+    #[test]
+    fn dimmed_header_strip_finds_its_columns() {
+        let labels = tab_labels(3);
+        let board = header_board(1664, 1007, &labels, 0.6);
+        assert!(preprocess::header_label_groups(&board).is_empty());
+        assert!(stat_columns_found(&board));
+        assert_centres(&board, &labels);
+    }
+
+    /// The scaled scan finds nothing where there are no labels: a plain
+    /// light strip, a plain dimmed strip, and a strip as dark as the rows.
+    #[test]
+    fn scaled_header_scan_finds_no_labels_on_a_plain_strip() {
+        for dim in [1.0, 0.6] {
+            let plain = header_board(1664, 1007, &[], dim);
+            assert!(
+                preprocess::header_label_groups_scaled(&plain).is_empty(),
+                "{dim}"
+            );
+            assert!(!stat_columns_found(&plain), "{dim}");
+        }
+        let dark = DynamicImage::ImageRgb8(RgbImage::from_pixel(1664, 1007, Rgb([18, 20, 32])));
+        assert!(!stat_columns_found(&dark));
+    }
+
+    /// Tesseract column calibration and the preflight keep the fixed scan:
+    /// its groups on these boards are pinned to their main 0b73ed6 output, and on
+    /// a normal board the scaled scan agrees with it.
+    #[test]
+    fn fixed_header_scan_is_unchanged() {
+        let cases = [
+            (
+                "1664 normal",
+                header_board(1664, 1007, &tab_labels(3), 1.0),
+                PINNED_1664.to_vec(),
+            ),
+            (
+                "1248 normal",
+                header_board(1248, 756, &tab_labels(2), 1.0),
+                PINNED_1248.to_vec(),
+            ),
+            (
+                "1414 2px H",
+                header_board(1414, 856, &tab_labels(2), 1.0),
+                PINNED_1414.to_vec(),
+            ),
+            (
+                "1664 dimmed",
+                header_board(1664, 1007, &tab_labels(3), 0.6),
+                Vec::new(),
+            ),
+        ];
+        for (what, board, want) in &cases {
+            assert_eq!(&preprocess::header_label_groups(board), want, "{what}");
+        }
+        for (what, board, _) in &cases[..2] {
+            assert_eq!(
+                preprocess::header_label_groups_scaled(board),
+                preprocess::header_label_groups(board),
+                "{what}"
+            );
+        }
+    }
+
+    /// `header_label_groups` on these boards at main 0b73ed6 (cv-v6).
+    const PINNED_1664: &[(u32, u32)] = &[
+        (496, 502),
+        (554, 560),
+        (613, 619),
+        (690, 722),
+        (806, 809),
+        (904, 916),
+    ];
+    const PINNED_1248: &[(u32, u32)] = &[
+        (371, 377),
+        (415, 421),
+        (459, 465),
+        (513, 545),
+        (604, 606),
+        (677, 689),
+    ];
+    const PINNED_1414: &[(u32, u32)] =
+        &[(421, 427), (471, 477), (520, 526), (584, 616), (767, 779)];
+
+    /// A whole synthetic board dimmed to 0.6 still reads every value.
+    #[test]
+    fn reads_a_dimmed_synthetic_board() {
+        let want = sample_values(6);
+        let board = synth_board(&want, 6, 3).to_rgb8();
+        let mut dimmed = board.clone();
+        for px in dimmed.pixels_mut() {
+            *px = Rgb(px.0.map(|v| (v as f64 * 0.6).round() as u8));
+        }
+        let dimmed = DynamicImage::ImageRgb8(dimmed);
+        let read = read_board(&dimmed, 6, Duration::from_secs(10)).unwrap();
+        assert_reads(&read, &want);
+    }
+
     #[test]
     fn reads_synthetic_6v6_board() {
         let want = sample_values(6);
@@ -2490,6 +2660,8 @@ mod tests {
             SLANT_MAX_INK as f64,
             SLANT_EXTENT_INK as f64,
             SEP_GAP_K,
+            preprocess::HEADER_DARK_CUT as f64,
+            preprocess::HEADER_BG_REF as f64,
         ];
         p.extend_from_slice(&SLANTS);
         p.extend_from_slice(&TYP_1440);
@@ -2544,8 +2716,8 @@ mod tests {
     /// as `params`.
     #[test]
     fn the_reader_id_says_when_ocr_was_off() {
-        assert_eq!(recognizer_id(true), "cv-v6");
-        assert_eq!(recognizer_id(false), "cv-v6-noocr");
+        assert_eq!(recognizer_id(true), "cv-v7");
+        assert_eq!(recognizer_id(false), "cv-v7-noocr");
         for id in [RECOGNIZER_ID, RECOGNIZER_ID_NO_OCR] {
             assert!(scuffed_types::api::stats::is_recognizer_id(id), "{id}");
         }
@@ -2558,6 +2730,7 @@ mod tests {
         ("cv-v4", 0xb51b_4c1f_19e1_1c65),
         ("cv-v5", 0xa751_b3dc_413b_764a),
         ("cv-v6", 0x3533_9fdc_9a40_b16f),
+        ("cv-v7", 0xad1f_8150_9f8a_9963),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
