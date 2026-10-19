@@ -484,6 +484,12 @@ mod tests {
             resolve_name_recognizer(&RecognizerInput::Value("reader-v2".into())).unwrap(),
             Some("reader-v2".to_string())
         );
+        // Format only. A short lowercase token is stored, even when it
+        // looks like a name. Free-form text (spaces, capitals) is not.
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Value("player1".into())).unwrap(),
+            Some("player1".to_string())
+        );
         assert!(is_recognizer_id("names-v1"));
         assert_eq!(
             resolve_name_recognizer(&RecognizerInput::Value("NOPE".into())).unwrap_err(),
