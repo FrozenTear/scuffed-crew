@@ -216,6 +216,22 @@ const COMPOSE_BOX_CSS: &str = r#"
 }
 "#;
 
+/// Near-limit counter. `aria-live` so the remaining count is announced.
+fn compose_counter(label: String, over_limit: bool) -> Element {
+    let class = if over_limit {
+        "chat-compose__counter chat-compose__counter--over"
+    } else {
+        "chat-compose__counter"
+    };
+    rsx! {
+        div {
+            class: "{class}",
+            aria_live: "polite",
+            "{label}"
+        }
+    }
+}
+
 /// Chat message compose box with text input and send button.
 #[component]
 pub fn ComposeBox(
@@ -263,6 +279,7 @@ pub fn ComposeBox(
             input {
                 class: "chat-compose__input",
                 r#type: "text",
+                aria_label: "Message",
                 placeholder: "{placeholder}",
                 disabled: disabled,
                 value: "{draft}",
@@ -281,14 +298,7 @@ pub fn ComposeBox(
             }
         }
         if let Some(label) = counter {
-            div {
-                class: if over_limit {
-                    "chat-compose__counter chat-compose__counter--over"
-                } else {
-                    "chat-compose__counter"
-                },
-                "{label}"
-            }
+            {compose_counter(label, over_limit)}
         }
     }
 }
@@ -415,6 +425,28 @@ mod tests {
             draft_after_outcome("hello", "hello", ComposeOutcome::Success),
             ""
         );
+    }
+
+    #[test]
+    fn message_input_is_named_and_the_counter_is_live() {
+        fn view() -> Element {
+            rsx! {
+                ComposeBox { on_send: |_| {} }
+                {compose_counter("1 character left".to_string(), false)}
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("aria-label=\"Message\""),
+            "the message field needs an accessible name: {html}"
+        );
+        assert!(
+            html.contains("aria-live=\"polite\""),
+            "the near-limit counter must announce updates: {html}"
+        );
+        assert!(html.contains("1 character left"), "{html}");
     }
 
     #[test]

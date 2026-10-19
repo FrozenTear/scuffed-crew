@@ -16,7 +16,7 @@ use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
-use crate::state::{AuthState, use_auth};
+use crate::state::{AuthState, use_auth, use_relay_availability_state};
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -147,12 +147,42 @@ pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
 const TRACKER_PLATFORM_COPY: &str =
     "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
-/// Stat-tracker build named in the install note on `/stats`.
-/// One constant, so the banner tracks the current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "alpha.10";
+/// Stat-tracker build named in the install note on `/stats` when health
+/// does not send `tracker_latest`. One constant, so the banner tracks the
+/// current build instead of an older alpha.
+const TRACKER_RELEASE: &str = "alpha.12";
 
-fn tracker_release_notice_text() -> String {
-    format!("Install {TRACKER_RELEASE} between games, not during one.")
+/// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
+fn is_release_core(core: &str) -> bool {
+    let mut parts = core.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    [major, minor, patch]
+        .into_iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Short install label. A bare `MAJOR.MINOR.PATCH-label` drops the numeric
+/// core so it matches [`TRACKER_RELEASE`]. A value that is already that
+/// short label is kept.
+fn tracker_notice_label(server: Option<&str>) -> String {
+    let Some(raw) = server.map(str::trim).filter(|value| !value.is_empty()) else {
+        return TRACKER_RELEASE.to_string();
+    };
+    match raw.split_once('-') {
+        Some((core, rest)) if is_release_core(core) && !rest.is_empty() => rest.to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+fn tracker_release_notice_text(server: Option<&str>) -> String {
+    format!(
+        "Install {} between games, not during one.",
+        tracker_notice_label(server)
+    )
 }
 
 fn format_date(dt: &DateTime<Utc>) -> String {
@@ -1052,9 +1082,10 @@ const STATS_CSS: &str = r#"
 "#;
 
 /// Release note inside the tracker install and reinstall blocks.
-fn tracker_release_notice() -> Element {
+fn tracker_release_notice(text: &str) -> Element {
+    let text = text.to_string();
     rsx! {
-        p { class: "tracker-release-notice", "{tracker_release_notice_text()}" }
+        p { class: "tracker-release-notice", "{text}" }
     }
 }
 
@@ -1071,6 +1102,8 @@ fn member_stats_url(auth: &AuthState, path: String) -> String {
 #[component]
 pub fn Stats() -> Element {
     let auth = use_auth();
+    let relay = use_relay_availability_state();
+    let tracker_notice = tracker_release_notice_text(relay.tracker_latest().as_deref());
     // "Total or per season": one selection drives every tab's fetch.
     // Nothing saved is all time. "Current season" is stored as a sentinel so a
     // rollover follows. Every season row is pinned by id, including the one
@@ -1239,7 +1272,7 @@ pub fn Stats() -> Element {
 
             if slim_tracker {
                 div { class: "tracker-slim",
-                    {tracker_release_notice()}
+                    {tracker_release_notice(&tracker_notice)}
                     span { class: "tracker-slim-label", "Tracker" }
                     span { class: "tracker-slim-sep", "·" }
                     span { class: "tracker-slim-note", "Linux only" }
@@ -1283,7 +1316,7 @@ pub fn Stats() -> Element {
                 // notice, so this copy is only for members who have no matches.
                 div { class: "tracker-download",
                     if !slim_tracker {
-                        {tracker_release_notice()}
+                        {tracker_release_notice(&tracker_notice)}
                     }
                     div { class: "tracker-download-head",
                         h3 { "Get the Stat Tracker" }
@@ -1733,25 +1766,27 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "alpha.10");
+        assert_eq!(TRACKER_RELEASE, "alpha.12");
+        let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(),
+            pinned,
             format!("Install {TRACKER_RELEASE} between games, not during one.")
         );
-        let notice = tracker_release_notice_text();
-        assert!(!notice.contains('\u{2014}'));
-        assert!(!notice.contains('\u{2013}'));
-        assert!(notice.contains(TRACKER_RELEASE));
+        assert!(!pinned.contains('\u{2014}'));
+        assert!(!pinned.contains('\u{2013}'));
+        assert!(pinned.contains(TRACKER_RELEASE));
         let src = include_str!("mod.rs");
-        // Built here so this test file does not itself contain the old label.
-        let previous = ["alpha", "8"].join(".");
-        assert!(
-            !src.contains(&previous),
-            "the install note must not keep the previous tracker build"
-        );
+        // Built here so this test file does not itself contain the old labels.
+        for previous in [["alpha", "8"], ["alpha", "10"]] {
+            let label = previous.join(".");
+            assert!(
+                !src.contains(&label),
+                "the install note must not keep the previous tracker build {label}"
+            );
+        }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         assert_eq!(
-            prod.matches("alpha.10").count(),
+            prod.matches("alpha.12").count(),
             1,
             "the build name lives only on TRACKER_RELEASE"
         );
@@ -1759,15 +1794,16 @@ mod tracker_platform_copy_tests {
             !prod.contains("Install alpha."),
             "the sentence must be built from TRACKER_RELEASE"
         );
+        let call = "{tracker_release_notice(&tracker_notice)}";
         let slim = src.find("if slim_tracker {").expect("slim tracker");
         assert!(
-            !src[..slim].contains("{tracker_release_notice()}"),
+            !src[..slim].contains(call),
             "the notice is not a page-wide banner"
         );
         let full = src[slim..].find("if show_full_setup").expect("full setup");
         let slim_body = &src[slim..slim + full];
         assert!(
-            slim_body.contains("{tracker_release_notice()}"),
+            slim_body.contains(call),
             "the collapsed reinstall row still shows the notice"
         );
         let download = src
@@ -1778,9 +1814,30 @@ mod tracker_platform_copy_tests {
             .find("if !slim_tracker {")
             .expect("install notice is skipped while the slim row is up");
         assert!(
-            download_body[guard..].contains("{tracker_release_notice()}"),
+            download_body[guard..].contains(call),
             "members with no matches still see the notice in the install block"
         );
+    }
+
+    #[test]
+    fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
+        let pinned = tracker_release_notice_text(None);
+        assert_eq!(
+            tracker_release_notice_text(Some("0.5.0-alpha.12")),
+            pinned,
+            "the current bare version reads the same as the pin"
+        );
+        assert_eq!(
+            tracker_release_notice_text(Some("  0.5.0-alpha.11  ")),
+            "Install alpha.11 between games, not during one."
+        );
+        assert_eq!(tracker_release_notice_text(Some("")), pinned);
+        assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
+        assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
+        let shown = tracker_release_notice_text(Some("0.5.0-alpha.12"));
+        assert!(!shown.contains("0.5.0-"));
+        assert!(!shown.contains("stat-tracker-v"));
+        assert!(!shown.contains('\u{2014}'));
     }
 }
 

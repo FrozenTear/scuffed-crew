@@ -127,8 +127,7 @@ pub fn TeamChat() -> Element {
         main { class: "team-chat-page",
             h1 { class: "team-chat-title", "Team Chat" }
             p { class: "team-chat-sub",
-                "Public messages use the team's discovered NIP-29 group. \
-                Officer channels send via the server encrypt API."
+                "Messages for the team you select."
             }
 
             {match team_list {

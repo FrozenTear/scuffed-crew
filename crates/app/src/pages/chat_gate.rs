@@ -138,6 +138,17 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_health_check_keeps_chat_out_of_the_unavailable_copy() {
+        for path in ["/chat", "/dm"] {
+            let html = render_route(path, RelayAvailability::Failed);
+            assert!(html.contains(CHAT_CHECKING), "{path} {html}");
+            assert!(!shows_unavailable(&html), "{path} {html}");
+            assert!(!html.contains("chat-widget"), "{path} {html}");
+            assert!(!html.contains("Team Chat"), "{path} {html}");
+        }
+    }
+
+    #[test]
     fn configured_relay_keeps_today_dm_and_chat_entry() {
         let dm = render_route("/dm", RelayAvailability::On);
         assert!(
@@ -151,6 +162,12 @@ mod tests {
             chat.contains("Team Chat"),
             "configured /chat keeps the team chat page: {chat}"
         );
+        assert!(
+            chat.contains("Messages for the team you select."),
+            "members get a plain subtitle: {chat}"
+        );
+        assert!(!chat.contains("NIP-29"), "{chat}");
+        assert!(!chat.contains("encrypt API"), "{chat}");
         assert!(!shows_unavailable(&chat), "{chat}");
     }
 

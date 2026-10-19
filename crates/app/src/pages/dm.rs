@@ -375,6 +375,7 @@ mod tests {
 
         assert!(!dm_may_sync(RelayAvailability::Off, true));
         assert!(!dm_may_sync(RelayAvailability::Unknown, true));
+        assert!(!dm_may_sync(RelayAvailability::Failed, true));
         assert!(!dm_may_sync(RelayAvailability::On, false));
         assert!(dm_may_sync(RelayAvailability::On, true));
 
