@@ -57,6 +57,7 @@ pub async fn upload_stats(
     // name_recognizer id, or a bad suspect_fields list must not be stored,
     // and a later entry must not leave the earlier ones committed.
     // deleted_sessions is not applied either.
+    // `recognizer` is checked first. A match that fails both reports that error.
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
@@ -1703,5 +1704,50 @@ mod tests {
             assert_eq!(rows[0].name_recognizer, None);
             assert_eq!(rows[0].recognizer, "ocr-v1");
         }
+    }
+
+    /// Both ids are unusable. The response names `recognizer`, which is
+    /// checked before `name_recognizer`.
+    #[tokio::test]
+    async fn upload_bad_recognizer_and_name_recognizer_reports_recognizer_first() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut bad = match_object("sess-keep", 99);
+        bad["recognizer"] = serde_json::json!("NOPE");
+        bad["name_recognizer"] = serde_json::json!("ALSO-BAD");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [bad] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        assert_eq!(
+            parsed["error"],
+            format!("matches[0]: {}", scuffed_types::api::RECOGNIZER_ID_ERROR),
+            "{parsed}"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "rejected batch must not update the stored row"
+        );
+        assert_eq!(rows[0].session_id, "sess-keep");
+        assert_eq!(rows[0].elims, 4);
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert_eq!(rows[0].name_recognizer, None);
     }
 }

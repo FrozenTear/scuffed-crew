@@ -551,8 +551,9 @@ pub struct PersonalMatch {
     ///
     /// `None` is unknown: the upload omitted `name_recognizer`, sent null, or
     /// the row was written before the column existed. JSON is null in that
-    /// case. Player names are never stored here. Returned on the member's own
-    /// match list, beside `recognizer`.
+    /// case. The upload accepts only recognizer ids in `[a-z0-9.-]`, 1 to 32
+    /// characters, so free-form name text can't be stored. Returned on the
+    /// member's own match list, beside `recognizer`.
     #[serde(default)]
     pub name_recognizer: Option<String>,
     /// Names the tracker flagged as unsure on this player's own row.

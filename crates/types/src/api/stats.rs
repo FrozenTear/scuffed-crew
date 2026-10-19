@@ -269,9 +269,9 @@ pub struct StatsUploadMatch {
     /// no default. Omitted or null means the reader is unknown and is stored
     /// as NONE.
     ///
-    /// Player names must never be sent. This field identifies only which
-    /// reader found the row. A value longer than [`RECOGNIZER_ID_MAX_LEN`]
-    /// is rejected, and so is any string that is not a recognizer id.
+    /// It accepts only recognizer ids in `[a-z0-9.-]`, 1 to 32 characters,
+    /// so free-form name text can't be stored. The field identifies only
+    /// which reader found the row.
     pub name_recognizer: RecognizerInput,
     pub suspect_fields: SuspectFieldsInput,
 }
