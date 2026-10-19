@@ -6,7 +6,8 @@
 //!
 //! When the member also asks to delete site stats, `DELETE /api/stats/me`
 //! runs with the tracker sync token before any local file or token is
-//! removed. The account on the site stays.
+//! removed. That call deletes site stats only. The account, forum posts,
+//! wiki edits, and messages stay.
 //!
 //! File removal is [`crate::uninstall::purge_saved_games`] and
 //! [`crate::uninstall::purge_settings`]. The capture daemon is stopped with
@@ -53,11 +54,10 @@ pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
 
 /// Shown in the confirm step while the site checkbox is ticked.
 ///
-/// Removed and kept lines match the site account page: forum threads and
-/// replies stay, with the author shown as "Deleted member", and direct
-/// messages the member sent are deleted. The account itself stays.
+/// This button calls `DELETE /api/stats/me` only. It does not delete the
+/// account, so it does not use the website's account-delete list.
 pub const SITE_CONFIRM_COPY: &str = "\
-Stats on the site from every PC are scheduled for deletion. Direct messages you sent are deleted. Forum posts (threads and replies) stay up, with the author shown as \"Deleted member\". Your account stays.";
+This deletes your tracker stats on the site (after a 7-day undo window, undo on the website account page) and the local stats on this computer. Your account, forum posts, wiki edits and messages are not affected.";
 
 /// 401 or 403 from `DELETE /api/stats/me`. Local data stays.
 pub const SITE_REJECTED: &str = "\
@@ -734,12 +734,12 @@ token = \"synthetic-token-value\"
         ] {
             assert!(!copy.contains('\u{2014}'), "{copy}");
         }
-        assert!(SITE_CONFIRM_COPY.contains("every PC"));
-        assert!(SITE_CONFIRM_COPY.contains("account stays"));
-        assert!(SITE_CONFIRM_COPY.contains("Direct messages you sent are deleted"));
-        assert!(SITE_CONFIRM_COPY.contains(
-            "Forum posts (threads and replies) stay up, with the author shown as \"Deleted member\""
-        ));
+        assert_eq!(
+            SITE_CONFIRM_COPY,
+            "This deletes your tracker stats on the site (after a 7-day undo window, undo on the website account page) and the local stats on this computer. Your account, forum posts, wiki edits and messages are not affected."
+        );
+        assert!(!SITE_CONFIRM_COPY.contains("Deleted member"));
+        assert!(!SITE_CONFIRM_COPY.contains("Direct messages you sent are deleted"));
         assert_eq!(
             SITE_DELETE_SUCCESS,
             "Your stats on the site will be deleted on {date}. To undo, go to your account page on the website before then, then make a new sync token there and paste it into the app."
