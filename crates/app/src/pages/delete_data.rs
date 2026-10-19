@@ -47,6 +47,7 @@ pub(crate) const STATS_RESTORED_COPY: &str =
 const INVALID_PASSWORD_COPY: &str = "That password is wrong.";
 const REAUTH_COPY: &str = "For safety, sign out and sign in again, then delete within 10 minutes.";
 const CONFIRM_MISMATCH_COPY: &str = "The name you typed doesn't match your account name.";
+const ACCOUNT_CONFIRM_PROMPT: &str = "Type your display name or username to confirm.";
 const SIGN_IN_AGAIN_COPY: &str = "Sign in again, then retry.";
 const FORBIDDEN_COPY: &str = "You don't have permission to do that.";
 const REJECTED_COPY: &str = "That request was rejected. Check what you typed and try again.";
@@ -84,20 +85,19 @@ const DELETE_LISTS: DeleteDialogCopy = DeleteDialogCopy {
     },
     account: DeleteLists {
         removes: &[
-            "Your profile",
-            "Game accounts",
-            "Member settings",
+            "Direct messages you sent",
             "Tracker stats and tokens",
             "Sessions, so you are signed out everywhere",
-            "Device links",
             "RSVPs and poll votes",
-            "Your Nostr link",
+            "Game accounts",
             "Personal strategies",
-            "your forum posts and direct messages",
+            "Member settings",
+            "Device links",
+            "Your Nostr link",
             CHAT_DELETE_COPY,
         ],
         stays: &[
-            "Team matches, articles, and attendance stay. Your name on those is shown as \"Deleted member\".",
+            "Forum posts (threads and replies) stay up, with the author shown as \"Deleted member\", like wiki edits, articles, announcements, match results, and audit entries.",
         ],
     },
 };
@@ -333,19 +333,41 @@ pub(crate) fn confirm_name_matches(typed: &str, account_name: &str) -> bool {
     !expected.is_empty() && typed.trim() == expected
 }
 
+/// Account delete accepts the display name or the username. Each side is
+/// trimmed. The compare stays case-sensitive, and a blank name never matches.
+pub(crate) fn confirm_matches_display_or_username(
+    typed: &str,
+    display_name: &str,
+    username: &str,
+) -> bool {
+    confirm_name_matches(typed, display_name) || confirm_name_matches(typed, username)
+}
+
+fn password_satisfied(prompt: PasswordPrompt, password: &str) -> bool {
+    match prompt {
+        PasswordPrompt::Required => !password.is_empty(),
+        PasswordPrompt::Hidden | PasswordPrompt::Optional => true,
+    }
+}
+
 pub(crate) fn delete_confirm_enabled(
     typed: &str,
     account_name: &str,
     prompt: PasswordPrompt,
     password: &str,
 ) -> bool {
-    if !confirm_name_matches(typed, account_name) {
-        return false;
-    }
-    match prompt {
-        PasswordPrompt::Required => !password.is_empty(),
-        PasswordPrompt::Hidden | PasswordPrompt::Optional => true,
-    }
+    confirm_name_matches(typed, account_name) && password_satisfied(prompt, password)
+}
+
+pub(crate) fn account_delete_enabled(
+    typed: &str,
+    display_name: &str,
+    username: &str,
+    prompt: PasswordPrompt,
+    password: &str,
+) -> bool {
+    confirm_matches_display_or_username(typed, display_name, username)
+        && password_satisfied(prompt, password)
 }
 
 pub(crate) fn delete_account_request(
@@ -685,7 +707,11 @@ pub fn PendingStatsDeletionBanner(
 }
 
 #[component]
-pub fn DeleteDataSection(account_name: String, has_password: Option<bool>) -> Element {
+pub fn DeleteDataSection(
+    account_name: String,
+    username: String,
+    has_password: Option<bool>,
+) -> Element {
     let nav = use_navigator();
     let mut auth = use_auth();
     let mut toast = use_toast();
@@ -729,11 +755,19 @@ pub fn DeleteDataSection(account_name: String, has_password: Option<bool>) -> El
     });
 
     let scheduled_at = schedule.read().as_ref().and_then(|value| value.clone());
-    let enabled = delete_confirm_enabled(&typed(), &account_name, prompt, &password());
     let kind = dialog();
+    let enabled = match kind {
+        DeleteKind::Account => {
+            account_delete_enabled(&typed(), &account_name, &username, prompt, &password())
+        }
+        DeleteKind::Stats | DeleteKind::Closed => {
+            delete_confirm_enabled(&typed(), &account_name, prompt, &password())
+        }
+    };
 
     let mut submit = {
         let account_name = account_name.clone();
+        let username = username.clone();
         move |_| {
             if busy() {
                 return;
@@ -741,7 +775,19 @@ pub fn DeleteDataSection(account_name: String, has_password: Option<bool>) -> El
             let kind = dialog();
             let typed_now = typed();
             let password_now = password();
-            if !delete_confirm_enabled(&typed_now, &account_name, prompt, &password_now) {
+            let allowed = match kind {
+                DeleteKind::Account => account_delete_enabled(
+                    &typed_now,
+                    &account_name,
+                    &username,
+                    prompt,
+                    &password_now,
+                ),
+                DeleteKind::Stats | DeleteKind::Closed => {
+                    delete_confirm_enabled(&typed_now, &account_name, prompt, &password_now)
+                }
+            };
+            if !allowed {
                 return;
             }
             busy.set(true);
@@ -902,7 +948,11 @@ pub fn DeleteDataSection(account_name: String, has_password: Option<bool>) -> El
                                 oninput: move |evt| typed.set(evt.value()),
                             }
                             p { class: "delete-data-hint",
-                                "Type your account name exactly: {account_name}"
+                                if kind == DeleteKind::Account {
+                                    "{ACCOUNT_CONFIRM_PROMPT}"
+                                } else {
+                                    "Type your account name exactly: {account_name}"
+                                }
                             }
                         }
                         if prompt != PasswordPrompt::Hidden {
@@ -1033,6 +1083,59 @@ mod tests {
     }
 
     #[test]
+    fn account_confirm_accepts_display_name_or_username() {
+        assert_eq!(
+            ACCOUNT_CONFIRM_PROMPT,
+            "Type your display name or username to confirm."
+        );
+        assert_plain(ACCOUNT_CONFIRM_PROMPT);
+        assert!(confirm_matches_display_or_username("Ada", "Ada", "ada"));
+        assert!(confirm_matches_display_or_username("  ada  ", "Ada", "ada"));
+        assert!(confirm_matches_display_or_username("Ada", "  Ada  ", "ada"));
+        assert!(confirm_matches_display_or_username("ada", "Ada", "  ada "));
+        assert!(confirm_matches_display_or_username("Ada", "Ada", "Ada"));
+        assert!(confirm_matches_display_or_username("ada", "", "ada"));
+        assert!(!confirm_matches_display_or_username("ADA", "Ada", "ada"));
+        assert!(!confirm_matches_display_or_username(
+            "Ada Lovelace",
+            "Ada",
+            "ada"
+        ));
+        assert!(!confirm_matches_display_or_username("Ada", "", "ada"));
+        assert!(!confirm_matches_display_or_username("", "Ada", "ada"));
+        assert!(!confirm_matches_display_or_username("   ", "   ", "   "));
+        assert!(!confirm_matches_display_or_username("Ada", "", ""));
+        assert!(account_delete_enabled(
+            "ada",
+            "Ada",
+            "ada",
+            PasswordPrompt::Hidden,
+            ""
+        ));
+        assert!(!account_delete_enabled(
+            "nope",
+            "Ada",
+            "ada",
+            PasswordPrompt::Hidden,
+            ""
+        ));
+        assert!(!account_delete_enabled(
+            "Ada",
+            "Ada",
+            "ada",
+            PasswordPrompt::Required,
+            ""
+        ));
+        assert!(account_delete_enabled(
+            "ada",
+            "Ada",
+            "ada",
+            PasswordPrompt::Required,
+            "pw"
+        ));
+    }
+
+    #[test]
     fn account_request_trims_the_name_and_omits_a_blank_password() {
         let hidden = delete_account_request("  Ada  ", PasswordPrompt::Hidden, "ignored");
         assert_eq!(hidden.confirm, "Ada");
@@ -1068,6 +1171,53 @@ mod tests {
         assert_eq!(password_prompt(Some(false)), PasswordPrompt::Hidden);
         assert_eq!(password_prompt(None), PasswordPrompt::Optional);
         assert_eq!(password_prompt(Some(true)), PasswordPrompt::Required);
+    }
+
+    #[test]
+    fn has_password_shows_requires_or_omits_the_field() {
+        assert_eq!(password_prompt(Some(true)), PasswordPrompt::Required);
+        assert!(!delete_confirm_enabled(
+            "Ada",
+            "Ada",
+            PasswordPrompt::Required,
+            ""
+        ));
+        assert_eq!(
+            delete_account_request("Ada", PasswordPrompt::Required, "pw")
+                .password
+                .as_deref(),
+            Some("pw")
+        );
+
+        assert_eq!(password_prompt(Some(false)), PasswordPrompt::Hidden);
+        assert!(delete_confirm_enabled(
+            "Ada",
+            "Ada",
+            PasswordPrompt::Hidden,
+            ""
+        ));
+        assert_eq!(
+            delete_account_request("Ada", PasswordPrompt::Hidden, "pw").password,
+            None
+        );
+
+        assert_eq!(password_prompt(None), PasswordPrompt::Optional);
+        assert!(delete_confirm_enabled(
+            "Ada",
+            "Ada",
+            PasswordPrompt::Optional,
+            ""
+        ));
+        assert_eq!(
+            delete_account_request("Ada", PasswordPrompt::Optional, "").password,
+            None
+        );
+        assert_eq!(
+            delete_account_request("Ada", PasswordPrompt::Optional, "pw")
+                .password
+                .as_deref(),
+            Some("pw")
+        );
     }
 
     #[test]
@@ -1183,28 +1333,43 @@ mod tests {
             assert_plain(line);
         }
         assert!(DELETE_LISTS.account.removes.contains(&CHAT_DELETE_COPY));
+        for line in [
+            "Direct messages you sent",
+            "Tracker stats and tokens",
+            "Sessions, so you are signed out everywhere",
+            "RSVPs and poll votes",
+            "Game accounts",
+            "Personal strategies",
+            "Member settings",
+            "Device links",
+            "Your Nostr link",
+        ] {
+            assert!(
+                DELETE_LISTS.account.removes.contains(&line),
+                "missing removed line {line}"
+            );
+        }
         assert!(
-            DELETE_LISTS
+            !DELETE_LISTS
                 .account
                 .removes
-                .contains(&"Personal strategies")
-        );
-        assert!(
-            DELETE_LISTS
-                .account
-                .removes
-                .contains(&"your forum posts and direct messages")
-        );
-        assert!(DELETE_LISTS.account.removes.contains(&"Device links"));
-        assert!(DELETE_LISTS.account.removes.contains(&"Member settings"));
-        assert!(DELETE_LISTS.stats.stays.contains(&TRACKER_LOCAL_COPY));
-        assert!(
-            DELETE_LISTS
-                .account
-                .stays
                 .iter()
-                .any(|line| line.contains("Deleted member"))
+                .any(|line| line.to_ascii_lowercase().contains("forum")),
+            "forum posts stay up"
         );
+        let stays = DELETE_LISTS.account.stays.join(" ");
+        for phrase in [
+            "Forum posts (threads and replies)",
+            "wiki edits",
+            "articles",
+            "announcements",
+            "match results",
+            "audit entries",
+            "Deleted member",
+        ] {
+            assert!(stays.contains(phrase), "kept copy missing {phrase}");
+        }
+        assert!(DELETE_LISTS.stats.stays.contains(&TRACKER_LOCAL_COPY));
         assert_plain(STATS_RESTORED_COPY);
         assert_plain(ACCOUNT_DELETED_COPY);
         assert_plain(LAST_ADMIN_COPY);

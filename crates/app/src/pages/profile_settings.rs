@@ -216,6 +216,7 @@ pub fn ProfileSettings() -> Element {
     let mut name_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
     let mut account_name = use_signal(String::new);
+    let mut username = use_signal(String::new);
     let mut has_password = use_signal(|| None::<bool>);
 
     use_future(move || async move {
@@ -227,6 +228,7 @@ pub fn ProfileSettings() -> Element {
             }
         };
         account_name.set(account_name_from_session(&me));
+        username.set(me.user.username.trim().to_string());
         has_password.set(session_has_password(&me));
         let Some(m) = me.member else {
             load_error.set(Some("Only org members have an editable profile.".into()));
@@ -486,6 +488,7 @@ pub fn ProfileSettings() -> Element {
                 }
                 DeleteDataSection {
                     account_name: account_name(),
+                    username: username(),
                     has_password: has_password(),
                 }
             }

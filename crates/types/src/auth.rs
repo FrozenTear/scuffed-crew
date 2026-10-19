@@ -36,8 +36,10 @@ pub struct MeResponse {
     /// what produced identities pointing at a domain we do not own.
     #[serde(default)]
     pub nip05: Option<String>,
-    /// `Some(false)` means this account has no password (hide the field).
-    /// `Some(true)` means a password is set. Absent means the server did not say.
+    /// `GET /api/auth/me` sends `has_password` as a bool.
+    /// `Some(true)`: the delete dialog shows a required password.
+    /// `Some(false)`: the field is hidden and the delete body omits `password`.
+    /// `None`: an older server omitted the field, so the password stays optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_password: Option<bool>,
 }
@@ -123,4 +125,30 @@ pub struct LocalLoginRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OkResponse {
     pub ok: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MeResponse;
+
+    fn me(json: &str) -> MeResponse {
+        serde_json::from_str(json).expect("me json")
+    }
+
+    #[test]
+    fn has_password_defaults_when_an_older_server_omits_it() {
+        let absent = me(r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null}"#);
+        assert_eq!(absent.has_password, None);
+        assert_eq!(absent.user.has_password, None);
+
+        let yes = me(
+            r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null,"has_password":true}"#,
+        );
+        assert_eq!(yes.has_password, Some(true));
+
+        let no = me(
+            r#"{"user":{"id":"u","username":"ada","avatar_url":null},"member":null,"has_password":false}"#,
+        );
+        assert_eq!(no.has_password, Some(false));
+    }
 }
