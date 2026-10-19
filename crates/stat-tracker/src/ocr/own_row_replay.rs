@@ -86,11 +86,10 @@ pub fn tally_own_row_dir(dir: &Path, player_name: &str) -> OwnRowCounts {
     counts
 }
 
-/// Text for the replay example. The configured player name is the only
-/// name it prints.
-pub fn format_own_row_counts(player_name: &str, counts: &OwnRowCounts) -> String {
+/// Text for the replay example. Counts only: no player name.
+pub fn format_own_row_counts(counts: &OwnRowCounts) -> String {
     let mut out = format!(
-        "player {player_name}\nframes {}\nfound {}\nfailures {}\n",
+        "frames {}\nfound {}\nfailures {}\n",
         counts.frames, counts.found, counts.failures
     );
     for (row, n) in &counts.rows {
@@ -120,17 +119,17 @@ mod tests {
             failures: 1,
             rows: BTreeMap::from([(4, 3)]),
         };
-        let text = format_own_row_counts(PLAYER, &counts);
-        assert!(text.contains("player FrozenTear"));
-        assert!(text.contains("frames 4"));
-        assert!(text.contains("found 3"));
-        assert!(text.contains("failures 1"));
-        assert!(text.contains("row 4 3"));
-        assert!(!text.split_whitespace().any(|word| word == NEAR_MISS));
+        let text = format_own_row_counts(&counts);
+        assert_eq!(text, "frames 4\nfound 3\nfailures 1\nrow 4 3\n");
+        assert!(
+            !text
+                .split_whitespace()
+                .any(|word| word == PLAYER || word == NEAR_MISS)
+        );
     }
 
     #[test]
-    fn replay_counts_print_only_the_configured_name() {
+    fn replay_counts_print_only_counts() {
         counts_text_has_no_decoy();
     }
 
@@ -144,7 +143,7 @@ mod tests {
         assert_eq!(counts.found, 0);
         assert_eq!(counts.failures, 1);
         assert!(counts.rows.is_empty());
-        let text = format_own_row_counts(PLAYER, &counts);
+        let text = format_own_row_counts(&counts);
         assert!(!text.contains("notes"));
         assert!(!text.contains("broken"));
         assert!(!text.split_whitespace().any(|word| word == NEAR_MISS));

@@ -3,7 +3,7 @@
 //! Usage: `cargo run -p scuffed-stat-tracker --example own_row_replay -- <dir> <player-name>`
 //!
 //! Each PNG in `<dir>` (not subfolders) is one frame. The printout is
-//! counts only, plus the player name given on the command line.
+//! counts only. The player name is used to match a row and is not printed.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let counts = tally_own_row_dir(Path::new(&dir), &player_name);
-    print!("{}", format_own_row_counts(&player_name, &counts));
+    print!("{}", format_own_row_counts(&counts));
     ExitCode::SUCCESS
 }
 
