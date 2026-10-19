@@ -56,13 +56,18 @@ impl IntoResponse for NostrHandlerError {
 ///
 /// HTTP status stays the caller's. The `error` field stays the stable code
 /// (`client_error`) the site client maps. The full error is logged and is
-/// never copied into the JSON body.
+/// never copied into the JSON body. A 400 or other client error is logged
+/// at warn. Server failures stay at error.
 fn internal_err(
     status: StatusCode,
     e: impl std::fmt::Display,
     client_error: &'static str,
 ) -> (StatusCode, Json<ErrorResponse>) {
-    tracing::error!(error = %e, "{client_error}");
+    if status.is_client_error() {
+        tracing::warn!(error = %e, "{client_error}");
+    } else {
+        tracing::error!(error = %e, "{client_error}");
+    }
     (
         status,
         Json(ErrorResponse {
