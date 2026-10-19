@@ -419,19 +419,40 @@ if [[ "${used_no_deps}" == "1" ]]; then
     fi
 fi
 
-echo "Waiting for site-server readiness on 127.0.0.1:${HOST_PORT}/api/ready (up to 60s)..."
+# shellcheck source=lib/deploy-probe.sh
+source "$ROOT/scripts/lib/deploy-probe.sh"
+echo "Waiting for site-server on 127.0.0.1:${HOST_PORT} (up to 60s)..."
 healthy=0
+used_health_fallback=0
+warned_ready_404=0
 for _ in $(seq 1 30); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${HOST_PORT}/api/ready" >/dev/null 2>&1; then
+    ready_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 2 \
+        "http://127.0.0.1:${HOST_PORT}/api/ready" || true)"
+    [[ -n "${ready_code}" ]] || ready_code="000"
+    choice="$(deploy_probe_choice "${ready_code}")"
+    if [[ "${choice}" == "ready" ]]; then
         healthy=1
         break
+    fi
+    if [[ "${choice}" == "health" ]]; then
+        if [[ "${warned_ready_404}" != "1" ]]; then
+            echo "warning: /api/ready returned 404. Falling back to /api/health. This image does not have the readiness route yet." >&2
+            warned_ready_404=1
+        fi
+        health_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 2 \
+            "http://127.0.0.1:${HOST_PORT}/api/health" || true)"
+        if [[ "${health_code}" == "200" ]]; then
+            healthy=1
+            used_health_fallback=1
+            break
+        fi
     fi
     sleep 2
 done
 
 if [[ "${healthy}" != "1" ]]; then
     cname="$(our_container_name)"
-    echo "error: site-server /api/ready was not 200 after 60s. Deploy failed." >&2
+    echo "error: site-server was not ready after 60s. Deploy failed." >&2
     echo "Container status:" >&2
     podman ps -a --filter "name=${PROJECT_NAME}" --format 'table {{.Names}}\t{{.Status}}' >&2 || true
     echo "Project Surreal containers (name-skew: hyphen vs underscore twins share one volume):" >&2
@@ -457,4 +478,8 @@ if [[ -n "${CANONICAL_SURREAL_NAME}" ]]; then
 fi
 
 echo
-echo "Updated and ready: http://127.0.0.1:${HOST_PORT}/api/ready OK"
+if [[ "${used_health_fallback}" == "1" ]]; then
+    echo "Updated and ready: http://127.0.0.1:${HOST_PORT}/api/health OK (/api/ready was 404)"
+else
+    echo "Updated and ready: http://127.0.0.1:${HOST_PORT}/api/ready OK"
+fi

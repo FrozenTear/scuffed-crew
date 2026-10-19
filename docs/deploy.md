@@ -35,7 +35,7 @@ Never ship with `root`/`root`. Migrations run as root during bootstrap only; the
 
 ### Relay database user (optional follow-up)
 
-`git pull` and `./scripts/update.sh` keep the running relay as it is. `update.sh` appends `SURREALDB_RELAY_PASSWORD` when the key is missing, replaces the key when it is present but blank, recreates site-server, and waits until `GET /api/ready` returns 200. The new process creates the login during bootstrap. The relay container is not rebuilt by `update.sh`, so an existing relay keeps its current environment and keeps serving.
+`git pull` and `./scripts/update.sh` keep the running relay as it is. `update.sh` appends `SURREALDB_RELAY_PASSWORD` when the key is missing, replaces the key when it is present but blank, recreates site-server, and waits until `GET /api/ready` returns 200. If that route returns 404, the image is older than the readiness check (a rollback, or the new image is not published yet) and `update.sh` logs a warning and waits on `GET /api/health` instead. Any other status keeps waiting. The new process creates the login during bootstrap. The relay container is not rebuilt by `update.sh`, so an existing relay keeps its current environment and keeps serving.
 
 Switch the relay only after that:
 
@@ -44,7 +44,7 @@ Switch the relay only after that:
 ./scripts/relay-up.sh
 ```
 
-`update.sh` waits for `/api/ready`. `relay-up.sh` checks `/api/ready` again and signs in as the relay user. It rebuilds strfry only after that sign-in returns 200. A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. The sign-in inside `relay-up.sh` is what proves the login. The result is cached for 2 seconds.
+`update.sh` waits for `/api/ready`, and falls back to `/api/health` when `/api/ready` returns 404. `relay-up.sh` checks `/api/ready` again and signs in as the relay user. It rebuilds strfry only after that sign-in returns 200. A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. The sign-in inside `relay-up.sh` is what proves the login. The result is cached for 2 seconds.
 
 Compose passes `SURREALDB_RELAY_PASSWORD` into the relay container and does not copy `SURREALDB_PASSWORD` into it. When `PRODUCTION=1`, the relay requires a non-blank relay password and does not fall back to `SURREALDB_USER`.
 
@@ -591,9 +591,10 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    Site bootstrap still uses root. See "Relay database user" above.
 
 2. Recreate site-server so it picks up `NOSTR_RELAY_URL` and creates the
-   relay login. `update.sh` waits until `/api/ready` returns 200. That 200
-   means a cached `RETURN true` succeeded. It does not by itself prove the
-   relay password.
+   relay login. `update.sh` waits until `/api/ready` returns 200. If that
+   route returns 404, it logs a warning and waits on `/api/health` instead.
+   A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does
+   not by itself prove the relay password.
 
    ```bash
    ./scripts/update.sh

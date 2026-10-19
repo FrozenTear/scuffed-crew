@@ -33,6 +33,8 @@ jobs:
         run: bash scripts/test-secrets-file.sh
       - name: Relay switch preflight
         run: bash scripts/test-relay-preflight.sh
+      - name: Deploy probe falls back when readiness is missing
+        run: bash scripts/test-deploy-probe.sh
 
   relay-production-env:
     name: Relay production env
