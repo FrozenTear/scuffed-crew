@@ -1406,8 +1406,7 @@ impl TrackerApp {
                             self.saved_config = defaults.clone();
                             self.settings = SettingsForm::from_config(&defaults);
                         }
-                        self.settings.sync_token.clear();
-                        self.settings.sync_url.clear();
+                        self.forget_sync_link();
                         self.health_status = self.health_now();
                         self.replace_toast(copy);
                         self.toast_shown_at = Some(SystemTime::now());
@@ -1423,8 +1422,11 @@ impl TrackerApp {
                                 self.delete_data.notice =
                                     Some(crate::delete_data::SITE_REJECTED.to_string());
                             }
-                            crate::delete_data::WipeFailure::Local(_) => {
+                            crate::delete_data::WipeFailure::Local { unlinked, .. } => {
                                 self.delete_data.offer_retry = false;
+                                if *unlinked {
+                                    self.forget_sync_link();
+                                }
                             }
                         }
                         self.replace_toast(err.message());
@@ -1755,6 +1757,14 @@ impl TrackerApp {
 
     fn replace_toast(&mut self, text: impl Into<String>) {
         show_plain_toast(&mut self.toast, &mut self.toast_action, text.into());
+    }
+
+    /// Drop the saved site link. A 200 from `DELETE /api/stats/me` revokes
+    /// every token, so this PC stays unlinked until a new token is saved.
+    fn forget_sync_link(&mut self) {
+        self.saved_config.sync = None;
+        self.settings.sync_token.clear();
+        self.settings.sync_url.clear();
     }
 
     /// Prefix "Restart now" starts the new binary from: the one the in-app
