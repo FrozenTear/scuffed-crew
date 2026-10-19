@@ -461,9 +461,17 @@ impl SyncClient {
     }
 
     /// Swap the URL and token after Settings saved a different pair.
-    /// The HTTP client (timeout, redirect policy) stays.
+    /// The HTTP client (timeout, redirect policy) stays. A different server
+    /// URL drops caps learned from the previous host. A token-only change
+    /// keeps them.
     pub fn replace_credentials(&self, config: SyncConfig) {
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
+        let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        let url_changed = slot.server_url != config.server_url;
+        *slot = config;
+        drop(slot);
+        if url_changed {
+            *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
+        }
     }
 
     /// `new`, but refuse an unsafe server URL before a client exists.
@@ -2754,6 +2762,34 @@ mod tests {
             "a later pass cannot raise a learned cap"
         );
         assert_eq!(c.clone().batch_caps().matches, 50);
+    }
+
+    #[test]
+    fn replace_credentials_resets_learned_caps_when_the_server_url_changes() {
+        let c = client("https://crew.example");
+        c.remember_batch_caps(BatchCaps {
+            matches: 50,
+            deletes: 100,
+        });
+        c.replace_credentials(SyncConfig {
+            server_url: "https://crew.example".into(),
+            token: "other-token".into(),
+        });
+        assert_eq!(
+            c.batch_caps(),
+            BatchCaps {
+                matches: 50,
+                deletes: 100,
+            },
+            "a new token on the same server keeps the learned caps"
+        );
+        c.replace_credentials(SyncConfig {
+            server_url: "https://other.example".into(),
+            token: "other-token".into(),
+        });
+        assert_eq!(c.batch_caps(), BatchCaps::default());
+        assert_eq!(c.batch_caps().matches, SYNC_UPLOAD_MAX_MATCHES);
+        assert_eq!(c.batch_caps().deletes, SYNC_UPLOAD_MAX_DELETES);
     }
 
     #[tokio::test]
