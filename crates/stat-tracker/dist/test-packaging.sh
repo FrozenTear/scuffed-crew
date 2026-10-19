@@ -14,6 +14,13 @@ bash "$DIST/test-atomic-install.sh"
 bash "$DIST/test-safe-extract.sh"
 # The tessdata check always runs; its wording follows `ocr` in config.toml.
 bash "$DIST/test-ocr-off.sh"
+# glibc floor comparator used by the release clean-room step.
+bash "$DIST/check-bundled-glibc.sh" --expect-ok 2.35 2.35
+bash "$DIST/check-bundled-glibc.sh" --expect-ok 2.34 2.35
+bash "$DIST/check-bundled-glibc.sh" --expect-ok 2.2.5 2.35
+bash "$DIST/check-bundled-glibc.sh" --expect-fail 2.36 2.35
+bash "$DIST/check-bundled-glibc.sh" --expect-fail 2.35.1 2.35
+echo "PASS  glibc floor comparator"
 FAILS=0
 
 pass() { echo "PASS  $*"; }
@@ -29,7 +36,7 @@ for name in libcrypto.so.3 libcrypto.so libssl.so.3 libssl.so.3.0.2; do
         fail "deny should match $name (DENY=$DENY)"
     fi
 done
-for name in liblept.so.5 libtesseract.so.4 libxdo.so.3 libpng16.so.16; do
+for name in liblept.so.5 libtesseract.so.4 libtesseract.so.5 libxdo.so.3 libpng16.so.16; do
     if echo "$name" | grep -qE "$DENY"; then
         fail "deny must not match OCR/GUI lib $name"
     else
@@ -69,7 +76,7 @@ cp "$UNINSTALL" "$PKG/uninstall.sh"
 
 # Tarball contents: OCR + GUI libs, plus a sneaky OpenSSL that must be skipped.
 printf 'ocr-lept\n' > "$PKG/lib/scuffed-stat-tracker/ocr/liblept.so.5"
-printf 'ocr-tess\n' > "$PKG/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+printf 'ocr-tess\n' > "$PKG/lib/scuffed-stat-tracker/ocr/libtesseract.so.5"
 printf 'BAD-crypto\n' > "$PKG/lib/scuffed-stat-tracker/ocr/libcrypto.so.3"
 printf 'BAD-ssl\n' > "$PKG/lib/scuffed-stat-tracker/ocr/libssl.so.3"
 printf 'gui-xdo\n' > "$PKG/lib/scuffed-stat-tracker/gui/libxdo.so.3"
@@ -80,11 +87,17 @@ printf 'OLD-ssl\n' > "$PREFIX/lib/libssl.so.3"
 printf 'OLD-lept\n' > "$PREFIX/lib/liblept.so.5"
 # A file the user owns in $PREFIX/lib - not in our manifest, must survive.
 printf 'keep-me\n' > "$PREFIX/lib/libsomething-else.so.1"
+# Older OCR dir: Tesseract 4 soname next to where 5 will be installed.
+mkdir -p "$PREFIX/lib/scuffed-stat-tracker/ocr"
+printf 'OLD-tess4\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+printf 'OLD-tess4-real\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1"
 {
     echo "$PREFIX/bin/scuffed-stat-tracker"
     echo "$PREFIX/lib/libcrypto.so.3"
     echo "$PREFIX/lib/libssl.so.3"
     echo "$PREFIX/lib/liblept.so.5"
+    echo "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+    echo "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1"
 } > "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
 
 # HOME is used for tessdata / desktop; keep it inside TMP.
@@ -105,10 +118,13 @@ fi
 
 # Isolated OCR / GUI libs installed.
 if [[ -f "$PREFIX/lib/scuffed-stat-tracker/ocr/liblept.so.5" \
-   && -f "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4" ]]; then
-    pass "OCR libs isolated under lib/scuffed-stat-tracker/ocr"
+   && -f "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.5" \
+   && ! -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4" \
+   && ! -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1" ]]; then
+    pass "OCR libs isolated and leftover libtesseract.so.4 removed"
 else
-    fail "OCR libs missing from private ocr dir"
+    fail "OCR libs missing, or leftover libtesseract.so.4 still installed"
+    find "$PREFIX/lib" -type f >&2 || true
 fi
 if [[ -f "$PREFIX/lib/scuffed-stat-tracker/gui/libxdo.so.3" ]]; then
     pass "GUI libxdo isolated under lib/scuffed-stat-tracker/gui"
@@ -133,11 +149,17 @@ fi
 # Manifest: new private paths present, leftover openssl paths gone.
 MANIFEST="$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
 if grep -qx "$PREFIX/lib/scuffed-stat-tracker/ocr/liblept.so.5" "$MANIFEST" \
+   && grep -qx "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.5" "$MANIFEST" \
    && grep -qx "$PREFIX/lib/scuffed-stat-tracker/gui/libxdo.so.3" "$MANIFEST"; then
     pass "manifest lists isolated lib paths"
 else
     fail "manifest missing isolated lib paths"
     cat "$MANIFEST" >&2
+fi
+if grep -E 'libtesseract\.so\.4' "$MANIFEST"; then
+    fail "manifest still lists libtesseract.so.4"
+else
+    pass "manifest has no libtesseract.so.4"
 fi
 if grep -E 'libcrypto\.so|libssl\.so' "$MANIFEST"; then
     fail "manifest still lists OpenSSL paths"
@@ -179,6 +201,34 @@ if [[ -e "$PREFIX2/lib/scuffed-stat-tracker" ]]; then
     fail "uninstall left lib/scuffed-stat-tracker behind"
 else
     pass "uninstall removed isolated lib tree"
+fi
+
+# A tarball that still ships libtesseract.so.4 keeps that file.
+PKG4="$TMP/pkg-so4"
+PREFIX4="$TMP/prefix-so4"
+rm -rf "$PKG4"
+cp -a "$PKG" "$PKG4"
+rm -f "$PKG4/lib/scuffed-stat-tracker/ocr/libtesseract.so.5"
+printf 'shipped4\n' > "$PKG4/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+mkdir -p "$PREFIX4/lib/scuffed-stat-tracker/ocr"
+printf 'preexisting4\n' > "$PREFIX4/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+HOME="$HOME_DIR" PREFIX="$PREFIX4" SKIP_INTEGRATION=1 \
+    "$PKG4/install.sh" >/dev/null
+if grep -qx 'shipped4' "$PREFIX4/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"; then
+    pass "tarball that ships libtesseract.so.4 keeps it"
+else
+    fail "installer removed libtesseract.so.4 that the tarball shipped"
+fi
+
+# Update already deleted .so.4. Uninstall of that prefix removes .so.5 too.
+PREFIX="$PREFIX" HOME="$HOME_DIR" \
+    "$PREFIX/bin/scuffed-stat-tracker-uninstall" --yes >/dev/null
+if [[ -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4" \
+   || -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1" \
+   || -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.5" ]]; then
+    fail "uninstall left a tesseract library behind"
+else
+    pass "uninstall removed bundled libtesseract.so.5"
 fi
 
 if [[ $FAILS -ne 0 ]]; then

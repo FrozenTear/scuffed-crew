@@ -42,7 +42,7 @@ install paths and the `.desktop` entry stay the same).
 
 | Component | Minimum | Notes |
 |-----------|---------|--------|
-| **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/scuffed-stat-tracker/ocr` (soname splits across distros). Installer copies that tree so RUNPATH `$ORIGIN/../lib/scuffed-stat-tracker/ocr` works. OpenSSL is **not** bundled. |
+| **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+, Linux Mint 21) | OCR `.so` closure is **bundled** in `lib/scuffed-stat-tracker/ocr`, including Tesseract 5.5.3 (`libtesseract.so.5`, Ubuntu 22.04 leptonica 1.82). Installer copies that tree so RUNPATH `$ORIGIN/../lib/scuffed-stat-tracker/ocr` works. OpenSSL is **not** bundled. |
 | **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`), binary name `stat-tracker-gui`. Tray (Hide-to-tray) needs **Ayatana AppIndicator** when the distro ships it; without it the window still starts. |
 | **Host still needed** | Wayland **or** X11 + `input` group | Capture, compositor, and keyboard access stay host-provided. The release tarball bundles `eng.traineddata`. |
 
@@ -215,8 +215,9 @@ parallel by the `ocr_threads` workers.
 
 Measured with Tesseract 5 on the development machine: the reads are
 identical on 10,784 + 816 samples, text and confidence, for about a third
-of the CPU time. Release builds bundle Tesseract 4.1.1 (also built with
-OpenMP); that library was not measured.
+of the CPU time. Release builds bundle Tesseract 5.5.3 (also built with
+OpenMP). The game-font model is still trained with Tesseract 4.1.1 tools.
+That bundled 5.5.3 library has not been measured on the game-font model yet.
 
 - The systemd unit sets it (`Environment=OMP_THREAD_LIMIT=1`). An update
   rewrites the unit and restarts a running tracker. The app's Start button

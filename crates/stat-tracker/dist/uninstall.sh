@@ -10,7 +10,9 @@
 #             (the saved crops of your own name are deleted either way)
 #   --yes     do not ask (keeps saved games unless --purge)
 #
-# Removes the files the installer recorded. It does not guess by name.
+# Removes the files the installer recorded. It does not guess by name,
+# except a leftover libtesseract.so.4 in the private OCR directory from
+# an older release (the current bundle is libtesseract.so.5).
 # A recorded path with `..`, or one that does not resolve under your home
 # folder or the install folder, is left alone. An older install with no
 # record shows the original files and asks first. Settings stay unless
@@ -74,7 +76,7 @@ for arg in "$@"; do
         --purge) PURGE=1 ;;
         --yes|-y) ASSUME_YES=1 ;;
         -h|--help)
-            sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+            sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
             exit 0
             ;;
         *)
@@ -343,6 +345,26 @@ join_paths() {
     printf '%s' "$text"
 }
 
+# An update that bundled libtesseract.so.5 deletes libtesseract.so.4.
+# If that file is still here and the manifest no longer lists it, remove
+# it anyway so uninstall does not leave the old library in the OCR dir.
+remove_leftover_tesseract4() {
+    local ocr="$LIB_DIR/ocr" old resolved
+    [[ -d "$ocr" && ! -L "$ocr" ]] || return 0
+    shopt -s nullglob
+    for old in "$ocr"/libtesseract.so.4 "$ocr"/libtesseract.so.4.*; do
+        [[ -e "$old" || -L "$old" ]] || continue
+        resolved=""
+        if ! resolved="$(confine_file "$old")"; then
+            warn "not removing $old (outside your home folder and the install folder)"
+            continue
+        fi
+        rm -f -- "$resolved"
+        info "Removed leftover Tesseract 4 library $resolved"
+    done
+    shopt -u nullglob
+}
+
 if [[ ${#SKIPPED_FILES[@]} -gt 0 ]]; then
     left_text="$(join_paths "${SKIPPED_FILES[@]}")"
     if [[ ${#REMOVED_PATHS[@]} -eq 0 ]]; then
@@ -354,6 +376,7 @@ if [[ ${#SKIPPED_FILES[@]} -gt 0 ]]; then
     exit 1
 fi
 info "Removed $removed installed file(s)."
+remove_leftover_tesseract4
 
 if [[ -d "$LIB_DIR" && ! -L "$LIB_DIR" ]] && parents_are_real "$LIB_DIR"; then
     find -P "$LIB_DIR" -depth -type d -exec rmdir {} \; 2>/dev/null || true

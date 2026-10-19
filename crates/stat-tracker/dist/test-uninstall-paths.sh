@@ -266,6 +266,23 @@ env HOME="$HOME_DIR" PREFIX="$PREFIX" \
 [[ ! -e "$PREFIX/bin/stat-tracker-gui" ]] || fail "recorded GUI survived"
 pass "extra file next to a recorded library survives"
 
+# libtesseract.so.4 is the one unlisted file uninstall still removes.
+# A neighbor file in the same directory stays.
+run_install "$HOME_DIR" "$PREFIX"
+printf 'old4\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4"
+printf 'old4real\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1"
+printf 'neighbor-lib\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/neighbor.so"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ ! -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4" ]] \
+    || fail "unlisted libtesseract.so.4 survived uninstall"
+[[ ! -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.so.4.0.1" ]] \
+    || fail "unlisted libtesseract.so.4.0.1 survived uninstall"
+[[ -f "$PREFIX/lib/scuffed-stat-tracker/ocr/neighbor.so" ]] \
+    || fail "neighbor library was removed with the tesseract 4 leftover"
+pass "uninstall removes leftover libtesseract.so.4 that the manifest omitted"
+
 # No manifest: show the fixed list, remove those paths, leave the neighbor
 # and config.toml.
 run_install "$HOME_DIR" "$PREFIX"

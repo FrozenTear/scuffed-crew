@@ -213,11 +213,15 @@ if ! groups 2>/dev/null | grep -qw input; then
 fi
 
 # eng.traineddata locations across distros (daemon probes these at runtime too).
+# The release tarball ships tessdata/ next to this installer. That copy is
+# installed a few lines below, so it counts before any system path. Otherwise
+# a machine without a distro model warns, then the bundled file is copied.
 # TESSDATA_SYSTEM_ROOT (empty by default) is put in front of the system
 # paths, so a test can run this on a machine that has the model installed.
 find_eng_traineddata() {
     local sys="${TESSDATA_SYSTEM_ROOT:-}"
     local candidates=(
+        "$PKG_ROOT/tessdata/eng.traineddata"
         "${TESSDATA_PREFIX:-}/eng.traineddata"
         "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata"
         "$sys/usr/share/tessdata/eng.traineddata"
@@ -363,6 +367,30 @@ if [[ -f "$MANIFEST" ]]; then
         info "Removed ${#REMOVED_ENTRIES[@]} leftover v0.4.0 lib(s) from $LIB_DIR"
     fi
 fi
+
+# Tesseract 5 bundles libtesseract.so.5. An older install left
+# libtesseract.so.4 (and sometimes libtesseract.so.4.*) in the private OCR
+# directory. Drop that soname when this tarball does not ship it, and take
+# it off the manifest so a later uninstall cannot leave the file behind.
+drop_replaced_tesseract4() {
+    local ocr="$BUNDLE_DEST/ocr" old base
+    [[ -d "$ocr" ]] || return 0
+    shopt -s nullglob
+    for old in "$ocr"/libtesseract.so.4 "$ocr"/libtesseract.so.4.*; do
+        [[ -e "$old" || -L "$old" ]] || continue
+        base="$(basename "$old")"
+        if [[ -d "$BUNDLE_SRC" ]]; then
+            [[ -f "$BUNDLE_SRC/ocr/$base" ]] && continue
+        elif [[ -f "$PKG_ROOT/lib/$base" ]]; then
+            continue
+        fi
+        rm -f -- "$old"
+        REMOVED_ENTRIES+=("$old")
+        info "Removed leftover $base from $ocr"
+    done
+    shopt -u nullglob
+}
+drop_replaced_tesseract4
 
 # Bundled runtime eng model → user tessdata dir (first-priority lookup, no root,
 # no distro tessdata package needed). Never clobber a user's own eng model

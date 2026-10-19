@@ -198,14 +198,25 @@ for text in 'ocr = "off"' '-'; do
 done
 
 # OCR off must not stop the bundled models from being installed: turning OCR
-# back on later has to work without another install.
+# back on later has to work without another install. The bundled file is also
+# enough on its own: no system model, and no "install tesseract-ocr-eng" warning.
 mkdir -p "$PKG/tessdata"
 printf 'eng-model\n' > "$PKG/tessdata/eng.traineddata"
-run_install bundled "$NO_MODEL" 'ocr = "off"' >/dev/null
+bundled_off="$(run_install bundled "$NO_MODEL" 'ocr = "off"')"
+check_out no "$bundled_off" "eng.traineddata not found" "bundled eng.traineddata, OCR off: no missing-model note"
+check_out no "$bundled_off" "tesseract-ocr-eng" "bundled eng.traineddata, OCR off: does not name the distro package"
 if [[ -f "$TMP/inst-bundled/home/.local/share/scuffed-stat-tracker/tessdata/eng.traineddata" ]]; then
     pass "install: OCR off still installs the bundled eng.traineddata"
 else
     fail "install: OCR off dropped the bundled eng.traineddata"
+fi
+bundled_on="$(run_install bundled-on "$NO_MODEL" '-')"
+check_out no "$bundled_on" "eng.traineddata not found" "bundled eng.traineddata: no missing-model warning"
+check_out no "$bundled_on" "tesseract-ocr-eng" "bundled eng.traineddata: does not ask to install tesseract-ocr-eng"
+if [[ -f "$TMP/inst-bundled-on/home/.local/share/scuffed-stat-tracker/tessdata/eng.traineddata" ]]; then
+    pass "install: bundled eng.traineddata is installed when OCR is on"
+else
+    fail "install: bundled eng.traineddata was not installed when OCR is on"
 fi
 rm -rf "$PKG/tessdata"
 
