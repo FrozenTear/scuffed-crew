@@ -15,6 +15,25 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-rc.2
+
+The name reader now really switches on after you update: once the `names-v1` pack downloads, from the tracker itself or from the app's setup guide, the tracker starts reading names with it right away, with no restart. Starting or restarting the tracker takes a few seconds again instead of about a minute (#401).
+
+### Highlights
+
+- If you updated to rc.1, you do not need to do anything. The tracker sees that the name pack was saved without one of its files and downloads it again by itself (#401).
+- A pack that does not check out is never switched in. The tracker keeps reading with what it has (#401).
+- Fixed the slow start on Wayland and X11 desktops: the step that finds your desktop session runs in under a second, and its log line now says which session it found and how long that took (#401).
+
+### Technical detail
+
+- names-v1 manifest (#401): rc.1 unpacked `names-v1.tar` without its inner `manifest.json`, which the name reader needs (canvas, glyph and mark counts, params, per-file sha256). It logged `names-v1 pack refused: missing manifest.json` and stayed on `ocr-v1`. Pack sync now keeps the verified manifest in `templates/names-v1/`. The other packs' folders are unchanged.
+- rc.1 folders (#401): a names-v1 folder without `manifest.json` counts as not installed, so the next sync downloads the pack again, even though `pack-versions.json` already names it.
+- Reload after install (#401): the name reader loaded once at startup, about a second before the pack keeper installed names-v1. The keeper now reports each install, and the daemon reloads the name reader on a background thread. Before the swap it checks that the manifest sha256 on disk is the one sync verified (before and after the load), every file against that manifest, and the version against the server list. The cached pack is then replaced in one step, so a scoreboard read in flight keeps the pack it started with. A pack that fails a check leaves the current reader running. The next game after the pack lands is stored with `name_recognizer = names-v1`.
+- App installs (#401): when the app's setup guide installs names-v1 while the tracker runs, the next name read sees the new `manifest.json` and runs the same checked reload. Pack sync records the verified manifest sha256 in `templates/pack-manifests.json` next to `pack-versions.json`. A folder changed by hand has no record and is used from the next start.
+- Session environment (#401): `import-session-env.sh`, the oneshot before every daemon start, walked all of `/proc` once per compositor name with two commands per process (about 60 s on a busy niri desktop). It now reads each process name once with the shell's own `read`, skips unreadable or exited processes without a message, stops after 5 s and falls back to the process environment as before.
+- Session lookup (#401): `plasmashell`, `kwin_x11` and `cinnamon` are added, so Mint Cinnamon on X11 takes `DISPLAY` and `XDG_CURRENT_DESKTOP` from the Cinnamon session. One log line names the session source, the processes scanned and the time taken.
+
 ## 0.5.0-rc.1
 
 This is the first release candidate for 0.5.0. The name reader is on by default and is used once the `names-v1` pack has downloaded from the site; until then the tracker keeps using the current reader. Syncing sends a big backlog in smaller batches. If the site refuses one game, only that game is set aside, marked "Upload rejected by server" on its card with a Retry button, and the rest still upload (#386, #370, #378).
