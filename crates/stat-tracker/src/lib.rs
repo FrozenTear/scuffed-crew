@@ -1,3 +1,4 @@
+pub mod board_review;
 pub mod boundary;
 pub mod capture;
 pub mod capture_gate;

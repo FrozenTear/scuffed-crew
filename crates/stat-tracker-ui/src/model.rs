@@ -246,6 +246,10 @@ pub struct Game {
     /// True when this row has already been uploaded. A blank map on a
     /// synced row was stored by an older build. It is not a local hold.
     pub synced: bool,
+    /// Scoreboard reads were only dimmed/unsure boards or all-zero
+    /// pre-round boards. Shown with the same needs-review chip as a
+    /// missing map or hero, and left out of auto-upload.
+    pub review_hold: bool,
 }
 
 /// Label for a game the server refused. The detail line is the server message.
@@ -289,6 +293,7 @@ impl Game {
             upload_reject: m.upload_rejection().map(str::to_string),
             suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
             synced: m.synced,
+            review_hold: m.review_hold,
         }
     }
 
@@ -321,9 +326,11 @@ impl Game {
         !self.review_fields().is_empty()
     }
 
-    /// Unsynced and missing a map or hero. The game has not been uploaded.
+    /// Unsynced, and either missing a map or hero or held because every
+    /// scoreboard read was dimmed/unsure or all zero. The game has not
+    /// been uploaded.
     pub fn held_locally(&self) -> bool {
-        self.needs_review() && !self.synced
+        !self.synced && (self.needs_review() || self.review_hold)
     }
 
     /// Banner for a missing map or hero.
@@ -333,6 +340,9 @@ impl Game {
     /// the row so the site can be corrected.
     pub fn review_notice(&self) -> Option<&'static str> {
         if !self.needs_review() {
+            if self.review_hold && !self.synced {
+                return Some("Needs review. This game stays on this machine.");
+            }
             return None;
         }
         if self.synced {
@@ -534,6 +544,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: vec!["dmg".into(), "hero".into()],
             synced: false,
+            review_hold: false,
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -569,6 +580,7 @@ mod review_tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            review_hold: false,
         }
     }
 
@@ -617,6 +629,25 @@ mod review_tests {
             Some("Hero is missing. Pick one to fix it on the site.")
         );
         assert!(!hero.held_locally());
+    }
+
+    #[test]
+    fn a_review_hold_uses_the_same_needs_review_chip() {
+        let mut game = game("Ana", "Busan");
+        assert!(!game.needs_review());
+        assert!(!game.held_locally());
+        assert!(game.review_notice().is_none());
+        game.review_hold = true;
+        assert!(game.held_locally());
+        assert_eq!(
+            game.review_notice(),
+            Some("Needs review. This game stays on this machine.")
+        );
+        let notice = game.review_notice().unwrap();
+        assert!(!notice.contains('—') && !notice.contains('–'));
+        game.synced = true;
+        assert!(!game.held_locally());
+        assert!(game.review_notice().is_none());
     }
 }
 

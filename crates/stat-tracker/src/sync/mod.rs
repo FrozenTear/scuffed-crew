@@ -559,10 +559,18 @@ struct AuthPauseFile {
     token_fingerprint: String,
 }
 
-/// True when this row must stay on the machine until the member picks
-/// a map or hero. See [`crate::parse::review_suspect_fields`].
+/// True when this row must stay on the machine.
+///
+/// A missing map or hero waits for a pick. [`PersonalMatch::review_hold`]
+/// waits for a clean, non-zero scoreboard read. Either one leaves the row
+/// out of auto-upload.
 pub fn row_needs_review(row: &PersonalMatch) -> bool {
-    !crate::parse::review_suspect_fields(row.display_map_name(), &row.game_mode, row.display_hero())
+    row.review_hold
+        || !crate::parse::review_suspect_fields(
+            row.display_map_name(),
+            &row.game_mode,
+            row.display_hero(),
+        )
         .is_empty()
 }
 
@@ -721,6 +729,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: String::new(),
             suspect_fields: Vec::new(),
+            review_hold: false,
         }
     }
 
@@ -810,6 +819,19 @@ mod tests {
         assert!(!body.contains("\"map_name\":\"\""));
         assert!(!body.contains("\"game_mode\":\"\""));
         assert!(!body.contains("Unknown"));
+    }
+
+    #[test]
+    fn review_hold_keeps_a_ready_row_off_the_upload() {
+        let ready = row("Ana", "Busan", "Control");
+        assert!(!ready.review_hold);
+        assert!(!row_needs_review(&ready));
+        assert_eq!(upload_request(&[ready], &[]).matches.len(), 1);
+
+        let mut held = row("Ana", "Busan", "Control");
+        held.review_hold = true;
+        assert!(row_needs_review(&held));
+        assert!(upload_request(&[held], &[]).matches.is_empty());
     }
 
     #[test]

@@ -1769,6 +1769,18 @@ async fn retire_active_game(
         }
     }
     store_best_guess_on_close(store, data_dir, &mut g).await;
+    // Game end: a dimmed-only or all-zero game stays local. A clean,
+    // non-zero read already stored in this game clears the flag before
+    // the close upload, including the end-of-night auto upload.
+    if g.session_created
+        && let Err(e) = store.apply_session_review_hold(&g.session_id).await
+    {
+        tracing::warn!(
+            error = %e,
+            session_id = %g.session_id,
+            "could not flag the closed game for review"
+        );
+    }
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
             .set_session_outcome(&g.session_id, &g.outcome.to_string())
@@ -5437,7 +5449,7 @@ async fn store_held_board(
     }
     let played_at = SurrealDatetime::from(played_at);
     let hero = parse::canonical_hero(hero);
-    let row = storage::PersonalMatch {
+    let mut row = storage::PersonalMatch {
         id: None,
         hero: hero.clone(),
         map_name: map_name.to_string(),
@@ -5471,7 +5483,9 @@ async fn store_held_board(
         segment_resolutions: Vec::new(),
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
+        review_hold: false,
     };
+    stamp_scoreboard_read(store, &mut row).await;
     storage::append_match_log(data_dir, &row);
     store
         .insert_match(row)
@@ -5772,6 +5786,7 @@ async fn store_best_guess_on_close(
     if g.finished() {
         row.outcome = g.outcome.to_string();
     }
+    stamp_scoreboard_read(store, &mut row).await;
     storage::append_match_log(data_dir, &row);
     match store.insert_match(row.clone()).await {
         Ok(_) => {
@@ -5798,10 +5813,12 @@ async fn commit_capture_rows(
     parsed: &storage::PersonalMatch,
     now: SurrealDatetime,
 ) -> anyhow::Result<bool> {
-    let created = write_staged_rows(store, staged, &parsed.hero, &parsed.role, now).await?;
-    storage::append_match_log(data_dir, parsed);
+    let mut stored = parsed.clone();
+    stamp_scoreboard_read(store, &mut stored).await;
+    let created = write_staged_rows(store, staged, &stored.hero, &stored.role, now).await?;
+    storage::append_match_log(data_dir, &stored);
     store
-        .insert_match(parsed.clone())
+        .insert_match(stored)
         .await
         .map_err(anyhow::Error::from_boxed)
         .context("store insert failed")?;
@@ -8219,6 +8236,53 @@ fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
 /// still the revision captured here. `upload` is the HTTP call (or a test
 /// double). It runs after the read and before the mark, which is the window
 /// a local outcome/map/hero/GUI write can revise a row.
+/// Compare one new scoreboard read with the session's earlier reads and
+/// set [`storage::PersonalMatch::review_hold`] before the row is written.
+async fn stamp_scoreboard_read(store: &storage::LocalStore, row: &mut storage::PersonalMatch) {
+    if let Err(e) = store.note_scoreboard_read(row).await {
+        tracing::warn!(
+            error = %e,
+            session_id = %row.session_id,
+            "could not compare this scoreboard read with the rest of the game"
+        );
+        row.review_hold = stat_tracker::board_review::ScoreboardRead::from_match(row).is_weak();
+    }
+}
+
+/// Refresh each session's review hold from every stored read, then copy
+/// the result onto the rows about to be uploaded.
+async fn refresh_review_holds_for_upload(
+    store: &storage::LocalStore,
+    rows: &mut [storage::PersonalMatch],
+) {
+    let mut seen = std::collections::HashSet::new();
+    let mut holds = std::collections::HashMap::new();
+    for row in rows.iter() {
+        if row.session_id.is_empty() || !seen.insert(row.session_id.clone()) {
+            continue;
+        }
+        match store.apply_session_review_hold(&row.session_id).await {
+            Ok(hold) => {
+                holds.insert(row.session_id.clone(), hold);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                session_id = %row.session_id,
+                "could not refresh the review hold before upload"
+            ),
+        }
+    }
+    for row in rows.iter_mut() {
+        if row.session_id.is_empty() {
+            row.review_hold = stat_tracker::board_review::ScoreboardRead::from_match(row).is_weak();
+            continue;
+        }
+        if let Some(hold) = holds.get(&row.session_id) {
+            row.review_hold = *hold;
+        }
+    }
+}
+
 fn claims_covering(
     claims: &[storage::SyncClaim],
     rows: &[storage::PersonalMatch],
@@ -8301,7 +8365,7 @@ where
             return sync::SyncAttempt::NoServerCall;
         }
     };
-    let (local_only, unsynced): (Vec<_>, Vec<_>) = unsynced.into_iter().partition(|row| {
+    let (local_only, mut unsynced): (Vec<_>, Vec<_>) = unsynced.into_iter().partition(|row| {
         let sent = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
         !parse::stats_row_is_tracked(row.display_map_name(), &row.game_mode)
             || !parse::stats_row_is_tracked(row.display_map_name(), &sent)
@@ -8335,6 +8399,10 @@ where
     // queued). Collapsed snapshots are represented by the uploaded one, but
     // a revision miss on any of them leaves the whole session queued so the
     // next sync cannot upload an older snapshot by itself.
+    // Same gate for a periodic sync and the end-of-night close upload.
+    // The hold is recomputed from every stored read of the session, so a
+    // later clean non-zero board clears it before the request is built.
+    refresh_review_holds_for_upload(store, &mut unsynced).await;
     let claims = storage::SyncClaim::capture(&unsynced);
     let mut newest_first = unsynced;
     newest_first.reverse(); // get_unsynced is played_at ASC
@@ -11833,6 +11901,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            review_hold: false,
         }
     }
 
@@ -14558,6 +14627,120 @@ mod tests {
         assert!(ready.synced, "the ready game is marked synced");
         assert!(!held.synced, "the held game stays unsynced");
         assert!(held.map_name.is_empty());
+    }
+
+    /// Synthetic scoreboards only. A game whose reads are all dimmed, or all
+    /// zero, is saved and left out of the upload. A later clean non-zero
+    /// read in that game uploads normally. A clean-only game is unchanged.
+    #[tokio::test]
+    async fn weak_scoreboard_games_stay_local_until_a_clean_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let base = Utc::now();
+
+        fn board(
+            session: &str,
+            stats: [u32; 6],
+            unsure: bool,
+            at: chrono::DateTime<Utc>,
+        ) -> storage::PersonalMatch {
+            let mut row = test_match(session, "victory");
+            row.elims = stats[0];
+            row.assists = stats[1];
+            row.deaths = stats[2];
+            row.damage = stats[3];
+            row.healing = stats[4];
+            row.mitigation = stats[5];
+            if unsure {
+                row.suspect_fields = reader_apply::OWN_ROW_FIELDS
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect();
+            }
+            row.played_at = SurrealDatetime::from(at);
+            row
+        }
+
+        let at = |secs: i64| base + chrono::Duration::seconds(secs);
+        let dimmed = [4, 1, 2, 900, 100, 0];
+        let zero = [0; 6];
+        let clean = [10, 4, 2, 4000, 8000, 100];
+
+        store
+            .insert_match(board("dimmed-only", dimmed, true, at(0)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("zero-only", zero, false, at(0)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("dimmed-clean", dimmed, true, at(0)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("dimmed-clean", clean, false, at(30)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("zero-clean", zero, false, at(0)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("zero-clean", clean, false, at(30)))
+            .await
+            .unwrap();
+        store
+            .insert_match(board("clean-only", clean, false, at(0)))
+            .await
+            .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_bg = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_bg = std::sync::Arc::clone(&seen_bg);
+            async move {
+                seen_bg.lock().unwrap().extend(matches);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+
+        let got = seen.lock().unwrap().clone();
+        let uploaded: Vec<_> = got.iter().map(|row| row.session_id.as_str()).collect();
+        for id in &uploaded {
+            assert!(
+                matches!(*id, "dimmed-clean" | "zero-clean" | "clean-only"),
+                "uploaded {id}"
+            );
+        }
+        assert_eq!(uploaded.len(), 3, "uploaded {uploaded:?}");
+        assert!(
+            got.iter()
+                .any(|row| row.session_id == "clean-only" && row.elims == 10)
+        );
+
+        let rows = store.get_all_matches().await.unwrap();
+        let session = |id: &str| {
+            rows.iter()
+                .filter(|row| row.session_id == id)
+                .collect::<Vec<_>>()
+        };
+        let dimmed_rows = session("dimmed-only");
+        assert_eq!(dimmed_rows.len(), 1, "the dimmed game is saved");
+        assert!(dimmed_rows.iter().all(|row| row.review_hold && !row.synced));
+        let zero_rows = session("zero-only");
+        assert_eq!(zero_rows.len(), 1, "the all-zero game is saved");
+        assert!(zero_rows.iter().all(|row| row.review_hold && !row.synced));
+        for id in ["dimmed-clean", "zero-clean", "clean-only"] {
+            let game = session(id);
+            assert!(!game.is_empty(), "{id} saved");
+            assert!(
+                game.iter().all(|row| !row.review_hold && row.synced),
+                "{id} should upload normally: {game:?}"
+            );
+        }
     }
 
     /// Shadow mode is log only: the same capture stored and uploaded with the

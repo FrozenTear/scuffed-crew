@@ -91,6 +91,7 @@ fn pm(
         segment_resolutions: Vec::new(),
         recognizer: String::new(),
         suspect_fields: Vec::new(),
+        review_hold: false,
     }
 }
 

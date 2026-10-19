@@ -124,6 +124,13 @@ pub struct PersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     pub suspect_fields: Vec<String>,
+    /// The game's scoreboard reads are only dimmed/unsure boards or all-zero
+    /// pre-round boards. The row stays on this machine and is left out of
+    /// auto-upload, including the end-of-night upload. A later clean,
+    /// non-zero read in the same game sets this back to false.
+    #[serde(default)]
+    #[surreal(default)]
+    pub review_hold: bool,
 }
 
 /// Identity and payload revision captured when a row was read for upload.
@@ -471,6 +478,7 @@ impl LocalStore {
             DEFINE INDEX IF NOT EXISTS idx_deleted_sid ON deleted_session FIELDS session_id;
             DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
             DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+            DEFINE FIELD IF NOT EXISTS review_hold ON personal_match TYPE bool DEFAULT false;
         ",
         )
         .await?;
@@ -1380,6 +1388,96 @@ impl LocalStore {
         Ok(matches)
     }
 
+    /// Set [`PersonalMatch::review_hold`] from this read plus the reads
+    /// already stored for its session. A clean, non-zero read clears the
+    /// flag on the earlier rows too.
+    pub async fn note_scoreboard_read(
+        &self,
+        row: &mut PersonalMatch,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let prior = if row.session_id.is_empty() {
+            Vec::new()
+        } else {
+            self.get_session_snapshots(&row.session_id).await?
+        };
+        let mut reads: Vec<crate::board_review::ScoreboardRead> = prior
+            .iter()
+            .map(crate::board_review::ScoreboardRead::from_match)
+            .collect();
+        reads.push(crate::board_review::ScoreboardRead::from_match(row));
+        let hold = crate::board_review::game_review_hold(reads);
+        let was_held = !prior.is_empty() && prior.iter().all(|old| old.review_hold);
+        let cleared = !hold && prior.iter().any(|old| old.review_hold);
+        row.review_hold = hold;
+        if !hold {
+            self.set_rows_review_hold(&prior, false).await?;
+        }
+        if hold && !was_held {
+            tracing::info!(
+                session_id = %row.session_id,
+                "scoreboard read kept local: this game has no clean non-zero board yet"
+            );
+        } else if cleared {
+            tracing::info!(
+                session_id = %row.session_id,
+                "clean scoreboard read cleared the review hold"
+            );
+        }
+        Ok(())
+    }
+
+    /// Recompute the review hold for every stored read of `session_id`.
+    ///
+    /// Game end and the upload pass both call this, so a dimmed-only or
+    /// all-zero game stays local and a later clean read clears the flag
+    /// before auto-upload.
+    pub async fn apply_session_review_hold(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let rows = self.get_session_snapshots(session_id).await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        let hold = crate::board_review::game_review_hold_matches(&rows);
+        let changed = rows.iter().any(|row| row.review_hold != hold);
+        self.set_rows_review_hold(&rows, hold).await?;
+        if changed && hold {
+            tracing::info!(
+                session_id,
+                reads = rows.len(),
+                "game kept local for review: every scoreboard read was dimmed or all zero"
+            );
+        } else if changed && !hold {
+            tracing::info!(session_id, "clean scoreboard read cleared the review hold");
+        }
+        Ok(hold)
+    }
+
+    async fn set_rows_review_hold(
+        &self,
+        rows: &[PersonalMatch],
+        hold: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for row in rows {
+            if row.review_hold == hold {
+                continue;
+            }
+            let Some(id) = row.id.clone() else {
+                continue;
+            };
+            self.db
+                .query("UPDATE $id SET review_hold = $hold")
+                .bind(("id", id))
+                .bind(("hold", hold))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Rewrite all live rows into a brand-new store and swap it in, leaving
     /// the old directory as `stats.surrealkv.pre-vacuum-<stamp>`.
     ///
@@ -2159,6 +2257,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            review_hold: false,
         }
     }
 
