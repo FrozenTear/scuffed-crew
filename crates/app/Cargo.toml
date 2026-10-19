@@ -40,6 +40,7 @@ web-sys = { version = "0.3", features = [
     "WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "console", "Location",
     "FormData", "File", "Blob", "HtmlInputElement", "FileList",
     "Storage", "StorageEvent", "MediaQueryList", "Url", "HtmlAnchorElement",
+    "Node", "NodeList",
 ] }
 
 # Desktop-only deps

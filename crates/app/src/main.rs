@@ -6,6 +6,7 @@
 
 mod canvas;
 mod components;
+mod head;
 mod hooks;
 mod keybindings;
 mod layouts;
@@ -29,6 +30,21 @@ use state::AuthState;
 #[used]
 static SITE_FAVICON: manganis::Asset = asset!(
     "/assets/favicon.svg",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+#[used]
+static SITE_FAVICON_PNG: manganis::Asset = asset!(
+    "/assets/favicon-32.png",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+#[used]
+static SITE_FAVICON_ICO: manganis::Asset = asset!(
+    "/assets/favicon.ico",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+#[used]
+static SITE_APPLE_TOUCH: manganis::Asset = asset!(
+    "/assets/apple-touch-icon.png",
     manganis::AssetOptions::builder().with_hash_suffix(false)
 );
 
@@ -95,39 +111,17 @@ fn App() -> Element {
     });
 
     // One settings fetch for the document head and every public consumer.
-    // Description and Open Graph tags stay in index.html: `document::Meta`
-    // would append a second copy and ignore later prop changes.
-    //
-    // The existing `<title>` is updated once a real org name exists.
-    // On web, `Document::set_title` writes that element. `document::Title`
-    // goes through Dioxus `WebDocument::set_title`, which runs
-    // `document.title = ...` via `js_sys::Function::new_with_args`
+    // `HeadLayout` rewrites the single title, description, and Open Graph
+    // tags. `document::Meta` would append a second copy and ignore later
+    // prop changes. On web, `Document::set_title` writes the title.
+    // `document::Title` goes through Dioxus `WebDocument::set_title`, which
+    // runs `document.title = ...` via `js_sys::Function::new_with_args`
     // (`new Function`). String eval is not allowed by the site CSP.
     // Desktop keeps `document::Title` for the window title. That build is
     // not served by site-server.
     let site_settings = state::provide_site_settings();
     let resolved = site_settings.resolved.read();
     let loaded_settings = state::loaded_site_settings(resolved.as_ref());
-    let page_title = loaded_settings.and_then(|s| {
-        let title = state::document_title(Some(&s.org_name));
-        if title.is_empty() { None } else { Some(title) }
-    });
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        use_effect(move || {
-            let resolved = site_settings.resolved.read();
-            let Some(title) = state::loaded_site_settings(resolved.as_ref()).and_then(|s| {
-                let title = state::document_title(Some(&s.org_name));
-                if title.is_empty() { None } else { Some(title) }
-            }) else {
-                return;
-            };
-            let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-                return;
-            };
-            document.set_title(&title);
-        });
-    }
     // Update the one `<link rel="icon">` from index.html. Pending leaves that
     // static href. A non-empty org name gets a data URI, including initials CL.
     // `document::Link` appends and then ignores href changes, so this effect
@@ -185,16 +179,13 @@ fn App() -> Element {
     }
 
     rsx! {
-        // index.html owns description, og:title, og:description, and og:site_name
-        // so the server can fill the one copy of each. Web title updates go
-        // through `Document::set_title` above. Desktop still uses
-        // `document::Title`, which replaces the window title.
-        {document_title_element(page_title.as_deref())}
-        // Preload in index.html starts the download without blocking boot paint.
-        // Applying it here avoids an inline onload, which script-src would block.
+        // The shell only preloads this CSS, so first paint does not wait on
+        // fonts.googleapis.com. Apply it after boot. An inline onload would
+        // be blocked by script-src. `display=swap` is in `FONT_STYLESHEET`.
+        // Web title and meta updates live in `HeadLayout`.
         document::Link {
             rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
+            href: crate::head::FONT_STYLESHEET,
         }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")
@@ -206,26 +197,6 @@ fn App() -> Element {
             ToastProvider {
                 Router::<Route> {}
             }
-        }
-    }
-}
-
-/// Desktop window title. The web build sets `document.title` with `web_sys`
-/// instead, so Dioxus does not `eval` the assignment. See `App`.
-fn document_title_element(title: Option<&str>) -> Element {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        let _ = title;
-        rsx! {}
-    }
-    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-    {
-        if let Some(title) = title {
-            rsx! {
-                document::Title { "{title}" }
-            }
-        } else {
-            rsx! {}
         }
     }
 }
@@ -244,10 +215,45 @@ mod tests {
             "property=\"og:title\"",
             "property=\"og:description\"",
             "property=\"og:site_name\"",
+            "property=\"og:type\"",
         ] {
             let count = visible.matches(needle).count();
             assert_eq!(count, 1, "{needle} appears {count} times");
         }
+        // Canonical, og:url, and og:image need an absolute public origin.
+        // One shell serves every path, so those tags are written by
+        // HeadLayout instead of stamped as relative URLs.
+        assert!(!visible.contains("rel=\"canonical\""));
+        assert!(!visible.contains("og:url"));
+        assert!(!visible.contains("og:image"));
+        let href = crate::head::FONT_STYLESHEET.replace('&', "&amp;");
+        assert_eq!(visible.matches(href.as_str()).count(), 1, "preload only");
+        assert!(
+            !visible.contains("rel=\"stylesheet\""),
+            "the font stylesheet is applied after boot"
+        );
+        assert_eq!(visible.matches("rel=\"preconnect\"").count(), 2);
+        assert!(visible.contains("fonts.gstatic.com"));
+        assert_eq!(visible.matches("rel=\"apple-touch-icon\"").count(), 1);
+        assert_eq!(visible.matches("/assets/favicon.svg").count(), 1);
+        assert_eq!(visible.matches("/assets/favicon-32.png").count(), 1);
+        assert_eq!(visible.matches("/assets/favicon.ico").count(), 1);
+        let svg = visible.find("/assets/favicon.svg").expect("svg icon");
+        let png = visible.find("/assets/favicon-32.png").expect("png icon");
+        assert!(
+            svg < png,
+            "svg icon stays first so the runtime href update hits it"
+        );
+        let main_src = include_str!("main.rs");
+        let before_tests = main_src.split("mod tests").next().unwrap_or(main_src);
+        assert!(
+            before_tests.contains("document::Link"),
+            "the font stylesheet is applied after boot"
+        );
+        assert!(
+            before_tests.contains("FONT_STYLESHEET"),
+            "the applied href is the shared font URL"
+        );
         // dx injects a loader at every `</body>`, including one inside a comment.
         assert_eq!(
             html.matches("</body>").count(),
@@ -322,13 +328,13 @@ mod tests {
             !main[cfg_at..eval_at].contains("feature = \"web\""),
             "canvas inject must stay on the desktop target"
         );
-        let title_fn = main
-            .find("fn document_title_element")
-            .expect("title helper");
-        let title_body = &main[title_fn..];
+        let head = include_str!("head.rs");
+        let title_fn = head.find("fn desktop_title_element").expect("title helper");
+        let title_body = &head[title_fn..];
         let title_end = title_body
-            .find("\n#[cfg(test)]")
-            .unwrap_or(title_body.len());
+            .find("\nfn document_head")
+            .or_else(|| title_body.find("\npub fn document_head"))
+            .expect("title helper end");
         let title_body = &title_body[..title_end];
         let web_at = title_body
             .find("all(feature = \"web\", target_arch = \"wasm32\")")
@@ -346,7 +352,7 @@ mod tests {
             "desktop window title still uses document::Title"
         );
         assert!(
-            main.contains("document.set_title"),
+            head.contains("document.set_title"),
             "web title must use web_sys Document::set_title"
         );
     }

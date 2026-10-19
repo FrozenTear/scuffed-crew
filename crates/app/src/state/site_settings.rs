@@ -151,6 +151,13 @@ fn set_test_settings_fetch(mock: Option<SettingsFetchMock>) {
     TEST_SETTINGS_FETCH.with(|slot| *slot.borrow_mut() = mock);
 }
 
+/// Text of `#sc-settings`, when the shell embedded anonymous settings.
+///
+/// Extra JSON keys that `SiteSettings` does not declare stay available here.
+pub(crate) fn embedded_settings_json() -> Option<String> {
+    embedded_settings_text()
+}
+
 fn embedded_settings_text() -> Option<String> {
     #[cfg(test)]
     {
