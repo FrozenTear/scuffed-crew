@@ -36,8 +36,9 @@
 //!   ([`career_hero_row`]). It names the row when seed and highlight name
 //!   none, marked ([`Source::CareerHero`]); it confirms a seed that has no
 //!   highlight beside it ([`Source::SeedAndHero`]) and a strong highlight
-//!   no seed matched ([`Source::HighlightAndHero`]). Only that last, sure
-//!   row is cut as a seed: a row the career hero alone named is not.
+//!   no seed matched ([`Source::HighlightAndHero`]). Its row may seed,
+//!   under a stricter rule than a highlighted row ([`Proof::CareerHero`]),
+//!   only on a board where no row matches a trusted group.
 //!   This module reads no name. When nothing names a row, the daemon may
 //!   still ask ocr-v1's name read for that one board
 //!   ([`Source::NameFallback`]).
@@ -1099,10 +1100,11 @@ pub struct OwnRowRead {
     /// Best and next best row score against the seeds (`-1` without one).
     pub best: f32,
     pub next: f32,
-    /// The name line of a sure row no seed matched: a strongly highlighted
-    /// row with the career hero read on it ([`Source::HighlightAndHero`],
-    /// [`Proof::Highlight`]). A row one voice named is never cut. The caller
-    /// still has to pass [`seed_gate`].
+    /// The name line of a row no seed matched: a strongly highlighted row
+    /// with the career hero read on it ([`Source::HighlightAndHero`],
+    /// [`Proof::Highlight`]), or, when no row matches a trusted group, the
+    /// career hero's row with no highlight or a weak one on that same row
+    /// ([`Proof::CareerHero`]). The caller still has to pass [`seed_gate`].
     pub candidate: Option<RowCandidate>,
     pub verdict: Verdict,
     /// A seed that could be compared with this board exists.
@@ -1156,12 +1158,20 @@ pub fn read_own_row(
     sorted.sort_by(|a, b| b.total_cmp(a));
     let seeded = board.seeded(seeds);
     let own = combine_scores(&scores, highlight, hero_row, seeded);
-    // A seed is cut only from a sure row no seed matched: a strong highlight
-    // with the career hero read on it. A row one voice named (a highlight
-    // alone, a weak highlight, the career hero alone) may be another
-    // player's, and a seed learned from it would follow that player.
-    let cut = match own.source {
-        Source::HighlightAndHero => own.row.map(|row| (row, Proof::Highlight)),
+    // A row any trusted group matches is on this board: the board's own row
+    // may then be someone else's, so the career hero alone does not seed.
+    let any_match = scores.iter().any(|s| *s >= MATCH_FLOOR);
+    // A seed is cut from a sure row no seed matched: a strong highlight with
+    // the career hero read on it ([`Proof::Highlight`]). The career hero's
+    // row with no highlight, or a weak one on that same row, is cut with the
+    // stricter [`Proof::CareerHero`] only when no row matches a trusted
+    // group. A highlight alone is never cut.
+    let cut = match (own.source, highlight) {
+        (Source::HighlightAndHero, _) => own.row.map(|row| (row, Proof::Highlight)),
+        (Source::HighlightOnly, Some(h)) if !any_match && hero_row == Some(h.row) => {
+            Some((h.row, Proof::CareerHero))
+        }
+        (Source::CareerHero, _) if !any_match => own.row.map(|row| (row, Proof::CareerHero)),
         _ => None,
     };
     let panel = heroes.and_then(|heroes| heroes.panel_hero());
