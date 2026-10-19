@@ -1943,3 +1943,119 @@ fn a_member_who_is_never_highlighted_is_found_learned_and_then_sure() {
     let read = read_with(&img, 5, None, Some(&dead), &[]);
     assert_eq!((read.own.row, read.own.source), (None, Source::Neither));
 }
+
+/// 1440p scoreboard crop height (`1440 * 0.70` truncates to 1007) and the
+/// 1080p crop (`1080 * 0.70`).
+#[test]
+fn the_review_pad_scales_like_the_clipped_header_pad() {
+    use crate::shadow::heroes::CLIPPED_HEADER_PAD_1440;
+    assert_eq!(own_row_review_pad(1007), CLIPPED_HEADER_PAD_1440);
+    assert_eq!(CLIPPED_HEADER_PAD_1440, 120);
+    // 1080p scoreboard is 756 px; clipped_header_pad on a 1920x1080 frame is 90.
+    assert_eq!(own_row_review_pad(756), 90);
+    assert_eq!(own_row_review_pad(0), 0);
+}
+
+/// The saved own-row crop, not the name-line seed. 1440p pitches are 88
+/// (5v5) and 75 (6v6); 1080p pitches are 66 and 57.
+#[test]
+fn the_saved_own_row_crop_includes_the_portrait_and_the_seed_stays_put() {
+    for (team, pitch) in [(5usize, 88u32), (6, 75), (5, 66), (6, 57)] {
+        let img = named_board(team, pitch, [TEAL, PURPLE], &roster(team, 0));
+        let board = image::DynamicImage::ImageRgb8(img.clone());
+        let rect = own_row_review_rect(&board, team, 0).expect("review rect");
+        let hdr = crate::shadow::heroes::find_header(crate::shadow::heroes::View::rgb(&img))
+            .expect("header");
+        let bands =
+            crate::shadow::heroes::find_rows(crate::shadow::heroes::View::rgb(&img), hdr, team);
+        assert_eq!(bands.len(), 2 * team);
+        let (px0, py0, px1, py1) = crate::shadow::heroes::portrait_box(hdr, bands[0]);
+        assert!(px1 > px0 && py1 > py0, "{team} {pitch}");
+        assert!(
+            rect.x <= px0 as u32 && rect.y <= py0 as u32,
+            "{team}v{team} @{pitch}: crop {rect:?} misses portrait origin {px0},{py0}"
+        );
+        assert!(
+            rect.x + rect.w >= px1 as u32 && rect.y + rect.h >= py1 as u32,
+            "{team}v{team} @{pitch}: crop {rect:?} misses portrait end {px1},{py1}"
+        );
+        assert!(rect.x + rect.w <= img.width());
+        assert!(rect.y + rect.h <= img.height());
+        // one row: the next row's portrait is not in this crop
+        let (_, ny0, _, _) = crate::shadow::heroes::portrait_box(hdr, bands[1]);
+        assert!(
+            rect.y + rect.h <= ny0 as u32,
+            "{team}v{team} @{pitch}: crop reaches the next row"
+        );
+        let crop = own_row_review_image(&board, team, 0).expect("review image");
+        assert_eq!((crop.width(), crop.height()), (rect.w, rect.h));
+        let crop = crop.to_rgb8();
+        for (sx, sy) in [(px0, py0), (px1 - 1, py1 - 1)] {
+            assert_eq!(
+                crop.get_pixel(sx as u32 - rect.x, sy as u32 - rect.y),
+                img.get_pixel(sx as u32, sy as u32),
+                "{team}v{team} @{pitch}: portrait pixel {sx},{sy}"
+            );
+        }
+        // The name-line seed is the glyph run, not this widened row.
+        let step = (GLYPH_STEP * f64::from(pitch)).round() as u32;
+        let gw = (0.20 * f64::from(pitch)).round() as u32;
+        let seed = candidate(&img, team, 0);
+        assert_eq!(
+            seed.seed().w,
+            5 * step + gw,
+            "{team}v{team} @{pitch}: seed width changed"
+        );
+        assert!(
+            seed.seed().h < rect.h,
+            "{team} {pitch}: seed is a name line"
+        );
+        assert!(seed.seed().w < rect.w, "{team} {pitch}");
+        let name_x = hdr.0 + px(SEARCH_X0 * (bands[0].1 - bands[0].0 + 2) as f64);
+        let pad = own_row_review_pad(img.height());
+        assert_eq!(
+            rect.x,
+            (name_x as u32).saturating_sub(pad),
+            "{team}v{team} @{pitch}"
+        );
+        assert!(
+            rect.x > 0,
+            "{team} {pitch}: unshifted board should not clamp"
+        );
+    }
+}
+
+/// A name column closer to the image edge than the pad does not read past x = 0.
+#[test]
+fn the_saved_own_row_crop_clamps_at_the_left_edge() {
+    for (team, pitch) in [(5usize, 88u32), (6, 75), (5, 66), (6, 57)] {
+        let img = named_board(team, pitch, [TEAL, PURPLE], &roster(team, 0));
+        let hdr = crate::shadow::heroes::find_header(crate::shadow::heroes::View::rgb(&img))
+            .expect("header");
+        let dx = hdr.0 as u32;
+        let slid =
+            image::imageops::crop_imm(&img, dx, 0, img.width() - dx, img.height()).to_image();
+        let board = image::DynamicImage::ImageRgb8(slid.clone());
+        let hdr = crate::shadow::heroes::find_header(crate::shadow::heroes::View::rgb(&slid))
+            .expect("header at left");
+        assert_eq!(hdr.0, 0, "{team} {pitch}");
+        let bands =
+            crate::shadow::heroes::find_rows(crate::shadow::heroes::View::rgb(&slid), hdr, team);
+        let row_h = bands[0].1 - bands[0].0 + 2;
+        let name_x = hdr.0 + px(SEARCH_X0 * row_h as f64);
+        let pad = own_row_review_pad(slid.height());
+        assert!(
+            (name_x as u32) < pad,
+            "{team}v{team} @{pitch}: name {name_x} pad {pad} does not need a clamp"
+        );
+        let rect = own_row_review_rect(&board, team, 0).expect("rect");
+        assert_eq!(rect.x, 0, "{team} {pitch}");
+        assert_eq!(rect.w, slid.width(), "{team} {pitch}");
+        assert!(rect.y + rect.h <= slid.height());
+        // Sliding the table left by the header margin does not widen the seed.
+        let step = (GLYPH_STEP * f64::from(pitch)).round() as u32;
+        let gw = (0.20 * f64::from(pitch)).round() as u32;
+        let seed = candidate(&slid, team, 0);
+        assert_eq!(seed.seed().w, 5 * step + gw, "{team} {pitch}");
+    }
+}

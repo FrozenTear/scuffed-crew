@@ -41,6 +41,11 @@
 //!   still ask ocr-v1's name read for that one board
 //!   ([`Source::NameFallback`]).
 //!
+//! The saved review crop of the member's own row ([`own_row_review_image`])
+//! is a different cut from the seed. It is the row band, widened left of the
+//! name column so the hero portrait is in the file. It is not a seed, and
+//! nothing here writes it into the seed file.
+//!
 //! The trusted seeds live in `<data_dir>/private/own-name/seeds.json` (dir
 //! 0700, file 0600, written atomically). Only crops confirmed as the member's
 //! own name line are ever written: a crop still waiting for confirmation may
@@ -1146,6 +1151,99 @@ pub fn seed_gate(
         return false;
     }
     career_hero_on(heroes, row)
+}
+
+// ------------------------------------------------------------- review crop
+
+/// Rectangle of the saved own-row review crop, in scoreboard pixels.
+///
+/// One row band of the member's own row. The left edge is the name area,
+/// moved left by [`own_row_review_pad`] and clamped to the image, so the
+/// hero portrait is inside the crop. The name-line seed
+/// ([`NameBoard::candidate`]) is a different, tighter cut and does not use
+/// this rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnRowReview {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// How far left of the name column the saved own-row crop reaches.
+///
+/// [`heroes::CLIPPED_HEADER_PAD_1440`] on a 1440p scoreboard. The 1440p
+/// `crop_scoreboard` height is 1007 (`1440 * 0.70`, truncated), and the pad
+/// scales by this board's height the way [`heroes::clipped_header_pad`]
+/// scales [`heroes::CLIPPED_HEADER_PAD_1440`] by the 16:9 frame height. A
+/// 1440p board widens by 120 px and a 1080p board (756 px) by 90.
+pub fn own_row_review_pad(board_h: u32) -> u32 {
+    /// 1440p scoreboard crop height.
+    const BOARD_H_1440: f64 = 1007.0;
+    (heroes::CLIPPED_HEADER_PAD_1440 as f64 * f64::from(board_h) / BOARD_H_1440).round() as u32
+}
+
+/// Name-area left and row bands. `None` on a board the name reader would
+/// not measure.
+fn review_layout(rgb: &RgbImage, team_size: usize) -> Option<(usize, Vec<(usize, usize)>)> {
+    if !(5..=6).contains(&team_size) {
+        return None;
+    }
+    let hdr = heroes::find_header(View::rgb(rgb))?;
+    let bands = heroes::find_rows(View::rgb(rgb), hdr, team_size);
+    if bands.len() != 2 * team_size {
+        return None;
+    }
+    let row_h = bands[0].1.checked_sub(bands[0].0)? + 2;
+    if !(ROW_H.0..=ROW_H.1).contains(&row_h) {
+        return None;
+    }
+    let rh = row_h as f64;
+    // Same horizontal gate as [`NameBoard::from_layout`]: the name cell has
+    // to sit on the image.
+    if hdr.0 + px(CELL_X1 * rh) > rgb.width() as usize {
+        return None;
+    }
+    let name_x = hdr.0 + px(SEARCH_X0 * rh);
+    Some((name_x, bands))
+}
+
+/// The saved debug/review crop of `row` on a scoreboard image.
+///
+/// The left edge is the name column ([`SEARCH_X0`]), shifted left by
+/// [`own_row_review_pad`] and clamped to x = 0. The right edge stays the
+/// right edge of the scoreboard. The vertical span is that row's band, so
+/// the crop is the member's row and not the rest of the Tab. `None` when
+/// the row is missing or the board has no measurable name area.
+pub fn own_row_review_rect(
+    scoreboard: &DynamicImage,
+    team_size: usize,
+    row: usize,
+) -> Option<OwnRowReview> {
+    let mut owned = None;
+    let rgb = rgb_of(scoreboard, &mut owned);
+    let (name_x, bands) = review_layout(rgb, team_size)?;
+    let &(top, bot) = bands.get(row)?;
+    let (width, height) = (rgb.width(), rgb.height());
+    let y = (top as u32).min(height);
+    let y1 = (bot as u32).min(height);
+    let h = y1.saturating_sub(y);
+    let x = (name_x as u32).saturating_sub(own_row_review_pad(height));
+    let w = width.saturating_sub(x);
+    if h == 0 || w == 0 {
+        return None;
+    }
+    Some(OwnRowReview { x, y, w, h })
+}
+
+/// [`own_row_review_rect`] cut out of `scoreboard`.
+pub fn own_row_review_image(
+    scoreboard: &DynamicImage,
+    team_size: usize,
+    row: usize,
+) -> Option<DynamicImage> {
+    let rect = own_row_review_rect(scoreboard, team_size, row)?;
+    Some(scoreboard.crop_imm(rect.x, rect.y, rect.w, rect.h))
 }
 
 // ------------------------------------------------------------------- store
