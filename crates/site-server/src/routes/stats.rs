@@ -52,11 +52,16 @@ pub async fn upload_stats(
         }));
     }
 
-    // Reject the whole batch before any write. A bad recognizer id or a bad
-    // suspect_fields list must not be stored, and a later entry must not leave
-    // the earlier ones committed. deleted_sessions is not applied either.
+    // Reject the whole batch before any write when a recognizer id, a
+    // suspect_fields list, or a rank-screen field has a JSON type this route
+    // cannot decode. A missing required core field fails the same way, during
+    // JSON decode. deleted_sessions is not applied either.
+    // A rank-screen value of the right JSON type that is out of range or not
+    // allowed is dropped (stored as none) so the scoreboard stats are kept.
+    // Those drops are logged after this loop, once the batch is accepted.
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
+    let mut rank_screens = Vec::with_capacity(body.matches.len());
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
             Ok(id) => recognizers.push(id),
@@ -80,6 +85,28 @@ pub async fn upload_stats(
                 ));
             }
         }
+        match &entry.rank_screen {
+            Ok(parsed) => rank_screens.push(parsed.clone()),
+            Err(message) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("matches[{i}]: {message}"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    for (entry, parsed) in body.matches.iter().zip(&rank_screens) {
+        for dropped in &parsed.drops {
+            tracing::warn!(
+                match_id = %entry.entry.session_id,
+                field = dropped.field,
+                reason = dropped.reason,
+                "dropped rank-screen field"
+            );
+        }
     }
 
     let total = body.matches.len() as u32;
@@ -91,9 +118,14 @@ pub async fn upload_stats(
     let stub_matches: Vec<PersonalMatch> = body
         .matches
         .into_iter()
-        .zip(recognizers.into_iter().zip(suspect_lists))
-        .filter(|(e, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|(e, (recognizer, suspect_fields))| {
+        .zip(recognizers)
+        .zip(suspect_lists)
+        .zip(rank_screens)
+        .filter(|(((e, _), _), _)| {
+            matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw")
+        })
+        .map(|(((e, recognizer), suspect_fields), parsed)| {
+            let rank = parsed.fields;
             let e = e.entry;
             let (hero, role) = normalize_hero(e.hero, e.role);
             PersonalMatch {
@@ -116,6 +148,7 @@ pub async fn upload_stats(
                 edited: e.edited,
                 recognizer,
                 suspect_fields,
+                rank,
             }
         })
         .collect();
@@ -1494,5 +1527,579 @@ mod tests {
         assert_eq!(row["recognizer"], "ocr-v1");
         assert_eq!(row["suspect_fields"], serde_json::json!([]));
         assert_eq!(row["elims"], 7);
+        assert_rank_keys_absent(row);
+    }
+
+    const RANK_JSON_KEYS: &[&str] = &[
+        "rank_role",
+        "rank_tier",
+        "rank_division",
+        "rank_progress_pct",
+        "rank_delta_pct",
+        "rank_modifiers",
+        "hero_sr",
+        "hero_sr_delta",
+        "rank_recognizer",
+        "rank_confidence",
+        "rank_dropped",
+    ];
+
+    fn json_has_key(value: &serde_json::Value, key: &str) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.contains_key(key) || map.values().any(|child| json_has_key(child, key))
+            }
+            serde_json::Value::Array(items) => items.iter().any(|child| json_has_key(child, key)),
+            _ => false,
+        }
+    }
+
+    fn assert_rank_keys_absent(value: &serde_json::Value) {
+        for key in RANK_JSON_KEYS {
+            assert!(!json_has_key(value, key), "{key} leaked into {value}");
+        }
+    }
+
+    fn rank_payload() -> serde_json::Value {
+        serde_json::json!({
+            "rank_role": "support",
+            "rank_tier": "diamond",
+            "rank_division": 2,
+            "rank_progress_pct": 40,
+            "rank_delta_pct": -15,
+            "rank_modifiers": ["Victory", "win streak", "future_mod"],
+            "hero_sr": 3200,
+            "hero_sr_delta": -25,
+            "rank_recognizer": "cv-v1",
+            "rank_confidence": {
+                "rank_role": 0.9,
+                "rank_tier": 0.5,
+                "rank_division": 0.0,
+                "hero_sr": 1.0
+            }
+        })
+    }
+
+    fn with_rank(session_id: &str, elims: u32) -> serde_json::Value {
+        let mut entry = match_object(session_id, elims);
+        let extra = rank_payload();
+        let obj = entry.as_object_mut().unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            obj.insert(key.clone(), value.clone());
+        }
+        entry
+    }
+
+    async fn read_json(app: axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    fn public_get(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("x-forwarded-for", "127.0.0.1")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                9,
+            ))))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_rank_screen_round_trips_for_the_member_only() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let mut bounds = match_object("sess-bounds", 3);
+        bounds["rank_role"] = serde_json::json!("tank");
+        bounds["rank_tier"] = serde_json::json!("champion");
+        bounds["rank_division"] = serde_json::json!(5);
+        bounds["rank_progress_pct"] = serde_json::json!(100);
+        bounds["rank_delta_pct"] = serde_json::json!(-100);
+        bounds["hero_sr"] = serde_json::json!(6000);
+        bounds["hero_sr_delta"] = serde_json::json!(1000);
+        bounds["rank_recognizer"] = serde_json::json!("a".repeat(32));
+        bounds["rank_modifiers"] = serde_json::json!([
+            "variance",
+            "victory",
+            "win_streak",
+            "loss_streak",
+            "uphill_battle",
+            "reversal",
+            "consolation",
+            "calibration"
+        ]);
+        bounds["rank_confidence"] = serde_json::json!({
+            "rank_modifiers": 1,
+            "hero_sr_delta": 0
+        });
+
+        let mut partial = match_object("sess-partial", 2);
+        partial["rank_tier"] = serde_json::json!("gold");
+        partial["rank_division"] = serde_json::json!(1);
+        partial["rank_progress_pct"] = serde_json::json!(0);
+        partial["hero_sr"] = serde_json::json!(0);
+        partial["hero_sr_delta"] = serde_json::json!(-1000);
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({
+                "matches": [with_rank("sess-rank", 4), bounds, partial, match_object("sess-old", 1)]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 4);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank");
+        assert_eq!(row["role"], "Support");
+        assert_eq!(row["rank_role"], "support");
+        assert_eq!(row["rank_tier"], "diamond");
+        assert_eq!(row["rank_division"], 2);
+        assert_eq!(row["rank_progress_pct"], 40);
+        assert_eq!(row["rank_delta_pct"], -15);
+        assert_eq!(
+            row["rank_modifiers"],
+            serde_json::json!(["victory", "win_streak", "future_mod"])
+        );
+        assert_eq!(row["hero_sr"], 3200);
+        assert_eq!(row["hero_sr_delta"], -25);
+        assert_eq!(row["rank_recognizer"], "cv-v1");
+        assert_eq!(row["rank_confidence"]["rank_role"], 0.9);
+        assert_eq!(row["rank_confidence"]["rank_tier"], 0.5);
+        assert_eq!(row["rank_confidence"]["rank_division"], 0.0);
+        assert_eq!(row["rank_confidence"]["hero_sr"], 1.0);
+        assert!(row.get("rank_dropped").is_none(), "{row}");
+
+        let bounds_row = row_by_session(&page, "sess-bounds");
+        assert_eq!(bounds_row["rank_division"], 5);
+        assert_eq!(bounds_row["rank_progress_pct"], 100);
+        assert_eq!(bounds_row["rank_delta_pct"], -100);
+        assert_eq!(bounds_row["hero_sr"], 6000);
+        assert_eq!(bounds_row["hero_sr_delta"], 1000);
+        assert_eq!(bounds_row["rank_modifiers"].as_array().unwrap().len(), 8);
+        assert_eq!(bounds_row["rank_recognizer"].as_str().unwrap().len(), 32);
+
+        let partial_row = row_by_session(&page, "sess-partial");
+        assert_eq!(partial_row["rank_tier"], "gold");
+        assert_eq!(partial_row["rank_division"], 1);
+        assert!(partial_row.get("rank_role").is_none());
+        assert!(partial_row.get("rank_modifiers").is_none());
+        assert!(partial_row.get("rank_recognizer").is_none());
+        assert!(partial_row.get("rank_confidence").is_none());
+
+        assert_rank_keys_absent(row_by_session(&page, "sess-old"));
+
+        let (status, anon) = read_json(
+            create_router(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/api/stats/me/matches?limit=20")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_rank_keys_absent(&anon);
+
+        let heroes_uri = format!("/api/public/members/{member_id}/heroes?top=0");
+        let (status, heroes) =
+            read_json(create_router(state.clone()), public_get(&heroes_uri)).await;
+        assert_eq!(status, StatusCode::OK, "{heroes}");
+        assert!(
+            heroes
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["games"].as_u64().unwrap() >= 1),
+            "public heroes should count the uploaded games: {heroes}"
+        );
+        assert_rank_keys_absent(&heroes);
+
+        let (status, board) = read_json(
+            create_router(state.clone()),
+            public_get("/api/public/leaderboards?metric=games&limit=10"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{board}");
+        assert_rank_keys_absent(&board);
+
+        let (status, mine) = read_json(
+            create_router(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/api/stats/me")
+                .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mine}");
+        assert_rank_keys_absent(&mine);
+        assert!(mine["total_matches"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn upload_without_rank_fields_keeps_old_client_and_clears_on_replace() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [with_rank("sess-clear", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let old = serde_json::json!({
+            "matches": [{
+                "session_id": "sess-clear",
+                "hero": "Ana",
+                "map_name": "Oasis",
+                "game_mode": "control",
+                "role": "Support",
+                "outcome": "victory",
+                "elims": 8,
+                "played_at": "2026-07-01T20:00:00Z"
+            }, {
+                "hero": "Ana",
+                "map_name": "Oasis",
+                "game_mode": "control",
+                "role": "Support",
+                "outcome": "defeat",
+                "played_at": "2026-07-02T20:00:00Z"
+            }]
+        });
+        let (status, parsed) = post_raw(create_router(state.clone()), &daemon_token, old).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 2);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let cleared = row_by_session(&page, "sess-clear");
+        assert_eq!(cleared["elims"], 8);
+        assert_rank_keys_absent(cleared);
+        let bare = page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["outcome"] == "defeat")
+            .expect("old client row");
+        assert_rank_keys_absent(bare);
+        assert_eq!(bare["role"], "Support");
+
+        let stored = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            stored
+                .iter()
+                .all(|row| row.rank == scuffed_types::RankScreenFields::default())
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct RankLogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for RankLogBuf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RankLogBuf {
+        type Writer = RankLogBuf;
+        fn make_writer(&'a self) -> RankLogBuf {
+            self.clone()
+        }
+    }
+
+    fn assert_scoreboard(row: &serde_json::Value, elims: u64) {
+        assert_eq!(row["hero"], "Ana");
+        assert_eq!(row["map_name"], "Oasis");
+        assert_eq!(row["game_mode"], "control");
+        assert_eq!(row["role"], "Support");
+        assert_eq!(row["outcome"], "victory");
+        assert_eq!(row["elims"], elims);
+        assert_eq!(row["deaths"], 1);
+        assert_eq!(row["assists"], 2);
+        assert_eq!(row["damage"], 1000);
+        assert_eq!(row["healing"], 4000);
+        assert_eq!(row["mitigation"], 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_rank_misread_drops_field_and_keeps_scoreboard() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let buf = RankLogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mut delta = with_rank("sess-delta", 11);
+        delta["rank_delta_pct"] = serde_json::json!(150);
+        delta["rank_dropped"] = serde_json::json!(["client_sent", "rank_role"]);
+        let mut hero_sr = with_rank("sess-sr", 12);
+        hero_sr["hero_sr"] = serde_json::json!(6001);
+        let mut confidence = with_rank("sess-conf", 13);
+        confidence["rank_confidence"] = serde_json::json!({
+            "rank_role": 0.4,
+            "rank_tier": 1.5,
+            "ocr_junk_token": 0.2
+        });
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({
+                "matches": [delta, hero_sr, confidence, with_rank("sess-ok", 14)]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 4);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+
+        let delta_row = row_by_session(&page, "sess-delta");
+        assert_scoreboard(delta_row, 11);
+        assert!(delta_row.get("rank_delta_pct").is_none(), "{delta_row}");
+        assert_eq!(delta_row["rank_role"], "support");
+        assert_eq!(delta_row["rank_tier"], "diamond");
+        assert_eq!(delta_row["rank_division"], 2);
+        assert_eq!(delta_row["rank_progress_pct"], 40);
+        assert_eq!(delta_row["hero_sr"], 3200);
+        assert_eq!(delta_row["hero_sr_delta"], -25);
+        assert_eq!(delta_row["rank_recognizer"], "cv-v1");
+        assert_eq!(
+            delta_row["rank_modifiers"],
+            serde_json::json!(["victory", "win_streak", "future_mod"])
+        );
+        assert_eq!(
+            delta_row["rank_dropped"],
+            serde_json::json!(["rank_delta_pct"])
+        );
+
+        let sr_row = row_by_session(&page, "sess-sr");
+        assert_scoreboard(sr_row, 12);
+        assert!(sr_row.get("hero_sr").is_none(), "{sr_row}");
+        assert_eq!(sr_row["hero_sr_delta"], -25);
+        assert_eq!(sr_row["rank_tier"], "diamond");
+        assert_eq!(sr_row["rank_delta_pct"], -15);
+        assert_eq!(sr_row["rank_dropped"], serde_json::json!(["hero_sr"]));
+
+        let conf_row = row_by_session(&page, "sess-conf");
+        assert_scoreboard(conf_row, 13);
+        assert_eq!(conf_row["rank_confidence"]["rank_role"], 0.4);
+        assert!(conf_row["rank_confidence"].get("rank_tier").is_none());
+        assert!(conf_row["rank_confidence"].get("ocr_junk_token").is_none());
+        assert_eq!(conf_row["rank_tier"], "diamond");
+        assert_eq!(conf_row["hero_sr"], 3200);
+        assert_eq!(
+            conf_row["rank_dropped"],
+            serde_json::json!(["rank_confidence", "rank_confidence.rank_tier"])
+        );
+
+        let ok_row = row_by_session(&page, "sess-ok");
+        assert_scoreboard(ok_row, 14);
+        assert_eq!(ok_row["rank_delta_pct"], -15);
+        assert_eq!(ok_row["hero_sr"], 3200);
+        assert!(ok_row.get("rank_dropped").is_none(), "{ok_row}");
+
+        let heroes_uri = format!("/api/public/members/{member_id}/heroes?top=0");
+        let (status, heroes) =
+            read_json(create_router(state.clone()), public_get(&heroes_uri)).await;
+        assert_eq!(status, StatusCode::OK, "{heroes}");
+        assert_rank_keys_absent(&heroes);
+        let (status, board) = read_json(
+            create_router(state.clone()),
+            public_get("/api/public/leaderboards?metric=games&limit=10"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{board}");
+        assert_rank_keys_absent(&board);
+        let (status, mine) = read_json(
+            create_router(state),
+            Request::builder()
+                .method("GET")
+                .uri("/api/stats/me")
+                .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mine}");
+        assert_rank_keys_absent(&mine);
+
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let drops: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("dropped rank-screen field"))
+            .collect();
+        let drops_text = drops.join("\n");
+        // Compare the message, not the clock. A timestamp such as
+        // 22:04:13.691150Z contains the digits of an out-of-range value.
+        for (session, field, reason) in [
+            ("sess-delta", "rank_delta_pct", "out of range"),
+            ("sess-sr", "hero_sr", "out of range"),
+            ("sess-conf", "rank_confidence", "confidence entry dropped"),
+        ] {
+            assert!(
+                drops.iter().any(|line| {
+                    line.contains(session) && line.contains(field) && line.contains(reason)
+                }),
+                "missing drop log for {session} {field} {reason} in {drops_text}"
+            );
+        }
+        assert_eq!(drops_text.matches("confidence entry dropped").count(), 2);
+        for secret in [
+            "150",
+            "6001",
+            "1.5",
+            "ocr_junk_token",
+            "susplayer",
+            "client_sent",
+        ] {
+            assert!(
+                !drops_text.contains(secret),
+                "rank drop log leaked {secret}: {drops_text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_top500_saves_and_drops_division() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut with_division = with_rank("sess-top", 7);
+        with_division["rank_tier"] = serde_json::json!("top500");
+        with_division["rank_division"] = serde_json::json!(4);
+        let mut bare = match_object("sess-top-bare", 8);
+        bare["rank_tier"] = serde_json::json!("top500");
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [with_division, bare] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2);
+
+        let page = get_my_matches(create_router(state), &session_token).await;
+        let row = row_by_session(&page, "sess-top");
+        assert_scoreboard(row, 7);
+        assert_eq!(row["rank_tier"], "top500");
+        assert!(row.get("rank_division").is_none(), "{row}");
+        assert_eq!(row["rank_role"], "support");
+        assert_eq!(row["hero_sr"], 3200);
+        assert_eq!(row["rank_delta_pct"], -15);
+        assert_eq!(row["rank_dropped"], serde_json::json!(["rank_division"]));
+
+        let bare_row = row_by_session(&page, "sess-top-bare");
+        assert_scoreboard(bare_row, 8);
+        assert_eq!(bare_row["rank_tier"], "top500");
+        assert!(bare_row.get("rank_division").is_none(), "{bare_row}");
+        assert!(bare_row.get("rank_dropped").is_none(), "{bare_row}");
+    }
+
+    #[tokio::test]
+    async fn upload_rank_screen_wrong_type_is_400_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let cases = [
+            ("rank_role", serde_json::json!(1), "rank_role"),
+            ("rank_division", serde_json::json!("3"), "rank_division"),
+            ("rank_division", serde_json::json!(1.5), "rank_division"),
+            ("rank_delta_pct", serde_json::json!(true), "rank_delta_pct"),
+            ("rank_delta_pct", serde_json::json!("150"), "rank_delta_pct"),
+            ("hero_sr", serde_json::json!("6000"), "hero_sr"),
+            ("rank_recognizer", serde_json::json!(1), "rank_recognizer"),
+            (
+                "rank_modifiers",
+                serde_json::json!("victory"),
+                "rank_modifiers",
+            ),
+            (
+                "rank_confidence",
+                serde_json::json!(["rank_tier"]),
+                "rank_confidence",
+            ),
+        ];
+
+        for (key, bad, needle) in cases {
+            let mut bad_row = with_rank("sess-keep", 99);
+            bad_row[key] = bad.clone();
+            let sibling = with_rank("sess-new", 1);
+            let (status, parsed) = post_raw(
+                create_router(state.clone()),
+                &token,
+                serde_json::json!({
+                    "matches": [sibling, bad_row],
+                    "deleted_sessions": ["sess-keep"]
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key}={bad} -> {parsed}");
+            let error = parsed["error"].as_str().unwrap_or("");
+            assert!(
+                error.starts_with("matches[1]: ") && error.contains(needle),
+                "{key}={bad} -> {error}"
+            );
+
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{key}={bad} must not insert");
+            assert_eq!(rows[0].session_id, "sess-keep");
+            assert_eq!(rows[0].elims, 4, "{key}={bad} must not update");
+            assert_eq!(rows[0].rank, scuffed_types::RankScreenFields::default());
+        }
+
+        let mut missing_hero = match_object("sess-new", 5);
+        missing_hero.as_object_mut().unwrap().remove("hero");
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [missing_hero],
+                "deleted_sessions": ["sess-keep"]
+            }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "missing hero must not be stored, got {status}"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "sess-keep");
+        assert_eq!(rows[0].elims, 4);
     }
 }
