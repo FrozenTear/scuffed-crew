@@ -26,6 +26,27 @@ fn internal_err(e: impl std::fmt::Display, ctx: &str) -> (StatusCode, Json<Error
     )
 }
 
+fn map_auth_provision_error(
+    e: scuffed_chat::AuthError,
+    ctx: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        scuffed_chat::AuthError::ChallengeTooLong => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Challenge is too long".into(),
+            }),
+        ),
+        scuffed_chat::AuthError::RelayUrlRejected => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Relay URL is not allowed".into(),
+            }),
+        ),
+        other => internal_err(other, ctx),
+    }
+}
+
 fn bad_request_logged(
     e: impl std::fmt::Display,
     ctx: &str,
@@ -78,17 +99,68 @@ fn charge_interactive_send(state: &AppState, member_id: &str) -> Result<(), Send
     }
 }
 
+/// Primary relay plus `site_settings.extra_relay_urls` (one URL per line).
+///
+/// Blank lines are dropped. Canonicalization happens in
+/// [`scuffed_chat::allowed_auth_relay`], so `http`/`https` lines never match.
+fn auth_relay_candidates(configured: Option<&str>, extra_lines: &str) -> Vec<String> {
+    let mut allowed = Vec::new();
+    if let Some(url) = configured.map(str::trim).filter(|url| !url.is_empty()) {
+        allowed.push(url.to_string());
+    }
+    for line in extra_lines.lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            allowed.push(line.to_string());
+        }
+    }
+    allowed
+}
+
+async fn load_auth_relay_candidates(state: &AppState) -> Vec<String> {
+    let extras = match state.db.get_settings().await {
+        Ok(settings) => settings.extra_relay_urls,
+        Err(e) => {
+            tracing::error!(error = %e, "auth-token allow-list settings lookup failed");
+            String::new()
+        }
+    };
+    auth_relay_candidates(state.relay_url.as_deref(), &extras)
+}
+
 /// POST /api/chat/auth-token — provision a NIP-42 auth event for relay authentication.
 ///
 /// Flow:
-/// 1. If the member has no Nostr keys, generate server-managed keys
-/// 2. If external keys (NIP-07), return error — client must sign client-side
-/// 3. Decrypt member's server-managed key, sign AUTH event, return it
+/// 1. Reject a challenge over 256 bytes, or a relay URL that does not
+///    canonicalize to `state.relay_url` or `site_settings.extra_relay_urls`
+/// 2. If the member has no Nostr keys, generate server-managed keys
+/// 3. If external keys (NIP-07), return an error. The client must sign client-side.
+/// 4. Decrypt member's server-managed key, sign AUTH event, return it
 pub async fn provision_auth_token(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<AuthTokenRequest>,
 ) -> Result<Json<AuthTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let challenge = body.challenge.as_deref().unwrap_or("");
+    if challenge.len() > scuffed_chat::MAX_AUTH_CHALLENGE_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Challenge is too long".into(),
+            }),
+        ));
+    }
+    let allowed = load_auth_relay_candidates(&state).await;
+    let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    if scuffed_chat::allowed_auth_relay(&body.relay_url, allowed_refs.iter().copied()).is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Relay URL is not allowed".into(),
+            }),
+        ));
+    }
+
     let crypto = require_crypto(&state)?;
     let auth_service = NostrAuthService::new(crypto);
     let member_id = caller.member.id.clone();
@@ -120,10 +192,9 @@ pub async fn provision_auth_token(
                 )
             })?;
 
-            let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
-                .provision_auth_event(encrypted, pubkey, &body.relay_url, challenge)
-                .map_err(|e| internal_err(e, "Auth event provisioning failed"))?;
+                .provision_auth_event(encrypted, pubkey, &body.relay_url, challenge, &allowed_refs)
+                .map_err(|e| map_auth_provision_error(e, "Auth event provisioning failed"))?;
 
             Ok(Json(response))
         }
@@ -162,10 +233,17 @@ pub async fn provision_auth_token(
             tracing::info!(member_id = %member_id, "Generated server-managed Nostr keypair");
 
             // Now provision the auth event with the newly created key
-            let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
-                .provision_auth_event(&encrypted, &pubkey, &body.relay_url, challenge)
-                .map_err(|e| internal_err(e, "Auth event provisioning failed after keygen"))?;
+                .provision_auth_event(
+                    &encrypted,
+                    &pubkey,
+                    &body.relay_url,
+                    challenge,
+                    &allowed_refs,
+                )
+                .map_err(|e| {
+                    map_auth_provision_error(e, "Auth event provisioning failed after keygen")
+                })?;
 
             Ok(Json(response))
         }
@@ -1132,6 +1210,41 @@ mod tests {
         assert!(
             body.contains("No usable relay URL"),
             "blank channel and unset NOSTR_RELAY_URL must 503 before dialing, got {body}"
+        );
+    }
+
+    #[test]
+    fn auth_token_allowlist_accepts_configured_rejects_other_host_and_http() {
+        let allowed = auth_relay_candidates(
+            Some("wss://Relay.Example.com:443/"),
+            "\nws://backup.example:80/\nhttps://nope.example\n",
+        );
+        let refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("WSS://relay.example.com/", refs.iter().copied())
+                .as_deref(),
+            Some("wss://relay.example.com")
+        );
+        assert_eq!(
+            scuffed_chat::allowed_auth_relay("ws://Backup.Example/", refs.iter().copied())
+                .as_deref(),
+            Some("ws://backup.example")
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("wss://evil.example", refs.iter().copied()).is_none()
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("http://relay.example.com", refs.iter().copied())
+                .is_none()
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("https://relay.example.com", refs.iter().copied())
+                .is_none()
+        );
+        assert!(
+            scuffed_chat::allowed_auth_relay("https://nope.example", refs.iter().copied())
+                .is_none()
         );
     }
 
