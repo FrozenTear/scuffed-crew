@@ -646,6 +646,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- fills new writes that omit it. Rows already on disk are not rewritten;
         -- a missing or empty value is read back as `ocr-v1`.
         DEFINE FIELD OVERWRITE recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
+        -- Which reader found this player's own scoreboard row. An id such as
+        -- `names-v1` or `ocr-v1`. Not a player name: the upload route rejects
+        -- anything that is not a recognizer id, including values longer than
+        -- 32 characters. Omitted or null is stored as NONE. There is no
+        -- reader-id default. Rows already on disk are not rewritten; a missing
+        -- value is read back as unknown.
+        DEFINE FIELD OVERWRITE name_recognizer ON personal_match TYPE option<string> DEFAULT NONE;
         -- Names the tracker flagged as unsure on this player's own row.
         -- An upload that omits the field, or sends null, is stored as [].
         -- Rows already on disk are not rewritten; a missing value is read

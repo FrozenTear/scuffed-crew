@@ -11,9 +11,10 @@ use scuffed_db::{
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
-    MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SUSPECT_FIELDS_ERROR,
-    SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
-    UpdateMemberSettingsRequest, resolve_recognizer, resolve_suspect_fields,
+    MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
+    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
+    UpdateMemberSettingsRequest, resolve_name_recognizer, resolve_recognizer,
+    resolve_suspect_fields,
 };
 use scuffed_types::{hero_key_to_name, role_for_hero_name};
 
@@ -52,10 +53,12 @@ pub async fn upload_stats(
         }));
     }
 
-    // Reject the whole batch before any write. A bad recognizer id or a bad
-    // suspect_fields list must not be stored, and a later entry must not leave
-    // the earlier ones committed. deleted_sessions is not applied either.
+    // Reject the whole batch before any write. A bad recognizer id, a bad
+    // name_recognizer id, or a bad suspect_fields list must not be stored,
+    // and a later entry must not leave the earlier ones committed.
+    // deleted_sessions is not applied either.
     let mut recognizers = Vec::with_capacity(body.matches.len());
+    let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
@@ -65,6 +68,17 @@ pub async fn upload_stats(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: format!("matches[{i}]: {RECOGNIZER_ID_ERROR}"),
+                    }),
+                ));
+            }
+        }
+        match resolve_name_recognizer(&entry.name_recognizer) {
+            Ok(id) => name_recognizers.push(id),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("matches[{i}]: {NAME_RECOGNIZER_ID_ERROR}"),
                     }),
                 ));
             }
@@ -91,9 +105,14 @@ pub async fn upload_stats(
     let stub_matches: Vec<PersonalMatch> = body
         .matches
         .into_iter()
-        .zip(recognizers.into_iter().zip(suspect_lists))
-        .filter(|(e, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|(e, (recognizer, suspect_fields))| {
+        .zip(recognizers)
+        .zip(name_recognizers)
+        .zip(suspect_lists)
+        .map(|(((entry, recognizer), name_recognizer), suspect_fields)| {
+            (entry, recognizer, name_recognizer, suspect_fields)
+        })
+        .filter(|(e, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
+        .map(|(e, recognizer, name_recognizer, suspect_fields)| {
             let e = e.entry;
             let (hero, role) = normalize_hero(e.hero, e.role);
             PersonalMatch {
@@ -115,6 +134,7 @@ pub async fn upload_stats(
                 uploaded_at: chrono::Utc::now(),
                 edited: e.edited,
                 recognizer,
+                name_recognizer,
                 suspect_fields,
             }
         })
@@ -999,6 +1019,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert_eq!(rows[0].name_recognizer, None);
         assert!(rows[0].suspect_fields.is_empty());
         assert_eq!(rows[0].elims, 0);
         assert!(!rows[0].edited);
@@ -1492,7 +1513,195 @@ mod tests {
         let page = get_my_matches(create_router(state), &session_token).await;
         let row = row_by_session(&page, "legacy-row");
         assert_eq!(row["recognizer"], "ocr-v1");
+        assert!(
+            row["name_recognizer"].is_null(),
+            "a row written before name_recognizer existed is unknown: {row}"
+        );
         assert_eq!(row["suspect_fields"], serde_json::json!([]));
         assert_eq!(row["elims"], 7);
+    }
+
+    #[tokio::test]
+    async fn upload_absent_name_recognizer_is_null_on_my_matches() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let omitted = match_object("sess-omit-name", 4);
+        let mut null_field = match_object("sess-null-name", 5);
+        null_field["name_recognizer"] = serde_json::Value::Null;
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [omitted, null_field] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2);
+
+        let page = get_my_matches(create_router(state), &session_token).await;
+        for session_id in ["sess-omit-name", "sess-null-name"] {
+            let row = row_by_session(&page, session_id);
+            assert!(
+                row.get("name_recognizer").is_some(),
+                "own match reads include the field: {row}"
+            );
+            assert!(row["name_recognizer"].is_null(), "{row}");
+            assert_eq!(row["recognizer"], "ocr-v1");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_valid_name_recognizer_round_trips_on_my_matches() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let mut names = match_object("sess-names", 4);
+        names["recognizer"] = serde_json::json!("cv-v1");
+        names["name_recognizer"] = serde_json::json!("names-v1");
+        let mut ocr = match_object("sess-ocr-name", 5);
+        ocr["name_recognizer"] = serde_json::json!("ocr-v1");
+        let mut later = match_object("sess-later-name", 6);
+        later["name_recognizer"] = serde_json::json!("reader-v2");
+        let max_id = "n".repeat(scuffed_types::RECOGNIZER_ID_MAX_LEN);
+        let mut maxed = match_object("sess-max-name", 7);
+        maxed["name_recognizer"] = serde_json::json!(max_id);
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [names, ocr, later, maxed] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 4);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        assert_eq!(
+            row_by_session(&page, "sess-names")["name_recognizer"],
+            "names-v1"
+        );
+        assert_eq!(row_by_session(&page, "sess-names")["recognizer"], "cv-v1");
+        assert_eq!(
+            row_by_session(&page, "sess-ocr-name")["name_recognizer"],
+            "ocr-v1"
+        );
+        assert_eq!(
+            row_by_session(&page, "sess-later-name")["name_recognizer"],
+            "reader-v2"
+        );
+        assert_eq!(
+            row_by_session(&page, "sess-max-name")["name_recognizer"],
+            max_id
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let stored = |sid: &str| {
+            rows.iter()
+                .find(|row| row.session_id == sid)
+                .unwrap()
+                .name_recognizer
+                .clone()
+        };
+        assert_eq!(stored("sess-names").as_deref(), Some("names-v1"));
+        assert_eq!(stored("sess-ocr-name").as_deref(), Some("ocr-v1"));
+        assert_eq!(stored("sess-later-name").as_deref(), Some("reader-v2"));
+        assert_eq!(stored("sess-max-name").as_deref(), Some(max_id.as_str()));
+
+        // A later upload of the same session that leaves the field out stores
+        // NONE. Old clients do not send it, and that upload still succeeds.
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [match_object("sess-names", 8)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let cleared = row_by_session(&page, "sess-names");
+        assert_eq!(cleared["elims"], 8);
+        assert!(cleared["name_recognizer"].is_null(), "{cleared}");
+        assert_eq!(
+            row_by_session(&page, "sess-ocr-name")["name_recognizer"],
+            "ocr-v1"
+        );
+
+        let overview = Request::builder()
+            .method("GET")
+            .uri(format!("/api/stats/member/{member_id}"))
+            .header(header::AUTHORIZATION, format!("Bearer {session_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = create_router(state).oneshot(overview).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !text.contains("name_recognizer"),
+            "member aggregate reads do not include the reader id: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_invalid_name_recognizer_is_400_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let too_long = "a".repeat(scuffed_types::RECOGNIZER_ID_MAX_LEN + 1);
+        let cases = [
+            serde_json::json!("NOPE"),
+            serde_json::json!(""),
+            serde_json::json!(too_long),
+            serde_json::json!(1),
+            serde_json::json!("has space"),
+            serde_json::json!("Names-V1"),
+        ];
+        for value in cases {
+            let mut bad = match_object("sess-keep", 99);
+            bad["name_recognizer"] = value.clone();
+            let mut sibling = match_object("sess-new", 1);
+            sibling["name_recognizer"] = serde_json::json!("names-v1");
+            let (status, parsed) = post_raw(
+                create_router(state.clone()),
+                &token,
+                serde_json::json!({ "matches": [sibling, bad] }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{value}: {parsed}");
+            assert_eq!(
+                parsed["error"],
+                format!(
+                    "matches[1]: {}",
+                    scuffed_types::api::NAME_RECOGNIZER_ID_ERROR
+                ),
+                "{value}: {parsed}"
+            );
+
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "rejected batch must not insert or update: {value}"
+            );
+            assert_eq!(rows[0].session_id, "sess-keep");
+            assert_eq!(rows[0].elims, 4);
+            assert_eq!(rows[0].name_recognizer, None);
+            assert_eq!(rows[0].recognizer, "ocr-v1");
+        }
     }
 }

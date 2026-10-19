@@ -94,10 +94,13 @@ pub fn effective_recognizer(stored: &str) -> &str {
     }
 }
 
-/// How `recognizer` arrived on one match object.
+/// How a recognizer id arrived on one match object.
+///
+/// [`resolve_recognizer`] stores [`RECOGNIZER_OCR_V1`] for [`Self::Absent`].
+/// [`resolve_name_recognizer`] stores none for that same variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecognizerInput {
-    /// JSON field omitted or `null`. Persist [`RECOGNIZER_OCR_V1`].
+    /// JSON field omitted or `null`.
     Absent,
     /// A JSON string. The upload route accepts it only when [`is_recognizer_id`].
     Value(String),
@@ -111,6 +114,38 @@ pub fn resolve_recognizer(input: &RecognizerInput) -> Result<String, &'static st
         RecognizerInput::Absent => Ok(RECOGNIZER_OCR_V1.to_string()),
         RecognizerInput::Value(id) if is_recognizer_id(id) => Ok(id.clone()),
         RecognizerInput::Value(_) | RecognizerInput::NotAString => Err(RECOGNIZER_ID_ERROR),
+    }
+}
+
+/// Returned with HTTP 400 when `name_recognizer` is present but not a usable id.
+///
+/// Same format rule as [`RECOGNIZER_ID_ERROR`]. The field name differs so a
+/// client can tell which key failed.
+pub const NAME_RECOGNIZER_ID_ERROR: &str =
+    "name_recognizer must be a string of 1-32 characters in [a-z0-9.-] including a letter or digit";
+
+/// Turn a decoded `name_recognizer` field into the id to store.
+///
+/// Omitted and `null` are unknown (`None`, stored as NONE). A string is kept
+/// only when [`is_recognizer_id`] accepts it. There is no allowlist and no
+/// default reader id. Expected values are `names-v1` and `ocr-v1`, but any
+/// later id of the same shape is stored.
+pub fn resolve_name_recognizer(input: &RecognizerInput) -> Result<Option<String>, &'static str> {
+    match input {
+        RecognizerInput::Absent => Ok(None),
+        RecognizerInput::Value(id) if is_recognizer_id(id) => Ok(Some(id.clone())),
+        RecognizerInput::Value(_) | RecognizerInput::NotAString => Err(NAME_RECOGNIZER_ID_ERROR),
+    }
+}
+
+fn take_recognizer_input(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> RecognizerInput {
+    match obj.remove(key) {
+        None | Some(serde_json::Value::Null) => RecognizerInput::Absent,
+        Some(serde_json::Value::String(id)) => RecognizerInput::Value(id),
+        Some(_) => RecognizerInput::NotAString,
     }
 }
 
@@ -203,14 +238,16 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 /// [`StatsUploadRequest`] is the body the desktop tracker builds. It sends
 /// `recognizer` from the stored row and omits `suspect_fields` when that list
 /// is empty. 0.4.x clients omit both. This type accepts that JSON plus an
-/// optional `recognizer` and `suspect_fields` on each object in `matches`. The values
-/// are per match because one sync batch can carry games captured under
-/// different readers.
+/// optional `recognizer`, `name_recognizer`, and `suspect_fields` on each
+/// object in `matches`. The values are per match because one sync batch can
+/// carry games captured under different readers.
 ///
-/// A later upload of the same session replaces both fields. Omitting
+/// A later upload of the same session replaces these fields. Omitting
 /// `suspect_fields`, or sending null, stores `[]`, the same way omitting
 /// `recognizer` stores `ocr-v1`. A correction that leaves the list out clears
-/// names stored by an earlier upload of that session.
+/// names stored by an earlier upload of that session. Omitting
+/// `name_recognizer`, or sending null, stores NONE. It is not filled with a
+/// reader id.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatsUploadBody {
     pub matches: Vec<StatsUploadMatch>,
@@ -219,12 +256,23 @@ pub struct StatsUploadBody {
     pub deleted_sessions: Vec<String>,
 }
 
-/// One match from [`StatsUploadBody`], plus optional recognizer and suspect fields.
+/// One match from [`StatsUploadBody`], plus optional reader ids and suspect fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "serde_json::Value")]
 pub struct StatsUploadMatch {
     pub entry: StatsUploadEntry,
     pub recognizer: RecognizerInput,
+    /// Which reader found this player's own scoreboard row.
+    ///
+    /// Expected values are `names-v1` and `ocr-v1`. The check is
+    /// [`is_recognizer_id`]: a format check, not an allowlist, and there is
+    /// no default. Omitted or null means the reader is unknown and is stored
+    /// as NONE.
+    ///
+    /// Player names must never be sent. This field identifies only which
+    /// reader found the row. A value longer than [`RECOGNIZER_ID_MAX_LEN`]
+    /// is rejected, and so is any string that is not a recognizer id.
+    pub name_recognizer: RecognizerInput,
     pub suspect_fields: SuspectFieldsInput,
 }
 
@@ -232,15 +280,12 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
     type Error = String;
 
     fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
-        let (recognizer, suspect_fields) = {
+        let (recognizer, name_recognizer, suspect_fields) = {
             let Some(obj) = value.as_object_mut() else {
                 return Err("match entry must be a JSON object".into());
             };
-            let recognizer = match obj.remove("recognizer") {
-                None | Some(serde_json::Value::Null) => RecognizerInput::Absent,
-                Some(serde_json::Value::String(id)) => RecognizerInput::Value(id),
-                Some(_) => RecognizerInput::NotAString,
-            };
+            let recognizer = take_recognizer_input(obj, "recognizer");
+            let name_recognizer = take_recognizer_input(obj, "name_recognizer");
             let suspect_fields = match obj.remove("suspect_fields") {
                 None | Some(serde_json::Value::Null) => SuspectFieldsInput::Absent,
                 Some(serde_json::Value::Array(items)) => {
@@ -263,12 +308,13 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
                 }
                 Some(_) => SuspectFieldsInput::NotAnArray,
             };
-            (recognizer, suspect_fields)
+            (recognizer, name_recognizer, suspect_fields)
         };
         let entry = serde_json::from_value(value).map_err(|err| err.to_string())?;
         Ok(Self {
             entry,
             recognizer,
+            name_recognizer,
             suspect_fields,
         })
     }
@@ -420,6 +466,41 @@ mod tests {
     }
 
     #[test]
+    fn resolve_name_recognizer_keeps_absent_unknown_and_reuses_the_id_check() {
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Absent).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Value("names-v1".into())).unwrap(),
+            Some("names-v1".to_string())
+        );
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Value("ocr-v1".into())).unwrap(),
+            Some("ocr-v1".to_string())
+        );
+        // Not an allowlist: a later id of the same shape is stored.
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Value("reader-v2".into())).unwrap(),
+            Some("reader-v2".to_string())
+        );
+        assert!(is_recognizer_id("names-v1"));
+        assert_eq!(
+            resolve_name_recognizer(&RecognizerInput::Value("NOPE".into())).unwrap_err(),
+            NAME_RECOGNIZER_ID_ERROR
+        );
+        assert!(resolve_name_recognizer(&RecognizerInput::Value(String::new())).is_err());
+        assert!(resolve_name_recognizer(&RecognizerInput::Value("has space".into())).is_err());
+        assert!(
+            resolve_name_recognizer(&RecognizerInput::Value(
+                "a".repeat(RECOGNIZER_ID_MAX_LEN + 1)
+            ))
+            .is_err()
+        );
+        assert!(resolve_name_recognizer(&RecognizerInput::NotAString).is_err());
+    }
+
+    #[test]
     fn missing_hero_is_rejected_when_null_or_omitted() {
         let omitted = r#"{
             "matches": [{
@@ -488,6 +569,10 @@ mod tests {
         let old: StatsUploadBody = serde_json::from_str(historical).unwrap();
         assert!(matches!(old.matches[0].recognizer, RecognizerInput::Absent));
         assert!(matches!(
+            old.matches[0].name_recognizer,
+            RecognizerInput::Absent
+        ));
+        assert!(matches!(
             old.matches[0].suspect_fields,
             SuspectFieldsInput::Absent
         ));
@@ -539,6 +624,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(null_body.matches[0].recognizer, RecognizerInput::Absent);
+        assert_eq!(
+            null_body.matches[0].name_recognizer,
+            RecognizerInput::Absent
+        );
 
         let number_body: StatsUploadBody = serde_json::from_str(
             r#"{
@@ -558,6 +647,72 @@ mod tests {
             number_body.matches[0].recognizer,
             RecognizerInput::NotAString
         );
+    }
+
+    #[test]
+    fn name_recognizer_null_is_absent_and_non_string_is_flagged() {
+        let null_body: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "name_recognizer": null
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            null_body.matches[0].name_recognizer,
+            RecognizerInput::Absent
+        );
+        assert!(matches!(
+            null_body.matches[0].recognizer,
+            RecognizerInput::Absent
+        ));
+
+        let number_body: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "name_recognizer": 1
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            number_body.matches[0].name_recognizer,
+            RecognizerInput::NotAString
+        );
+
+        let named: StatsUploadBody = serde_json::from_str(
+            r#"{
+                "matches": [{
+                    "hero": "Ana",
+                    "map_name": "Oasis",
+                    "game_mode": "control",
+                    "role": "Support",
+                    "outcome": "victory",
+                    "played_at": "2026-07-01T20:00:00Z",
+                    "recognizer": "ocr-v1",
+                    "name_recognizer": "names-v1"
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            named.matches[0].name_recognizer,
+            RecognizerInput::Value("names-v1".into())
+        );
+        assert_eq!(named.matches[0].entry.recognizer, None);
     }
 
     #[test]
