@@ -62,8 +62,10 @@ relay_signin_status() {
     fi
     payload="$(printf '{"ns":"%s","db":"%s","ac":"relay","user":"%s","pass":"%s"}' \
         "$ns" "$db" "$user" "$password")"
-    code="$(printf '%s' "$payload" | podman exec -i "$container" \
+    # timeout covers a stuck podman exec. curl's own limits cover a hung sign-in.
+    code="$(printf '%s' "$payload" | timeout 20 podman exec -i "$container" \
         curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 2 --max-time 5 \
         -H 'Accept: application/json' \
         -H 'Content-Type: application/json' \
         --data-binary @- \

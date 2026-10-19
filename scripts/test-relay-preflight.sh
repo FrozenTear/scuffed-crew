@@ -30,4 +30,10 @@ weird="$(relay_preflight_decision "has space" 200 200 || true)"
 [[ "$blank" != *"cmVsYXlzZWNyZXQ="* ]] || fail "blank path printed a password"
 [[ "$signin" != *"cmVsYXlzZWNyZXQ="* ]] || fail "signin path printed a password"
 
+up="${SCRIPT_DIR}/relay-up.sh"
+grep -q -- '--connect-timeout 2 --max-time 5' "$up" || fail "ready probe has no timeout"
+preflight="${SCRIPT_DIR}/lib/relay-preflight.sh"
+grep -q 'timeout 20 podman exec' "$preflight" || fail "sign-in exec has no timeout"
+grep -q -- '--connect-timeout 2 --max-time 5' "$preflight" || fail "sign-in curl has no timeout"
+
 echo "relay preflight checks passed"

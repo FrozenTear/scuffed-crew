@@ -101,7 +101,7 @@ fi
 # shellcheck source=lib/relay-preflight.sh
 source "$ROOT/scripts/lib/relay-preflight.sh"
 relay_password="$(trim_secret "${SURREALDB_RELAY_PASSWORD:-}")"
-ready_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+ready_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
     "http://127.0.0.1:${HOST_PORT:-3000}/api/ready" || true)"
 [[ -n "$ready_code" ]] || ready_code="000"
 signin_code="000"
