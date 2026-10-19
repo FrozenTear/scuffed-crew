@@ -156,7 +156,7 @@ fn unzip(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
         let mut f = ar.by_index(i).unwrap();
         let mut data = Vec::new();
         f.read_to_end(&mut data).unwrap();
-        out.push((f.name().to_string(), data));
+        out.push((f.name().unwrap().into_owned(), data));
     }
     out
 }
@@ -763,7 +763,7 @@ fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
     );
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(report.bytes)).unwrap();
     let mut names: Vec<_> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
     names.sort();
     assert_eq!(names, ["log.txt", "manifest.json"]);
@@ -829,6 +829,8 @@ fn raw_zip_entries(b: &[u8]) -> Vec<String> {
     names
 }
 
+/// Dates, names, and uncompressed hashes. zip 9 can compress differently.
+/// The check is the same files and content hashes.
 #[test]
 fn zip_fixture_dates_entries_hashes_and_bom() {
     let dir = tempfile::tempdir().unwrap();
@@ -858,7 +860,8 @@ fn zip_fixture_dates_entries_hashes_and_bom() {
             (1980, 1, 1, 0, 0, 0)
         );
         assert!(f.extra_data().is_none_or(|e| e.is_empty()));
-        assert!(!f.name().contains('\\') && !f.name().starts_with('/'));
+        let name = f.name().unwrap();
+        assert!(!name.contains('\\') && !name.starts_with('/'));
     }
     drop(ar);
 
@@ -1022,7 +1025,7 @@ mod game {
             let mut f = z.by_index(i).unwrap();
             let mut buf = Vec::new();
             f.read_to_end(&mut buf).unwrap();
-            out.insert(f.name().to_string(), buf);
+            out.insert(f.name().unwrap().into_owned(), buf);
         }
         out
     }
