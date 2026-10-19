@@ -862,6 +862,10 @@ pub struct MemberSettings {
 }
 
 /// A daemon authentication token.
+///
+/// `expires_at` and `expired` default when absent, so a payload from before
+/// those fields existed still deserializes. The list endpoint always sends
+/// both: `expires_at` is an RFC 3339 string or `null`, and `expired` is a bool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonToken {
     pub id: String,
@@ -870,6 +874,12 @@ pub struct DaemonToken {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+    /// RFC 3339 when the token has an expiry. `null` for older tokens with none.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// True when `expires_at` is set and at or before now. No expiry is not expired.
+    #[serde(default)]
+    pub expired: bool,
 }
 
 /// Audit log action types.

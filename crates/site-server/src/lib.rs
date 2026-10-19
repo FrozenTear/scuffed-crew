@@ -16,6 +16,7 @@ pub mod routes;
 pub mod seed;
 pub mod stat_reports;
 pub mod state;
+mod stats_upload_limits;
 pub mod team_channels;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -41,6 +42,22 @@ use state::AppState;
 /// Build the application router. Static files come from `dist/`.
 pub fn create_router(state: AppState) -> Router {
     create_router_with_dist(state, "dist")
+}
+
+/// JSON 405 for `/api` routes registered so far.
+///
+/// Axum only replaces a method router that still uses the default empty 405.
+/// A `.layer` applied first wraps that default, and this call then replaces
+/// the fallback, so the layer does not see a wrong method. The rate-limit
+/// governors in [`create_router_with_dist`] are applied first for that reason:
+/// a 405 must not spend the caller's budget. Call this before a layer that
+/// should still wrap the 405 (CORS, a feature gate). Non-`/api` paths stay an
+/// empty 405.
+pub fn apply_api_method_not_allowed<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.method_not_allowed_fallback(routes::seo::api_method_not_allowed)
 }
 
 /// Same router as [`create_router`], with an explicit Dioxus output directory.
@@ -141,8 +158,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
-    // extractor the other governors use. POST /api/stats/upload itself is
-    // not on a governor.
+    // extractor the other governors use.
     let token_check_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
@@ -157,6 +173,24 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             GovernorLayer::new(token_check_governor_config)
                 .error_handler(rate_limit::governor_error_response),
         );
+
+    // Own per-IP budget for POST /api/stats/upload, looser than the per-token
+    // limit. Avatar and image uploads keep burst 8 / 10s. The key is still
+    // TrustedProxyIpKeyExtractor. After the token is validated, the route
+    // also spends a per-token cell keyed by token id.
+    let stats_upload_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::STATS_UPLOAD_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::STATS_UPLOAD_IP_BURST)
+            .finish()
+            .expect("valid stats upload ip governor config"),
+    );
+    #[cfg(test)]
+    let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
+        .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
+    #[cfg(not(test))]
+    let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
     // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
     // 10s). Filling this bucket does not block uploads or token-check.
@@ -264,46 +298,52 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // cell per second (see `link_poll`) so three devices can sit on the
     // 5 second interval for the whole code lifetime.
     let link_period = 30;
-    let link_start_routes = Router::new()
-        .route("/api/link/start", post(routes::link::start))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor.clone())
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_START_BURST)
-                    .finish()
-                    .expect("valid device link start governor"),
+    let link_start_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/start", post(routes::link::start))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor.clone())
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_START_BURST)
+                        .finish()
+                        .expect("valid device link start governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_poll_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/poll", post(routes::link::poll))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                routes::link::limit_link_poll,
             ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_poll_routes = Router::new()
-        .route("/api/link/poll", post(routes::link::poll))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::link::limit_link_poll,
-        ))
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_user_routes = Router::new()
-        .route("/api/link/lookup", post(routes::link::lookup))
-        .route("/api/link/approve", post(routes::link::approve))
-        .route("/api/link/deny", post(routes::link::deny))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor)
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_USER_BURST)
-                    .finish()
-                    .expect("valid device link user governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_user_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/lookup", post(routes::link::lookup))
+            .route("/api/link/approve", post(routes::link::approve))
+            .route("/api/link/deny", post(routes::link::deny))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor)
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_USER_BURST)
+                        .finish()
+                        .expect("valid device link user governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
@@ -470,7 +510,20 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::matches::get_match).put(routes::matches::update_match),
         )
         // Personal stats routes
-        .route("/api/stats/upload", post(routes::stats::upload_stats))
+        .route(
+            "/api/stats/upload",
+            post(routes::stats::upload_stats)
+                .layer::<_, std::convert::Infallible>(middleware::from_fn_with_state(
+                    stats_token_governor,
+                    stats_upload_limits::attach_stats_upload_governor,
+                ))
+                // Outer layer: refuse a hot IP before the handler validates
+                // the bearer or spends a per-token cell.
+                .layer::<_, std::convert::Infallible>(
+                    GovernorLayer::new(stats_upload_ip_config)
+                        .error_handler(rate_limit::governor_error_response),
+                ),
+        )
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
@@ -764,9 +817,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             uploads::uploads_router(state.upload_dir.clone()),
         )
         // Unmatched `/api` and `/api/*` are a JSON 404 inside the SPA service.
-        // Every other unmatched path is the shell or a static file. Known
-        // routes, including a wrong method on a known path, are resolved
-        // before this fallback.
+        // Every other unmatched path is the shell or a static file. A known
+        // `/api` path with the wrong method is a JSON 405. The per-route
+        // governors above wrap Axum's default 405; this call replaces that
+        // fallback, so a wrong method does not spend the caller's budget.
+        // Body limit, trace, and CORS below still wrap the JSON 405.
+        .method_not_allowed_fallback(routes::seo::api_method_not_allowed)
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
         // 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB.
         // Stat-report uploads raise only their own POST route to 10 MB.
@@ -827,6 +883,210 @@ pub async fn bootstrap_admin_reset(
     Ok(BootstrapResetOutcome::Applied { sessions_revoked })
 }
 
+/// Operator values for the one-shot local admin password reset.
+///
+/// `Debug` does not print the password.
+pub struct BootstrapAdminEnv {
+    /// Raw `BOOTSTRAP_ADMIN_RESET`. `None` when unset.
+    pub reset: Option<String>,
+    /// Raw `BOOTSTRAP_ADMIN_USERNAME`. `None` when unset.
+    pub username: Option<String>,
+    /// Raw `BOOTSTRAP_ADMIN_PASSWORD`. `None` when unset.
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for BootstrapAdminEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootstrapAdminEnv")
+            .field("reset", &self.reset)
+            .field("username", &self.username)
+            .field(
+                "password_set",
+                &self.password.as_ref().is_some_and(|p| !p.is_empty()),
+            )
+            .finish()
+    }
+}
+
+impl BootstrapAdminEnv {
+    pub fn from_env() -> Self {
+        Self {
+            reset: std::env::var("BOOTSTRAP_ADMIN_RESET").ok(),
+            username: std::env::var("BOOTSTRAP_ADMIN_USERNAME").ok(),
+            password: std::env::var("BOOTSTRAP_ADMIN_PASSWORD").ok(),
+        }
+    }
+
+    fn any_set(&self) -> bool {
+        [
+            self.reset.as_deref(),
+            self.username.as_deref(),
+            self.password.as_deref(),
+        ]
+        .into_iter()
+        .any(|value| value.is_some_and(|s| !s.is_empty()))
+    }
+
+    /// Same gate the process used before W1019-16: flag exactly `1` and a
+    /// non-empty password. Username defaults to `admin`.
+    fn reset_request(&self) -> Option<(String, String)> {
+        if self.reset.as_deref() != Some("1") {
+            return None;
+        }
+        let password = self.password.as_deref().filter(|p| !p.is_empty())?;
+        let username = self
+            .username
+            .clone()
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| "admin".to_string());
+        Some((username, password.to_string()))
+    }
+}
+
+/// Logged when leftover `BOOTSTRAP_ADMIN_*` values are not applied.
+pub const BOOTSTRAP_ENV_REMOVE_NOTICE: &str = "\
+BOOTSTRAP_ADMIN_* is still set and an admin already exists. These values are ignored. \
+Remove BOOTSTRAP_ADMIN_RESET, BOOTSTRAP_ADMIN_PASSWORD, and BOOTSTRAP_ADMIN_USERNAME \
+from the environment. Nothing was deleted.";
+
+enum BootstrapEnvDecision {
+    Quiet,
+    Ignore { admin_exists: bool },
+    Apply { username: String, password: String },
+}
+
+/// String hashed into the one-shot marker. Length prefixes keep two different
+/// username and password pairs from producing the same input. The plaintext
+/// is not stored.
+fn bootstrap_marker_input(username: &str, password: &str) -> String {
+    format!(
+        "bootstrap-admin-env-v1:{}:{username}{}:{password}",
+        username.len(),
+        password.len()
+    )
+}
+
+/// `true` only when `stored` is an argon2 hash of this username and password.
+///
+/// A value that will not parse as argon2, including an older blake3 hex, is a
+/// mismatch. Callers re-apply the reset instead of treating it as already done.
+fn bootstrap_marker_matches(stored: &str, username: &str, password: &str) -> bool {
+    let input = bootstrap_marker_input(username, password);
+    match scuffed_auth::password::verify_password(&input, stored) {
+        Ok(matched) => matched,
+        Err(err) => {
+            tracing::warn!(
+                "BOOTSTRAP_ADMIN_RESET marker is not an argon2 hash ({err}). \
+                 The reset will run again. Nothing was deleted."
+            );
+            false
+        }
+    }
+}
+
+fn decide_bootstrap_admin_env(
+    env: &BootstrapAdminEnv,
+    admin_exists: bool,
+    stored_fingerprint: Option<&str>,
+) -> BootstrapEnvDecision {
+    if let Some((username, password)) = env.reset_request() {
+        let already_applied = stored_fingerprint
+            .is_some_and(|stored| bootstrap_marker_matches(stored, &username, &password));
+        if already_applied {
+            return BootstrapEnvDecision::Ignore { admin_exists };
+        }
+        return BootstrapEnvDecision::Apply { username, password };
+    }
+    if admin_exists && env.any_set() {
+        return BootstrapEnvDecision::Ignore { admin_exists: true };
+    }
+    BootstrapEnvDecision::Quiet
+}
+
+/// What startup did with `BOOTSTRAP_ADMIN_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapStartupOutcome {
+    Quiet,
+    Ignored,
+    Applied { sessions_revoked: u64 },
+    NoSuchUser,
+}
+
+/// Apply `BOOTSTRAP_ADMIN_*` from the process environment. See
+/// [`apply_bootstrap_admin_env_with`].
+pub async fn apply_bootstrap_admin_env(
+    db: &scuffed_db::Database,
+) -> Result<BootstrapStartupOutcome, String> {
+    apply_bootstrap_admin_env_with(db, &BootstrapAdminEnv::from_env()).await
+}
+
+/// One-shot local admin reset (W1019-16).
+///
+/// The first start that sees `BOOTSTRAP_ADMIN_RESET=1` and a password still
+/// resets that local user and revokes their sessions. The same values on a
+/// later start are ignored, and a warning says they can be removed. Values
+/// left set after an admin exists, without a new reset request, are ignored
+/// the same way. This function does not delete environment variables or files.
+pub async fn apply_bootstrap_admin_env_with(
+    db: &scuffed_db::Database,
+    env: &BootstrapAdminEnv,
+) -> Result<BootstrapStartupOutcome, String> {
+    let admin_exists = db
+        .has_any_admin_member()
+        .await
+        .map_err(|e| format!("admin lookup failed: {e}"))?;
+    let stored = db
+        .bootstrap_env_fingerprint()
+        .await
+        .map_err(|e| format!("bootstrap env fingerprint lookup failed: {e}"))?;
+    match decide_bootstrap_admin_env(env, admin_exists, stored.as_deref()) {
+        BootstrapEnvDecision::Quiet => Ok(BootstrapStartupOutcome::Quiet),
+        BootstrapEnvDecision::Ignore { admin_exists: true } => {
+            tracing::warn!("{BOOTSTRAP_ENV_REMOVE_NOTICE}");
+            Ok(BootstrapStartupOutcome::Ignored)
+        }
+        BootstrapEnvDecision::Ignore {
+            admin_exists: false,
+        } => {
+            tracing::warn!(
+                "BOOTSTRAP_ADMIN_RESET was already applied. These values are ignored. \
+                 Remove BOOTSTRAP_ADMIN_RESET, BOOTSTRAP_ADMIN_PASSWORD, and \
+                 BOOTSTRAP_ADMIN_USERNAME from the environment. Nothing was deleted."
+            );
+            Ok(BootstrapStartupOutcome::Ignored)
+        }
+        BootstrapEnvDecision::Apply { username, password } => {
+            let fingerprint = scuffed_auth::password::hash_password(&bootstrap_marker_input(
+                &username, &password,
+            ))
+            .map_err(|e| format!("bootstrap marker hash failed: {e}"))?;
+            match bootstrap_admin_reset(db, &username, &password).await? {
+                BootstrapResetOutcome::Applied { sessions_revoked } => {
+                    if let Err(e) = db.set_bootstrap_env_fingerprint(&fingerprint).await {
+                        tracing::error!(
+                            "BOOTSTRAP_ADMIN_RESET applied but the one-shot marker was not stored: {e}"
+                        );
+                    }
+                    tracing::warn!(
+                        "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
+                         ({sessions_revoked} existing session(s) revoked). Remove \
+                         BOOTSTRAP_ADMIN_RESET, BOOTSTRAP_ADMIN_PASSWORD, and \
+                         BOOTSTRAP_ADMIN_USERNAME from the environment. Nothing was deleted."
+                    );
+                    Ok(BootstrapStartupOutcome::Applied { sessions_revoked })
+                }
+                BootstrapResetOutcome::NoSuchUser => {
+                    tracing::error!(
+                        "BOOTSTRAP_ADMIN_RESET: no local user '{username}'. \
+                         Create that user via first-boot setup first."
+                    );
+                    Ok(BootstrapStartupOutcome::NoSuchUser)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod bootstrap_reset_tests {
     use super::*;
@@ -884,5 +1144,151 @@ mod bootstrap_reset_tests {
             .await
             .unwrap();
         assert_eq!(outcome, BootstrapResetOutcome::NoSuchUser);
+    }
+
+    fn reset_env(password: &str) -> BootstrapAdminEnv {
+        BootstrapAdminEnv {
+            reset: Some("1".into()),
+            username: Some("admin".into()),
+            password: Some(password.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_env_is_ignored_on_a_later_start_when_an_admin_exists() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+        db.create_session(&user.id, "tok-live", 168).await.unwrap();
+
+        let env = reset_env("brand-new-password-456");
+        let first = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(
+            first,
+            BootstrapStartupOutcome::Applied {
+                sessions_revoked: 1
+            }
+        );
+        assert!(db.get_session("tok-live").await.unwrap().is_none());
+
+        // The operator rotates the password again and leaves the env in place.
+        // The next start must not put the env password back or drop sessions.
+        let middle = scuffed_auth::password::hash_password("changed-after-reset-99").unwrap();
+        db.set_local_password_hash(&user.id, &middle).await.unwrap();
+        db.create_session(&user.id, "tok-after", 168).await.unwrap();
+
+        let second = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(second, BootstrapStartupOutcome::Ignored);
+        let (_, hash) = db
+            .get_local_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_password("changed-after-reset-99", &hash).unwrap());
+        assert!(!verify_password("brand-new-password-456", &hash).unwrap());
+        assert!(db.get_session("tok-after").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn leftover_bootstrap_password_is_ignored_when_an_admin_exists() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+
+        let env = BootstrapAdminEnv {
+            reset: None,
+            username: Some("admin".into()),
+            password: Some("should-not-apply-123".into()),
+        };
+        let outcome = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(outcome, BootstrapStartupOutcome::Ignored);
+        let (_, hash) = db
+            .get_local_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_password("original-password-1", &hash).unwrap());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_reset_still_reports_a_missing_user_before_an_admin_exists() {
+        let db = mem_db().await;
+        let outcome = apply_bootstrap_admin_env_with(&db, &reset_env("whatever-password-789"))
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapStartupOutcome::NoSuchUser);
+        let again = apply_bootstrap_admin_env_with(&db, &reset_env("whatever-password-789"))
+            .await
+            .unwrap();
+        assert_eq!(again, BootstrapStartupOutcome::NoSuchUser);
+    }
+
+    #[tokio::test]
+    async fn stored_bootstrap_marker_verifies_and_is_not_plain_blake3() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+
+        let env = reset_env("brand-new-password-456");
+        let outcome = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert!(matches!(outcome, BootstrapStartupOutcome::Applied { .. }));
+
+        let stored = db
+            .bootstrap_env_fingerprint()
+            .await
+            .unwrap()
+            .expect("marker stored");
+        let input = bootstrap_marker_input("admin", "brand-new-password-456");
+        let plain = blake3::hash(input.as_bytes()).to_hex().to_string();
+        assert_ne!(stored, plain, "marker must not be the plain blake3 hex");
+        assert!(verify_password(&input, &stored).unwrap());
+        assert!(!verify_password("other-marker-input", &stored).unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_blake3_bootstrap_marker_is_reapplied() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+        db.create_session(&user.id, "tok-old", 168).await.unwrap();
+
+        let legacy = blake3::hash(b"bootstrap-admin-env-v1").to_hex().to_string();
+        db.set_bootstrap_env_fingerprint(&legacy).await.unwrap();
+
+        let env = reset_env("brand-new-password-456");
+        let outcome = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(
+            outcome,
+            BootstrapStartupOutcome::Applied {
+                sessions_revoked: 1
+            }
+        );
+        assert!(db.get_session("tok-old").await.unwrap().is_none());
+        let (_, hash) = db
+            .get_local_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_password("brand-new-password-456", &hash).unwrap());
+
+        let stored = db.bootstrap_env_fingerprint().await.unwrap().unwrap();
+        assert_ne!(stored, legacy);
+        let input = bootstrap_marker_input("admin", "brand-new-password-456");
+        assert!(verify_password(&input, &stored).unwrap());
+
+        let second = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(second, BootstrapStartupOutcome::Ignored);
     }
 }

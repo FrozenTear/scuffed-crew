@@ -7,12 +7,13 @@ use scuffed_auth::SessionConfig;
 use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{
-    create_router,
+    apply_api_method_not_allowed, create_router,
     notifications::Notifier,
     state::{AppState, OAuthConfig, relay_url_from_env},
     uploads,
 };
 use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{And, DefaultPredicate, NotForContentType, Predicate};
 use tracing_subscriber::EnvFilter;
 
 mod collab;
@@ -81,30 +82,12 @@ async fn main() {
             .expect("Failed to connect to SurrealDB")
     };
 
-    // Emergency local admin password reset (production only). Unset BOOTSTRAP_ADMIN_RESET after use.
-    if !is_dev
-        && std::env::var("BOOTSTRAP_ADMIN_RESET").ok().as_deref() == Some("1")
-        && let Ok(new_password) = std::env::var("BOOTSTRAP_ADMIN_PASSWORD")
-        && !new_password.is_empty()
-    {
-        let username =
-            std::env::var("BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string());
-        // Rewrites the password hash AND revokes all existing sessions for the
-        // user, so a live attacker session cannot survive the reset
-        // (DR1-AUTH-003).
-        match scuffed_site_server::bootstrap_admin_reset(&db, &username, &new_password).await {
-            Ok(scuffed_site_server::BootstrapResetOutcome::Applied { sessions_revoked }) => {
-                tracing::warn!(
-                    "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
-                     ({sessions_revoked} existing session(s) revoked) — remove \
-                     BOOTSTRAP_ADMIN_RESET from env"
-                );
-            }
-            Ok(scuffed_site_server::BootstrapResetOutcome::NoSuchUser) => tracing::error!(
-                "BOOTSTRAP_ADMIN_RESET: no local user '{username}' — create via first-boot setup first"
-            ),
-            Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET failed: {e}"),
-        }
+    // Emergency local admin password reset (production only).
+    // A successful reset is recorded and the same BOOTSTRAP_ADMIN_* values are
+    // ignored on later starts. Leftover values after an admin exists are also
+    // ignored. Nothing in the environment or secrets file is deleted.
+    if !is_dev && let Err(e) = scuffed_site_server::apply_bootstrap_admin_env(&db).await {
+        tracing::error!("BOOTSTRAP_ADMIN_*: {e}");
     }
 
     let db = Arc::new(db);
@@ -176,6 +159,7 @@ async fn main() {
         db: db.clone(),
         session_config: SessionConfig::default(),
         oauth_config,
+        auth_redirect_base: scuffed_site_server::state::auth_redirect_base_from_env(),
         upload_dir,
         reports_dir: reports_dir.clone(),
         reports_enabled,
@@ -257,9 +241,13 @@ async fn main() {
         .route(
             "/api/strategy/ws",
             get(routes::ws::websocket_handler).with_state(ws_state),
-        )
+        );
+    // After every route, including strategy and chat. create_router already
+    // installed this fallback; calling it again covers routes merged above
+    // and leaves routers that already have it alone.
+    let app = apply_api_method_not_allowed(app)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
-        .layer(CompressionLayer::new())
+        .layer(response_compression_layer())
         .layer(axum::middleware::from_fn(move |req, next| {
             let csp = csp.clone();
             async move { security::apply(req, next, csp).await }
@@ -282,19 +270,38 @@ async fn main() {
     .unwrap();
 }
 
+/// Response compression for the unified server.
+///
+/// `GET /api/tracker/packs/{name}` sends `application/octet-stream` for a
+/// `.tar` whose contents are already compressed. Compressing that body again
+/// changes the sha256 the tracker checks. `application/x-tar` is skipped for
+/// the same reason. Other responses keep the default predicate (tiny bodies,
+/// images, server-sent events, and gRPC stay uncompressed).
+fn response_compression_layer()
+-> CompressionLayer<And<And<DefaultPredicate, NotForContentType>, NotForContentType>> {
+    CompressionLayer::new().compress_when(
+        DefaultPredicate::new()
+            .and(NotForContentType::const_new("application/octet-stream"))
+            .and(NotForContentType::const_new("application/x-tar")),
+    )
+}
+
 #[cfg(test)]
 mod compression_shell {
     use std::io::Read;
+    use std::net::SocketAddr;
 
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Method, Request, StatusCode, header};
     use http_body_util::BodyExt;
     use scuffed_auth::SessionConfig;
+    use scuffed_db::OrgRole;
     use scuffed_db::migrations::run_migrations;
     use scuffed_site_server::create_router_with_dist;
     use scuffed_site_server::state::{AppState, OAuthConfig};
+    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
-    use tower_http::compression::CompressionLayer;
 
     #[tokio::test]
     async fn get_and_head_shell_round_trip_through_compression() {
@@ -321,6 +328,7 @@ mod compression_shell {
                 redirect_base_url: "https://crew.example.test".into(),
                 allowed_origins: vec!["https://crew.example.test".into()],
             },
+            auth_redirect_base: None,
             upload_dir: root.join("uploads"),
             reports_dir: root.join("reports"),
             reports_enabled: true,
@@ -341,8 +349,9 @@ mod compression_shell {
             public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
             leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
         };
-        // Same layer `main` puts around the router (`CompressionLayer::new()`).
-        let app = create_router_with_dist(state, root.join("dist")).layer(CompressionLayer::new());
+        // Same layer `main` puts around the router.
+        let app = create_router_with_dist(state, root.join("dist"))
+            .layer(super::response_compression_layer());
 
         let get_response = app
             .clone()
@@ -393,5 +402,201 @@ mod compression_shell {
         assert_eq!(head_bytes.len(), 0);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn pack_download_skips_compression_and_json_stays_compressed() {
+        let root =
+            std::env::temp_dir().join(format!("scuffed-pack-compress-{}", uuid::Uuid::new_v4()));
+        let packs = root.join("packs");
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::create_dir_all(root.join("uploads")).unwrap();
+        std::fs::create_dir_all(&packs).unwrap();
+        std::fs::write(
+            root.join("dist/index.html"),
+            "<!DOCTYPE html><html><head></head><body>SPA-SHELL-MARKER</body></html>",
+        )
+        .unwrap();
+        // Larger than the compressor's 32 byte floor, and repetitive so a
+        // mistaken gzip/br pass would both set Content-Encoding and change
+        // the bytes.
+        let file_bytes = vec![b'P'; 4096];
+        let file_sha = sha256_hex(&file_bytes);
+        std::fs::write(packs.join("heroes-v1.tar"), &file_bytes).unwrap();
+        let manifest = serde_json::json!([{
+            "name": "heroes-v1.tar",
+            "version": "1",
+            "sha256": file_sha,
+            "size": file_bytes.len(),
+        }]);
+        std::fs::write(
+            packs.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let db = scuffed_db::Database::connect_memory()
+            .await
+            .expect("in-memory DB");
+        run_migrations(&db.client).await.expect("migrations");
+        let member = db
+            .create_member("packmember", "Tracker", OrgRole::Member)
+            .await
+            .expect("member");
+        db.create_daemon_token(&member.id, "pack-token-valid", "valid")
+            .await
+            .expect("daemon token");
+        let state = AppState {
+            db: std::sync::Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "https://crew.example.test".into(),
+                allowed_origins: vec!["https://crew.example.test".into()],
+            },
+            auth_redirect_base: None,
+            upload_dir: root.join("uploads"),
+            reports_dir: root.join("reports"),
+            reports_enabled: true,
+            packs_dir: Some(packs),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+            link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
+            link_poll: scuffed_site_server::link_poll::LinkPollGate::system(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+            public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
+            leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+        };
+        let app = create_router_with_dist(state, root.join("dist"))
+            .layer(super::response_compression_layer());
+        let peer = SocketAddr::from(([203, 0, 113, 50], 44000));
+
+        let pack = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/tracker/packs/heroes-v1.tar")
+                    .header(header::ACCEPT_ENCODING, "gzip, br")
+                    .header(header::AUTHORIZATION, "Bearer pack-token-valid")
+                    .extension(ConnectInfo(peer))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pack.status(), StatusCode::OK);
+        assert!(
+            pack.headers().get(header::CONTENT_ENCODING).is_none(),
+            "pack download must not set Content-Encoding, got {:?}",
+            pack.headers().get(header::CONTENT_ENCODING)
+        );
+        assert_eq!(
+            pack.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            pack.headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("4096")
+        );
+        assert_eq!(
+            pack.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("private, no-store")
+        );
+        let etag = format!("\"{file_sha}\"");
+        assert_eq!(
+            pack.headers()
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok()),
+            Some(etag.as_str())
+        );
+        assert_eq!(
+            pack.headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"heroes-v1.tar\"")
+        );
+        let pack_body = pack.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(sha256_hex(&pack_body), file_sha);
+        assert_eq!(pack_body.as_ref(), file_bytes.as_slice());
+
+        let raw_json = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/auth/providers")
+                    .extension(ConnectInfo(peer))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(raw_json.status(), StatusCode::OK);
+        assert!(raw_json.headers().get(header::CONTENT_ENCODING).is_none());
+        let raw_body = raw_json.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            raw_body.len() >= 32,
+            "JSON fixture must be large enough for the default compressor, got {}",
+            raw_body.len()
+        );
+        assert!(raw_body.starts_with(b"{"), "providers body is JSON");
+
+        let compressed = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/auth/providers")
+                    .header(header::ACCEPT_ENCODING, "gzip, br")
+                    .extension(ConnectInfo(peer))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(compressed.status(), StatusCode::OK);
+        assert_eq!(
+            compressed
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("br"),
+            "a normal JSON route must still be compressed"
+        );
+        assert_eq!(
+            compressed
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let compressed_body = compressed.into_body().collect().await.unwrap().to_bytes();
+        assert_ne!(compressed_body, raw_body);
+        assert!(!compressed_body.starts_with(b"{"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
     }
 }

@@ -32,6 +32,7 @@ async fn test_state() -> AppState {
             redirect_base_url: "http://localhost:3000".into(),
             allowed_origins: vec!["http://localhost:3000".into()],
         },
+        auth_redirect_base: None,
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
@@ -136,6 +137,7 @@ fn assert_rate_limited(headers: &axum::http::HeaderMap, body: &[u8]) -> u64 {
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry:?}"));
     assert!(secs >= 1, "Retry-After must be at least 1, got {secs}");
     let expected = serde_json::to_vec(&json!({
+        "code": "rate_limited",
         "error": "rate_limited",
         "retry_after": secs,
     }))

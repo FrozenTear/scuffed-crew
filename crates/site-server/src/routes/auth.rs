@@ -548,6 +548,29 @@ pub async fn local_register(
         .into_response()
 }
 
+/// Drop a failed first-boot claim so a later POST can succeed (W1019-14).
+///
+/// Deletes `created_user_id` only when no member row exists, then clears the
+/// lock under the same condition. A member row keeps both the user and the claim.
+async fn abandon_failed_setup(state: &AppState, created_user_id: Option<&str>) {
+    if let Some(user_id) = created_user_id {
+        match state.db.delete_local_user_if_no_member(user_id).await {
+            Ok(true) => {
+                tracing::warn!("setup rolled back the local user after member create failed")
+            }
+            Ok(false) => {
+                tracing::error!("setup left the local user in place because a member row exists")
+            }
+            Err(e) => tracing::error!("setup rollback delete user: {e}"),
+        }
+    }
+    match state.db.release_bootstrap_lock().await {
+        Ok(true) => tracing::warn!("setup released the first-boot lock after a failed create"),
+        Ok(false) => {}
+        Err(e) => tracing::error!("setup release_bootstrap_lock: {e}"),
+    }
+}
+
 /// POST /api/auth/setup — one-time first admin account (local username/password).
 ///
 /// Gate (DR1-ACCT-003): this unauthenticated endpoint proceeds **only when no
@@ -563,8 +586,10 @@ pub async fn local_register(
 /// The `has_any_member` check alone is not atomic: two concurrent first-boot
 /// POSTs can both observe an empty member table (F-API-002). After validation,
 /// we CAS-claim `bootstrap_lock:setup` (`UPDATE … WHERE claimed = false`) so
-/// only one request may call `create_member(..., Admin)`. The lock is never
-/// reset, so setup stays closed after the first successful claim.
+/// only one request may call `create_member(..., Admin)`. If that create fails
+/// and no member row exists, the claim is released so a later POST can retry.
+/// Once a member exists the lock stays claimed, including when session
+/// creation fails after the member row is stored.
 ///
 /// Lockout recovery for an already-provisioned org (all admins
 /// suspended/banned) is intentionally NOT this endpoint: recovery is an
@@ -635,9 +660,10 @@ pub async fn setup(
     };
 
     // F-API-002: claim the singleton before creating user/member so two
-    // concurrent POSTs cannot both become admins. Loser → 403 (same as the
-    // sequential "already completed" path). Claim stays held if a later
-    // create_* fails — fail closed rather than reopen first-boot.
+    // concurrent POSTs cannot both become admins. The loser gets 403 (same as
+    // the sequential "already completed" path). If user or member creation
+    // fails and no member row exists, the claim is released so setup can be
+    // retried (W1019-14). A member row keeps the claim closed.
     match state.db.claim_bootstrap_lock().await {
         Ok(()) => {}
         Err(scuffed_db::DbError::Conflict(_)) => {
@@ -665,6 +691,7 @@ pub async fn setup(
         Ok(u) => u,
         Err(e) => {
             tracing::error!("setup create_local_user: {e}");
+            abandon_failed_setup(&state, None).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -680,6 +707,7 @@ pub async fn setup(
         .create_member(&user.id, &username, OrgRole::Admin)
         .await
     {
+        abandon_failed_setup(&state, Some(&user.id)).await;
         if let Some(response) = crate::routes::members::display_name_write_error(&e) {
             return response.into_response();
         }

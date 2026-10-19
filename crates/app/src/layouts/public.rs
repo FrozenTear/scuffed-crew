@@ -1403,6 +1403,17 @@ mod tests {
         );
         assert!(off.contains("My reports"), "{off}");
 
+        set_test_relay_availability(Some(RelayAvailability::Failed));
+        let failed = render_logged_in_nav();
+        assert!(
+            failed.matches("href=\"/chat\"").count() >= 2,
+            "a failed health check keeps Chat in the nav: {failed}"
+        );
+        assert!(
+            failed.matches("href=\"/dm\"").count() >= 2,
+            "a failed health check keeps DMs in the nav: {failed}"
+        );
+
         set_test_relay_availability(Some(RelayAvailability::On));
         let on = render_logged_in_nav();
         assert!(

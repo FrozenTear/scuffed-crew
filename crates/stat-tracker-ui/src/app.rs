@@ -2729,18 +2729,20 @@ fn uninstall_dialog_escape(
     notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
 }
 
+/// A pid that is already gone, or that is not the tracker, is not a running
+/// tracker. Killing it was refused on purpose. Uninstall can continue.
+/// `disable --now` inside [`crate::uninstall::apply`] stops a unit systemd
+/// restarted after the old pid exited. `apply` then refuses to delete files
+/// if a tracker process is still alive.
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
     match daemon::stop_daemon(&req.data_dir).await {
         Ok(()) => {}
-        Err(err) if err == "Tracker is not running" => {}
+        Err(err) if err.allows_restart() => {}
         Err(_) => {
             return Err("Could not stop the tracker. Nothing was removed.".into());
         }
-    }
-    if daemon::daemon_running(&req.data_dir).is_some() {
-        return Err("The tracker is still running. Nothing was removed.".into());
     }
     crate::uninstall::apply(&req)
 }
@@ -2872,6 +2874,26 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
+        use crate::daemon::StopError;
+
+        assert!(StopError::NotRunning.allows_restart());
+        assert!(
+            StopError::Refused("Saved process id is not the tracker, not stopping it")
+                .allows_restart()
+        );
+        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
+        assert!(
+            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Could not stop the tracker: Permission denied".into())
+                .allows_restart()
+        );
+    }
 
     #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {

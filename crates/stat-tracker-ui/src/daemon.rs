@@ -206,14 +206,17 @@ pub const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
-enum StopError {
+pub enum StopError {
     NotRunning,
     Refused(&'static str),
     Failed(String),
 }
 
 impl StopError {
-    fn allows_restart(&self) -> bool {
+    /// Nothing live was signalled: there was no pid, or the pid is not the
+    /// tracker. Restart and uninstall may continue. A [`StopError::Failed`]
+    /// means a live tracker is still up.
+    pub(crate) fn allows_restart(&self) -> bool {
         matches!(self, StopError::NotRunning | StopError::Refused(_))
     }
 }
@@ -237,10 +240,8 @@ impl std::fmt::Display for StopError {
 /// Stale pid files are left in place. [`daemon_running`] still clears them
 /// when it refreshes status; this path must not delete a file that a newer
 /// tracker may already own.
-pub async fn stop_daemon(data_dir: &Path) -> Result<(), String> {
-    stop_daemon_result(data_dir)
-        .await
-        .map_err(|e| e.to_string())
+pub async fn stop_daemon(data_dir: &Path) -> Result<(), StopError> {
+    stop_daemon_result(data_dir).await
 }
 
 async fn stop_daemon_result(data_dir: &Path) -> Result<(), StopError> {
@@ -378,7 +379,7 @@ pub async fn run_verb(
             if service_installed {
                 systemd_action("stop").await?;
             } else {
-                stop_daemon(&data_dir).await?;
+                stop_daemon(&data_dir).await.map_err(|e| e.to_string())?;
             }
             Ok("Tracker stopped".into())
         }
@@ -459,6 +460,11 @@ mod tests {
         std::fs::write(pid_file(dir.path()), &contents).unwrap();
         let err = stop_daemon(dir.path()).await.expect_err("must refuse");
         assert!(
+            matches!(err, StopError::Refused(_)),
+            "unexpected refusal: {err}"
+        );
+        let err = err.to_string();
+        assert!(
             err.contains("not the tracker") || err.contains("this window"),
             "unexpected refusal: {err}"
         );
@@ -474,6 +480,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(pid_file(dir.path()), "4294967295").unwrap();
         let err = stop_daemon(dir.path()).await.expect_err("stale");
+        assert!(matches!(err, StopError::Refused(_)), "{err}");
+        let err = err.to_string();
         assert!(err.contains("not the tracker"), "{err}");
         assert_eq!(
             std::fs::read_to_string(pid_file(dir.path()))
@@ -487,6 +495,8 @@ mod tests {
     async fn stop_without_pid_file_is_a_clean_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = stop_daemon(dir.path()).await.expect_err("no pid");
+        assert!(matches!(err, StopError::NotRunning), "{err}");
+        let err = err.to_string();
         assert!(err.contains("not running"), "{err}");
     }
 
