@@ -43,6 +43,22 @@ pub fn create_router(state: AppState) -> Router {
     create_router_with_dist(state, "dist")
 }
 
+/// JSON 405 for `/api` routes registered so far.
+///
+/// Axum only replaces a method router that still uses the default empty 405.
+/// A `.layer` applied first wraps that default, and this call then replaces
+/// the fallback, so the layer does not see a wrong method. The rate-limit
+/// governors in [`create_router_with_dist`] are applied first for that reason:
+/// a 405 must not spend the caller's budget. Call this before a layer that
+/// should still wrap the 405 (CORS, a feature gate). Non-`/api` paths stay an
+/// empty 405.
+pub fn apply_api_method_not_allowed<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.method_not_allowed_fallback(routes::seo::api_method_not_allowed)
+}
+
 /// Same router as [`create_router`], with an explicit Dioxus output directory.
 ///
 /// Tests pass a temp dir so cache-header checks do not need a built frontend.
@@ -264,46 +280,52 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // cell per second (see `link_poll`) so three devices can sit on the
     // 5 second interval for the whole code lifetime.
     let link_period = 30;
-    let link_start_routes = Router::new()
-        .route("/api/link/start", post(routes::link::start))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor.clone())
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_START_BURST)
-                    .finish()
-                    .expect("valid device link start governor"),
+    let link_start_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/start", post(routes::link::start))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor.clone())
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_START_BURST)
+                        .finish()
+                        .expect("valid device link start governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_poll_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/poll", post(routes::link::poll))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                routes::link::limit_link_poll,
             ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_poll_routes = Router::new()
-        .route("/api/link/poll", post(routes::link::poll))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::link::limit_link_poll,
-        ))
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_user_routes = Router::new()
-        .route("/api/link/lookup", post(routes::link::lookup))
-        .route("/api/link/approve", post(routes::link::approve))
-        .route("/api/link/deny", post(routes::link::deny))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor)
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_USER_BURST)
-                    .finish()
-                    .expect("valid device link user governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_user_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/lookup", post(routes::link::lookup))
+            .route("/api/link/approve", post(routes::link::approve))
+            .route("/api/link/deny", post(routes::link::deny))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor)
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_USER_BURST)
+                        .finish()
+                        .expect("valid device link user governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
@@ -762,9 +784,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             uploads::uploads_router(state.upload_dir.clone()),
         )
         // Unmatched `/api` and `/api/*` are a JSON 404 inside the SPA service.
-        // Every other unmatched path is the shell or a static file. Known
-        // routes, including a wrong method on a known path, are resolved
-        // before this fallback.
+        // Every other unmatched path is the shell or a static file. A known
+        // `/api` path with the wrong method is a JSON 405. The per-route
+        // governors above wrap Axum's default 405; this call replaces that
+        // fallback, so a wrong method does not spend the caller's budget.
+        // Body limit, trace, and CORS below still wrap the JSON 405.
+        .method_not_allowed_fallback(routes::seo::api_method_not_allowed)
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
         // 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB.
         // Stat-report uploads raise only their own POST route to 10 MB.

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType};
+use scuffed_site_server::apply_api_method_not_allowed;
 use scuffed_site_server::extractors::OfficerUser;
 use scuffed_site_server::routes::audit_log::audit;
 use scuffed_site_server::state::AppState;
@@ -27,36 +28,40 @@ use scuffed_types::strategy::{
 /// Patch Notes stay ungated. Strategy CRUD/helpers are 404 when
 /// `SiteSettings.strategies_enabled` is false.
 pub fn strategy_routes(state: AppState) -> Router {
-    let gated = Router::new()
-        .route(
-            "/api/strategy/strategies",
-            get(list_strategies).post(create_strategy),
-        )
-        .route("/api/strategy/strategies/mine", get(list_my_strategies))
-        .route(
-            "/api/strategy/strategies/{id}",
-            get(get_strategy)
-                .put(update_strategy)
-                .delete(delete_strategy),
-        )
-        .route("/api/strategy/heroes", get(list_heroes))
-        .route("/api/strategy/meta", get(get_meta))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_strategies_enabled,
-        ))
-        .with_state(state.clone());
+    let gated = apply_api_method_not_allowed(
+        Router::new()
+            .route(
+                "/api/strategy/strategies",
+                get(list_strategies).post(create_strategy),
+            )
+            .route("/api/strategy/strategies/mine", get(list_my_strategies))
+            .route(
+                "/api/strategy/strategies/{id}",
+                get(get_strategy)
+                    .put(update_strategy)
+                    .delete(delete_strategy),
+            )
+            .route("/api/strategy/heroes", get(list_heroes))
+            .route("/api/strategy/meta", get(get_meta)),
+    )
+    .route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        require_strategies_enabled,
+    ))
+    .with_state(state.clone());
 
-    let patch_notes = Router::new()
-        .route(
-            "/api/strategy/patch-notes",
-            get(list_patch_notes).post(create_patch_note),
-        )
-        .route(
-            "/api/strategy/patch-notes/{version}",
-            put(update_patch_note).delete(delete_patch_note),
-        )
-        .with_state(state);
+    let patch_notes = apply_api_method_not_allowed(
+        Router::new()
+            .route(
+                "/api/strategy/patch-notes",
+                get(list_patch_notes).post(create_patch_note),
+            )
+            .route(
+                "/api/strategy/patch-notes/{version}",
+                put(update_patch_note).delete(delete_patch_note),
+            ),
+    )
+    .with_state(state);
 
     gated.merge(patch_notes)
 }
