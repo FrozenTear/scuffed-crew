@@ -31,7 +31,7 @@ pub async fn optional_session_user(
 }
 
 /// Bearer token when `Authorization` is present, otherwise the session cookie.
-fn presented_session_token(
+pub(crate) fn presented_session_token(
     cookie_name: &str,
     headers: &HeaderMap,
     jar: &CookieJar,
@@ -460,6 +460,56 @@ impl FromRequestParts<AppState> for ReportCreator {
         Ok(ReportCreator {
             member,
             credential: ReportCredential::SyncToken,
+        })
+    }
+}
+
+/// Auth for `DELETE /api/stats/me`.
+///
+/// Site session: immediate hard delete. A 401 plus `Authorization: Bearer`
+/// falls through to the same daemon-token check as stats upload. Any other
+/// session failure is returned as-is, so a daemon token is not tried for a
+/// suspended session member.
+pub struct StatsEraseCaller {
+    pub member: Member,
+    pub via_session: bool,
+}
+
+impl FromRequestParts<AppState> for StatsEraseCaller {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let session_reject = match OrgMember::from_request_parts(parts, state).await {
+            Ok(org) => {
+                return Ok(StatsEraseCaller {
+                    member: org.member,
+                    via_session: true,
+                });
+            }
+            Err(reject) => reject,
+        };
+        let has_bearer = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Bearer "));
+        if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
+            return Err(session_reject.into_response());
+        }
+        let DaemonUser { member } = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Distinct,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
+        Ok(StatsEraseCaller {
+            member,
+            via_session: false,
         })
     }
 }

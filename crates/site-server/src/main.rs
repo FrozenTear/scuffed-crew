@@ -582,6 +582,11 @@ async fn main() {
         }
     });
     scuffed_site_server::link_cleanup::spawn_device_link_cleanup(db.clone());
+    scuffed_site_server::stats_purge::spawn_stats_purge(
+        db.clone(),
+        state.leaderboard_cache.clone(),
+        reports_dir.clone(),
+    );
 
     if reports_enabled {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);

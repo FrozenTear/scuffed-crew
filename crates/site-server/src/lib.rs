@@ -16,6 +16,7 @@ pub mod routes;
 pub mod seed;
 pub mod stat_reports;
 pub mod state;
+pub mod stats_purge;
 pub mod team_channels;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -334,7 +335,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .merge(link_start_routes)
         .merge(link_poll_routes)
         .merge(link_user_routes)
-        .route("/api/auth/me", get(routes::auth::me))
+        .route(
+            "/api/auth/me",
+            get(routes::auth::me).delete(routes::auth::delete_account),
+        )
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
         .route("/api/members", get(routes::members::list_members))
@@ -469,7 +473,14 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         // Personal stats routes
         .route("/api/stats/upload", post(routes::stats::upload_stats))
-        .route("/api/stats/me", get(routes::stats::my_stats))
+        .route(
+            "/api/stats/me",
+            get(routes::stats::my_stats).delete(routes::stats::delete_my_stats),
+        )
+        .route(
+            "/api/stats/me/restore",
+            post(routes::stats::restore_my_stats),
+        )
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
         .route("/api/stats/me/roles", get(routes::stats::my_role_stats))

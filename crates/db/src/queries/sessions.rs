@@ -168,6 +168,30 @@ impl Database {
         .await
     }
 
+    /// When the presented session was created. Used for the OAuth re-auth window.
+    pub async fn session_created_at(
+        &self,
+        raw_token: &str,
+    ) -> DbResult<Option<chrono::DateTime<Utc>>> {
+        with_timeout(async {
+            let token_hash = hash_session_token(raw_token);
+            let mut result = self
+                .client
+                .query(
+                    "SELECT created_at FROM session WHERE token = $tok AND expires_at > time::now() LIMIT 1",
+                )
+                .bind(("tok", token_hash))
+                .await?;
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                created_at: SurrealDatetime,
+            }
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().next().map(|row| row.created_at.into()))
+        })
+        .await
+    }
+
     /// Delete a session by raw token (logout).
     pub async fn delete_session(&self, raw_token: &str) -> DbResult<()> {
         with_timeout(async {

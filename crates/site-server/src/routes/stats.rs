@@ -1,7 +1,9 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 
 use scuffed_auth::server::session::ErrorResponse;
@@ -17,7 +19,7 @@ use scuffed_types::api::{
 };
 use scuffed_types::{hero_key_to_name, role_for_hero_name};
 
-use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember, StatsEraseCaller};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -39,10 +41,46 @@ fn normalize_hero(hero: String, role: String) -> (String, String) {
 }
 
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
+///
+/// A pending stats soft delete is a 409 for the whole body, before JSON or
+/// row checks. The tracker quarantines a batch on 400 or 422.
 pub async fn upload_stats(
     State(state): State<AppState>,
     daemon: DaemonUser,
-    Json(body): Json<StatsUploadBody>,
+    body_bytes: Bytes,
+) -> Response {
+    if let Some(at) = daemon.member.stats_delete_scheduled_at {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "code": "stats_delete_pending",
+                "stats_delete_scheduled_at": at.to_rfc3339(),
+            })),
+        )
+            .into_response();
+    }
+    let body: StatsUploadBody = match serde_json::from_slice(&body_bytes) {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: "Failed to parse the request body as JSON".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    match upload_stats_parsed(state, daemon, body).await {
+        Ok(body) => body.into_response(),
+        Err((status, body)) => (status, body).into_response(),
+    }
+}
+
+async fn upload_stats_parsed(
+    state: AppState,
+    daemon: DaemonUser,
+    body: StatsUploadBody,
 ) -> Result<Json<StatsUploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     if body.matches.is_empty() && body.deleted_sessions.is_empty() {
         return Ok(Json(StatsUploadResponse {
@@ -197,6 +235,149 @@ pub async fn my_stats(
                 }),
             )
         })
+}
+
+#[derive(serde::Deserialize)]
+pub struct StatsConfirmBody {
+    confirm: String,
+}
+
+fn coded(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(serde_json::json!({ "code": code }))).into_response()
+}
+
+fn stats_internal() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+        .into_response()
+}
+
+/// DELETE /api/stats/me
+///
+/// A site session hard-deletes personal stats now. A tracker daemon token
+/// schedules a soft delete (7 days), hides reads immediately, and revokes
+/// every daemon token for that member. Repeat calls keep the original deadline.
+pub async fn delete_my_stats(
+    State(state): State<AppState>,
+    caller: StatsEraseCaller,
+    Json(body): Json<StatsConfirmBody>,
+) -> Response {
+    if body.confirm.trim() != "delete my stats" {
+        return coded(StatusCode::BAD_REQUEST, "confirm_mismatch");
+    }
+    if caller.via_session {
+        let wipe = match state.db.hard_delete_personal_stats(&caller.member.id).await {
+            Ok(wipe) => wipe,
+            Err(error) => {
+                tracing::error!(
+                    error_kind = stats_db_kind(&error),
+                    "hard delete personal stats"
+                );
+                return stats_internal();
+            }
+        };
+        state.leaderboard_cache.invalidate_all();
+        for id in &wipe.stat_report_ids {
+            if let Err(error) =
+                crate::stat_reports::remove_report_files(&state.reports_dir, id).await
+            {
+                tracing::warn!(
+                    error_kind = ?error.kind(),
+                    "stat report file remove after hard delete"
+                );
+            }
+        }
+        audit(
+            &state.db,
+            &caller.member.id,
+            AuditAction::DeletedPersonalStats,
+            AuditTargetType::PersonalStats,
+            &caller.member.id,
+            Some(&format!(
+                "personal_match={} stat_report={} tokens_revoked={}",
+                wipe.personal_match, wipe.stat_report, wipe.tokens_revoked
+            )),
+        )
+        .await;
+        Json(serde_json::json!({
+            "deleted": {
+                "personal_match": wipe.personal_match,
+                "stat_report": wipe.stat_report,
+            },
+            "tokens_revoked": wipe.tokens_revoked,
+        }))
+        .into_response()
+    } else {
+        let (deadline, tokens_revoked) = match state
+            .db
+            .schedule_stats_delete(&caller.member.id, chrono::Utc::now())
+            .await
+        {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::error!(error_kind = stats_db_kind(&error), "schedule stats delete");
+                return stats_internal();
+            }
+        };
+        state.leaderboard_cache.invalidate_all();
+        audit(
+            &state.db,
+            &caller.member.id,
+            AuditAction::ScheduledStatsDeletion,
+            AuditTargetType::PersonalStats,
+            &caller.member.id,
+            Some(&format!("tokens_revoked={tokens_revoked}")),
+        )
+        .await;
+        Json(serde_json::json!({
+            "scheduled": true,
+            "stats_delete_scheduled_at": deadline.to_rfc3339(),
+            "tokens_revoked": tokens_revoked,
+        }))
+        .into_response()
+    }
+}
+
+/// POST /api/stats/me/restore — session only. Tokens stay revoked.
+pub async fn restore_my_stats(State(state): State<AppState>, member: OrgMember) -> Response {
+    let restored = match state.db.cancel_stats_delete(&member.member.id).await {
+        Ok(restored) => restored,
+        Err(error) => {
+            tracing::error!(error_kind = stats_db_kind(&error), "cancel stats delete");
+            return stats_internal();
+        }
+    };
+    if !restored {
+        return coded(StatusCode::NOT_FOUND, "no_pending_delete");
+    }
+    state.leaderboard_cache.invalidate_all();
+    audit(
+        &state.db,
+        &member.member.id,
+        AuditAction::RestoredPersonalStats,
+        AuditTargetType::PersonalStats,
+        &member.member.id,
+        None,
+    )
+    .await;
+    Json(serde_json::json!({ "restored": true })).into_response()
+}
+
+fn stats_db_kind(error: &scuffed_db::DbError) -> &'static str {
+    match error {
+        scuffed_db::DbError::Surreal(_) => "surreal",
+        scuffed_db::DbError::NotFound(_) => "not_found",
+        scuffed_db::DbError::Conflict(_) => "conflict",
+        scuffed_db::DbError::Config(_) => "config",
+        scuffed_db::DbError::Timeout => "timeout",
+        scuffed_db::DbError::Crypto(_) => "crypto",
+        scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
+        scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+    }
 }
 
 /// GET /api/stats/me/matches — personal match history (session auth, paginated)

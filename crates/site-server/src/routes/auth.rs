@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -17,12 +17,14 @@ use scuffed_auth::server::session::{
     clear_session_cookie, generate_session_token, validate_csrf_state,
 };
 use scuffed_auth::{AuthProvider, UserInfo};
-use scuffed_db::{Member, OrgRole};
+use scuffed_db::{AuditAction, AuditTargetType, Member, OrgRole};
 use scuffed_types::{
     AuthProvidersResponse, LocalLoginRequest, OkResponse, RegisterRequest, SetupRequest,
     SetupStatusResponse,
 };
 
+use crate::extractors::{OrgMember, presented_session_token};
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 fn validate_local_username(username: &str) -> Result<String, &'static str> {
@@ -305,6 +307,9 @@ pub struct MeResponse {
     /// no valid public NIP-05 domain configured. Computed here so the client
     /// never guesses the domain. Mirrors `scuffed_types::MeResponse::nip05`.
     pub nip05: Option<String>,
+    /// True when a local password is set. Account delete then requires
+    /// `password`. OAuth-only accounts are false. The hash is not returned.
+    pub has_password: bool,
 }
 
 /// GET /api/auth/me — return current user + member info
@@ -327,10 +332,27 @@ pub async fn me(
             let nip05 = member.as_ref().and_then(|m| {
                 crate::state::nip05_identifier(&m.display_name, state.nip05_domain.as_deref())
             });
+            let has_password = match state.db.password_hash_for_user(&auth_user.id).await {
+                Ok(hash) => hash.is_some(),
+                Err(error) => {
+                    tracing::error!(
+                        error_kind = account_db_kind(&error),
+                        "password presence lookup"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Internal error".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
             Json(MeResponse {
                 user: info,
                 member,
                 nip05,
+                has_password,
             })
             .into_response()
         }
@@ -347,6 +369,217 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     }
     let clear_cookie = clear_session_cookie(&state.session_config);
     (jar.add(clear_cookie), StatusCode::OK).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DeleteAccountBody {
+    #[serde(default)]
+    password: Option<String>,
+    confirm: String,
+}
+
+fn account_code(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(serde_json::json!({ "code": code }))).into_response()
+}
+
+/// DELETE /api/auth/me — erase the signed-in account. Session only.
+///
+/// `confirm` must equal the display name or the username after trimming.
+/// The match is case-sensitive. A local account (password hash present)
+/// must send that password. An OAuth-only account must present a session
+/// created within the last 10 minutes. Tracker daemon tokens are 401.
+pub async fn delete_account(
+    State(state): State<AppState>,
+    member: OrgMember,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(body): Json<DeleteAccountBody>,
+) -> Response {
+    let confirm = body.confirm.trim();
+    let name_ok =
+        confirm == member.member.display_name.trim() || confirm == member.user.username.trim();
+    if !name_ok {
+        return account_code(StatusCode::BAD_REQUEST, "confirm_mismatch");
+    }
+
+    let password_hash = match state.db.password_hash_for_user(&member.user.id).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "password lookup");
+            return account_internal();
+        }
+    };
+    if let Some(hash) = password_hash {
+        let password = body.password.as_deref().unwrap_or("");
+        match verify_password(password, &hash) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                return account_code(StatusCode::UNAUTHORIZED, "invalid_password");
+            }
+        }
+    } else {
+        let fresh = session_is_fresh(&state, &headers, &jar).await;
+        match fresh {
+            Ok(true) => {}
+            Ok(false) => return account_code(StatusCode::UNAUTHORIZED, "reauth_required"),
+            Err(()) => return account_internal(),
+        }
+    }
+
+    match state
+        .db
+        .member_is_last_actionable_admin(&member.member.id)
+        .await
+    {
+        Ok(true) => return account_code(StatusCode::CONFLICT, "last_admin"),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "last admin check");
+            return account_internal();
+        }
+    }
+
+    let signed = match sign_account_deletion(&state, &member.member.id).await {
+        Ok(signed) => signed,
+        Err(()) => return account_internal(),
+    };
+
+    let report = match state
+        .db
+        .erase_account(
+            &member.member.id,
+            &member.user.id,
+            member.member.nostr_pubkey.as_deref(),
+            signed.as_ref().map(|(json, _)| json.as_str()),
+        )
+        .await
+    {
+        Ok(report) => report,
+        Err(scuffed_db::DbError::Conflict(code)) if code == "last_admin" => {
+            return account_code(StatusCode::CONFLICT, "last_admin");
+        }
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "erase account");
+            return account_internal();
+        }
+    };
+
+    state.leaderboard_cache.invalidate_all();
+    for id in &report.stat_report_ids {
+        if let Err(error) = crate::stat_reports::remove_report_files(&state.reports_dir, id).await {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "stat report file remove after erase"
+            );
+        }
+    }
+    if let (Some(url), Some((_, event))) = (&state.relay_url, signed)
+        && let Err(error) = scuffed_chat::publish_event_oneshot(url, event).await
+    {
+        tracing::warn!(error = %error, "nip-09 publish failed");
+    }
+
+    audit(
+        &state.db,
+        &member.member.id,
+        AuditAction::DeletedAccount,
+        AuditTargetType::Member,
+        &member.member.id,
+        Some(&format!(
+            "personal_match={} stat_report={}",
+            report.personal_match,
+            report.stat_report_ids.len()
+        )),
+    )
+    .await;
+
+    let clear_cookie = clear_session_cookie(&state.session_config);
+    (
+        jar.add(clear_cookie),
+        Json(serde_json::json!({ "deleted": true })),
+    )
+        .into_response()
+}
+
+fn account_internal() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+        .into_response()
+}
+
+fn account_db_kind(error: &scuffed_db::DbError) -> &'static str {
+    match error {
+        scuffed_db::DbError::Surreal(_) => "surreal",
+        scuffed_db::DbError::NotFound(_) => "not_found",
+        scuffed_db::DbError::Conflict(_) => "conflict",
+        scuffed_db::DbError::Config(_) => "config",
+        scuffed_db::DbError::Timeout => "timeout",
+        scuffed_db::DbError::Crypto(_) => "crypto",
+        scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
+        scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+    }
+}
+
+async fn session_is_fresh(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<bool, ()> {
+    let Some(token) = presented_session_token(&state.session_config.cookie_name, headers, jar)
+    else {
+        return Ok(false);
+    };
+    let created = state.db.session_created_at(&token).await.map_err(|error| {
+        tracing::error!(error_kind = account_db_kind(&error), "session age lookup");
+    })?;
+    let Some(created) = created else {
+        return Ok(false);
+    };
+    Ok(chrono::Utc::now().signed_duration_since(created) <= chrono::Duration::minutes(10))
+}
+
+/// Sign a NIP-09 kind 5 when this member has stored forum event ids and a
+/// server-held key. No key, or no stored ids: skip. Articles are not included.
+async fn sign_account_deletion(
+    state: &AppState,
+    member_id: &str,
+) -> Result<Option<(String, scuffed_types::NostrEvent)>, ()> {
+    let ids = state
+        .db
+        .member_stored_nostr_event_ids(member_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error_kind = account_db_kind(&error),
+                "list stored nostr ids"
+            );
+        })?;
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let Some(secret) = state
+        .db
+        .get_nostr_secret_key(member_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error_kind = account_db_kind(&error), "nostr secret lookup");
+        })?
+    else {
+        return Ok(None);
+    };
+    let keys = scuffed_chat::EventBuilder::keys_from_hex(secret.as_str()).map_err(|_| ())?;
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let event =
+        scuffed_chat::EventBuilder::build_delete_event(&keys, &refs, Some("account deleted"))
+            .map_err(|_| ())?;
+    let relay_event = scuffed_chat::EventBuilder::to_relay_event(&event);
+    let json = serde_json::to_string(&relay_event).map_err(|_| ())?;
+    drop(secret);
+    Ok(Some((json, relay_event)))
 }
 
 /// GET /api/auth/setup-status — whether first-boot admin creation is required.

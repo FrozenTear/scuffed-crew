@@ -703,7 +703,7 @@ pub async fn public_team_detail(
                     team_id = %id,
                     "roster references a member with no row (dangling plays_on edge)"
                 );
-                "Unknown".to_string()
+                scuffed_db::DELETED_MEMBER_NAME.to_string()
             });
             TeamRosterMember {
                 member_id,

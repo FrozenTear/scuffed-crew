@@ -86,7 +86,21 @@ pub struct Member {
     /// X/Twitter handle (not URL).
     #[serde(default)]
     pub twitter: Option<String>,
+    /// Tracker soft-delete deadline. While this is set, personal stats reads
+    /// are empty and uploads are refused. The purge task hard-deletes the rows
+    /// once the instant has passed.
+    #[serde(default)]
+    pub stats_delete_scheduled_at: Option<DateTime<Utc>>,
 }
+
+/// Record id of the inactive member left behind so shared rows can still show a name.
+pub const DELETED_MEMBER_ID: &str = "deleted";
+
+/// Name rendered for [`DELETED_MEMBER_ID`] and for any shared row whose member is gone.
+pub const DELETED_MEMBER_NAME: &str = "Deleted member";
+
+/// User row for the tombstone. It has no password and cannot sign in.
+pub const DELETED_USER_ID: &str = "deleteduser";
 
 /// A game/title that teams can play.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,6 +576,10 @@ pub struct PersonalStats {
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
+    /// RFC3339 instant while a tracker soft delete is pending. Null otherwise.
+    /// Always serialized so `GET /api/stats/me` can show either value.
+    #[serde(default)]
+    pub stats_delete_scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// Aggregated stats per hero.
@@ -943,6 +961,10 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    ScheduledStatsDeletion,
+    DeletedPersonalStats,
+    RestoredPersonalStats,
+    DeletedAccount,
 }
 
 impl std::fmt::Display for AuditAction {

@@ -137,8 +137,11 @@ impl Database {
         for entry in entries.iter_mut() {
             if let Some(name) = map.get(&entry.actor_id) {
                 entry.actor_name = name.clone();
+            } else {
+                // Account erase cannot rewrite this append-only table. A missing
+                // member is rendered as the tombstone name. actor_id is unchanged.
+                entry.actor_name = crate::DELETED_MEMBER_NAME.to_string();
             }
-            // else leave actor_name = actor_id (set in db_to_entry)
         }
         Ok(())
     }
@@ -212,6 +215,8 @@ impl Database {
             for entry in entries.iter_mut().filter(|e| e.target_type == *target_type) {
                 if let Some(label) = map.get(&entry.target_id) {
                     entry.target_label = label.clone();
+                } else if *target_type == "member" {
+                    entry.target_label = crate::DELETED_MEMBER_NAME.to_string();
                 }
                 // else leave target_label = target_id (set in db_to_entry)
             }
@@ -272,8 +277,8 @@ mod tests {
         let entries = db.list_audit_log(10, 0).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].actor_id, "actor-1");
-        // No matching member → actor_name falls back to actor_id
-        assert_eq!(entries[0].actor_name, "actor-1");
+        // Missing member renders as Deleted member. The stored actor_id stays.
+        assert_eq!(entries[0].actor_name, crate::DELETED_MEMBER_NAME);
         // wiki_page has no label source → target_label falls back to target_id
         assert_eq!(entries[0].target_label, "target-1");
         assert_eq!(entries[0].details.as_deref(), Some("original"));

@@ -17,7 +17,7 @@ use crate::{with_timeout, Database, DbResult};
 /// so encrypted secrets never enter process memory on bulk reads.
 const MEMBER_SAFE_COLS: &str = "id, user_id, org_role, display_name, bio, avatar_url, timezone, \
     pronouns, availability_status, nostr_pubkey, nostr_key_mode, joined_at, is_active, \
-    main_role, twitch, twitter";
+    main_role, twitch, twitter, stats_delete_scheduled_at";
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMember {
@@ -53,6 +53,9 @@ struct DbMember {
     #[serde(default)]
     #[surreal(default)]
     twitter: Option<String>,
+    #[serde(default)]
+    #[surreal(default)]
+    stats_delete_scheduled_at: Option<SurrealDatetime>,
 }
 
 /// Singleton first-boot lock row (`bootstrap_lock:setup`).
@@ -158,6 +161,7 @@ fn db_to_member(db: DbMember) -> DbResult<Member> {
         main_role: db.main_role,
         twitch: db.twitch,
         twitter: db.twitter,
+        stats_delete_scheduled_at: db.stats_delete_scheduled_at.map(Into::into),
     })
 }
 
@@ -207,6 +211,7 @@ impl Database {
                 main_role: None,
                 twitch: None,
                 twitter: None,
+                stats_delete_scheduled_at: None,
             };
             let created: Option<DbMember> =
                 self.client

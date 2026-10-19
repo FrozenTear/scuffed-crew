@@ -349,6 +349,35 @@ impl Database {
         .await
     }
 
+    /// Password hash for one user, if this account has one.
+    ///
+    /// OAuth-only rows return `None`. The hash is for verify-and-drop only.
+    pub async fn password_hash_for_user(&self, user_id: &str) -> DbResult<Option<String>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT password_hash FROM $rid")
+                .bind(("rid", RecordId::new("user", user_id)))
+                .await?;
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                #[serde(default)]
+                #[surreal(default)]
+                password_hash: Option<String>,
+            }
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().next().and_then(|row| {
+                let hash = row.password_hash?;
+                if hash.is_empty() {
+                    None
+                } else {
+                    Some(hash)
+                }
+            }))
+        })
+        .await
+    }
+
     /// Update password hash for a local user (emergency reset).
     pub async fn set_local_password_hash(
         &self,
