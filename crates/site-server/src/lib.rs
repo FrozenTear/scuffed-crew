@@ -16,6 +16,7 @@ pub mod routes;
 pub mod seed;
 pub mod stat_reports;
 pub mod state;
+mod stats_upload_limits;
 pub mod team_channels;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -141,8 +142,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
-    // extractor the other governors use. POST /api/stats/upload itself is
-    // not on a governor.
+    // extractor the other governors use. POST /api/stats/upload is not on
+    // this IP bucket. It has its own governor, keyed by daemon token hash,
+    // wired on that route.
     let token_check_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
@@ -468,7 +470,13 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::matches::get_match).put(routes::matches::update_match),
         )
         // Personal stats routes
-        .route("/api/stats/upload", post(routes::stats::upload_stats))
+        .route(
+            "/api/stats/upload",
+            post(routes::stats::upload_stats).layer(middleware::from_fn_with_state(
+                stats_upload_limits::StatsUploadGovernor::new(),
+                stats_upload_limits::limit_stats_upload,
+            )),
+        )
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))

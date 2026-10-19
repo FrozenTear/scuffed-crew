@@ -167,6 +167,12 @@ services:
       WS_MAX_PER_IP: ${WS_MAX_PER_IP:-32}
       PRODUCTION: ${PRODUCTION:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-}
+      # Off when unset, empty, 0, false, no, or off. Any other value makes
+      # POST /api/stats/upload reject more than 200 matches or 500 deleted
+      # sessions with 413. Leave this blank until tracker builds that send
+      # at most those sizes and handle 413 are in use. The per-token 429
+      # and token_expired 401 do not depend on this flag.
+      STATS_UPLOAD_BATCH_CAP: ${STATS_UPLOAD_BATCH_CAP:-}
       BOOTSTRAP_ADMIN_RESET: ${BOOTSTRAP_ADMIN_RESET:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
