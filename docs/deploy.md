@@ -50,6 +50,23 @@ Compose passes `SURREALDB_RELAY_PASSWORD` into the relay container and does not 
 
 Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then unset it. Compose passes that variable into site-server. A normal restart does not rewrite the stored password. The record token uses the server default of 1 hour. The relay signs in again every 20 minutes. A failed refresh exits so the container restarts. A new password is used after `relay-up.sh` recreates the relay, once site-server has stored it.
 
+### Rolling the site image back
+
+An image from before the relay login runs `DEFINE FIELD OVERWRITE` on `nostr_secret_key_encrypted`, `moderation_action.reason`, and `moderation_action.issued_by` without field permissions, and it reopens `audit_log`. Those statements make the hidden columns readable to a record user again. The `relay` access and the `relay_db_user` row stay in the database, because the old image does not know about them. Remove the login before that image boots. Root and the EDITOR app user bypass table permissions, so the site keeps its current access after the grants widen.
+
+Do this while this checkout is still present, and before `update.sh` recreates site-server on the old image:
+
+1. Stop the relay so it is not using the login: `podman compose --env-file data/secrets.env --profile relay stop strfry` (or `podman-compose`).
+2. Remove the access and the principal table. The script runs `/surreal sql` inside the Up Surreal container. The CLI reads `SURREAL_USER` and `SURREAL_PASS` from that container. The password is not an argument and is not printed.
+
+   ```bash
+   ./scripts/relay-access-down.sh --yes
+   ```
+
+3. Pin the older site image in `data/secrets.env`, then `./scripts/update.sh`. That image returns 404 for `/api/ready`. `update.sh` logs a warning and waits on `/api/health`.
+
+Starting the current site-server again recreates the login during bootstrap. Run `./scripts/relay-up.sh` only after that, when you want the relay on the new image.
+
 ### Split migrator vs app (optional multi-container)
 
 Single-container install keeps default bootstrap on every start (root session is short-lived, then EDITOR). For a stricter split:

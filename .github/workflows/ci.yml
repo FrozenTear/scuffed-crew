@@ -35,6 +35,8 @@ jobs:
         run: bash scripts/test-relay-preflight.sh
       - name: Deploy probe falls back when readiness is missing
         run: bash scripts/test-deploy-probe.sh
+      - name: Relay login rollback script
+        run: bash scripts/test-relay-access-down.sh
 
   relay-production-env:
     name: Relay production env
