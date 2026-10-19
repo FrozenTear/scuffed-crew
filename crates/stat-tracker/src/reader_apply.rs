@@ -356,8 +356,21 @@ pub fn merge_saved_with_authority(
         } else {
             RECOGNIZER_OCR_V1
         },
-        suspect_fields: order_suspects(suspect),
+        suspect_fields: dimmed_board_suspects(board, used_cv, suspect),
     }
+}
+
+/// The suspect list of a row read off `board`. A board whose columns were
+/// found only on a dimmed header strip ([`BoardRead::header_dimmed`]) still
+/// saves its numbers, but every own-row field is listed, the same mark
+/// [`mark_own_row_suspect`] gives a row only one signal named: the read must
+/// not look as solid as a clean one. A clean board's list is unchanged.
+fn dimmed_board_suspects(board: &BoardRead, used_cv: bool, suspect: Vec<String>) -> Vec<String> {
+    let mut fields = order_suspects(suspect);
+    if board.header_dimmed && used_cv {
+        mark_own_row_suspect(&mut fields);
+    }
+    fields
 }
 
 /// The digit reader's number for each own-row stat (`e a d dmg h mit`),
@@ -669,6 +682,7 @@ mod tests {
                 suspect: true,
             }],
             elapsed_ms: 1,
+            header_dimmed: false,
         };
         let read = BoardRead {
             status: BoardStatus::Read,
@@ -680,6 +694,7 @@ mod tests {
                 suspect: false,
             }],
             elapsed_ms: 1,
+            header_dimmed: false,
         };
         for empty in [&not_found, &size_unknown, &no_digits] {
             assert!(
@@ -800,11 +815,74 @@ mod tests {
             team_size: Some(team_size),
             fields,
             elapsed_ms: 1,
+            header_dimmed: false,
         }
     }
 
     fn identified(index: usize, team_size: usize) -> OwnRow {
         OwnRow::Identified { index, team_size }
+    }
+
+    /// A board read only through the dimmed header path still saves every
+    /// sure number, but the row lists every own-row field as suspect. The
+    /// same board read clean lists none, and a later clean read in the same
+    /// game is the row the game keeps.
+    #[test]
+    fn a_dimmed_header_read_saves_marked_unsure_and_a_later_clean_read_replaces_it() {
+        let clean_board = confident_board(5, 2);
+        let mut dimmed_board = clean_board.clone();
+        dimmed_board.header_dimmed = true;
+
+        // The capture gate still accepts the dimmed read: every cell is sure.
+        let stats = read_own_row_stats(&dimmed_board, identified(2, 5), "victory").unwrap();
+        assert_eq!(stats.held, [false; 6]);
+
+        let dimmed = merge_saved(&ocr(), identified(2, 5), Some(&dimmed_board));
+        assert_eq!(dimmed.recognizer, RECOGNIZER_ID);
+        assert_eq!(
+            (dimmed.elims, dimmed.assists, dimmed.deaths),
+            (21, 9, 3),
+            "the numbers are saved"
+        );
+        assert_eq!(
+            (dimmed.damage, dimmed.healing, dimmed.mitigation),
+            (9100, 1200, 50)
+        );
+        // The clean read lists only the board map, which names a different
+        // map than the policy row; the dimmed read adds every own-row field.
+        let clean = merge_saved(&ocr(), identified(2, 5), Some(&clean_board));
+        assert_eq!(clean.suspect_fields, vec!["map".to_string()]);
+        let mut want = clean.suspect_fields.clone();
+        mark_own_row_suspect(&mut want);
+        assert_eq!(dimmed.suspect_fields, want, "every own-row field is unsure");
+        for name in ["e", "a", "d", "dmg", "h", "mit", "hero"] {
+            assert!(dimmed.suspect_fields.iter().any(|f| f == name), "{name}");
+        }
+
+        // Two snapshots of one game, newest first (the store's order): the
+        // later clean read wins.
+        let row = |saved: &SavedRead| {
+            let mut m = crate::parse::match_from_stats(
+                [
+                    saved.elims,
+                    saved.assists,
+                    saved.deaths,
+                    saved.damage,
+                    saved.healing,
+                    saved.mitigation,
+                ],
+                "victory",
+            );
+            m.session_id = "game".into();
+            m.suspect_fields = saved.suspect_fields.clone();
+            m
+        };
+        let mut later = clean.clone();
+        later.elims += 1;
+        let games = crate::storage::latest_per_game(vec![row(&later), row(&dimmed)]);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].elims, 22);
+        assert_eq!(games[0].suspect_fields, vec!["map".to_string()]);
     }
 
     // ----- alpha.7 O10: the trust gate and the stats without OCR -----
@@ -1099,6 +1177,7 @@ mod tests {
                 .map(|name| unread(&name))
                 .collect(),
             elapsed_ms: 1,
+            header_dimmed: false,
         };
         for (name, value) in [
             ("map", "Ilios"),
@@ -1153,6 +1232,7 @@ mod tests {
             team_size: None,
             fields: vec![unread("map"), unread("mode"), unread("result")],
             elapsed_ms: 1,
+            header_dimmed: false,
         };
         board.fields[0] = FieldRead {
             name: "map".into(),

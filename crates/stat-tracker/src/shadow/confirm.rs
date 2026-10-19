@@ -120,6 +120,7 @@ mod tests {
             board: BoardRead {
                 rows,
                 elapsed_ms: 10,
+                header_dimmed: false,
             },
         }
     }

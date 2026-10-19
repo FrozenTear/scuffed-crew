@@ -145,6 +145,10 @@ pub struct RowRead {
 pub struct BoardRead {
     pub rows: Vec<RowRead>,
     pub elapsed_ms: u32,
+    /// The columns were found only because the header strip was read as
+    /// dimmed ([`header_found_only_dimmed`]). The capture path marks the
+    /// row unsure.
+    pub header_dimmed: bool,
 }
 
 #[derive(Debug)]
@@ -399,8 +403,25 @@ fn neutral_ink(img: &DynamicImage) -> Plane {
 /// Header label centres (px) of E A D DMG H MIT from
 /// [`preprocess::header_label_groups_scaled`], filtered like columns_from_header_groups.
 fn column_centres(board: &DynamicImage) -> Result<[f64; 6], ShadowError> {
-    let w = board.width() as f64;
-    let labels: Vec<f64> = preprocess::header_label_groups_scaled(board)
+    centres_from_groups(preprocess::header_label_groups_scaled(board), board.width())
+}
+
+/// True when the scaled scan finds the six columns only through its lowered
+/// dark cut: the strip is dimmed and the same scan at the fixed cut does
+/// not find them. A clean board is never marked.
+pub fn header_found_only_dimmed(board: &DynamicImage) -> bool {
+    preprocess::header_strip_dimmed(board)
+        && column_centres(board).is_ok()
+        && centres_from_groups(
+            preprocess::header_label_groups_scaled_undimmed(board),
+            board.width(),
+        )
+        .is_err()
+}
+
+fn centres_from_groups(groups: Vec<(u32, u32)>, width: u32) -> Result<[f64; 6], ShadowError> {
+    let w = width as f64;
+    let labels: Vec<f64> = groups
         .into_iter()
         .filter(|&(s, e)| (e - s) as f64 / w <= 0.05)
         .map(|(s, e)| (s + e) as f64 / 2.0)
@@ -1553,6 +1574,7 @@ pub fn read_board(
     }
     let tpl = templates_for(h);
     let centres = column_centres(scoreboard)?;
+    let header_dimmed = header_found_only_dimmed(scoreboard);
     let n = neutral_ink(scoreboard);
     let wins = column_windows(&centres, n.w);
     let bands = row_bands(&n, &wins, team_size);
@@ -1600,6 +1622,7 @@ pub fn read_board(
     Ok(BoardRead {
         rows,
         elapsed_ms: t0.elapsed().as_millis().min(u32::MAX as u128) as u32,
+        header_dimmed,
     })
 }
 
@@ -1928,6 +1951,44 @@ mod tests {
         let dimmed = DynamicImage::ImageRgb8(dimmed);
         let read = read_board(&dimmed, 6, Duration::from_secs(10)).unwrap();
         assert_reads(&read, &want);
+        assert!(read.header_dimmed, "columns found only on the dimmed strip");
+        let clean = read_board(&synth_board(&want, 6, 3), 6, Duration::from_secs(10)).unwrap();
+        assert!(!clean.header_dimmed, "a clean board is not marked");
+    }
+
+    /// Only a strip the fixed cut cannot read is marked: a downscaled board
+    /// at normal brightness, and a slightly dim strip whose labels the fixed
+    /// cut still finds, are not.
+    #[test]
+    fn only_a_header_found_through_the_lowered_cut_is_marked_dimmed() {
+        assert!(header_found_only_dimmed(&header_board(
+            1664,
+            1007,
+            &tab_labels(3),
+            0.6
+        )));
+        assert!(!header_found_only_dimmed(&header_board(
+            1664,
+            1007,
+            &tab_labels(3),
+            1.0
+        )));
+        assert!(!header_found_only_dimmed(&header_board(
+            1414,
+            856,
+            &tab_labels(2),
+            1.0
+        )));
+        let slightly_dim = header_board(1664, 1007, &tab_labels(3), 0.9);
+        assert!(preprocess::header_strip_dimmed(&slightly_dim));
+        assert!(stat_columns_found(&slightly_dim));
+        assert!(!header_found_only_dimmed(&slightly_dim));
+        assert!(!header_found_only_dimmed(&header_board(
+            1664,
+            1007,
+            &[],
+            0.6
+        )));
     }
 
     #[test]

@@ -873,6 +873,7 @@ mod tests {
                 team_size: Some(6),
                 fields,
                 elapsed_ms: 1,
+                header_dimmed: false,
             }
         }
 
@@ -1004,6 +1005,7 @@ mod tests {
                     number("r0.h", 1, true),
                     number("r0.mit", 1, true),
                 ],
+                header_dimmed: false,
             }
         }
 

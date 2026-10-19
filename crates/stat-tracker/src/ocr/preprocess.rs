@@ -1001,6 +1001,30 @@ pub fn header_label_groups_scaled(scoreboard: &DynamicImage) -> Vec<(u32, u32)> 
     label_groups(scoreboard, LabelScan::Scaled)
 }
 
+/// [`header_label_groups_scaled`] with the fixed dark cut: what the scaled
+/// scan finds when the strip is not treated as dimmed.
+pub fn header_label_groups_scaled_undimmed(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
+    label_groups(scoreboard, LabelScan::ScaledFixedCut)
+}
+
+/// The scaled scan lowers its dark cut on this board: the header strip's
+/// light background is below [`HEADER_BG_REF`] by enough to move the cut.
+pub fn header_strip_dimmed(scoreboard: &DynamicImage) -> bool {
+    let rgb = header_strip_rgb(scoreboard);
+    header_dark_cut(&rgb, LabelScan::Scaled) < HEADER_DARK_CUT
+}
+
+/// The thin header strip [`header_label_groups`] scans, as RGB.
+fn header_strip_rgb(scoreboard: &DynamicImage) -> image::RgbImage {
+    let (w, h) = (scoreboard.width(), scoreboard.height());
+    let scan_start = (h as f64 * 0.005) as u32;
+    let scan_end = (h as f64 * 0.025).max(15.0) as u32;
+    let scan_h = scan_end.saturating_sub(scan_start).max(1);
+    scoreboard
+        .crop_imm(0, scan_start, w, scan_h.min(h.saturating_sub(scan_start)))
+        .to_rgb8()
+}
+
 /// Brightness below which a header strip pixel counts as label ink.
 pub const HEADER_DARK_CUT: u32 = 150;
 /// Light strip background (p95 brightness) of a normal Tab board header.
@@ -1010,11 +1034,12 @@ pub const HEADER_BG_REF: u32 = 219;
 enum LabelScan {
     Fixed,
     Scaled,
+    ScaledFixedCut,
 }
 
 /// The dark cut for a header strip under `scan`.
 fn header_dark_cut(rgb: &image::RgbImage, scan: LabelScan) -> u32 {
-    if scan == LabelScan::Fixed {
+    if scan != LabelScan::Scaled {
         return HEADER_DARK_CUT;
     }
     let w = rgb.width();
@@ -1069,7 +1094,7 @@ fn label_groups(scoreboard: &DynamicImage, scan: LabelScan) -> Vec<(u32, u32)> {
     // is ~3px at 1664, ~4.5px at 4K: a proportionally-scaled 5px floor would
     // delete it there, the mirror image of the 1080p failure above).
     let min_w = w as f64 * 3.0 / 1664.0;
-    let min_w = if scan == LabelScan::Scaled {
+    let min_w = if scan != LabelScan::Fixed {
         min_w.floor()
     } else {
         min_w.round()
