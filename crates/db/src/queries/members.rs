@@ -19,6 +19,36 @@ const MEMBER_SAFE_COLS: &str = "id, user_id, org_role, display_name, bio, avatar
     pronouns, availability_status, nostr_pubkey, nostr_key_mode, joined_at, is_active, \
     main_role, twitch, twitter";
 
+/// Columns the officer encrypted-send path reads. Omits the encrypted secret
+/// and every profile column that path does not use.
+const OFFICER_CHAT_RECIPIENT_COLS: &str = "id, org_role, is_active, nostr_pubkey";
+
+/// Roster row for officer gift-wrap recipients.
+///
+/// `send-encrypted` needs the id (ban check), role, active flag, and pubkey.
+/// The encrypted Nostr secret stays on the sender load only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficerChatRecipient {
+    pub id: String,
+    pub org_role: OrgRole,
+    pub is_active: bool,
+    pub nostr_pubkey: Option<String>,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct OfficerChatRecipientRow {
+    #[surreal(default)]
+    id: Option<RecordId>,
+    org_role: String,
+    is_active: bool,
+    nostr_pubkey: Option<String>,
+    /// Not part of [`OFFICER_CHAT_RECIPIENT_COLS`]. Stays None unless a wider
+    /// SELECT loads the column. The recipient test asserts it is None.
+    #[serde(default)]
+    #[surreal(default)]
+    nostr_secret_key_encrypted: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMember {
     #[surreal(default)]
@@ -363,6 +393,43 @@ impl Database {
                 }
             }
             Ok(map)
+        })
+        .await
+    }
+
+    /// Officer chat recipients. Selects only id, role, active, and pubkey.
+    pub async fn get_officer_chat_recipient(
+        &self,
+        id: &str,
+    ) -> DbResult<Option<OfficerChatRecipient>> {
+        let Some(row) = self.load_officer_chat_recipient_row(id).await? else {
+            return Ok(None);
+        };
+        let id = row
+            .id
+            .map(|r| crate::record_id_key_to_string(r.key))
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(Some(OfficerChatRecipient {
+            id,
+            org_role: parse_role(&row.org_role),
+            is_active: row.is_active,
+            nostr_pubkey: row.nostr_pubkey,
+        }))
+    }
+
+    async fn load_officer_chat_recipient_row(
+        &self,
+        id: &str,
+    ) -> DbResult<Option<OfficerChatRecipientRow>> {
+        with_timeout(async {
+            let q = format!("SELECT {OFFICER_CHAT_RECIPIENT_COLS} FROM $rid LIMIT 1");
+            let mut result = self
+                .client
+                .query(&q)
+                .bind(("rid", RecordId::new("member", id)))
+                .await?;
+            let rows: Vec<OfficerChatRecipientRow> = result.take(0)?;
+            Ok(rows.into_iter().next())
         })
         .await
     }
@@ -924,6 +991,57 @@ mod tests {
         // Full get still has the secret for signing.
         let full = db.get_member(&m.id).await.unwrap().unwrap();
         assert!(full.nostr_secret_key_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn officer_chat_recipient_selects_role_and_pubkey_not_secret() {
+        let db = test_db_with_crypto().await;
+        let m = db
+            .create_member("user-off", "Ada", OrgRole::Officer)
+            .await
+            .unwrap();
+        assert!(
+            m.nostr_secret_key_encrypted.is_some(),
+            "fixture must store an encrypted secret so a SELECT * would show it"
+        );
+
+        let row = db
+            .load_officer_chat_recipient_row(&m.id)
+            .await
+            .unwrap()
+            .expect("row");
+        assert!(
+            row.nostr_secret_key_encrypted.is_none(),
+            "officer recipient select must not load nostr_secret_key_encrypted"
+        );
+        assert_eq!(row.org_role, "officer");
+        assert!(row.is_active);
+        assert!(row.nostr_pubkey.is_some());
+
+        let view = db
+            .get_officer_chat_recipient(&m.id)
+            .await
+            .unwrap()
+            .expect("recipient");
+        assert_eq!(view.id, m.id);
+        assert_eq!(view.org_role, OrgRole::Officer);
+        assert!(view.is_active);
+        assert_eq!(view.nostr_pubkey, m.nostr_pubkey);
+
+        assert_eq!(
+            OFFICER_CHAT_RECIPIENT_COLS, "id, org_role, is_active, nostr_pubkey",
+            "recipient query must stay limited to the columns send-encrypted reads"
+        );
+        assert!(
+            !OFFICER_CHAT_RECIPIENT_COLS.contains("nostr_secret"),
+            "column list must not name the encrypted secret"
+        );
+
+        assert!(db
+            .get_officer_chat_recipient("missing-member")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

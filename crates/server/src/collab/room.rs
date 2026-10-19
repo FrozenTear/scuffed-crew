@@ -11,8 +11,17 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 /// uses the configured value so the two caps stay aligned.
 pub const MAX_GLOBAL_CONNECTIONS: usize = 512;
 pub const MAX_ROOM_CONNECTIONS: usize = 32;
-/// Max concurrent fire-and-forget DB persist tasks across all rooms.
+/// Max concurrent strategy content writes across all rooms.
 pub const MAX_CONCURRENT_PERSISTS: usize = 64;
+
+/// Why a strategy content write did not complete.
+#[derive(Debug)]
+pub enum PersistError<E> {
+    /// Persist semaphore is saturated. Caller should surface the busy error.
+    Busy,
+    /// The database write failed. The edit must not be broadcast.
+    Failed(E),
+}
 
 /// Why a join was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,33 +252,39 @@ impl RoomManager {
             .clone()
     }
 
-    /// Try to reserve a persist slot. `None` means the server is saturated —
-    /// caller should reject the mutation (backpressure) rather than spawn.
+    /// Try to reserve a persist slot. `None` means the server is saturated.
+    /// The caller should reject the mutation (backpressure) rather than waiting.
     pub fn try_persist_permit(&self) -> Option<OwnedSemaphorePermit> {
         self.persist_sem.clone().try_acquire_owned().ok()
     }
 
-    /// Spawn a strategy content persist task under the global permit + strategy lock.
+    /// Await `work` under the persist permit and the per-strategy lock.
+    /// Broadcast `message` only after `work` returns `Ok`, while the lock is
+    /// still held, so a later edit cannot be announced first.
     ///
-    /// Returns `false` if the persist semaphore is saturated (caller should
-    /// surface a busy error to the client). The live collab broadcast may still
-    /// have already been sent — that is intentional for latency; DB will catch
-    /// up on the next successful mutation / full save.
-    pub fn try_spawn_persist<F, Fut>(&self, strategy_id: &StrategyId, work: F) -> bool
+    /// `Err(PersistError::Busy)` means the persist semaphore is saturated.
+    /// `Err(PersistError::Failed)` means the write failed and nothing was broadcast.
+    pub async fn persist_then_broadcast<F, Fut, E>(
+        &self,
+        strategy_id: &StrategyId,
+        sender_connection_id: &str,
+        message: ServerMessage,
+        work: F,
+    ) -> Result<(), PersistError<E>>
     where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<(), E>> + Send,
     {
         let Some(permit) = self.try_persist_permit() else {
-            return false;
+            return Err(PersistError::Busy);
         };
         let lock = self.strategy_lock(strategy_id);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let _guard = lock.lock().await;
-            work().await;
-        });
-        true
+        let _guard = lock.lock().await;
+        work().await.map_err(PersistError::Failed)?;
+        self.broadcast(strategy_id, sender_connection_id, message);
+        drop(_guard);
+        drop(permit);
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -292,7 +307,7 @@ impl Default for RoomManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scuffed_types::strategy::CollabUserInfo;
+    use scuffed_types::strategy::{CollabUserInfo, ServerMessage};
 
     fn dummy_user(id: &str) -> CollabUserInfo {
         CollabUserInfo {
@@ -354,5 +369,41 @@ mod tests {
         assert!(mgr.try_persist_permit().is_none());
         drop(permits);
         assert!(mgr.try_persist_permit().is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_persist_does_not_broadcast() {
+        let mgr = RoomManager::new();
+        let sid = "strat-fail".to_string();
+        let (tx_sender, _rx_sender) = dummy_conn();
+        let (tx_peer, mut rx_peer) = dummy_conn();
+        mgr.join_room(&sid, "sender".into(), dummy_user("owner"), tx_sender)
+            .unwrap();
+        mgr.join_room(&sid, "peer".into(), dummy_user("peer"), tx_peer)
+            .unwrap();
+        // Second join announces UserJoined to the sender only. Peer starts empty.
+        assert!(rx_peer.try_recv().is_err());
+
+        let err = mgr
+            .persist_then_broadcast(&sid, "sender", ServerMessage::Pong, || async {
+                Err::<(), &str>("disk full")
+            })
+            .await
+            .expect_err("failed write");
+        assert!(matches!(err, PersistError::Failed("disk full")));
+        assert!(
+            rx_peer.try_recv().is_err(),
+            "a failed persist must not broadcast"
+        );
+
+        mgr.persist_then_broadcast(&sid, "sender", ServerMessage::Pong, || async {
+            Ok::<(), &str>(())
+        })
+        .await
+        .expect("successful write");
+        assert!(
+            rx_peer.try_recv().is_ok(),
+            "a successful persist broadcasts after the write"
+        );
     }
 }

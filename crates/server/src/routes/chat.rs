@@ -376,17 +376,23 @@ pub async fn send_encrypted(
 
     // Collect pubkeys of officer-channel-eligible members only (admin/officer).
     // Recruits/members must not receive gift-wraps for officer traffic.
+    // Recipients are a narrow projection (id, role, active, pubkey). The
+    // sender secret stays on `load_member_with_secret` above.
     let mut recipient_pubkeys = Vec::new();
     for entry in &roster {
-        let m = state.db.get_member(&entry.member_id).await.map_err(|e| {
-            tracing::error!("Failed to get member {}: {e}", entry.member_id);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to resolve member keys".into(),
-                }),
-            )
-        })?;
+        let m = state
+            .db
+            .get_officer_chat_recipient(&entry.member_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get member {}: {e}", entry.member_id);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to resolve member keys".into(),
+                    }),
+                )
+            })?;
         if let Some(m) = m {
             // Same rule as `get_team_roster`: active and not banned. The query
             // already drops them; this skips a row that is still on the edge.
@@ -1110,6 +1116,26 @@ mod tests {
             .add_to_roster("liveofficer", &team.id, scuffed_db::TeamRole::Player)
             .await
             .unwrap();
+        let narrow = state
+            .db
+            .get_officer_chat_recipient("liveofficer")
+            .await
+            .unwrap()
+            .expect("officer recipient projection");
+        let full = state
+            .db
+            .get_member("liveofficer")
+            .await
+            .unwrap()
+            .expect("full member still holds the sender-style secret");
+        assert!(
+            full.nostr_secret_key_encrypted.is_some(),
+            "the row stores an encrypted secret"
+        );
+        assert_eq!(narrow.id, "liveofficer");
+        assert!(narrow.is_active);
+        assert!(narrow.org_role.can_access_officer_channel());
+        assert_eq!(narrow.nostr_pubkey, full.nostr_pubkey);
         let app = Router::new()
             .route("/api/chat/send-encrypted", post(send_encrypted))
             .with_state(state);
