@@ -243,6 +243,26 @@ pub async fn stop_daemon(data_dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Stop a live capture daemon before its files are removed.
+///
+/// Same identity check as [`stop_daemon`]: a pid that is not the tracker is
+/// not signalled. A stale pid file is not a running tracker. When the
+/// process is still alive afterwards, nothing should be removed.
+pub async fn stop_before_file_removal(data_dir: &Path) -> Result<(), String> {
+    if daemon_running(data_dir).is_none() {
+        return Ok(());
+    }
+    match stop_daemon(data_dir).await {
+        Ok(()) => {}
+        Err(err) if err == "Tracker is not running" => {}
+        Err(_) => return Err("Could not stop the tracker. Nothing was removed.".into()),
+    }
+    if daemon_running(data_dir).is_some() {
+        return Err("The tracker is still running. Nothing was removed.".into());
+    }
+    Ok(())
+}
+
 async fn stop_daemon_result(data_dir: &Path) -> Result<(), StopError> {
     let pid = read_pid(data_dir).ok_or(StopError::NotRunning)?;
     if pid == std::process::id() {

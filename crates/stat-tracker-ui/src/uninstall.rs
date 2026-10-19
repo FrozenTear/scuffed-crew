@@ -492,7 +492,7 @@ fn keep_exact_file(path: &Path, home: &Path, prefix: &Path) -> bool {
 
 /// Reject `..`, resolve the parent, and require the file to sit under the
 /// home folder or the install prefix.
-fn confined_path(path: &Path, home: &Path, prefix: &Path) -> bool {
+pub(crate) fn confined_path(path: &Path, home: &Path, prefix: &Path) -> bool {
     if !path.is_absolute() || contains_dotdot(path) || path_has_pattern(path) {
         return false;
     }
@@ -742,7 +742,7 @@ fn own_name_seed_dir(data_dir: &Path, home: &Path, prefix: &Path) -> Option<Path
 /// Delete the own-name crops. They go on every uninstall, with the saved
 /// games kept or not. A link on the way is not followed, and a `private`
 /// folder that holds anything else stays.
-fn remove_own_name_seed(data_dir: &Path, home: &Path, prefix: &Path) {
+pub(crate) fn remove_own_name_seed(data_dir: &Path, home: &Path, prefix: &Path) {
     let Some(seed) = own_name_seed_dir(data_dir, home, prefix) else {
         return;
     };
@@ -793,14 +793,14 @@ fn stop_units(systemctl: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn systemctl_exists(path: &Path) -> bool {
+pub(crate) fn systemctl_exists(path: &Path) -> bool {
     if path.components().count() == 1 {
         return Command::new(path).arg("--version").output().is_ok();
     }
     path.is_file()
 }
 
-fn unit_is_missing(output: &std::process::Output) -> bool {
+pub(crate) fn unit_is_missing(output: &std::process::Output) -> bool {
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stderr),
@@ -817,7 +817,7 @@ fn unit_is_missing(output: &std::process::Output) -> bool {
         || lower.contains("failed to connect to user scope")
 }
 
-fn run_systemctl(bin: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+pub(crate) fn run_systemctl(bin: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new(bin)
         .args(args)
         .output()
@@ -883,6 +883,9 @@ fn remove_exact_file(path: &Path, home: &Path, prefix: &Path) -> Result<RemoveOu
 /// Files and folders the tracker writes inside its saved-games folder.
 /// Anything else in that folder stays, including when the folder is
 /// `~/.config`, `~/Documents`, or `~/Games`.
+///
+/// Downloaded packs stay. They live under `templates/` (hero, letter, word,
+/// and map packs) and are not listed here.
 fn is_tracker_data_name(name: &str) -> bool {
     matches!(
         name,
@@ -895,6 +898,10 @@ fn is_tracker_data_name(name: &str) -> bool {
             | "daemon.pid"
             | "daemon.log"
             | "daemon.log.1"
+            | "gui.log"
+            | "gui.log.1"
+            | "perf.log"
+            | "perf.log.1"
             | "debug"
             | "shadow"
             | "tessdata"
@@ -903,11 +910,13 @@ fn is_tracker_data_name(name: &str) -> bool {
             | "portraits"
             | "ui_state.json"
             | "report-kit"
+            | "reports"
             | "run.marker"
             | "last_crash.marker"
             | "ocr_switch.json"
             | "ocr_switch.json.tmp"
     ) || name.starts_with("stats.surrealkv.pre-vacuum-")
+        || name.starts_with("scuffed-report-")
 }
 
 fn is_broad_saved_folder(dir: &Path, home: &Path) -> bool {
@@ -957,7 +966,7 @@ fn parent_is_symlink(path: &Path) -> bool {
 /// Delete only the tracker's own files inside `dir`. Never the folder when
 /// it contains the install folder, the settings folder, or other files.
 /// A symlink is not followed. Returns the path that is still present.
-fn purge_saved_games(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
+pub(crate) fn purge_saved_games(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
     if !confined_path(dir, home, prefix) {
         return Ok(());
     }
@@ -1001,7 +1010,7 @@ fn purge_saved_games(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathB
     Ok(())
 }
 
-fn purge_settings(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
+pub(crate) fn purge_settings(dir: &Path, home: &Path, prefix: &Path) -> Result<(), PathBuf> {
     if !confined_path(dir, home, prefix) {
         return Ok(());
     }

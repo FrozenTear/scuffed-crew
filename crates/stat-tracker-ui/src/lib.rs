@@ -22,6 +22,7 @@ pub mod cli;
 pub mod clipboard;
 pub mod commands;
 pub mod daemon;
+pub mod delete_data;
 pub mod fixtures;
 pub mod games;
 pub mod heroes;

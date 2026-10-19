@@ -468,9 +468,21 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         let creds = client.credentials();
         let mut pack_startup = None;
         if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
-            tracing::error!(
-                "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
-            );
+            match sync::auth_pause_kind(&config.data_dir, Some((&creds.server_url, &creds.token))) {
+                Some(sync::AuthPauseKind::StatsDeletePending) => {
+                    if let Some(line) = sync::auth_pause_status(
+                        &config.data_dir,
+                        Some((&creds.server_url, &creds.token)),
+                    ) {
+                        tracing::error!("sync paused: {line}");
+                    }
+                }
+                _ => {
+                    tracing::error!(
+                        "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
+                    );
+                }
+            }
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
             pack_startup = Some(
@@ -15030,6 +15042,28 @@ mod tests {
         let spawn =
             at("    if let Some(extras) = extra_packs {\n        tokio::spawn(extras.run());\n");
         assert!(keeper < spawn && spawn < run_loop);
+    }
+
+    /// The startup log picks the pause from `AuthPauseKind`, not from the
+    /// status sentence. Copy can change without moving this branch.
+    #[test]
+    fn startup_log_matches_the_pause_reason_not_the_status_copy() {
+        let src = include_str!("main.rs");
+        let begin = src
+            .find("        if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {")
+            .expect("pause check");
+        let body = &src[begin..];
+        let end = body
+            .find("fetch_player_name_if_needed(")
+            .expect("unpaused branch");
+        let body = &body[..end];
+        assert_eq!(body.matches("auth_pause_matches(").count(), 1, "{body}");
+        assert!(body.contains("sync::auth_pause_kind("), "{body}");
+        assert!(body.contains("AuthPauseKind::StatsDeletePending"), "{body}");
+        assert!(!body.contains("scheduled for deletion"), "{body}");
+        assert!(!body.contains("were deleted"), "{body}");
+        assert!(!body.contains(".contains("), "{body}");
+        assert!(body.contains("the server rejected this token"), "{body}");
     }
 
     /// Deleting the command-tick call, or the upload inside the timer, fails

@@ -240,6 +240,13 @@ pub enum Message {
     ConfirmClear,
     ClearData,
     ClearReady(Result<String, String>),
+    ArmDeleteData,
+    CancelDeleteData,
+    DeleteDataTyped(String),
+    ToggleKeepSettings(bool),
+    ToggleDeleteSite(bool),
+    ConfirmDeleteData,
+    DeleteDataFinished(Result<String, crate::delete_data::WipeFailure>),
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
@@ -424,6 +431,7 @@ pub struct TrackerApp {
     /// the daemon on every frame.
     pub installed_version: Option<String>,
     pub confirm_clear: bool,
+    pub delete_data: crate::delete_data::DeleteDataForm,
     pub tessdata_busy: bool,
     pub tessdata_installed: bool,
     /// Pack state, a refused toggle's reason, and the tracker's notice for
@@ -635,6 +643,7 @@ impl TrackerApp {
             uninstall_busy: false,
             report: None,
             confirm_clear: false,
+            delete_data: crate::delete_data::DeleteDataForm::default(),
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
             ocr_switch: settings::OcrSwitchView::default(),
@@ -1295,6 +1304,142 @@ impl TrackerApp {
                 }
                 Task::none()
             }
+            Message::ArmDeleteData => {
+                if self.fixture.is_some() || self.delete_data.busy {
+                    return Task::none();
+                }
+                self.delete_data.armed = true;
+                self.delete_data.notice = None;
+                Task::none()
+            }
+            Message::CancelDeleteData => {
+                if !self.delete_data.busy {
+                    self.delete_data.armed = false;
+                    self.delete_data.typed.clear();
+                    self.delete_data.offer_retry = false;
+                    self.delete_data.notice = None;
+                }
+                Task::none()
+            }
+            Message::DeleteDataTyped(typed) => {
+                if !self.delete_data.busy {
+                    self.delete_data.typed = typed;
+                }
+                Task::none()
+            }
+            Message::ToggleKeepSettings(keep) => {
+                if !self.delete_data.busy {
+                    self.delete_data.keep_settings = keep;
+                }
+                Task::none()
+            }
+            Message::ToggleDeleteSite(on) => {
+                if !self.delete_data.busy
+                    && crate::delete_data::site_delete_checkbox_visible(
+                        self.saved_config.sync.as_ref(),
+                    )
+                {
+                    self.delete_data.also_delete_site = on;
+                }
+                Task::none()
+            }
+            Message::ConfirmDeleteData => {
+                if self.fixture.is_some() || self.delete_data.busy {
+                    return Task::none();
+                }
+                if !crate::delete_data::confirmation_accepted(&self.delete_data.typed) {
+                    self.replace_toast("Type DELETE to confirm. Nothing was removed.");
+                    self.toast_shown_at = Some(SystemTime::now());
+                    return Task::none();
+                }
+                let also_delete_site = self.delete_data.also_delete_site
+                    && crate::delete_data::site_delete_checkbox_visible(
+                        self.saved_config.sync.as_ref(),
+                    );
+                let req = match crate::delete_data::request_for_app(
+                    &self.data_dir,
+                    self.delete_data.keep_settings,
+                    also_delete_site,
+                    self.saved_config.sync.as_ref(),
+                    self.delete_data.typed.clone(),
+                ) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        self.replace_toast(err);
+                        self.toast_shown_at = Some(SystemTime::now());
+                        return Task::none();
+                    }
+                };
+                self.delete_data.busy = true;
+                self.delete_data.offer_retry = false;
+                Task::perform(
+                    crate::delete_data::wipe_local_data(req),
+                    Message::DeleteDataFinished,
+                )
+            }
+            Message::DeleteDataFinished(result) => {
+                self.delete_data.busy = false;
+                match result {
+                    Ok(copy) => {
+                        let keep = self.delete_data.keep_settings;
+                        self.delete_data.armed = false;
+                        self.delete_data.typed.clear();
+                        self.delete_data.also_delete_site = false;
+                        self.delete_data.offer_retry = false;
+                        self.delete_data.notice = Some(copy.clone());
+                        self.games.clear();
+                        self.sessions_with_kit.clear();
+                        self.confirm_clear = false;
+                        self.preview = None;
+                        if keep {
+                            if let Ok(path) = Config::config_path()
+                                && let Ok(config) = Config::read_at(&path)
+                            {
+                                self.saved_config = config.clone();
+                                self.settings = SettingsForm::from_config(&config);
+                            }
+                        } else {
+                            let defaults = Config {
+                                data_dir: self.data_dir.clone(),
+                                ..Config::default()
+                            };
+                            self.saved_config = defaults.clone();
+                            self.settings = SettingsForm::from_config(&defaults);
+                        }
+                        self.forget_sync_link();
+                        self.health_status = self.health_now();
+                        self.replace_toast(copy);
+                        self.toast_shown_at = Some(SystemTime::now());
+                    }
+                    Err(err) => {
+                        match &err {
+                            crate::delete_data::WipeFailure::SiteRetry(msg) => {
+                                self.delete_data.offer_retry = true;
+                                self.delete_data.notice = Some(msg.clone());
+                            }
+                            crate::delete_data::WipeFailure::SiteRejected => {
+                                self.delete_data.offer_retry = false;
+                                self.delete_data.notice =
+                                    Some(crate::delete_data::SITE_REJECTED.to_string());
+                            }
+                            crate::delete_data::WipeFailure::SiteKept(msg) => {
+                                self.delete_data.offer_retry = false;
+                                self.delete_data.notice = Some(msg.clone());
+                            }
+                            crate::delete_data::WipeFailure::Local { unlinked, .. } => {
+                                self.delete_data.offer_retry = false;
+                                if *unlinked {
+                                    self.forget_sync_link();
+                                    self.health_status = self.health_now();
+                                }
+                            }
+                        }
+                        self.replace_toast(err.message());
+                        self.toast_shown_at = Some(SystemTime::now());
+                    }
+                }
+                Task::none()
+            }
             Message::UpdateChecked(info) => {
                 self.update_open_details.clear();
                 self.update_show_older = false;
@@ -1617,6 +1762,14 @@ impl TrackerApp {
 
     fn replace_toast(&mut self, text: impl Into<String>) {
         show_plain_toast(&mut self.toast, &mut self.toast_action, text.into());
+    }
+
+    /// Drop the saved site link. A 200 from `DELETE /api/stats/me` revokes
+    /// every token, so this PC stays unlinked until a new token is saved.
+    fn forget_sync_link(&mut self) {
+        self.saved_config.sync = None;
+        self.settings.sync_token.clear();
+        self.settings.sync_url.clear();
     }
 
     /// Prefix "Restart now" starts the new binary from: the one the in-app
@@ -2732,16 +2885,7 @@ fn uninstall_dialog_escape(
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
-    match daemon::stop_daemon(&req.data_dir).await {
-        Ok(()) => {}
-        Err(err) if err == "Tracker is not running" => {}
-        Err(_) => {
-            return Err("Could not stop the tracker. Nothing was removed.".into());
-        }
-    }
-    if daemon::daemon_running(&req.data_dir).is_some() {
-        return Err("The tracker is still running. Nothing was removed.".into());
-    }
+    daemon::stop_before_file_removal(&req.data_dir).await?;
     crate::uninstall::apply(&req)
 }
 
@@ -2855,9 +2999,11 @@ fn health_status_for(
         {
             return format!("Sync paused: {}", e.message());
         }
-        if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
-            return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
+        if let Some(line) = stat_tracker::sync::auth_pause_status(data_dir, Some((url, token))) {
+            return line;
         }
+    } else if let Some(line) = stat_tracker::sync::auth_pause_status(data_dir, None) {
+        return line;
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
         HEALTH_READY.into()
@@ -3431,6 +3577,35 @@ token = \"secret-token-must-stay\"
             super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
             "Ready",
             "a changed URL clears the rejected state"
+        );
+        stat_tracker::sync::write_stats_delete_pending(
+            &dir,
+            "https://crew.example",
+            "old-token",
+            Some("2099-10-26T15:04:05Z"),
+        )
+        .unwrap();
+        let when = stat_tracker::sync::scheduled_delete_local_date("2099-10-26T15:04:05Z");
+        let deletion =
+            stat_tracker::sync::stats_delete_pending_status(Some("2099-10-26T15:04:05Z"));
+        assert!(when.as_deref().unwrap().contains("October"), "{when:?}");
+        assert!(when.as_deref().unwrap().contains(", 2099"), "{when:?}");
+        assert!(deletion.contains("Edit Profile"), "{deletion}");
+        assert!(deletion.contains("Sync Tokens"), "{deletion}");
+        assert!(!deletion.contains("account page"), "{deletion}");
+        assert_eq!(
+            super::health_status_for(&dir, &[], None),
+            deletion,
+            "an unlinked app shows the deletion line without waiting for an upload"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
+            deletion
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "new-token"))),
+            "Ready",
+            "a new token does not keep the deletion line"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
