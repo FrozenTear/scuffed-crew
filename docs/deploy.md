@@ -153,7 +153,7 @@ podman compose --env-file data/secrets.env up -d
 
 `site-server` still uses a plain `depends_on` list (start order, not `service_healthy`). On day-2 hosts, a health condition makes podman-compose start Surreal and can create the underscore twin on the same volume. A fresh `up` can therefore start site-server before RocksDB is serving.
 
-`GET /api/health` is liveness only. It does not touch the database, and it is not rate limited. `GET /api/ready` returns 200 when a cached `RETURN true` against Surreal succeeded, and 503 when that probe failed. The process caches either result for 2 seconds, so a burst of probes runs the query at most once per 2 seconds. A 200 does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. It is unauthenticated and not on the request governor. The body is empty either way.
+`GET /api/health` is liveness only. It does not touch the database, and it is not rate limited. `GET /api/ready` returns 200 when a cached `RETURN true` against Surreal succeeded, and 503 when that probe failed. The process caches either result for 2 seconds. Concurrent cache misses share one probe, so a burst runs the query once. A 200 does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. It is unauthenticated and not on the request governor. The body is empty either way.
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/health"
