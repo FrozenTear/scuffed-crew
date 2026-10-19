@@ -126,6 +126,8 @@ services:
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Public origin only. A path or query is ignored. The AUTH allow-list
+      # adds wss://host/relay for an https base, or ws://host/relay for http.
       REDIRECT_BASE_URL: ${REDIRECT_BASE_URL:-http://127.0.0.1:3000}
       # Single level. A nested fallback to REDIRECT_BASE_URL is what
       # podman-compose 1.5 turns into a stray brace or a literal. When

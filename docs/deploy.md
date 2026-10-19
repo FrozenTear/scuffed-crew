@@ -364,7 +364,9 @@ then remove `CSP_ENFORCE=0` to enforce again.
 > Set the two variables in `data/secrets.env`. Compose passes them through.
 > Leave them unset to keep the defaults.
 
-**3. App public URL** (required for cookies / redirects):
+**3. App public URL** (required for cookies / redirects).
+
+`REDIRECT_BASE_URL` is the public origin: scheme, host, and port. A path or query on it is ignored. Chat AUTH then allows this site's relay at `wss://<host>/relay` when the base is `https`, or `ws://<host>/relay` when the base is `http`. `http` and `https` relay tags are not signed. The relay path is always `/relay`.
 
 ```bash
 cd /root/github/scuffed-crew   # your clone path

@@ -91,6 +91,7 @@ async fn harness_enabled(reports_enabled: bool) -> Harness {
             redirect_base_url: "http://localhost:3000".into(),
             allowed_origins: vec!["http://localhost:3000".into()],
         },
+        auth_redirect_base: None,
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: reports_dir.clone(),
         reports_enabled,

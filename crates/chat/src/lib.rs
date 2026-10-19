@@ -12,7 +12,10 @@ pub use community::{
     build_event_announcement, build_lfg_event, build_match_result_event, kinds as community_kinds,
     EventAnnouncement, LfgRequest, MatchResult,
 };
-pub use nostr::auth::{AuthError, AuthTokenRequest, AuthTokenResponse, KeyMode, NostrAuthService};
+pub use nostr::auth::{
+    allowed_auth_relay, canonical_relay_url, site_auth_relay_urls, AuthError, AuthTokenRequest,
+    AuthTokenResponse, KeyMode, NostrAuthService, MAX_AUTH_CHALLENGE_BYTES,
+};
 pub use nostr::encryption::{
     EncryptionError, EncryptionService, GiftWrappedEvent, UnwrappedMessage,
 };

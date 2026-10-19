@@ -29,6 +29,9 @@ fn keys_from_secret_plaintext(pt: &Zeroizing<Vec<u8>>) -> Result<nostr::Keys, Au
     Ok(Keys::new(sk))
 }
 
+/// NIP-42 AUTH challenge cap. Longer challenges are rejected before signing.
+pub const MAX_AUTH_CHALLENGE_BYTES: usize = 256;
+
 /// Errors from the auth service.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -44,6 +47,108 @@ pub enum AuthError {
     InvalidKeyData,
     #[error("decrypted Nostr secret does not match owner pubkey")]
     PubkeyMismatch,
+    #[error("relay URL is not allowed")]
+    RelayUrlRejected,
+    #[error("challenge is too long")]
+    ChallengeTooLong,
+}
+
+/// Canonical relay URL for AUTH allow-list comparison.
+///
+/// Accepts `ws` and `wss` only. `http` and `https` relay tags are rejected.
+/// Scheme and host are lowercase, a trailing slash is removed, and the
+/// default port is omitted (`80` for `ws`, `443` for `wss`). Any other
+/// scheme, a missing host, or userinfo yields `None`.
+pub fn canonical_relay_url(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "ws" | "wss") {
+        return None;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = canonical_host(&parsed)?;
+    // `Url::port` already hides the scheme default.
+    let port = parsed.port();
+    let path = parsed.path().trim_end_matches('/');
+
+    let mut out = String::new();
+    out.push_str(scheme);
+    out.push_str("://");
+    out.push_str(&host);
+    if let Some(port) = port {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    if !path.is_empty() {
+        out.push_str(path);
+    }
+    if let Some(query) = parsed.query() {
+        out.push('?');
+        out.push_str(query);
+    }
+    Some(out)
+}
+
+/// Host for a canonical relay URL. IPv6 is bracketed so the result parses.
+fn canonical_host(parsed: &url::Url) -> Option<String> {
+    match parsed.host()? {
+        url::Host::Domain(domain) if !domain.is_empty() => Some(domain.to_ascii_lowercase()),
+        url::Host::Domain(_) => None,
+        url::Host::Ipv4(addr) => Some(addr.to_string()),
+        url::Host::Ipv6(addr) => Some(format!("[{addr}]")),
+    }
+}
+
+/// This site's `/relay` URL, derived from the public site base.
+///
+/// An `https` or `wss` base becomes `wss://host/relay`. An `http` or `ws`
+/// base becomes `ws://host/relay`. The result is already canonical:
+/// lowercase scheme and host, default port omitted, no trailing slash.
+/// `http` and `https` relay tags are not produced. An empty, unparseable,
+/// or other scheme yields no URLs.
+///
+/// A path, query, or fragment on the base is dropped. The browser opens
+/// this site's relay at the origin's `/relay` path, so
+/// `https://host/app?x=1` becomes `wss://host/relay`.
+pub fn site_auth_relay_urls(redirect_base: &str) -> Vec<String> {
+    let Ok(parsed) = url::Url::parse(redirect_base.trim()) else {
+        return Vec::new();
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Vec::new();
+    }
+    let Some(host) = canonical_host(&parsed) else {
+        return Vec::new();
+    };
+    let scheme = match parsed.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => return Vec::new(),
+    };
+    // `Url::port` is None for the base scheme's default port; canonical_relay_url
+    // drops a port that is the default for the emitted scheme.
+    let port = parsed.port();
+    let raw = match port {
+        Some(port) => format!("{scheme}://{host}:{port}/relay"),
+        None => format!("{scheme}://{host}/relay"),
+    };
+    canonical_relay_url(&raw).into_iter().collect()
+}
+
+/// Relay URL to sign, when `requested` canonicalizes to one of `allowed`.
+///
+/// Returns the canonical form. Callers sign that string, not the raw input.
+pub fn allowed_auth_relay<'a>(
+    requested: &str,
+    allowed: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let requested = canonical_relay_url(requested)?;
+    let matched = allowed
+        .into_iter()
+        .any(|candidate| canonical_relay_url(candidate).as_deref() == Some(requested.as_str()));
+    matched.then_some(requested)
 }
 
 /// Request for a NIP-42 auth token.
@@ -113,15 +218,24 @@ impl NostrAuthService {
 
     /// Provision a NIP-42 AUTH event for a member with a server-managed key.
     ///
-    /// Decrypts the member's secret key, signs an AUTH event, and immediately
-    /// zeroizes the decrypted key material.
+    /// Signs only when `relay_url` canonicalizes to one of `allowed_relay_urls`
+    /// and `challenge` is at most [`MAX_AUTH_CHALLENGE_BYTES`] bytes. The event
+    /// uses the canonical relay URL. Decrypts the secret only after those
+    /// checks, then zeroizes it.
     pub fn provision_auth_event(
         &self,
         encrypted_secret_key: &EncryptedBlob,
         owner_pubkey_hex: &str,
         relay_url: &str,
         challenge: &str,
+        allowed_relay_urls: &[&str],
     ) -> Result<AuthTokenResponse, AuthError> {
+        if challenge.len() > MAX_AUTH_CHALLENGE_BYTES {
+            return Err(AuthError::ChallengeTooLong);
+        }
+        let relay_url = allowed_auth_relay(relay_url, allowed_relay_urls.iter().copied())
+            .ok_or(AuthError::RelayUrlRejected)?;
+
         let aad = aad::nostr_secret_key(owner_pubkey_hex);
         let pt = self
             .crypto
@@ -135,7 +249,7 @@ impl NostrAuthService {
         }
 
         // Build the AUTH event
-        let event = EventBuilder::build_auth_event(&keys, relay_url, challenge)?;
+        let event = EventBuilder::build_auth_event(&keys, &relay_url, challenge)?;
         let relay_event = EventBuilder::to_relay_event(&event);
 
         Ok(AuthTokenResponse {
@@ -230,6 +344,7 @@ mod tests {
                 &pubkey,
                 "wss://relay.example.com",
                 "challenge123",
+                &["wss://relay.example.com"],
             )
             .unwrap();
 
@@ -282,6 +397,7 @@ mod tests {
             &_pubkey,
             "wss://relay.example.com",
             "challenge",
+            &["wss://relay.example.com"],
         );
         assert!(result.is_err());
     }
@@ -311,6 +427,7 @@ mod tests {
             &claimed_owner,
             "wss://relay.example.com",
             "c",
+            &["wss://relay.example.com"],
         );
         assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
     }
@@ -329,5 +446,191 @@ mod tests {
 
         let result = service.sign_event_for_member(&mismatched, &claimed_owner, 1, "hi", vec![]);
         assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
+    }
+
+    #[test]
+    fn allowlist_accepts_normalized_configured_relay() {
+        let allowed = ["wss://Relay.Example.com:443/", "ws://backup.example:80/"];
+        assert_eq!(
+            allowed_auth_relay("WSS://relay.example.com/", allowed).as_deref(),
+            Some("wss://relay.example.com")
+        );
+        assert_eq!(
+            allowed_auth_relay("ws://Backup.Example/", allowed).as_deref(),
+            Some("ws://backup.example")
+        );
+        assert_eq!(
+            canonical_relay_url("ws://relay.example.com:443"),
+            Some("ws://relay.example.com:443".into())
+        );
+        assert_eq!(
+            canonical_relay_url("wss://relay.example.com/path/"),
+            Some("wss://relay.example.com/path".into())
+        );
+    }
+
+    #[test]
+    fn allowlist_rejects_other_host_userinfo_and_unlisted_https() {
+        let allowed = ["wss://relay.example.com"];
+        assert!(allowed_auth_relay("wss://evil.example", allowed).is_none());
+        assert!(allowed_auth_relay("http://relay.example.com", allowed).is_none());
+        assert!(allowed_auth_relay("https://relay.example.com", allowed).is_none());
+        assert!(allowed_auth_relay("wss://user:pass@relay.example.com", allowed).is_none());
+        assert!(allowed_auth_relay("https://user:pass@relay.example.com/relay", allowed).is_none());
+    }
+
+    #[test]
+    fn allowlist_rejects_https_even_when_listed() {
+        let allowed = [
+            "https://Relay.Example.com:443/relay/",
+            "wss://relay.example.com/relay",
+        ];
+        assert!(allowed_auth_relay("HTTPS://relay.example.com/relay", allowed).is_none());
+        assert!(allowed_auth_relay("http://relay.example.com/relay", allowed).is_none());
+        assert!(canonical_relay_url("http://relay.example.com:80/relay/").is_none());
+        assert!(canonical_relay_url("https://relay.example.com/relay").is_none());
+        assert_eq!(
+            allowed_auth_relay("wss://relay.example.com/relay/", allowed).as_deref(),
+            Some("wss://relay.example.com/relay")
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_https_base_is_wss_only() {
+        assert_eq!(
+            site_auth_relay_urls("HTTPS://OW.Example.com:443/"),
+            vec!["wss://ow.example.com/relay".to_string()]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_http_base_keeps_nondefault_port() {
+        assert_eq!(
+            site_auth_relay_urls("http://127.0.0.1:3000"),
+            vec!["ws://127.0.0.1:3000/relay".to_string()]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_drops_path_and_query() {
+        assert_eq!(
+            site_auth_relay_urls("https://OW.Example.com/app/chat?x=1#frag"),
+            vec!["wss://ow.example.com/relay".to_string()]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_http_explicit_port_80_is_omitted() {
+        assert_eq!(
+            site_auth_relay_urls("http://relay.example:80/ignored?q=1"),
+            vec!["ws://relay.example/relay".to_string()]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_ipv6_keeps_brackets_and_matches() {
+        let urls = site_auth_relay_urls("http://[::1]:3000/app?x=1");
+        assert_eq!(urls, vec!["ws://[::1]:3000/relay".to_string()]);
+        let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+        assert_eq!(
+            allowed_auth_relay("WS://[::1]:3000/relay/", refs.iter().copied()).as_deref(),
+            Some("ws://[::1]:3000/relay")
+        );
+        assert!(allowed_auth_relay("http://[::1]:3000/relay", refs.iter().copied()).is_none());
+    }
+
+    #[test]
+    fn site_auth_relay_urls_unusable_base_is_empty() {
+        assert!(site_auth_relay_urls("").is_empty());
+        assert!(site_auth_relay_urls("   ").is_empty());
+        assert!(site_auth_relay_urls("not a url").is_empty());
+        assert!(site_auth_relay_urls("ftp://example.com").is_empty());
+        assert!(site_auth_relay_urls("https://user:pass@example.com").is_empty());
+    }
+
+    #[test]
+    fn provision_auth_event_challenge_256_ok_257_rejected() {
+        let crypto = test_crypto();
+        let service = NostrAuthService::new(crypto);
+        let (pubkey, encrypted) = service.generate_keypair().unwrap();
+        let allowed = ["wss://relay.example.com"];
+
+        let challenge_ok = "a".repeat(256);
+        let response = service
+            .provision_auth_event(
+                &encrypted,
+                &pubkey,
+                "WSS://Relay.Example.com:443/",
+                &challenge_ok,
+                &allowed,
+            )
+            .unwrap();
+        assert_eq!(response.relay_url, "wss://relay.example.com");
+        assert_eq!(
+            response.auth_event.tag_value("relay"),
+            Some("wss://relay.example.com")
+        );
+        assert_eq!(
+            response.auth_event.tag_value("challenge"),
+            Some(challenge_ok.as_str())
+        );
+
+        let challenge_bad = "b".repeat(257);
+        let rejected = service.provision_auth_event(
+            &encrypted,
+            &pubkey,
+            "wss://relay.example.com",
+            &challenge_bad,
+            &allowed,
+        );
+        assert!(matches!(rejected, Err(AuthError::ChallengeTooLong)));
+    }
+
+    #[test]
+    fn provision_auth_event_rejects_unlisted_host_and_scheme() {
+        let crypto = test_crypto();
+        let service = NostrAuthService::new(crypto);
+        let (pubkey, encrypted) = service.generate_keypair().unwrap();
+        let allowed = ["wss://relay.example.com"];
+
+        for url in [
+            "wss://evil.example",
+            "http://relay.example.com",
+            "https://relay.example.com",
+        ] {
+            let rejected = service.provision_auth_event(&encrypted, &pubkey, url, "c", &allowed);
+            assert!(
+                matches!(rejected, Err(AuthError::RelayUrlRejected)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn provision_auth_event_rejects_listed_https_relay() {
+        let crypto = test_crypto();
+        let service = NostrAuthService::new(crypto);
+        let (pubkey, encrypted) = service.generate_keypair().unwrap();
+        let allowed = ["https://ow.example/relay", "wss://ow.example/relay"];
+
+        let rejected = service.provision_auth_event(
+            &encrypted,
+            &pubkey,
+            "HTTPS://ow.example/relay/",
+            "c",
+            &allowed,
+        );
+        assert!(matches!(rejected, Err(AuthError::RelayUrlRejected)));
+
+        let response = service
+            .provision_auth_event(
+                &encrypted,
+                &pubkey,
+                "WSS://ow.example/relay/",
+                "c",
+                &allowed,
+            )
+            .unwrap();
+        assert_eq!(response.relay_url, "wss://ow.example/relay");
     }
 }
