@@ -635,6 +635,11 @@ fn path_is_private(path: &str) -> bool {
         .any(|prefix| path.starts_with(prefix))
 }
 
+/// Request path used in `og:url` and the canonical.
+///
+/// Query and fragment are dropped. `/` and `/index.html` stay `/`. One
+/// trailing slash is removed on every other path so `/news/` matches the
+/// sitemap loc and the client route.
 fn canonical_request_path(request_path: &str) -> String {
     let path = request_path
         .split(['?', '#'])
@@ -650,10 +655,9 @@ fn canonical_request_path(request_path: &str) -> String {
             byte < 0x20 || matches!(byte, b'\\' | b'"' | b'\'' | b'<' | b'>' | b' ' | b'`')
         });
     if invalid {
-        "/".to_string()
-    } else {
-        path.to_string()
+        return "/".to_string();
     }
+    path.strip_suffix('/').unwrap_or(path).to_string()
 }
 
 fn absolute_site_url(base: &str, value: &str) -> Option<String> {
@@ -2351,6 +2355,13 @@ mod tests {
         assert!(blog.contains("href=\"https://crew.example.test/blog/hello\""));
         assert!(index.contains("content=\"https://crew.example.test/\""));
         assert!(!index.contains("/index.html"));
+        let news = render_shell(&template, Some(&settings), base, "/news/?x=1");
+        assert_eq!(canonical_request_path("/news/"), "/news");
+        assert_eq!(canonical_request_path("/"), "/");
+        assert!(news.contains("content=\"https://crew.example.test/news\""));
+        assert!(news.contains("href=\"https://crew.example.test/news\""));
+        assert!(!news.contains("https://crew.example.test/news/"));
+        assert!(!news.contains('?'));
         assert!(blog.contains(
             "<script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></head>"
         ));
