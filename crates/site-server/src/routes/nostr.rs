@@ -52,6 +52,30 @@ impl IntoResponse for NostrHandlerError {
     }
 }
 
+/// Client-facing body for failures that used to interpolate `{e}`.
+///
+/// HTTP status stays the caller's. The `error` field stays the stable code
+/// (`client_error`) the site client maps. The full error is logged and is
+/// never copied into the JSON body. A 400 or other client error is logged
+/// at warn. Server failures stay at error.
+fn internal_err(
+    status: StatusCode,
+    e: impl std::fmt::Display,
+    client_error: &'static str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    if status.is_client_error() {
+        tracing::warn!(error = %e, "{client_error}");
+    } else {
+        tracing::error!(error = %e, "{client_error}");
+    }
+    (
+        status,
+        Json(ErrorResponse {
+            error: client_error.into(),
+        }),
+    )
+}
+
 /// Enforce the per-member rate limit for a secret-touching Nostr op
 /// (DR1-NOSTR-006). Each [`RateClass`] has its own independent per-member
 /// bucket, so exhausting one class never throttles the other. Returns `429`
@@ -378,14 +402,8 @@ pub async fn nostr_verify(
 
     // 1. Verify the challenge token
     let (challenge, token_member_id) =
-        verify_challenge_token(&state.nostr_challenge_key, &body.token).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Token verification failed: {e}"),
-                }),
-            )
-        })?;
+        verify_challenge_token(&state.nostr_challenge_key, &body.token)
+            .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Token verification failed"))?;
 
     // 2. Ensure the token was issued for this member
     if token_member_id != caller.member.id {
@@ -421,25 +439,14 @@ pub async fn nostr_verify(
     }
 
     // 5. Verify event ID and signature
-    body.signed_event.verify().map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Event verification failed: {e}"),
-            }),
-        )
-    })?;
+    body.signed_event
+        .verify()
+        .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Event verification failed"))?;
 
     // 5b. Reject stale events. `Event::verify()` does not bound `created_at`, so
     // a captured event would otherwise verify forever — enforce a freshness window.
-    check_event_freshness(body.signed_event.created_at.as_secs()).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    check_event_freshness(body.signed_event.created_at.as_secs())
+        .map_err(|code| internal_err(StatusCode::BAD_REQUEST, code, code))?;
 
     // 5c. One-time-use: block replay of this challenge within the TTL window.
     if !state
@@ -639,14 +646,8 @@ pub async fn nostr_export_backup(
             )
         })?;
 
-    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, &body.password).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Encryption failed: {e}"),
-            }),
-        )
-    })?;
+    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, &body.password)
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Encryption failed"))?;
     secret_hex.zeroize();
 
     crate::routes::audit_log::audit(
@@ -701,25 +702,15 @@ pub async fn nostr_import_key(
     }
 
     let mut secret_hex = Zeroizing::new(
-        scuffed_auth::nip49::decrypt(&body.ncryptsec, &body.password).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Failed to decrypt: {e}"),
-                }),
-            )
-        })?,
+        scuffed_auth::nip49::decrypt(&body.ncryptsec, &body.password)
+            .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Failed to decrypt"))?,
     );
 
     // Derive pubkey from the decrypted secret
-    let keys = Keys::new(SecretKey::from_hex(&secret_hex).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid key in backup: {e}"),
-            }),
-        )
-    })?);
+    let keys = Keys::new(
+        SecretKey::from_hex(&secret_hex)
+            .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Invalid key in backup"))?,
+    );
     secret_hex.zeroize();
     let pubkey_hex = keys.public_key().to_hex();
 
@@ -835,14 +826,8 @@ pub async fn nostr_community(
             )
         })?;
 
-    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Invalid key: {e}"),
-            }),
-        )
-    })?;
+    let keys = EventBuilder::keys_from_hex(&secret_hex)
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Invalid key"))?;
     secret_hex.zeroize();
 
     let members = state.db.list_nostr_identities().await.map_err(|_e| {
@@ -870,11 +855,10 @@ pub async fn nostr_community(
         &moderator_pubkeys,
     )
     .map_err(|e| {
-        (
+        internal_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build event: {e}"),
-            }),
+            e,
+            "Failed to build event",
         )
     })?;
 
@@ -981,14 +965,8 @@ pub async fn nostr_react(
             )
         })?;
 
-    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Invalid key: {e}"),
-            }),
-        )
-    })?;
+    let keys = EventBuilder::keys_from_hex(&secret_hex)
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Invalid key"))?;
     secret_hex.zeroize();
 
     let event = EventBuilder::build_reaction(
@@ -998,11 +976,10 @@ pub async fn nostr_react(
         &body.content,
     )
     .map_err(|e| {
-        (
+        internal_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build event: {e}"),
-            }),
+            e,
+            "Failed to build event",
         )
     })?;
 
@@ -1471,14 +1448,8 @@ pub async fn nostr_post(
             )
         })?;
 
-    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Invalid key: {e}"),
-            }),
-        )
-    })?;
+    let keys = EventBuilder::keys_from_hex(&secret_hex)
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Invalid key"))?;
     secret_hex.zeroize();
 
     let event = EventBuilder::build_community_post(
@@ -1491,11 +1462,10 @@ pub async fn nostr_post(
         body.root.as_deref(),
     )
     .map_err(|e| {
-        (
+        internal_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build event: {e}"),
-            }),
+            e,
+            "Failed to build event",
         )
     })?;
 
@@ -1808,14 +1778,7 @@ fn parse_rfc3339(
 ) -> Result<chrono::DateTime<chrono::Utc>, (StatusCode, Json<ErrorResponse>)> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&chrono::Utc))
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid RFC3339 timestamp: {e}"),
-                }),
-            )
-        })
+        .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Invalid RFC3339 timestamp"))
 }
 
 /// POST /api/nostr/dm/send — send an encrypted DM via NIP-59 gift wrap.
@@ -1827,14 +1790,8 @@ pub async fn dm_send(
     enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     let recipient = body.recipient_pubkey.trim().to_lowercase();
-    validate_pubkey_hex(&recipient).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid recipient_pubkey: {e}"),
-            }),
-        )
-    })?;
+    validate_pubkey_hex(&recipient)
+        .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Invalid recipient_pubkey"))?;
     let content = body.content.trim();
     if content.is_empty() {
         return Err((
@@ -1878,11 +1835,10 @@ pub async fn dm_send(
         )
         .await
         .map_err(|e| {
-            (
+            internal_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to build gift wrap: {e}"),
-                }),
+                e,
+                "Failed to build gift wrap",
             )
         })?;
 
@@ -1926,11 +1882,10 @@ pub async fn dm_send(
         )
         .await
         .map_err(|e| {
-            (
+            internal_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to store sent message: {e}"),
-                }),
+                e,
+                "Failed to store sent message",
             )
         })?;
 
@@ -1967,11 +1922,10 @@ pub async fn dm_sync(
         .dm_inbox_high_water(&my_pubkey)
         .await
         .map_err(|e| {
-            (
+            internal_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to read inbox high-water: {e}"),
-                }),
+                e,
+                "Failed to read inbox high-water",
             )
         })?;
     let since_secs: Option<u64> = high_water.map(|dt| {
@@ -1993,14 +1947,7 @@ pub async fn dm_sync(
 
     let events = scuffed_chat::nostr::relay::query_events_oneshot(&relay_url, vec![filter], 10)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Relay query failed: {e}"),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(StatusCode::BAD_GATEWAY, e, "Relay query failed"))?;
     let fetched = events.len() as u32;
 
     let mut stored: u32 = 0;
@@ -2097,14 +2044,7 @@ pub async fn dm_inbox(
         .db
         .list_dm_inbox(&my_pubkey, limit, since)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list inbox: {e}"),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Failed to list inbox"))?;
     Ok(Json(messages.into_iter().map(Into::into).collect()))
 }
 
@@ -2119,11 +2059,10 @@ pub async fn dm_conversations(
         .list_dm_conversations(&caller.member.id, &my_pubkey)
         .await
         .map_err(|e| {
-            (
+            internal_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list conversations: {e}"),
-                }),
+                e,
+                "Failed to list conversations",
             )
         })?;
     Ok(Json(convs.into_iter().map(Into::into).collect()))
@@ -2150,14 +2089,8 @@ pub async fn dm_thread(
 ) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let peer = query.peer_pubkey.trim().to_lowercase();
-    validate_pubkey_hex(&peer).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid peer_pubkey: {e}"),
-            }),
-        )
-    })?;
+    validate_pubkey_hex(&peer)
+        .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Invalid peer_pubkey"))?;
     let limit = query.limit.unwrap_or(50).min(200);
     let before = query.before_ts.as_deref().map(parse_rfc3339).transpose()?;
     let messages = state
@@ -2165,11 +2098,10 @@ pub async fn dm_thread(
         .list_dm_thread(&my_pubkey, &peer, limit, before)
         .await
         .map_err(|e| {
-            (
+            internal_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list thread: {e}"),
-                }),
+                e,
+                "Failed to list thread",
             )
         })?;
     Ok(Json(messages.into_iter().map(Into::into).collect()))
@@ -2249,27 +2181,14 @@ pub async fn dm_mark_read(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let (_, _, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let peer = body.peer_pubkey.trim().to_lowercase();
-    validate_pubkey_hex(&peer).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid peer_pubkey: {e}"),
-            }),
-        )
-    })?;
+    validate_pubkey_hex(&peer)
+        .map_err(|e| internal_err(StatusCode::BAD_REQUEST, e, "Invalid peer_pubkey"))?;
     let until = parse_rfc3339(&body.until_ts)?;
     state
         .db
         .upsert_dm_read_marker(&caller.member.id, &peer, until)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to mark read: {e}"),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(StatusCode::INTERNAL_SERVER_ERROR, e, "Failed to mark read"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2290,6 +2209,16 @@ mod hardening_tests {
         // Within the past window and within the future skew tolerance.
         assert!(check_event_freshness(now() - (EVENT_MAX_AGE_SECS - 1)).is_ok());
         assert!(check_event_freshness(now() + (EVENT_FUTURE_SKEW_SECS - 1)).is_ok());
+    }
+
+    #[test]
+    fn invalid_timestamp_body_is_generic_and_keeps_status_code() {
+        let (status, Json(body)) = parse_rfc3339("not-a-timestamp").expect_err("bad timestamp");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status.as_u16(), 400);
+        let json = serde_json::to_string(&body).expect("error json");
+        assert_eq!(json, r#"{"error":"Invalid RFC3339 timestamp"}"#);
+        assert!(!json.contains("not-a-timestamp"));
     }
 
     #[test]

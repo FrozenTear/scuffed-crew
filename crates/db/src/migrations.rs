@@ -709,8 +709,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE is_active ON daemon_token TYPE bool DEFAULT true;
         DEFINE FIELD OVERWRITE created_at ON daemon_token TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE last_used_at ON daemon_token TYPE option<datetime>;
-        -- NONE does not expire. A past value fails token auth the same way an
-        -- unknown token does, and does not bump last_used_at.
+        -- NONE does not expire. A datetime at or before now is expired:
+        -- upload and daemon-config answer 401 token_expired and do not bump
+        -- last_used_at. Token-check and pack downloads keep one shared 401.
+        -- GET /api/stats/tokens returns expires_at (RFC 3339 or null) and expired.
         DEFINE FIELD OVERWRITE expires_at ON daemon_token TYPE option<datetime>;
 
         DEFINE INDEX IF NOT EXISTS dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
@@ -795,6 +797,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE slot ON bootstrap_lock TYPE string;
         DEFINE FIELD OVERWRITE claimed ON bootstrap_lock TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE claimed_at ON bootstrap_lock TYPE option<datetime>;
+        -- One-shot marker for BOOTSTRAP_ADMIN_RESET. A hash, not the password.
+        -- Migrations never write this column; startup does, after a reset runs.
+        DEFINE FIELD OVERWRITE env_fingerprint ON bootstrap_lock TYPE option<string>;
         DEFINE INDEX IF NOT EXISTS bootstrap_lock_slot_idx ON bootstrap_lock COLUMNS slot UNIQUE;
 
         -- ================================================

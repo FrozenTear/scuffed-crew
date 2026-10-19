@@ -42,6 +42,7 @@ async fn test_state() -> AppState {
             redirect_base_url: "http://localhost:3000".into(),
             allowed_origins: vec!["http://localhost:3000".into()],
         },
+        auth_redirect_base: None,
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
@@ -665,6 +666,44 @@ async fn update_member_profile_fields_and_game_account_meta() {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["rank"], "Diamond 2");
     assert_eq!(accounts[0]["sr"], 3200);
+}
+
+/// account_name is trimmed, then capped at 64 characters.
+#[tokio::test]
+async fn game_account_name_is_trimmed_and_capped_at_64() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let put = |app: &axum::Router, name: &str| {
+        let app = app.clone();
+        let name = name.to_string();
+        async move {
+            app.oneshot(authed_json_request(
+                Method::PUT,
+                "/api/members/membermember/game-accounts",
+                MEMBER_TOKEN,
+                json!({
+                    "game_id": "ow2",
+                    "account_name": name,
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    };
+
+    let capped = "N".repeat(64);
+    let ok = put(&app, &format!("  {capped}  ")).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(body_json(ok).await["account_name"], capped);
+
+    let too_long = put(&app, &"N".repeat(65)).await;
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(too_long).await["error"],
+        "account_name too long (max 64)"
+    );
 }
 
 /// NS2-5: the profile's team list now comes from one `plays_on` traversal
@@ -3086,6 +3125,55 @@ async fn setup_creates_admin_and_blocks_second_setup() {
         .await
         .unwrap();
     assert_eq!(res2.status(), StatusCode::FORBIDDEN);
+}
+
+/// A create that fails after the setup lock is claimed must not stick the lock.
+/// The next POST, with a username that can be created, becomes the admin.
+#[tokio::test]
+async fn setup_can_be_retried_after_a_failed_create() {
+    let state = test_state().await;
+    let hash = scuffed_auth::password::hash_password("not-the-setup-password").unwrap();
+    state
+        .db
+        .create_local_user("taken", &hash)
+        .await
+        .expect("orphan local user");
+    let app = create_router(state);
+
+    let setup = |app: axum::Router, username: &str| {
+        let username = username.to_string();
+        async move {
+            app.oneshot(
+                rate_limit_ip(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/auth/setup")
+                        .header(header::CONTENT_TYPE, "application/json"),
+                )
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "username": username,
+                        "password": "a-strong-password"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let failed = setup(app.clone(), "taken").await;
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body_json(failed).await["error"], "failed to create user");
+
+    let created = setup(app.clone(), "realadmin").await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let closed = setup(app, "another").await;
+    assert_eq!(closed.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(closed).await["error"], "setup already completed");
 }
 
 /// Register and setup only accept a trimmed, lowercased username of 1 to 32
@@ -7604,6 +7692,96 @@ async fn set_board_min_role(db: &Database, slug: &str, role: &str) {
         .unwrap_or_else(|e| panic!("set min_role {slug}: {e}"));
 }
 
+/// A min_role string outside admin/officer/member/recruit is not public.
+/// Blank stays public. A known role still admits that role.
+#[tokio::test]
+async fn unknown_forum_min_role_is_denied() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let db = state.db.clone();
+    set_board_min_role(&db, "general", "officers").await;
+    let app = create_router(state);
+
+    let anon = app
+        .clone()
+        .oneshot(unauthed_request(Method::GET, "/api/forum/boards/general"))
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        body_json(anon).await["error"],
+        "Login required for this board"
+    );
+
+    for token in [RECRUIT_TOKEN, MEMBER_TOKEN, OFFICER_TOKEN, ADMIN_TOKEN] {
+        let resp = app
+            .clone()
+            .oneshot(authed_request(
+                Method::GET,
+                "/api/forum/boards/general",
+                token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{token}");
+        assert_eq!(
+            body_json(resp).await["error"],
+            "Insufficient role for this board"
+        );
+    }
+
+    let tree = app
+        .clone()
+        .oneshot(authed_request(Method::GET, "/api/forum/tree", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(tree.status(), StatusCode::OK);
+    let tree_body = body_json(tree).await;
+    let slugs: Vec<&str> = tree_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|cat| cat["boards"].as_array().into_iter().flatten())
+        .filter_map(|board| board["slug"].as_str())
+        .collect();
+    assert!(
+        !slugs.contains(&"general"),
+        "unknown min_role must hide the board, got {slugs:?}"
+    );
+
+    set_board_min_role(&db, "general", "officer").await;
+    let officer = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/boards/general",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(officer.status(), StatusCode::OK);
+    let recruit = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/boards/general",
+            RECRUIT_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recruit.status(), StatusCode::FORBIDDEN);
+
+    db.client
+        .query("UPDATE forum_board SET min_role = NONE WHERE slug = 'general'")
+        .await
+        .expect("clear min_role");
+    let public = app
+        .oneshot(unauthed_request(Method::GET, "/api/forum/boards/general"))
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
+}
+
 /// Stamp `updated_at` with a fixed SurrealQL duration so list order does not
 /// depend on insert timing. Each match arm is a complete query string. The
 /// title is bound as `$title` and is not spliced into the query.
@@ -9109,6 +9287,146 @@ async fn event_time_must_be_a_clock_time() {
         .unwrap();
     assert_eq!(still.status(), StatusCode::OK);
     assert_eq!(body_json(still).await["duration_minutes"], 90);
+}
+
+/// day_of_week is 0 (Monday) through 6 (Sunday). RSVP writes require an active event.
+#[tokio::test]
+async fn event_day_of_week_is_bounded_and_rsvp_requires_an_active_event() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let create = |app: &axum::Router, day: u8| {
+        let app = app.clone();
+        async move {
+            app.oneshot(authed_json_request(
+                Method::POST,
+                "/api/events",
+                OFFICER_TOKEN,
+                json!({
+                    "title": format!("Day {day}"),
+                    "day_of_week": day,
+                    "time": "19:00",
+                    "timezone": "UTC",
+                    "is_public": false
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    };
+
+    for day in [7u8, 99] {
+        let resp = create(&app, day).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "day {day}");
+        assert_eq!(
+            body_json(resp).await["error"],
+            "day_of_week must be from 0 to 6"
+        );
+    }
+
+    for day in [-1_i64, 256, 1_000_000] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/events",
+                OFFICER_TOKEN,
+                json!({
+                    "title": format!("Day {day}"),
+                    "day_of_week": day,
+                    "time": "19:00",
+                    "timezone": "UTC",
+                    "is_public": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "day {day}");
+        assert_eq!(
+            body_json(resp).await["error"],
+            "day_of_week must be from 0 to 6"
+        );
+    }
+
+    let created = create(&app, 0).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_body = body_json(created).await;
+    let event_id = created_body["id"].as_str().unwrap().to_string();
+    assert_eq!(created_body["day_of_week"], 0);
+
+    let sunday = create(&app, 6).await;
+    assert_eq!(sunday.status(), StatusCode::CREATED);
+
+    let bad_update = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/events/{event_id}"),
+            OFFICER_TOKEN,
+            json!({ "day_of_week": 8 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad_update.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(bad_update).await["error"],
+        "day_of_week must be from 0 to 6"
+    );
+
+    let negative_update = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/events/{event_id}"),
+            OFFICER_TOKEN,
+            json!({ "day_of_week": -1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(negative_update.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(negative_update).await["error"],
+        "day_of_week must be from 0 to 6"
+    );
+
+    let rsvp = |app: &axum::Router, id: &str| {
+        let app = app.clone();
+        let id = id.to_string();
+        async move {
+            app.oneshot(authed_json_request(
+                Method::POST,
+                &format!("/api/events/{id}/rsvp"),
+                MEMBER_TOKEN,
+                json!({ "status": "yes" }),
+            ))
+            .await
+            .unwrap()
+        }
+    };
+
+    let yes = rsvp(&app, &event_id).await;
+    assert_eq!(yes.status(), StatusCode::OK);
+    assert_eq!(body_json(yes).await["status"], "yes");
+
+    let missing = rsvp(&app, "missing-event").await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(missing).await["error"], "Event not found");
+
+    let deleted = app
+        .clone()
+        .oneshot(authed_request(
+            Method::DELETE,
+            &format!("/api/events/{event_id}"),
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let inactive = rsvp(&app, &event_id).await;
+    assert_eq!(inactive.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(inactive).await["error"], "Event not found");
 }
 
 /// Missing public rows use the not-found error string. A draft article stays

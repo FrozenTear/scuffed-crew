@@ -24,8 +24,12 @@ const NEW_READER_BADGE: &str = "New reader (alpha)";
 const NEW_READER_BADGE_SHORT: &str = "alpha";
 /// Tooltip for [`NEW_READER_BADGE`].
 const NEW_READER_TITLE: &str = "Read by the new stat reader, still in testing";
-/// Tooltip on every flagged stat cell.
-const UNSURE_TITLE: &str = "Unsure read. Check and edit if wrong.";
+/// Shared tail of the unsure-cell tooltip. The stat's display name is the prefix.
+const UNSURE_DETAIL: &str = "unsure read. Check and edit if wrong.";
+
+fn unsure_title(stat_name: &str) -> String {
+    format!("{stat_name}: {UNSURE_DETAIL}")
+}
 
 /// `true` when this row should show the new-reader badge.
 /// Empty and missing ids count as `ocr-v1`.
@@ -50,7 +54,7 @@ fn unsure_note() -> Element {
 }
 
 /// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
-/// text, and [`UNSURE_TITLE`]. A sure numeric cell keeps the stat name as its title.
+/// text, and [`unsure_title`]. A sure numeric cell keeps the stat name as its title.
 fn marked_value(
     class: &str,
     text: &str,
@@ -69,7 +73,7 @@ fn marked_value(
     };
     let text = text.to_string();
     let title = if unsure {
-        Some(UNSURE_TITLE.to_string())
+        Some(unsure_title(stat_name))
     } else if titled_when_sure {
         Some(stat_name.to_string())
     } else {
@@ -521,16 +525,40 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("class=\"sr-only\""), "{html}");
-        assert_eq!(
-            html.matches(&format!("title=\"{UNSURE_TITLE}\"")).count(),
-            scuffed_types::SUSPECT_FIELD_NAMES.len(),
-            "each flagged cell uses the unsure tooltip: {html}"
+        let titles = [
+            "Result",
+            "Hero",
+            "Map",
+            "Mode",
+            "Eliminations",
+            "Assists",
+            "Deaths",
+            "Damage",
+            "Healing",
+            "Mitigation",
+        ];
+        assert_eq!(titles.len(), scuffed_types::SUSPECT_FIELD_NAMES.len());
+        for name in titles {
+            let title = unsure_title(name);
+            assert_eq!(
+                html.matches(&format!("title=\"{title}\"")).count(),
+                1,
+                "{name} tooltip missing: {html}"
+            );
+        }
+        assert!(
+            html.contains("Deaths: unsure read. Check and edit if wrong."),
+            "{html}"
+        );
+        assert!(!UNSURE_DETAIL.contains('\u{2014}'), "{UNSURE_DETAIL}");
+        assert!(
+            !html.contains("title=\"Unsure read"),
+            "the tooltip must name the stat: {html}"
         );
         assert!(
             !html.contains("the reader was unsure"),
             "old unsure copy must stay off the row: {html}"
         );
-        assert!(!UNSURE_TITLE.contains('\u{2014}'), "{UNSURE_TITLE}");
         assert!(
             html.contains("class=\"stat-value-text\">Ana</span><span class=\"stat-unsure-mark\""),
             "the mark sits outside the clipped hero text: {html}"

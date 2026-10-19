@@ -126,6 +126,8 @@ services:
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Public origin only. A path or query is ignored. The AUTH allow-list
+      # adds wss://host/relay for an https base, or ws://host/relay for http.
       REDIRECT_BASE_URL: ${REDIRECT_BASE_URL:-http://127.0.0.1:3000}
       # Single level. A nested fallback to REDIRECT_BASE_URL is what
       # podman-compose 1.5 turns into a stray brace or a literal. When
@@ -167,6 +169,13 @@ services:
       WS_MAX_PER_IP: ${WS_MAX_PER_IP:-32}
       PRODUCTION: ${PRODUCTION:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-}
+      # Off when unset, empty, 0, false, no, or off. Any other value makes
+      # POST /api/stats/upload reject more than 200 matches or 500 deleted
+      # sessions with 413. Leave this blank until tracker builds that send
+      # at most those sizes and handle 413 are in use. The per-token 429,
+      # the per-IP 429 (burst 40, then 1 every 2 seconds, body includes
+      # "code":"rate_limited"), and token_expired 401 do not depend on this flag.
+      STATS_UPLOAD_BATCH_CAP: ${STATS_UPLOAD_BATCH_CAP:-}
       BOOTSTRAP_ADMIN_RESET: ${BOOTSTRAP_ADMIN_RESET:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}

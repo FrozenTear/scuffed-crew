@@ -46,6 +46,9 @@ pub struct SecurityConfig {
     pub extra_img_src: Option<String>,
     /// `'sha256-…'` tokens (including quotes) for inline scripts.
     pub script_hashes: Vec<String>,
+    /// Send `Strict-Transport-Security`. [`SecurityPolicy::from_env`] sets this
+    /// from `PRODUCTION` via [`hsts_from_env_value`].
+    pub hsts: bool,
 }
 
 /// Resolved policy. Built once at startup and cloned into the header layer.
@@ -55,6 +58,16 @@ pub struct SecurityPolicy {
     connect_extras: Vec<String>,
     img_extras: Vec<String>,
     script_hashes: Vec<String>,
+    hsts: bool,
+}
+
+/// Whether `PRODUCTION` should send HSTS.
+///
+/// Unset, empty, `0`, `false`, `no`, and `off` are off. Any other non-empty
+/// value is on, including `1` and `true`. This is the same classification as
+/// [`scuffed_auth::is_production_env`].
+pub fn hsts_from_env_value(value: Option<&str>) -> bool {
+    value.is_some_and(scuffed_auth::production_value_enabled)
 }
 
 impl SecurityPolicy {
@@ -68,6 +81,7 @@ impl SecurityPolicy {
             extra_connect_src: std::env::var("CSP_EXTRA_CONNECT_SRC").ok(),
             extra_img_src: std::env::var("CSP_IMG_SRC").ok(),
             script_hashes: bundled_script_hashes(),
+            hsts: hsts_from_env_value(std::env::var("PRODUCTION").ok().as_deref()),
         })
     }
 
@@ -95,6 +109,7 @@ impl SecurityPolicy {
             connect_extras,
             img_extras,
             script_hashes,
+            hsts: config.hsts,
         }
     }
 
@@ -110,10 +125,11 @@ impl SecurityPolicy {
         }
         connect.extend(self.connect_extras.iter().cloned());
         // Preconnect hints in `crates/app/index.html` are connection hints.
-        // Chrome checks preconnect against connect-src. The stylesheet is
-        // applied from `document::Link` in `crates/app/src/main.rs` (index.html
-        // only preloads it). style-src allows the stylesheet host; font files
-        // are font-src.
+        // Chrome checks preconnect against connect-src. `index.html` preloads
+        // the font stylesheet; `document::Link` in `crates/app/src/main.rs`
+        // applies it after boot (URL in `crates/app/src/head.rs`
+        // `FONT_STYLESHEET` once #385 lands). style-src allows the stylesheet
+        // host; font files are font-src.
         connect.push("https://fonts.googleapis.com".to_string());
         connect.push("https://fonts.gstatic.com".to_string());
         dedupe(&mut connect);
@@ -141,9 +157,11 @@ impl SecurityPolicy {
         // 'unsafe-inline' then. Do not add it to script-src.
         //
         // https://fonts.googleapis.com is the Inter / Space Grotesk / JetBrains
-        // Mono stylesheet. `index.html` preloads it; `crates/app/src/main.rs`
-        // applies it with `document::Link`. Preconnect in index.html is only a
-        // connection hint. Font files load from fonts.gstatic.com (font-src below).
+        // Mono stylesheet. `index.html` preloads the font stylesheet;
+        // `document::Link` in `crates/app/src/main.rs` applies it after boot
+        // (URL in `crates/app/src/head.rs` `FONT_STYLESHEET` once #385 lands).
+        // Preconnect in index.html is only a connection hint. Font files load
+        // from fonts.gstatic.com (font-src below).
         let script_src = script.join(" ");
         let img_src = img.join(" ");
         let connect_src = connect.join(" ");
@@ -214,8 +232,10 @@ pub async fn apply(
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
 
-    // Only send HSTS in production — prevents breaking local dev over HTTP.
-    if std::env::var("PRODUCTION").is_ok() {
+    // Only send HSTS when PRODUCTION is truthy. Empty, 0, false, no, and off
+    // stay off so a compose file that sets the variable blank does not pin
+    // a dev host. The value is fixed at startup on `SecurityPolicy`.
+    if policy.hsts {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
@@ -529,6 +549,7 @@ mod tests {
             extra_connect_src: Some("ws://strfry:7777, https://evil.example;default-src *".into()),
             extra_img_src: Some("https://images.example".into()),
             script_hashes: inline_script_hashes(include_str!("../../app/index.html")),
+            hsts: false,
         })
     }
 
@@ -648,6 +669,7 @@ mod tests {
             extra_connect_src: None,
             extra_img_src: None,
             script_hashes: Vec::new(),
+            hsts: false,
         });
         let header = policy.policy(None);
         assert!(
@@ -839,6 +861,67 @@ mod tests {
                 !enforce_from_env(Some(off)),
                 "{off:?} must switch to report-only"
             );
+        }
+    }
+
+    #[test]
+    fn hsts_follows_the_production_boolean() {
+        for off in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("OFF"),
+        ] {
+            assert!(!hsts_from_env_value(off), "{off:?} must not enable HSTS");
+        }
+        for on in [
+            Some("1"),
+            Some("true"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+            Some("production"),
+        ] {
+            assert!(hsts_from_env_value(on), "{on:?} must enable HSTS");
+        }
+    }
+
+    #[tokio::test]
+    async fn hsts_header_is_sent_only_when_the_policy_says_so() {
+        for hsts in [false, true] {
+            let mut config_policy = test_policy(true);
+            config_policy.hsts = hsts;
+            let app = Router::new()
+                .route("/api/health", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    let policy = config_policy.clone();
+                    async move { apply(req, next, policy).await }
+                }));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let header = response.headers().get(header::STRICT_TRANSPORT_SECURITY);
+            if hsts {
+                assert_eq!(
+                    header.and_then(|v| v.to_str().ok()),
+                    Some("max-age=63072000; includeSubDomains; preload")
+                );
+            } else {
+                assert!(
+                    header.is_none(),
+                    "HSTS must stay off when production is off"
+                );
+            }
         }
     }
 
