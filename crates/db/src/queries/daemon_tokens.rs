@@ -18,10 +18,9 @@ struct DbDaemonToken {
     is_active: bool,
     created_at: SurrealDatetime,
     last_used_at: Option<SurrealDatetime>,
-    /// NONE means the token does not expire. Read by the validate query, not Rust.
+    /// NONE means the token does not expire.
     #[serde(default)]
     #[surreal(default)]
-    #[allow(dead_code)]
     expires_at: Option<SurrealDatetime>,
 }
 
@@ -30,6 +29,8 @@ fn db_to_token(db: DbDaemonToken) -> DaemonToken {
         .id
         .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
+    let expires_at = db.expires_at.map(chrono::DateTime::<chrono::Utc>::from);
+    let expired = expires_at.is_some_and(|at| at <= chrono::Utc::now());
     DaemonToken {
         id,
         member_id: db.member_id,
@@ -37,6 +38,8 @@ fn db_to_token(db: DbDaemonToken) -> DaemonToken {
         is_active: db.is_active,
         created_at: db.created_at.into(),
         last_used_at: db.last_used_at.map(|d| d.into()),
+        expires_at,
+        expired,
     }
 }
 

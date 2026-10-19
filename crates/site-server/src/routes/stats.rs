@@ -1779,4 +1779,90 @@ mod tests {
             before
         );
     }
+
+    /// Fields the current site page deserializes. Extra keys must stay ignorable.
+    #[derive(Debug, serde::Deserialize)]
+    struct CurrentSiteToken {
+        id: String,
+        member_id: String,
+        label: String,
+        is_active: bool,
+        created_at: chrono::DateTime<Utc>,
+        last_used_at: Option<chrono::DateTime<Utc>>,
+    }
+
+    #[tokio::test]
+    async fn token_list_reports_live_and_expired() {
+        let (state, member_id, _daemon, session) = member_reader().await;
+        insert_expiry_token(
+            &state,
+            &member_id,
+            "expired-list-token",
+            "expired",
+            "time::now() - 1d",
+        )
+        .await;
+        insert_expiry_token(&state, &member_id, "none-list-token", "legacy", "NONE").await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/stats/tokens")
+            .header(header::AUTHORIZATION, format!("Bearer {session}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = create_router(state).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let site: Vec<CurrentSiteToken> =
+            serde_json::from_slice(&bytes).expect("current site fields still parse");
+        assert_eq!(site.len(), 3);
+
+        let listed: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        let by_label = |label: &str| {
+            listed
+                .iter()
+                .find(|row| row["label"] == label)
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .clone()
+        };
+        let live = by_label("tracker");
+        let expired = by_label("expired");
+        let legacy = by_label("legacy");
+
+        let live_at = live["expires_at"]
+            .as_str()
+            .expect("live expires_at is an RFC 3339 string");
+        let live_exp = chrono::DateTime::parse_from_rfc3339(live_at).expect("RFC 3339");
+        assert!(live_exp > Utc::now());
+        assert_eq!(live["expired"], false);
+        assert_eq!(live["is_active"], true);
+
+        let expired_at = expired["expires_at"]
+            .as_str()
+            .expect("expired expires_at is an RFC 3339 string");
+        let expired_exp = chrono::DateTime::parse_from_rfc3339(expired_at).expect("RFC 3339");
+        assert!(expired_exp <= Utc::now());
+        assert_eq!(expired["expired"], true);
+        assert_eq!(expired["is_active"], true);
+
+        assert!(legacy["expires_at"].is_null());
+        assert_eq!(legacy["expired"], false);
+
+        let tracker = site
+            .iter()
+            .find(|row| row.label == "tracker")
+            .expect("live token");
+        assert!(tracker.is_active);
+        assert_eq!(tracker.id, live["id"]);
+        assert_eq!(tracker.member_id, member_id);
+        assert!(tracker.created_at <= Utc::now());
+        assert!(tracker.last_used_at.is_none());
+    }
 }

@@ -712,6 +712,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- NONE does not expire. A datetime at or before now is expired:
         -- upload and daemon-config answer 401 token_expired and do not bump
         -- last_used_at. Token-check and pack downloads keep one shared 401.
+        -- GET /api/stats/tokens returns expires_at (RFC 3339 or null) and expired.
         DEFINE FIELD OVERWRITE expires_at ON daemon_token TYPE option<datetime>;
 
         DEFINE INDEX IF NOT EXISTS dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
