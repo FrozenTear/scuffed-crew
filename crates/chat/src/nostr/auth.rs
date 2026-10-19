@@ -68,10 +68,7 @@ pub fn canonical_relay_url(raw: &str) -> Option<String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return None;
     }
-    let host = parsed.host_str()?;
-    if host.is_empty() {
-        return None;
-    }
+    let host = canonical_host(&parsed)?;
     // `Url::port` already hides the scheme default.
     let port = parsed.port();
     let path = parsed.path().trim_end_matches('/');
@@ -79,7 +76,7 @@ pub fn canonical_relay_url(raw: &str) -> Option<String> {
     let mut out = String::new();
     out.push_str(scheme);
     out.push_str("://");
-    out.push_str(host);
+    out.push_str(&host);
     if let Some(port) = port {
         out.push(':');
         out.push_str(&port.to_string());
@@ -94,6 +91,16 @@ pub fn canonical_relay_url(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// Host for a canonical relay URL. IPv6 is bracketed so the result parses.
+fn canonical_host(parsed: &url::Url) -> Option<String> {
+    match parsed.host()? {
+        url::Host::Domain(domain) if !domain.is_empty() => Some(domain.to_ascii_lowercase()),
+        url::Host::Domain(_) => None,
+        url::Host::Ipv4(addr) => Some(addr.to_string()),
+        url::Host::Ipv6(addr) => Some(format!("[{addr}]")),
+    }
+}
+
 /// This site's `/relay` URLs, derived from the public site base.
 ///
 /// An `https` (or `wss`) base becomes `wss://host/relay` and
@@ -101,6 +108,11 @@ pub fn canonical_relay_url(raw: &str) -> Option<String> {
 /// and `http://host/relay`. Both forms are already canonical: lowercase
 /// scheme and host, default port omitted, no trailing slash. An empty,
 /// unparseable, or non-http(s) base yields no URLs.
+///
+/// A path, query, or fragment on the base is dropped. The browser always
+/// opens this site's relay at the origin's `/relay` path, so
+/// `https://host/app?x=1` still becomes `wss://host/relay` and
+/// `https://host/relay`.
 pub fn site_auth_relay_urls(redirect_base: &str) -> Vec<String> {
     let Ok(parsed) = url::Url::parse(redirect_base.trim()) else {
         return Vec::new();
@@ -108,7 +120,7 @@ pub fn site_auth_relay_urls(redirect_base: &str) -> Vec<String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Vec::new();
     }
-    let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) else {
+    let Some(host) = canonical_host(&parsed) else {
         return Vec::new();
     };
     let schemes: &[&str] = match parsed.scheme() {
@@ -116,8 +128,8 @@ pub fn site_auth_relay_urls(redirect_base: &str) -> Vec<String> {
         "http" | "ws" => &["ws", "http"],
         _ => return Vec::new(),
     };
-    // Non-default for the source scheme. `canonical_relay_url` drops a port
-    // that is the default for the form we emit.
+    // `Url::port` is None for the base scheme's default port; canonical_relay_url
+    // drops a port that is the default for the emitted scheme.
     let port = parsed.port();
     let mut out = Vec::with_capacity(schemes.len());
     for scheme in schemes {
@@ -506,6 +518,49 @@ mod tests {
                 "ws://127.0.0.1:3000/relay".to_string(),
                 "http://127.0.0.1:3000/relay".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_drops_path_and_query() {
+        assert_eq!(
+            site_auth_relay_urls("https://OW.Example.com/app/chat?x=1#frag"),
+            vec![
+                "wss://ow.example.com/relay".to_string(),
+                "https://ow.example.com/relay".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_http_explicit_port_80_is_omitted() {
+        assert_eq!(
+            site_auth_relay_urls("http://relay.example:80/ignored?q=1"),
+            vec![
+                "ws://relay.example/relay".to_string(),
+                "http://relay.example/relay".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn site_auth_relay_urls_ipv6_keeps_brackets_and_matches() {
+        let urls = site_auth_relay_urls("http://[::1]:3000/app?x=1");
+        assert_eq!(
+            urls,
+            vec![
+                "ws://[::1]:3000/relay".to_string(),
+                "http://[::1]:3000/relay".to_string(),
+            ]
+        );
+        let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+        assert_eq!(
+            allowed_auth_relay("WS://[::1]:3000/relay/", refs.iter().copied()).as_deref(),
+            Some("ws://[::1]:3000/relay")
+        );
+        assert_eq!(
+            allowed_auth_relay("http://[::1]:3000/relay", refs.iter().copied()).as_deref(),
+            Some("http://[::1]:3000/relay")
         );
     }
 
