@@ -780,6 +780,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         .push(section_card(SPANNING_SECTION, app, demo))
         .push(save_footer(demo))
         .push(report_row())
+        .push(delete_my_data_section(app, demo))
         .push(uninstall_row());
 
     scroll_frame(layout, col)
@@ -1461,6 +1462,101 @@ fn report_row() -> Element<'static, Message> {
             .spacing(GRID_GAP),
         ),
     )
+}
+
+fn delete_my_data_section(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let form = &app.delete_data;
+    let mut body = column![hint(
+        "Deletes games, saved stats, crops, debug images, report kits, logs, and the sync token on this computer. The app stays installed. Downloaded hero, letter, word, and map packs stay."
+    )]
+    .spacing(8)
+    .width(Fill);
+
+    if let Some(notice) = &form.notice {
+        body = body.push(
+            text(notice.clone())
+                .size(SIZE_BODY)
+                .font(FONT_MEDIUM)
+                .color(TEXT),
+        );
+    }
+
+    if !demo {
+        if form.busy {
+            body = body.push(
+                text("Deleting local data.")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+            );
+        } else if !form.armed {
+            body = body.push(action_btn(
+                "Delete everything on this PC",
+                false,
+                Message::ArmDeleteData,
+            ));
+        } else {
+            body = body.push(
+                text("Type DELETE to confirm.")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(theme::DANGER),
+            );
+            body = body.push(
+                text_input("DELETE", &form.typed)
+                    .padding(Padding::from([8, 10]))
+                    .size(SIZE_BODY)
+                    .width(Length::Fixed(220.0))
+                    .on_input(Message::DeleteDataTyped),
+            );
+            body = body.push(
+                checkbox(form.keep_settings)
+                    .label("Keep my settings")
+                    .on_toggle(Message::ToggleKeepSettings)
+                    .size(16)
+                    .text_size(SIZE_BODY)
+                    .style(checkbox_style),
+            );
+            let mut actions = row![action_btn("Cancel", false, Message::CancelDeleteData)]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            if crate::delete_data::confirmation_accepted(&form.typed) {
+                actions = actions.push(
+                    button(
+                        text("Delete everything on this PC")
+                            .size(SIZE_META)
+                            .font(FONT_SEMIBOLD)
+                            .color(TEXT),
+                    )
+                    .padding(Padding::from([8, 16]))
+                    .style(theme::danger_btn(true))
+                    .on_press(Message::ConfirmDeleteData),
+                );
+            }
+            body = body.push(actions);
+        }
+
+        // Hidden until the site can delete synced stats.
+        // TODO: awaits the server endpoint. Do not call any server endpoint from here.
+        if crate::delete_data::site_delete_button_visible() {
+            body = body.push(site_delete_button());
+        }
+    }
+
+    settings_card("Delete my data", body.into())
+}
+
+fn site_delete_button() -> Element<'static, Message> {
+    button(
+        text(crate::delete_data::SITE_DELETE_LABEL)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(theme::DANGER),
+    )
+    .padding(Padding::from([8, 16]))
+    .style(theme::danger_btn(false))
+    .on_press(Message::DeleteSiteStats)
+    .into()
 }
 
 fn uninstall_row() -> Element<'static, Message> {

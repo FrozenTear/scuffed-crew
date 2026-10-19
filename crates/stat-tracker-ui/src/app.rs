@@ -240,6 +240,14 @@ pub enum Message {
     ConfirmClear,
     ClearData,
     ClearReady(Result<String, String>),
+    ArmDeleteData,
+    CancelDeleteData,
+    DeleteDataTyped(String),
+    ToggleKeepSettings(bool),
+    ConfirmDeleteData,
+    DeleteDataFinished(Result<String, String>),
+    /// Hidden until the site endpoint exists. The handler sends no request.
+    DeleteSiteStats,
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
@@ -424,6 +432,7 @@ pub struct TrackerApp {
     /// the daemon on every frame.
     pub installed_version: Option<String>,
     pub confirm_clear: bool,
+    pub delete_data: crate::delete_data::DeleteDataForm,
     pub tessdata_busy: bool,
     pub tessdata_installed: bool,
     /// Pack state, a refused toggle's reason, and the tracker's notice for
@@ -635,6 +644,7 @@ impl TrackerApp {
             uninstall_busy: false,
             report: None,
             confirm_clear: false,
+            delete_data: crate::delete_data::DeleteDataForm::default(),
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
             ocr_switch: settings::OcrSwitchView::default(),
@@ -1293,6 +1303,105 @@ impl TrackerApp {
                     self.games.clear();
                     self.health_status = self.health_now();
                 }
+                Task::none()
+            }
+            Message::ArmDeleteData => {
+                if self.fixture.is_some() || self.delete_data.busy {
+                    return Task::none();
+                }
+                self.delete_data.armed = true;
+                self.delete_data.notice = None;
+                Task::none()
+            }
+            Message::CancelDeleteData => {
+                if !self.delete_data.busy {
+                    self.delete_data.armed = false;
+                    self.delete_data.typed.clear();
+                }
+                Task::none()
+            }
+            Message::DeleteDataTyped(typed) => {
+                if !self.delete_data.busy {
+                    self.delete_data.typed = typed;
+                }
+                Task::none()
+            }
+            Message::ToggleKeepSettings(keep) => {
+                if !self.delete_data.busy {
+                    self.delete_data.keep_settings = keep;
+                }
+                Task::none()
+            }
+            Message::ConfirmDeleteData => {
+                if self.fixture.is_some() || self.delete_data.busy {
+                    return Task::none();
+                }
+                if !crate::delete_data::confirmation_accepted(&self.delete_data.typed) {
+                    self.replace_toast("Type DELETE to confirm. Nothing was removed.");
+                    self.toast_shown_at = Some(SystemTime::now());
+                    return Task::none();
+                }
+                let req = match crate::delete_data::request_for_app(
+                    &self.data_dir,
+                    self.delete_data.keep_settings,
+                    self.delete_data.typed.clone(),
+                ) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        self.replace_toast(err);
+                        self.toast_shown_at = Some(SystemTime::now());
+                        return Task::none();
+                    }
+                };
+                self.delete_data.busy = true;
+                Task::perform(crate::delete_data::wipe_local_data(req), |result| {
+                    Message::DeleteDataFinished(result.map(|copy| copy.to_string()))
+                })
+            }
+            Message::DeleteDataFinished(result) => {
+                self.delete_data.busy = false;
+                match result {
+                    Ok(copy) => {
+                        let keep = self.delete_data.keep_settings;
+                        self.delete_data.armed = false;
+                        self.delete_data.typed.clear();
+                        self.delete_data.notice = Some(copy.clone());
+                        self.games.clear();
+                        self.sessions_with_kit.clear();
+                        self.confirm_clear = false;
+                        self.preview = None;
+                        if keep {
+                            if let Ok(path) = Config::config_path()
+                                && let Ok(config) = Config::read_at(&path)
+                            {
+                                self.saved_config = config.clone();
+                                self.settings = SettingsForm::from_config(&config);
+                            }
+                        } else {
+                            let defaults = Config {
+                                data_dir: self.data_dir.clone(),
+                                ..Config::default()
+                            };
+                            self.saved_config = defaults.clone();
+                            self.settings = SettingsForm::from_config(&defaults);
+                        }
+                        self.settings.sync_token.clear();
+                        self.settings.sync_url.clear();
+                        self.health_status = self.health_now();
+                        self.replace_toast(copy);
+                        self.toast_shown_at = Some(SystemTime::now());
+                    }
+                    Err(err) => {
+                        self.replace_toast(err);
+                        self.toast_shown_at = Some(SystemTime::now());
+                    }
+                }
+                Task::none()
+            }
+            // TODO: awaits the server endpoint. This sends no request.
+            Message::DeleteSiteStats => {
+                self.replace_toast(crate::delete_data::refuse_site_delete());
+                self.toast_shown_at = Some(SystemTime::now());
                 Task::none()
             }
             Message::UpdateChecked(info) => {
@@ -2732,16 +2841,7 @@ fn uninstall_dialog_escape(
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
-    match daemon::stop_daemon(&req.data_dir).await {
-        Ok(()) => {}
-        Err(err) if err == "Tracker is not running" => {}
-        Err(_) => {
-            return Err("Could not stop the tracker. Nothing was removed.".into());
-        }
-    }
-    if daemon::daemon_running(&req.data_dir).is_some() {
-        return Err("The tracker is still running. Nothing was removed.".into());
-    }
+    daemon::stop_before_file_removal(&req.data_dir).await?;
     crate::uninstall::apply(&req)
 }
 
