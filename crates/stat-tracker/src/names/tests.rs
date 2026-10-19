@@ -106,7 +106,7 @@ fn grid(tiles: &[Vec<u8>], (w, h): (usize, usize)) -> Vec<u8> {
 }
 
 /// A pack cut from synthetic rows, with identity whitening.
-fn write_pack(dir: &std::path::Path, training: &[&str]) {
+pub(crate) fn write_pack(dir: &std::path::Path, training: &[&str]) {
     std::fs::create_dir_all(dir).unwrap();
     let mut tiles = Vec::new();
     let mut lines = String::new();
@@ -668,7 +668,7 @@ fn startup_returns_before_the_pack_load_and_keeps_the_cell_row() {
 }
 
 /// Rewrite a test pack's manifest `files` map into pack sync's array form.
-fn to_files_array(dir: &std::path::Path, drop: Option<&str>, bad_sha: Option<&str>) {
+pub(crate) fn to_files_array(dir: &std::path::Path, drop: Option<&str>, bad_sha: Option<&str>) {
     let p = dir.join("manifest.json");
     let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     let list: Vec<serde_json::Value> = m["files"]
@@ -785,4 +785,144 @@ fn a_pack_without_a_version_is_refused() {
             "{name}"
         );
     }
+}
+
+/// sha256 of the folder's manifest, as pack sync reports it.
+fn installed(dir: &std::path::Path, version: &str) -> InstalledNames {
+    let bytes = std::fs::read(dir.join("manifest.json")).unwrap();
+    InstalledNames {
+        version: version.to_string(),
+        manifest_sha256: format!("{:x}", Sha256::digest(&bytes)),
+    }
+}
+
+/// Swap a fresh synthetic pack into `data_dir`'s names-v1 folder, the way
+/// pack sync does, and say what was installed.
+fn install_synthetic(data_dir: &std::path::Path, tag: &str, training: &[&str]) -> InstalledNames {
+    let staging = data_dir.join("templates").join(format!(".names-v1-{tag}"));
+    write_pack(&staging, training);
+    let live = crate::names::pack::dir_in(data_dir);
+    crate::packs::swap_dir(&staging, &live).unwrap();
+    installed(&live, "test")
+}
+
+/// A 6v6 board, 1007 px high, with `names[i]` in row `i`.
+fn board_of(names: &[&str]) -> image::DynamicImage {
+    let mut board = image::RgbImage::from_pixel(600, 1007, image::Rgb([60, 20, 70]));
+    let slot = crate::ocr::preprocess::row_slot_height(1007, 6);
+    for (i, name) in names.iter().enumerate() {
+        let team_start = if i < 6 {
+            (1007.0 * 0.025) as u32
+        } else {
+            (1007.0 * 0.565) as u32
+        };
+        let y = team_start + (i % 6) as u32 * slot;
+        let row = row(name).to_rgb8();
+        image::imageops::replace(&mut board, &row, 0, i64::from(y));
+    }
+    image::DynamicImage::ImageRgb8(board)
+}
+
+/// The Soot first start on 0.5.0-rc.1: the reader starts with no pack, then
+/// pack sync installs names-v1. The install reload makes the next game's
+/// name come from the pack, tagged names-v1, without a restart.
+#[test]
+fn a_pack_installed_after_startup_reloads_and_tags_the_next_game_names_v1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let switch = NameSwitch::load(true, tmp.path());
+    let expected = install_synthetic(tmp.path(), "first", &["ABC", "CBA", "BAC"]);
+    switch.reload_installed(expected);
+    switch.wait_reload();
+    let pack = switch.pack().expect("the installed pack is loaded");
+    assert_eq!(pack.version, "test");
+    assert_eq!(pack.templates(), 9);
+
+    let names = [
+        "CAB", "BAC", "ACB", "CBA", "BCA", "ABC", "CAB", "BAC", "ACB", "CBA", "BCA", "ABC",
+    ];
+    let board = board_of(&names);
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::On);
+    let found = match_player_row(&board, 6, "ACB", &switch, BoardMatch::FullBoard, || {
+        panic!("a board of sure template names does not call Tesseract")
+    });
+    drop(off);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer.as_str())),
+        Some((2, "names-v1"))
+    );
+}
+
+/// Vision's review ask: a reload whose folder does not match what sync
+/// installed leaves the current reader running, with no downgrade.
+#[test]
+fn a_reload_that_fails_its_check_keeps_the_current_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
+    let before = switch.pack().expect("startup pack");
+
+    // A newer pack lands, but the manifest is not the one sync verified.
+    let mut wrong = install_synthetic(tmp.path(), "wrong-sha", &["ABC", "CBA"]);
+    wrong.manifest_sha256 = "0".repeat(64);
+    switch.reload_installed(wrong);
+    switch.wait_reload();
+    assert!(std::sync::Arc::ptr_eq(&before, &switch.pack().unwrap()));
+
+    // The right manifest, but a file on disk no longer matches it.
+    let good = install_synthetic(tmp.path(), "torn", &["ABC", "CBA"]);
+    let live = crate::names::pack::dir_in(tmp.path());
+    let mut glyphs = std::fs::read(live.join("glyphs.txt")).unwrap();
+    glyphs[0] ^= 1;
+    std::fs::write(live.join("glyphs.txt"), glyphs).unwrap();
+    switch.reload_installed(good);
+    switch.wait_reload();
+    assert!(std::sync::Arc::ptr_eq(&before, &switch.pack().unwrap()));
+
+    // Another version than the list gave.
+    let mut other = install_synthetic(tmp.path(), "version", &["ABC", "CBA"]);
+    other.version = "full-20990101".into();
+    switch.reload_installed(other);
+    switch.wait_reload();
+    assert!(std::sync::Arc::ptr_eq(&before, &switch.pack().unwrap()));
+
+    // And one that checks out replaces it.
+    let fine = install_synthetic(tmp.path(), "fine", &["ABC", "CBA"]);
+    switch.reload_installed(fine);
+    switch.wait_reload();
+    let after = switch.pack().unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&before, &after));
+    assert_eq!(after.templates(), 6);
+    // A read that took the old pack before the swap still holds it whole.
+    assert_eq!(before.templates(), 3);
+}
+
+/// With no pack in hand, a refused reload leaves the reader on ocr-v1.
+#[test]
+fn a_refused_reload_with_no_pack_stays_on_ocr_v1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let switch = NameSwitch::load(true, tmp.path());
+    let live = crate::names::pack::dir_in(tmp.path());
+    let mut bad = install_synthetic(tmp.path(), "bad", &["ABC"]);
+    // The 0.5.0-rc.1 install: the data files without their manifest.
+    std::fs::remove_file(live.join("manifest.json")).unwrap();
+    bad.manifest_sha256 = "0".repeat(64);
+    switch.reload_installed(bad);
+    switch.wait_reload();
+    assert!(switch.pack().is_none());
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert_eq!(found.map(|m| m.recognizer), Some(NameRecognizer::OcrV1));
+}
+
+/// The switch off ignores an install.
+#[test]
+fn the_switch_off_ignores_an_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let switch = NameSwitch::off();
+    let expected = install_synthetic(tmp.path(), "off", &["ABC"]);
+    switch.reload_installed(expected);
+    assert!(switch.pack().is_none());
 }

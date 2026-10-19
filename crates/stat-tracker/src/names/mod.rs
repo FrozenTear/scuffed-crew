@@ -179,15 +179,32 @@ pub fn load_installed(data_dir: &std::path::Path) -> Result<NamePack, PackError>
     NamePack::load(&pack::dir_in(data_dir))
 }
 
-/// The name reader's pack, loaded once and then kept.
+/// What pack sync installed, for [`LiveNames::reload_installed`]: the
+/// version on the list and the sha256 of the manifest it checked every file
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledNames {
+    pub version: String,
+    pub manifest_sha256: String,
+}
+
+/// The name reader's pack, loaded in the background and then kept.
 ///
 /// In memory a loaded pack is about 29 MB. The tar on disk is 1,966,080
 /// bytes. The load takes about 250 ms, so a name read must not load it
 /// again. Startup starts that load on a background thread and does not
-/// wait. When pack sync installs the folder later, the next name read
-/// starts the same one load and still uses the Tesseract rows already in
-/// hand; after that load the cached pack is what every later read uses.
-/// A folder swapped in after that is left for the next tracker start.
+/// wait. When the folder is not there at startup, the first name read that
+/// sees it starts the same load and still uses the Tesseract rows already
+/// in hand.
+///
+/// Pack sync calls [`Self::reload_installed`] once it has installed a
+/// names-v1 pack (the daemon wires it to the pack keeper), so a pack that
+/// lands after startup, or a newer one, is loaded without a restart. That
+/// reload checks the folder against what sync installed before it swaps
+/// the pack in, and a pack that fails leaves the current one in use. The
+/// swap replaces one `Arc` under a lock: a read in flight keeps the pack it
+/// started with. Nothing else reloads: a folder changed by hand waits for
+/// the next start.
 #[derive(Debug, Clone)]
 pub struct LiveNames {
     inner: Arc<LiveInner>,
@@ -200,8 +217,12 @@ struct LiveInner {
     /// `true` once a pack is cached, or the one late load has finished.
     /// Further reads do not look at the folder.
     settled: std::sync::atomic::AtomicBool,
-    /// The one late load. `Some` means it has been started, finished or not.
+    /// The latest background load. `Some` means one has been started,
+    /// finished or not, so a name read does not start the late load.
     loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Held for the whole of every load, so two loads never interleave and
+    /// the last one to run is the one that reflects the folder.
+    loading: std::sync::Mutex<()>,
     #[cfg(test)]
     spawns: std::sync::atomic::AtomicUsize,
     /// When set, the background load waits until the test releases it.
@@ -235,6 +256,12 @@ impl LoadGate {
 impl LiveInner {
     fn cache(&self, pack: NamePack) {
         tracing::info!(templates = pack.templates(), "names-v1 pack loaded");
+        self.swap_in(pack);
+    }
+
+    /// Replace the cached pack in one step. A reader holding the old `Arc`
+    /// finishes its board with it.
+    fn swap_in(&self, pack: NamePack) {
         *self.cached.write().unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(pack));
         self.settled
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -245,6 +272,81 @@ impl LiveInner {
         self.settled
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    fn cached_templates(&self) -> usize {
+        self.cached
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .map_or(0, |pack| pack.templates())
+    }
+
+    /// Load the folder for [`LiveNames::reload_installed`] and swap it in
+    /// when it is the pack sync installed. Blocking. Logs counts and the
+    /// reason only, never a letter or a name.
+    fn reload(&self, expected: &InstalledNames) {
+        let _loading = self.loading.lock().unwrap_or_else(|err| err.into_inner());
+        match load_checked(&self.dir, expected) {
+            Ok(pack) => {
+                tracing::info!(
+                    templates = pack.templates(),
+                    previous_templates = self.cached_templates(),
+                    "names-v1 pack reloaded after install"
+                );
+                self.swap_in(pack);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    reason = %err,
+                    kept_templates = self.cached_templates(),
+                    "names-v1 reload refused; the name reader keeps the pack it has"
+                );
+                // The late load is not needed any more: this folder was
+                // just looked at.
+                self.settled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+/// sha256 of the `manifest.json` in `dir`, read with the loader's cap.
+fn manifest_sha256(dir: &std::path::Path) -> Result<String, PackError> {
+    use sha2::{Digest, Sha256};
+    let path = dir.join("manifest.json");
+    let len = std::fs::metadata(&path)
+        .map_err(|_| PackError::Invalid("missing manifest.json".into()))?
+        .len();
+    if len > 64 * 1024 {
+        return Err(PackError::Invalid("manifest.json size".into()));
+    }
+    let bytes =
+        std::fs::read(&path).map_err(|_| PackError::Invalid("missing manifest.json".into()))?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// [`NamePack::load`] (every file's size and sha256 against the folder's
+/// manifest), plus: that manifest is the one pack sync verified the files
+/// against, before and after the load, and the loaded version is the
+/// installed one.
+fn load_checked(dir: &std::path::Path, expected: &InstalledNames) -> Result<NamePack, PackError> {
+    if !dir.is_dir() {
+        return Err(PackError::Missing);
+    }
+    let mismatch = || PackError::Invalid("manifest.json sha256 is not the installed one".into());
+    if manifest_sha256(dir)? != expected.manifest_sha256 {
+        return Err(mismatch());
+    }
+    let pack = NamePack::load(dir)?;
+    if manifest_sha256(dir)? != expected.manifest_sha256 {
+        return Err(mismatch());
+    }
+    if pack.version != expected.version {
+        return Err(PackError::Invalid(
+            "version is not the installed one".into(),
+        ));
+    }
+    Ok(pack)
 }
 
 impl LiveInner {
@@ -270,6 +372,7 @@ impl LiveNames {
                 cached: std::sync::RwLock::new(None),
                 settled: std::sync::atomic::AtomicBool::new(false),
                 loader: std::sync::Mutex::new(None),
+                loading: std::sync::Mutex::new(()),
                 #[cfg(test)]
                 spawns: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
@@ -343,6 +446,7 @@ impl LiveNames {
             .name("name-pack-reload".into())
             .spawn(move || {
                 inner.wait_for_test_gate();
+                let _loading = inner.loading.lock().unwrap_or_else(|err| err.into_inner());
                 match NamePack::load(&inner.dir) {
                     Ok(pack) => inner.cache(pack),
                     Err(err) => inner.give_up(&err),
@@ -361,6 +465,35 @@ impl LiveNames {
                 tracing::warn!(error = %err, "names-v1 reload not started");
                 false
             }
+        }
+    }
+
+    /// Load the folder again on a background thread, after pack sync
+    /// installed `expected`, and swap it in when it checks out (see
+    /// [`load_checked`]). Returns at once. A folder that does not match
+    /// leaves the current pack in use, or none, and the reads go on as
+    /// before.
+    pub fn reload_installed(&self, expected: InstalledNames) {
+        let inner = Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("name-pack-reload".into())
+            .spawn(move || inner.reload(&expected));
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                self.inner
+                    .spawns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut loader = self
+                    .inner
+                    .loader
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                // An earlier load keeps running detached; `loading` orders
+                // it before or after this one.
+                *loader = Some(handle);
+            }
+            Err(err) => tracing::warn!(error = %err, "names-v1 reload not started"),
         }
     }
 
@@ -386,8 +519,9 @@ impl LiveNames {
 #[derive(Debug, Clone)]
 pub struct NameSwitch {
     pub enabled: bool,
-    /// Shared pack. `None` when the switch is off. Loaded once at startup,
-    /// or once when the folder appears later.
+    /// Shared pack. `None` when the switch is off. Loaded at startup, or
+    /// when the folder appears later, and again after each install pack
+    /// sync reports ([`Self::reload_installed`]).
     live: Option<LiveNames>,
 }
 
@@ -402,9 +536,9 @@ impl NameSwitch {
     /// Start the load and return. A missing or refused pack is logged (template
     /// count and the reason, never a player name) on the background thread,
     /// or here when the folder is not there yet. A pack that lands later is
-    /// loaded once by [`Self::pack`]. Until that load finishes, name reads
-    /// use the Tesseract rows already in hand. A cached pack is not loaded
-    /// again.
+    /// loaded by [`Self::reload_installed`] (pack sync calls it), or else
+    /// once by [`Self::pack`]. Until a load finishes, name reads use the
+    /// Tesseract rows already in hand.
     pub fn load(enabled: bool, data_dir: &std::path::Path) -> Self {
         if !enabled {
             return Self::off();
@@ -426,6 +560,14 @@ impl NameSwitch {
             },
             release,
         )
+    }
+
+    /// Reload the pack after pack sync installed `expected`. Does nothing
+    /// when the switch is off. See [`LiveNames::reload_installed`].
+    pub fn reload_installed(&self, expected: InstalledNames) {
+        if let Some(live) = &self.live {
+            live.reload_installed(expected);
+        }
     }
 
     /// The cached pack. `None` when the switch is off, the folder is missing
@@ -713,4 +855,4 @@ pub fn match_player_row(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

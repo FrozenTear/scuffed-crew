@@ -38,11 +38,12 @@
 //! re-loads its hero set once heroes-v2 or heroes-v2-1080 is swapped in
 //! ([`crate::shadow::heroes::LiveHeroSet`]), and loads maps-v1 the same way
 //! once it lands ([`crate::shadow::banner::LiveMaps`]). The name reader
-//! loads names-v1 once ([`crate::names::LiveNames`]), on a background
-//! thread at startup or the first time the folder is there, and keeps
-//! that pack. The daemon does not wait. It reads with the Tesseract rows
-//! already in hand until that load finishes, and does not load the pack
-//! again on later reads. The setup
+//! loads names-v1 ([`crate::names::LiveNames`]) on a background thread at
+//! startup when the folder is there, and again each time the keeper
+//! installs a names-v1 pack ([`PackKeeper::on_installed`]): that reload
+//! checks the installed files against the manifest sync verified and swaps
+//! the pack in only when they match. The daemon does not wait. It reads
+//! with the Tesseract rows already in hand until a load finishes. The setup
 //! guide ([`sync_reader_packs`]) syncs all of them. Every run
 //! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
 //! at the same time is [`PackSync::Busy`] and sends no request.
@@ -383,6 +384,22 @@ pub fn extra_packs_message(ready: usize, listed: usize) -> String {
     format!("Extra reader packs ready: {ready} of {listed}.")
 }
 
+/// One pack a run swapped into place, for [`PackKeeper::on_installed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPack {
+    /// List name, such as `names-v1.tar`.
+    pub name: &'static str,
+    /// The version the list and the inner manifest both gave.
+    pub version: String,
+    /// sha256 of the inner `manifest.json` this install checked every file
+    /// against. A reader that loads the folder again can check the manifest
+    /// it finds on disk is that same one.
+    pub manifest_sha256: String,
+}
+
+/// Called by [`PackKeeper`] for every pack it installs.
+type InstalledHook = Box<dyn Fn(&InstalledPack) + Send>;
+
 /// Which packs one run covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
@@ -650,7 +667,7 @@ fn missing_packs(data_dir: &Path, report: &PackReport) -> Vec<&'static str> {
     let versions = read_versions(data_dir);
     PACKS
         .iter()
-        .filter(|spec| !(versions.contains_key(spec.name) && spec.dir_in(data_dir).is_dir()))
+        .filter(|spec| !(versions.contains_key(spec.name) && in_place(data_dir, spec)))
         .filter(|spec| !report.get(spec.name).is_some_and(PackSync::is_settled))
         .map(|spec| spec.name)
         .collect()
@@ -891,6 +908,7 @@ pub struct PackKeeper {
     /// The site has answered 429: one request per try from here on.
     paced: bool,
     first_try: Option<tokio::sync::oneshot::Sender<FirstTry>>,
+    on_installed: Option<InstalledHook>,
 }
 
 impl PackKeeper {
@@ -914,6 +932,7 @@ impl PackKeeper {
             refused: Refused::new(),
             paced: false,
             first_try: None,
+            on_installed: None,
         };
         if let Some(startup) = startup {
             let goes_on = startup.goes_on();
@@ -954,6 +973,16 @@ impl PackKeeper {
         let (done, first) = tokio::sync::oneshot::channel();
         self.first_try = Some(done);
         first
+    }
+
+    /// Run `hook` for every pack this job installs, right after it is
+    /// swapped into place and its version is stored. The daemon uses it to
+    /// reload the name reader once names-v1 lands, so a first start does not
+    /// need a second one. `hook` runs on the job's task: it must hand any
+    /// slow work to a thread of its own. Call it before [`Self::run`]. A
+    /// second call replaces the first hook.
+    pub fn on_installed(&mut self, hook: impl Fn(&InstalledPack) + Send + 'static) {
+        self.on_installed = Some(Box::new(hook));
     }
 
     /// Meant for `tokio::spawn`. Returns once every pack is settled.
@@ -1041,6 +1070,11 @@ impl PackKeeper {
         )
         .await;
         log_installed(&run.report);
+        if let Some(hook) = &self.on_installed {
+            for installed in &run.installed {
+                hook(installed);
+            }
+        }
         self.learn(&credentials.server_url, &mut run, age);
         Tried {
             report: run.report,
@@ -1123,6 +1157,8 @@ struct SyncRun {
     held_back: usize,
     /// Downloads this run refused for a fixed reason.
     refused: Vec<(PackListEntry, String)>,
+    /// Packs this run swapped into place, in [`PACKS`] order.
+    installed: Vec<InstalledPack>,
 }
 
 impl SyncRun {
@@ -1138,6 +1174,7 @@ impl SyncRun {
             stale: false,
             held_back: 0,
             refused: Vec::new(),
+            installed: Vec::new(),
         }
     }
 }
@@ -1221,6 +1258,7 @@ async fn run_sync(
     let mut stale = false;
     let mut held_back = 0;
     let mut refused = Vec::new();
+    let mut installed = Vec::new();
     for spec in scope.specs() {
         let entry = match select_pack(&entries, spec) {
             Ok(entry) => entry,
@@ -1245,6 +1283,14 @@ async fn run_sync(
             continue;
         } else {
             let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
+                Step::Installed(manifest_sha256) => {
+                    installed.push(InstalledPack {
+                        name: spec.name,
+                        version: entry.version.clone(),
+                        manifest_sha256,
+                    });
+                    PackSync::Installed
+                }
                 Step::Done(outcome) => outcome,
                 Step::Gone => {
                     stale = true;
@@ -1295,6 +1341,7 @@ async fn run_sync(
         stale,
         held_back,
         refused,
+        installed,
     }
 }
 
@@ -1333,7 +1380,21 @@ fn is_current(
     installed
         .get(spec.name)
         .is_some_and(|version| version == &entry.version)
-        && spec.dir_in(data_dir).is_dir()
+        && in_place(data_dir, spec)
+}
+
+/// The pack's folder is there, with its `manifest.json` when the layout
+/// keeps one ([`PackLayout::keeps_manifest`]). 0.5.0-rc.1 installed
+/// names-v1 without its manifest, which the name reader refuses; that
+/// folder is not in place, so the next sync downloads the pack again.
+fn in_place(data_dir: &Path, spec: &PackSpec) -> bool {
+    let dir = spec.dir_in(data_dir);
+    dir.is_dir()
+        && (!spec.layout.keeps_manifest()
+            || dir
+                .join("manifest.json")
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.is_file()))
 }
 
 /// File locked for the length of one sync, so the daemon and the app never
@@ -1476,6 +1537,8 @@ fn sweep_stale_staging(data_dir: &Path) {
 
 /// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
 enum Step {
+    /// Swapped into place. Carries the sha256 of the inner manifest.
+    Installed(String),
     Done(PackSync),
     /// The site listed the pack and then had no such file (404). The pack
     /// failed, and the list is out of date.
@@ -1523,8 +1586,11 @@ async fn sync_one(
     let (data_dir, entry) = (data_dir.to_path_buf(), entry.clone());
     let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes))
         .await
-        .unwrap_or_else(|| PackSync::Failed(PACK_FAILED.to_string()));
-    Step::Done(installed)
+        .unwrap_or_else(|| Err(PackSync::Failed(PACK_FAILED.to_string())));
+    match installed {
+        Ok(manifest_sha256) => Step::Installed(manifest_sha256),
+        Err(outcome) => Step::Done(outcome),
+    }
 }
 
 /// Run blocking file work (hashing, unpacking, fsync) on tokio's blocking
@@ -1536,29 +1602,40 @@ async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 
 /// The file side of one download: check the bytes against the list, unpack
 /// into a staging folder and swap it in. Blocking; see [`off_runtime`].
-fn install_pack(data_dir: &Path, spec: &PackSpec, entry: &PackListEntry, bytes: &[u8]) -> PackSync {
+/// `Ok` carries the sha256 of the inner manifest; an `Err` is the
+/// [`PackSync::Failed`] to report.
+fn install_pack(
+    data_dir: &Path,
+    spec: &PackSpec,
+    entry: &PackListEntry,
+    bytes: &[u8],
+) -> Result<String, PackSync> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
     let live = spec.dir_in(data_dir);
     let parent = pack_parent(data_dir, spec);
     // List size and sha256 are checked before any file is written.
     if bytes.len() as u64 != entry.size || sha256_hex(bytes) != entry.sha256 {
-        return PackSync::Failed(PACK_MISMATCH.to_string());
+        return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
     }
     let staging = parent.join(format!(".{}-next-{}", dir_label(&live), unique_suffix()));
     if std::fs::create_dir(&staging).is_err() {
-        return PackSync::Failed(PACK_FAILED.to_string());
+        return Err(PackSync::Failed(PACK_FAILED.to_string()));
     }
-    if let Err(message) = unpack_pack(bytes, spec.layout, &entry.name, &entry.version, &staging) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return PackSync::Failed(message.to_string());
-    }
+    let manifest_sha256 =
+        match unpack_pack(bytes, spec.layout, &entry.name, &entry.version, &staging) {
+            Ok(sha) => sha,
+            Err(message) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(PackSync::Failed(message.to_string()));
+            }
+        };
     if let Err(message) = swap_dir(&staging, &live) {
         let _ = std::fs::remove_dir_all(&staging);
         tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
-        return PackSync::Failed(PACK_FAILED.to_string());
+        return Err(PackSync::Failed(PACK_FAILED.to_string()));
     }
-    PackSync::Installed
+    Ok(manifest_sha256)
 }
 
 /// The folder a pack's live, staging and backup folders sit in.
@@ -1717,7 +1794,7 @@ fn unpack_pack(
     expected_name: &str,
     expected_version: &str,
     staging: &Path,
-) -> Result<(), &'static str> {
+) -> Result<String, &'static str> {
     let files = read_ustar(bytes, layout)?;
     if files
         .iter()
@@ -1783,7 +1860,19 @@ fn unpack_pack(
     if seen != listed {
         return Err(PACK_MISMATCH);
     }
-    Ok(())
+    if layout.keeps_manifest() {
+        // The bytes checked above, so the reader sees the manifest every
+        // file was just verified against.
+        let dest = staging.join("manifest.json");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|_| PACK_FAILED)?;
+        file.write_all(manifest_bytes).map_err(|_| PACK_FAILED)?;
+        file.sync_all().map_err(|_| PACK_FAILED)?;
+    }
+    Ok(sha256_hex(manifest_bytes))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1988,9 +2077,19 @@ pub(crate) fn is_glyph_name(raw: &str) -> bool {
 }
 
 impl PackLayout {
+    /// `true` when [`unpack_pack`] stores the inner `manifest.json` in the
+    /// pack folder, because the reader needs it. Only names-v1: its loader
+    /// ([`crate::names::pack`]) reads the canvas, the glyph and mark counts,
+    /// the params and every file's sha256 from it. The other layouts keep
+    /// alpha.6's folders, without the manifest.
+    pub fn keeps_manifest(self) -> bool {
+        matches!(self, Self::Names)
+    }
+
     /// The path a file is stored under, or [`PACK_UNSAFE`] when the layout
     /// does not allow it. `manifest.json` is accepted at the top level for
-    /// every layout; [`unpack_pack`] reads it and never writes it.
+    /// every layout; [`unpack_pack`] reads it and writes it only for a
+    /// layout that [`Self::keeps_manifest`].
     fn file_path(self, raw: &str) -> Result<String, &'static str> {
         if self == Self::HeroesV1 {
             return heroes_v1_file_path(raw);
@@ -2277,7 +2376,7 @@ mod tests {
             "1",
             dir.path(),
         )
-        .map(|()| dir)
+        .map(|_| dir)
     }
 
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -3584,7 +3683,12 @@ mod tests {
                     spec.name
                 );
             }
-            assert!(!live.join("manifest.json").exists());
+            assert_eq!(
+                live.join("manifest.json").exists(),
+                spec.layout.keeps_manifest(),
+                "only names-v1 keeps its manifest: {}",
+                spec.name
+            );
         }
         assert_eq!(served.hits(), PACKS.len());
         let versions = stored_versions(dir.path());
@@ -6712,5 +6816,150 @@ mod tests {
         let mut expected_b = vec![ms(13_250), ms(12_250), ms(22_250), ms(42_250)];
         expected_b.extend([secs(10); 7]);
         assert_eq!(*waits_b.lock().unwrap(), expected_b);
+    }
+
+    /// A names-v1 tar shaped like the published one: the synthetic letter
+    /// pack from the name reader's tests, with its manifest at the top
+    /// level. Returns the tar and the manifest bytes.
+    fn names_tar(version: &str) -> (Vec<u8>, Vec<u8>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("names-v1");
+        crate::names::tests::write_pack(&dir, &["ABC", "CBA", "BAC"]);
+        crate::names::tests::to_files_array(&dir, None, None);
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = serde_json::Value::String(version.to_string());
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let mut bytes = ustar_file("manifest.json", &manifest);
+        for file in [
+            "glyphs.png",
+            "glyphs.txt",
+            "marks.png",
+            "marks.txt",
+            "compose.txt",
+            "whiten.f32",
+        ] {
+            bytes.extend(ustar_file(file, &std::fs::read(dir.join(file)).unwrap()));
+        }
+        (finish_tar(bytes), manifest)
+    }
+
+    /// Every pack from [`all_packs`], with names-v1 replaced by a real
+    /// (synthetic) letter pack.
+    fn all_packs_with_real_names(version: &str) -> (Vec<serde_json::Value>, ServedFiles, Vec<u8>) {
+        let (mut list, mut files, _) = all_packs();
+        let (tar, manifest) = names_tar(version);
+        let name = crate::names::pack::PACK_NAME;
+        for entry in &mut list {
+            if entry["name"] == name {
+                *entry = entry_json(name, version, &tar);
+            }
+        }
+        files.insert(name.to_string(), (200, tar));
+        (list, files, manifest)
+    }
+
+    /// The rc.1 bug on Soot: names-v1 was installed without its
+    /// `manifest.json`, so the name reader refused it. The manifest is kept
+    /// now, byte for byte, and the reader loads the installed folder.
+    #[tokio::test]
+    async fn names_v1_keeps_its_manifest_and_the_name_reader_loads_it() {
+        let (list, files, manifest) = all_packs_with_real_names("full-20261019");
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(
+            outcome(&report, crate::names::pack::PACK_NAME),
+            &PackSync::Installed
+        );
+        let live = crate::names::pack::dir_in(dir.path());
+        assert_eq!(std::fs::read(live.join("manifest.json")).unwrap(), manifest);
+        let heroes = pack_spec(HEROES_PACK_NAME).unwrap().dir_in(dir.path());
+        assert!(
+            !heroes.join("manifest.json").exists(),
+            "heroes-v1 still has no manifest in its folder"
+        );
+        let switch = crate::names::NameSwitch::load(true, dir.path());
+        switch.wait_reload();
+        let pack = switch.pack().expect("the installed names-v1 loads");
+        assert_eq!(pack.version, "full-20261019");
+        assert_eq!(pack.templates(), 9);
+    }
+
+    /// A folder rc.1 left behind (the six files, no manifest, the version
+    /// stored) is not current: the next sync downloads the pack again.
+    #[tokio::test]
+    async fn a_names_folder_without_its_manifest_is_downloaded_again() {
+        let (list, files, manifest) = all_packs_with_real_names("full-20261019");
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            outcome(
+                &sync(&served, dir.path()).await,
+                crate::names::pack::PACK_NAME
+            ),
+            &PackSync::Installed
+        );
+        let live = crate::names::pack::dir_in(dir.path());
+        std::fs::remove_file(live.join("manifest.json")).unwrap();
+        let spec = pack_spec(crate::names::pack::PACK_NAME).unwrap();
+        assert!(!in_place(dir.path(), spec));
+        assert_eq!(
+            missing_packs(dir.path(), &PackReport { packs: Vec::new() }),
+            vec![crate::names::pack::PACK_NAME]
+        );
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(
+            outcome(&report, crate::names::pack::PACK_NAME),
+            &PackSync::Installed
+        );
+        assert_eq!(outcome(&report, HEROES_PACK_NAME), &PackSync::Current);
+        assert_eq!(std::fs::read(live.join("manifest.json")).unwrap(), manifest);
+    }
+
+    /// The keeper tells the daemon about every install, with the version
+    /// and the sha256 of the manifest the files were checked against, and
+    /// the name reader that hook reloads ends up on names-v1.
+    #[tokio::test]
+    async fn the_keeper_reports_installs_and_the_name_reader_reloads() {
+        let (list, files, manifest) = all_packs_with_real_names("full-20261019");
+        let served = serve(list, files);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let switch = crate::names::NameSwitch::load(true, dir.path());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let base = served.base.clone();
+        let mut keeper = PackKeeper::new(dir.path(), None, move || {
+            Some(PackCredentials {
+                server_url: base.clone(),
+                token: TOKEN.to_string(),
+            })
+        });
+        let (log, names) = (seen.clone(), switch.clone());
+        keeper.on_installed(move |installed| {
+            log.lock().unwrap().push(installed.clone());
+            if installed.name == crate::names::pack::PACK_NAME {
+                names.reload_installed(crate::names::InstalledNames {
+                    version: installed.version.clone(),
+                    manifest_sha256: installed.manifest_sha256.clone(),
+                });
+            }
+        });
+        keeper.run().await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().map(|p| p.name).collect::<Vec<_>>(),
+            PACKS.iter().map(|spec| spec.name).collect::<Vec<_>>(),
+            "one report per install, in PACKS order"
+        );
+        let names_v1 = seen
+            .iter()
+            .find(|p| p.name == crate::names::pack::PACK_NAME)
+            .unwrap();
+        assert_eq!(names_v1.version, "full-20261019");
+        assert_eq!(names_v1.manifest_sha256, sha256_hex(&manifest));
+        switch.wait_reload();
+        let pack = switch.pack().expect("reloaded without a restart");
+        assert_eq!(pack.version, "full-20261019");
     }
 }

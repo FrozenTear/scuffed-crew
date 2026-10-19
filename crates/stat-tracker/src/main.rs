@@ -467,6 +467,13 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // heroes-v1 syncs here; the other packs sync in the background once
     // capture is up. The new reader picks up heroes-v2 and heroes-v2-1080
     // on a later board when they land (`shadow::heroes::LiveHeroSet`).
+    //
+    // The name reader is made here, before the pack keeper, so the keeper
+    // can reload it once names-v1 lands. Returns immediately: the names-v1
+    // load, when the folder is already there, runs on one background
+    // thread, and reads before it finishes reuse the Tesseract rows
+    // already in hand.
+    let name_switch = names::NameSwitch::load(config.name_reader, &config.data_dir);
     let mut extra_packs = None;
     if let Some(client) = &sync_client {
         let creds = client.credentials();
@@ -505,11 +512,18 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         // (it does that while sync is paused on a rejected token) the job
         // uses it on its next try.
         let (data_dir, client) = (config.data_dir.clone(), client.clone());
-        extra_packs = Some(stat_tracker::packs::PackKeeper::new(
-            &config.data_dir,
-            pack_startup,
-            move || pack_credentials(&data_dir, &client),
-        ));
+        let mut keeper =
+            stat_tracker::packs::PackKeeper::new(&config.data_dir, pack_startup, move || {
+                pack_credentials(&data_dir, &client)
+            });
+        // A names-v1 install (a first start, or a newer pack) reloads the
+        // name reader without a restart. 0.5.0-rc.1 loaded it once at
+        // startup, a second before the keeper installed the pack.
+        let names_on_install = name_switch.clone();
+        keeper.on_installed(move |installed| {
+            reload_names_after_install(&names_on_install, installed);
+        });
+        extra_packs = Some(keeper);
     }
 
     // Single wiring point for OCR debug dumps, the lib reads this switch
@@ -665,10 +679,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         shadow: shadow::worker::ShadowWorker::start_for_reader(&config, reader),
         use_new_reader,
         own_name: open_own_name_seeds(use_new_reader, &config),
-        // Returns immediately. The names-v1 load, when the folder is already
-        // there, runs on one background thread. Reads before it finishes
-        // reuse the Tesseract rows already in hand.
-        names: names::NameSwitch::load(config.name_reader, &config.data_dir),
+        // Made before the pack keeper, which reloads it on a names-v1
+        // install.
+        names: name_switch,
     });
     // Watches the reader packs while OCR is asked off: a pack that goes away
     // holds its reads and is named in the status file. It never turns OCR on.
@@ -688,6 +701,21 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         guard.finish();
     }
     result
+}
+
+/// The pack keeper's install hook: a names-v1 install reloads the name
+/// reader on its own thread. Other packs have readers that watch their
+/// folders, so nothing is done for them here.
+fn reload_names_after_install(
+    switch: &names::NameSwitch,
+    installed: &stat_tracker::packs::InstalledPack,
+) {
+    if installed.name == names::pack::PACK_NAME {
+        switch.reload_installed(names::InstalledNames {
+            version: installed.version.clone(),
+            manifest_sha256: installed.manifest_sha256.clone(),
+        });
+    }
 }
 
 /// Wait for `work`, at most `limit`. True when `stop` (SIGTERM or Ctrl+C at
