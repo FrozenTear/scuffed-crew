@@ -383,6 +383,12 @@ impl SyncClient {
             .map_err(|e| SyncUploadError::plain(e.to_string()))
     }
 
+    /// POST `/api/stats/upload`.
+    ///
+    /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
+    /// ([`isolate_rejected`], called from `try_sync_with`) bisects those
+    /// batches. This function sends one request. 413, 401, 403, and 429 are
+    /// not payload rejects. 429 and 503 keep `Retry-After`.
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],
@@ -547,9 +553,6 @@ fn clip_text(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
-/// Logged when every probed row in a pass comes back 400 or 422.
-pub const SERVER_REFUSING_UPLOADS: &str = "Server is refusing uploads";
-
 /// How many HTTP calls one sync pass may spend isolating 400/422 rows.
 /// `2 * ceil(log2(n)) + n` once the batch is larger than one row.
 pub fn isolation_request_budget(n: usize) -> usize {
@@ -560,11 +563,29 @@ pub fn isolation_request_budget(n: usize) -> usize {
     2 * (log2 as usize) + n
 }
 
+/// True when the server named one row of this request (`matches[<digits>]:`).
+/// The index is only valid for that body, so a named row is bisected rather
+/// than trusted as a stable id. A 400 or 422 without this prefix is a refusal
+/// of the request as a whole.
+pub fn payload_names_a_row(message: &str) -> bool {
+    let Some(rest) = message.trim().strip_prefix("matches[") else {
+        return false;
+    };
+    let Some(end) = rest.find("]:") else {
+        return false;
+    };
+    let index = &rest[..end];
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One row the server refused while splitting a batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedUpload {
     pub index: usize,
+    /// Server message, still carrying a `matches[n]:` prefix when the body had one.
     pub message: String,
+    /// JSON `code` when the body sent one. Absent for a plain validation message.
+    pub code: Option<String>,
 }
 
 /// Result of [`isolate_rejected`]. Indices are into the batch that was passed in.
@@ -573,22 +594,28 @@ pub struct UploadIsolation {
     pub accepted: Vec<usize>,
     pub rejected: Vec<RejectedUpload>,
     pub deferred: Vec<usize>,
-    /// 5xx, network, 401, 403, 429, or a server-wide 400/422 (every probed
-    /// row refused, so nothing was quarantined). Splitting stops. Already
-    /// accepted indexes stay accepted.
+    /// 5xx, network, 401, 403, 429, or 413. Splitting stops. Already accepted
+    /// indexes stay accepted. A 400 or 422 does not land here: those rows are
+    /// quarantined.
     pub stopped: Option<SyncUploadError>,
     pub requests: usize,
 }
 
-/// Upload `rows`. On HTTP 400 or 422, split the slice in half and retry
-/// each half until a singleton is refused or the request budget runs out.
-/// A singleton is quarantined only when some other row in the same pass
-/// was accepted. If both halves of the first split are fully refused, or
-/// every probed row comes back 400 or 422, nothing is quarantined: the
-/// whole batch is deferred and [`UploadIsolation::stopped`] is
-/// [`SERVER_REFUSING_UPLOADS`] (backoff, same as a 5xx).
-/// A 5xx, a network error, 401, 403, or 429 does not split: the rest of
-/// the pass stops and those indexes are [`UploadIsolation::deferred`].
+/// Upload `rows`. On HTTP 400 or 422 that names a row (`matches[n]:`), split
+/// the slice in half and retry each half until the bad singletons are
+/// isolated. A row that fails alone is quarantined even when every row in
+/// the batch fails. Request count stays at or under [`isolation_request_budget`]
+/// (about `2 * log2(n) + n`).
+///
+/// A 400 or 422 that does not name a row is not bisected. One single-row
+/// probe confirms it. If that row also fails with 400 or 422 and still does
+/// not name a row, every index in the slice is quarantined and no further
+/// split is sent. If the single row is accepted, the rest of the slice is
+/// retried, so a good row still uploads.
+///
+/// A 5xx, a network error, 401, 403, 413, or 429 does not split. 429 keeps
+/// `Retry-After` on [`UploadIsolation::stopped`]. The rest of the pass stops
+/// and those indexes are [`UploadIsolation::deferred`].
 pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
 where
     F: FnMut(&[T]) -> Fut,
@@ -613,16 +640,53 @@ where
         requests += 1;
         match upload(&rows[range.start..range.end]).await {
             Ok(_) => accepted.extend(range),
-            Err(err) if err.is_payload_reject() && range.len() > 1 => {
+            Err(err)
+                if err.is_payload_reject()
+                    && range.len() > 1
+                    && payload_names_a_row(&err.message) =>
+            {
                 let mid = range.start + range.len() / 2;
                 stack.push(mid..range.end);
                 stack.push(range.start..mid);
             }
+            Err(err) if err.is_payload_reject() && range.len() > 1 => {
+                if requests >= budget {
+                    deferred.extend(range);
+                    continue;
+                }
+                // One single-row send. A second 400/422 that still names no
+                // row quarantines the slice. Further halves are not requested.
+                requests += 1;
+                let probe = range.start..range.start + 1;
+                match upload(&rows[probe]).await {
+                    Err(one) if one.is_payload_reject() && !payload_names_a_row(&one.message) => {
+                        for index in range {
+                            rejected.push(rejected_upload(index, &one));
+                        }
+                    }
+                    Err(one) if one.is_payload_reject() => {
+                        rejected.push(rejected_upload(range.start, &one));
+                        let rest = range.start + 1..range.end;
+                        if !rest.is_empty() {
+                            stack.push(rest);
+                        }
+                    }
+                    Ok(_) => {
+                        accepted.push(range.start);
+                        let rest = range.start + 1..range.end;
+                        if !rest.is_empty() {
+                            stack.push(rest);
+                        }
+                    }
+                    Err(other) => {
+                        deferred.extend(range);
+                        stopped = Some(other);
+                        halt = true;
+                    }
+                }
+            }
             Err(err) if err.is_payload_reject() => {
-                rejected.push(RejectedUpload {
-                    index: range.start,
-                    message: err.message,
-                });
+                rejected.push(rejected_upload(range.start, &err));
             }
             Err(err) => {
                 deferred.extend(range);
@@ -630,19 +694,6 @@ where
                 halt = true;
             }
         }
-    }
-    // No accepted row means the 400/422s were not single bad payloads.
-    // A validator change refuses every subset, including both halves of
-    // the first split. Keep the batch queued and back off.
-    if accepted.is_empty() && !rejected.is_empty() {
-        let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
-        queued.append(&mut deferred);
-        queued.sort_unstable();
-        deferred = queued;
-        if stopped.is_none() {
-            stopped = Some(server_wide_refusal(&rejected[0].message));
-        }
-        rejected.clear();
     }
     UploadIsolation {
         accepted,
@@ -653,10 +704,11 @@ where
     }
 }
 
-fn server_wide_refusal(detail: &str) -> SyncUploadError {
-    SyncUploadError {
-        message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
-        ..SyncUploadError::plain("")
+fn rejected_upload(index: usize, err: &SyncUploadError) -> RejectedUpload {
+    RejectedUpload {
+        index,
+        message: err.message.clone(),
+        code: err.code.clone(),
     }
 }
 
@@ -1764,19 +1816,156 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_reject_split_stays_inside_the_request_budget() {
+    async fn all_bad_batch_quarantines_every_row_inside_the_budget() {
+        let n = 7usize;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = batch;
+            async { Err(payload_reject(422)) }
+        })
+        .await;
+        let budget = isolation_request_budget(n);
+        assert!(
+            isolation.requests <= budget,
+            "used {} requests, budget {budget}",
+            isolation.requests
+        );
+        assert_eq!(
+            isolation.requests,
+            calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(isolation.requests > 1, "the batch is split");
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.deferred.is_empty());
+        assert!(isolation.stopped.is_none());
+        let mut rejected: Vec<usize> = isolation.rejected.iter().map(|row| row.index).collect();
+        rejected.sort_unstable();
+        assert_eq!(rejected, (0..n).collect::<Vec<_>>());
+        assert!(
+            isolation.rejected.iter().all(|row| {
+                row.message == "matches[0]: hero is not allowed" && row.code.is_none()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_request_400_quarantines_without_looping() {
+        for status in [400_u16, 422] {
+            let n = 16usize;
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let sizes = std::sync::Mutex::new(Vec::new());
+            let rows: Vec<u32> = (0..n as u32).collect();
+            let isolation = isolate_rejected(&rows, |batch| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                sizes.lock().unwrap().push(batch.len());
+                async move {
+                    Err(SyncUploadError {
+                        message: "schema mismatch".into(),
+                        status: Some(status),
+                        code: Some("invalid_body".into()),
+                        ..SyncUploadError::plain("")
+                    })
+                }
+            })
+            .await;
+            let used = calls.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                *sizes.lock().unwrap(),
+                vec![n, 1],
+                "status {status} sends the batch, then one row, and stops"
+            );
+            assert_eq!(isolation.requests, 2);
+            assert_eq!(used, 2);
+            assert!(isolation.requests <= isolation_request_budget(n));
+            assert!(isolation.accepted.is_empty());
+            assert!(isolation.deferred.is_empty());
+            assert!(isolation.stopped.is_none());
+            assert_eq!(isolation.rejected.len(), n);
+            assert!(isolation.rejected.iter().all(|row| {
+                row.message == "schema mismatch" && row.code.as_deref() == Some("invalid_body")
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn nonspecific_400_still_uploads_a_row_that_succeeds_alone() {
+        let rows: Vec<usize> = (0..4).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let ids = batch.to_vec();
+            async move {
+                if ids.len() > 1 {
+                    Err(SyncUploadError {
+                        message: "schema mismatch".into(),
+                        status: Some(400),
+                        ..SyncUploadError::plain("")
+                    })
+                } else if ids[0] == 2 {
+                    Err(payload_reject(422))
+                } else {
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: 1,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        assert_eq!(isolation.accepted, vec![0, 1, 3]);
+        assert_eq!(isolation.rejected.len(), 1);
+        assert_eq!(isolation.rejected[0].index, 2);
+        assert!(isolation.deferred.is_empty());
+        assert!(isolation.stopped.is_none());
+        assert!(isolation.requests <= isolation_request_budget(4));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_mid_split_keeps_retry_after_and_does_not_quarantine() {
+        let rows: Vec<usize> = (0..4).collect();
+        let retry = std::time::Duration::from_secs(12);
+        let isolation = isolate_rejected(&rows, |batch| {
+            let len = batch.len();
+            let wait = retry;
+            async move {
+                if len == 4 {
+                    Err(payload_reject(400))
+                } else {
+                    Err(SyncUploadError {
+                        message: "slow down".into(),
+                        status: Some(429),
+                        retry_after: Some(wait),
+                        code: Some("rate_limited".into()),
+                        ..SyncUploadError::plain("")
+                    })
+                }
+            }
+        })
+        .await;
+        assert_eq!(isolation.requests, 2);
+        assert!(isolation.accepted.is_empty());
+        assert!(isolation.rejected.is_empty());
+        assert_eq!(isolation.deferred, vec![0, 1, 2, 3]);
+        let stopped = isolation.stopped.expect("429 stops the pass");
+        assert_eq!(stopped.status, Some(429));
+        assert_eq!(stopped.retry_after, Some(retry));
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::RateLimited {
+                retry_after: Some(wait)
+            } if wait == retry
+        ));
+    }
+
+    #[tokio::test]
+    async fn row_specific_split_stays_inside_the_request_budget() {
         let n = 32usize;
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let rows: Vec<u32> = (0..n as u32).collect();
         let isolation = isolate_rejected(&rows, |_| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async {
-                Err(SyncUploadError {
-                    message: "nope".into(),
-                    status: Some(422),
-                    ..SyncUploadError::plain("")
-                })
-            }
+            async { Err(payload_reject(400)) }
         })
         .await;
         let budget = isolation_request_budget(n);
@@ -1785,23 +1974,18 @@ mod tests {
             isolation.requests,
             calls.load(std::sync::atomic::Ordering::SeqCst)
         );
-        assert!(
-            isolation.requests > 1,
-            "the batch is split before giving up"
-        );
+        assert!(isolation.requests > 1, "the batch is split");
         assert!(isolation.accepted.is_empty());
-        assert!(
-            isolation.rejected.is_empty(),
-            "a pass that accepts nothing quarantines nothing"
-        );
-        assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
-        let stopped = isolation.stopped.expect("server-wide refusal");
-        assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
-        assert!(stopped.message.contains("nope"), "{}", stopped.message);
-        assert!(matches!(
-            stopped.attempt(),
-            SyncAttempt::ServerError { retry_after: None }
-        ));
+        assert!(isolation.stopped.is_none());
+        assert!(!isolation.rejected.is_empty());
+        let mut seen = isolation
+            .rejected
+            .iter()
+            .map(|row| row.index)
+            .collect::<Vec<_>>();
+        seen.extend(isolation.deferred.iter().copied());
+        seen.sort_unstable();
+        assert_eq!(seen, (0..n).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -1927,18 +2111,14 @@ mod tests {
 
     #[tokio::test]
     async fn batch_sizes_and_several_bad_rows() {
-        // N=1 refused cannot be told from a server-wide refusal.
+        // N=1 refused is quarantined. One request, no second try.
         let alone = isolate_case(1, &[0]).await;
         assert!(alone.accepted.is_empty());
-        assert!(alone.rejected.is_empty());
-        assert_eq!(alone.deferred, vec![0]);
-        assert!(
-            alone
-                .stopped
-                .expect("n=1")
-                .message
-                .starts_with(SERVER_REFUSING_UPLOADS)
-        );
+        assert_eq!(alone.rejected.len(), 1);
+        assert_eq!(alone.rejected[0].index, 0);
+        assert!(alone.deferred.is_empty());
+        assert!(alone.stopped.is_none());
+        assert_eq!(alone.requests, 1);
 
         let one_ok = isolate_case(1, &[]).await;
         assert_eq!(one_ok.accepted, vec![0]);
@@ -1953,12 +2133,15 @@ mod tests {
         assert_eq!(pair.rejected[0].index, 1);
         assert!(pair.stopped.is_none());
 
-        // N=2, both refused.
+        // N=2, both refused. Each singleton is quarantined.
         let both = isolate_case(2, &[0, 1]).await;
         assert!(both.accepted.is_empty());
-        assert!(both.rejected.is_empty());
-        assert_eq!(both.deferred, vec![0, 1]);
-        assert!(both.stopped.is_some());
+        let mut both_rejected: Vec<usize> = both.rejected.iter().map(|row| row.index).collect();
+        both_rejected.sort_unstable();
+        assert_eq!(both_rejected, vec![0, 1]);
+        assert!(both.deferred.is_empty());
+        assert!(both.stopped.is_none());
+        assert!(both.requests <= isolation_request_budget(2));
 
         // Odd length, one bad row in the longer half.
         let odd = isolate_case(5, &[2]).await;
