@@ -972,8 +972,14 @@ mod tests {
         assert_eq!(wipe.personal_match, 2);
         assert_eq!(wipe.stat_report, 0);
         assert_eq!(wipe.tokens_revoked, 2);
-        assert!(db.validate_daemon_token("tok-1").await.unwrap().is_none());
-        assert!(db.validate_daemon_token("tok-2").await.unwrap().is_none());
+        assert_eq!(
+            db.validate_daemon_token("tok-1").await.unwrap(),
+            crate::DaemonTokenAuth::Missing
+        );
+        assert_eq!(
+            db.validate_daemon_token("tok-2").await.unwrap(),
+            crate::DaemonTokenAuth::Missing
+        );
         assert_eq!(
             db.get_personal_stats(&other.id)
                 .await

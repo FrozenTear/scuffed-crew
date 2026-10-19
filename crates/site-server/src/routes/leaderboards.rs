@@ -558,13 +558,15 @@ mod cache_http_tests {
     }
 
     async fn post_upload(app: &axum::Router, token: &str, body: &StatsUploadRequest) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap();
+        let req = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/stats/upload")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json"),
+        )
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }

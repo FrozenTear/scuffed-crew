@@ -37,6 +37,7 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use axum::Json;
+use axum::Router;
 use axum::extract::{ConnectInfo, State};
 use axum::http::uri::PathAndQuery;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
@@ -211,12 +212,43 @@ pub async fn strip_link_query_secrets(mut req: axum::extract::Request, next: Nex
     next.run(req).await
 }
 
-/// Reject a flagged link request. Runs inside the per-route governor.
+/// Reject a flagged link request. Runs inside the per-route governor for a
+/// method the route actually allows. A wrong method is answered by
+/// [`method_not_allowed_outside_limit`], which does the same query-code check
+/// without spending the limiter.
 pub async fn reject_link_query_secrets(req: axum::extract::Request, next: Next) -> Response {
     if req.extensions().get::<LinkSecretInQuery>().is_some() {
         return bad_request(QUERY_CODE_ERROR).into_response();
     }
     next.run(req).await
+}
+
+/// JSON 405 outside the rate limiter that already wraps `router`.
+///
+/// Call this after the governor (or the poll limiter) and after `no_store`.
+/// Axum still has its default 405 at that point, wrapped by those layers.
+/// Replacing it means a wrong method does not spend the budget. The outer
+/// strip middleware has already flagged a code in the query string, so that
+/// case stays a 400 here too, including on a wrong method.
+pub fn method_not_allowed_outside_limit<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.method_not_allowed_fallback(link_method_not_allowed)
+}
+
+async fn link_method_not_allowed(req: axum::extract::Request) -> Response {
+    if req.extensions().get::<LinkSecretInQuery>().is_some() {
+        let mut response = bad_request(QUERY_CODE_ERROR).into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        return response;
+    }
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    crate::routes::seo::api_method_not_allowed(method, uri).await
 }
 
 fn query_has_link_secret(query: &str) -> bool {

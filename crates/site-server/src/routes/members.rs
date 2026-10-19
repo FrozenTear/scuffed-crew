@@ -776,6 +776,21 @@ pub async fn upsert_game_account(
         ));
     }
 
+    // Length units differ on purpose.
+    // `account_name` is counted in Unicode scalars (`chars().count()`), so 64
+    // characters are allowed even when the UTF-8 encoding is longer than 64
+    // bytes. `rank` (max 64) and `role` (max 32) are counted in bytes
+    // (`str::len()`), which is what those existing error strings mean.
+    let account_name = body.account_name.trim();
+    if account_name.chars().count() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "account_name too long (max 64)".into(),
+            }),
+        ));
+    }
+
     let rank = match &body.rank {
         None => None,
         Some(None) => Some(None),
@@ -820,7 +835,7 @@ pub async fn upsert_game_account(
         .upsert_game_account(
             &member_id,
             &body.game_id,
-            &body.account_name,
+            account_name,
             body.account_id.as_deref(),
             rank.as_ref().map(|r| r.as_deref()),
             body.sr,

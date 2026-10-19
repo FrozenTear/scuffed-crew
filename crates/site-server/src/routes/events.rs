@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
+use serde::de::{self, Deserializer, Visitor};
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, Event};
@@ -37,10 +38,44 @@ pub async fn list_events(
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
+/// JSON integer for `day_of_week`, including values that do not fit in a `u8`.
+///
+/// The handler rejects anything outside 0..=6 with 400. A non-integer still
+/// fails deserialization, which Axum reports as 422.
+#[derive(Debug, Clone, Copy)]
+pub struct DayOfWeekInput(i128);
+
+impl<'de> Deserialize<'de> for DayOfWeekInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DayVisitor;
+
+        impl Visitor<'_> for DayVisitor {
+            type Value = DayOfWeekInput;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an integer day_of_week")
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(DayOfWeekInput(i128::from(value)))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(DayOfWeekInput(i128::from(value)))
+            }
+        }
+
+        deserializer.deserialize_any(DayVisitor)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateEventRequest {
     pub title: String,
-    pub day_of_week: u8,
+    pub day_of_week: DayOfWeekInput,
     pub time: String,
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -164,12 +199,14 @@ pub async fn create_event(
     )
     .map_err(|msg| bad_request(&msg))?;
     schedule_error(&body.time, body.duration_minutes).map_err(|msg| bad_request(&msg))?;
+    let day_of_week =
+        crate::calendar::check_day_of_week(body.day_of_week.0).map_err(bad_request)?;
 
     let event = state
         .db
         .create_event(
             &body.title,
-            body.day_of_week,
+            day_of_week,
             &body.time,
             &body.timezone,
             body.duration_minutes,
@@ -203,7 +240,7 @@ pub async fn create_event(
 #[derive(Deserialize)]
 pub struct UpdateEventRequest {
     pub title: Option<String>,
-    pub day_of_week: Option<u8>,
+    pub day_of_week: Option<DayOfWeekInput>,
     pub time: Option<String>,
     pub timezone: Option<String>,
     pub duration_minutes: Option<u32>,
@@ -219,6 +256,10 @@ pub async fn update_event(
     Path(id): Path<String>,
     Json(body): Json<UpdateEventRequest>,
 ) -> Result<Json<Event>, (StatusCode, Json<ErrorResponse>)> {
+    let day_of_week = match body.day_of_week {
+        Some(day) => Some(crate::calendar::check_day_of_week(day.0).map_err(bad_request)?),
+        None => None,
+    };
     if let Some(title) = body.title.as_deref() {
         reject_controls("title", title).map_err(|msg| bad_request(&msg))?;
     }
@@ -257,7 +298,7 @@ pub async fn update_event(
         .update_event(
             &id,
             body.title.as_deref(),
-            body.day_of_week,
+            day_of_week,
             body.time.as_deref(),
             body.timezone.as_deref(),
             body.duration_minutes,

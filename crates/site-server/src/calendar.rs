@@ -1,6 +1,9 @@
 use scuffed_db::Event;
 
 /// Map day_of_week (0=Monday..6=Sunday) to RRULE BYDAY abbreviation.
+///
+/// Values outside 0..=6 are legacy rows. Create and update reject them.
+/// The feed still emits Monday so an old row does not drop out of the calendar.
 fn day_to_rrule(day: u8) -> &'static str {
     match day {
         0 => "MO",
@@ -37,6 +40,17 @@ impl ScheduleError {
             ScheduleError::Duration => "duration_minutes must be from 1 to 1440",
             ScheduleError::EndsBeforeStart => "end time must be after the start time",
         }
+    }
+}
+
+/// `day_of_week` stored by this API: 0 = Monday through 6 = Sunday.
+///
+/// Accepts the full JSON integer range. Negatives and values above 255 are
+/// the same error as 7 through 255, so the route can answer 400 for all of them.
+pub(crate) fn check_day_of_week(day: i128) -> Result<u8, &'static str> {
+    match u8::try_from(day) {
+        Ok(day) if day <= 6 => Ok(day),
+        _ => Err("day_of_week must be from 0 to 6"),
     }
 }
 
@@ -339,5 +353,19 @@ mod tests {
             !ics.contains("BEGIN:VEVENT"),
             "a duration that cannot be placed on the feed must be omitted, got {ics}"
         );
+    }
+
+    #[test]
+    fn day_of_week_accepts_monday_through_sunday_only() {
+        for day in 0i128..=6 {
+            assert_eq!(check_day_of_week(day).unwrap(), day as u8, "{day}");
+        }
+        assert_eq!(
+            check_day_of_week(7).unwrap_err(),
+            "day_of_week must be from 0 to 6"
+        );
+        assert!(check_day_of_week(99).is_err());
+        assert!(check_day_of_week(-1).is_err());
+        assert!(check_day_of_week(256).is_err());
     }
 }

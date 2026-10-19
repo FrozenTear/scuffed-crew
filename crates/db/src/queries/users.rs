@@ -405,6 +405,22 @@ impl Database {
         .await
     }
 
+    /// Delete a local user created during a failed first-boot setup.
+    ///
+    /// Returns false without deleting when any member row exists, so a
+    /// finished setup cannot lose its user on a later rollback.
+    pub async fn delete_local_user_if_no_member(&self, user_id: &str) -> DbResult<bool> {
+        if self.has_any_member().await? {
+            return Ok(false);
+        }
+        with_timeout(async {
+            let rid = RecordId::new("user", user_id);
+            self.client.query("DELETE $rid").bind(("rid", rid)).await?;
+            Ok(true)
+        })
+        .await
+    }
+
     /// Convert a DB user record to the public User type.
     fn db_user_to_user(&self, db: DbUser) -> DbResult<User> {
         let provider = match db.provider.as_str() {

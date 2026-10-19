@@ -383,13 +383,13 @@ async fn session_delete_schedules_and_restore_brings_stats_back() {
     assert_eq!(again["stats_delete_scheduled_at"], deadline);
     assert_eq!(again["tokens_revoked"], 0);
 
-    assert!(
+    assert_eq!(
         state
             .db
             .validate_daemon_token("ada-daemon-2")
             .await
-            .unwrap()
-            .is_none()
+            .unwrap(),
+        scuffed_db::DaemonTokenAuth::Missing
     );
     assert_eq!(
         state

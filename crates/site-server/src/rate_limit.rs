@@ -197,9 +197,11 @@ fn host_net(ip: IpAddr) -> IpNet {
 
 /// JSON 429 shared by every governor layer and the per-member Nostr limiter.
 ///
-/// Body is `{"error":"rate_limited","retry_after":N}` with
+/// Body is `{"code":"rate_limited","error":"rate_limited","retry_after":N}` with
 /// `Content-Type: application/json` and `Cache-Control: no-store`.
-/// `Retry-After` is the same second count. `N` is at least 1.
+/// `code` is the same key the per-token upload 429 uses. `error` stays so
+/// older clients keep working. `Retry-After` is the same second count.
+/// `N` is at least 1.
 ///
 /// `tower_governor` 0.8 writes `Retry-After` from `Duration::as_secs`, which
 /// truncates. [`governor_error_response`] rounds that back up before it gets
@@ -211,6 +213,7 @@ pub fn rate_limited_response(secs: u64) -> Response<Body> {
 fn rate_limited_response_with_headers(secs: u64, headers: HeaderMap) -> Response<Body> {
     let secs = secs.max(1);
     let body = serde_json::json!({
+        "code": "rate_limited",
         "error": "rate_limited",
         "retry_after": secs,
     });
@@ -480,7 +483,7 @@ mod tests {
             .to_bytes();
         assert_eq!(
             bytes.as_ref(),
-            br#"{"error":"rate_limited","retry_after":1}"#
+            br#"{"code":"rate_limited","error":"rate_limited","retry_after":1}"#
         );
 
         // A truncated 2 is a real wait of 2.0 to 2.99 s, so it goes out as 3.
@@ -501,7 +504,7 @@ mod tests {
             .to_bytes();
         assert_eq!(
             bytes.as_ref(),
-            br#"{"error":"rate_limited","retry_after":3}"#
+            br#"{"code":"rate_limited","error":"rate_limited","retry_after":3}"#
         );
     }
 

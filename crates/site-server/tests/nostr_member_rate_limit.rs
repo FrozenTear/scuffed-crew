@@ -136,6 +136,7 @@ fn assert_rate_limited(headers: &axum::http::HeaderMap, body: &[u8]) -> u64 {
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry:?}"));
     assert!(secs >= 1, "Retry-After must be at least 1, got {secs}");
     let expected = serde_json::to_vec(&json!({
+        "code": "rate_limited",
         "error": "rate_limited",
         "retry_after": secs,
     }))
