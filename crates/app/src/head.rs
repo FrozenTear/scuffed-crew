@@ -6,10 +6,10 @@
 //! `web_sys` (`Document::set_title` does not eval a string, which the site CSP
 //! forbids). Desktop still uses `document::Title` for the window title.
 //!
-//! `og:url` is absolute only when settings name a public http(s) origin
-//! under `public_base_url`. Without that origin the tag is left out.
-//! Canonical stays on the route path, which the browser resolves against
-//! the current document. No deploy host is baked in.
+//! `og:url` and `og:image` are absolute only when settings name a public
+//! http(s) origin under `public_base_url`. Without that origin both tags
+//! are left out. Canonical stays on the route path, which the browser
+//! resolves against the current document. No deploy host is baked in.
 
 use dioxus::prelude::*;
 
@@ -144,15 +144,14 @@ pub fn document_head(
     };
     let (og_url, og_image, canonical) = if is_public_route(route) {
         let path = route_path(route);
-        // A relative og:url is dropped. Crawlers that do not run wasm only
-        // see the shell, and a relative og:url is not a document URL.
-        // Canonical may stay on the path.
+        // Relative og:url and og:image are dropped. Crawlers that do not
+        // run wasm only see the shell, and they ignore a root-relative
+        // preview URL. Canonical may stay on the path.
         let og_url = base.as_ref().map(|origin| format!("{origin}{path}"));
-        (
-            og_url,
-            Some(join_base(base.as_deref(), OG_IMAGE_PATH)),
-            Some(join_base(base.as_deref(), &path)),
-        )
+        let og_image = base
+            .as_ref()
+            .map(|origin| format!("{origin}{OG_IMAGE_PATH}"));
+        (og_url, og_image, Some(join_base(base.as_deref(), &path)))
     } else {
         (None, None, None)
     };
@@ -730,7 +729,10 @@ mod tests {
             assert_eq!(head.og_site_name, "Owls");
             assert_eq!(head.canonical.as_deref(), Some(path.as_str()));
             assert!(head.og_url.is_none(), "no relative og:url without a base");
-            assert_eq!(head.og_image.as_deref(), Some(OG_IMAGE_PATH));
+            assert!(
+                head.og_image.is_none(),
+                "no relative og:image without a base"
+            );
             assert!(!head.canonical.as_deref().unwrap().contains("://"));
             titles.push(head.title);
         }
@@ -738,6 +740,26 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), titles.len(), "{titles:?}");
+    }
+
+    #[test]
+    fn og_image_and_og_url_are_absolute_or_absent() {
+        let missing = document_head(&Route::News {}, Some("Owls"), "d", None);
+        assert!(missing.og_url.is_none());
+        assert!(missing.og_image.is_none());
+        assert_eq!(missing.canonical.as_deref(), Some("/news"));
+
+        let present = document_head(
+            &Route::News {},
+            Some("Owls"),
+            "d",
+            Some("https://example.com"),
+        );
+        assert_eq!(present.og_url.as_deref(), Some("https://example.com/news"));
+        assert_eq!(
+            present.og_image.as_deref(),
+            Some("https://example.com/assets/apple-touch-icon.png")
+        );
     }
 
     #[test]
@@ -780,6 +802,7 @@ mod tests {
             let head = document_head(&Route::News {}, Some("Owls"), "d", Some(bad));
             assert_eq!(head.canonical.as_deref(), Some("/news"), "{bad}");
             assert!(head.og_url.is_none(), "{bad}");
+            assert!(head.og_image.is_none(), "{bad}");
         }
     }
 
@@ -858,6 +881,10 @@ mod tests {
         assert!(
             slots.og_url.is_empty(),
             "a public page with no base clears og:url"
+        );
+        assert!(
+            slots.og_image.is_empty(),
+            "a public page with no base clears og:image"
         );
         assert!(slots.title.iter().all(|value| !value.contains("STALE")));
         assert!(

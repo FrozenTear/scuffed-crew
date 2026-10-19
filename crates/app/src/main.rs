@@ -179,9 +179,14 @@ fn App() -> Element {
     }
 
     rsx! {
-        // index.html preloads and applies the font stylesheet. A second
-        // `document::Link` here would request another copy after boot.
+        // The shell only preloads this CSS, so first paint does not wait on
+        // fonts.googleapis.com. Apply it after boot. An inline onload would
+        // be blocked by script-src. `display=swap` is in `FONT_STYLESHEET`.
         // Web title and meta updates live in `HeadLayout`.
+        document::Link {
+            rel: "stylesheet",
+            href: crate::head::FONT_STYLESHEET,
+        }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")
         }
@@ -211,21 +216,21 @@ mod tests {
             "property=\"og:description\"",
             "property=\"og:site_name\"",
             "property=\"og:type\"",
-            "property=\"og:image\"",
         ] {
             let count = visible.matches(needle).count();
             assert_eq!(count, 1, "{needle} appears {count} times");
         }
-        // Canonical and og:url depend on the route. One shell serves every
-        // path, so those tags are written by HeadLayout instead of stamped
-        // as the home URL on every document.
+        // Canonical, og:url, and og:image need an absolute public origin.
+        // One shell serves every path, so those tags are written by
+        // HeadLayout instead of stamped as relative URLs.
         assert!(!visible.contains("rel=\"canonical\""));
         assert!(!visible.contains("og:url"));
+        assert!(!visible.contains("og:image"));
         let href = crate::head::FONT_STYLESHEET.replace('&', "&amp;");
-        assert_eq!(
-            visible.matches(href.as_str()).count(),
-            2,
-            "preload and stylesheet"
+        assert_eq!(visible.matches(href.as_str()).count(), 1, "preload only");
+        assert!(
+            !visible.contains("rel=\"stylesheet\""),
+            "the font stylesheet is applied after boot"
         );
         assert_eq!(visible.matches("rel=\"preconnect\"").count(), 2);
         assert!(visible.contains("fonts.gstatic.com"));
@@ -242,8 +247,12 @@ mod tests {
         let main_src = include_str!("main.rs");
         let before_tests = main_src.split("mod tests").next().unwrap_or(main_src);
         assert!(
-            !before_tests.contains("fonts.googleapis.com"),
-            "the font stylesheet belongs in index.html"
+            before_tests.contains("document::Link"),
+            "the font stylesheet is applied after boot"
+        );
+        assert!(
+            before_tests.contains("FONT_STYLESHEET"),
+            "the applied href is the shared font URL"
         );
         // dx injects a loader at every `</body>`, including one inside a comment.
         assert_eq!(
