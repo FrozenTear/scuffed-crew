@@ -893,24 +893,37 @@ from the environment. Nothing was deleted.";
 
 enum BootstrapEnvDecision {
     Quiet,
-    Ignore {
-        admin_exists: bool,
-    },
-    Apply {
-        username: String,
-        password: String,
-        fingerprint: String,
-    },
+    Ignore { admin_exists: bool },
+    Apply { username: String, password: String },
 }
 
-fn bootstrap_env_fingerprint(username: &str, password: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"bootstrap-admin-env-v1");
-    hasher.update(&[0xff]);
-    hasher.update(username.as_bytes());
-    hasher.update(&[0xff]);
-    hasher.update(password.as_bytes());
-    hasher.finalize().to_hex().to_string()
+/// String hashed into the one-shot marker. Length prefixes keep two different
+/// username and password pairs from producing the same input. The plaintext
+/// is not stored.
+fn bootstrap_marker_input(username: &str, password: &str) -> String {
+    format!(
+        "bootstrap-admin-env-v1:{}:{username}{}:{password}",
+        username.len(),
+        password.len()
+    )
+}
+
+/// `true` only when `stored` is an argon2 hash of this username and password.
+///
+/// A value that will not parse as argon2, including an older blake3 hex, is a
+/// mismatch. Callers re-apply the reset instead of treating it as already done.
+fn bootstrap_marker_matches(stored: &str, username: &str, password: &str) -> bool {
+    let input = bootstrap_marker_input(username, password);
+    match scuffed_auth::password::verify_password(&input, stored) {
+        Ok(matched) => matched,
+        Err(err) => {
+            tracing::warn!(
+                "BOOTSTRAP_ADMIN_RESET marker is not an argon2 hash ({err}). \
+                 The reset will run again. Nothing was deleted."
+            );
+            false
+        }
+    }
 }
 
 fn decide_bootstrap_admin_env(
@@ -919,15 +932,12 @@ fn decide_bootstrap_admin_env(
     stored_fingerprint: Option<&str>,
 ) -> BootstrapEnvDecision {
     if let Some((username, password)) = env.reset_request() {
-        let fingerprint = bootstrap_env_fingerprint(&username, &password);
-        if stored_fingerprint == Some(fingerprint.as_str()) {
+        let already_applied = stored_fingerprint
+            .is_some_and(|stored| bootstrap_marker_matches(stored, &username, &password));
+        if already_applied {
             return BootstrapEnvDecision::Ignore { admin_exists };
         }
-        return BootstrapEnvDecision::Apply {
-            username,
-            password,
-            fingerprint,
-        };
+        return BootstrapEnvDecision::Apply { username, password };
     }
     if admin_exists && env.any_set() {
         return BootstrapEnvDecision::Ignore { admin_exists: true };
@@ -987,33 +997,35 @@ pub async fn apply_bootstrap_admin_env_with(
             );
             Ok(BootstrapStartupOutcome::Ignored)
         }
-        BootstrapEnvDecision::Apply {
-            username,
-            password,
-            fingerprint,
-        } => match bootstrap_admin_reset(db, &username, &password).await? {
-            BootstrapResetOutcome::Applied { sessions_revoked } => {
-                if let Err(e) = db.set_bootstrap_env_fingerprint(&fingerprint).await {
-                    tracing::error!(
-                        "BOOTSTRAP_ADMIN_RESET applied but the one-shot marker was not stored: {e}"
+        BootstrapEnvDecision::Apply { username, password } => {
+            let fingerprint = scuffed_auth::password::hash_password(&bootstrap_marker_input(
+                &username, &password,
+            ))
+            .map_err(|e| format!("bootstrap marker hash failed: {e}"))?;
+            match bootstrap_admin_reset(db, &username, &password).await? {
+                BootstrapResetOutcome::Applied { sessions_revoked } => {
+                    if let Err(e) = db.set_bootstrap_env_fingerprint(&fingerprint).await {
+                        tracing::error!(
+                            "BOOTSTRAP_ADMIN_RESET applied but the one-shot marker was not stored: {e}"
+                        );
+                    }
+                    tracing::warn!(
+                        "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
+                         ({sessions_revoked} existing session(s) revoked). Remove \
+                         BOOTSTRAP_ADMIN_RESET, BOOTSTRAP_ADMIN_PASSWORD, and \
+                         BOOTSTRAP_ADMIN_USERNAME from the environment. Nothing was deleted."
                     );
+                    Ok(BootstrapStartupOutcome::Applied { sessions_revoked })
                 }
-                tracing::warn!(
-                    "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
-                     ({sessions_revoked} existing session(s) revoked). Remove \
-                     BOOTSTRAP_ADMIN_RESET, BOOTSTRAP_ADMIN_PASSWORD, and \
-                     BOOTSTRAP_ADMIN_USERNAME from the environment. Nothing was deleted."
-                );
-                Ok(BootstrapStartupOutcome::Applied { sessions_revoked })
+                BootstrapResetOutcome::NoSuchUser => {
+                    tracing::error!(
+                        "BOOTSTRAP_ADMIN_RESET: no local user '{username}'. \
+                         Create that user via first-boot setup first."
+                    );
+                    Ok(BootstrapStartupOutcome::NoSuchUser)
+                }
             }
-            BootstrapResetOutcome::NoSuchUser => {
-                tracing::error!(
-                    "BOOTSTRAP_ADMIN_RESET: no local user '{username}'. \
-                     Create that user via first-boot setup first."
-                );
-                Ok(BootstrapStartupOutcome::NoSuchUser)
-            }
-        },
+        }
     }
 }
 
@@ -1157,5 +1169,68 @@ mod bootstrap_reset_tests {
             .await
             .unwrap();
         assert_eq!(again, BootstrapStartupOutcome::NoSuchUser);
+    }
+
+    #[tokio::test]
+    async fn stored_bootstrap_marker_verifies_and_is_not_plain_blake3() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+
+        let env = reset_env("brand-new-password-456");
+        let outcome = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert!(matches!(outcome, BootstrapStartupOutcome::Applied { .. }));
+
+        let stored = db
+            .bootstrap_env_fingerprint()
+            .await
+            .unwrap()
+            .expect("marker stored");
+        let input = bootstrap_marker_input("admin", "brand-new-password-456");
+        let plain = blake3::hash(input.as_bytes()).to_hex().to_string();
+        assert_ne!(stored, plain, "marker must not be the plain blake3 hex");
+        assert!(verify_password(&input, &stored).unwrap());
+        assert!(!verify_password("other-marker-input", &stored).unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_blake3_bootstrap_marker_is_reapplied() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("original-password-1").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+        db.create_member(&user.id, "Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+        db.create_session(&user.id, "tok-old", 168).await.unwrap();
+
+        let legacy = blake3::hash(b"bootstrap-admin-env-v1").to_hex().to_string();
+        db.set_bootstrap_env_fingerprint(&legacy).await.unwrap();
+
+        let env = reset_env("brand-new-password-456");
+        let outcome = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(
+            outcome,
+            BootstrapStartupOutcome::Applied {
+                sessions_revoked: 1
+            }
+        );
+        assert!(db.get_session("tok-old").await.unwrap().is_none());
+        let (_, hash) = db
+            .get_local_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_password("brand-new-password-456", &hash).unwrap());
+
+        let stored = db.bootstrap_env_fingerprint().await.unwrap().unwrap();
+        assert_ne!(stored, legacy);
+        let input = bootstrap_marker_input("admin", "brand-new-password-456");
+        assert!(verify_password(&input, &stored).unwrap());
+
+        let second = apply_bootstrap_admin_env_with(&db, &env).await.unwrap();
+        assert_eq!(second, BootstrapStartupOutcome::Ignored);
     }
 }
