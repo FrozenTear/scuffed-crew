@@ -156,6 +156,13 @@ pub fn relay_permission_sql() -> String {
 /// The copied columns are the only ones named here. Secrets, display names,
 /// `user_id`, `reason`, and `issued_by` are not on these tables.
 ///
+/// Relay tables hold only columns the relay is allowed to see. They never
+/// store an unsafe or hidden column, and they do not rely on field
+/// `PERMISSIONS`. SurrealDB 3.0.5 IndexScan checks the table permission and
+/// skips field permissions, so a hidden column on one of these tables would
+/// come back from any index that covers the query. Keep the relay tables
+/// index-free unless `relay-chat-flow index-perms` covers that index.
+///
 /// The backfill runs before the events are defined. If the events ran first,
 /// a concurrent write could update a projection row and the backfill `UPSERT`
 /// would replace it with the older snapshot. Events are installed only after
@@ -234,6 +241,7 @@ DEFINE EVENT OVERWRITE relay_member_write ON TABLE member WHEN $event = "CREATE"
 DEFINE EVENT OVERWRITE relay_member_delete ON TABLE member WHEN $event = "DELETE" THEN {
     DELETE type::record("relay_member", record::id($before.id));
     DELETE relay_roster WHERE member_id = <string>record::id($before.id);
+    DELETE relay_moderation WHERE member_id = <string>record::id($before.id);
 };
 DEFINE EVENT OVERWRITE relay_roster_write ON TABLE plays_on WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
     LET $active_rows = (SELECT VALUE is_active FROM type::record("member", record::id($after.in)));
@@ -1315,6 +1323,42 @@ mod tests {
             keys.iter()
                 .any(|row| row.id == member.id && row.nostr_pubkey.as_deref() == Some(pubkey)),
             "backfill did not restore the pubkey: {keys:?}"
+        );
+
+        let mut moderation_before = owner
+            .client
+            .query("SELECT member_id FROM relay_moderation WHERE member_id = $id")
+            .bind(("id", member.id.clone()))
+            .await
+            .expect("moderation before delete");
+        let before_rows: Vec<surrealdb_types::Value> =
+            moderation_before.take(0).expect("moderation before rows");
+        assert!(
+            !before_rows.is_empty(),
+            "ban copy missing before member delete: {before_rows:?}"
+        );
+        owner
+            .client
+            .query("DELETE plays_on WHERE in = $rid; DELETE $rid")
+            .bind((
+                "rid",
+                surrealdb_types::RecordId::new("member", member.id.clone()),
+            ))
+            .await
+            .expect("delete member")
+            .check()
+            .expect("delete member check");
+        let mut moderation_after = owner
+            .client
+            .query("SELECT member_id FROM relay_moderation WHERE member_id = $id")
+            .bind(("id", member.id.clone()))
+            .await
+            .expect("moderation after delete");
+        let after_rows: Vec<surrealdb_types::Value> =
+            moderation_after.take(0).expect("moderation after rows");
+        assert!(
+            after_rows.is_empty(),
+            "member delete left a relay_moderation row: {after_rows:?}"
         );
     }
 
