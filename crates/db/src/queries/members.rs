@@ -10,7 +10,7 @@ use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::EncryptedBlob;
 
-use crate::types::{Member, NostrKeyMode, OrgRole};
+use crate::types::{Member, NostrKeyMode, OrgRole, RelayMemberKey};
 use crate::{with_timeout, Database, DbResult};
 
 /// Columns safe to load for list/API paths — omits `nostr_secret_key_encrypted`
@@ -611,6 +611,45 @@ impl Database {
                 .into_iter()
                 .map(db_to_member)
                 .collect::<DbResult<Vec<_>>>()
+        })
+        .await
+    }
+
+    /// Columns the relay login is allowed to read from `member`.
+    ///
+    /// The site still uses [`Database::list_nostr_identities`], which selects
+    /// the wider safe projection. That projection names columns this login
+    /// cannot read, so the relay calls this query instead.
+    pub async fn list_relay_member_keys(&self) -> DbResult<Vec<RelayMemberKey>> {
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct Row {
+            id: Option<RecordId>,
+            org_role: String,
+            nostr_pubkey: Option<String>,
+            is_active: bool,
+        }
+
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT id, org_role, nostr_pubkey, is_active FROM member \
+                     WHERE is_active = true AND nostr_pubkey != NONE LIMIT 2000",
+                )
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .map(|row| RelayMemberKey {
+                    id: row
+                        .id
+                        .map(|record| crate::record_id_key_to_string(record.key))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    org_role: parse_role(&row.org_role),
+                    nostr_pubkey: row.nostr_pubkey,
+                    is_active: row.is_active,
+                })
+                .collect())
         })
         .await
     }

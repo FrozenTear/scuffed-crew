@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::read_policy::{GroupAcl, MemberAcl, ReadDirectory};
 
 pub async fn load_read_directory(db: &Database) -> scuffed_db::DbResult<ReadDirectory> {
-    let members = db.list_nostr_identities().await?;
+    let members = db.list_relay_member_keys().await?;
     let pairs = db.list_active_roster_pairs().await?;
     let channels = db.list_all_team_channels().await?;
 
@@ -70,7 +70,7 @@ struct TeamWriters {
 pub async fn load_group_writers(
     db: &Database,
 ) -> scuffed_db::DbResult<HashMap<String, HashSet<String>>> {
-    let members = db.list_nostr_identities().await?;
+    let members = db.list_relay_member_keys().await?;
     let pairs = db.list_active_roster_pairs().await?;
     let channels = db.list_all_team_channels().await?;
 

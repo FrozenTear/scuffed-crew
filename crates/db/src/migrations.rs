@@ -61,27 +61,46 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Members (org membership, extends user)
         -- ================================================
         DEFINE TABLE IF NOT EXISTS member SCHEMAFULL;
-        DEFINE FIELD OVERWRITE user_id ON member TYPE string;
+        DEFINE FIELD OVERWRITE user_id ON member TYPE string
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE org_role ON member TYPE string
-            ASSERT $value IN ['admin', 'officer', 'member', 'recruit'];
-        DEFINE FIELD OVERWRITE display_name ON member TYPE string;
+            ASSERT $value IN ['admin', 'officer', 'member', 'recruit']
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
+        DEFINE FIELD OVERWRITE display_name ON member TYPE string
+            PERMISSIONS FOR select NONE;
         -- Comparison key for display_name. Optional so a row can be inserted
         -- before backfill fills it. The UNIQUE index is installed by
         -- backfill_display_name_keys only after a clash check, so it is not
         -- defined in this script (a missing key is NONE, and many NONE values
         -- are allowed, which would hide duplicates).
-        DEFINE FIELD OVERWRITE display_name_key ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE bio ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE joined_at ON member TYPE datetime DEFAULT time::now();
-        DEFINE FIELD OVERWRITE avatar_url ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE timezone ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE pronouns ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE availability_status ON member TYPE option<string>;
-        DEFINE FIELD OVERWRITE nostr_pubkey ON member TYPE option<string>;
+        DEFINE FIELD OVERWRITE display_name_key ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE bio ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE joined_at ON member TYPE datetime DEFAULT time::now()
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE avatar_url ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE timezone ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE pronouns ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE availability_status ON member TYPE option<string>
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE nostr_pubkey ON member TYPE option<string>
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
         DEFINE FIELD OVERWRITE nostr_key_mode ON member TYPE option<string>
-            ASSERT $value IN [NONE, 'server_managed', 'external'];
-        DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE;
-        DEFINE FIELD OVERWRITE is_active ON member TYPE bool DEFAULT true;
+            ASSERT $value IN [NONE, 'server_managed', 'external']
+            PERMISSIONS FOR select NONE;
+        -- Hidden on this statement, not in a later one. A failed migration
+        -- after this line must not leave the secret readable to a record user.
+        DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE is_active ON member TYPE bool DEFAULT true
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
 
         DEFINE INDEX IF NOT EXISTS member_user_idx ON member COLUMNS user_id UNIQUE;
         DEFINE INDEX IF NOT EXISTS member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
@@ -234,25 +253,19 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Audit Log (immutable admin action history)
         -- ================================================
         -- DR1-DB-007: enforce append-only at the SCHEMA level so a compromised
-        -- app credential cannot rewrite/erase history to cover its tracks.
-        -- Two complementary layers, because they bind different auth classes:
-        --   1. Table PERMISSIONS (select/create FULL, update/delete NONE) —
-        --      governs RECORD/access users. NOTE: SurrealDB *system* users
-        --      (root / the database-scoped EDITOR the app actually connects as)
-        --      BYPASS table permissions, so this layer alone does NOT stop the
-        --      app user; it documents intent and covers any future record user.
-        --   2. DEFINE EVENT ... THROW on UPDATE/DELETE — events run inside the
-        --      write transaction for EVERY writer regardless of role, so THROW
-        --      rolls the mutation back even for the EDITOR app user and root.
-        --      This is the layer that actually enforces immutability in prod.
-        -- CREATE + SELECT stay open: insert_audit_log / list_audit_log / count.
-        -- OVERWRITE (not IF NOT EXISTS) so existing deployments whose audit_log
-        -- predates this migration pick up the new permissions + event. OVERWRITE
-        -- redefines the table/event only; existing rows are preserved.
+        -- app credential cannot rewrite or erase history to cover its tracks.
+        -- Two layers, because they bind different auth classes:
+        --   1. Table PERMISSIONS NONE. Record users, including the relay login,
+        --      cannot select or create. SurrealDB system users (root and the
+        --      database-scoped EDITOR the app connects as) bypass table
+        --      permissions, so insert_audit_log and list_audit_log still run.
+        --   2. DEFINE EVENT ... THROW on UPDATE or DELETE. Events run inside the
+        --      write transaction for every writer, so THROW rolls the mutation
+        --      back for the EDITOR app user and for root.
+        -- OVERWRITE (not IF NOT EXISTS) so an older audit_log picks up NONE.
+        -- OVERWRITE redefines the table and the event. Existing rows stay.
         DEFINE TABLE OVERWRITE audit_log SCHEMAFULL
-            PERMISSIONS
-                FOR select, create FULL
-                FOR update, delete NONE;
+            PERMISSIONS NONE;
         DEFINE FIELD OVERWRITE actor_id ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE action ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE target_type ON audit_log TYPE string;
@@ -272,14 +285,26 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Moderation Actions (warnings, suspensions, bans)
         -- ================================================
         DEFINE TABLE IF NOT EXISTS moderation_action SCHEMAFULL;
-        DEFINE FIELD OVERWRITE member_id ON moderation_action TYPE string;
+        DEFINE FIELD OVERWRITE member_id ON moderation_action TYPE string
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
         DEFINE FIELD OVERWRITE action_type ON moderation_action TYPE string
-            ASSERT $value IN ['note', 'warning', 'suspension', 'ban'];
-        DEFINE FIELD OVERWRITE reason ON moderation_action TYPE string;
-        DEFINE FIELD OVERWRITE issued_by ON moderation_action TYPE string;
-        DEFINE FIELD OVERWRITE expires_at ON moderation_action TYPE option<datetime>;
-        DEFINE FIELD OVERWRITE is_active ON moderation_action TYPE bool DEFAULT true;
-        DEFINE FIELD OVERWRITE created_at ON moderation_action TYPE datetime DEFAULT time::now();
+            ASSERT $value IN ['note', 'warning', 'suspension', 'ban']
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
+        -- Hidden on this statement. See nostr_secret_key_encrypted above.
+        DEFINE FIELD OVERWRITE reason ON moderation_action TYPE string
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE issued_by ON moderation_action TYPE string
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE expires_at ON moderation_action TYPE option<datetime>
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
+        DEFINE FIELD OVERWRITE is_active ON moderation_action TYPE bool DEFAULT true
+            PERMISSIONS FOR select WHERE $access = 'relay'
+                FOR create NONE FOR update NONE;
+        DEFINE FIELD OVERWRITE created_at ON moderation_action TYPE datetime DEFAULT time::now()
+            PERMISSIONS FOR select NONE;
 
         DEFINE INDEX IF NOT EXISTS mod_member_idx ON moderation_action COLUMNS member_id;
         DEFINE INDEX IF NOT EXISTS mod_active_idx ON moderation_action COLUMNS member_id, action_type, is_active;
@@ -750,9 +775,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Socials: store validated handles (not URLs).
         -- GameAccount rank/sr/role: public-but-minimal competitive info.
         -- ================================================
-        DEFINE FIELD OVERWRITE main_role ON member TYPE option<string> DEFAULT NONE;
-        DEFINE FIELD OVERWRITE twitch ON member TYPE option<string> DEFAULT NONE;
-        DEFINE FIELD OVERWRITE twitter ON member TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE main_role ON member TYPE option<string> DEFAULT NONE
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE twitch ON member TYPE option<string> DEFAULT NONE
+            PERMISSIONS FOR select NONE;
+        DEFINE FIELD OVERWRITE twitter ON member TYPE option<string> DEFAULT NONE
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE rank ON game_account TYPE option<string> DEFAULT NONE;
         DEFINE FIELD OVERWRITE sr ON game_account TYPE option<int> DEFAULT NONE;
         DEFINE FIELD OVERWRITE role ON game_account TYPE option<string> DEFAULT NONE;
