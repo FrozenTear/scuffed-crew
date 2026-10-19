@@ -1558,7 +1558,7 @@ pub struct HeroRecord {
     pub rows: Vec<HeroRowLog>,
 }
 
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod test_fixtures {
     //! Synthetic boards and templates for tests. No game art.
     use super::*;
@@ -1683,6 +1683,15 @@ pub(crate) mod test_fixtures {
             .save(dir.join("special/skull_01.png"))
             .unwrap();
     }
+}
+
+/// Write `count` synthetic hero icons into `dir` (74 px, the heroes-v2
+/// cut). No game art. The portrait matcher and the hero reader both load
+/// this directory.
+pub fn write_synthetic_hero_icons(dir: &Path, count: usize) -> usize {
+    let ids: Vec<u32> = (1..=count as u32).collect();
+    test_fixtures::write_templates(dir, &ids, 74, 0);
+    ids.len()
 }
 
 #[cfg(test)]

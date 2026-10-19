@@ -12317,76 +12317,156 @@ mod tests {
         }
     }
 
-    /// Release soak for the arena cap. Generated frames only, no captured boards.
+    /// Release soak for the arena cap. Synthetic Tab frames only, no captured boards.
     ///
-    /// `cargo test --release --bin scuffed-stat-tracker -- --ignored --exact ram_plateau_soak --test-threads 1 --nocapture`
-    #[tokio::test]
+    /// Each read is one `spawn_blocking` of [`analyze_frame`], the same shape
+    /// as a Tab capture. The frame is a 1920x1080 board from the blanker
+    /// generator, and the portrait matcher loads a synthetic hero-icon pack.
+    /// RssAnon is printed after each wave.
+    ///
+    /// `cargo test --release --bin scuffed-stat-tracker ram_plateau_soak -- --ignored --test-threads 1 --nocapture`
+    #[test]
     #[ignore = "release soak: synthetic Tab bursts, asserts RssAnon under 400 MB"]
-    async fn ram_plateau_soak() {
+    fn ram_plateau_soak() {
+        // Before any of this test's threads, same place as `main`.
         limit_glibc_arenas();
-        let _off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
-        let portraits = tempfile::tempdir().unwrap();
-        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
-            portraits.path(),
+        // Process-wide, so the blocking threads see it. A scoped mode would not.
+        ocr::gate::set_mode(ocr::gate::OcrMode::Off);
+        struct RestoreOcr;
+        impl Drop for RestoreOcr {
+            fn drop(&mut self) {
+                ocr::gate::set_mode(ocr::gate::OcrMode::On);
+            }
+        }
+        let _ocr = RestoreOcr;
+
+        let data = tempfile::tempdir().unwrap();
+        let pack = data.path().join("templates/heroes-v2-1080");
+        let icons = stat_tracker::shadow::heroes::write_synthetic_hero_icons(&pack, 40);
+        let loaded =
+            stat_tracker::shadow::heroes::HeroTemplates::load_dir(&pack).expect("hero-icon pack");
+        assert!(
+            icons >= 32 && loaded.hero_count() >= 32,
+            "hero icon pack has {icons} written, {} loaded",
+            loaded.hero_count()
+        );
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load_installed(
+            data.path(),
         ));
-        let flags = FrameFlags {
+        assert!(
+            !matcher.is_empty(),
+            "portrait templates from the hero-icon pack did not load"
+        );
+        assert!(
+            stat_tracker::shadow::init(&stat_tracker::shadow::ReaderConfig::from_data_dir(
+                data.path()
+            )),
+            "hero-icon pack was not installed on the reader"
+        );
+
+        let tab_flags = || FrameFlags {
             allow_banner_recovery: false,
             session_map_known: true,
-            shadow_on: false,
+            shadow_on: true,
             use_new_reader: true,
         };
-        let saves = tempfile::tempdir().unwrap();
-        for _wave in 0..2 {
-            let mut tasks = Vec::new();
-            for _ in 0..8 {
-                let matcher = Arc::clone(&matcher);
-                tasks.push(tokio::task::spawn_blocking(move || {
-                    let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(
-                        2560,
-                        1440,
-                        |x, y| image::Rgb([(x & 255) as u8, (y & 255) as u8, 24]),
-                    ));
-                    let _ = analyze_frame(
-                        frame,
-                        matcher,
-                        None,
-                        detect::MatchOutcome::Unknown,
-                        flags,
-                        Vec::new(),
-                    );
-                }));
-            }
-            for task in tasks {
-                task.await.unwrap();
-            }
-        }
-        let labelled = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-            320,
-            180,
-            image::Rgb([12, 14, 22]),
-        ));
-        if let Some(job) = archive_map_label_crop(saves.path(), "soak", &labelled) {
-            job.await.unwrap();
-        }
-        for _ in 0..4 {
-            let img = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-                64,
-                64,
-                image::Rgb([8, 16, 32]),
-            )));
-            save_accepted_frame(true, saves.path(), img)
-                .expect("debug save queued")
-                .await
-                .unwrap();
-        }
-        release_glibc_heap();
-        let Some(rss) = stat_tracker::perf_log::rss_anon_kb() else {
-            eprintln!("RssAnon is not available on this host");
-            return;
+        let probe = analyze_frame(
+            stat_tracker::report::blank::synthetic_tab_frame(1920),
+            Arc::clone(&matcher),
+            None,
+            detect::MatchOutcome::Unknown,
+            tab_flags(),
+            Vec::new(),
+        );
+        let FrameAnalysisOutcome::Analyzed(probe) = probe else {
+            panic!("synthetic 1920x1080 Tab did not pass the scoreboard gate");
         };
+        assert_eq!(probe.frame.width(), 1920);
+        assert_eq!(probe.frame.height(), 1080);
+        assert_eq!(
+            probe.board.as_ref().map(|b| b.status),
+            Some(shadow::reader::BoardStatus::Read),
+            "the digit reader did not run on the synthetic Tab"
+        );
+
+        fn rss(tag: &str) -> Option<u64> {
+            let kb = stat_tracker::perf_log::rss_anon_kb();
+            match kb {
+                Some(kb) => eprintln!("rss_anon_kb {tag}={kb}"),
+                None => eprintln!("rss_anon_kb {tag}=na"),
+            }
+            kb
+        }
+
+        // Hundreds of Tabs, each on its own short-lived blocking thread,
+        // the way a capture hands `analyze_frame` to `spawn_blocking`.
+        const READS: usize = 256;
+        const BATCH: usize = 32;
+        rss("before");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(64)
+            .thread_keep_alive(std::time::Duration::from_millis(200))
+            .enable_all()
+            .build()
+            .expect("soak runtime");
+        let mut analyzed = 0usize;
+        let mut with_board = 0usize;
+        for wave in 0..(READS / BATCH) {
+            let (ok, boards) = rt.block_on(async {
+                let mut tasks = Vec::with_capacity(BATCH);
+                for _ in 0..BATCH {
+                    let matcher = Arc::clone(&matcher);
+                    tasks.push(tokio::task::spawn_blocking(move || {
+                        let frame = stat_tracker::report::blank::synthetic_tab_frame(1920);
+                        analyze_frame(
+                            frame,
+                            matcher,
+                            None,
+                            detect::MatchOutcome::Unknown,
+                            FrameFlags {
+                                allow_banner_recovery: false,
+                                session_map_known: true,
+                                shadow_on: true,
+                                use_new_reader: true,
+                            },
+                            Vec::new(),
+                        )
+                    }));
+                }
+                let mut ok = 0usize;
+                let mut boards = 0usize;
+                for task in tasks {
+                    if let FrameAnalysisOutcome::Analyzed(a) = task.await.expect("analyze task") {
+                        ok += 1;
+                        if a.board
+                            .as_ref()
+                            .is_some_and(|b| b.status == shadow::reader::BoardStatus::Read)
+                        {
+                            boards += 1;
+                        }
+                    }
+                }
+                (ok, boards)
+            });
+            analyzed += ok;
+            with_board += boards;
+            rss(&format!("wave{wave}"));
+        }
+        drop(rt);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        rss("threads_gone");
+        release_glibc_heap();
+        let trimmed = rss("trimmed");
+        assert_eq!(analyzed, READS, "Tab reads that passed the scoreboard gate");
+        assert!(
+            with_board * 2 >= READS,
+            "digit reader ran on {with_board} of {READS} Tabs"
+        );
+        let rss = trimmed.expect("RssAnon from /proc/self/status");
         assert!(
             rss < 400 * 1024,
-            "RssAnon {rss} kB after synthetic Tab bursts"
+            "RssAnon {rss} kB after {READS} synthetic Tab reads"
         );
     }
 
