@@ -467,10 +467,10 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(client) = &sync_client {
         let creds = client.credentials();
         let mut pack_startup = None;
-        if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
-            tracing::error!(
-                "sync paused: the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
-            );
+        if let Some(status) =
+            sync::auth_pause_status(&config.data_dir, &creds.server_url, &creds.token)
+        {
+            tracing::error!("{status}. Sync resumes when the URL or token changes in Settings.");
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
             pack_startup = Some(
@@ -1013,17 +1013,37 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
                     "server has no player_name configured: set it in the web UI under My Stats → Settings"
                 );
             }
-            Err(e) if matches!(e.attempt(), sync::SyncAttempt::AuthRejected) => {
+            Err(e)
+                if matches!(
+                    e.attempt(),
+                    sync::SyncAttempt::AuthRejected | sync::SyncAttempt::TokenExpired
+                ) =>
+            {
                 let creds = client.credentials();
-                if let Err(err) =
-                    sync::write_auth_pause(&config.data_dir, &creds.server_url, &creds.token)
-                {
+                let reason = if e.is_token_expired() {
+                    sync::AuthPauseReason::Expired
+                } else {
+                    sync::AuthPauseReason::Rejected
+                };
+                if let Err(err) = sync::write_auth_pause_reason(
+                    &config.data_dir,
+                    &creds.server_url,
+                    &creds.token,
+                    reason,
+                ) {
                     tracing::warn!(error = %err, "could not record sync auth pause");
                 }
-                tracing::error!(
-                    error = %e,
-                    "sync token rejected by daemon-config: pausing sync until the URL or token changes in Settings"
-                );
+                if e.is_token_expired() {
+                    tracing::error!(
+                        error = %e,
+                        "sync token expired on daemon-config: pausing until it is relinked in Settings"
+                    );
+                } else {
+                    tracing::error!(
+                        error = %e,
+                        "sync token rejected by daemon-config: pausing sync until the URL or token changes in Settings"
+                    );
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
@@ -4294,14 +4314,12 @@ async fn run_loop(
     // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
     let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
-    if sync_credentials_rejected(data_dir, sync_client) {
+    if let Some(status) = sync_pause_status(data_dir, sync_client) {
         sync_backoff
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .record_auth_rejected();
-        tracing::error!(
-            "sync paused: token rejected. Update the token in Settings; sync resumes when the URL or token changes."
-        );
+        tracing::error!("{status}. Sync resumes when the URL or token changes.");
     }
 
     // Startup drops a stale skeleton and schedules the upload on `sync_task`.
@@ -7618,9 +7636,16 @@ async fn try_sync(
         }
     })
     .await;
-    if matches!(outcome, sync::SyncAttempt::AuthRejected) {
+    let pause = match outcome {
+        sync::SyncAttempt::AuthRejected => Some(sync::AuthPauseReason::Rejected),
+        sync::SyncAttempt::TokenExpired => Some(sync::AuthPauseReason::Expired),
+        _ => None,
+    };
+    if let Some(reason) = pause {
         let creds = client.credentials();
-        if let Err(e) = sync::write_auth_pause(data_dir, &creds.server_url, &creds.token) {
+        if let Err(e) =
+            sync::write_auth_pause_reason(data_dir, &creds.server_url, &creds.token, reason)
+        {
             tracing::warn!(error = %e, "could not record sync auth pause");
         }
     }
@@ -7691,6 +7716,14 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
                 "sync token rejected: pausing until the server URL or token changes in Settings"
             );
         }
+        sync::SyncAttempt::TokenExpired => {
+            tracing::error!("sync token expired: pausing until it is relinked in Settings");
+        }
+        sync::SyncAttempt::BatchTooLarge => {
+            tracing::warn!(
+                "sync batch was still over the server cap after shrinking; rows stay queued"
+            );
+        }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
     }
 }
@@ -7699,11 +7732,16 @@ fn sync_credentials_rejected(
     data_dir: &std::path::Path,
     client: Option<&sync::SyncClient>,
 ) -> bool {
-    let Some(client) = client else {
-        return false;
-    };
+    sync_pause_status(data_dir, client).is_some()
+}
+
+fn sync_pause_status(
+    data_dir: &std::path::Path,
+    client: Option<&sync::SyncClient>,
+) -> Option<&'static str> {
+    let client = client?;
     let creds = client.credentials();
-    sync::auth_pause_matches(data_dir, &creds.server_url, &creds.token)
+    sync::auth_pause_status(data_dir, &creds.server_url, &creds.token)
 }
 
 /// While sync is paused on a rejected token, re-read Settings. A different
@@ -8207,6 +8245,18 @@ fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
                 "sync token rejected, will not retry until the URL or token changes"
             );
         }
+        sync::SyncAttempt::TokenExpired => {
+            tracing::error!(
+                error = %err,
+                "sync token expired, will not retry until it is relinked in Settings"
+            );
+        }
+        sync::SyncAttempt::BatchTooLarge => {
+            tracing::warn!(
+                error = %err,
+                "sync batch was too large and the server cap did not shrink"
+            );
+        }
         _ if err.message.starts_with(sync::SERVER_REFUSING_UPLOADS) => {
             tracing::error!("{}", err.message);
         }
@@ -8353,103 +8403,226 @@ where
         tombstones = tombstones.len(),
         "syncing unsynced matches"
     );
-    // Quarantine can leave deletes with no match rows. Those still need one
-    // request. There is nothing to split. A deletes-only 400 still retries
-    // forever (backoff, same as a 5xx). That matters if the server ever
-    // validates deleted_sessions: one bad id keeps the delete queue retrying,
-    // because there are no match rows to isolate.
-    if to_upload.is_empty() {
-        return match upload(Vec::new(), tombstones.clone()).await {
-            Ok(resp) => {
-                tracing::info!(deleted = resp.deleted, "sync complete");
-                if let Err(e) = store
-                    .clear_tombstones(tombstones)
+    // Chunks stay at or under the server batch cap. Each chunk is acknowledged
+    // on its own: mark_synced / clear_tombstones run only for the rows that
+    // request wrote. A later chunk is not sent after a hard failure.
+    upload_chunked(
+        store,
+        data_dir,
+        &claims,
+        &to_upload,
+        tombstones,
+        &mut upload,
+    )
+    .await
+}
+
+/// Send `to_upload` and `tombstones` in capped requests.
+///
+/// At most [`sync::SYNC_UPLOAD_MAX_MATCHES`] games and
+/// [`sync::SYNC_UPLOAD_MAX_DELETES`] tombstones go out together. HTTP 400
+/// and 422 still split inside the chunk. HTTP 413 `batch_too_large` lowers
+/// those caps (never below 1) and resends immediately; that request wrote
+/// nothing and is not a failure streak. HTTP 429, 401, 403, and other
+/// errors stop the pass. Tombstones ride on the chunk they were sent with,
+/// including 400 splits of that chunk, and are cleared only after a 2xx.
+/// A deletes-only 400 still backs off like a 5xx: there are no match rows
+/// to isolate, so one bad id keeps that delete chunk retrying.
+async fn upload_chunked<F, Fut>(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    claims: &[storage::SyncClaim],
+    to_upload: &[storage::PersonalMatch],
+    mut tombstones: Vec<String>,
+    upload: &mut F,
+) -> sync::SyncAttempt
+where
+    F: FnMut(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
+        >,
+{
+    let mut match_limit = sync::SYNC_UPLOAD_MAX_MATCHES;
+    let mut delete_limit = sync::SYNC_UPLOAD_MAX_DELETES;
+    let mut remaining: Vec<usize> = (0..to_upload.len()).collect();
+    let mut uploaded = 0usize;
+    let mut quarantined = 0usize;
+    let mut requests = 0usize;
+    let mut progress = false;
+    let mut stop: Option<sync::SyncAttempt> = None;
+
+    loop {
+        if remaining.is_empty() && tombstones.is_empty() {
+            break;
+        }
+        let match_take = match_limit.min(remaining.len());
+        let delete_take = delete_limit.min(tombstones.len());
+        let chunk_indexes: Vec<usize> = remaining.iter().take(match_take).copied().collect();
+        let chunk_rows: Vec<storage::PersonalMatch> = chunk_indexes
+            .iter()
+            .map(|&index| to_upload[index].clone())
+            .collect();
+        let chunk_deletes: Vec<String> = tombstones.iter().take(delete_take).cloned().collect();
+
+        if chunk_rows.is_empty() {
+            requests += 1;
+            match upload(Vec::new(), chunk_deletes.clone()).await {
+                Ok(resp) => {
+                    tracing::info!(deleted = resp.deleted, "sync delete chunk complete");
+                    clear_acknowledged_tombstones(store, &chunk_deletes).await;
+                    tombstones.drain(..delete_take);
+                    progress = true;
+                }
+                Err(err) if err.is_batch_too_large() => {
+                    if !sync::lower_batch_limits(
+                        &mut match_limit,
+                        &mut delete_limit,
+                        err.max_matches,
+                        err.max_deleted_sessions,
+                    ) {
+                        stop = Some(sync_attempt_from_error(&err));
+                        break;
+                    }
+                    tracing::info!(
+                        max_matches = match_limit,
+                        max_deleted_sessions = delete_limit,
+                        "server asked for a smaller delete batch, retrying"
+                    );
+                }
+                Err(err) => {
+                    stop = Some(sync_attempt_from_error(&err));
+                    break;
+                }
+            }
+            continue;
+        }
+
+        let isolation = sync::isolate_rejected(&chunk_rows, |batch| {
+            upload(batch.to_vec(), chunk_deletes.clone())
+        })
+        .await;
+        requests += isolation.requests;
+
+        for rejected in &isolation.rejected {
+            let Some(&global) = chunk_indexes.get(rejected.index) else {
+                continue;
+            };
+            let covered = claims_covering(claims, to_upload, [global]);
+            let session_id = to_upload
+                .get(global)
+                .map(|row| row.session_id.as_str())
+                .unwrap_or("");
+            tracing::warn!(
+                session_id,
+                error = %rejected.message,
+                "upload rejected this row"
+            );
+            if let Err(e) = store
+                .quarantine_upload(&covered, &rejected.message)
+                .await
+                .map_err(|e| e.to_string())
+            {
+                tracing::error!(error = %e, session_id, "failed to quarantine a rejected row");
+            }
+            quarantined += 1;
+            progress = true;
+        }
+
+        if !isolation.accepted.is_empty() {
+            let accepted_global: Vec<usize> = isolation
+                .accepted
+                .iter()
+                .filter_map(|&local| chunk_indexes.get(local).copied())
+                .collect();
+            let accepted = claims_covering(claims, to_upload, accepted_global.iter().copied());
+            if !accepted.is_empty()
+                && let Err(e) = store
+                    .mark_synced(&accepted)
                     .await
                     .map_err(|e| e.to_string())
-                {
-                    tracing::error!(error = %e, "failed to clear acknowledged tombstones");
-                }
-                refresh_snapshot_force(store, data_dir).await;
-                sync::SyncAttempt::Uploaded
+            {
+                tracing::error!(error = %e, "failed to mark matches as synced");
             }
-            Err(err) => sync_attempt_from_error(&err),
-        };
-    }
-    // 400 and 422 split the batch so one refused row does not retry the
-    // whole queue forever. A pass that accepts nothing is a server-wide
-    // refusal: quarantine nothing and back off. 5xx, network errors, 401,
-    // and 403 stop the pass without splitting.
-    let isolation = sync::isolate_rejected(&to_upload, |batch| {
-        upload(batch.to_vec(), tombstones.clone())
-    })
-    .await;
+            clear_acknowledged_tombstones(store, &chunk_deletes).await;
+            tombstones.drain(..delete_take);
+            uploaded += accepted_global.len();
+            progress = true;
+        }
 
-    for rejected in &isolation.rejected {
-        let covered = claims_covering(&claims, &to_upload, [rejected.index]);
-        let session_id = to_upload
-            .get(rejected.index)
-            .map(|row| row.session_id.as_str())
-            .unwrap_or("");
-        tracing::warn!(
-            session_id,
-            error = %rejected.message,
-            "upload rejected this row"
-        );
-        if let Err(e) = store
-            .quarantine_upload(&covered, &rejected.message)
-            .await
-            .map_err(|e| e.to_string())
-        {
-            tracing::error!(error = %e, session_id, "failed to quarantine a rejected row");
+        let mut done_local = vec![false; chunk_rows.len()];
+        for &local in &isolation.accepted {
+            if let Some(slot) = done_local.get_mut(local) {
+                *slot = true;
+            }
+        }
+        for rejected in &isolation.rejected {
+            if let Some(slot) = done_local.get_mut(rejected.index) {
+                *slot = true;
+            }
+        }
+        let mut next_remaining = Vec::with_capacity(remaining.len());
+        for (offset, &global) in remaining.iter().enumerate() {
+            if offset < match_take && done_local.get(offset).copied().unwrap_or(false) {
+                continue;
+            }
+            next_remaining.push(global);
+        }
+        remaining = next_remaining;
+
+        if let Some(err) = isolation.stopped {
+            if err.is_batch_too_large()
+                && sync::lower_batch_limits(
+                    &mut match_limit,
+                    &mut delete_limit,
+                    err.max_matches,
+                    err.max_deleted_sessions,
+                )
+            {
+                tracing::info!(
+                    max_matches = match_limit,
+                    max_deleted_sessions = delete_limit,
+                    "server asked for a smaller sync batch, retrying"
+                );
+                continue;
+            }
+            stop = Some(sync_attempt_from_error(&err));
+            break;
+        }
+
+        if !isolation.deferred.is_empty() {
+            tracing::warn!(
+                deferred = isolation.deferred.len(),
+                requests,
+                "sync left rows queued after the request cap"
+            );
+            break;
         }
     }
 
-    let accepted = claims_covering(&claims, &to_upload, isolation.accepted.iter().copied());
-    if !accepted.is_empty() {
-        if let Err(e) = store
-            .mark_synced(&accepted)
-            .await
-            .map_err(|e| e.to_string())
-        {
-            tracing::error!(error = %e, "failed to mark matches as synced");
-        }
-        if let Err(e) = store
-            .clear_tombstones(tombstones)
-            .await
-            .map_err(|e| e.to_string())
-        {
-            tracing::error!(error = %e, "failed to clear acknowledged tombstones");
-        }
-    }
-
-    if !isolation.accepted.is_empty() || !isolation.rejected.is_empty() {
+    if progress {
         refresh_snapshot_force(store, data_dir).await;
     }
-
-    if let Some(err) = isolation.stopped {
-        return sync_attempt_from_error(&err);
+    if let Some(attempt) = stop {
+        return attempt;
     }
-
-    if !isolation.deferred.is_empty() {
-        tracing::warn!(
-            deferred = isolation.deferred.len(),
-            requests = isolation.requests,
-            "sync left rows queued after the request cap"
-        );
-    }
-
-    if isolation.accepted.is_empty() && isolation.rejected.is_empty() {
+    if !progress {
         return sync::SyncAttempt::NoServerCall;
     }
-
-    tracing::info!(
-        uploaded = isolation.accepted.len(),
-        quarantined = isolation.rejected.len(),
-        deferred = isolation.deferred.len(),
-        requests = isolation.requests,
-        "sync pass finished"
-    );
+    tracing::info!(uploaded, quarantined, requests, "sync pass finished");
     sync::SyncAttempt::Uploaded
+}
+
+async fn clear_acknowledged_tombstones(store: &storage::LocalStore, session_ids: &[String]) {
+    if session_ids.is_empty() {
+        return;
+    }
+    if let Err(e) = store
+        .clear_tombstones(session_ids.to_vec())
+        .await
+        .map_err(|e| e.to_string())
+    {
+        tracing::error!(error = %e, "failed to clear acknowledged tombstones");
+    }
 }
 
 #[cfg(test)]
@@ -14999,7 +15172,7 @@ mod tests {
         let guard = at("acquire_pid_guard(&config.data_dir)?");
         for later in [
             "open_sync_client(",
-            "auth_pause_matches(",
+            "auth_pause_status(",
             "fetch_player_name_if_needed(",
             "packs::sync_on_startup(",
             "maybe_vacuum(",
@@ -18590,7 +18763,7 @@ mod tests {
                     Err(sync::SyncUploadError {
                         message: "matches[0]: hero is not allowed".into(),
                         status: Some(400),
-                        retry_after: None,
+                        ..sync::SyncUploadError::plain("")
                     })
                 } else {
                     uploaded_pass.lock().unwrap().extend(ids);
@@ -18679,7 +18852,7 @@ mod tests {
                 Err(sync::SyncUploadError {
                     message: "down".into(),
                     status: Some(500),
-                    retry_after: None,
+                    ..sync::SyncUploadError::plain("")
                 })
             }
         })
@@ -18716,7 +18889,7 @@ mod tests {
                 Err(sync::SyncUploadError {
                     message: "matches[0]: recognizer is not allowed".into(),
                     status: Some(422),
-                    retry_after: None,
+                    ..sync::SyncUploadError::plain("")
                 })
             }
         })
@@ -18762,6 +18935,333 @@ mod tests {
         assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    async fn insert_synced_games(store: &storage::LocalStore, n: i64) {
+        for i in 0..n {
+            let mut row = test_match(&format!("s{i}"), "victory");
+            row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(i));
+            store.insert_match(row).await.unwrap();
+        }
+    }
+
+    fn batch_too_large(max_matches: u64, max_deleted_sessions: u64) -> sync::SyncUploadError {
+        sync::SyncUploadError {
+            message: "batch too large".into(),
+            status: Some(413),
+            code: Some("batch_too_large".into()),
+            max_matches: Some(max_matches),
+            max_deleted_sessions: Some(max_deleted_sessions),
+            ..sync::SyncUploadError::plain("")
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_uploads_matches_in_chunks_of_200() {
+        let n = 450i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sizes_pass = std::sync::Arc::clone(&sizes);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+            let sizes_pass = std::sync::Arc::clone(&sizes_pass);
+            async move {
+                assert!(tombstones.is_empty());
+                assert!(matches.len() <= sync::SYNC_UPLOAD_MAX_MATCHES);
+                sizes_pass.lock().unwrap().push(matches.len());
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        assert_eq!(
+            *sizes.lock().unwrap(),
+            vec![
+                sync::SYNC_UPLOAD_MAX_MATCHES,
+                sync::SYNC_UPLOAD_MAX_MATCHES,
+                n as usize - 2 * sync::SYNC_UPLOAD_MAX_MATCHES,
+            ]
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.synced)
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_uploads_tombstones_in_chunks_of_500() {
+        let n = 1200i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        for i in 0..n {
+            store.delete_session(&format!("t{i}")).await.unwrap();
+        }
+        let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sizes_pass = std::sync::Arc::clone(&sizes);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+            let sizes_pass = std::sync::Arc::clone(&sizes_pass);
+            async move {
+                assert!(matches.is_empty());
+                assert!(tombstones.len() <= sync::SYNC_UPLOAD_MAX_DELETES);
+                sizes_pass.lock().unwrap().push(tombstones.len());
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let cap = sync::SYNC_UPLOAD_MAX_DELETES;
+        assert_eq!(*sizes.lock().unwrap(), vec![cap, cap, n as usize - 2 * cap]);
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_413_resends_at_the_server_match_cap_and_is_not_a_failure() {
+        let n = 120i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sizes_pass = std::sync::Arc::clone(&sizes);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let sizes_pass = std::sync::Arc::clone(&sizes_pass);
+            let len = matches.len();
+            async move {
+                sizes_pass.lock().unwrap().push(len);
+                if len > 50 {
+                    Err(batch_too_large(50, sync::SYNC_UPLOAD_MAX_DELETES as u64))
+                } else {
+                    Ok(upload_ok())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let sizes = sizes.lock().unwrap().clone();
+        assert_eq!(
+            sizes[0], n as usize,
+            "the first request is the uncapped chunk"
+        );
+        assert!(sizes[1..].iter().all(|len| *len <= 50 && *len > 0));
+        assert_eq!(sizes[1..].iter().sum::<usize>(), n as usize);
+        assert_eq!(sizes[1..].iter().filter(|len| **len == 50).count(), 2);
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.record_failure(now);
+        backoff.observe(attempt, now);
+        assert_eq!(
+            backoff.failures(),
+            0,
+            "a 413 that is resent in the same pass is not a failure streak"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_429_stops_later_chunks_and_keeps_the_rest_queued() {
+        let n = 450i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let retry = std::time::Duration::from_secs(120);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            let n = calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let len = matches.len();
+            async move {
+                assert_eq!(len, sync::SYNC_UPLOAD_MAX_MATCHES);
+                if n == 0 {
+                    Ok(upload_ok())
+                } else if n == 1 {
+                    Err(sync::SyncUploadError {
+                        message: "rate_limited".into(),
+                        status: Some(429),
+                        retry_after: Some(retry),
+                        code: Some("rate_limited".into()),
+                        ..sync::SyncUploadError::plain("")
+                    })
+                } else {
+                    panic!("a 429 must stop the remaining chunks");
+                }
+            }
+        })
+        .await;
+        assert!(matches!(
+            attempt,
+            sync::SyncAttempt::RateLimited {
+                retry_after: Some(wait)
+            } if wait == retry
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let rows = store.get_all_matches().await.unwrap();
+        let synced = rows.iter().filter(|row| row.synced).count();
+        assert_eq!(synced, sync::SYNC_UPLOAD_MAX_MATCHES);
+        assert_eq!(
+            store.get_unsynced().await.unwrap().len(),
+            n as usize - sync::SYNC_UPLOAD_MAX_MATCHES
+        );
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.record_failure(now);
+        backoff.observe(attempt, now);
+        assert_eq!(
+            backoff.failures(),
+            1,
+            "429 must not grow the failure streak"
+        );
+        assert_eq!(backoff.retry_after(now), retry);
+    }
+
+    #[tokio::test]
+    async fn token_expired_stops_the_rest_of_the_chunks() {
+        let n = 250i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                let n = calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(n, 0, "token_expired must stop the remaining chunks");
+                Err(sync::SyncUploadError {
+                    message: "token expired".into(),
+                    status: Some(401),
+                    code: Some("token_expired".into()),
+                    ..sync::SyncUploadError::plain("")
+                })
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::TokenExpired));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            store
+                .get_all_matches()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| !row.synced)
+        );
+        assert_eq!(store.get_unsynced().await.unwrap().len(), n as usize);
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.observe(attempt, now);
+        assert!(backoff.auth_rejected());
+        assert_eq!(backoff.failures(), 0);
+    }
+
+    #[tokio::test]
+    async fn token_expired_maps_to_the_relink_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("s1", "victory"))
+            .await
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = br#"{"code":"token_expired"}"#;
+        let response = format!(
+            "HTTP/1.1 401 no\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut bytes = response.into_bytes();
+        bytes.extend_from_slice(body);
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 8192];
+            let mut got = Vec::new();
+            loop {
+                match std::io::Read::read(&mut sock, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        got.extend_from_slice(&buf[..n]);
+                        if got.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = std::io::Write::write_all(&mut sock, &bytes);
+        });
+        let server_url = format!("http://127.0.0.1:{port}");
+        let client = sync::SyncClient::new(config::SyncConfig {
+            server_url: server_url.clone(),
+            token: "tok".into(),
+        });
+        let attempt = try_sync(&store, &client, dir.path(), None).await;
+        server.join().unwrap();
+        assert!(matches!(attempt, sync::SyncAttempt::TokenExpired));
+        assert_eq!(
+            sync::auth_pause_status(dir.path(), &server_url, "tok"),
+            Some(sync::SYNC_TOKEN_EXPIRED_STATUS)
+        );
+        assert_eq!(
+            sync::SYNC_TOKEN_EXPIRED_STATUS,
+            "Sync token expired, relink in Settings"
+        );
+        assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_bad_row_in_the_first_chunk_still_uploads_the_next_chunk() {
+        let n = 201i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        insert_synced_games(&store, n).await;
+        let bad = format!("s{}", n - 1);
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uploaded_pass = std::sync::Arc::clone(&uploaded);
+        let bad_id = bad.clone();
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let uploaded_pass = std::sync::Arc::clone(&uploaded_pass);
+            let bad_here = matches.iter().any(|row| row.session_id == bad_id);
+            let ids: Vec<String> = matches.iter().map(|row| row.session_id.clone()).collect();
+            async move {
+                if bad_here {
+                    Err(sync::SyncUploadError {
+                        message: "matches[0]: hero is not allowed".into(),
+                        status: Some(400),
+                        ..sync::SyncUploadError::plain("")
+                    })
+                } else {
+                    uploaded_pass.lock().unwrap().extend(ids);
+                    Ok(upload_ok())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let got = uploaded.lock().unwrap().clone();
+        assert!(
+            got.iter().any(|id| id == "s0"),
+            "the next chunk still uploads"
+        );
+        assert!(!got.iter().any(|id| id == &bad));
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter()
+                .find(|row| row.session_id == bad)
+                .unwrap()
+                .upload_rejection()
+                .is_some()
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.session_id != bad)
+                .all(|row| row.synced)
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
     }
 
     fn unfinished_row(session_id: &str) -> storage::PersonalMatch {
