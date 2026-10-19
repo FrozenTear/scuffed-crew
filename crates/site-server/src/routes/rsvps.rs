@@ -64,6 +64,16 @@ pub async fn rsvp_event(
     Path(event_id): Path<String>,
     Json(body): Json<RsvpRequest>,
 ) -> Result<Json<EventRsvp>, (StatusCode, Json<ErrorResponse>)> {
+    let event = state
+        .db
+        .get_event(&event_id)
+        .await
+        .map_err(|_| internal_err())?
+        .ok_or_else(not_found)?;
+    if !event.is_active {
+        return Err(not_found());
+    }
+
     let rsvp = state
         .db
         .upsert_rsvp(&event_id, &member.member.id, body.status)

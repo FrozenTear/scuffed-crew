@@ -795,6 +795,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE slot ON bootstrap_lock TYPE string;
         DEFINE FIELD OVERWRITE claimed ON bootstrap_lock TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE claimed_at ON bootstrap_lock TYPE option<datetime>;
+        -- One-shot marker for BOOTSTRAP_ADMIN_RESET. A hash, not the password.
+        -- Migrations never write this column; startup does, after a reset runs.
+        DEFINE FIELD OVERWRITE env_fingerprint ON bootstrap_lock TYPE option<string>;
         DEFINE INDEX IF NOT EXISTS bootstrap_lock_slot_idx ON bootstrap_lock COLUMNS slot UNIQUE;
 
         -- ================================================

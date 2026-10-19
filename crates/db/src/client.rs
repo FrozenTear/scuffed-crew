@@ -77,9 +77,11 @@ fn check_credentials(username: &str, password: &str) -> DbResult<()> {
 }
 
 fn assert_safe_sql_ident(name: &str, what: &str) -> DbResult<()> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    let ascii_ident = (1..=64).contains(&name.len())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ascii_ident {
         return Err(DbError::Config(format!(
-            "Invalid {what}: use only ASCII alphanumeric and underscore"
+            "Invalid {what}: use 1 to 64 characters of ASCII letters, digits, and underscore"
         )));
     }
     Ok(())
@@ -87,6 +89,40 @@ fn assert_safe_sql_ident(name: &str, what: &str) -> DbResult<()> {
 
 fn escape_surreal_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Quoted SurrealQL literal for a password when a bound parameter is refused.
+///
+/// Control characters, including newline and NUL, are rejected. They are not
+/// given a lexer escape, because a wrong escape would change the statement.
+fn quoted_surreal_password(password: &str) -> DbResult<String> {
+    if password
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        return Err(DbError::Config(
+            "App database password must not contain control characters".into(),
+        ));
+    }
+    Ok(format!("'{}'", escape_surreal_string(password)))
+}
+
+/// `DEFINE USER` for the app role.
+///
+/// SurrealDB 3 rejects a bound password here (`PARSE error: Unexpected token
+/// a parameter, expected a strand` on `PASSWORD $app_pass`). The password is
+/// therefore a quoted literal from [`quoted_surreal_password`]. The username
+/// is an identifier, interpolated only after [`assert_safe_sql_ident`].
+async fn define_database_user(
+    client: &Surreal<Any>,
+    username: &str,
+    password: &str,
+) -> DbResult<()> {
+    let pass = quoted_surreal_password(password)?;
+    let statement =
+        format!("DEFINE USER OVERWRITE {username} ON DATABASE PASSWORD {pass} ROLES EDITOR");
+    client.query(statement).await?.check()?;
+    Ok(())
 }
 
 /// Remote DB boot policy: PRODUCTION + ENCRYPTION_KEY required.
@@ -405,14 +441,11 @@ impl Database {
     /// old behavior — re-align the stored password to the env value on this boot
     /// — for an intentional credential rotation.
     ///
-    /// **Password is SQL-string-interpolated** (SurrealDB `DEFINE USER` does not
-    /// accept a bound password parameter reliably). `escape_surreal_string` only
-    /// escapes backslash (`\`) and single-quote (`'`). Therefore the app password
-    /// (`SURREALDB_APP_PASSWORD`) MUST NOT contain raw control characters
-    /// (NUL, newline, carriage return, tab, etc.) or other bytes the SurrealQL
-    /// string lexer may reject/misparse — restrict it to printable ASCII (or a
-    /// documented safe subset). Username is separately constrained to
-    /// `[A-Za-z0-9_]` by `assert_safe_sql_ident`.
+    /// **Password is a quoted literal, not a bound parameter.** SurrealDB 3
+    /// rejects `PASSWORD $param` (`expected a strand`). [`quoted_surreal_password`]
+    /// escapes `\` and `'` and refuses control characters. The username is an
+    /// identifier, interpolated only after [`assert_safe_sql_ident`] accepts
+    /// `[A-Za-z0-9_]{1,64}`.
     pub async fn ensure_database_app_user(
         client: &Surreal<Any>,
         username: &str,
@@ -453,14 +486,14 @@ impl Database {
             }
         }
 
-        let pass = escape_surreal_string(password);
         // `OVERWRITE` keeps this idempotent: SurrealDB v3 plain `DEFINE USER` is
         // create-only and errors if the user exists (this crash-looped prod on
         // redeploy). Reaching here means either the user is missing, or
         // FORCE_APP_PASSWORD_SYNC=1 requested an intentional rotation.
-        let q =
-            format!("DEFINE USER OVERWRITE {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR");
-        client.query(q).await?.check()?;
+        // Username is an identifier, so it cannot be a bound string. The
+        // pattern check above is what makes interpolating it safe. The password
+        // is bound and never concatenated into the statement.
+        define_database_user(client, username, password).await?;
         tracing::info!(
             username,
             force_sync,
@@ -629,6 +662,80 @@ mod app_user_tests {
         Database::ensure_database_app_user(&db.client, "scuffed_app", "test-pass-2")
             .await
             .expect("re-define with new password must not error");
+    }
+
+    #[tokio::test]
+    async fn define_user_rejects_usernames_outside_the_pattern() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let too_long = "a".repeat(65);
+        for name in [
+            "",
+            " ",
+            &too_long,
+            "has space",
+            "quote'",
+            "semi;",
+            "dash-name",
+            "dot.name",
+            "unicodeü",
+            "app' ON DATABASE PASSWORD 'x' ROLES OWNER",
+        ] {
+            let err = Database::ensure_database_app_user(&db.client, name, "secret")
+                .await
+                .expect_err(name);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("1 to 64"),
+                "username {name:?} should fail the pattern, got {msg}"
+            );
+        }
+
+        let max = "a".repeat(64);
+        Database::ensure_database_app_user(&db.client, &max, "secret")
+            .await
+            .expect("64 character username is in range");
+    }
+
+    /// A quote or backslash in the password must be the password, not statement
+    /// text. Sign-in with that password is the check. A wrong password must fail.
+    #[tokio::test]
+    async fn define_user_password_is_not_interpolated() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let password = "p'a\\ss word";
+        Database::ensure_database_app_user(&db.client, "app_quote", password)
+            .await
+            .expect("define user");
+
+        db.client
+            .signin(super::DatabaseAuth {
+                namespace: "scuffed_crew".into(),
+                database: "main".into(),
+                username: "app_quote".into(),
+                password: password.into(),
+            })
+            .await
+            .expect("signin with the real password");
+
+        let denied = db
+            .client
+            .signin(super::DatabaseAuth {
+                namespace: "scuffed_crew".into(),
+                database: "main".into(),
+                username: "app_quote".into(),
+                password: "not-the-password".into(),
+            })
+            .await;
+        assert!(
+            denied.is_err(),
+            "a wrong password must not authenticate: {denied:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_password_escapes_quote_and_backslash_and_rejects_controls() {
+        assert_eq!(quoted_surreal_password("a'b\\c").unwrap(), "'a\\'b\\\\c'");
+        assert!(quoted_surreal_password("line\nbreak").is_err());
+        assert!(quoted_surreal_password("nul\0").is_err());
     }
 }
 

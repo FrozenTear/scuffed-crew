@@ -24,7 +24,9 @@ use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// Whether `role` meets board `min_role` (`admin`/`officer`/`member`/`recruit`).
-/// Empty/unknown min_role → unrestricted.
+///
+/// Blank stays public. Any other string that is not one of those four roles
+/// denies every caller, including admin (W1019-9).
 fn role_meets_min(role: OrgRole, min_role: Option<&str>) -> bool {
     let Some(min) = min_role.map(str::trim).filter(|s| !s.is_empty()) else {
         return true;
@@ -34,7 +36,10 @@ fn role_meets_min(role: OrgRole, min_role: Option<&str>) -> bool {
         "officer" => OrgRole::Officer,
         "member" => OrgRole::Member,
         "recruit" => OrgRole::Recruit,
-        _ => return true,
+        _ => {
+            tracing::warn!(min_role = min, "unknown forum min_role; denying access");
+            return false;
+        }
     };
     role.is_at_least(required)
 }
@@ -1089,5 +1094,24 @@ mod tests {
             "officer can post",
         );
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[test]
+    fn unknown_min_role_denies_every_caller_and_blank_stays_public() {
+        for role in [
+            OrgRole::Admin,
+            OrgRole::Officer,
+            OrgRole::Member,
+            OrgRole::Recruit,
+        ] {
+            assert!(super::role_meets_min(role, None));
+            assert!(super::role_meets_min(role, Some("")));
+            assert!(super::role_meets_min(role, Some("   ")));
+            assert!(!super::role_meets_min(role, Some("officers")));
+            assert!(!super::role_meets_min(role, Some("superuser")));
+        }
+        assert!(super::role_meets_min(OrgRole::Officer, Some(" Officer ")));
+        assert!(!super::role_meets_min(OrgRole::Recruit, Some(" Officer ")));
+        assert!(super::role_meets_min(OrgRole::Admin, Some("admin")));
     }
 }

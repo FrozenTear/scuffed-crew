@@ -81,30 +81,12 @@ async fn main() {
             .expect("Failed to connect to SurrealDB")
     };
 
-    // Emergency local admin password reset (production only). Unset BOOTSTRAP_ADMIN_RESET after use.
-    if !is_dev
-        && std::env::var("BOOTSTRAP_ADMIN_RESET").ok().as_deref() == Some("1")
-        && let Ok(new_password) = std::env::var("BOOTSTRAP_ADMIN_PASSWORD")
-        && !new_password.is_empty()
-    {
-        let username =
-            std::env::var("BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string());
-        // Rewrites the password hash AND revokes all existing sessions for the
-        // user, so a live attacker session cannot survive the reset
-        // (DR1-AUTH-003).
-        match scuffed_site_server::bootstrap_admin_reset(&db, &username, &new_password).await {
-            Ok(scuffed_site_server::BootstrapResetOutcome::Applied { sessions_revoked }) => {
-                tracing::warn!(
-                    "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
-                     ({sessions_revoked} existing session(s) revoked) — remove \
-                     BOOTSTRAP_ADMIN_RESET from env"
-                );
-            }
-            Ok(scuffed_site_server::BootstrapResetOutcome::NoSuchUser) => tracing::error!(
-                "BOOTSTRAP_ADMIN_RESET: no local user '{username}' — create via first-boot setup first"
-            ),
-            Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET failed: {e}"),
-        }
+    // Emergency local admin password reset (production only).
+    // A successful reset is recorded and the same BOOTSTRAP_ADMIN_* values are
+    // ignored on later starts. Leftover values after an admin exists are also
+    // ignored. Nothing in the environment or secrets file is deleted.
+    if !is_dev && let Err(e) = scuffed_site_server::apply_bootstrap_admin_env(&db).await {
+        tracing::error!("BOOTSTRAP_ADMIN_*: {e}");
     }
 
     let db = Arc::new(db);

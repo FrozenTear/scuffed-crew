@@ -164,6 +164,7 @@ pub async fn create_event(
     )
     .map_err(|msg| bad_request(&msg))?;
     schedule_error(&body.time, body.duration_minutes).map_err(|msg| bad_request(&msg))?;
+    crate::calendar::check_day_of_week(body.day_of_week).map_err(bad_request)?;
 
     let event = state
         .db
@@ -219,6 +220,9 @@ pub async fn update_event(
     Path(id): Path<String>,
     Json(body): Json<UpdateEventRequest>,
 ) -> Result<Json<Event>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(day) = body.day_of_week {
+        crate::calendar::check_day_of_week(day).map_err(bad_request)?;
+    }
     if let Some(title) = body.title.as_deref() {
         reject_controls("title", title).map_err(|msg| bad_request(&msg))?;
     }

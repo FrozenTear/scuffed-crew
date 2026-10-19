@@ -66,6 +66,10 @@ struct DbBootstrapLock {
     #[serde(default)]
     #[surreal(default)]
     claimed_at: Option<SurrealDatetime>,
+    /// Hash of a `BOOTSTRAP_ADMIN_RESET` that already ran. Not a password.
+    #[serde(default)]
+    #[surreal(default)]
+    env_fingerprint: Option<String>,
 }
 
 /// Ensure the unclaimed `bootstrap_lock:setup` sentinel exists.
@@ -82,6 +86,7 @@ pub async fn ensure_bootstrap_lock_sentinel(client: &Surreal<Any>) -> DbResult<(
         slot: "setup".into(),
         claimed: false,
         claimed_at: None,
+        env_fingerprint: None,
     };
     // Concurrent migrators: the unique record id / slot index rejects the loser.
     let _: Option<DbBootstrapLock> = match client
@@ -774,8 +779,10 @@ impl Database {
     /// `UPDATE … WHERE claimed = false` is the same CAS shape as application
     /// status / role-change: two concurrent `/api/auth/setup` calls cannot both
     /// match. Winner proceeds to `create_member(..., Admin)`; loser gets
-    /// [`crate::DbError::Conflict`]. Once claimed, the row is never reset — the
-    /// lock stays closed even if every admin is later suspended (DR1-ACCT-003).
+    /// [`crate::DbError::Conflict`]. The claim is released only when setup's
+    /// user or member create fails and no member row exists
+    /// ([`Self::release_bootstrap_lock`]). A member row keeps it closed, including
+    /// when every admin is later suspended (DR1-ACCT-003).
     pub async fn claim_bootstrap_lock(&self) -> DbResult<()> {
         with_timeout(async {
             let now = SurrealDatetime::from(Utc::now());
@@ -795,6 +802,76 @@ impl Database {
                 return Ok(());
             }
             Err(crate::DbError::Conflict("setup already completed".into()))
+        })
+        .await
+    }
+
+    /// Open the first-boot lock again when no member row exists (W1019-14).
+    ///
+    /// Returns true when a claimed row was cleared. A member row leaves the
+    /// claim in place so setup stays closed.
+    pub async fn release_bootstrap_lock(&self) -> DbResult<bool> {
+        if self.has_any_member().await? {
+            return Ok(false);
+        }
+        with_timeout(async {
+            let rid = RecordId::new("bootstrap_lock", "setup");
+            let mut result = self
+                .client
+                .query(
+                    "UPDATE $rid SET claimed = false, claimed_at = NONE \
+                     WHERE claimed = true \
+                     RETURN AFTER",
+                )
+                .bind(("rid", rid))
+                .await?;
+            let updated: Option<DbBootstrapLock> = result.take(0)?;
+            Ok(updated.is_some())
+        })
+        .await
+    }
+
+    /// True when any member has `org_role = admin`, including inactive rows.
+    pub async fn has_any_admin_member(&self) -> DbResult<bool> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let mut result = self
+                .client
+                .query("SELECT count() FROM member WHERE org_role = 'admin' GROUP ALL")
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0) > 0)
+        })
+        .await
+    }
+
+    /// Stored one-shot marker for `BOOTSTRAP_ADMIN_RESET`. Empty becomes `None`.
+    pub async fn bootstrap_env_fingerprint(&self) -> DbResult<Option<String>> {
+        with_timeout(async {
+            let row: Option<DbBootstrapLock> =
+                self.client.select(("bootstrap_lock", "setup")).await?;
+            Ok(row
+                .and_then(|r| r.env_fingerprint)
+                .filter(|s| !s.is_empty()))
+        })
+        .await
+    }
+
+    /// Record that this `BOOTSTRAP_ADMIN_RESET` value already ran.
+    ///
+    /// Does not change `claimed`. The value is a hash, not the password.
+    pub async fn set_bootstrap_env_fingerprint(&self, fingerprint: &str) -> DbResult<()> {
+        with_timeout(async {
+            let rid = RecordId::new("bootstrap_lock", "setup");
+            self.client
+                .query("UPDATE $rid SET env_fingerprint = $fp")
+                .bind(("rid", rid))
+                .bind(("fp", fingerprint.to_string()))
+                .await?;
+            Ok(())
         })
         .await
     }
@@ -1105,6 +1182,52 @@ mod tests {
             matches!(r3, Err(crate::DbError::Conflict(_))),
             "claimed lock must stay closed, got {r3:?}"
         );
+    }
+
+    /// W1019-14: a failed create may release the claim only while no member exists.
+    #[tokio::test]
+    async fn release_bootstrap_lock_reopens_only_when_no_member() {
+        let db = test_db_with_crypto().await;
+        db.claim_bootstrap_lock().await.unwrap();
+        assert!(
+            db.release_bootstrap_lock().await.unwrap(),
+            "no member: the claim must reopen"
+        );
+        db.claim_bootstrap_lock().await.unwrap();
+
+        db.create_member("u-boot", "BootAdmin", OrgRole::Admin)
+            .await
+            .unwrap();
+        assert!(
+            !db.release_bootstrap_lock().await.unwrap(),
+            "a member row must keep the claim"
+        );
+        let again = db.claim_bootstrap_lock().await;
+        assert!(
+            matches!(again, Err(crate::DbError::Conflict(_))),
+            "setup must stay closed after a member exists, got {again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_local_user_if_no_member_rolls_back_only_an_orphan() {
+        let db = test_db_with_crypto().await;
+        let orphan = db
+            .create_local_user("orphan", "hash-not-verified")
+            .await
+            .unwrap();
+        assert!(db.delete_local_user_if_no_member(&orphan.id).await.unwrap());
+        assert!(db.get_user(&orphan.id).await.unwrap().is_none());
+
+        let kept = db
+            .create_local_user("kept", "hash-not-verified")
+            .await
+            .unwrap();
+        db.create_member(&kept.id, "Kept", OrgRole::Admin)
+            .await
+            .unwrap();
+        assert!(!db.delete_local_user_if_no_member(&kept.id).await.unwrap());
+        assert!(db.get_user(&kept.id).await.unwrap().is_some());
     }
 
     // ── DR1-ACCT-004: role-change compare-and-swap ─────────────────────────
