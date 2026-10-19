@@ -839,8 +839,9 @@ pub fn seed_rows_matched(scores: &[f32]) -> Option<Vec<usize>> {
 
 /// [`combine_with_hero`] from a board's seed scores.
 ///
-/// When two or more rows match the seeds ([`seed_rows_matched`]) the seeds
-/// name no row by themselves. If one of those rows is the strongly
+/// A row [`seed_row`] names is combined as usual, whatever else reaches the
+/// floor. Otherwise, when two or more rows match the seeds
+/// ([`seed_rows_matched`]), the seeds name no row by themselves. If one of those rows is the strongly
 /// highlighted row the career hero is read on, it is the member's, sure
 /// ([`Source::HighlightAndHero`]). A weak highlight, a career hero on
 /// another row, or a highlighted row that is not one of the matched rows
@@ -851,13 +852,14 @@ pub fn combine_scores(
     hero: Option<usize>,
     seeded: bool,
 ) -> OwnRow {
-    let matched = seed_rows_matched(scores);
-    let seed = if matched.is_some() {
-        None
-    } else {
-        seed_row(scores)
-    };
+    let seed = seed_row(scores);
     let own = combine_with_hero(seed, highlight, hero, seeded);
+    if seed.is_some() {
+        // One row leads by the margin: a normal seed match, even when a
+        // lookalike name on another row also reaches the floor.
+        return own;
+    }
+    let matched = seed_rows_matched(scores);
     match (&matched, own.row) {
         (Some(rows), Some(row))
             if own.source == Source::HighlightAndHero && !rows.contains(&row) =>

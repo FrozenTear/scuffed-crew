@@ -2407,3 +2407,40 @@ fn a_hero_only_board_where_another_row_matches_a_trusted_group_learns_nothing() 
         );
     }
 }
+
+/// One row leading by the margin stays a normal seed match even when a
+/// lookalike name on another row also reaches the floor (0.97 vs 0.84):
+/// sure through the seed, and the board still confirms the seeds.
+#[test]
+fn a_seed_that_leads_by_the_margin_stays_a_seed_match_beside_a_lookalike() {
+    let scores = [0.97, 0.20, 0.84, 0.10, 0.15, 0.10, 0.12, 0.10, 0.11, 0.10];
+    assert_eq!(seed_row(&scores), Some(0));
+    assert_eq!(seed_rows_matched(&scores), Some(vec![0, 2]));
+    // the highlight on the seed's row: sure through the seed
+    assert_eq!(
+        combine_scores(&scores, lit(0, 1.5), Some(0), true),
+        OwnRow {
+            row: Some(0),
+            trust: Trust::Sure,
+            source: Source::Both
+        }
+    );
+    // no highlight, the career hero on the seed's row: seed and hero
+    assert_eq!(
+        combine_scores(&scores, None, Some(0), true).source,
+        Source::SeedAndHero
+    );
+    // a strong highlight with the career hero on the lookalike's row: the
+    // seed and the highlight disagree, as they always have
+    assert_eq!(
+        combine_scores(&scores, lit(2, 1.5), Some(2), true).source,
+        Source::Disagree
+    );
+    // the same scores without the lead are the multi-match path
+    let tied = [0.97, 0.20, 0.92, 0.10, 0.15, 0.10, 0.12, 0.10, 0.11, 0.10];
+    assert_eq!(seed_row(&tied), None);
+    assert_eq!(
+        combine_scores(&tied, lit(0, 1.5), Some(0), true).source,
+        Source::HighlightAndHero
+    );
+}
