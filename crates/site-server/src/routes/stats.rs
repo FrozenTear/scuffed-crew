@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 
 use scuffed_auth::server::session::ErrorResponse;
@@ -15,9 +16,12 @@ use scuffed_types::api::{
     SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
     UpdateMemberSettingsRequest, resolve_recognizer, resolve_suspect_fields,
 };
-use scuffed_types::{hero_key_to_name, role_for_hero_name};
+use scuffed_types::{
+    STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
+    role_for_hero_name,
+};
 
-use crate::extractors::{DaemonUser, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{DaemonUser, LimitedUploadDaemon, OpaqueDaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -38,12 +42,51 @@ fn normalize_hero(hero: String, role: String) -> (String, String) {
     (display.to_string(), role)
 }
 
+/// Rejection from [`upload_stats`]. Existing `{error}` bodies and the batch
+/// cap's `{code}` body both become responses.
+pub(crate) struct UploadReject(Box<Response>);
+
+impl From<(StatusCode, Json<ErrorResponse>)> for UploadReject {
+    fn from(err: (StatusCode, Json<ErrorResponse>)) -> Self {
+        Self(Box::new(err.into_response()))
+    }
+}
+
+impl IntoResponse for UploadReject {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+fn batch_over_cap(body: &StatsUploadBody) -> bool {
+    body.matches.len() > STATS_UPLOAD_MAX_MATCHES
+        || body.deleted_sessions.len() > STATS_UPLOAD_MAX_DELETED_SESSIONS
+}
+
+fn batch_too_large() -> UploadReject {
+    let body = format!(
+        r#"{{"code":"batch_too_large","max_matches":{STATS_UPLOAD_MAX_MATCHES},"max_deleted_sessions":{STATS_UPLOAD_MAX_DELETED_SESSIONS}}}"#
+    );
+    UploadReject(Box::new(
+        Response::builder()
+            .status(StatusCode::PAYLOAD_TOO_LARGE)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(axum::body::Body::from(body))
+            .expect("batch_too_large response"),
+    ))
+}
+
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
-pub async fn upload_stats(
+pub(crate) async fn upload_stats(
     State(state): State<AppState>,
-    daemon: DaemonUser,
+    daemon: LimitedUploadDaemon,
     Json(body): Json<StatsUploadBody>,
-) -> Result<Json<StatsUploadResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<StatsUploadResponse>, UploadReject> {
+    if crate::stats_upload_limits::stats_upload_batch_cap_enabled() && batch_over_cap(&body) {
+        return Err(batch_too_large());
+    }
+
     if body.matches.is_empty() && body.deleted_sessions.is_empty() {
         return Ok(Json(StatsUploadResponse {
             inserted: 0,
@@ -66,7 +109,8 @@ pub async fn upload_stats(
                     Json(ErrorResponse {
                         error: format!("matches[{i}]: {RECOGNIZER_ID_ERROR}"),
                     }),
-                ));
+                )
+                    .into());
             }
         }
         match resolve_suspect_fields(&entry.suspect_fields) {
@@ -77,7 +121,8 @@ pub async fn upload_stats(
                     Json(ErrorResponse {
                         error: format!("matches[{i}]: {SUSPECT_FIELDS_ERROR}"),
                     }),
-                ));
+                )
+                    .into());
             }
         }
     }
@@ -602,7 +647,10 @@ fn generate_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode, header};
     use chrono::{TimeZone, Utc};
     use http_body_util::BodyExt;
@@ -637,18 +685,27 @@ mod tests {
         }
     }
 
+    fn upload_request(token: &str, body: Vec<u8>, peer: Ipv4Addr) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(ConnectInfo(SocketAddr::new(IpAddr::V4(peer), 9)))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
     async fn post_upload(
         app: axum::Router,
         token: &str,
         body: &StatsUploadRequest,
     ) -> (StatusCode, StatsUploadResponse) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap();
+        let req = upload_request(
+            token,
+            serde_json::to_vec(body).unwrap(),
+            Ipv4Addr::LOCALHOST,
+        );
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -744,13 +801,11 @@ mod tests {
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+        let req = upload_request(
+            token,
+            serde_json::to_vec(&body).unwrap(),
+            Ipv4Addr::LOCALHOST,
+        );
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1494,5 +1549,517 @@ mod tests {
         assert_eq!(row["recognizer"], "ocr-v1");
         assert_eq!(row["suspect_fields"], serde_json::json!([]));
         assert_eq!(row["elims"], 7);
+    }
+
+    const BATCH_TOO_LARGE: &str =
+        r#"{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}"#;
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(fut)
+    }
+
+    fn match_entry(session_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "hero": "Ana",
+            "map_name": "Oasis",
+            "game_mode": "control",
+            "role": "Support",
+            "outcome": "victory",
+            "elims": 1,
+            "deaths": 1,
+            "assists": 1,
+            "damage": 1,
+            "healing": 1,
+            "mitigation": 0,
+            "played_at": "2026-07-01T20:00:00Z",
+            "edited": false
+        })
+    }
+
+    fn matches_body(prefix: &str, count: usize) -> serde_json::Value {
+        let matches: Vec<_> = (0..count)
+            .map(|i| match_entry(&format!("{prefix}-{i}")))
+            .collect();
+        serde_json::json!({ "matches": matches, "deleted_sessions": [] })
+    }
+
+    async fn post_text(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        post_text_from(app, token, body, Ipv4Addr::LOCALHOST).await
+    }
+
+    async fn post_text_from(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+        peer: Ipv4Addr,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let req = upload_request(token, serde_json::to_vec(&body).unwrap(), peer);
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        (status, headers, text)
+    }
+
+    async fn capped_member(name: &str) -> (crate::state::AppState, String, String) {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member(&format!("u-{name}"), name, OrgRole::Member)
+            .await
+            .unwrap();
+        let token = format!("tok-{name}");
+        state
+            .db
+            .create_daemon_token(&member.id, &token, name)
+            .await
+            .unwrap();
+        (state, member.id, token)
+    }
+
+    async fn insert_expiry_token(
+        state: &crate::state::AppState,
+        member_id: &str,
+        raw: &str,
+        label: &str,
+        expires_sql: &str,
+    ) {
+        let token_hash = scuffed_auth::crypto::hash_session_token(raw);
+        state
+            .db
+            .client
+            .query(format!(
+                "CREATE daemon_token SET \
+                    member_id = $mid, \
+                    token_hash = $tok, \
+                    label = $label, \
+                    is_active = true, \
+                    created_at = time::now(), \
+                    expires_at = {expires_sql}"
+            ))
+            .bind(("mid", member_id.to_string()))
+            .bind(("tok", token_hash))
+            .bind(("label", label.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[test]
+    fn batch_cap_off_accepts_201_matches() {
+        let _force = crate::stats_upload_limits::force_batch_cap(false);
+        block_on(async {
+            let (state, _member_id, token) = capped_member("capoff").await;
+            let app = create_router(state.clone());
+            let (status, _, text) = post_text(app, &token, matches_body("off", 201)).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let parsed: StatsUploadResponse = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed.inserted, 201);
+            assert_eq!(state.db.count_table("personal_match").await.unwrap(), 201);
+        });
+    }
+
+    #[test]
+    fn batch_cap_on_rejects_201_matches_and_501_deletes_before_any_write() {
+        let _force = crate::stats_upload_limits::force_batch_cap(true);
+        block_on(async {
+            let (state, member_id, token) = capped_member("capon").await;
+            let app = create_router(state.clone());
+
+            let (status, _, text) = post_text(app.clone(), &token, matches_body("keep", 1)).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(state.db.count_table("personal_match").await.unwrap(), 1);
+
+            let (status, headers, text) =
+                post_text(app.clone(), &token, matches_body("over", 201)).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
+            assert_eq!(text, BATCH_TOO_LARGE);
+            assert_eq!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store")
+            );
+            assert_eq!(
+                state.db.count_table("personal_match").await.unwrap(),
+                1,
+                "oversized matches must not be written"
+            );
+
+            let mut deleted: Vec<String> = (0..500).map(|i| format!("gone-{i}")).collect();
+            deleted.push("keep-0".into());
+            assert_eq!(deleted.len(), 501);
+            let (status, headers, text) = post_text(
+                app,
+                &token,
+                serde_json::json!({ "matches": [], "deleted_sessions": deleted }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
+            assert_eq!(text, BATCH_TOO_LARGE);
+            assert_eq!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store")
+            );
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].session_id, "keep-0");
+        });
+    }
+
+    #[tokio::test]
+    async fn upload_rate_limit_is_per_token_hash() {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-burst", "burst", OrgRole::Member)
+            .await
+            .unwrap();
+        let token = "burst-token";
+        let other = "burst-other";
+        state
+            .db
+            .create_daemon_token(&member.id, token, "burst")
+            .await
+            .unwrap();
+        state
+            .db
+            .create_daemon_token(&member.id, other, "other")
+            .await
+            .unwrap();
+        let app = create_router(state.clone());
+
+        for i in 0..10 {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                token,
+                matches_body(&format!("b{i}"), 1),
+                Ipv4Addr::new(10, 2, 0, i + 1),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "request {i}: {text}");
+        }
+
+        let (status, headers, text) = post_text_from(
+            app.clone(),
+            token,
+            matches_body("blocked", 1),
+            Ipv4Addr::new(10, 2, 0, 11),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        assert_eq!(text, r#"{"code":"rate_limited"}"#);
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let retry = headers
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After")
+            .to_str()
+            .unwrap();
+        let secs: u64 = retry.parse().expect("Retry-After seconds");
+        assert!(secs >= 1, "Retry-After={secs}");
+        assert_eq!(
+            state.db.count_table("personal_match").await.unwrap(),
+            10,
+            "the limited request must not write"
+        );
+
+        let (status, _, text) = post_text_from(
+            app,
+            other,
+            matches_body("other", 1),
+            Ipv4Addr::new(10, 2, 0, 12),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "other token: {text}");
+        assert_eq!(state.db.count_table("personal_match").await.unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn over_limit_token_malformed_json_is_429_not_400() {
+        let (state, _member_id, token) = daemon().await;
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 60);
+        for i in 0..scuffed_types::STATS_UPLOAD_TOKEN_BURST {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                &token,
+                matches_body(&format!("ok{i}"), 1),
+                peer,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+        }
+
+        let resp = app
+            .oneshot(upload_request(&token, b"{".to_vec(), peer))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        assert_eq!(text, r#"{"code":"rate_limited"}"#);
+    }
+
+    #[tokio::test]
+    async fn fake_bearers_leave_the_token_limiter_empty() {
+        let (state, _member_id, live, _session) = member_reader().await;
+        let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
+        crate::stats_upload_limits::override_stats_upload_governor(governor.clone());
+        let app = create_router(state);
+
+        for i in 1..=30u8 {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                &format!("made-up-{i}"),
+                matches_body("nope", 1),
+                Ipv4Addr::new(198, 51, 100, i),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+        }
+        assert_eq!(
+            governor.len(),
+            0,
+            "unknown bearers must not create limiter entries"
+        );
+
+        let (status, _, text) = post_text_from(
+            app,
+            &live,
+            matches_body("live", 1),
+            Ipv4Addr::new(203, 0, 113, 20),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(governor.len(), 1, "one validated token id is one entry");
+    }
+
+    #[tokio::test]
+    async fn two_tokens_on_one_ip_send_twenty_uploads_without_ip_limit() {
+        let (state, member_id, token_a) = daemon().await;
+        let token_b = "rec-daemon-token-b";
+        state
+            .db
+            .create_daemon_token(&member_id, token_b, "second")
+            .await
+            .unwrap();
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 41);
+
+        for (token, prefix) in [(token_a.as_str(), "a"), (token_b, "b")] {
+            for i in 0..scuffed_types::STATS_UPLOAD_TOKEN_BURST {
+                let (status, _, text) = post_text_from(
+                    app.clone(),
+                    token,
+                    matches_body(&format!("{prefix}{i}"), 1),
+                    peer,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{prefix}{i}: {text}");
+            }
+        }
+
+        let (status, _, text) =
+            post_text_from(app, &token_a, matches_body("a-over", 1), peer).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        assert_eq!(text, r#"{"code":"rate_limited"}"#);
+    }
+
+    #[tokio::test]
+    async fn upload_ip_limit_returns_governor_429() {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-ip", "ipplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        let tokens = ["ip-a", "ip-b", "ip-c", "ip-d", "ip-e"];
+        for token in tokens {
+            state
+                .db
+                .create_daemon_token(&member.id, token, token)
+                .await
+                .unwrap();
+        }
+        let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
+        crate::stats_upload_limits::override_stats_upload_governor(governor.clone());
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 40);
+        let burst = scuffed_types::STATS_UPLOAD_IP_BURST;
+        assert!(
+            burst / (tokens.len() as u32) < scuffed_types::STATS_UPLOAD_TOKEN_BURST,
+            "each token must stay under its own burst while the IP bucket fills"
+        );
+
+        for i in 0..burst {
+            let token = tokens[(i as usize) % tokens.len()];
+            let (status, _, text) =
+                post_text_from(app.clone(), token, matches_body(&format!("ip{i}"), 1), peer).await;
+            assert_eq!(status, StatusCode::OK, "request {i}: {text}");
+        }
+
+        let (status, headers, text) =
+            post_text_from(app, tokens[0], matches_body("ip-blocked", 1), peer).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["code"], "rate_limited");
+        assert_eq!(body["error"], "rate_limited");
+        let retry = body["retry_after"].as_u64().expect("retry_after");
+        assert!(retry >= 1, "retry_after={retry}");
+        assert_eq!(
+            headers
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(retry.to_string().as_str())
+        );
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(governor.len(), tokens.len());
+    }
+
+    #[tokio::test]
+    async fn none_expiry_token_uploads_and_expired_token_is_401() {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-exp", "expiry", OrgRole::Member)
+            .await
+            .unwrap();
+        insert_expiry_token(&state, &member.id, "none-token", "none", "NONE").await;
+        insert_expiry_token(
+            &state,
+            &member.id,
+            "expired-token",
+            "expired",
+            "time::now() - 1d",
+        )
+        .await;
+        let app = create_router(state.clone());
+
+        let (status, _, text) = post_text(app.clone(), "none-token", matches_body("none", 1)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(state.db.count_table("personal_match").await.unwrap(), 1);
+
+        let before = state.db.count_table("personal_match").await.unwrap();
+        let (status, _, text) = post_text(app, "expired-token", matches_body("expired", 1)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+        assert_eq!(text, r#"{"code":"token_expired"}"#);
+        assert_eq!(
+            state.db.count_table("personal_match").await.unwrap(),
+            before
+        );
+    }
+
+    /// Fields the current site page deserializes. Extra keys must stay ignorable.
+    #[derive(Debug, serde::Deserialize)]
+    struct CurrentSiteToken {
+        id: String,
+        member_id: String,
+        label: String,
+        is_active: bool,
+        created_at: chrono::DateTime<Utc>,
+        last_used_at: Option<chrono::DateTime<Utc>>,
+    }
+
+    #[tokio::test]
+    async fn token_list_reports_live_and_expired() {
+        let (state, member_id, _daemon, session) = member_reader().await;
+        insert_expiry_token(
+            &state,
+            &member_id,
+            "expired-list-token",
+            "expired",
+            "time::now() - 1d",
+        )
+        .await;
+        insert_expiry_token(&state, &member_id, "none-list-token", "legacy", "NONE").await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/stats/tokens")
+            .header(header::AUTHORIZATION, format!("Bearer {session}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = create_router(state).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let site: Vec<CurrentSiteToken> =
+            serde_json::from_slice(&bytes).expect("current site fields still parse");
+        assert_eq!(site.len(), 3);
+
+        let listed: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        let by_label = |label: &str| {
+            listed
+                .iter()
+                .find(|row| row["label"] == label)
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .clone()
+        };
+        let live = by_label("tracker");
+        let expired = by_label("expired");
+        let legacy = by_label("legacy");
+
+        let live_at = live["expires_at"]
+            .as_str()
+            .expect("live expires_at is an RFC 3339 string");
+        let live_exp = chrono::DateTime::parse_from_rfc3339(live_at).expect("RFC 3339");
+        assert!(live_exp > Utc::now());
+        assert_eq!(live["expired"], false);
+        assert_eq!(live["is_active"], true);
+
+        let expired_at = expired["expires_at"]
+            .as_str()
+            .expect("expired expires_at is an RFC 3339 string");
+        let expired_exp = chrono::DateTime::parse_from_rfc3339(expired_at).expect("RFC 3339");
+        assert!(expired_exp <= Utc::now());
+        assert_eq!(expired["expired"], true);
+        assert_eq!(expired["is_active"], true);
+
+        assert!(legacy["expires_at"].is_null());
+        assert_eq!(legacy["expired"], false);
+
+        let tracker = site
+            .iter()
+            .find(|row| row.label == "tracker")
+            .expect("live token");
+        assert!(tracker.is_active);
+        assert_eq!(tracker.id, live["id"]);
+        assert_eq!(tracker.member_id, member_id);
+        assert!(tracker.created_at <= Utc::now());
+        assert!(tracker.last_used_at.is_none());
     }
 }

@@ -10,7 +10,7 @@ use scuffed_auth::User;
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::HasAuth;
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{Member, OrgRole};
+use scuffed_db::{DaemonTokenAuth, Member, OrgRole};
 
 use crate::state::AppState;
 
@@ -186,6 +186,8 @@ impl FromRequestParts<AppState> for AdminUser {
 /// Extractor: daemon token authentication (stat-tracker uploads).
 pub struct DaemonUser {
     pub member: Member,
+    /// Record id of the validated daemon token. Empty for the read-only pack lookup.
+    pub token_id: String,
 }
 
 /// 401 body for `GET /api/stats/token-check`.
@@ -197,9 +199,11 @@ pub const TOKEN_CHECK_UNAUTHORIZED: &str = "Unauthorized";
 /// How a daemon-token 401 is worded.
 #[derive(Clone, Copy)]
 enum DaemonUnauthorized {
-    /// Upload and daemon-config keep their existing distinct messages.
+    /// Upload and daemon-config keep distinct messages. An expired token
+    /// uses `{"code":"token_expired"}` instead of the revoked text.
     Distinct,
-    /// Token-check: one body for every token failure.
+    /// Token-check and pack downloads: one body for every token failure,
+    /// including expiry.
     Opaque,
 }
 
@@ -233,6 +237,24 @@ fn unauthorized(error: &str) -> Box<Response> {
         )
             .into_response(),
     )
+}
+
+fn token_expired() -> Box<Response> {
+    Box::new(
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(axum::body::Body::from(r#"{"code":"token_expired"}"#))
+            .expect("token expired response"),
+    )
+}
+
+fn expired_unauthorized(mode: DaemonUnauthorized) -> Box<Response> {
+    match mode {
+        DaemonUnauthorized::Distinct => token_expired(),
+        DaemonUnauthorized::Opaque => unauthorized(mode.rejected()),
+    }
 }
 
 fn internal_error() -> Box<Response> {
@@ -273,7 +295,9 @@ enum DaemonLookup {
 /// `validate_daemon_token` sets `last_used_at` when the token is accepted.
 /// That write already happens on the upload path. Pack downloads pass
 /// [`DaemonLookup::ReadOnly`] and do not write. Rejected tokens, including
-/// revoked and expired ones, do not update `last_used_at`.
+/// revoked and expired ones, do not update `last_used_at`. An expired token
+/// on upload and daemon-config is 401 `{"code":"token_expired"}`.
+/// Token-check and pack downloads keep one shared 401 body.
 ///
 /// The raw bearer value is hashed and then dropped. It is not logged.
 async fn authenticate_daemon(
@@ -289,13 +313,28 @@ async fn authenticate_daemon(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| unauthorized(unauthorized_mode.missing()))?;
 
-    let lookup_result = match lookup {
-        DaemonLookup::StampLastUsed => state.db.validate_daemon_token(auth_header).await,
-        DaemonLookup::ReadOnly => state.db.lookup_daemon_token(auth_header).await,
+    let (member_id, token_id) = match lookup {
+        DaemonLookup::StampLastUsed => match state.db.validate_daemon_token(auth_header).await {
+            Ok(DaemonTokenAuth::Active {
+                member_id,
+                token_id,
+            }) => (member_id, token_id),
+            Ok(DaemonTokenAuth::Expired) => return Err(expired_unauthorized(unauthorized_mode)),
+            Ok(DaemonTokenAuth::Missing) => {
+                return Err(unauthorized(unauthorized_mode.rejected()));
+            }
+            Err(_e) => return Err(internal_error()),
+        },
+        DaemonLookup::ReadOnly => (
+            state
+                .db
+                .lookup_daemon_token(auth_header)
+                .await
+                .map_err(|_e| internal_error())?
+                .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?,
+            String::new(),
+        ),
     };
-    let member_id = lookup_result
-        .map_err(|_e| internal_error())?
-        .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?;
 
     let member = state
         .db
@@ -318,7 +357,46 @@ async fn authenticate_daemon(
         return Err(forbidden("Member is suspended or banned"));
     }
 
-    Ok(DaemonUser { member })
+    Ok(DaemonUser { member, token_id })
+}
+
+/// Upload daemon auth plus the per-token governor.
+///
+/// `FromRequestParts`, so it runs before the JSON body is read. An over-limit
+/// token is 429 even when the body is not valid JSON.
+pub struct LimitedUploadDaemon {
+    pub member: Member,
+}
+
+impl FromRequestParts<AppState> for LimitedUploadDaemon {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let governor = parts
+            .extensions
+            .get::<crate::stats_upload_limits::StatsUploadGovernor>()
+            .cloned()
+            .ok_or_else(|| *internal_error())?;
+        let daemon = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Distinct,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
+        if let Err(secs) = governor.allow(&daemon.token_id) {
+            return Err(crate::stats_upload_limits::token_rate_limited_response(
+                secs,
+            ));
+        }
+        Ok(Self {
+            member: daemon.member,
+        })
+    }
 }
 
 impl FromRequestParts<AppState> for DaemonUser {
@@ -353,7 +431,7 @@ impl FromRequestParts<AppState> for OpaqueDaemonUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let DaemonUser { member } = authenticate_daemon(
+        let DaemonUser { member, .. } = authenticate_daemon(
             parts,
             state,
             DaemonUnauthorized::Opaque,
@@ -449,7 +527,7 @@ impl FromRequestParts<AppState> for ReportCreator {
         if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
             return Err(session_reject.into_response());
         }
-        let DaemonUser { member } = authenticate_daemon(
+        let DaemonUser { member, .. } = authenticate_daemon(
             parts,
             state,
             DaemonUnauthorized::Opaque,

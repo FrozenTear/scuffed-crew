@@ -1002,7 +1002,7 @@ async fn wrong_user_codes_are_limited_per_ip() {
     let retry_after = json_of(&body)["retry_after"].as_u64().unwrap();
     assert_eq!(
         body,
-        format!(r#"{{"error":"rate_limited","retry_after":{retry_after}}}"#)
+        format!(r#"{{"code":"rate_limited","error":"rate_limited","retry_after":{retry_after}}}"#)
     );
     assert_eq!(
         headers
@@ -1538,7 +1538,7 @@ async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
     assert!(wait >= 1, "Retry-After={retry_after} body {body}");
     assert_eq!(
         body,
-        format!(r#"{{"error":"rate_limited","retry_after":{wait}}}"#)
+        format!(r#"{{"code":"rate_limited","error":"rate_limited","retry_after":{wait}}}"#)
     );
     assert_eq!(
         headers

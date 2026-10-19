@@ -16,6 +16,7 @@ pub use client::{
     Database, DatabaseBootMode, DbConfig, SurrealAuthMode, PRODUCTION_WITHOUT_DATABASE_URL,
 };
 pub use display_name::{display_name_key, DisplayNameError};
+pub use queries::daemon_tokens::DaemonTokenAuth;
 pub use queries::stat_reports::{retention_deadline, utc_day_start};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;

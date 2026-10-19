@@ -16,6 +16,7 @@ pub mod routes;
 pub mod seed;
 pub mod stat_reports;
 pub mod state;
+mod stats_upload_limits;
 pub mod team_channels;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -157,8 +158,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
-    // extractor the other governors use. POST /api/stats/upload itself is
-    // not on a governor.
+    // extractor the other governors use.
     let token_check_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
@@ -173,6 +173,24 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             GovernorLayer::new(token_check_governor_config)
                 .error_handler(rate_limit::governor_error_response),
         );
+
+    // Own per-IP budget for POST /api/stats/upload, looser than the per-token
+    // limit. Avatar and image uploads keep burst 8 / 10s. The key is still
+    // TrustedProxyIpKeyExtractor. After the token is validated, the route
+    // also spends a per-token cell keyed by token id.
+    let stats_upload_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::STATS_UPLOAD_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::STATS_UPLOAD_IP_BURST)
+            .finish()
+            .expect("valid stats upload ip governor config"),
+    );
+    #[cfg(test)]
+    let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
+        .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
+    #[cfg(not(test))]
+    let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
     // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
     // 10s). Filling this bucket does not block uploads or token-check.
@@ -490,7 +508,20 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::matches::get_match).put(routes::matches::update_match),
         )
         // Personal stats routes
-        .route("/api/stats/upload", post(routes::stats::upload_stats))
+        .route(
+            "/api/stats/upload",
+            post(routes::stats::upload_stats)
+                .layer::<_, std::convert::Infallible>(middleware::from_fn_with_state(
+                    stats_token_governor,
+                    stats_upload_limits::attach_stats_upload_governor,
+                ))
+                // Outer layer: refuse a hot IP before the handler validates
+                // the bearer or spends a per-token cell.
+                .layer::<_, std::convert::Infallible>(
+                    GovernorLayer::new(stats_upload_ip_config)
+                        .error_handler(rate_limit::governor_error_response),
+                ),
+        )
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
