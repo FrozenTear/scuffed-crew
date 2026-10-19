@@ -52,12 +52,14 @@ Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then
 
 ### Rolling the site image back
 
-An image from before the relay login runs `DEFINE FIELD OVERWRITE` on `nostr_secret_key_encrypted`, `moderation_action.reason`, and `moderation_action.issued_by` without field permissions, and it reopens `audit_log`. Those statements make the hidden columns readable to a record user again. The `relay` access and the `relay_db_user` row stay in the database, because the old image does not know about them. Remove the login before that image boots. Root and the EDITOR app user bypass table permissions, so the site keeps its current access after the grants widen.
+The relay reads four projection tables (`relay_member`, `relay_roster`, `relay_moderation`, `relay_team_channel`) that hold only the columns it needs. Database events on `member`, `plays_on`, `moderation_action`, and `team_channel` keep those copies updated, and startup backfills them. `relay_roster.member_active` is the copy of `member.is_active`. The relay login's table permission on `member`, `plays_on`, `team_channel`, and `moderation_action` is NONE.
+
+An image from before this login runs `DEFINE FIELD OVERWRITE` on `nostr_secret_key_encrypted`, `moderation_action.reason`, and `moderation_action.issued_by` without field permissions, reopens `audit_log`, and grants the relay `SELECT` on the base tables. Those statements make the hidden columns readable to a record user again. The access, the principal row, the projection tables, and the events stay in the database, because the old image does not know about them. If the events are still installed and the projection tables are gone, the next member or roster write fails. Remove the events, then the projection tables, then the login, before that image boots. Root and the EDITOR app user bypass table permissions, so the site keeps its current access after the grants widen.
 
 Do this while this checkout is still present, and before `update.sh` recreates site-server on the old image:
 
 1. Stop the relay so it is not using the login: `podman compose --env-file data/secrets.env --profile relay stop strfry` (or `podman-compose`).
-2. Remove the access and the principal table. The script runs `/surreal sql` inside the Up Surreal container. The CLI reads `SURREAL_USER` and `SURREAL_PASS` from that container. The password is not an argument and is not printed.
+2. Remove the events, the projection tables, the access, and the principal table, in that order. The script runs `/surreal sql` inside the Up Surreal container. The CLI reads `SURREAL_USER` and `SURREAL_PASS` from that container. The password is not an argument and is not printed.
 
    ```bash
    ./scripts/relay-access-down.sh --yes
@@ -65,7 +67,7 @@ Do this while this checkout is still present, and before `update.sh` recreates s
 
 3. Pin the older site image in `data/secrets.env`, then `./scripts/update.sh`. That image returns 404 for `/api/ready`. `update.sh` logs a warning and waits on `/api/health`.
 
-Starting the current site-server again recreates the login during bootstrap. Run `./scripts/relay-up.sh` only after that, when you want the relay on the new image.
+Starting the current site-server again recreates the projection tables, the events, the backfill, and the login during bootstrap. Run `./scripts/relay-up.sh` only after that, when you want the relay on the new image.
 
 ### Split migrator vs app (optional multi-container)
 

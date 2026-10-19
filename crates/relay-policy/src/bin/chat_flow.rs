@@ -188,7 +188,9 @@ async fn relay_login() -> Result<(), String> {
 
 /// Indexed selects against the real server. SurrealDB 3.0.5 can serve a
 /// SELECT from a BTree index without field permissions. This fails if a
-/// hidden value comes back.
+/// hidden value comes back from `member` or `moderation_action`. It also
+/// fails if the relay projection is missing the pubkey, the roster pair, or
+/// the team channel, or if those copies contain a hidden value.
 async fn index_perms() -> Result<(), String> {
     let password = env_or("SURREALDB_RELAY_PASSWORD", "relay-ci-record-login");
     let password = password.trim();
@@ -216,12 +218,14 @@ async fn index_perms() -> Result<(), String> {
             "CREATE member:indexleak SET user_id = $user_id, org_role = 'member', \
              display_name = $display_name, display_name_key = $name_key, is_active = true, \
              nostr_pubkey = 'ab', nostr_secret_key_encrypted = { marker: $secret };
-             CREATE moderation_action:indexleak SET member_id = 'indexleak', \
-             action_type = 'ban', reason = $reason, issued_by = $issued_by, is_active = true",
+             CREATE team:indexleak SET name = 'IndexSquad', game_id = 'ow2', is_active = true;
+             RELATE member:indexleak->plays_on->team:indexleak \
+                 SET team_role = 'player', is_active = true;
+             CREATE team_channel:indexleak SET team_id = 'indexleak', \
+                 group_id = 'indexleak-public', group_type = 'public', \
+                 relay_url = 'wss://relay.example', is_active = true",
         )
         .bind(("secret", secret))
-        .bind(("reason", reason))
-        .bind(("issued_by", issued_by))
         .bind(("display_name", display_name))
         .bind(("name_key", name_key))
         .bind(("user_id", user_id))
@@ -238,7 +242,8 @@ async fn index_perms() -> Result<(), String> {
             .await
             .map_err(|e| format!("relay sign-in: {e}"))?;
 
-    let queries = [
+    let hidden = [secret, reason, issued_by, display_name, name_key, user_id];
+    let member_queries = [
         (
             "member_user_idx",
             "SELECT * FROM member WHERE user_id = 'user:indexleak'",
@@ -255,6 +260,94 @@ async fn index_perms() -> Result<(), String> {
             "member_nostr_pubkey_idx",
             "SELECT * FROM member WHERE nostr_pubkey = 'ab'",
         ),
+    ];
+    let mut leaked = Vec::new();
+    for (label, sql) in member_queries {
+        if indexed_select_leaks(&relay, label, sql, &hidden).await? {
+            leaked.push(label);
+        }
+    }
+
+    let keys = relay
+        .list_relay_member_keys()
+        .await
+        .map_err(|e| format!("relay members: {e}"))?;
+    reject_hidden("relay member projection", &format!("{keys:?}"), &hidden)?;
+    if !keys
+        .iter()
+        .any(|row| row.id == "indexleak" && row.nostr_pubkey.as_deref() == Some("ab"))
+    {
+        return Err("relay member projection did not include the indexed pubkey".to_string());
+    }
+    let pairs = relay
+        .list_active_roster_pairs()
+        .await
+        .map_err(|e| format!("relay roster: {e}"))?;
+    reject_hidden("relay roster projection", &format!("{pairs:?}"), &hidden)?;
+    if !pairs
+        .iter()
+        .any(|(member_id, team_id)| member_id == "indexleak" && team_id == "indexleak")
+    {
+        return Err("relay roster projection did not include the active pair".to_string());
+    }
+    let channels = relay
+        .list_all_team_channels()
+        .await
+        .map_err(|e| format!("relay channels: {e}"))?;
+    reject_hidden(
+        "relay channel projection",
+        &format!("{channels:?}"),
+        &hidden,
+    )?;
+    if !channels
+        .iter()
+        .any(|channel| channel.group_id == "indexleak-public" && channel.team_id == "indexleak")
+    {
+        return Err("relay channel projection did not include the team channel".to_string());
+    }
+
+    db.client
+        .query("UPDATE member:indexleak SET is_active = false")
+        .await
+        .map_err(|e| format!("deactivate member: {e}"))?
+        .check()
+        .map_err(|e| format!("deactivate member: {e}"))?;
+    let pairs = relay
+        .list_active_roster_pairs()
+        .await
+        .map_err(|e| format!("relay roster after deactivate: {e}"))?;
+    if pairs.iter().any(|(member_id, _)| member_id == "indexleak") {
+        return Err("relay roster still listed the member after is_active was cleared".to_string());
+    }
+    db.client
+        .query("UPDATE member:indexleak SET is_active = true")
+        .await
+        .map_err(|e| format!("reactivate member: {e}"))?
+        .check()
+        .map_err(|e| format!("reactivate member: {e}"))?;
+    let pairs = relay
+        .list_active_roster_pairs()
+        .await
+        .map_err(|e| format!("relay roster after reactivate: {e}"))?;
+    if !pairs
+        .iter()
+        .any(|(member_id, team_id)| member_id == "indexleak" && team_id == "indexleak")
+    {
+        return Err("relay roster did not restore the member after reactivation".to_string());
+    }
+
+    db.client
+        .query(
+            "CREATE moderation_action:indexleak SET member_id = 'indexleak', \
+             action_type = 'ban', reason = $reason, issued_by = $issued_by, is_active = true",
+        )
+        .bind(("reason", reason))
+        .bind(("issued_by", issued_by))
+        .await
+        .map_err(|e| format!("seed moderation: {e}"))?
+        .check()
+        .map_err(|e| format!("seed moderation: {e}"))?;
+    let mod_queries = [
         (
             "mod_member_idx",
             "SELECT * FROM moderation_action WHERE member_id = 'indexleak'",
@@ -264,27 +357,19 @@ async fn index_perms() -> Result<(), String> {
             "SELECT * FROM moderation_action WHERE member_id = 'indexleak' AND action_type = 'ban' AND is_active = true",
         ),
     ];
-    let hidden = [secret, reason, issued_by, display_name, name_key, user_id];
-    let mut leaked = Vec::new();
-    for (label, sql) in queries {
-        let response = relay
-            .client
-            .query(sql)
-            .await
-            .map_err(|e| format!("{label}: {e}"))?;
-        let rendered = format!("{response:?}");
-        let hits: Vec<&str> = hidden
-            .iter()
-            .copied()
-            .filter(|marker| rendered.contains(marker))
-            .collect();
-        if hits.is_empty() {
-            eprintln!("{label}: no hidden field");
-        } else {
-            eprintln!("{label}: hidden fields returned ({})", hits.len());
+    for (label, sql) in mod_queries {
+        if indexed_select_leaks(&relay, label, sql, &hidden).await? {
             leaked.push(label);
         }
     }
+    let pairs = relay
+        .list_active_roster_pairs()
+        .await
+        .map_err(|e| format!("relay roster after ban: {e}"))?;
+    if pairs.iter().any(|(member_id, _)| member_id == "indexleak") {
+        return Err("relay roster still listed the banned member".to_string());
+    }
+
     if !leaked.is_empty() {
         return Err(format!(
             "indexed select returned hidden fields: {}",
@@ -293,6 +378,49 @@ async fn index_perms() -> Result<(), String> {
     }
     println!("indexed selects did not return hidden fields");
     Ok(())
+}
+
+fn reject_hidden(label: &str, rendered: &str, hidden: &[&str]) -> Result<(), String> {
+    if hidden.iter().any(|marker| rendered.contains(marker)) {
+        return Err(format!("{label} included a hidden field"));
+    }
+    Ok(())
+}
+
+/// True when the taken result contains a hidden marker. A denied query is
+/// not a leak. The check uses the result value, not the response debug,
+/// because the SQL text itself names some of the markers.
+async fn indexed_select_leaks(
+    relay: &scuffed_db::Database,
+    label: &str,
+    sql: &str,
+    hidden: &[&str],
+) -> Result<bool, String> {
+    let mut response = match relay.client.query(sql).await {
+        Ok(response) => response,
+        Err(err) => {
+            reject_hidden(label, &err.to_string(), hidden)?;
+            eprintln!("{label}: denied");
+            return Ok(false);
+        }
+    };
+    match response.take::<surrealdb::types::Value>(0) {
+        Ok(value) => {
+            let rendered = format!("{value:?}");
+            if hidden.iter().any(|marker| rendered.contains(marker)) {
+                eprintln!("{label}: hidden fields returned");
+                Ok(true)
+            } else {
+                eprintln!("{label}: no hidden field");
+                Ok(false)
+            }
+        }
+        Err(err) => {
+            reject_hidden(label, &err.to_string(), hidden)?;
+            eprintln!("{label}: denied");
+            Ok(false)
+        }
+    }
 }
 
 async fn seed() -> Result<(), String> {

@@ -76,7 +76,7 @@ SURREALDB_DB=main
 SURREALDB_AUTH_MODE=scoped
 SURREALDB_APP_USER=scuffed_app
 SURREALDB_APP_PASSWORD=${SURREALDB_APP_PASSWORD}
-# Relay record user. SELECT on member, plays_on, team_channel, and moderation_action.
+# Relay record user. SELECT on the relay projection tables only.
 # Created when site-server boots. The relay container uses this password and does
 # not receive the root password. Must differ from the root and app passwords
 # when PRODUCTION=1.

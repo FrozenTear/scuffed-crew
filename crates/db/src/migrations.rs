@@ -63,10 +63,14 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE TABLE IF NOT EXISTS member SCHEMAFULL;
         DEFINE FIELD OVERWRITE user_id ON member TYPE string
             PERMISSIONS FOR select NONE;
+        -- The relay does not read this table. SurrealDB 3.0.5 indexed scans
+        -- check the table permission and skip field permissions, so a SELECT
+        -- grant here would return every column the index covers. The relay
+        -- grant is NONE. org_role, nostr_pubkey, and is_active are copied
+        -- onto relay_member.
         DEFINE FIELD OVERWRITE org_role ON member TYPE string
             ASSERT $value IN ['admin', 'officer', 'member', 'recruit']
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE display_name ON member TYPE string
             PERMISSIONS FOR select NONE;
         -- Comparison key for display_name. Optional so a row can be inserted
@@ -89,8 +93,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE availability_status ON member TYPE option<string>
             PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE nostr_pubkey ON member TYPE option<string>
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE nostr_key_mode ON member TYPE option<string>
             ASSERT $value IN [NONE, 'server_managed', 'external']
             PERMISSIONS FOR select NONE;
@@ -99,8 +102,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE
             PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE is_active ON member TYPE bool DEFAULT true
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
 
         DEFINE INDEX IF NOT EXISTS member_user_idx ON member COLUMNS user_id UNIQUE;
         DEFINE INDEX IF NOT EXISTS member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
@@ -285,24 +287,22 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Moderation Actions (warnings, suspensions, bans)
         -- ================================================
         DEFINE TABLE IF NOT EXISTS moderation_action SCHEMAFULL;
+        -- Same rule as member.org_role. The relay reads relay_moderation,
+        -- which does not copy reason or issued_by.
         DEFINE FIELD OVERWRITE member_id ON moderation_action TYPE string
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE action_type ON moderation_action TYPE string
             ASSERT $value IN ['note', 'warning', 'suspension', 'ban']
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         -- Hidden on this statement. See nostr_secret_key_encrypted above.
         DEFINE FIELD OVERWRITE reason ON moderation_action TYPE string
             PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE issued_by ON moderation_action TYPE string
             PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE expires_at ON moderation_action TYPE option<datetime>
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE is_active ON moderation_action TYPE bool DEFAULT true
-            PERMISSIONS FOR select WHERE $access = 'relay'
-                FOR create NONE FOR update NONE;
+            PERMISSIONS FOR select NONE;
         DEFINE FIELD OVERWRITE created_at ON moderation_action TYPE datetime DEFAULT time::now()
             PERMISSIONS FOR select NONE;
 
@@ -910,9 +910,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         tracing::warn!("officers_can_edit_teams backfill: {e}");
     }
 
-    // Relay record-user permissions. System users are not affected.
-    // Failure here must stop boot: a relay login without these grants
-    // either cannot read, or would be created against the wrong schema.
+    // Relay projection tables, events, backfill, and PERMISSIONS NONE on the
+    // base tables. System users are not affected. Failure here must stop boot:
+    // a relay login without these grants either cannot read, or would be
+    // created against the base tables.
     crate::relay_access::apply_relay_read_permissions(client).await?;
 
     tracing::info!("Database migrations complete");

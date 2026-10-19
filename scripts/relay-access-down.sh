@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Remove the relay record login before rolling the site image back.
 #
-# An older site image runs DEFINE FIELD OVERWRITE without field permissions
-# and reopens audit_log. Those statements make the hidden columns readable
-# to a record user again. This script deletes the access and the principal
-# table first, so the widened grants have no record user. Root and the
-# EDITOR app user bypass table permissions and keep working.
+# An older site image runs DEFINE FIELD OVERWRITE without field permissions,
+# reopens audit_log, and grants the relay SELECT on the base tables. Those
+# statements make the hidden columns readable to a record user again. The
+# projection events write relay_member, relay_roster, relay_moderation, and
+# relay_team_channel. A write fails if those events stay and the tables are
+# gone. This script removes the events, then the projection tables, then the
+# access and the principal table. Root and the EDITOR app user bypass table
+# permissions and keep working.
 #
 # The surreal image has no shell. /surreal sql reads SURREAL_USER and
 # SURREAL_PASS from the container environment. This script does not pass
@@ -17,6 +20,18 @@ set -euo pipefail
 
 relay_access_down_sql() {
     printf '%s\n' \
+        "REMOVE EVENT IF EXISTS relay_member_write ON TABLE member;" \
+        "REMOVE EVENT IF EXISTS relay_member_delete ON TABLE member;" \
+        "REMOVE EVENT IF EXISTS relay_roster_write ON TABLE plays_on;" \
+        "REMOVE EVENT IF EXISTS relay_roster_delete ON TABLE plays_on;" \
+        "REMOVE EVENT IF EXISTS relay_moderation_write ON TABLE moderation_action;" \
+        "REMOVE EVENT IF EXISTS relay_moderation_delete ON TABLE moderation_action;" \
+        "REMOVE EVENT IF EXISTS relay_team_channel_write ON TABLE team_channel;" \
+        "REMOVE EVENT IF EXISTS relay_team_channel_delete ON TABLE team_channel;" \
+        "REMOVE TABLE IF EXISTS relay_member;" \
+        "REMOVE TABLE IF EXISTS relay_roster;" \
+        "REMOVE TABLE IF EXISTS relay_moderation;" \
+        "REMOVE TABLE IF EXISTS relay_team_channel;" \
         "REMOVE ACCESS IF EXISTS relay ON DATABASE;" \
         "REMOVE TABLE IF EXISTS relay_db_user;"
 }
@@ -119,5 +134,5 @@ if ! relay_access_down_sql | timeout 30 podman exec -i \
     echo "error: surreal sql failed. The password was not printed." >&2
     exit 1
 fi
-echo "Removed ACCESS relay and TABLE relay_db_user on ${ns}/${db}."
+echo "Removed relay projection events and tables, ACCESS relay, and TABLE relay_db_user on ${ns}/${db}."
 echo "Next: pin the older site image and run ./scripts/update.sh."

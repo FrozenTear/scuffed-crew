@@ -615,11 +615,12 @@ impl Database {
         .await
     }
 
-    /// Columns the relay login is allowed to read from `member`.
+    /// Columns the relay login reads from `relay_member`.
     ///
     /// The site still uses [`Database::list_nostr_identities`], which selects
-    /// the wider safe projection. That projection names columns this login
-    /// cannot read, so the relay calls this query instead.
+    /// the wider safe projection from `member`. The relay login cannot read
+    /// `member`. Events keep `relay_member` aligned with `org_role`,
+    /// `nostr_pubkey`, and `is_active`.
     pub async fn list_relay_member_keys(&self) -> DbResult<Vec<RelayMemberKey>> {
         #[derive(Debug, Deserialize, SurrealValue)]
         struct Row {
@@ -633,7 +634,7 @@ impl Database {
             let mut result = self
                 .client
                 .query(
-                    "SELECT id, org_role, nostr_pubkey, is_active FROM member \
+                    "SELECT id, org_role, nostr_pubkey, is_active FROM relay_member \
                      WHERE is_active = true AND nostr_pubkey != NONE LIMIT 2000",
                 )
                 .await?;

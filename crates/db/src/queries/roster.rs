@@ -192,11 +192,12 @@ impl Database {
         .await
     }
 
-    /// Active roster edges as `(member_id, team_id)`.
+    /// Active roster edges as `(member_id, team_id)` for the relay login.
     ///
-    /// Same active-member and active-ban filter as [`Self::get_team_roster`].
-    /// The relay read gate builds its team map from this instead of one query
-    /// per team.
+    /// Reads `relay_roster` and `relay_moderation` instead of `plays_on` and
+    /// `moderation_action`. `member_active` is the copy of `member.is_active`,
+    /// so this does not follow `in.is_active`. The site roster queries stay
+    /// on `plays_on`.
     pub async fn list_active_roster_pairs(&self) -> DbResult<Vec<(String, String)>> {
         #[derive(Debug, Deserialize, SurrealValue)]
         struct Pair {
@@ -207,9 +208,15 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(roster_select!(
-                    "SELECT <string>in AS member_id, <string>out AS team_id FROM plays_on WHERE true"
-                ))
+                .query(
+                    "SELECT member_id, team_id FROM relay_roster \
+                     WHERE edge_active = true AND member_active = true \
+                     AND member_id NOT IN ( \
+                         SELECT VALUE member_id FROM relay_moderation \
+                         WHERE is_active = true AND action_type = 'ban' \
+                         AND (expires_at IS NONE OR expires_at > time::now()) \
+                     )",
+                )
                 .await?;
             let rows: Vec<Pair> = result.take(0)?;
             Ok(rows

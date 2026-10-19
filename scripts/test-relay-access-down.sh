@@ -15,6 +15,26 @@ fail() {
 sql="$(relay_access_down_sql)"
 [[ "$sql" == *"REMOVE ACCESS IF EXISTS relay ON DATABASE;"* ]] || fail "missing REMOVE ACCESS"
 [[ "$sql" == *"REMOVE TABLE IF EXISTS relay_db_user;"* ]] || fail "missing REMOVE TABLE"
+for statement in \
+    "REMOVE EVENT IF EXISTS relay_member_write ON TABLE member;" \
+    "REMOVE EVENT IF EXISTS relay_member_delete ON TABLE member;" \
+    "REMOVE EVENT IF EXISTS relay_roster_write ON TABLE plays_on;" \
+    "REMOVE EVENT IF EXISTS relay_roster_delete ON TABLE plays_on;" \
+    "REMOVE EVENT IF EXISTS relay_moderation_write ON TABLE moderation_action;" \
+    "REMOVE EVENT IF EXISTS relay_moderation_delete ON TABLE moderation_action;" \
+    "REMOVE EVENT IF EXISTS relay_team_channel_write ON TABLE team_channel;" \
+    "REMOVE EVENT IF EXISTS relay_team_channel_delete ON TABLE team_channel;" \
+    "REMOVE TABLE IF EXISTS relay_member;" \
+    "REMOVE TABLE IF EXISTS relay_roster;" \
+    "REMOVE TABLE IF EXISTS relay_moderation;" \
+    "REMOVE TABLE IF EXISTS relay_team_channel;"
+do
+    [[ "$sql" == *"$statement"* ]] || fail "missing $statement"
+done
+events_at=$(printf '%s' "$sql" | grep -n 'REMOVE EVENT IF EXISTS relay_member_write' | head -1 | cut -d: -f1)
+tables_at=$(printf '%s' "$sql" | grep -n 'REMOVE TABLE IF EXISTS relay_member;' | head -1 | cut -d: -f1)
+access_at=$(printf '%s' "$sql" | grep -n 'REMOVE ACCESS IF EXISTS relay' | head -1 | cut -d: -f1)
+[[ "$events_at" -lt "$tables_at" && "$tables_at" -lt "$access_at" ]] || fail "rollback order is events, tables, then access"
 
 argv="$(relay_access_down_argv)"
 [[ "$argv" == *"/surreal"* ]] || fail "argv does not call /surreal"

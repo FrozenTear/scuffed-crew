@@ -8,21 +8,32 @@
 //! against that same record-access shape. This module does not claim the
 //! server image is 3.2.
 //!
-//! The relay process (`relay-policy` and `relay-read-gate`) only reads:
+//! The relay process (`relay-policy` and `relay-read-gate`) reads four
+//! projection tables, and nothing else:
 //!
-//! - `member` (`list_relay_member_keys`: `id`, `org_role`, `nostr_pubkey`,
-//!   `is_active`; `LIVE SELECT id`; `in.is_active` on roster edges)
-//! - `plays_on` (`list_active_roster_pairs`, `LIVE SELECT id`)
-//! - `team_channel` (`list_all_team_channels`, `LIVE SELECT id`)
-//! - `moderation_action` (`member_id`, `action_type`, `expires_at`,
-//!   `is_active` inside `list_active_roster_pairs`)
+//! - `relay_member` (`id`, `org_role`, `nostr_pubkey`, `is_active`)
+//! - `relay_roster` (`member_id`, `team_id`, `edge_active`, `member_active`)
+//! - `relay_moderation` (`member_id`, `action_type`, `expires_at`, `is_active`)
+//! - `relay_team_channel` (the channel columns the directory needs)
 //!
-//! It does not write. Other `member` columns, and `moderation_action.reason`,
-//! `issued_by`, and `created_at`, are not selectable by this login. The field
-//! permissions are on the migration `DEFINE FIELD` statements, so a later
-//! statement failing cannot make those columns readable again. System users
-//! (root bootstrap and the EDITOR app user) bypass table and field
-//! permissions, so the site keeps its current access.
+//! SurrealDB 3.0.5 serves an indexed `SELECT` with an index scan that checks
+//! the table permission and skips field permissions. A relay grant of
+//! `SELECT` on `member` or `moderation_action` therefore returns
+//! `user_id`, display names, `nostr_secret_key_encrypted`, `reason`, and
+//! `issued_by` whenever the planner uses `member_user_idx`,
+//! `member_display_name_key_idx`, `member_active_name_idx`,
+//! `member_nostr_pubkey_idx`, `mod_member_idx`, or `mod_active_idx`.
+//! Field permissions do not close that hole. The base tables are
+//! `PERMISSIONS NONE` for this login. The projection tables hold only the
+//! columns the relay needs.
+//!
+//! `DEFINE EVENT` on `member`, `plays_on`, `moderation_action`, and
+//! `team_channel` copies those columns in the same write. Startup backfills
+//! rows that already exist. `member_active` on `relay_roster` is that copy
+//! of `member.is_active`, so roster reads do not follow `in.is_active`.
+//! The relay does not write. System users (root bootstrap and the EDITOR
+//! app user) bypass table and field permissions, so the site keeps reading
+//! the base tables.
 
 use surrealdb::engine::any::{self, Any};
 use surrealdb::opt::auth::Record;
@@ -40,9 +51,16 @@ pub const RELAY_DB_USERNAME_DEFAULT: &str = "scuffed_relay";
 /// Table that holds the single relay principal. Record users cannot read it.
 pub const RELAY_PRINCIPAL_TABLE: &str = "relay_db_user";
 
-/// Tables the relay login may `SELECT`. Nothing else.
-pub const RELAY_SELECT_TABLES: &[&str] =
-    &["member", "plays_on", "team_channel", "moderation_action"];
+/// Projection tables the relay login may `SELECT`. Nothing else.
+pub const RELAY_SELECT_TABLES: &[&str] = &[
+    "relay_member",
+    "relay_roster",
+    "relay_moderation",
+    "relay_team_channel",
+];
+
+/// Base tables the relay used to read. Table permission for this login is NONE.
+pub const RELAY_BASE_TABLES: &[&str] = &["member", "plays_on", "team_channel", "moderation_action"];
 
 /// Sign-in parameters. Not `Debug`: `pass` is the relay password.
 #[derive(SurrealValue)]
@@ -67,11 +85,6 @@ const TABLE_PERMS: &str = "PERMISSIONS \
      FOR delete NONE";
 
 /// Field permissions have no DELETE clause. SurrealDB rejects `FOR delete` on a field.
-const FIELD_RELAY: &str = "PERMISSIONS \
-     FOR select WHERE $access = 'relay' \
-     FOR create NONE \
-     FOR update NONE";
-
 const FIELD_HIDDEN: &str = "PERMISSIONS FOR select NONE \
      FOR create NONE \
      FOR update NONE";
@@ -94,11 +107,13 @@ pub fn relay_permission_sql() -> String {
         assert_safe_ident(table, "relay select table").expect("relay table list");
         sql.push_str(&format!("ALTER TABLE {table} {TABLE_PERMS};\n"));
     }
-    for field in ["org_role", "nostr_pubkey", "is_active"] {
-        sql.push_str(&format!("ALTER FIELD {field} ON member {FIELD_RELAY};\n"));
+    for table in RELAY_BASE_TABLES {
+        assert_safe_ident(table, "relay base table").expect("relay base table list");
+        sql.push_str(&format!("ALTER TABLE {table} PERMISSIONS NONE;\n"));
     }
     for field in [
         "user_id",
+        "org_role",
         "display_name",
         "display_name_key",
         "bio",
@@ -107,25 +122,134 @@ pub fn relay_permission_sql() -> String {
         "timezone",
         "pronouns",
         "availability_status",
+        "nostr_pubkey",
         "nostr_key_mode",
         "nostr_secret_key_encrypted",
+        "is_active",
         "main_role",
         "twitch",
         "twitter",
     ] {
         sql.push_str(&format!("ALTER FIELD {field} ON member {FIELD_HIDDEN};\n"));
     }
-    for field in ["member_id", "action_type", "expires_at", "is_active"] {
-        sql.push_str(&format!(
-            "ALTER FIELD {field} ON moderation_action {FIELD_RELAY};\n"
-        ));
-    }
-    for field in ["reason", "issued_by", "created_at"] {
+    for field in [
+        "member_id",
+        "action_type",
+        "reason",
+        "issued_by",
+        "expires_at",
+        "is_active",
+        "created_at",
+    ] {
         sql.push_str(&format!(
             "ALTER FIELD {field} ON moderation_action {FIELD_HIDDEN};\n"
         ));
     }
     sql
+}
+
+/// Projection tables, the events that maintain them, and a backfill.
+///
+/// Idempotent. `DEFINE EVENT OVERWRITE` replaces the copy logic. The backfill
+/// uses `LET` and then `FOR`. On SurrealDB 3.0.5, `FOR $row IN (SELECT ...)`
+/// rejects the row. Binding the select first is the form that server accepts.
+/// The copied columns are the only ones named here. Secrets, display names,
+/// `user_id`, `reason`, and `issued_by` are not on these tables.
+const RELAY_PROJECTION_SQL: &str = r#"
+DEFINE TABLE OVERWRITE relay_member SCHEMAFULL
+    PERMISSIONS FOR select WHERE $access = 'relay'
+    FOR create NONE
+    FOR update NONE
+    FOR delete NONE;
+DEFINE FIELD OVERWRITE org_role ON relay_member TYPE string;
+DEFINE FIELD OVERWRITE nostr_pubkey ON relay_member TYPE option<string>;
+DEFINE FIELD OVERWRITE is_active ON relay_member TYPE bool;
+
+DEFINE TABLE OVERWRITE relay_roster SCHEMAFULL
+    PERMISSIONS FOR select WHERE $access = 'relay'
+    FOR create NONE
+    FOR update NONE
+    FOR delete NONE;
+DEFINE FIELD OVERWRITE member_id ON relay_roster TYPE string;
+DEFINE FIELD OVERWRITE team_id ON relay_roster TYPE string;
+DEFINE FIELD OVERWRITE edge_active ON relay_roster TYPE bool;
+DEFINE FIELD OVERWRITE member_active ON relay_roster TYPE bool;
+
+DEFINE TABLE OVERWRITE relay_moderation SCHEMAFULL
+    PERMISSIONS FOR select WHERE $access = 'relay'
+    FOR create NONE
+    FOR update NONE
+    FOR delete NONE;
+DEFINE FIELD OVERWRITE member_id ON relay_moderation TYPE string;
+DEFINE FIELD OVERWRITE action_type ON relay_moderation TYPE string;
+DEFINE FIELD OVERWRITE expires_at ON relay_moderation TYPE option<datetime>;
+DEFINE FIELD OVERWRITE is_active ON relay_moderation TYPE bool;
+
+DEFINE TABLE OVERWRITE relay_team_channel SCHEMAFULL
+    PERMISSIONS FOR select WHERE $access = 'relay'
+    FOR create NONE
+    FOR update NONE
+    FOR delete NONE;
+DEFINE FIELD OVERWRITE team_id ON relay_team_channel TYPE string;
+DEFINE FIELD OVERWRITE group_id ON relay_team_channel TYPE string;
+DEFINE FIELD OVERWRITE group_type ON relay_team_channel TYPE string;
+DEFINE FIELD OVERWRITE relay_url ON relay_team_channel TYPE string;
+DEFINE FIELD OVERWRITE is_active ON relay_team_channel TYPE bool;
+DEFINE FIELD OVERWRITE created_at ON relay_team_channel TYPE datetime;
+DEFINE FIELD OVERWRITE synced_at ON relay_team_channel TYPE option<datetime>;
+
+DEFINE EVENT OVERWRITE relay_member_write ON TABLE member WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
+    UPSERT type::record("relay_member", record::id($after.id)) SET org_role = $after.org_role, nostr_pubkey = $after.nostr_pubkey, is_active = $after.is_active;
+    UPDATE relay_roster SET member_active = $after.is_active WHERE member_id = <string>record::id($after.id);
+};
+DEFINE EVENT OVERWRITE relay_member_delete ON TABLE member WHEN $event = "DELETE" THEN {
+    DELETE type::record("relay_member", record::id($before.id));
+    DELETE relay_roster WHERE member_id = <string>record::id($before.id);
+};
+DEFINE EVENT OVERWRITE relay_roster_write ON TABLE plays_on WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
+    LET $active_rows = (SELECT VALUE is_active FROM type::record("member", record::id($after.in)));
+    LET $member_active = $active_rows[0] ?? false;
+    UPSERT type::record("relay_roster", record::id($after.id)) SET member_id = <string>record::id($after.in), team_id = <string>record::id($after.out), edge_active = $after.is_active, member_active = $member_active;
+};
+DEFINE EVENT OVERWRITE relay_roster_delete ON TABLE plays_on WHEN $event = "DELETE" THEN {
+    DELETE type::record("relay_roster", record::id($before.id));
+};
+DEFINE EVENT OVERWRITE relay_moderation_write ON TABLE moderation_action WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
+    UPSERT type::record("relay_moderation", record::id($after.id)) SET member_id = $after.member_id, action_type = $after.action_type, expires_at = $after.expires_at, is_active = $after.is_active;
+};
+DEFINE EVENT OVERWRITE relay_moderation_delete ON TABLE moderation_action WHEN $event = "DELETE" THEN {
+    DELETE type::record("relay_moderation", record::id($before.id));
+};
+DEFINE EVENT OVERWRITE relay_team_channel_write ON TABLE team_channel WHEN $event = "CREATE" OR $event = "UPDATE" THEN {
+    UPSERT type::record("relay_team_channel", record::id($after.id)) SET team_id = $after.team_id, group_id = $after.group_id, group_type = $after.group_type, relay_url = $after.relay_url, is_active = $after.is_active, created_at = $after.created_at, synced_at = $after.synced_at;
+};
+DEFINE EVENT OVERWRITE relay_team_channel_delete ON TABLE team_channel WHEN $event = "DELETE" THEN {
+    DELETE type::record("relay_team_channel", record::id($before.id));
+};
+
+LET $relay_members = (SELECT id, org_role, nostr_pubkey, is_active FROM member);
+FOR $row IN $relay_members {
+    UPSERT type::record("relay_member", record::id($row.id)) SET org_role = $row.org_role, nostr_pubkey = $row.nostr_pubkey, is_active = $row.is_active;
+};
+LET $relay_edges = (SELECT id, in, out, is_active FROM plays_on);
+FOR $row IN $relay_edges {
+    LET $active_rows = (SELECT VALUE is_active FROM type::record("member", record::id($row.in)));
+    LET $member_active = $active_rows[0] ?? false;
+    UPSERT type::record("relay_roster", record::id($row.id)) SET member_id = <string>record::id($row.in), team_id = <string>record::id($row.out), edge_active = $row.is_active, member_active = $member_active;
+};
+LET $relay_actions = (SELECT id, member_id, action_type, expires_at, is_active FROM moderation_action);
+FOR $row IN $relay_actions {
+    UPSERT type::record("relay_moderation", record::id($row.id)) SET member_id = $row.member_id, action_type = $row.action_type, expires_at = $row.expires_at, is_active = $row.is_active;
+};
+LET $relay_channels = (SELECT id, team_id, group_id, group_type, relay_url, is_active, created_at, synced_at FROM team_channel);
+FOR $row IN $relay_channels {
+    UPSERT type::record("relay_team_channel", record::id($row.id)) SET team_id = $row.team_id, group_id = $row.group_id, group_type = $row.group_type, relay_url = $row.relay_url, is_active = $row.is_active, created_at = $row.created_at, synced_at = $row.synced_at;
+};
+"#;
+
+async fn install_relay_projection(client: &Surreal<Any>) -> DbResult<()> {
+    client.query(RELAY_PROJECTION_SQL).await?.check()?;
+    Ok(())
 }
 
 /// Record access rejects `DURATION FOR TOKEN NONE`. Omitting `DURATION`
@@ -143,11 +267,14 @@ DEFINE ACCESS OVERWRITE relay ON DATABASE TYPE RECORD \
         WHERE username = $user AND crypto::argon2::compare(pass, $pass) \
     )";
 
-/// Install table and field permissions. Idempotent. Does not create the login.
+/// Install the projection tables and the relay read permissions. Idempotent.
+/// Does not create the login.
 ///
 /// Tables outside [`RELAY_SELECT_TABLES`] are set to `PERMISSIONS NONE` so a
-/// record user cannot select or create them. System users bypass that.
+/// record user cannot select or create them. That includes [`RELAY_BASE_TABLES`].
+/// System users bypass that.
 pub async fn apply_relay_read_permissions(client: &Surreal<Any>) -> DbResult<()> {
+    install_relay_projection(client).await?;
     client.query(relay_permission_sql()).await?.check()?;
     deny_unlisted_tables(client).await?;
     Ok(())
@@ -233,7 +360,7 @@ pub async fn ensure_relay_access(
         username,
         access = RELAY_DB_ACCESS,
         force_sync,
-        "Defined relay database user (SELECT on member, plays_on, team_channel, moderation_action)"
+        "Defined relay database user (SELECT on relay_member, relay_roster, relay_moderation, relay_team_channel)"
     );
     Ok(())
 }
@@ -430,12 +557,62 @@ mod tests {
         assert!(
             sql.contains("ALTER FIELD issued_by ON moderation_action PERMISSIONS FOR select NONE")
         );
-        assert!(sql.contains(
-            "ALTER FIELD org_role ON member PERMISSIONS FOR select WHERE $access = 'relay'"
-        ));
-        assert!(sql.contains(
-            "ALTER FIELD member_id ON moderation_action PERMISSIONS FOR select WHERE $access = 'relay'"
-        ));
+        assert!(sql.contains("ALTER FIELD org_role ON member PERMISSIONS FOR select NONE"));
+        assert!(sql.contains("ALTER FIELD nostr_pubkey ON member PERMISSIONS FOR select NONE"));
+        assert!(sql.contains("ALTER FIELD is_active ON member PERMISSIONS FOR select NONE"));
+        assert!(
+            sql.contains("ALTER FIELD member_id ON moderation_action PERMISSIONS FOR select NONE")
+        );
+        assert!(sql
+            .contains("ALTER FIELD action_type ON moderation_action PERMISSIONS FOR select NONE"));
+        for table in RELAY_BASE_TABLES {
+            assert!(
+                sql.contains(&format!("ALTER TABLE {table} PERMISSIONS NONE")),
+                "{table} must not be selectable by the relay: {sql}"
+            );
+            assert!(
+                !sql.contains(&format!("ALTER TABLE {table} PERMISSIONS FOR select")),
+                "{table} still has a relay SELECT grant: {sql}"
+            );
+        }
+        assert!(RELAY_PROJECTION_SQL.contains("DEFINE EVENT OVERWRITE relay_member_write"));
+        assert!(RELAY_PROJECTION_SQL.contains("UPDATE relay_roster SET member_active"));
+        assert!(!RELAY_PROJECTION_SQL.contains("nostr_secret_key_encrypted"));
+        assert!(!RELAY_PROJECTION_SQL.contains("display_name"));
+        assert!(!RELAY_PROJECTION_SQL.contains("issued_by"));
+        assert!(!RELAY_PROJECTION_SQL.contains("user_id"));
+        let rollback = include_str!("../../../scripts/relay-access-down.sh");
+        for statement in [
+            "REMOVE EVENT IF EXISTS relay_member_write ON TABLE member;",
+            "REMOVE EVENT IF EXISTS relay_member_delete ON TABLE member;",
+            "REMOVE EVENT IF EXISTS relay_roster_write ON TABLE plays_on;",
+            "REMOVE EVENT IF EXISTS relay_roster_delete ON TABLE plays_on;",
+            "REMOVE EVENT IF EXISTS relay_moderation_write ON TABLE moderation_action;",
+            "REMOVE EVENT IF EXISTS relay_moderation_delete ON TABLE moderation_action;",
+            "REMOVE EVENT IF EXISTS relay_team_channel_write ON TABLE team_channel;",
+            "REMOVE EVENT IF EXISTS relay_team_channel_delete ON TABLE team_channel;",
+            "REMOVE TABLE IF EXISTS relay_member;",
+            "REMOVE TABLE IF EXISTS relay_roster;",
+            "REMOVE TABLE IF EXISTS relay_moderation;",
+            "REMOVE TABLE IF EXISTS relay_team_channel;",
+        ] {
+            assert!(
+                rollback.contains(statement),
+                "rollback script is missing {statement}"
+            );
+            assert!(
+                RELAY_PROJECTION_SQL.contains(
+                    statement
+                        .trim_start_matches("REMOVE EVENT IF EXISTS ")
+                        .trim_start_matches("REMOVE TABLE IF EXISTS ")
+                        .trim_end_matches(';')
+                        .split_once(" ON TABLE")
+                        .map(|(name, _)| name)
+                        .unwrap_or(statement)
+                ) || statement.starts_with("REMOVE TABLE"),
+                "projection SQL does not define {statement}"
+            );
+        }
         assert!(!sql.contains("DEFINE FIELD OVERWRITE nostr_secret_key_encrypted"));
         assert!(!sql.contains("DEFINE FIELD OVERWRITE reason"));
         assert!(!sql.contains("DEFINE FIELD OVERWRITE issued_by"));
@@ -560,7 +737,7 @@ mod tests {
         let banned = relay
             .client
             .query(
-                "SELECT VALUE member_id FROM moderation_action \
+                "SELECT VALUE member_id FROM relay_moderation \
                  WHERE is_active = true AND action_type = 'ban'",
             )
             .await
@@ -568,7 +745,20 @@ mod tests {
         let banned = format!("{banned:?}");
         assert!(
             banned.contains("probe"),
-            "ban subquery must still see member_id: {banned}"
+            "ban subquery must still see member_id on the projection: {banned}"
+        );
+        let base_ban = relay
+            .client
+            .query(
+                "SELECT VALUE member_id FROM moderation_action \
+                 WHERE is_active = true AND action_type = 'ban'",
+            )
+            .await
+            .expect("base ban query");
+        let base_ban_dbg = format!("{base_ban:?}");
+        assert!(
+            base_ban.check().is_err() || !base_ban_dbg.contains("probe"),
+            "relay read moderation_action through the ban predicate: {base_ban_dbg}"
         );
 
         let write = relay
@@ -759,7 +949,16 @@ mod tests {
             );
             denied.push(name.clone());
         }
-        for required in ["audit_log", "user", "relay_db_user", "session"] {
+        for required in [
+            "audit_log",
+            "user",
+            "relay_db_user",
+            "session",
+            "member",
+            "plays_on",
+            "team_channel",
+            "moderation_action",
+        ] {
             assert!(
                 denied.iter().any(|table| table == required),
                 "INFO FOR DB did not list {required}: {denied:?}"
@@ -829,7 +1028,7 @@ mod tests {
         let secret = "sekrit-live-do-not-leak";
         let mut response = relay
             .client
-            .query("LIVE SELECT id FROM member")
+            .query("LIVE SELECT id FROM relay_member")
             .await
             .expect("live query");
         let mut stream = response
@@ -909,6 +1108,194 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn relay_projection_follows_member_active_and_bans() {
+        let owner = owner("relay-projection-roster").await;
+        crate::migrations::run_migrations(&owner.client)
+            .await
+            .expect("migrations");
+        ensure_relay_access(&owner.client, "scuffed_relay", "relay-pass-1", false)
+            .await
+            .expect("relay user");
+
+        let member = owner
+            .create_member("proj-user", "ProjName", crate::OrgRole::Member)
+            .await
+            .expect("member");
+        let pubkey = "ab";
+        owner
+            .update_member_nostr_keys(&member.id, Some(pubkey), Some("external"), None)
+            .await
+            .expect("pubkey");
+        let secret = "proj-secret-marker";
+        owner
+            .client
+            .query("UPDATE $rid SET nostr_secret_key_encrypted = { marker: $secret }")
+            .bind((
+                "rid",
+                surrealdb_types::RecordId::new("member", member.id.clone()),
+            ))
+            .bind(("secret", secret))
+            .await
+            .expect("secret update")
+            .check()
+            .expect("secret update check");
+        let team = owner
+            .create_team("Proj Squad", "ow2", None, None, None)
+            .await
+            .expect("team");
+        owner
+            .add_to_roster(&member.id, &team.id, crate::TeamRole::Player)
+            .await
+            .expect("roster");
+        owner
+            .create_team_channel(&team.id, "proj-public", crate::GroupType::Public, "")
+            .await
+            .expect("channel");
+
+        let relay = relay_session(&owner, "relay-pass-1")
+            .await
+            .expect("relay sign-in");
+        let keys = relay.list_relay_member_keys().await.expect("keys");
+        assert!(
+            keys.iter()
+                .any(|row| row.id == member.id && row.nostr_pubkey.as_deref() == Some(pubkey)),
+            "projection missed the pubkey: {keys:?}"
+        );
+        let pairs = relay.list_active_roster_pairs().await.expect("pairs");
+        assert!(
+            pairs
+                .iter()
+                .any(|(member_id, team_id)| member_id == &member.id && team_id == &team.id),
+            "projection missed the roster pair: {pairs:?}"
+        );
+        let channels = relay.list_all_team_channels().await.expect("channels");
+        assert!(
+            channels
+                .iter()
+                .any(|channel| channel.group_id == "proj-public" && channel.team_id == team.id),
+            "projection missed the channel: {channels:?}"
+        );
+        let copied = owner
+            .client
+            .query("SELECT * FROM relay_member")
+            .await
+            .expect("owner projection");
+        let copied = format!("{copied:?}");
+        assert!(
+            !copied.contains(secret) && !copied.contains("ProjName"),
+            "projection stored a hidden column: {copied}"
+        );
+
+        let indexed = relay
+            .client
+            .query("SELECT * FROM member WHERE nostr_pubkey = 'ab'")
+            .await
+            .expect("indexed member select");
+        let indexed_dbg = format!("{indexed:?}");
+        assert!(
+            indexed.check().is_err() || !indexed_dbg.contains(secret),
+            "indexed member select returned the secret: {indexed_dbg}"
+        );
+        assert!(
+            !indexed_dbg.contains("ProjName"),
+            "indexed member select returned the display name: {indexed_dbg}"
+        );
+
+        owner
+            .client
+            .query("UPDATE $rid SET is_active = false")
+            .bind((
+                "rid",
+                surrealdb_types::RecordId::new("member", member.id.clone()),
+            ))
+            .await
+            .expect("deactivate")
+            .check()
+            .expect("deactivate check");
+        let pairs = relay.list_active_roster_pairs().await.expect("pairs off");
+        assert!(
+            pairs.iter().all(|(member_id, _)| member_id != &member.id),
+            "inactive member stayed on the relay roster: {pairs:?}"
+        );
+        let site = owner.get_team_roster(&team.id).await.expect("site roster");
+        assert!(
+            site.is_empty(),
+            "site roster still lists the inactive member: {site:?}"
+        );
+
+        owner
+            .client
+            .query("UPDATE $rid SET is_active = true")
+            .bind((
+                "rid",
+                surrealdb_types::RecordId::new("member", member.id.clone()),
+            ))
+            .await
+            .expect("reactivate")
+            .check()
+            .expect("reactivate check");
+        let pairs = relay.list_active_roster_pairs().await.expect("pairs on");
+        assert!(
+            pairs
+                .iter()
+                .any(|(member_id, team_id)| member_id == &member.id && team_id == &team.id),
+            "reactivated member did not return to the relay roster: {pairs:?}"
+        );
+
+        let reason = "proj-reason-marker";
+        owner
+            .client
+            .query(
+                "CREATE moderation_action SET member_id = $id, action_type = 'ban', \
+                 reason = $reason, issued_by = 'officer-proj', is_active = true",
+            )
+            .bind(("id", member.id.clone()))
+            .bind(("reason", reason))
+            .await
+            .expect("ban")
+            .check()
+            .expect("ban check");
+        let pairs = relay
+            .list_active_roster_pairs()
+            .await
+            .expect("pairs banned");
+        assert!(
+            pairs.iter().all(|(member_id, _)| member_id != &member.id),
+            "banned member stayed on the relay roster: {pairs:?}"
+        );
+        let banned_base = relay
+            .client
+            .query("SELECT * FROM moderation_action")
+            .await
+            .expect("base moderation");
+        let banned_base_dbg = format!("{banned_base:?}");
+        assert!(
+            !banned_base_dbg.contains(reason),
+            "relay read the ban reason from moderation_action: {banned_base_dbg}"
+        );
+
+        owner
+            .client
+            .query("DELETE relay_member")
+            .await
+            .expect("drop projection")
+            .check()
+            .expect("drop projection check");
+        apply_relay_read_permissions(&owner.client)
+            .await
+            .expect("backfill");
+        let keys = relay
+            .list_relay_member_keys()
+            .await
+            .expect("keys after backfill");
+        assert!(
+            keys.iter()
+                .any(|row| row.id == member.id && row.nostr_pubkey.as_deref() == Some(pubkey)),
+            "backfill did not restore the pubkey: {keys:?}"
+        );
     }
 
     /// The text of one SurrealQL statement in `migrations.rs`, not a copy.

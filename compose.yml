@@ -57,8 +57,9 @@ services:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
       SURREALDB_DB: ${SURREALDB_DB:-main}
-      # Record login created by site-server bootstrap. SELECT on member,
-      # plays_on, team_channel, and moderation_action only.
+      # Record login created by site-server bootstrap. SELECT on
+      # relay_member, relay_roster, relay_moderation, and
+      # relay_team_channel only. The base tables are not readable.
       SURREALDB_RELAY_USER: ${SURREALDB_RELAY_USER:-scuffed_relay}
       SURREALDB_RELAY_PASSWORD: ${SURREALDB_RELAY_PASSWORD:-}
       # Always empty. scripts/lib/compose-env.sh does not copy
