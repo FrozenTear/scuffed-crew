@@ -233,6 +233,12 @@ fn any_problem_with_the_pack_refuses_all_of_it() {
         b[0] ^= 1;
         std::fs::write(&p, b).unwrap();
     })));
+    assert!(invalid(variant("grown", &|d| {
+        let p = d.join("whiten.f32");
+        let mut b = std::fs::read(&p).unwrap();
+        b.extend_from_slice(&[0; 4]);
+        std::fs::write(&p, b).unwrap();
+    })));
     assert!(invalid(variant("wrong_name", &|d| {
         let p = d.join("manifest.json");
         let s = std::fs::read_to_string(&p)
@@ -240,4 +246,124 @@ fn any_problem_with_the_pack_refuses_all_of_it() {
             .replace("names-v1.tar", "names-v0.tar");
         std::fs::write(&p, s).unwrap();
     })));
+}
+
+/// Rewrite a test pack's manifest `files` map into pack sync's array form.
+fn to_files_array(dir: &std::path::Path, drop: Option<&str>, bad_sha: Option<&str>) {
+    let p = dir.join("manifest.json");
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+    let list: Vec<serde_json::Value> = m["files"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != drop)
+        .map(|(name, v)| {
+            let sha = if Some(name.as_str()) == bad_sha {
+                "0".repeat(64)
+            } else {
+                v["sha256"].as_str().unwrap().to_owned()
+            };
+            serde_json::json!({"path": name, "sha256": sha, "size": v["size"]})
+        })
+        .collect();
+    m["files"] = serde_json::Value::Array(list);
+    std::fs::write(&p, serde_json::to_vec(&m).unwrap()).unwrap();
+}
+
+#[test]
+fn loads_the_pack_sync_files_array_and_the_files_map_alike() {
+    let tmp = tempfile::tempdir().unwrap();
+    let map = tmp.path().join("map");
+    let array = tmp.path().join("array");
+    write_pack(&map, &["ABC", "CBA", "BAC"]);
+    write_pack(&array, &["ABC", "CBA", "BAC"]);
+    to_files_array(&array, None, None);
+    let from_map = NamePack::load(&map).expect("map form");
+    let from_array = NamePack::load(&array).expect("array form");
+    assert_eq!(from_array.templates(), from_map.templates());
+    assert_eq!(from_array.params, from_map.params);
+    assert_eq!(from_array.z, from_map.z);
+    assert_eq!(
+        read_row_name(&row("CAB"), 1007, 6, &from_array).map(|r| r.text),
+        read_row_name(&row("CAB"), 1007, 6, &from_map).map(|r| r.text)
+    );
+    let refused = |name: &str, drop: Option<&str>, bad_sha: Option<&str>| {
+        let d = tmp.path().join(name);
+        write_pack(&d, &["ABC"]);
+        to_files_array(&d, drop, bad_sha);
+        matches!(NamePack::load(&d).unwrap_err(), PackError::Invalid(_))
+    };
+    assert!(refused("array_unlisted", Some("whiten.f32"), None));
+    assert!(refused("array_bad_sha", None, Some("glyphs.png")));
+}
+
+/// Rewrite `glyphs.txt`'s first width to `width` and fix its manifest entry,
+/// so only the value itself is wrong.
+fn set_first_width(dir: &std::path::Path, width: &str) {
+    let p = dir.join("glyphs.txt");
+    let text = std::fs::read_to_string(&p).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    let letter = first.split('\t').next().unwrap();
+    let new = format!("{letter}\t{width}\n{rest}");
+    std::fs::write(&p, &new).unwrap();
+    let mp = dir.join("manifest.json");
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();
+    m["files"]["glyphs.txt"] = serde_json::json!({
+        "size": new.len(),
+        "sha256": format!("{:x}", Sha256::digest(new.as_bytes())),
+    });
+    std::fs::write(&mp, serde_json::to_vec(&m).unwrap()).unwrap();
+}
+
+/// Set (or with `None`, remove) the manifest's `version`.
+fn set_version(dir: &std::path::Path, version: Option<&str>) {
+    let mp = dir.join("manifest.json");
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();
+    match version {
+        Some(v) => m["version"] = serde_json::json!(v),
+        None => {
+            m.as_object_mut().unwrap().remove("version");
+        }
+    }
+    std::fs::write(&mp, serde_json::to_vec(&m).unwrap()).unwrap();
+}
+
+#[test]
+fn a_width_that_is_not_a_positive_number_refuses_the_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ok = tmp.path().join("ok");
+    write_pack(&ok, &["ABC"]);
+    set_first_width(&ok, "0.5");
+    assert!(NamePack::load(&ok).is_ok(), "the rewrite itself is sound");
+    for (i, w) in ["NaN", "nan", "inf", "-inf", "infinity", "0", "-0.5"]
+        .iter()
+        .enumerate()
+    {
+        let d = tmp.path().join(format!("w{i}"));
+        write_pack(&d, &["ABC"]);
+        set_first_width(&d, w);
+        assert_eq!(
+            NamePack::load(&d).unwrap_err(),
+            PackError::Invalid("glyphs.txt width".into()),
+            "width {w}"
+        );
+    }
+}
+
+#[test]
+fn a_pack_without_a_version_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let named = tmp.path().join("named");
+    write_pack(&named, &["ABC"]);
+    assert_eq!(NamePack::load(&named).unwrap().version, "test");
+    for (name, v) in [("empty", Some("")), ("blank", Some("  ")), ("absent", None)] {
+        let d = tmp.path().join(name);
+        write_pack(&d, &["ABC"]);
+        set_version(&d, v);
+        assert_eq!(
+            NamePack::load(&d).unwrap_err(),
+            PackError::Invalid("no version".into()),
+            "{name}"
+        );
+    }
 }

@@ -11,6 +11,11 @@
 //! Without a usable pack nothing here runs: [`read_names`] hands the board to
 //! [`crate::ocr::recognize_scoreboard_names_pre_cropped`], today's ocr-v1
 //! path, and returns exactly what it returns.
+//!
+//! Toolchain: this module uses `<[T]>::as_chunks`, stable since Rust 1.88,
+//! as other modules of the crate already do. The crate as a whole needs
+//! Rust 1.90 today through its dependencies (`roaring` 0.11, via
+//! surrealdb), so a distro toolchain older than that cannot build it.
 
 pub mod pack;
 mod reader;
@@ -43,7 +48,9 @@ impl NameRecognizer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NameRead {
     pub text: String,
-    /// Smallest best-vs-second letter margin; at least the pack's `min_confidence`.
+    /// Smallest best-vs-second letter margin ([`Params::min_confidence`] says
+    /// what the scale means); at least the pack's `min_confidence`, 0.016 by
+    /// default.
     pub confidence: f32,
 }
 
@@ -106,6 +113,14 @@ pub fn accept(raw: RawRead, pack: &NamePack) -> Option<NameRead> {
 }
 
 /// The names on a cropped board, and which reader read them.
+///
+/// The two readers fill `rows` on different scales. With
+/// [`NameRecognizer::OcrV1`], a name's `CellOcrResult::confidence` is
+/// Tesseract's 0 to 100 and `name_alternates` holds the other name windows.
+/// With [`NameRecognizer::NamesV1`], `confidence` is the letter margin times
+/// 1000, rounded (16 and up at the default minimum of 0.016, see
+/// [`Params::min_confidence`]), and `name_alternates` is always empty.
+/// Never compare a confidence across the two.
 #[derive(Debug)]
 pub struct BoardNames {
     pub recognizer: NameRecognizer,
@@ -120,6 +135,10 @@ pub struct BoardNames {
 /// reader's name or none, no name windows (`name_alternates` is empty), no
 /// Tesseract call, and `confidence` is the margin in thousandths. With OCR
 /// off nothing is read either way.
+// `#[track_caller]` is needed: the ocr-v1 call below is `#[track_caller]`
+// too, and the OCR gate records the line that asked when it refuses a read
+// (OCR off). With it, a refusal names the daemon's call site, as a direct
+// ocr-v1 call does; `tests/names_fallback.rs` checks this.
 #[track_caller]
 pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack>) -> BoardNames {
     let Some(pack) = pack else {
