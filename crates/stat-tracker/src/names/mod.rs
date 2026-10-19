@@ -24,6 +24,8 @@ mod resize;
 pub use pack::{NamePack, PackError, Params};
 pub use reader::{Abstain, RawRead};
 
+use std::sync::Arc;
+
 use crate::ocr::{self, CellOcrResult, RowOcrResult};
 use image::DynamicImage;
 
@@ -175,6 +177,539 @@ pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack
 /// Load the installed pack under `data_dir`, or say why there is none.
 pub fn load_installed(data_dir: &std::path::Path) -> Result<NamePack, PackError> {
     NamePack::load(&pack::dir_in(data_dir))
+}
+
+/// The name reader's pack, loaded once and then kept.
+///
+/// In memory a loaded pack is about 29 MB. The tar on disk is 1,966,080
+/// bytes. The load takes about 250 ms, so a name read must not load it
+/// again. Startup starts that load on a background thread and does not
+/// wait. When pack sync installs the folder later, the next name read
+/// starts the same one load and still uses the Tesseract rows already in
+/// hand; after that load the cached pack is what every later read uses.
+/// A folder swapped in after that is left for the next tracker start.
+#[derive(Debug, Clone)]
+pub struct LiveNames {
+    inner: Arc<LiveInner>,
+}
+
+#[derive(Debug)]
+struct LiveInner {
+    dir: std::path::PathBuf,
+    cached: std::sync::RwLock<Option<Arc<NamePack>>>,
+    /// `true` once a pack is cached, or the one late load has finished.
+    /// Further reads do not look at the folder.
+    settled: std::sync::atomic::AtomicBool,
+    /// The one late load. `Some` means it has been started, finished or not.
+    loader: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    spawns: std::sync::atomic::AtomicUsize,
+    /// When set, the background load waits until the test releases it.
+    #[cfg(test)]
+    gate: std::sync::Mutex<Option<std::sync::Arc<LoadGate>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct LoadGate {
+    go: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl LoadGate {
+    fn closed() -> Self {
+        Self {
+            go: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn release(&self) {
+        let mut go = self.go.lock().unwrap();
+        *go = true;
+        self.cv.notify_all();
+    }
+}
+
+impl LiveInner {
+    fn cache(&self, pack: NamePack) {
+        tracing::info!(templates = pack.templates(), "names-v1 pack loaded");
+        *self.cached.write().unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(pack));
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn give_up(&self, err: &PackError) {
+        tracing::warn!(reason = %err, templates = 0, "names-v1 pack was not loaded");
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl LiveInner {
+    fn wait_for_test_gate(&self) {
+        #[cfg(test)]
+        {
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                let mut go = gate.go.lock().unwrap();
+                while !*go {
+                    go = gate.cv.wait(go).unwrap();
+                }
+            }
+        }
+    }
+}
+
+impl LiveNames {
+    fn empty(dir: std::path::PathBuf) -> Self {
+        Self {
+            inner: Arc::new(LiveInner {
+                dir,
+                cached: std::sync::RwLock::new(None),
+                settled: std::sync::atomic::AtomicBool::new(false),
+                loader: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                spawns: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                gate: std::sync::Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Start loading and return. When the folder is already installed, one
+    /// background thread loads it. A missing folder stays empty until
+    /// [`Self::current`] sees it once. Neither path blocks the caller.
+    pub fn load(dir: std::path::PathBuf) -> Self {
+        let live = Self::empty(dir);
+        live.kick();
+        live
+    }
+
+    /// Like [`Self::load`], but the background load waits until `release`.
+    #[cfg(test)]
+    pub(crate) fn load_held(dir: std::path::PathBuf) -> (Self, impl FnOnce()) {
+        let gate = std::sync::Arc::new(LoadGate::closed());
+        let live = Self::empty(dir);
+        *live.inner.gate.lock().unwrap() = Some(std::sync::Arc::clone(&gate));
+        live.kick();
+        (live, move || gate.release())
+    }
+
+    fn kick(&self) {
+        if self.inner.dir.is_dir() {
+            self.start_late_load();
+        } else {
+            tracing::warn!(
+                reason = %PackError::Missing,
+                templates = 0,
+                "names-v1 pack was not loaded"
+            );
+        }
+    }
+
+    /// The cached pack. When startup found no folder, the first call that
+    /// sees `templates/names-v1/` starts the one late load and returns
+    /// `None` for that call. Later calls use the cache and do not load again.
+    pub fn current(&self) -> Option<Arc<NamePack>> {
+        if self.inner.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.cached();
+        }
+        if self.inner.dir.is_dir() && self.start_late_load() {
+            return None;
+        }
+        self.cached()
+    }
+
+    fn cached(&self) -> Option<Arc<NamePack>> {
+        self.inner
+            .cached
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Start the one background load. `true` when this call started it.
+    fn start_late_load(&self) -> bool {
+        let Ok(mut loader) = self.inner.loader.try_lock() else {
+            return false;
+        };
+        if loader.is_some() {
+            return false;
+        }
+        let inner = Arc::clone(&self.inner);
+        let spawned = std::thread::Builder::new()
+            .name("name-pack-reload".into())
+            .spawn(move || {
+                inner.wait_for_test_gate();
+                match NamePack::load(&inner.dir) {
+                    Ok(pack) => inner.cache(pack),
+                    Err(err) => inner.give_up(&err),
+                }
+            });
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                self.inner
+                    .spawns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *loader = Some(handle);
+                true
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "names-v1 reload not started");
+                false
+            }
+        }
+    }
+
+    /// How many late loads have been started (tests).
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.inner.spawns.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait for the late load (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_reload(&self) {
+        let handle = self.inner.loader.lock().unwrap().take();
+        if let Some(handle) = handle {
+            handle.join().unwrap();
+        }
+    }
+}
+
+/// The name-reader switch for one process. On unless config sets
+/// `name_reader = false`. Independent of the cv reader (`reader = "ocr-v1"`
+/// or `"new"`).
+#[derive(Debug, Clone)]
+pub struct NameSwitch {
+    pub enabled: bool,
+    /// Shared pack. `None` when the switch is off. Loaded once at startup,
+    /// or once when the folder appears later.
+    live: Option<LiveNames>,
+}
+
+impl NameSwitch {
+    pub const fn off() -> Self {
+        Self {
+            enabled: false,
+            live: None,
+        }
+    }
+
+    /// Start the load and return. A missing or refused pack is logged (template
+    /// count and the reason, never a player name) on the background thread,
+    /// or here when the folder is not there yet. A pack that lands later is
+    /// loaded once by [`Self::pack`]. Until that load finishes, name reads
+    /// use the Tesseract rows already in hand. A cached pack is not loaded
+    /// again.
+    pub fn load(enabled: bool, data_dir: &std::path::Path) -> Self {
+        if !enabled {
+            return Self::off();
+        }
+        Self {
+            enabled: true,
+            live: Some(LiveNames::load(pack::dir_in(data_dir))),
+        }
+    }
+
+    /// [`Self::load`] with the background load held until `release` (tests).
+    #[cfg(test)]
+    pub(crate) fn load_held(data_dir: &std::path::Path) -> (Self, impl FnOnce()) {
+        let (live, release) = LiveNames::load_held(pack::dir_in(data_dir));
+        (
+            Self {
+                enabled: true,
+                live: Some(live),
+            },
+            release,
+        )
+    }
+
+    /// The cached pack. `None` when the switch is off, the folder is missing
+    /// or refused, or the one load has not finished. [`match_player_row`]
+    /// then reuses the Tesseract rows already in hand.
+    pub fn pack(&self) -> Option<Arc<NamePack>> {
+        self.live.as_ref().and_then(LiveNames::current)
+    }
+
+    /// Background loads started so far (tests), including the one startup
+    /// starts when the folder is already there.
+    #[cfg(test)]
+    pub(crate) fn reload_spawns(&self) -> usize {
+        self.live
+            .as_ref()
+            .map(LiveNames::reload_spawns)
+            .unwrap_or(0)
+    }
+
+    /// Wait for the late load (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_reload(&self) {
+        if let Some(live) = &self.live {
+            live.wait_reload();
+        }
+    }
+}
+
+/// How a list of name rows is turned into the configured player's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardMatch {
+    /// ocr-v1's cell rows. A short list is still matched.
+    Cells,
+    /// A name-window read. The index picks a row on the digit reader's
+    /// board, so a short list names no row (a crop that fell outside the
+    /// board must not shift every later index).
+    FullBoard,
+}
+
+/// A row reduced to the name reads the player-row matcher looks at.
+pub fn name_only(row: &RowOcrResult) -> RowOcrResult {
+    RowOcrResult {
+        name: row.name.as_ref().map(copy_cell),
+        name_alternates: row
+            .name_alternates
+            .iter()
+            .map(|cell| cell.as_ref().map(copy_cell))
+            .collect(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+fn copy_cell(cell: &CellOcrResult) -> CellOcrResult {
+    CellOcrResult {
+        value: cell.value.clone(),
+        confidence: cell.confidence,
+        suspect: cell.suspect,
+    }
+}
+
+fn blank_name_row() -> RowOcrResult {
+    RowOcrResult {
+        name: None,
+        name_alternates: Vec::new(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+/// Thousandths, the same scale [`read_names`] stores for a template margin.
+fn confidence_millis(min_confidence: f32) -> i32 {
+    (min_confidence * 1000.0).round() as i32
+}
+
+/// `confidence` is the thousandths [`read_names`] writes, and
+/// `min_confidence` is the pack's own [`Params::min_confidence`].
+fn name_meets(cell: &CellOcrResult, min_confidence: f32) -> bool {
+    !cell.value.is_empty() && cell.confidence >= confidence_millis(min_confidence)
+}
+
+fn row_meets(row: &RowOcrResult, min_confidence: f32) -> bool {
+    row.name
+        .as_ref()
+        .is_some_and(|cell| name_meets(cell, min_confidence))
+}
+
+/// Match `rows` against `player`. [`BoardMatch::FullBoard`] refuses a list
+/// that is not both teams.
+pub fn match_named_rows(
+    rows: &[RowOcrResult],
+    player: &str,
+    team_size: usize,
+    policy: BoardMatch,
+) -> Option<crate::parse::NameMatch> {
+    if policy == BoardMatch::FullBoard && rows.len() != team_size * 2 {
+        return None;
+    }
+    crate::parse::match_player_row_by_name(rows, player)
+}
+
+fn sure_rows(rows: &[RowOcrResult], min_confidence: f32) -> Vec<RowOcrResult> {
+    rows.iter()
+        .map(|row| {
+            if row_meets(row, min_confidence) {
+                RowOcrResult {
+                    name: row.name.as_ref().map(copy_cell),
+                    name_alternates: Vec::new(),
+                    stats: Vec::new(),
+                    mean_confidence: 0,
+                }
+            } else {
+                blank_name_row()
+            }
+        })
+        .collect()
+}
+
+/// Keep a template name that meets `min_confidence`. A blank or lower row
+/// takes the Tesseract read of that same row, including its other name
+/// windows. `None` when the two lists are not the same length.
+fn merge_weak_rows(
+    template: &[RowOcrResult],
+    tesseract: &[RowOcrResult],
+    min_confidence: f32,
+) -> Option<Vec<RowOcrResult>> {
+    if template.len() != tesseract.len() {
+        return None;
+    }
+    Some(
+        template
+            .iter()
+            .zip(tesseract)
+            .map(|(temp, tess)| {
+                if row_meets(temp, min_confidence) {
+                    RowOcrResult {
+                        name: temp.name.as_ref().map(copy_cell),
+                        name_alternates: Vec::new(),
+                        stats: Vec::new(),
+                        mean_confidence: 0,
+                    }
+                } else {
+                    name_only(tess)
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Rows [`read_names`] returned for one board, when the switch is on.
+pub struct ReaderNames<'a> {
+    pub rows: &'a [RowOcrResult],
+    /// `None` when no pack loaded: `rows` are already today's Tesseract
+    /// read. `Some` is the pack's own `min_confidence`.
+    pub min_confidence: Option<f32>,
+}
+
+/// The configured player's row, and which reader produced that row's name.
+///
+/// [`NameRecognizer::NamesV1`] means the name came from the names pack.
+/// [`NameRecognizer::OcrV1`] means it came from Tesseract, including a
+/// per-row fallback. No match means no name was read for the upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerRowMatch {
+    pub name: crate::parse::NameMatch,
+    pub recognizer: NameRecognizer,
+}
+
+fn player_row(name: crate::parse::NameMatch, recognizer: NameRecognizer) -> PlayerRowMatch {
+    PlayerRowMatch { name, recognizer }
+}
+
+/// The row of `player` from the name reader, or from `tesseract_rows`.
+///
+/// The switch off uses `tesseract_rows` and `policy` and does not look at
+/// `reader`. [`match_player_row`] does the same when the switch is on and
+/// no pack is loaded, so this function is not asked to treat a missing pack
+/// as a full board. `min_confidence: None` still matches `reader.rows` as a
+/// full board. The switch on with a pack uses a row whose template name
+/// meets the pack threshold.
+/// When the player's own row is blank or under that threshold, only the
+/// weak rows are filled from `tesseract_rows` and the match is tried again.
+/// A full board of sure names that does not contain the player does not
+/// call Tesseract.
+///
+/// The recognizer is [`NameRecognizer::NamesV1`] only when the matched row's
+/// name came from the pack. A Tesseract row, including one filled in for a
+/// blank or low-confidence row, is [`NameRecognizer::OcrV1`].
+pub fn choose_player_row(
+    player: &str,
+    team_size: usize,
+    enabled: bool,
+    reader: Option<ReaderNames<'_>>,
+    policy: BoardMatch,
+    tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
+) -> Option<PlayerRowMatch> {
+    if !enabled {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
+    }
+    let Some(reader) = reader else {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
+    };
+    let Some(min_confidence) = reader.min_confidence else {
+        return match_named_rows(reader.rows, player, team_size, BoardMatch::FullBoard)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
+    };
+    let full = reader.rows.len() == team_size * 2;
+    if full
+        && let Some(found) = match_named_rows(
+            &sure_rows(reader.rows, min_confidence),
+            player,
+            team_size,
+            BoardMatch::FullBoard,
+        )
+    {
+        return Some(player_row(found, NameRecognizer::NamesV1));
+    }
+    let any_weak = !full
+        || reader
+            .rows
+            .iter()
+            .any(|row| !row_meets(row, min_confidence));
+    if !any_weak {
+        return None;
+    }
+    let tess = tesseract_rows();
+    match merge_weak_rows(reader.rows, &tess, min_confidence) {
+        Some(rows) => {
+            let found = match_named_rows(&rows, player, team_size, policy)?;
+            let from_pack = reader
+                .rows
+                .get(found.row)
+                .is_some_and(|row| row_meets(row, min_confidence));
+            let recognizer = if from_pack {
+                NameRecognizer::NamesV1
+            } else {
+                NameRecognizer::OcrV1
+            };
+            Some(player_row(found, recognizer))
+        }
+        None => match_named_rows(&tess, player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1)),
+    }
+}
+
+/// Find `player` on `board`. `tesseract_rows` is the tracker's current name
+/// read for this cv mode (cell rows under ocr-v1, name windows under the
+/// new reader). See [`choose_player_row`].
+///
+/// With the switch on and no pack loaded (sync off, before install, or the
+/// read that notices a late install), this does not call [`read_names`].
+/// That would be a second Tesseract name read under ocr-v1, and it would
+/// match the new rows as a full board instead of the cell rows already in
+/// `tesseract_rows`. Those rows are matched with `policy` and tagged
+/// [`NameRecognizer::OcrV1`].
+pub fn match_player_row(
+    board: &DynamicImage,
+    team_size: usize,
+    player: &str,
+    switch: &NameSwitch,
+    policy: BoardMatch,
+    tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
+) -> Option<PlayerRowMatch> {
+    if !switch.enabled {
+        return choose_player_row(player, team_size, false, None, policy, tesseract_rows);
+    }
+    let Some(pack) = switch.pack() else {
+        return match_named_rows(&tesseract_rows(), player, team_size, policy)
+            .map(|name| player_row(name, NameRecognizer::OcrV1));
+    };
+    let read = read_names(board, team_size, Some(pack.as_ref()));
+    choose_player_row(
+        player,
+        team_size,
+        true,
+        Some(ReaderNames {
+            rows: &read.rows,
+            min_confidence: Some(pack.params.min_confidence),
+        }),
+        policy,
+        tesseract_rows,
+    )
 }
 
 #[cfg(test)]

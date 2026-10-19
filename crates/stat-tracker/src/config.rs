@@ -103,7 +103,9 @@ pub struct Config {
     /// or uploaded as 0, and a game that ends that way is not stored at
     /// all. The member's own row is found from the own-name seeds and the
     /// highlight; a name is read with OCR only on a board where neither
-    /// names a row and a player name is set. The top-bar map still falls
+    /// names a row and a player name is set. `name_reader` (on unless the
+    /// file says `false`) can take that read, and the ocr-v1 name match,
+    /// from the names-v1 pack. The top-bar map still falls
     /// back to OCR when the banner reader abstains. Under `"new"` the
     /// result words, the FINAL SCORE line and the
     /// game-start screens are read from the words pack, with OCR only where
@@ -132,6 +134,30 @@ pub struct Config {
     /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
+    /// Letter-template names for the configured player's own row.
+    ///
+    /// Missing, or `true`, is on (rc.1). `false` keeps today's Tesseract
+    /// read of that row. Independent of [`Self::reader`]: ocr-v1 and the
+    /// new reader both honor it. With a `names-v1` pack loaded, a row is
+    /// used when its confidence meets the pack's own `min_confidence`. A
+    /// blank row, or one under that threshold, is read with Tesseract for
+    /// that row. With no pack installed, [`crate::names::read_names`]
+    /// already uses Tesseract, so leaving this on does not change that
+    /// path. The pack is not in the repo. A default install downloads it
+    /// with the other reader packs.
+    #[serde(
+        default = "default_name_reader",
+        skip_serializing_if = "name_reader_is_on"
+    )]
+    pub name_reader: bool,
+}
+
+fn default_name_reader() -> bool {
+    true
+}
+
+fn name_reader_is_on(on: &bool) -> bool {
+    *on
 }
 
 /// Env override for [`Config::ocr`]: `on` or `off`. Read by
@@ -1154,6 +1180,7 @@ impl Default for Config {
             reader_pack_url: None,
             reader: ReaderSetting::New,
             ocr: OcrSetting::On,
+            name_reader: true,
         }
     }
 }
@@ -1467,6 +1494,31 @@ shadow_recognizer = false
     }
 
     #[test]
+    fn name_reader_defaults_on_and_stays_independent_of_the_cv_reader() {
+        assert!(Config::default().name_reader);
+        let raw = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!raw.contains("name_reader"), "{raw}");
+        let ocr_v1: Config =
+            toml::from_str("data_dir = \"/tmp/x\"\nreader = \"ocr-v1\"\n").unwrap();
+        assert!(ocr_v1.name_reader, "ocr-v1 still reads names with the pack");
+        assert!(ocr_v1.reader.is_ocr_v1());
+        let off: Config =
+            toml::from_str("data_dir = \"/tmp/x\"\nreader = \"ocr-v1\"\nname_reader = false\n")
+                .unwrap();
+        assert!(!off.name_reader);
+        assert!(off.reader.is_ocr_v1());
+        let saved = toml::to_string_pretty(&off).unwrap();
+        assert!(saved.contains("name_reader = false"), "{saved}");
+        let on_again: Config =
+            toml::from_str("data_dir = \"/tmp/x\"\nname_reader = true\n").unwrap();
+        assert!(on_again.name_reader);
+        assert!(
+            on_again.reader.is_new(),
+            "the cv reader stays on its own default"
+        );
+    }
+
+    #[test]
     fn shadow_recognizer_defaults_off_and_is_not_written_when_off() {
         assert!(!Config::default().shadow_recognizer);
         let raw = toml::to_string_pretty(&Config::default()).unwrap();
@@ -1715,6 +1767,9 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
             } else {
                 OcrSetting::On
             },
+            // On is the default and is left out of the file. The full sample
+            // sets the explicit off so the round trip keeps that line.
+            name_reader: !full,
         }
     }
 
@@ -1728,11 +1783,13 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
                 assert!(raw.contains("player_name"), "{raw}");
                 assert!(raw.contains("[sync]"), "{raw}");
                 assert!(raw.contains("ocr_threads"), "{raw}");
+                assert!(raw.contains("name_reader = false"), "{raw}");
             } else {
                 assert!(!raw.contains("capture_output"), "{raw}");
                 assert!(!raw.contains("player_name"), "{raw}");
                 assert!(!raw.contains("[sync]"), "{raw}");
                 assert!(!raw.contains("ocr_threads"), "{raw}");
+                assert!(!raw.contains("name_reader"), "{raw}");
             }
             let back: Config = toml::from_str(&raw).expect("toml 1 output must parse");
             assert_eq!(back, cfg);

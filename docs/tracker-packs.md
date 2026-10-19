@@ -10,7 +10,7 @@ release, a PR, or a comment. Do not put them in fixtures or under
 `crates/stat-tracker/test-data/`. They live in two places only: the build
 folder on the machine that made them, and `PACKS_DIR` on the server.
 
-## The six packs
+## The packs
 
 | Pack | What it is for | Size on 2026-10-13 |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `bans-v1.tar` | ban icons | 600 KiB |
 | `maps-v1.tar` | map-name glyphs | 40 KiB |
 | `words-v1.tar` | result words | 90 KiB |
+| `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).
@@ -602,6 +603,7 @@ inside `PACKS_DIR`.
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
+| `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32` | name reader. Optional. Single-letter templates only, no member data. Loaded once at startup or when the folder first appears, then kept. Until that load finishes, names fall back to Tesseract |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -647,6 +649,18 @@ event's label for Eichenwalde, is one of those names: a sure read of it is
 stored as Eichenwalde, the way the top-bar OCR stores it, and it marks the
 board for the Junkenstein check (a board with stats on one team only is not
 stored).
+
+The name reader reads the player's own row from `names-v1.tar` when that
+pack is loaded. The pack is optional and holds single-letter templates
+only, never a member's name. It is loaded once, on a background thread:
+at startup when the folder is already there, or when sync installs it
+later. That load is kept for the rest of the run. Daemon startup does not
+wait for it. A name read before the load finishes reuses the Tesseract
+rows already in hand (ocr-v1's cell rows, or the new reader's one name
+window read) and tags them `ocr-v1`. It does not start a second Tesseract
+name read. The next read after the load uses the cached pack. A folder
+swapped in after that load is left until the next tracker start. With the
+switch off, the name read is those same Tesseract rows.
 
 The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
 at the end of a match) from the end-title templates of `words-v1.tar`:

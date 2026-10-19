@@ -702,6 +702,7 @@ mod tests {
                 edited: false,
                 recognizer: Some(scuffed_types::RECOGNIZER_OCR_V1.into()),
                 suspect_fields: Vec::new(),
+                name_recognizer: None,
             }],
             deleted_sessions: vec![],
         }

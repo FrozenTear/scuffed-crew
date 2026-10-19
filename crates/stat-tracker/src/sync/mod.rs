@@ -808,6 +808,13 @@ pub fn upload_request(
                 // None is what an older client omits; this client does not.
                 recognizer: Some(m.stored_recognizer().to_string()),
                 suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
+                // None omits the key. An older server that ignores
+                // name_recognizer still accepts the rest of the row.
+                name_recognizer: m
+                    .name_recognizer
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
             })
         })
         .collect();
@@ -940,6 +947,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: String::new(),
             suspect_fields: Vec::new(),
+            name_recognizer: None,
         }
     }
 
@@ -1029,6 +1037,37 @@ mod tests {
         assert!(!body.contains("\"map_name\":\"\""));
         assert!(!body.contains("\"game_mode\":\"\""));
         assert!(!body.contains("Unknown"));
+    }
+
+    fn upload_name_recognizer(id: Option<&str>) -> serde_json::Value {
+        let mut match_row = row("Ana", "Busan", "Control");
+        match_row.name_recognizer = id.map(str::to_string);
+        let raw = serde_json::to_string(&upload_request(&[match_row], &[])).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn upload_serializes_names_v1_when_the_pack_named_the_row() {
+        let body = upload_name_recognizer(Some("names-v1"));
+        assert_eq!(body["matches"][0]["name_recognizer"], "names-v1");
+    }
+
+    #[test]
+    fn upload_serializes_ocr_v1_when_the_row_fell_back_to_tesseract() {
+        let body = upload_name_recognizer(Some("ocr-v1"));
+        assert_eq!(body["matches"][0]["name_recognizer"], "ocr-v1");
+    }
+
+    #[test]
+    fn upload_omits_name_recognizer_when_no_name_was_read() {
+        let body = upload_name_recognizer(None);
+        assert!(
+            body["matches"][0].get("name_recognizer").is_none(),
+            "{body}"
+        );
+        let raw = serde_json::to_string(&body).unwrap();
+        assert!(!raw.contains("name_recognizer"), "{raw}");
+        assert!(!raw.contains("\"name_recognizer\":null"), "{raw}");
     }
 
     #[test]

@@ -124,6 +124,14 @@ pub struct PersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     pub suspect_fields: Vec<String>,
+    /// Which reader found this player's own scoreboard row.
+    /// `names-v1` or `ocr-v1`. Absent when this match never read a name.
+    /// A later snapshot of the same match keeps the value already stored, and
+    /// every upload of the match sends it. Omitted from JSON when absent, so
+    /// an older row sends nothing and an older server still accepts the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub name_recognizer: Option<String>,
 }
 
 /// Identity and payload revision captured when a row was read for upload.
@@ -471,6 +479,7 @@ impl LocalStore {
             DEFINE INDEX IF NOT EXISTS idx_deleted_sid ON deleted_session FIELDS session_id;
             DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
             DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+            DEFINE FIELD IF NOT EXISTS name_recognizer ON personal_match TYPE option<string>;
         ",
         )
         .await?;
@@ -599,11 +608,32 @@ impl LocalStore {
 
     pub async fn insert_match(
         &self,
-        match_data: PersonalMatch,
+        mut match_data: PersonalMatch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // A later snapshot that did not read a name must keep the recognizer
+        // already stored for this match. A resend that omits it clears the
+        // server's copy.
+        if name_recognizer_absent(&match_data.name_recognizer)
+            && !match_data.session_id.is_empty()
+            && let Some(kept) = self.session_name_recognizer(&match_data.session_id).await?
+        {
+            match_data.name_recognizer = Some(kept);
+        }
         let _: Option<PersonalMatch> = self.db.create("personal_match").content(match_data).await?;
         tracing::debug!("match inserted into local store");
         Ok(())
+    }
+
+    /// The recognizer already stored for this match, newest snapshot first.
+    async fn session_name_recognizer(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        Ok(snaps.into_iter().rev().find_map(|row| {
+            let id = row.name_recognizer?;
+            (!id.is_empty()).then_some(id)
+        }))
     }
 
     /// Rows awaiting upload. Holds back `unknown` outcomes: the server only
@@ -2045,6 +2075,12 @@ pub fn majority_map(snapshots: &[PersonalMatch]) -> Option<String> {
         .map(|(map, _)| map.to_string())
 }
 
+/// `true` when this row has no name recognizer to send. An empty string is
+/// the same as absent: the upload omits the field.
+fn name_recognizer_absent(id: &Option<String>) -> bool {
+    id.as_deref().is_none_or(str::is_empty)
+}
+
 /// Collapse capture snapshots (multiple Tab presses during one match) to one
 /// row per game. Snapshots of the same game share a `session_id`, and the
 /// newest snapshot carries the final scoreboard — so with newest-first input
@@ -2069,8 +2105,19 @@ pub fn latest_per_game(matches: Vec<PersonalMatch>) -> Vec<PersonalMatch> {
                 legacy.insert(m.session_id.clone(), vec![m.clone()]);
             }
             games.push(m);
-        } else if let Some(snaps) = legacy.get_mut(&m.session_id) {
-            snaps.push(m);
+        } else {
+            // The newest snapshot is the uploaded row. If it did not read a
+            // name, keep the recognizer from an earlier snapshot of the same
+            // match so a resend does not clear it on the server.
+            if let Some(game) = games.iter_mut().find(|g| g.session_id == m.session_id)
+                && name_recognizer_absent(&game.name_recognizer)
+                && !name_recognizer_absent(&m.name_recognizer)
+            {
+                game.name_recognizer = m.name_recognizer.clone();
+            }
+            if let Some(snaps) = legacy.get_mut(&m.session_id) {
+                snaps.push(m);
+            }
         }
     }
     for g in &mut games {
@@ -2159,6 +2206,7 @@ mod tests {
             segment_resolutions: Vec::new(),
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
             suspect_fields: Vec::new(),
+            name_recognizer: None,
         }
     }
 
@@ -2192,6 +2240,24 @@ mod tests {
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].session_id, "b");
         assert_eq!(games[1].elims, 20);
+    }
+
+    /// A later snapshot that did not read a name must not drop the recognizer
+    /// an earlier snapshot of the same match stored. The uploaded row is the
+    /// newest one, so the recognizer is copied onto it.
+    #[test]
+    fn latest_per_game_keeps_an_earlier_name_recognizer() {
+        let mut older = snap("s", 4);
+        older.name_recognizer = Some("names-v1".into());
+        let newer = snap("s", 9);
+        let games = latest_per_game(vec![newer, older]);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].elims, 9);
+        assert_eq!(games[0].name_recognizer.as_deref(), Some("names-v1"));
+        let mut named = snap("s2", 1);
+        named.name_recognizer = Some("ocr-v1".into());
+        let games = latest_per_game(vec![named]);
+        assert_eq!(games[0].name_recognizer.as_deref(), Some("ocr-v1"));
     }
 
     #[test]
@@ -3500,6 +3566,10 @@ mod tests {
             "a row written before recognizer existed still uploads as ocr-v1"
         );
         assert!(rows[0].suspect_fields.is_empty());
+        assert_eq!(
+            rows[0].name_recognizer, None,
+            "a row written before name_recognizer existed uploads with the field omitted"
+        );
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
         let after = store.get_all_matches().await.unwrap();
         assert!(after[0].synced);
@@ -3532,6 +3602,10 @@ mod tests {
             "an upload payload must not contain a dotted name: {json}"
         );
         assert!(json.contains(&format!("\"recognizer\":\"{recognizer}\"")));
+        assert!(
+            body.matches[0].name_recognizer.is_none(),
+            "this row stored no name recognizer"
+        );
         assert_eq!(
             body.matches[0].suspect_fields,
             vec!["hero".to_string(), "e".into(), "dmg".into()]
@@ -3556,6 +3630,74 @@ mod tests {
         let again_json = serde_json::to_string(&again).unwrap();
         assert!(!again_json.contains("r3.dmg"), "{again_json}");
         assert!(!again_json.contains("\"dmg\""));
+    }
+
+    /// The recognizer that found the player's row is stored on the match.
+    /// A restart and a later snapshot that did not read a name both keep it,
+    /// and a resend still sends it. A missing value stays omitted.
+    #[tokio::test]
+    async fn name_recognizer_survives_restart_and_is_resent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let store = LocalStore::open(dir.path()).await.unwrap();
+            let mut row = snap("kept", 4);
+            row.hero = "Ana".into();
+            row.map_name = "Busan".into();
+            row.game_mode = "Control".into();
+            row.name_recognizer = Some("names-v1".into());
+            row.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+            store.insert_match(row).await.unwrap();
+        }
+        let store = reopen_store(dir.path()).await;
+        let opened = store.get_all_matches().await.unwrap();
+        assert_eq!(opened[0].name_recognizer.as_deref(), Some("names-v1"));
+        let first = crate::sync::upload_request(&opened, &[]);
+        assert_eq!(
+            first.matches[0].name_recognizer.as_deref(),
+            Some("names-v1")
+        );
+
+        let mut later = snap("kept", 11);
+        later.hero = "Ana".into();
+        later.map_name = "Busan".into();
+        later.game_mode = "Control".into();
+        later.name_recognizer = None;
+        later.played_at = SurrealDatetime::from(Utc::now());
+        store.insert_match(later).await.unwrap();
+        let stored = store.get_session_snapshots("kept").await.unwrap();
+        assert!(
+            stored
+                .iter()
+                .all(|row| row.name_recognizer.as_deref() == Some("names-v1")),
+            "a snapshot with no name read keeps the match recognizer: {stored:?}"
+        );
+        drop(store);
+
+        let store = reopen_store(dir.path()).await;
+        let mut newest_first = store.get_unsynced().await.unwrap();
+        newest_first.reverse();
+        let games = latest_per_game(newest_first);
+        let body = crate::sync::upload_request(&games, &[]);
+        assert_eq!(body.matches.len(), 1);
+        assert_eq!(body.matches[0].name_recognizer.as_deref(), Some("names-v1"));
+        let raw = serde_json::to_string(&body).unwrap();
+        assert!(raw.contains("\"name_recognizer\":\"names-v1\""), "{raw}");
+
+        store
+            .mark_synced(&SyncClaim::capture(&store.get_all_matches().await.unwrap()))
+            .await
+            .unwrap();
+        store.set_session_map("kept", "Ilios").await.unwrap();
+        let mut resent = store.get_unsynced().await.unwrap();
+        assert!(!resent.is_empty(), "the map change queues a resend");
+        resent.reverse();
+        let again = crate::sync::upload_request(&latest_per_game(resent), &[]);
+        assert_eq!(again.matches[0].map_name, "Ilios");
+        assert_eq!(
+            again.matches[0].name_recognizer.as_deref(),
+            Some("names-v1"),
+            "a resend still sends the stored recognizer"
+        );
     }
 
     #[test]
