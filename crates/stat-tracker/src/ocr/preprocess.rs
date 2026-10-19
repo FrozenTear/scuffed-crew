@@ -1165,6 +1165,10 @@ pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {
 
 /// The rectangle [`crop_scoreboard`] cuts from a `w` x `h` frame, as
 /// `(x, y, width, height)`. Report blanking uses the same rectangle.
+///
+/// This is the 6v6 crop (1007 px tall at 1440p, 756 px at 1080p). A 5v5
+/// board uses [`crop_scoreboard_rect_for`] with team size 5, which keeps
+/// this top edge and grows downward only.
 pub fn crop_scoreboard_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
     // OW2's scoreboard renders inside a 16:9 region centered on the frame. On
     // non-16:9 displays (ultrawide, 16:10) the ratios below must apply to that
@@ -1175,6 +1179,63 @@ pub fn crop_scoreboard_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
     let crop_w = ((gw as f64 * SCOREBOARD_W_RATIO) as u32).min(w.saturating_sub(x));
     let crop_h = ((gh as f64 * SCOREBOARD_H_RATIO) as u32).min(h.saturating_sub(y));
     (x, y, crop_w, crop_h)
+}
+
+/// Pixels added under a 1440p scoreboard crop so the 5v5 bottom portrait
+/// fits. On that crop the square for row 9 starts at y 928 and is 86 px
+/// tall, so it ends at y 1014. The unpadded crop is 1007 px and the slot
+/// code skips any square that does not fit.
+const SCOREBOARD_5V5_BOTTOM_PAD_1440: u32 = 7;
+
+/// Bottom pad for a 5v5 crop, in px.
+///
+/// [`SCOREBOARD_5V5_BOTTOM_PAD_1440`] scaled by the frame height from
+/// 1440p, then clamped to the pixels left under the unpadded crop so the
+/// rectangle stays inside the frame.
+pub fn scoreboard_5v5_bottom_pad(frame_w: u32, frame_h: u32) -> u32 {
+    let (_, y, _, crop_h) = crop_scoreboard_rect(frame_w, frame_h);
+    bottom_pad_clamped(frame_h, y, crop_h)
+}
+
+/// `SCOREBOARD_5V5_BOTTOM_PAD_1440` scaled from `frame_h`, stopped where
+/// the frame ends.
+fn bottom_pad_clamped(frame_h: u32, y: u32, crop_h: u32) -> u32 {
+    let wanted =
+        (SCOREBOARD_5V5_BOTTOM_PAD_1440 as f64 * f64::from(frame_h) / 1440.0).round() as u32;
+    let room = frame_h.saturating_sub(y.saturating_add(crop_h));
+    wanted.min(room)
+}
+
+/// [`crop_scoreboard_rect`] for a known team size.
+///
+/// Team size 5 grows downward by [`scoreboard_5v5_bottom_pad`]. Team size
+/// 6 and any other size keep the unpadded rectangle: same origin, width
+/// and height. The top edge does not move. Recognizers that place rows by
+/// dividing the crop height ([`crop_player_row`], the digit reader) must
+/// keep the unpadded image from [`crop_scoreboard`]. This function only
+/// adds pixels below that image.
+pub fn crop_scoreboard_rect_for(w: u32, h: u32, team_size: usize) -> (u32, u32, u32, u32) {
+    let (x, y, crop_w, crop_h) = crop_scoreboard_rect(w, h);
+    if team_size != 5 {
+        return (x, y, crop_w, crop_h);
+    }
+    let pad = bottom_pad_clamped(h, y, crop_h);
+    (x, y, crop_w, crop_h.saturating_add(pad))
+}
+
+/// [`crop_scoreboard`] plus the 5v5 bottom pad when `team_size` is 5.
+/// Other team sizes are the unpadded crop.
+pub fn crop_scoreboard_for(img: &DynamicImage, team_size: usize) -> DynamicImage {
+    let (x, y, crop_w, crop_h) = crop_scoreboard_rect_for(img.width(), img.height(), team_size);
+    img.crop_imm(x, y, crop_w, crop_h)
+}
+
+/// `board_w` x `board_h` is this frame's scoreboard crop: the unpadded
+/// rectangle, or that rectangle plus the 5v5 bottom pad.
+pub fn is_frame_scoreboard_crop(frame_w: u32, frame_h: u32, board_w: u32, board_h: u32) -> bool {
+    let (_, _, cw, ch) = crop_scoreboard_rect(frame_w, frame_h);
+    let (_, _, _, ch5) = crop_scoreboard_rect_for(frame_w, frame_h, 5);
+    board_w == cw && (board_h == ch || board_h == ch5)
 }
 
 /// Compute the centered 16:9 sub-rectangle of a frame as (x, y, w, h).
@@ -3349,5 +3410,147 @@ mod map_label_stretch_tests {
         let speck = DynamicImage::ImageRgb8(speck);
         assert!(brightness_range(&speck) >= MAP_LABEL_MIN_RANGE);
         assert!(contrast_stretch_brightness(&speck).is_none());
+    }
+}
+
+#[cfg(test)]
+mod five_v_five_crop_tests {
+    use super::{
+        bottom_pad_clamped, crop_scoreboard, crop_scoreboard_for, crop_scoreboard_rect,
+        crop_scoreboard_rect_for, row_slot_height,
+    };
+    use crate::detect::hero_portrait::portrait_rect;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn frame(w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::new(w, h))
+    }
+
+    /// Paint row 9's portrait square into a full frame and require every
+    /// pixel of it to land inside the 5v5 crop. The unpadded crop still
+    /// refuses that square.
+    fn bottom_portrait_is_inside(frame_w: u32, frame_h: u32) {
+        let (x, y, cw, ch) = crop_scoreboard_rect_for(frame_w, frame_h, 5);
+        let (ox, oy, ow, oh) = crop_scoreboard_rect(frame_w, frame_h);
+        assert_eq!(
+            (x, y, cw),
+            (ox, oy, ow),
+            "{frame_w}x{frame_h} top edge moved"
+        );
+        assert!(ch > oh, "{frame_w}x{frame_h} crop did not grow");
+        assert!(y + ch <= frame_h, "{frame_w}x{frame_h} crop past the frame");
+
+        let rect = portrait_rect((cw, ch), 9, 5).expect("row 9 fits the 5v5 crop");
+        assert!(rect.y + rect.h <= ch);
+        assert!(rect.y + rect.h > oh, "row 9 already fit the unpadded crop");
+        assert!(portrait_rect((ow, oh), 9, 5).is_none());
+
+        // Rows the unpadded crop already held stay on the same squares.
+        // The top edge of the crop did not move, so neither do they.
+        for row in [0usize, 4, 5, 8] {
+            let tall = portrait_rect((cw, ch), row, 5).unwrap();
+            let short = portrait_rect((ow, oh), row, 5).unwrap();
+            assert_eq!(
+                (tall.x, tall.y, tall.w, tall.h),
+                (short.x, short.y, short.w, short.h),
+                "row {row}"
+            );
+        }
+
+        let mut painted = RgbImage::from_pixel(frame_w, frame_h, Rgb([0, 0, 0]));
+        for py in rect.y..rect.y + rect.h {
+            for px in rect.x..rect.x + rect.w {
+                painted.put_pixel(x + px, y + py, Rgb([255, 0, 0]));
+            }
+        }
+        let crop = crop_scoreboard_for(&DynamicImage::ImageRgb8(painted), 5).to_rgb8();
+        assert_eq!((crop.width(), crop.height()), (cw, ch));
+        for py in 0..rect.h {
+            for px in 0..rect.w {
+                assert_eq!(
+                    crop.get_pixel(rect.x + px, rect.y + py).0,
+                    [255, 0, 0],
+                    "portrait pixel ({px},{py}) missing from the crop"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_5v5_1440p_bottom_portrait_is_inside_the_crop() {
+        bottom_portrait_is_inside(2560, 1440);
+        assert_eq!(
+            crop_scoreboard_rect_for(2560, 1440, 5),
+            (448, 216, 1664, 1014)
+        );
+        assert_eq!(crop_scoreboard_rect(2560, 1440), (448, 216, 1664, 1007));
+    }
+
+    #[test]
+    fn synthetic_5v5_1080p_bottom_portrait_is_inside_the_crop() {
+        bottom_portrait_is_inside(1920, 1080);
+        assert_eq!(
+            crop_scoreboard_rect_for(1920, 1080, 5),
+            (336, 162, 1248, 761)
+        );
+        assert_eq!(crop_scoreboard_rect(1920, 1080), (336, 162, 1248, 756));
+    }
+
+    #[test]
+    fn six_v_six_crop_is_unchanged() {
+        for (w, h, rect) in [
+            (2560, 1440, (448, 216, 1664, 1007)),
+            (1920, 1080, (336, 162, 1248, 756)),
+        ] {
+            assert_eq!(crop_scoreboard_rect(w, h), rect, "{w}x{h}");
+            assert_eq!(crop_scoreboard_rect_for(w, h, 6), rect, "{w}x{h}");
+            assert_eq!(crop_scoreboard_rect_for(w, h, 0), rect, "{w}x{h}");
+            let img = frame(w, h);
+            assert_eq!(crop_scoreboard(&img).height(), rect.3, "{w}x{h}");
+            assert_eq!(crop_scoreboard_for(&img, 6).height(), rect.3, "{w}x{h}");
+            // Last 6v6 portrait still fits the unpadded crop.
+            assert!(portrait_rect((rect.2, rect.3), 11, 6).is_some(), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn five_v_five_bottom_pad_clamps_at_the_frame_bottom() {
+        // 7 px wanted at 1440p, 3 px of room under the crop. The pad stops
+        // on the last frame row.
+        let (frame_h, y, crop_h) = (1440u32, 1430u32, 7u32);
+        let pad = bottom_pad_clamped(frame_h, y, crop_h);
+        assert_eq!(pad, 3);
+        assert_eq!(y + crop_h + pad, frame_h);
+
+        // A 16:9 frame has room, and the crop still ends inside it.
+        let (x, y, w, h) = crop_scoreboard_rect_for(2560, 1440, 5);
+        assert_eq!((x, y, w, h), (448, 216, 1664, 1014));
+        assert!(y + h <= 1440);
+        let (x, y, w, h) = crop_scoreboard_rect_for(1920, 1080, 5);
+        assert_eq!((x, y, w, h), (336, 162, 1248, 761));
+        assert!(y + h <= 1080);
+    }
+
+    #[test]
+    fn row_slots_stay_on_the_unpadded_height() {
+        // crop_player_row divides by crop height. The 5v5 image is taller,
+        // so stat rows keep the unpadded height (1007 at 1440p, 756 at 1080p).
+        let native = frame(2560, 1440);
+        let short = crop_scoreboard(&native);
+        let tall = crop_scoreboard_for(&native, 5);
+        assert_eq!(short.height(), 1007);
+        assert_eq!(tall.height(), 1014);
+        assert_eq!(row_slot_height(short.height(), 5), 90);
+        assert_ne!(
+            row_slot_height(tall.height(), 5),
+            row_slot_height(short.height(), 5),
+            "feeding the padded height into the row grid would move every row"
+        );
+        let small = frame(1920, 1080);
+        assert_eq!(crop_scoreboard(&small).height(), 756);
+        assert_eq!(
+            row_slot_height(756, 5),
+            row_slot_height(crop_scoreboard(&small).height(), 5)
+        );
     }
 }
