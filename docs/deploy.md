@@ -32,6 +32,16 @@ In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a h
 
 Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
 
+## Stats upload limits
+
+`POST /api/stats/upload` has two always-on rate limits. Per client IP: 40 requests, then one more every 2 seconds. That budget is this route's own. It is looser than the per-token limit, so a few devices on one home IP hit the token limit first. Avatar and image uploads stay at 8 requests, then one every 10 seconds. The key is the trusted-proxy client IP. Over the IP limit the response is `429` with `Retry-After` (seconds), `Cache-Control: no-store`, and `{"code":"rate_limited","error":"rate_limited","retry_after":N}`. Per daemon token, after the token is validated: 10 requests, then one more every 6 seconds. The bucket is the token id. Unknown bearers do not create buckets, and idle buckets are pruned every 60 seconds. Over that limit the response is `429` with `Retry-After`, `Cache-Control: no-store`, and `{"code":"rate_limited"}`. Both 429 bodies include `code`, so a client can branch on that field alone. The batch-cap `413` also sends `Cache-Control: no-store`.
+
+New daemon tokens expire 180 days after they are created. A token already stored with `expires_at` NONE keeps working. An expired token on upload or daemon-config is `401` `{"code":"token_expired"}`. Token-check and pack downloads still use one shared unauthorized body. These two limits are always on. They do not follow `STATS_UPLOAD_BATCH_CAP`.
+
+`STATS_UPLOAD_BATCH_CAP` is off when unset, empty, or `0` / `false` / `no` / `off` (any case). Any other value rejects one upload with more than 200 matches or more than 500 `deleted_sessions` before any write: `413` `{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}`. While the flag is off, oversized batches are stored as they are today.
+
+Leave the flag off until a tracker release that sends at most 200 matches and 500 deletions, and that handles `413`, `429`, and `token_expired`, is out and most members are on it. Today's tracker puts every unsynced game in one request. Compose passes the variable through as `STATS_UPLOAD_BATCH_CAP` (blank by default). The process reads it on each upload.
+
 ### Split migrator vs app (optional multi-container)
 
 Single-container install keeps default bootstrap on every start (root session is short-lived, then EDITOR). For a stricter split:

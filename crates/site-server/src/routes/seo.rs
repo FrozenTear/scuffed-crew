@@ -4,7 +4,9 @@
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
 //! Unmatched `/api` and `/api/*` requests get the JSON error envelope
 //! (`{"error":"Not found"}`) instead of that shell. OPTIONS is answered by
-//! the CORS layer and never reaches that 404. The static cache policy
+//! the CORS layer and never reaches that 404. A known `/api` path whose
+//! method is not registered returns 405 with the same envelope
+//! (`{"error":"Method not allowed"}`). The static cache policy
 //! (`cache_control_value`) applies only to `dist/` responses, never to
 //! registered `/api/*` routes or `/uploads`; the unmatched-API 404 is `no-store`.
 //!
@@ -55,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use axum::http::{HeaderValue, Method, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
 use scuffed_auth::server::session::ErrorResponse;
@@ -279,18 +281,45 @@ pub(crate) fn is_api_path(path: &str) -> bool {
 
 /// JSON 404 for an unmatched API path.
 ///
-/// The router reaches this service only after registered routes miss, so a
-/// known `/api` path with a wrong method other than OPTIONS stays 405. OPTIONS
-/// on a route registered inside [`crate::create_router`] is answered by the
-/// CORS layer with 200 and does not reach this function. OPTIONS on an
-/// unmatched `/api` path is also answered by the CORS layer with 200 and never
-/// reaches this function. `scuffed-server` merges strategy routes and adds chat
-/// and websocket routes with `.route` on top of [`crate::create_router`]; those
-/// stay registered routes, outside the CORS layer, so OPTIONS on them is 405.
-/// HEAD uses the same status and headers as GET, with an empty body.
+/// The router reaches this service only after registered routes miss. A known
+/// `/api` path with the wrong method is [`api_method_not_allowed`], not this
+/// function. OPTIONS on a route registered inside [`crate::create_router`] is
+/// answered by the CORS layer with 200 and does not reach this function.
+/// OPTIONS on an unmatched `/api` path is also answered by the CORS layer with
+/// 200 and never reaches this function. `scuffed-server` merges strategy
+/// routes and adds chat and websocket routes with `.route` on top of
+/// [`crate::create_router`]; those stay registered routes, outside the CORS
+/// layer, so OPTIONS on them is 405. HEAD uses the same status and headers as
+/// GET, with an empty body.
 fn unmatched_api_response(method: &Method) -> Response {
+    json_error(StatusCode::NOT_FOUND, "Not found", method)
+}
+
+/// 405 for a path that is registered, but not for this method.
+///
+/// `/api` and `/api/*` use the same JSON envelope as the unmatched-API 404.
+/// Other paths keep Axum's empty 405. Axum still sets `Allow` from the methods
+/// the path does register. [`crate::apply_api_method_not_allowed`] replaces
+/// Axum's default 405. A rate-limit governor applied first does not see a
+/// wrong method. A layer applied after this call still wraps the response.
+pub(crate) async fn api_method_not_allowed(method: Method, uri: Uri) -> Response {
+    if is_api_path(uri.path()) {
+        json_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed",
+            &method,
+        )
+    } else {
+        StatusCode::METHOD_NOT_ALLOWED.into_response()
+    }
+}
+
+/// `{"error":"..."}` with `application/json` and `Cache-Control: no-store`.
+///
+/// HEAD carries the GET `Content-Length` and an empty body.
+fn json_error(status: StatusCode, message: &str, method: &Method) -> Response {
     let json = serde_json::to_vec(&ErrorResponse {
-        error: "Not found".to_string(),
+        error: message.to_string(),
     })
     .expect("ErrorResponse serializes");
     let len = json.len();
@@ -300,12 +329,12 @@ fn unmatched_api_response(method: &Method) -> Response {
         Body::from(json)
     };
     Response::builder()
-        .status(StatusCode::NOT_FOUND)
+        .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::CONTENT_LENGTH, len.to_string())
         .body(body)
-        .expect("unmatched api response")
+        .expect("json error response")
 }
 
 #[derive(Clone)]
