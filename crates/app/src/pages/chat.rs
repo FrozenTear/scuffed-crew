@@ -5,9 +5,9 @@ use scuffed_types::{Team, TeamChannel};
 
 use crate::components::{list_cap_notice, member_pending};
 use crate::hooks::{ApiResource, use_api_list_with, use_api_with};
-use crate::pages::chat_gate::{CHAT_CHECKING, CHAT_UNAVAILABLE, ChatUnavailable};
+use crate::pages::chat_gate::ChatGateNotice;
 use crate::state::auth::AuthState;
-use crate::state::{RelayAvailability, use_auth, use_relay_availability_state};
+use crate::state::{use_auth, use_relay_availability_state};
 
 #[cfg(feature = "web")]
 use crate::components::chat::ChatWidget;
@@ -109,13 +109,11 @@ pub fn TeamChat() -> Element {
     });
 
     if !availability.allows_connection() {
-        let message = if availability == RelayAvailability::Off {
-            CHAT_UNAVAILABLE
-        } else {
-            CHAT_CHECKING
-        };
         return rsx! {
-            ChatUnavailable { message }
+            ChatGateNotice {
+                availability,
+                on_retry: move |_| relay.retry(),
+            }
         };
     }
 

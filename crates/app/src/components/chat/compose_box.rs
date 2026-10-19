@@ -210,14 +210,17 @@ const COMPOSE_BOX_CSS: &str = r#"
     padding: 0 12px 6px;
     background: var(--surface);
 }
+.chat-compose__counter:empty {
+    padding: 0;
+}
 
 .chat-compose__counter--over {
     color: var(--danger);
 }
 "#;
 
-/// Near-limit counter. `aria-live` so the remaining count is announced.
-fn compose_counter(label: String, over_limit: bool) -> Element {
+/// Near-limit counter. The live region stays mounted so the first count is announced.
+fn compose_counter(label: Option<String>, over_limit: bool) -> Element {
     let class = if over_limit {
         "chat-compose__counter chat-compose__counter--over"
     } else {
@@ -227,7 +230,9 @@ fn compose_counter(label: String, over_limit: bool) -> Element {
         div {
             class: "{class}",
             aria_live: "polite",
-            "{label}"
+            if let Some(label) = label {
+                "{label}"
+            }
         }
     }
 }
@@ -242,8 +247,11 @@ pub fn ComposeBox(
     /// Blocks the send button without locking the input (rate-limit countdown).
     #[props(default = false)]
     send_locked: bool,
+    /// Starting text. Empty for a fresh box.
+    #[props(default)]
+    initial_draft: String,
 ) -> Element {
-    let mut draft = use_signal(String::new);
+    let mut draft = use_signal(|| initial_draft);
     let mut pending = use_signal(|| false);
     let mut sent_exact = use_signal(String::new);
     let finish = use_callback(move |outcome: ComposeOutcome| {
@@ -297,9 +305,7 @@ pub fn ComposeBox(
                 "Send"
             }
         }
-        if let Some(label) = counter {
-            {compose_counter(label, over_limit)}
-        }
+        {compose_counter(counter, over_limit)}
     }
 }
 
@@ -427,26 +433,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn message_input_is_named_and_the_counter_is_live() {
-        fn view() -> Element {
-            rsx! {
-                ComposeBox { on_send: |_| {} }
-                {compose_counter("1 character left".to_string(), false)}
+    #[component]
+    fn CounterProbe(initial_draft: String) -> Element {
+        rsx! {
+            ComposeBox {
+                on_send: |_| {},
+                initial_draft,
             }
         }
-        let mut dom = VirtualDom::new(view);
+    }
+
+    fn render_box(initial_draft: String) -> String {
+        let mut dom = VirtualDom::new_with_props(CounterProbe, CounterProbeProps { initial_draft });
         dom.rebuild_in_place();
-        let html = dioxus_ssr::render(&dom);
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn message_input_is_named_and_the_counter_stays_mounted() {
+        let empty = render_box(String::new());
         assert!(
-            html.contains("aria-label=\"Message\""),
-            "the message field needs an accessible name: {html}"
+            empty.contains("aria-label=\"Message\""),
+            "the message field needs an accessible name: {empty}"
+        );
+        assert_eq!(
+            empty.matches("aria-live=\"polite\"").count(),
+            1,
+            "the live region is mounted before the count appears: {empty}"
         );
         assert!(
-            html.contains("aria-live=\"polite\""),
-            "the near-limit counter must announce updates: {html}"
+            !empty.contains("characters left"),
+            "an empty draft does not announce a count: {empty}"
         );
-        assert!(html.contains("1 character left"), "{html}");
+
+        let near = "a".repeat(MAX_CHAT_MESSAGE_CHARS - 1);
+        let html = render_box(near);
+        let live_at = html.find("aria-live=\"polite\"").expect("live region");
+        let label_at = html.find("1 character left").expect("near-limit count");
+        assert!(live_at < label_at, "{html}");
+        assert!(
+            !html[live_at..label_at].contains("</div>"),
+            "the count is inside the live region: {html}"
+        );
     }
 
     #[test]

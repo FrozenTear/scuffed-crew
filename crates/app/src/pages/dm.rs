@@ -8,11 +8,11 @@ use crate::components::dm::{
     DmLoadFailure, MessageThread, SyncResponse, classify_dm_client_error,
 };
 use crate::components::{Toast, use_toast};
-use crate::pages::chat_gate::{CHAT_CHECKING, CHAT_UNAVAILABLE, ChatUnavailable};
+use crate::pages::chat_gate::ChatGateNotice;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use crate::state::relay::dm_may_sync;
-use crate::state::{RelayAvailability, use_relay_availability_state};
+use crate::state::use_relay_availability_state;
 
 const PAGE_CSS: &str = r#"
 .dm-page {
@@ -166,13 +166,11 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     });
 
     if !availability.allows_connection() {
-        let message = if availability == RelayAvailability::Off {
-            CHAT_UNAVAILABLE
-        } else {
-            CHAT_CHECKING
-        };
         return rsx! {
-            ChatUnavailable { message }
+            ChatGateNotice {
+                availability,
+                on_retry: move |_| relay.retry(),
+            }
         };
     }
 

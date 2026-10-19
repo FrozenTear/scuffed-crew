@@ -48,6 +48,9 @@ impl RelayAvailability {
 pub struct RelayAvailabilityState {
     availability: Memo<RelayAvailability>,
     tracker_latest: Memo<Option<String>>,
+    resource: Resource<Result<RelayHealthSnapshot, String>>,
+    fixed: Signal<Option<RelayAvailability>>,
+    manual_retry: Signal<bool>,
 }
 
 impl RelayAvailabilityState {
@@ -60,6 +63,18 @@ impl RelayAvailabilityState {
     /// field was missing, null, or blank.
     pub fn tracker_latest(self) -> Option<String> {
         self.tracker_latest.read().clone()
+    }
+
+    /// Run the health check again after [`RelayAvailability::Failed`].
+    /// The shell shows the checking state until the new response settles.
+    pub fn retry(self) {
+        let mut manual_retry = self.manual_retry;
+        manual_retry.set(true);
+        let mut fixed = self.fixed;
+        fixed.set(None);
+        let mut resource = self.resource;
+        resource.clear();
+        resource.restart();
     }
 }
 
@@ -80,13 +95,26 @@ struct RelayHealthConfigured {
 pub(crate) const HEALTH_FETCH_ATTEMPTS: u32 = 3;
 /// Pause between those tries. Short, so a blip does not sit on the check.
 pub(crate) const HEALTH_RETRY_BACKOFF_MS: u32 = 400;
+/// Shortest wait taken from a 429 `Retry-After` header, in seconds.
+pub(crate) const HEALTH_RETRY_AFTER_FLOOR_SECS: u64 = 1;
+/// Longest wait taken from a 429 `Retry-After` header, in seconds.
+/// A larger header is clamped here so chat does not sit on the check.
+pub(crate) const HEALTH_RETRY_AFTER_CAP_SECS: u64 = 60;
+
+/// Clamp a `Retry-After` delay-seconds value to the floor and the cap.
+pub(crate) fn clamped_retry_after_ms(seconds: u64) -> u32 {
+    let secs = seconds.clamp(HEALTH_RETRY_AFTER_FLOOR_SECS, HEALTH_RETRY_AFTER_CAP_SECS);
+    u32::try_from(secs.saturating_mul(1_000)).unwrap_or(60_000)
+}
 
 /// Milliseconds before another health fetch. `None` means stop.
 ///
 /// `failed_attempts` counts this failure. Network errors and HTTP 5xx use
 /// the short pause. HTTP 429 waits for the `Retry-After` delay-seconds
-/// header and never the short pause. Other 4xx responses, a parse error,
-/// and a 429 with no usable `Retry-After` stop on the first failure.
+/// header, clamped to [`HEALTH_RETRY_AFTER_FLOOR_SECS`] through
+/// [`HEALTH_RETRY_AFTER_CAP_SECS`], and never the short pause. Other 4xx
+/// responses, a parse error, and a 429 with no usable `Retry-After` stop
+/// on the first failure.
 pub(crate) fn health_retry_delay_ms(error: &ClientError, failed_attempts: u32) -> Option<u32> {
     if failed_attempts == 0 || failed_attempts >= HEALTH_FETCH_ATTEMPTS {
         return None;
@@ -99,13 +127,31 @@ pub(crate) fn health_retry_delay_ms(error: &ClientError, failed_attempts: u32) -
             ..
         } => {
             let seconds = (*retry_after)?;
-            u32::try_from(seconds.saturating_mul(1_000)).ok()
+            Some(clamped_retry_after_ms(seconds))
         }
         ClientError::Http { status, .. } if (500..600).contains(status) => {
             Some(HEALTH_RETRY_BACKOFF_MS)
         }
         _ => None,
     }
+}
+
+/// What the shell shows for a health result, including a manual retry.
+///
+/// A retry in flight with no settled response is [`RelayAvailability::Unknown`]
+/// again, so the failure screen does not stay up while the new check runs.
+pub(crate) fn displayed_availability(
+    fixed: Option<RelayAvailability>,
+    fetched: Option<&Result<bool, String>>,
+    manual_retry: bool,
+) -> RelayAvailability {
+    if manual_retry && fetched.is_none() {
+        return RelayAvailability::Unknown;
+    }
+    if !manual_retry && let Some(value) = fixed {
+        return value;
+    }
+    availability_from_health(fetched)
 }
 
 /// Drop null, missing, empty, and whitespace-only `tracker_latest` values.
@@ -195,6 +241,7 @@ pub fn provide_relay_availability() -> RelayAvailabilityState {
     let fixed = use_signal(test_fixed);
     #[cfg(not(test))]
     let fixed = use_signal(|| Option::<RelayAvailability>::None);
+    let manual_retry = use_signal(|| false);
 
     let resource = use_resource(move || {
         let skip = fixed().is_some();
@@ -209,19 +256,16 @@ pub fn provide_relay_availability() -> RelayAvailabilityState {
         }
     });
     let availability = use_memo(move || {
-        if let Some(value) = fixed() {
-            return value;
-        }
         let read = resource.read();
         let mapped = match read.as_ref() {
             None => None,
             Some(Ok(body)) => Some(Ok(body.configured)),
             Some(Err(err)) => Some(Err(err.clone())),
         };
-        availability_from_health(mapped.as_ref())
+        displayed_availability(fixed(), mapped.as_ref(), manual_retry())
     });
     let tracker_latest = use_memo(move || {
-        if fixed().is_some() {
+        if fixed().is_some() && !manual_retry() {
             return None;
         }
         match resource.read().as_ref() {
@@ -232,6 +276,9 @@ pub fn provide_relay_availability() -> RelayAvailabilityState {
     let state = RelayAvailabilityState {
         availability,
         tracker_latest,
+        resource,
+        fixed,
+        manual_retry,
     };
     use_context_provider(|| state);
     state
@@ -344,6 +391,46 @@ mod tests {
         assert_eq!(
             health_retry_delay_ms(&ClientError::Deserialize("bad json".into()), 1),
             None
+        );
+    }
+
+    #[test]
+    fn health_retry_after_is_clamped_between_one_second_and_sixty() {
+        assert_eq!(clamped_retry_after_ms(0), 1_000);
+        assert_eq!(clamped_retry_after_ms(1), 1_000);
+        assert_eq!(clamped_retry_after_ms(12), 12_000);
+        assert_eq!(clamped_retry_after_ms(60), 60_000);
+        assert_eq!(clamped_retry_after_ms(61), 60_000);
+        assert_eq!(clamped_retry_after_ms(3600), 60_000);
+
+        let huge = ClientError::http(429, "slow", Some("3600"));
+        assert_eq!(health_retry_delay_ms(&huge, 1), Some(60_000));
+        assert_ne!(health_retry_delay_ms(&huge, 1), Some(3_600_000));
+    }
+
+    #[test]
+    fn manual_retry_leaves_the_failure_screen_until_the_check_settles() {
+        let failed = Some(RelayAvailability::Failed);
+        let offline = Err("offline".into());
+        assert_eq!(
+            displayed_availability(failed, Some(&offline), false),
+            RelayAvailability::Failed
+        );
+        assert_eq!(
+            displayed_availability(failed, None, true),
+            RelayAvailability::Unknown
+        );
+        assert_eq!(
+            displayed_availability(None, Some(&offline), true),
+            RelayAvailability::Failed
+        );
+        assert_eq!(
+            displayed_availability(Some(RelayAvailability::Off), None, false),
+            RelayAvailability::Off
+        );
+        assert_eq!(
+            displayed_availability(None, None, false),
+            RelayAvailability::Unknown
         );
     }
 
