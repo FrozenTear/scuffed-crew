@@ -512,6 +512,16 @@ async fn missing_static_files_404_and_client_routes_stay_shell() {
 
 const SETTINGS_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
 
+/// The embed is the anonymous settings object plus `public_base_url`.
+fn assert_shell_settings(json: &str, api_body: &str, api: &Value) {
+    let parsed: Value = serde_json::from_str(json).unwrap();
+    let mut expected = api.clone();
+    expected["public_base_url"] = Value::String(PUBLIC_BASE.to_string());
+    assert_eq!(parsed, expected);
+    assert_ne!(json, api_body);
+    assert!(api.get("public_base_url").is_none());
+}
+
 /// JSON text of `#sc-settings`, which must sit immediately before `</head>`.
 fn settings_json_before_head(html: &str) -> &str {
     let head = html.find("</head>").expect("</head>");
@@ -579,12 +589,7 @@ async fn shell_embeds_anonymous_settings_before_head() {
         assert_eq!(cache_control(&headers), Some("no-cache"), "{uri}");
         assert!(body.contains(SHELL), "{uri}");
         let json = settings_json_before_head(&body);
-        assert_eq!(
-            json, api_body,
-            "{uri} must match the anonymous settings body"
-        );
-        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed, api, "{uri}");
+        assert_shell_settings(json, &api_body, &api);
     }
 
     let (_, _, robots) = get(app.clone(), "/robots.txt").await;
@@ -598,6 +603,75 @@ async fn shell_embeds_anonymous_settings_before_head() {
     let (status, headers, _) = get(app, "/api/health").await;
     assert_eq!(status, StatusCode::OK);
     assert!(cache_control(&headers).is_none());
+}
+
+const CRAWLER_SHELL: &str = r#"<!DOCTYPE html><html><head>
+<meta property="og:image" content="/assets/apple-touch-icon.png">
+<meta property="og:url" content="/old">
+<link rel="canonical" href="/old">
+</head><body>SPA-SHELL-MARKER</body></html>"#;
+
+#[tokio::test]
+async fn shell_sets_public_base_and_absolute_crawler_urls() {
+    let tree = TempTree::new("crawler-public");
+    std::fs::write(tree.dist().join("index.html"), CRAWLER_SHELL).unwrap();
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (api_status, _, api_body) = get(app.clone(), "/api/settings").await;
+    assert_eq!(api_status, StatusCode::OK);
+    let api: Value = serde_json::from_str(&api_body).unwrap();
+    assert!(api.get("public_base_url").is_none(), "{api_body}");
+
+    let (status, _, body) = get(app.clone(), "/blog/hello").await;
+    assert_eq!(status, StatusCode::OK);
+    let json = settings_json_before_head(&body);
+    let parsed: Value = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed["public_base_url"], PUBLIC_BASE);
+    assert_eq!(body.matches("property=\"og:url\"").count(), 1);
+    assert!(body.contains("content=\"https://crew.example.test/blog/hello\""));
+    assert!(body.contains("content=\"https://crew.example.test/assets/apple-touch-icon.png\""));
+    assert!(body.contains("href=\"https://crew.example.test/blog/hello\""));
+    assert!(!body.contains("content=\"/old\""));
+    assert!(!body.contains("href=\"/old\""));
+
+    let (status, _, home) = get(app, "/index.html").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(home.contains("content=\"https://crew.example.test/\""));
+    assert!(!home.contains("/index.html"));
+}
+
+#[tokio::test]
+async fn shell_omits_public_base_and_og_url_when_the_origin_is_not_public() {
+    let tree = TempTree::new("crawler-loopback");
+    std::fs::write(tree.dist().join("index.html"), CRAWLER_SHELL).unwrap();
+    let mut state = test_state(tree.uploads()).await;
+    state.oauth_config.redirect_base_url = "http://localhost:3000".into();
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (status, _, body) = get(app, "/blog/hello").await;
+    assert_eq!(status, StatusCode::OK);
+    let json = settings_json_before_head(&body);
+    let parsed: Value = serde_json::from_str(json).unwrap();
+    assert!(parsed.get("public_base_url").is_none(), "{json}");
+    assert!(parsed.get("org_name").is_some(), "{json}");
+    assert!(!body.contains("og:url"), "{body}");
+    assert!(body.contains("content=\"/assets/apple-touch-icon.png\""));
+    assert!(body.contains("href=\"/old\""));
+    assert!(!body.contains("localhost"));
+
+    let creds = TempTree::new("crawler-creds");
+    std::fs::write(creds.dist().join("index.html"), CRAWLER_SHELL).unwrap();
+    let mut state = test_state(creds.uploads()).await;
+    state.oauth_config.redirect_base_url = "https://user:pass@crew.example.test/clan".into();
+    let app = create_router_with_dist(state, creds.dist());
+    let (status, _, body) = get(app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert!(parsed.get("public_base_url").is_none(), "{body}");
+    assert!(!body.contains("og:url"), "{body}");
+    assert!(!body.contains("user:pass"), "{body}");
+    assert!(!body.contains("/clan"), "{body}");
 }
 
 #[tokio::test]
@@ -634,7 +708,7 @@ async fn settings_embed_escapes_script_breakout() {
             "raw script close leaked into the JSON: {json}"
         );
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed, api);
+        assert_shell_settings(json, &api_body, &api);
         assert_eq!(parsed["site_description"], payload);
     }
     assert_eq!(

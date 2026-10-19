@@ -19,8 +19,13 @@
 //! ```
 //!
 //! The object is [`crate::routes::settings::load_anonymous_settings`] run
-//! through `serde_json` — the same mapping and serializer as that route, so
+//! through `serde_json`, the same mapping and serializer as that route, so
 //! the embed cannot grow a private field the public GET does not return.
+//! When [`sanitized_public_base`] accepts `REDIRECT_BASE_URL`, the embed also
+//! includes `public_base_url`. That string is the origin robots.txt and the
+//! sitemap already publish, kept only for a public http(s) origin with no
+//! loopback host, credentials, or path. Otherwise the key is left out.
+//! `GET /api/settings` does not include it.
 //! `<`, `>`, `&`, U+2028, and U+2029 are written as `\u003c`, `\u003e`,
 //! `\u0026`, `\u2028`, and `\u2029`. The script block is cached with the blob.
 //! The rewritten head prefix is filled once for that blob and reused. The
@@ -42,7 +47,11 @@
 //! successful read rewrites `<title>` and the `og:title`, `og:site_name`,
 //! description, and `og:description` meta contents from the trimmed
 //! `org_name` and `site_description`. A value that is empty after trimming
-//! leaves its own tags as built. The tag is a data block
+//! leaves its own tags as built. On every shell response, including one with
+//! no settings blob, absolute `og:image`, `og:url`, and the canonical link
+//! are set from the public base and the request path. Crawlers do not run
+//! the wasm. With no public base, `og:url` is removed. A relative canonical
+//! and a relative `og:image` stay as built. The settings tag is a data block
 //! (`type="application/json"`), not an executed script.
 
 use std::collections::HashSet;
@@ -135,6 +144,68 @@ const SHELL_CACHE: &str = "no-cache";
 /// slashes removed, so `Sitemap:` and `<loc>` values stay absolute and single-slash.
 pub(crate) fn public_base_url(redirect_base_url: &str) -> String {
     redirect_base_url.trim().trim_end_matches('/').to_string()
+}
+
+/// [`public_base_url`] kept only when it is a public http(s) origin.
+///
+/// Loopback hosts, credentials, and any path, query, or fragment are dropped.
+/// An empty result means the shell embed omits `public_base_url` and the
+/// crawler tags stay relative (`og:url` is removed).
+pub(crate) fn sanitized_public_base(redirect_base_url: &str) -> Option<String> {
+    sanitize_public_origin(&public_base_url(redirect_base_url))
+}
+
+fn sanitize_public_origin(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = split_http_scheme(raw)?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty()
+        || rest.contains('@')
+        || rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('\\')
+        || rest.contains(' ')
+    {
+        return None;
+    }
+    let host = rest.split(':').next()?.trim();
+    if !is_public_http_host(host) {
+        return None;
+    }
+    Some(format!("{scheme}://{rest}"))
+}
+
+fn split_http_scheme(raw: &str) -> Option<(&'static str, &str)> {
+    for (scheme, prefix) in [("https", "https://"), ("http", "http://")] {
+        if raw.len() >= prefix.len() && raw[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return Some((scheme, &raw[prefix.len()..]));
+        }
+    }
+    None
+}
+
+fn is_public_http_host(host: &str) -> bool {
+    if host.is_empty() || host.starts_with('[') || host.starts_with('.') {
+        return false;
+    }
+    let host = host.trim_matches('.');
+    if host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("0.0.0.0")
+        || host.eq_ignore_ascii_case("::1")
+    {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+        && (ip.is_loopback() || ip.is_unspecified())
+    {
+        return false;
+    }
+    let suffix = host.rsplit('.').next().unwrap_or(host);
+    !suffix.eq_ignore_ascii_case("local") && !suffix.eq_ignore_ascii_case("localhost")
 }
 
 pub(crate) fn render_robots(redirect_base_url: &str) -> String {
@@ -410,6 +481,27 @@ pub(crate) fn escape_json_for_html(json: &str) -> String {
     out
 }
 
+/// Anonymous settings JSON plus `public_base_url` when `public_base` is set.
+///
+/// `None` returns `json` unchanged, so a shell with no public origin matches
+/// `GET /api/settings` byte for byte.
+fn embed_settings_json(json: &str, public_base: Option<&str>) -> String {
+    let Some(public_base) = public_base else {
+        return json.to_string();
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return json.to_string();
+    };
+    object.insert(
+        "public_base_url".to_string(),
+        serde_json::Value::String(public_base.to_string()),
+    );
+    serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
+}
+
 fn cached_settings(json: &str, org_name: &str, site_description: &str) -> CachedPublicSettings {
     let escaped_json = escape_json_for_html(json);
     let mut script_block =
@@ -426,29 +518,263 @@ fn cached_settings(json: &str, org_name: &str, site_description: &str) -> Cached
 
 /// Shell HTML for one response.
 ///
-/// Without settings, the template is returned untouched (title and meta stay
-/// as built). With settings, `<title>` and the matching meta contents in the
-/// head are replaced, then the already-rendered script block is inserted at
-/// the `</head>` index captured when the template was loaded.
-fn render_shell(template: &ShellTemplate, embed: Option<&CachedPublicSettings>) -> String {
-    let Some(embed) = embed else {
-        return template.html.to_string();
-    };
+/// With settings, `<title>` and the matching meta contents in the head are
+/// replaced, then the already-rendered script block is inserted at the
+/// `</head>` index captured when the template was loaded. That title rewrite
+/// is cached on the settings blob and does not include the request path.
+/// `og:image`, `og:url`, and the canonical link are applied after the cache,
+/// so each path gets its own absolute URL. A template with no `</head>` is
+/// returned as loaded.
+fn render_shell(
+    template: &ShellTemplate,
+    embed: Option<&CachedPublicSettings>,
+    public_base: Option<&str>,
+    request_path: &str,
+) -> String {
     let Some(idx) = template.head_close else {
         return template.html.to_string();
     };
-    let head = embed.rendered_head(&template.html, || {
-        rewrite_document_head(
-            &template.html[..idx],
-            &embed.org_name,
-            &embed.site_description,
-        )
-    });
-    let mut out =
-        String::with_capacity(head.len() + embed.script_block.len() + template.html.len() - idx);
+    let rewritten;
+    let head_src: &str = if let Some(embed) = embed {
+        rewritten = embed.rendered_head(&template.html, || {
+            rewrite_document_head(
+                &template.html[..idx],
+                &embed.org_name,
+                &embed.site_description,
+            )
+        });
+        rewritten.as_ref()
+    } else {
+        &template.html[..idx]
+    };
+    let head = apply_crawler_urls(head_src, public_base, request_path);
+    let script = embed.map(|embed| embed.script_block.as_str()).unwrap_or("");
+    let mut out = String::with_capacity(head.len() + script.len() + template.html.len() - idx);
     out.push_str(&head);
-    out.push_str(&embed.script_block);
+    out.push_str(script);
     out.push_str(&template.html[idx..]);
+    out
+}
+
+enum TagChange {
+    Keep,
+    Drop,
+    Replace(String),
+}
+
+fn rewrite_tags(html: &str, needle: &str, mut edit: impl FnMut(&str) -> TagChange) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(start) = find_tag(html, i, needle) {
+        let Some(end) = tag_gt_end(html.as_bytes(), start) else {
+            break;
+        };
+        out.push_str(&html[i..start]);
+        match edit(&html[start..end]) {
+            TagChange::Keep => out.push_str(&html[start..end]),
+            TagChange::Drop => {}
+            TagChange::Replace(tag) => out.push_str(&tag),
+        }
+        i = end;
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+/// Absolute Open Graph and canonical URLs for crawlers, which do not run wasm.
+///
+/// `public_base` is a sanitized origin with no trailing slash. `og:url` is
+/// removed when that origin is absent, including a relative `og:url` already
+/// in the shell. A relative `og:image` and a relative canonical stay in that
+/// case. The request path is not part of the cached title rewrite.
+fn apply_crawler_urls(head: &str, public_base: Option<&str>, request_path: &str) -> String {
+    let head = drop_meta_property(head, "og:url");
+    let Some(base) = public_base.filter(|base| !base.is_empty()) else {
+        return head;
+    };
+    let page = format!("{base}{}", canonical_request_path(request_path));
+    let mut found_image = false;
+    let head = rewrite_tags(&head, "<meta", |tag| {
+        if !meta_property_is(tag, "og:image") {
+            return TagChange::Keep;
+        }
+        found_image = true;
+        let Some(content) = attr_value(tag, "content") else {
+            return TagChange::Keep;
+        };
+        match absolute_site_url(base, &content) {
+            Some(absolute) => TagChange::Replace(set_quoted_attr(tag, "content", &absolute)),
+            None => TagChange::Keep,
+        }
+    });
+    let mut head = head;
+    if !found_image
+        && let Some(path) = preferred_icon_path(&head)
+        && let Some(absolute) = absolute_site_url(base, &path)
+    {
+        push_meta(&mut head, "og:image", &absolute);
+    }
+    push_meta(&mut head, "og:url", &page);
+    upsert_canonical(head, &page)
+}
+
+fn canonical_request_path(request_path: &str) -> String {
+    let path = request_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(request_path);
+    if path.is_empty() || path == "/" || path.eq_ignore_ascii_case("/index.html") {
+        return "/".to_string();
+    }
+    let invalid = !path.starts_with('/')
+        || path.contains("//")
+        || path.split('/').any(|seg| seg == "." || seg == "..")
+        || path.bytes().any(|byte| {
+            byte < 0x20 || matches!(byte, b'\\' | b'"' | b'\'' | b'<' | b'>' | b' ' | b'`')
+        });
+    if invalid {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn absolute_site_url(base: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.starts_with('/') && !value.starts_with("//") {
+        Some(format!("{base}{value}"))
+    } else {
+        None
+    }
+}
+
+fn drop_meta_property(head: &str, property: &str) -> String {
+    rewrite_tags(head, "<meta", |tag| {
+        if meta_property_is(tag, property) {
+            TagChange::Drop
+        } else {
+            TagChange::Keep
+        }
+    })
+}
+
+fn meta_property_is(tag: &str, property: &str) -> bool {
+    attr_value(tag, "property").is_some_and(|value| value.eq_ignore_ascii_case(property))
+}
+
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    scan_attrs(tag)
+        .into_iter()
+        .find(|attr| attr.name.eq_ignore_ascii_case(name))
+        .map(|attr| attr.value)
+}
+
+fn preferred_icon_path(head: &str) -> Option<String> {
+    let mut icon = None;
+    let mut apple = None;
+    let mut i = 0;
+    while let Some(start) = find_tag(head, i, "<link") {
+        let Some(end) = tag_gt_end(head.as_bytes(), start) else {
+            break;
+        };
+        let tag = &head[start..end];
+        let rel = attr_value(tag, "rel").unwrap_or_default();
+        if let Some(href) = attr_value(tag, "href") {
+            let href = href.trim();
+            if href.starts_with('/') && !href.starts_with("//") {
+                if rel
+                    .split_whitespace()
+                    .any(|token| token.eq_ignore_ascii_case("apple-touch-icon"))
+                {
+                    apple = Some(href.to_string());
+                } else if icon.is_none()
+                    && rel
+                        .split_whitespace()
+                        .any(|token| token.eq_ignore_ascii_case("icon"))
+                {
+                    icon = Some(href.to_string());
+                }
+            }
+        }
+        i = end;
+    }
+    apple.or(icon)
+}
+
+fn upsert_canonical(head: String, page: &str) -> String {
+    let mut seen = false;
+    let head = rewrite_tags(&head, "<link", |tag| {
+        if !link_rel_has(tag, "canonical") {
+            return TagChange::Keep;
+        }
+        if seen {
+            return TagChange::Drop;
+        }
+        seen = true;
+        TagChange::Replace(set_quoted_attr(tag, "href", page))
+    });
+    if seen {
+        return head;
+    }
+    let mut head = head;
+    head.push_str("\n<link rel=\"canonical\" href=\"");
+    head.push_str(&escape_html_text(page));
+    head.push_str("\">");
+    head
+}
+
+fn link_rel_has(tag: &str, token: &str) -> bool {
+    attr_value(tag, "rel").is_some_and(|rel| {
+        rel.split_whitespace()
+            .any(|part| part.eq_ignore_ascii_case(token))
+    })
+}
+
+fn push_meta(head: &mut String, property: &str, content: &str) {
+    head.push_str("\n<meta property=\"");
+    head.push_str(property);
+    head.push_str("\" content=\"");
+    head.push_str(&escape_html_text(content));
+    head.push_str("\">");
+}
+
+fn set_quoted_attr(tag: &str, attr_name: &str, new_value: &str) -> String {
+    let attrs = scan_attrs(tag);
+    let Some(attr) = attrs
+        .iter()
+        .find(|attr| attr.name.eq_ignore_ascii_case(attr_name))
+    else {
+        return insert_attr_before_end(tag, attr_name, new_value);
+    };
+    let escaped = escape_html_text(new_value);
+    let mut out = String::with_capacity(tag.len() + escaped.len() + 2);
+    out.push_str(&tag[..attr.value_range.start]);
+    if attr.quoted {
+        out.push_str(&escaped);
+    } else {
+        out.push('"');
+        out.push_str(&escaped);
+        out.push('"');
+    }
+    out.push_str(&tag[attr.value_range.end..]);
+    out
+}
+
+fn insert_attr_before_end(tag: &str, name: &str, value: &str) -> String {
+    let escaped = escape_html_text(value);
+    let end = tag.rfind('>').unwrap_or(tag.len());
+    let mut insert_at = end;
+    if insert_at > 0 && tag.as_bytes()[insert_at - 1] == b'/' {
+        insert_at -= 1;
+    }
+    let mut out = String::with_capacity(tag.len() + escaped.len() + name.len() + 4);
+    out.push_str(&tag[..insert_at]);
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    out.push_str(&escaped);
+    out.push('"');
+    out.push_str(&tag[insert_at..]);
     out
 }
 
@@ -951,13 +1277,23 @@ fn embed_read<'a>(
     if let Some(loader) = state.public_settings.loader() {
         return loader();
     }
-    Box::pin(read_public_settings(&state.db))
+    Box::pin(read_public_settings(
+        &state.db,
+        &state.oauth_config.redirect_base_url,
+    ))
 }
 
-async fn read_public_settings(db: &scuffed_db::Database) -> Result<CachedPublicSettings, String> {
+async fn read_public_settings(
+    db: &scuffed_db::Database,
+    redirect_base_url: &str,
+) -> Result<CachedPublicSettings, String> {
     let settings = crate::routes::settings::anonymous_settings_json(db).await?;
-    Ok(cached_settings(
+    let json = embed_settings_json(
         &settings.json,
+        sanitized_public_base(redirect_base_url).as_deref(),
+    );
+    Ok(cached_settings(
+        &json,
         &settings.org_name,
         &settings.site_description,
     ))
@@ -1153,7 +1489,7 @@ where
         let dist_root = self.dist_root.clone();
         match route {
             SpaRoute::Shell => Box::pin(async move {
-                match shell_html(&index, &dist_root, &state).await {
+                match shell_html(&index, &dist_root, &state, &path).await {
                     Ok(html) => Ok(shell_response(html, method == Method::HEAD)),
                     Err(ShellMiss::Missing) => Ok(plain_not_found()),
                     Err(ShellMiss::Unreadable) => {
@@ -1187,6 +1523,7 @@ async fn shell_html(
     index: &Mutex<IndexSlot>,
     dist_root: &Path,
     state: &AppState,
+    request_path: &str,
 ) -> Result<String, ShellMiss> {
     let ready = {
         let guard = index.lock().unwrap_or_else(|err| err.into_inner());
@@ -1198,7 +1535,12 @@ async fn shell_html(
     };
     if let Some(template) = ready {
         let embed = load_embed(state).await;
-        return Ok(render_shell(&template, embed.as_deref()));
+        return Ok(render_for_request(
+            &template,
+            embed.as_deref(),
+            state,
+            request_path,
+        ));
     }
     let missing = {
         let guard = index.lock().unwrap_or_else(|err| err.into_inner());
@@ -1243,7 +1585,22 @@ async fn shell_html(
     };
     let template = loaded?;
     let embed = load_embed(state).await;
-    Ok(render_shell(&template, embed.as_deref()))
+    Ok(render_for_request(
+        &template,
+        embed.as_deref(),
+        state,
+        request_path,
+    ))
+}
+
+fn render_for_request(
+    template: &ShellTemplate,
+    embed: Option<&CachedPublicSettings>,
+    state: &AppState,
+    request_path: &str,
+) -> String {
+    let public_base = sanitized_public_base(&state.oauth_config.redirect_base_url);
+    render_shell(template, embed, public_base.as_deref(), request_path)
 }
 
 async fn serve_dist<ReqBody>(
@@ -1874,7 +2231,7 @@ mod tests {
     fn render_shell_inserts_cached_block_immediately_before_head() {
         let template = template_with("<html><head><title>x</title></HEAD><body></body></html>");
         let settings = embed("Clan", "tag", r#"{"a":1}"#);
-        let out = render_shell(&template, Some(&settings));
+        let out = render_shell(&template, Some(&settings), None, "/");
         assert_eq!(
             out,
             "<html><head><title>Clan</title><script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></HEAD><body></body></html>"
@@ -1886,14 +2243,135 @@ mod tests {
     fn render_shell_leaves_template_when_settings_or_head_are_missing() {
         let html = "<html><head><title>The Scuffed Crew</title></head><body>SPA-SHELL-MARKER</body></html>";
         let template = template_with(html);
-        assert_eq!(render_shell(&template, None), html);
+        assert_eq!(render_shell(&template, None, None, "/"), html);
         let no_head = template_with("<html><body>SPA-SHELL-MARKER</body></html>");
         assert!(no_head.head_close.is_none());
         let settings = embed("Clan", "tag", "{}");
         assert_eq!(
-            render_shell(&no_head, Some(&settings)),
+            render_shell(&no_head, Some(&settings), None, "/"),
             "<html><body>SPA-SHELL-MARKER</body></html>"
         );
+    }
+
+    #[test]
+    fn sanitized_public_base_keeps_public_origins_only() {
+        assert_eq!(
+            sanitized_public_base("https://crew.example.test/").as_deref(),
+            Some("https://crew.example.test")
+        );
+        assert_eq!(
+            sanitized_public_base("HTTPS://Crew.Example.Test").as_deref(),
+            Some("https://Crew.Example.Test")
+        );
+        assert_eq!(
+            sanitized_public_base("https://crew.example.test:8443").as_deref(),
+            Some("https://crew.example.test:8443")
+        );
+        for rejected in [
+            "",
+            "   ",
+            "http://localhost:3000",
+            "http://127.0.0.1:3030",
+            "http://127.0.0.2",
+            "http://[::1]",
+            "http://0.0.0.0",
+            "https://user:pass@crew.example.test",
+            "https://crew.example.test/path",
+            "https://crew.example.test?x=1",
+            "https://crew.example.test#frag",
+            "ftp://crew.example.test",
+            "http://foo.local",
+            "http://foo.localhost",
+        ] {
+            assert_eq!(sanitized_public_base(rejected), None, "{rejected}");
+        }
+    }
+
+    #[test]
+    fn embed_settings_json_adds_public_base_only_when_present() {
+        let raw = r#"{"org_name":"Clan"}"#;
+        assert_eq!(embed_settings_json(raw, None), raw);
+        let with = embed_settings_json(raw, Some("https://crew.example.test"));
+        let parsed: serde_json::Value = serde_json::from_str(&with).unwrap();
+        assert_eq!(parsed["org_name"], "Clan");
+        assert_eq!(parsed["public_base_url"], "https://crew.example.test");
+        assert!(with.contains("\"public_base_url\""));
+    }
+
+    #[test]
+    fn crawler_urls_are_absolute_per_path_and_relative_og_url_is_removed() {
+        let html = "\
+<html><head>\
+<title>Clan</title>\
+<meta property=\"og:image\" content=\"/assets/apple-touch-icon.png\">\
+<meta property=\"og:url\" content=\"/old\">\
+<meta property='og:url' content='/also'>\
+<link rel=\"canonical\" href=\"/old\">\
+</head><body></body></html>";
+        let template = template_with(html);
+        let settings = embed("Clan", "tag", r#"{"a":1}"#);
+        let base = Some("https://crew.example.test");
+        let home = render_shell(&template, Some(&settings), base, "/");
+        let blog = render_shell(&template, Some(&settings), base, "/blog/hello?x=1");
+        let index = render_shell(&template, Some(&settings), base, "/index.html");
+        assert!(home.contains("content=\"https://crew.example.test/\""));
+        assert!(blog.contains("content=\"https://crew.example.test/blog/hello\""));
+        assert!(!blog.contains("content=\"https://crew.example.test/\""));
+        assert!(!blog.contains('?'));
+        assert_eq!(blog.matches("property=\"og:url\"").count(), 1);
+        assert!(blog.contains("content=\"https://crew.example.test/assets/apple-touch-icon.png\""));
+        assert_eq!(blog.matches("rel=\"canonical\"").count(), 1);
+        assert!(blog.contains("href=\"https://crew.example.test/blog/hello\""));
+        assert!(index.contains("content=\"https://crew.example.test/\""));
+        assert!(!index.contains("/index.html"));
+        assert!(blog.contains(
+            "<script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></head>"
+        ));
+
+        let plain = render_shell(&template, Some(&settings), None, "/blog/hello");
+        assert!(!plain.contains("og:url"));
+        assert!(!plain.contains("/also"));
+        assert!(plain.contains("content=\"/assets/apple-touch-icon.png\""));
+        assert!(plain.contains("href=\"/old\""));
+        assert!(!plain.contains("https://crew.example.test"));
+    }
+
+    #[test]
+    fn missing_og_image_uses_the_shell_icon_and_bad_paths_stay_on_the_origin() {
+        let html = "\
+<html><head>\
+<link rel=\"icon\" href=\"/assets/favicon.svg\">\
+<link rel=\"apple-touch-icon\" href=\"/assets/apple-touch-icon.png\">\
+<meta property=\"og:image\" content=\"//cdn.example/a.png\">\
+</head><body></body></html>";
+        let external = render_shell(
+            &template_with(html),
+            None,
+            Some("https://crew.example.test"),
+            "/../secret",
+        );
+        assert!(external.contains("content=\"//cdn.example/a.png\""));
+        assert_eq!(external.matches("og:image").count(), 1);
+        assert!(external.contains("content=\"https://crew.example.test/\""));
+        assert!(!external.contains("secret"));
+
+        let icons = "\
+<html><head>\
+<link rel=\"icon\" href=\"/assets/favicon.svg\">\
+<link rel=\"apple-touch-icon\" href=\"/assets/apple-touch-icon.png\">\
+</head><body></body></html>";
+        let inserted = render_shell(
+            &template_with(icons),
+            None,
+            Some("https://crew.example.test"),
+            "/members",
+        );
+        assert_eq!(inserted.matches("og:image").count(), 1);
+        assert!(
+            inserted.contains("content=\"https://crew.example.test/assets/apple-touch-icon.png\"")
+        );
+        assert!(inserted.contains("content=\"https://crew.example.test/members\""));
+        assert!(inserted.contains("href=\"https://crew.example.test/members\""));
     }
 
     #[test]
@@ -2142,7 +2620,7 @@ mod tests {
         let template = prepare_shell_template(html.to_string());
         let source_head = find_head_close(html).expect("index has </head>");
         let embed = cached_settings(r#"{"org_name":"x"}"#, org, desc);
-        let out = render_shell(&template, Some(&embed));
+        let out = render_shell(&template, Some(&embed), None, "/");
         let head_at = find_head_close(&out).expect("rewritten index has </head>");
         assert_eq!(
             &out[head_at - embed.script_block.len()..head_at],
