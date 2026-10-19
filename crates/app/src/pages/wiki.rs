@@ -74,7 +74,6 @@ const PAGE_CSS: &str = r#"
         color: var(--text-3);
     }
     .wiki-search input:focus {
-        outline: none;
         border-color: var(--accent-soft);
     }
     .wiki-list {
@@ -143,7 +142,7 @@ pub fn Wiki() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-wiki-page-css", css: PAGE_CSS }
 
         main { class: "wiki-page",
             div { class: "wiki-header",

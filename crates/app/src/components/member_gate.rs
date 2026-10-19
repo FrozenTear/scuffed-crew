@@ -54,7 +54,7 @@ pub fn is_http_status(err: &str, status: u16) -> bool {
 
 fn sign_in_panel(what: &str) -> Element {
     rsx! {
-        style { {GATE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-member_gate-gate-css", css: GATE_CSS }
         div { class: "member-gate",
             h2 { "Sign in required" }
             p { "Sign in to view {what}." }
@@ -67,7 +67,7 @@ fn sign_in_panel(what: &str) -> Element {
 
 fn apply_panel(what: &str) -> Element {
     rsx! {
-        style { {GATE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-member_gate-gate-css", css: GATE_CSS }
         div { class: "member-gate",
             h2 { "Membership required" }
             p { "You need to be an org member to view {what}." }
@@ -80,7 +80,7 @@ fn apply_panel(what: &str) -> Element {
 
 fn inactive_panel(what: &str) -> Element {
     rsx! {
-        style { {GATE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-member_gate-gate-css", css: GATE_CSS }
         div { class: "member-gate",
             h2 { "Membership inactive" }
             p { "Your membership isn't active, so {what} isn't available." }
@@ -117,7 +117,7 @@ pub fn member_pending<T: 'static>(
         let mut refresh = resource.refresh;
         let what = what.to_string();
         return rsx! {
-            style { {GATE_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-components-member_gate-gate-css", css: GATE_CSS }
             p { class: "member-gate-error", "Failed to load {what}: {err}" }
             div { class: "member-gate-actions",
                 button {
@@ -130,7 +130,7 @@ pub fn member_pending<T: 'static>(
     }
 
     rsx! {
-        style { {GATE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-member_gate-gate-css", css: GATE_CSS }
         p { class: "member-gate-status", "Loading {what}..." }
     }
 }

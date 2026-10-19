@@ -69,7 +69,7 @@ fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
     let skin_attr = HomeSkin::default().as_str();
     let css = home_css_layers();
     rsx! {
-        style { "{css}" }
+        crate::styles::StyleLive { id: "scuffed-css-home", css }
         div {
             class: "home-wrap",
             "data-home-shell": "{shell_attr}",
@@ -273,7 +273,7 @@ pub fn Home() -> Element {
     };
 
     rsx! {
-        style { "{css}" }
+        crate::styles::StyleLive { id: "scuffed-css-home", css }
         div {
             class: "home-wrap",
             "data-home-shell": "{shell_attr}",

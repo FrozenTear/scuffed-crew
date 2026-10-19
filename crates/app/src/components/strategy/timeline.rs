@@ -128,7 +128,6 @@ const TIMELINE_CSS: &str = r#"
         color: var(--text);
         font-size: 0.8rem;
         padding: 0.3rem 0.4rem;
-        outline: none;
         transition: border-color 0.15s;
     }
     .add-phase-form input:focus {
@@ -234,7 +233,7 @@ pub fn Timeline(
     let is_playing = playback_state == PlaybackState::Playing;
 
     rsx! {
-        style { {TIMELINE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-timeline-timeline-css", css: TIMELINE_CSS }
         div { class: "timeline-panel",
             h3 { class: "panel-title", "Timeline" }
 

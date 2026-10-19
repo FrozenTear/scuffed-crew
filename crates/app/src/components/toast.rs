@@ -129,7 +129,7 @@ pub fn ToastProvider(children: Element) -> Element {
     use_context_provider(|| state);
 
     rsx! {
-        style { {TOAST_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-toast-toast-css", css: TOAST_CSS }
         {children}
         div { class: "toast-container",
             for toast in toasts.read().iter() {

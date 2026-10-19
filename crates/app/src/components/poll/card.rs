@@ -132,7 +132,7 @@ pub fn PollCard(
     let my_votes = results.my_votes.clone();
 
     rsx! {
-        style { {CARD_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-poll-card-card-css", css: CARD_CSS }
 
         article { class: "poll-card",
             h3 { class: "poll-card-title", "{results.poll.title}" }

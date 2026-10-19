@@ -176,10 +176,36 @@ fn client_rate_limit_message(err: &scuffed_api_client::ClientError) -> Option<St
     scuffed_types::too_many_requests_message(*status, body)
 }
 
-/// Password login. A 429 (lockout, or a rate limit with no usable wait) names
-/// the wait. Any other failure stays the generic credential message.
+const SIGN_IN_RATE_LIMIT: &str = "Too many sign-in attempts. Try again later.";
+
+fn sign_in_wait_message(seconds: u64) -> String {
+    if seconds >= 120 {
+        let minutes = seconds.div_ceil(60);
+        format!("Too many sign-in attempts. Try again in {minutes} minutes.")
+    } else if seconds == 1 {
+        "Too many sign-in attempts. Try again in 1 second.".to_string()
+    } else {
+        format!("Too many sign-in attempts. Try again in {seconds} seconds.")
+    }
+}
+
+/// Password login. A 429 with a usable JSON `retry_after` or `Retry-After`
+/// header names that wait. 120 seconds or more is whole minutes, rounded up.
+/// Any other 429 says to try again later, without guessing the wait. Anything
+/// else stays the generic credential message.
 fn login_failure_message(err: &scuffed_api_client::ClientError) -> String {
-    client_rate_limit_message(err).unwrap_or_else(|| "Invalid username or password".into())
+    let scuffed_api_client::ClientError::Http {
+        status: 429,
+        body,
+        retry_after,
+    } = err
+    else {
+        return "Invalid username or password".into();
+    };
+    match scuffed_types::json_retry_after(body).or(*retry_after) {
+        Some(seconds) => sign_in_wait_message(seconds),
+        None => SIGN_IN_RATE_LIMIT.to_string(),
+    }
 }
 
 /// Local register. 409, 400, and 403 keep their own copy. A 429 names the wait.
@@ -735,7 +761,7 @@ pub fn Login() -> Element {
     let min_age = p.as_ref().map(|x| x.min_age).unwrap_or(16);
 
     rsx! {
-        style { {CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-login-css", css: CSS }
         div { class: "login-page",
             div { class: "login-card",
                 h1 { if registering() { "Create account" } else { "Sign in" } }
@@ -1026,10 +1052,67 @@ mod tests {
             later
         );
 
-        assert_eq!(login_failure_message(&json_err), "Try again in 9 s");
-        assert_eq!(login_failure_message(&plain_err), later);
-        assert_eq!(login_failure_message(&lockout_err), later);
-        assert_eq!(login_failure_message(&over_hour), later);
+        assert_eq!(
+            login_failure_message(&json_err),
+            "Too many sign-in attempts. Try again in 9 seconds."
+        );
+        assert_eq!(
+            SIGN_IN_RATE_LIMIT,
+            "Too many sign-in attempts. Try again later."
+        );
+        assert_eq!(login_failure_message(&plain_err), SIGN_IN_RATE_LIMIT);
+        assert_eq!(login_failure_message(&lockout_err), SIGN_IN_RATE_LIMIT);
+        assert_eq!(login_failure_message(&over_hour), SIGN_IN_RATE_LIMIT);
+        assert_eq!(
+            login_failure_message(&http(429, r#"{"error":"rate_limited","retry_after":1}"#)),
+            "Too many sign-in attempts. Try again in 1 second."
+        );
+        let header_only = scuffed_api_client::ClientError::Http {
+            status: 429,
+            body: plain.to_string(),
+            retry_after: Some(4),
+        };
+        assert_eq!(
+            login_failure_message(&header_only),
+            "Too many sign-in attempts. Try again in 4 seconds."
+        );
+        let json_beats_header = scuffed_api_client::ClientError::Http {
+            status: 429,
+            body: json.to_string(),
+            retry_after: Some(4),
+        };
+        assert_eq!(
+            login_failure_message(&json_beats_header),
+            "Too many sign-in attempts. Try again in 9 seconds."
+        );
+        let two_minutes = scuffed_api_client::ClientError::Http {
+            status: 429,
+            body: lockout.to_string(),
+            retry_after: Some(120),
+        };
+        assert_eq!(
+            login_failure_message(&two_minutes),
+            "Too many sign-in attempts. Try again in 2 minutes."
+        );
+        let fifteen_minutes = scuffed_api_client::ClientError::Http {
+            status: 429,
+            body: lockout.to_string(),
+            retry_after: Some(900),
+        };
+        assert_eq!(
+            login_failure_message(&fifteen_minutes),
+            "Too many sign-in attempts. Try again in 15 minutes."
+        );
+        let round_up = scuffed_api_client::ClientError::Http {
+            status: 429,
+            body: plain.to_string(),
+            retry_after: Some(121),
+        };
+        assert_eq!(
+            login_failure_message(&round_up),
+            "Too many sign-in attempts. Try again in 3 minutes."
+        );
+        assert!(!login_failure_message(&json_err).contains('\u{2014}'));
         assert_eq!(
             login_failure_message(&http(401, r#"{"error":"invalid username or password"}"#)),
             "Invalid username or password"

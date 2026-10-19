@@ -194,7 +194,7 @@ pub fn ConversationList(
     let compose_from_header = on_compose;
     let compose_from_empty = on_compose;
     rsx! {
-        style { {CONVERSATION_LIST_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-dm-conversation_list-conversation-list-css", css: CONVERSATION_LIST_CSS }
         div { class: "dm-conv-list",
             div { class: "dm-conv-list-header",
                 h2 { class: "dm-conv-list-title", "Messages" }

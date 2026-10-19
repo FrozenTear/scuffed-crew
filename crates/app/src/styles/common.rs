@@ -95,4 +95,15 @@ pub const CSS: &str = r#"
             scroll-behavior: auto !important;
         }
     }
+
+    /* Keyboard focus. :focus-visible stays off for mouse clicks. */
+    a:focus-visible,
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    [tabindex]:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+    }
 "#;

@@ -107,7 +107,7 @@ pub fn Blog() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-blog-page-css", css: PAGE_CSS }
 
         main { class: "blog-page",
             h1 { class: "blog-page-title", "Blog" }

@@ -242,7 +242,7 @@ pub fn Events() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-events-page-css", css: PAGE_CSS }
 
         main { class: "events-page",
             h1 { "Events" }

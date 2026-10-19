@@ -807,7 +807,7 @@ pub fn ChatWidget(
     };
 
     rsx! {
-        style { {CHAT_WIDGET_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-chat_widget-chat-widget-css", css: CHAT_WIDGET_CSS }
         div { class: "{widget_class}",
 
             div {

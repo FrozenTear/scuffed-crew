@@ -168,7 +168,6 @@ const PAGE_CSS: &str = r#"
         resize: vertical;
     }
     .wiki-edit-form textarea:focus {
-        outline: none;
         border-color: var(--accent-soft);
     }
     .wiki-edit-form input {
@@ -182,7 +181,6 @@ const PAGE_CSS: &str = r#"
         font-size: 0.8rem;
     }
     .wiki-edit-form input:focus {
-        outline: none;
         border-color: var(--accent-soft);
     }
     .wiki-edit-form input::placeholder {
@@ -255,7 +253,7 @@ pub fn WikiPage(topic: String) -> Element {
     let mut save_error = use_signal(|| Option::<String>::None);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-wiki_page-page-css", css: PAGE_CSS }
 
         main { class: "wiki-detail",
             Link { to: Route::Wiki {}, class: "wiki-back", "< Back to Wiki" }

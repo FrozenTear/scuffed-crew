@@ -61,7 +61,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 2px;
     }
-    .btn-create {
+    .strategy-browse .btn-create {
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
@@ -78,7 +78,7 @@ const PAGE_CSS: &str = r#"
         text-decoration: none;
         transition: all 0.2s;
     }
-    .btn-create:hover {
+    .strategy-browse .btn-create:hover {
         filter: brightness(1.15);
         box-shadow: 0 0 15px var(--accent-soft);
     }
@@ -103,7 +103,6 @@ const PAGE_CSS: &str = r#"
         color: var(--text-3);
     }
     .strategy-search-input:focus {
-        outline: none;
         border-color: var(--accent);
     }
 
@@ -114,7 +113,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         margin-bottom: 1.5rem;
     }
-    .filter-chip {
+    .strategy-browse .filter-chip {
         padding: 0.3rem 0.75rem;
         border-radius: 999px;
         border: 1px solid var(--border);
@@ -127,11 +126,11 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
-    .filter-chip:hover {
+    .strategy-browse .filter-chip:hover {
         border-color: var(--accent-soft);
         color: var(--text);
     }
-    .filter-chip.active {
+    .strategy-browse .filter-chip.active {
         background: var(--accent);
         border-color: var(--accent);
         color: white;
@@ -265,7 +264,7 @@ pub fn StrategyBrowse() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-browse-page-css", css: PAGE_CSS }
 
         div { class: "strategy-browse",
             // Header

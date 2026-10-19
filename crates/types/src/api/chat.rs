@@ -135,7 +135,7 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
         403 => "You don't have access to this channel.".into(),
         404 => "This channel isn't provisioned yet.".into(),
         400 if body_mentions(body, &["External key", "NIP-07"]) => {
-            "Your Nostr key is external — use a NIP-07 extension to send.".into()
+            "Your Nostr key is external. Use a NIP-07 extension to send.".into()
         }
         400 if body_mentions(
             body,
@@ -153,7 +153,7 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
             }
             serde_json::from_str::<serde_json::Value>(body)
                 .ok()
-                .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
+                .and_then(|v| v.get("error")?.as_str().map(plain_punctuation))
                 .unwrap_or_else(|| format!("Chat request failed (HTTP {status})"))
         }),
     }
@@ -161,6 +161,37 @@ pub fn chat_api_error_copy(status: u16, body: &str) -> String {
 
 fn body_mentions(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| body.contains(n))
+}
+
+/// User-facing text must not use an em dash. A run of them becomes one sentence
+/// break, and `capitalize_next` capitalizes the following letter. The dash is
+/// not itself the character that gets uppercased, so a doubled dash cannot
+/// leak into the sentence.
+fn plain_punctuation(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut capitalize_next = false;
+    for ch in text.chars() {
+        if ch == '\u{2014}' {
+            if !capitalize_next {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str(". ");
+                capitalize_next = true;
+            }
+            continue;
+        }
+        if capitalize_next {
+            if ch == ' ' {
+                continue;
+            }
+            out.extend(ch.to_uppercase());
+            capitalize_next = false;
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn is_rate_limited_code(body: &str) -> bool {
@@ -265,12 +296,19 @@ mod tests {
             )
             .contains("provisioning")
         );
-        assert!(
+        assert_eq!(
             chat_api_error_copy(
                 400,
                 "External key users must encrypt client-side (NIP-07 + NIP-44)"
+            ),
+            "Your Nostr key is external. Use a NIP-07 extension to send."
+        );
+        assert!(
+            !chat_api_error_copy(
+                400,
+                "External key users must encrypt client-side (NIP-07 + NIP-44)"
             )
-            .contains("NIP-07")
+            .contains('\u{2014}')
         );
         assert_eq!(
             chat_api_error_copy(409, r#"{"error":"duplicate"}"#),
@@ -297,14 +335,30 @@ mod tests {
             "Too many requests. Try again later."
         );
         // API PR 209 changes this Nostr limiter 429 to
-        // {"error":"rate_limited","retry_after":N}. This assertion stays on
-        // the old sentence until that PR lands.
+        // {"error":"rate_limited","retry_after":N}. Until that lands, the old
+        // sentence is shown with the em dash rewritten as a sentence break.
         assert_eq!(
             chat_api_error_copy(
                 429,
                 r#"{"error":"Too many Nostr key/message operations — please slow down and retry shortly."}"#
             ),
-            "Too many Nostr key/message operations — please slow down and retry shortly."
+            "Too many Nostr key/message operations. Please slow down and retry shortly."
+        );
+        let unspaced = format!("{{\"error\":\"a{}b\"}}", '\u{2014}');
+        assert_eq!(chat_api_error_copy(409, &unspaced), "a. B");
+        let doubled = format!("{{\"error\":\"a{}{}b\"}}", '\u{2014}', '\u{2014}');
+        let doubled_msg = chat_api_error_copy(409, &doubled);
+        assert_eq!(doubled_msg, "a. B");
+        assert!(
+            !doubled_msg.contains('\u{2014}'),
+            "a doubled em dash must not survive: {doubled_msg}"
+        );
+        let spaced_doubled = format!("{{\"error\":\"a {} {} b\"}}", '\u{2014}', '\u{2014}');
+        let spaced_msg = chat_api_error_copy(409, &spaced_doubled);
+        assert_eq!(spaced_msg, "a. B");
+        assert!(
+            !spaced_msg.contains('\u{2014}'),
+            "spaced doubled em dashes must not survive: {spaced_msg}"
         );
     }
 }

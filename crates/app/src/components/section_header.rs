@@ -20,7 +20,7 @@ pub fn SectionHeader(
     let label_class = format!("sec-label sec-label-{color}");
 
     rsx! {
-        style { {SECTION_HEADER_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-section_header-section-header-css", css: SECTION_HEADER_CSS }
         div {
             div { class: "{label_class}", "{label}" }
             h2 { class: "sec-title", "{title}" }

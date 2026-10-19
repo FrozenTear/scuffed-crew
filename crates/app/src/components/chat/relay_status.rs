@@ -117,7 +117,7 @@ pub fn RelayStatus(state: RelayConnectionState, on_retry: EventHandler<()>) -> E
     );
 
     rsx! {
-        style { {RELAY_STATUS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-relay_status-relay-status-css", css: RELAY_STATUS_CSS }
         div {
             class: "relay-status relay-status--{modifier}",
             span { class: "relay-status__dot" }

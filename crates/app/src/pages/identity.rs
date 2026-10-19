@@ -71,7 +71,6 @@ const PAGE_CSS: &str = r#"
         border-radius: 6px;
         color: var(--text);
         font-size: 0.875rem;
-        outline: none;
         transition: border-color 0.15s;
         box-sizing: border-box;
     }
@@ -417,7 +416,7 @@ pub fn IdentitySettings() -> Element {
         .unwrap_or(false);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-identity-page-css", css: PAGE_CSS }
 
         main { class: "identity-page",
             h1 { class: "identity-page-title", "Nostr Identity" }

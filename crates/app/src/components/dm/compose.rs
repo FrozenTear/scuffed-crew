@@ -82,7 +82,7 @@ const COMPOSE_CSS: &str = r#"
 }
 .dm-compose-textarea { min-height: 110px; resize: vertical; line-height: 1.5; }
 .dm-compose-input:focus,
-.dm-compose-textarea:focus { outline: none; border-color: var(--accent); }
+.dm-compose-textarea:focus { border-color: var(--accent); }
 .dm-compose-input::placeholder,
 .dm-compose-textarea::placeholder { color: var(--text-3); }
 .dm-compose-suggestions {
@@ -307,7 +307,7 @@ pub fn DmComposeModal(
     };
 
     rsx! {
-        style { {COMPOSE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-dm-compose-compose-css", css: COMPOSE_CSS }
         div {
             class: "dm-compose-overlay",
             onclick: move |_| {

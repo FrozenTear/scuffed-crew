@@ -55,7 +55,7 @@ pub fn Modal(open: Signal<bool>, on_close: EventHandler<()>, children: Element) 
     }
 
     rsx! {
-        style { {MODAL_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-modal-modal-css", css: MODAL_CSS }
         div {
             class: "modal-backdrop",
             onclick: move |_| on_close.call(()),

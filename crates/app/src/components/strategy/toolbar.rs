@@ -152,7 +152,6 @@ const TOOLBAR_CSS: &str = r#"
         font-size: 0.8rem;
         padding: 0.3rem 0.5rem;
         width: 160px;
-        outline: none;
         transition: border-color 0.15s;
     }
     .tb-name-input:focus {
@@ -275,7 +274,7 @@ pub fn Toolbar(
     let zoom_pct = format!("{:.0}%", zoom * 100.0);
 
     rsx! {
-        style { {TOOLBAR_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-toolbar-toolbar-css", css: TOOLBAR_CSS }
         div { class: "editor-toolbar",
 
             // ===== Tools =====

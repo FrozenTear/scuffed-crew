@@ -25,7 +25,7 @@ pub fn DmFailureNotice(failure: DmLoadFailure) -> Element {
     let message = failure.message();
     let identity = matches!(failure, DmLoadFailure::IdentitySettings);
     rsx! {
-        style { {FAILURE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-dm-failure-failure-css", css: FAILURE_CSS }
         div { class: "dm-failure", role: "alert",
             "{message}"
             if identity {

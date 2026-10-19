@@ -43,7 +43,6 @@ const CREATE_CSS: &str = r#"
 }
 .poll-create input[type="text"]:focus,
 .poll-create textarea:focus {
-    outline: none;
     border-color: var(--accent);
 }
 .poll-create input::placeholder,
@@ -184,7 +183,7 @@ pub fn PollCreate(on_created: EventHandler<()>) -> Element {
     let option_count = options().len();
 
     rsx! {
-        style { {CREATE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-poll-create-create-css", css: CREATE_CSS }
         div { class: "poll-create",
             p { class: "poll-create-title", "Create a Poll" }
 

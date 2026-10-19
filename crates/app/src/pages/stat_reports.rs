@@ -1008,7 +1008,7 @@ pub(crate) fn MyReportsBody(
 ) -> Element {
     let show_dialog = screen == MemberScreen::Ready && pending.is_some();
     rsx! {
-        style { {REPORTS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stat_reports-reports-css", css: REPORTS_CSS }
         main { class: "reports-page",
             h1 { id: MY_REPORTS_HEADING_ID, tabindex: "-1", "My reports" }
             if screen != MemberScreen::Disabled {
@@ -1242,7 +1242,7 @@ pub(crate) fn OfficerReportsBody(
     #[props(default)] on_retry: EventHandler<()>,
 ) -> Element {
     rsx! {
-        style { {REPORTS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stat_reports-reports-css", css: REPORTS_CSS }
         match screen {
             OfficerScreen::Checking => rsx! { p { class: "reports-status", "{COPY_CHECKING}" } },
             OfficerScreen::Forbidden => rsx! {

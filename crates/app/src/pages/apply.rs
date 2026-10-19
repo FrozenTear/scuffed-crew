@@ -150,7 +150,7 @@ pub fn Apply() -> Element {
         .cloned();
 
     rsx! {
-        style { {APPLY_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-apply-apply-css", css: APPLY_CSS }
         div { class: "apply-page",
             h1 { class: "apply-title",
                 if let Some(name) = org_name {

@@ -79,7 +79,7 @@ pub fn EncryptedChat(
     #[props(default = false)] loading: bool,
 ) -> Element {
     rsx! {
-        style { {ENCRYPTED_CHAT_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-encrypted_chat-encrypted-chat-css", css: ENCRYPTED_CHAT_CSS }
         div { class: "encrypted-chat",
             div { class: "encrypted-chat__badge",
                 span { class: "encrypted-chat__badge-icon", "\u{1F512}" }

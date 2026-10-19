@@ -239,7 +239,7 @@ pub fn Leaderboards() -> Element {
     };
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-leaderboards-page-css", css: PAGE_CSS }
         main { class: "lb-page",
             h1 { "Leaderboards" }
             p { class: "lb-sub", "Ranked from uploaded personal stats (OCR). Sparse data is normal." }

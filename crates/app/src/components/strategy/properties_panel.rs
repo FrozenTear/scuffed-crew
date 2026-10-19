@@ -64,7 +64,6 @@ const PROPERTIES_CSS: &str = r#"
         color: var(--text);
         font-size: 0.8rem;
         padding: 0.3rem 0.4rem;
-        outline: none;
         transition: border-color 0.15s;
     }
     .prop-input:focus {
@@ -174,7 +173,7 @@ pub fn PropertiesPanel(
     on_delete: EventHandler<Uuid>,
 ) -> Element {
     rsx! {
-        style { {PROPERTIES_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-strategy-properties_panel-properties-css", css: PROPERTIES_CSS }
         div { class: "props-panel",
             h3 { class: "props-title", "Properties" }
 

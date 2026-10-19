@@ -360,7 +360,7 @@ pub fn StrategyMeta() -> Element {
     let sort_dir = use_signal(|| SortDir::Desc);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-meta-page-css", css: PAGE_CSS }
 
         div { class: "meta-page",
             h1 { class: "meta-page-title", "Competitive Meta" }

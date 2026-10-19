@@ -153,7 +153,7 @@ pub fn MatchDetail(id: String) -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-match_detail-page-css", css: PAGE_CSS }
         main { class: "match-page",
             {
                 match data.read().as_ref() {

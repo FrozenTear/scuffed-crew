@@ -174,7 +174,7 @@ pub fn Forum() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-forum-page-css", css: PAGE_CSS }
         div { class: "forum-page",
             h1 { class: "forum-page-title", "Forum" }
             p { class: "forum-lead", "Old-school boards. Pick a section, then a board (or sub-board)." }
@@ -279,7 +279,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
         .is_some_and(|b| b.is_locked);
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-forum-page-css", css: PAGE_CSS }
         div { class: "forum-page",
             div { class: "forum-toolbar",
                 div { class: "forum-crumb",

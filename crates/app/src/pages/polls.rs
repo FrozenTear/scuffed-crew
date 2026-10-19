@@ -51,7 +51,7 @@ pub fn Polls() -> Element {
     };
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-polls-page-css", css: PAGE_CSS }
 
         main { class: "polls-page",
             h1 { class: "polls-page-title", "Polls" }

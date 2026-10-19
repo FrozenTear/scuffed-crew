@@ -158,8 +158,8 @@ pub fn Tournaments() -> Element {
     });
 
     rsx! {
-        style { {PAGE_CSS} }
-        style { {BRACKET_STYLES} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-tournaments-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-tournaments-bracket-styles", css: BRACKET_STYLES }
 
         main { class: "tournaments-page",
             h1 { "Tournaments" }

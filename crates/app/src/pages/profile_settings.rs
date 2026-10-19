@@ -332,7 +332,7 @@ pub fn ProfileSettings() -> Element {
     };
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-profile_settings-page-css", css: PAGE_CSS }
 
         main { class: "profile-edit-page",
             h1 { "Edit Profile" }

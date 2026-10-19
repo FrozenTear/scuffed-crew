@@ -627,10 +627,8 @@ pub fn PublicLayout() -> Element {
     );
 
     rsx! {
-        style { {NAV_CSS} }
-        if !bg_css.is_empty() {
-            style { {bg_css} }
-        }
+        crate::styles::StyleOnce { id: "scuffed-css-layouts-public-nav-css", css: NAV_CSS }
+        crate::styles::StyleLive { id: "scuffed-css-page-bg", css: bg_css }
         nav { class: "site-nav",
             Link {
                 to: Route::Home {},

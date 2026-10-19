@@ -139,7 +139,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 pub fn MessageList(messages: Vec<ChatMessage>, #[props(default = false)] loading: bool) -> Element {
     if messages.is_empty() && !loading {
         return rsx! {
-            style { {MESSAGE_LIST_CSS} }
+            crate::styles::StyleOnce { id: "scuffed-css-components-chat-message_list-message-list-css", css: MESSAGE_LIST_CSS }
             div { class: "chat-messages chat-messages--empty",
                 "No messages yet. Say something!"
             }
@@ -147,7 +147,7 @@ pub fn MessageList(messages: Vec<ChatMessage>, #[props(default = false)] loading
     }
 
     rsx! {
-        style { {MESSAGE_LIST_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-components-chat-message_list-message-list-css", css: MESSAGE_LIST_CSS }
         div { class: "chat-messages",
             if loading {
                 div { class: "chat-msg--loading",

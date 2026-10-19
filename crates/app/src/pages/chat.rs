@@ -56,7 +56,6 @@ const PAGE_CSS: &str = r#"
     font-size: 0.9rem;
 }
 .team-chat-select:focus {
-    outline: none;
     border-color: var(--accent);
 }
 .team-chat-empty {
@@ -121,7 +120,7 @@ pub fn TeamChat() -> Element {
     let team_list = teams_data.as_ref().and_then(|d| d.as_ref());
 
     rsx! {
-        style { {PAGE_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-chat-page-css", css: PAGE_CSS }
         main { class: "team-chat-page",
             h1 { class: "team-chat-title", "Team Chat" }
             p { class: "team-chat-sub",

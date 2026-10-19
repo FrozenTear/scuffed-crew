@@ -283,8 +283,8 @@ pub fn StatsTokens() -> Element {
     };
 
     rsx! {
-        style { {TOKENS_CSS} }
-        style { {crate::styles::admin::CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats_tokens-tokens-css", css: TOKENS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
         div { class: "tokens-page",
             div { class: "admin-toolbar",

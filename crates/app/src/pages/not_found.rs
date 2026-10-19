@@ -68,7 +68,7 @@ pub fn NotFound(segments: Vec<String>) -> Element {
     };
 
     rsx! {
-        style { {NOT_FOUND_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-not_found-not-found-css", css: NOT_FOUND_CSS }
         div { class: "nf-page",
             h1 { class: "nf-code", "404" }
             p { class: "nf-title", "Page not found" }

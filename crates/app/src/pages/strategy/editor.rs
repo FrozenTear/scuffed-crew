@@ -832,8 +832,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let saving_val = *save_in_progress.read();
 
     rsx! {
-        style { {EDITOR_CSS} }
-        style { {crate::components::strategy::MAP_CANVAS_CSS} }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-editor-editor-css", css: EDITOR_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-strategy-editor-crate-components-strategy-map-canvas-css", css: crate::components::strategy::MAP_CANVAS_CSS }
 
         div { class: "editor-page",
 
