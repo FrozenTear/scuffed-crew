@@ -552,6 +552,7 @@ mod cache_http_tests {
                 edited,
                 recognizer: Some(scuffed_types::RECOGNIZER_OCR_V1.into()),
                 suspect_fields: Vec::new(),
+                name_recognizer: None,
             }],
             deleted_sessions: vec![],
         }

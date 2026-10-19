@@ -248,6 +248,425 @@ fn any_problem_with_the_pack_refuses_all_of_it() {
     })));
 }
 
+fn set_min_confidence(dir: &std::path::Path, min_confidence: f32) {
+    let path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["params"] = serde_json::json!({ "min_confidence": min_confidence });
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+/// A name cell. `confidence` is the thousandths [`read_names`] stores.
+fn named(value: &str, confidence: i32) -> crate::ocr::RowOcrResult {
+    crate::ocr::RowOcrResult {
+        name: Some(crate::ocr::CellOcrResult {
+            value: value.into(),
+            confidence,
+            suspect: false,
+        }),
+        name_alternates: Vec::new(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+fn blank_row() -> crate::ocr::RowOcrResult {
+    crate::ocr::RowOcrResult {
+        name: None,
+        name_alternates: Vec::new(),
+        stats: Vec::new(),
+        mean_confidence: 0,
+    }
+}
+
+/// `CAB` here is three synthetic letters, not a member's name.
+#[test]
+fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+    let switch = NameSwitch::off();
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut called = false;
+    let found = match_player_row(&board, 5, "CAB", &switch, BoardMatch::Cells, || {
+        called = true;
+        vec![named("CAB", 10)]
+    });
+    assert!(called);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "the switch off does not call read_names"
+    );
+
+    // A pack read sitting on another row is ignored.
+    let mut called = false;
+    let found = choose_player_row(
+        "CAB",
+        5,
+        false,
+        Some(ReaderNames {
+            rows: &[named("ZZZ", 900)],
+            min_confidence: Some(Params::DEFAULT.min_confidence),
+        }),
+        BoardMatch::Cells,
+        || {
+            called = true;
+            vec![named("CAB", 10)]
+        },
+    );
+    assert!(called);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+}
+
+#[test]
+fn the_switch_on_with_no_pack_reuses_the_cell_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let loaded = NameSwitch::load(false, tmp.path());
+    assert!(!loaded.enabled);
+    assert!(loaded.pack().is_none());
+    let missing = NameSwitch::load(true, tmp.path());
+    assert!(missing.enabled);
+    assert!(missing.pack().is_none());
+
+    // ocr-v1 already read these cell rows. A second Tesseract name read
+    // would show up on the OCR gate, and a full-board match would refuse
+    // this short list (4 rows, team size 5).
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut calls = 0;
+    let found = match_player_row(&board, 5, "CAB", &missing, BoardMatch::Cells, || {
+        calls += 1;
+        vec![
+            named("OTHER", 80),
+            named("OTHER", 80),
+            named("CAB", 40),
+            named("OTHER", 70),
+        ]
+    });
+    assert_eq!(calls, 1, "the cell rows are used once");
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((2, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "no pack does not start a second Tesseract name read: {:?}",
+        off.blocked()
+    );
+}
+
+#[test]
+fn a_confident_template_name_is_used_and_a_lower_one_falls_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lo_dir = tmp.path().join("lo");
+    let hi_dir = tmp.path().join("hi");
+    write_pack(&lo_dir, &["ABC"]);
+    write_pack(&hi_dir, &["ABC"]);
+    // 0.020 rounds to 20 thousandths. The default 0.016 rounds to 16.
+    // A row at 17 passes the default pack and fails this one, so a
+    // hardcoded 0.016 would accept both.
+    set_min_confidence(&hi_dir, 0.020);
+    let lo = NamePack::load(&lo_dir).unwrap();
+    let hi = NamePack::load(&hi_dir).unwrap();
+    assert_eq!(confidence_millis(lo.params.min_confidence), 16);
+    assert_eq!(confidence_millis(hi.params.min_confidence), 20);
+    assert_ne!(
+        confidence_millis(lo.params.min_confidence),
+        confidence_millis(hi.params.min_confidence)
+    );
+
+    // Row 0 is the configured letters at 17 thousandths. Row 1 abstains.
+    let rows = [named("CAB", 17), blank_row()];
+    let pick = |min: f32| {
+        let mut called = false;
+        let found = choose_player_row(
+            "CAB",
+            1,
+            true,
+            Some(ReaderNames {
+                rows: &rows,
+                min_confidence: Some(min),
+            }),
+            BoardMatch::FullBoard,
+            || {
+                called = true;
+                vec![named("FALLBACK", 90), named("OTHER", 90)]
+            },
+        );
+        (found.map(|m| (m.name.row, m.recognizer)), called)
+    };
+    assert_eq!(
+        pick(lo.params.min_confidence),
+        (Some((0, NameRecognizer::NamesV1)), false)
+    );
+    assert_eq!(pick(hi.params.min_confidence), (None, true));
+
+    // The pack threshold itself passes. One thousandth under it does not.
+    let at = confidence_millis(lo.params.min_confidence);
+    let edge = [named("CAB", at), named("OTHER", 90)];
+    let under = [named("CAB", at - 1), named("OTHER", 90)];
+    let on_edge = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &edge,
+            min_confidence: Some(lo.params.min_confidence),
+        }),
+        BoardMatch::FullBoard,
+        || panic!("a row at the pack threshold does not need Tesseract"),
+    );
+    assert_eq!(
+        on_edge.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::NamesV1))
+    );
+    let mut called = false;
+    let below = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &under,
+            min_confidence: Some(lo.params.min_confidence),
+        }),
+        BoardMatch::FullBoard,
+        || {
+            called = true;
+            vec![named("FALLBACK", 90), named("OTHER", 90)]
+        },
+    );
+    assert!(called);
+    assert!(below.is_none());
+}
+
+#[test]
+fn a_blank_own_row_falls_back_and_a_sure_board_without_the_player_does_not() {
+    let min = Params::DEFAULT.min_confidence;
+    let rows = [blank_row(), named("OTHER", 90)];
+    let mut called = false;
+    let found = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &rows,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::FullBoard,
+        || {
+            called = true;
+            vec![named("CAB", 40), named("OTHER", 80)]
+        },
+    );
+    assert!(called);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+
+    // A short board still keeps a sure template name on the player's row.
+    let short = [named("CAB", 90)];
+    let kept = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &short,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::Cells,
+        || vec![named("FALLBACK", 40)],
+    );
+    assert_eq!(
+        kept.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::NamesV1))
+    );
+
+    let sure = [named("OTHER", 90), named("OTHER", 90)];
+    let missed = choose_player_row(
+        "CAB",
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &sure,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::FullBoard,
+        || panic!("a full board of sure names does not call Tesseract"),
+    );
+    assert!(missed.is_none());
+}
+
+#[test]
+fn a_loaded_pack_that_abstains_fills_the_row_from_tesseract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("templates").join("names-v1");
+    write_pack(&dir, &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    switch.wait_reload();
+    assert!(switch.pack().is_some());
+    // Flat colour: no letter line, so every row is blank.
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        64,
+        64,
+        image::Rgb([12, 12, 18]),
+    ));
+    let mut called = false;
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        called = true;
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert!(called);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+}
+
+/// Pack sync can land names-v1 after the reader has started. The read that
+/// notices the new folder still uses Tesseract. The next read uses the pack.
+#[test]
+fn a_names_pack_that_lands_after_startup_is_reloaded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let switch = NameSwitch::load(true, tmp.path());
+    assert!(switch.pack().is_none(), "startup has no pack");
+
+    let staging = tmp.path().join("templates").join(".names-v1-staging");
+    write_pack(&staging, &["ABC"]);
+    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        64,
+        64,
+        image::Rgb([12, 12, 18]),
+    ));
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut called = false;
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        called = true;
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert!(called, "the noticing read reuses the Tesseract rows");
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "that read does not start a second Tesseract name read: {:?}",
+        off.blocked()
+    );
+    drop(off);
+
+    switch.wait_reload();
+    let loaded = switch.pack().expect("the landed pack is loaded");
+    assert_eq!(switch.reload_spawns(), 1, "the late load runs once");
+    for _ in 0..20 {
+        assert!(std::sync::Arc::ptr_eq(
+            &loaded,
+            &switch.pack().expect("cached")
+        ));
+    }
+    assert_eq!(switch.reload_spawns(), 1, "later reads do not load again");
+    let again = tmp.path().join("templates").join(".names-v1-again");
+    write_pack(&again, &["CAB"]);
+    crate::packs::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&loaded, &switch.pack().expect("still cached")),
+        "a pack swapped in after the first load waits for the next start"
+    );
+    assert_eq!(switch.reload_spawns(), 1);
+    let mut called = false;
+    let found = match_player_row(&board, 1, "CAB", &switch, BoardMatch::FullBoard, || {
+        called = true;
+        vec![named("CAB", 70), named("OTHER", 70)]
+    });
+    assert!(
+        called,
+        "the loaded pack abstains and fills the row from Tesseract"
+    );
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((0, NameRecognizer::OcrV1))
+    );
+}
+
+/// A pack that is already installed at startup is loaded then, and a later
+/// read does not load it again.
+#[test]
+fn a_names_pack_loaded_at_startup_is_cached() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let switch = NameSwitch::load(true, tmp.path());
+    assert_eq!(
+        switch.reload_spawns(),
+        1,
+        "startup starts one background load"
+    );
+    switch.wait_reload();
+    let loaded = switch.pack().expect("startup load");
+    for _ in 0..20 {
+        assert!(std::sync::Arc::ptr_eq(
+            &loaded,
+            &switch.pack().expect("cached")
+        ));
+    }
+    assert_eq!(switch.reload_spawns(), 1);
+    let staging = tmp.path().join("templates").join(".names-v1-next");
+    write_pack(&staging, &["CAB"]);
+    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded,
+        &switch.pack().expect("still the startup pack")
+    ));
+    assert_eq!(switch.reload_spawns(), 1);
+}
+
+/// Startup returns before the pack is loaded. A name read in that window
+/// keeps ocr-v1's cell-row match and does not read names again.
+#[test]
+fn startup_returns_before_the_pack_load_and_keeps_the_cell_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pack(&crate::names::pack::dir_in(tmp.path()), &["ABC"]);
+    let (switch, release) = NameSwitch::load_held(tmp.path());
+    assert!(
+        switch.pack().is_none(),
+        "startup returned before the load finished"
+    );
+    let board = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+    let off = crate::ocr::gate::scoped(crate::ocr::gate::OcrMode::Off);
+    let mut calls = 0;
+    let found = match_player_row(&board, 5, "CAB", &switch, BoardMatch::Cells, || {
+        calls += 1;
+        vec![
+            named("OTHER", 80),
+            named("OTHER", 80),
+            named("CAB", 40),
+            named("OTHER", 70),
+        ]
+    });
+    assert_eq!(calls, 1);
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((2, NameRecognizer::OcrV1))
+    );
+    assert!(
+        off.blocked().is_empty(),
+        "the in-flight startup load does not read names again: {:?}",
+        off.blocked()
+    );
+    drop(off);
+    release();
+    switch.wait_reload();
+    assert!(switch.pack().is_some(), "the one startup load is cached");
+    assert_eq!(switch.reload_spawns(), 1);
+}
+
 /// Rewrite a test pack's manifest `files` map into pack sync's array form.
 fn to_files_array(dir: &std::path::Path, drop: Option<&str>, bad_sha: Option<&str>) {
     let p = dir.join("manifest.json");

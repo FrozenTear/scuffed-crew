@@ -97,6 +97,7 @@ fn tab(
         flags,
         // No own-name seeds: the bench has no data dir of a member.
         Vec::new(),
+        &names::NameSwitch::off(),
     ) {
         FrameAnalysisOutcome::Analyzed(a) => *a,
         FrameAnalysisOutcome::NotAScoreboard { outcome, .. } => {
