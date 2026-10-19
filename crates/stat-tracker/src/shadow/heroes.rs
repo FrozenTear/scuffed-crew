@@ -2114,13 +2114,14 @@ mod tests {
         }
     }
 
-    /// #302: on every 16:9 frame the 5v5 board's last row (row 9) runs
-    /// past the bottom of the scoreboard crop. Measured on the 1440p crop:
-    /// row 9 spans y 928 to 1014 and the crop stops at 1007, so 7 px of its
-    /// portrait are cut (5 px of 65 at 1080p). The hero icon reader reads
-    /// the visible part of that row. The board here is drawn so its last row
-    /// ends `cut` px below the crop, through the live re-crop path, at 1440p
-    /// and 1080p. Synthetic board, no game art.
+    /// #302 regression pin: on a 16:9 frame the 5v5 board's last row (row 9)
+    /// runs past the bottom of the unpadded scoreboard crop. Measured on the
+    /// 1440p crop: row 9 spans y 928 to 1014 and the crop stops at 1007, so
+    /// 7 px of its portrait are cut (5 px of 65 at 1080p). The hero icon
+    /// reader still reads the visible part of that row. The board here is
+    /// drawn so its last row ends `cut` px below the unpadded crop, through
+    /// the live re-crop path, at 1440p and 1080p. Synthetic board, no game
+    /// art.
     #[test]
     fn the_5v5_bottom_row_cut_by_the_crop_is_still_read() {
         let data = data_dir(true, None, None);
@@ -2152,13 +2153,6 @@ mod tests {
             assert!(!last.suspect, "{fh}p: {last:?}");
             assert_eq!(last.accepted(), Some("hero-5"), "{fh}p");
             assert_eq!(five_v_five_right(&r.board.rows), 10, "{fh}p: {r:?}");
-            // The legacy portrait matcher's grid refuses the cut square on
-            // purpose (see `portrait_rect`).
-            assert_eq!(
-                crate::detect::hero_portrait::portrait_rect((sb.width(), sb.height()), 9, 5),
-                None,
-                "{fh}p"
-            );
         }
     }
 

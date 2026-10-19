@@ -383,15 +383,6 @@ fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
 /// Returns None unless the full square fits in the crop. A cut-off
 /// rectangle can be saved as a hero reference, so a short board is
 /// refused instead of clipped.
-///
-/// 5v5 row 9 is always refused on a 16:9 board (#302). The game draws that
-/// row from y 928 to 1014 on the 1440p crop, and `crop_scoreboard` stops at
-/// 1007 (756 at 1080p), so 7 px of the square (5 px at 1080p) are not in
-/// the crop. Reading the cut part here was measured on the kept boards and
-/// dropped: 2 of 11 new reads were right, the other 9 named a hero on a
-/// screen that was not a board, or on a covered or shifted portrait. The
-/// row's hero comes from the hero icon reader
-/// ([`crate::shadow::heroes`]), which reads the visible part of that row.
 /// Stat and digit cells use `crop_player_row`, not this grid.
 pub fn portrait_rect(
     scoreboard_dims: (u32, u32),
