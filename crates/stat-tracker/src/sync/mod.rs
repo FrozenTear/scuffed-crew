@@ -19,8 +19,22 @@ pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the to
 pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "\
 Your site stats are scheduled for deletion on {date}. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app.";
 
+/// Shown once `stats_delete_scheduled_at` is in the past. Undo is gone.
+/// A new token on the Sync Tokens page syncs new games only.
+pub const SYNC_STATS_DELETED_STATUS: &str = "\
+Your site stats were deleted on {date}. Make a new sync token on the Sync Tokens page and paste it into the app to sync new games.";
+
 /// Used when a pending stats delete has no usable timestamp.
 pub const SYNC_STATS_DELETE_FALLBACK_WHEN: &str = "in 7 days";
+
+/// Why a saved pause is stopping sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPauseKind {
+    /// HTTP 401 or 403. The file has no reason field.
+    Rejected,
+    /// Reason `stats_delete_pending`.
+    StatsDeletePending,
+}
 
 /// JSON `code` / pause `reason` while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
@@ -592,12 +606,37 @@ pub fn scheduled_delete_local_date(raw: &str) -> Option<String> {
     )
 }
 
-/// Health line for a pending stats delete. `when` is a local calendar date.
-pub fn stats_delete_pending_status(when: Option<&str>) -> String {
-    match when {
-        Some(date) if !date.is_empty() => SYNC_STATS_DELETE_PENDING_STATUS.replace("{date}", date),
-        _ => SYNC_STATS_DELETE_PENDING_STATUS.replace("on {date}", SYNC_STATS_DELETE_FALLBACK_WHEN),
+/// Health line for a stats delete pause. `scheduled_at` is the raw RFC3339
+/// timestamp. A missing or unparseable value uses "in 7 days". Once that
+/// instant has passed, the line says the stats were deleted.
+pub fn stats_delete_pending_status(scheduled_at: Option<&str>) -> String {
+    stats_delete_pending_status_at(scheduled_at, chrono::Utc::now())
+}
+
+/// [`stats_delete_pending_status`] at a fixed clock, for tests.
+pub fn stats_delete_pending_status_at(
+    scheduled_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let Some(raw) = scheduled_at.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return pending_fallback();
+    };
+    let Some(when) = chrono::DateTime::parse_from_rfc3339(raw).ok() else {
+        return pending_fallback();
+    };
+    let date = when
+        .with_timezone(&chrono::Local)
+        .format("%B %-d, %Y")
+        .to_string();
+    if when.with_timezone(&chrono::Utc) <= now {
+        SYNC_STATS_DELETED_STATUS.replace("{date}", &date)
+    } else {
+        SYNC_STATS_DELETE_PENDING_STATUS.replace("{date}", &date)
     }
+}
+
+fn pending_fallback() -> String {
+    SYNC_STATS_DELETE_PENDING_STATUS.replace("on {date}", SYNC_STATS_DELETE_FALLBACK_WHEN)
 }
 
 /// True when this row must stay on the machine until the member picks
@@ -741,6 +780,26 @@ pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> boo
     read_auth_pause(data_dir).is_some_and(|file| pause_matches_saved(&file, server_url, token))
 }
 
+/// Why this saved pair is paused. `None` when sync should keep running.
+///
+/// A stats-delete pause matches the token alone, including when nothing is
+/// linked. A rejection matches the URL and the token.
+pub fn auth_pause_kind(data_dir: &Path, saved: Option<(&str, &str)>) -> Option<AuthPauseKind> {
+    let file = read_auth_pause(data_dir)?;
+    let delete_pending = file.reason.as_deref() == Some(STATS_DELETE_PENDING_CODE);
+    match saved {
+        Some((server_url, token)) if pause_matches_saved(&file, server_url, token) => {
+            Some(if delete_pending {
+                AuthPauseKind::StatsDeletePending
+            } else {
+                AuthPauseKind::Rejected
+            })
+        }
+        None if delete_pending => Some(AuthPauseKind::StatsDeletePending),
+        _ => None,
+    }
+}
+
 /// GUI health line when sync is paused. `None` when it should keep running.
 ///
 /// `saved` is the linked URL and token. With no link, a stats-delete pause
@@ -748,27 +807,11 @@ pub fn auth_pause_matches(data_dir: &Path, server_url: &str, token: &str) -> boo
 /// upload. A different token does not match that pause.
 pub fn auth_pause_status(data_dir: &Path, saved: Option<(&str, &str)>) -> Option<String> {
     let file = read_auth_pause(data_dir)?;
-    let delete_pending = file.reason.as_deref() == Some(STATS_DELETE_PENDING_CODE);
-    match saved {
-        Some((server_url, token)) if pause_matches_saved(&file, server_url, token) => {
-            if delete_pending {
-                let when = file
-                    .stats_delete_scheduled_at
-                    .as_deref()
-                    .and_then(scheduled_delete_local_date);
-                Some(stats_delete_pending_status(when.as_deref()))
-            } else {
-                Some(SYNC_TOKEN_REJECTED_STATUS.to_string())
-            }
-        }
-        None if delete_pending => {
-            let when = file
-                .stats_delete_scheduled_at
-                .as_deref()
-                .and_then(scheduled_delete_local_date);
-            Some(stats_delete_pending_status(when.as_deref()))
-        }
-        _ => None,
+    match auth_pause_kind(data_dir, saved)? {
+        AuthPauseKind::Rejected => Some(SYNC_TOKEN_REJECTED_STATUS.to_string()),
+        AuthPauseKind::StatsDeletePending => Some(stats_delete_pending_status(
+            file.stats_delete_scheduled_at.as_deref(),
+        )),
     }
 }
 
@@ -1616,15 +1659,15 @@ mod tests {
             dir.path(),
             "https://crew.example",
             "old-token",
-            Some("2026-10-26T15:04:05Z"),
+            Some("2099-10-26T15:04:05Z"),
         )
         .unwrap();
         let raw = std::fs::read_to_string(dir.path().join(AUTH_PAUSE_FILE)).unwrap();
         assert!(raw.contains("stats_delete_pending"), "{raw}");
-        assert!(raw.contains("2026-10-26T15:04:05Z"), "{raw}");
+        assert!(raw.contains("2099-10-26T15:04:05Z"), "{raw}");
         assert!(!raw.contains("old-token"), "{raw}");
-        let when = scheduled_delete_local_date("2026-10-26T15:04:05Z");
-        let expected = stats_delete_pending_status(when.as_deref());
+        let when = scheduled_delete_local_date("2099-10-26T15:04:05Z");
+        let expected = stats_delete_pending_status(Some("2099-10-26T15:04:05Z"));
         assert_eq!(
             expected,
             format!(
@@ -1633,7 +1676,15 @@ mod tests {
             )
         );
         assert!(when.as_deref().unwrap().contains("October"), "{when:?}");
-        assert!(when.as_deref().unwrap().contains(", 2026"), "{when:?}");
+        assert!(when.as_deref().unwrap().contains(", 2099"), "{when:?}");
+        assert_eq!(
+            auth_pause_kind(dir.path(), Some(("https://crew.example", "old-token"))),
+            Some(AuthPauseKind::StatsDeletePending)
+        );
+        assert_eq!(
+            auth_pause_kind(dir.path(), None),
+            Some(AuthPauseKind::StatsDeletePending)
+        );
         assert!(!expected.contains('\u{2014}'));
         assert!(!expected.contains("account page"), "{expected}");
         assert_eq!(
@@ -1673,6 +1724,58 @@ mod tests {
             "Your site stats are scheduled for deletion in 7 days. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app."
         );
         assert!(!fallback.contains('\u{2014}'), "{fallback}");
+    }
+
+    #[test]
+    fn stats_delete_status_says_deleted_once_the_date_has_passed() {
+        let when = "2026-10-26T15:04:05Z";
+        let date = scheduled_delete_local_date(when).unwrap();
+        assert_eq!(date, "October 26, 2026");
+        let before = chrono::DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let after = chrono::DateTime::parse_from_rfc3339("2026-10-27T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let exact = chrono::DateTime::parse_from_rfc3339(when)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let scheduled = stats_delete_pending_status_at(Some(when), before);
+        let deleted = stats_delete_pending_status_at(Some(when), after);
+        assert_eq!(
+            scheduled,
+            SYNC_STATS_DELETE_PENDING_STATUS.replace("{date}", &date)
+        );
+        assert_eq!(
+            deleted,
+            "Your site stats were deleted on October 26, 2026. Make a new sync token on the Sync Tokens page and paste it into the app to sync new games."
+        );
+        assert_eq!(stats_delete_pending_status_at(Some(when), exact), deleted);
+        assert!(scheduled.contains("Undo") && scheduled.contains("Edit Profile"));
+        assert!(!deleted.contains("Undo"), "{deleted}");
+        assert!(!deleted.contains("scheduled for deletion"), "{deleted}");
+        assert!(deleted.contains("sync new games"), "{deleted}");
+        let formatted = stats_delete_pending_status_at(Some("October 26, 2026"), before);
+        assert_eq!(formatted, pending_fallback());
+        assert!(!formatted.contains("were deleted"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_stats_delete_pending(
+            dir.path(),
+            "https://crew.example",
+            "old-token",
+            Some("2020-01-15T12:00:00Z"),
+        )
+        .unwrap();
+        let shown = scheduled_delete_local_date("2020-01-15T12:00:00Z").unwrap();
+        assert_eq!(shown, "January 15, 2020");
+        let status = auth_pause_status(dir.path(), None).unwrap();
+        assert_eq!(status, SYNC_STATS_DELETED_STATUS.replace("{date}", &shown));
+        assert_eq!(
+            auth_pause_kind(dir.path(), None),
+            Some(AuthPauseKind::StatsDeletePending)
+        );
+        assert!(!status.contains("Undo"), "{status}");
     }
 
     #[test]

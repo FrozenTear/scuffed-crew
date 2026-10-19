@@ -57,7 +57,7 @@ pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
 /// This button calls `DELETE /api/stats/me` only. It does not delete the
 /// account, so it does not use the website's account-delete list.
 pub const SITE_CONFIRM_COPY: &str = "\
-Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also removes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. Local stats on this computer are deleted now. Your account, forum posts, wiki edits and messages are not affected.";
+Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes local stats, saved crops, debug screenshots, logs, report kits, and the sync token now. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected.";
 
 /// 401 or 403 from `DELETE /api/stats/me`. Local data stays.
 pub const SITE_REJECTED: &str = "\
@@ -70,6 +70,10 @@ The site does not support deleting stats yet. Nothing on this PC was removed. Tr
 /// JSON 200 whose `scheduled` flag is not true. Local data stays.
 pub const SITE_NOT_SCHEDULED: &str = "\
 The site did not schedule the stats delete. Nothing on this PC was removed.";
+
+/// 400, 415, or 422. Retrying the same request cannot help.
+pub const SITE_BAD_REQUEST: &str = "\
+The site rejected this delete request. Nothing on this PC was removed.";
 
 /// Network error or 5xx from `DELETE /api/stats/me`. Local data stays.
 pub const SITE_RETRY: &str = "\
@@ -95,7 +99,7 @@ pub struct DeleteDataForm {
     pub also_delete_site: bool,
     pub busy: bool,
     pub notice: Option<String>,
-    /// Set after a network error or 5xx. The confirm step offers Try again.
+    /// Set after a network error, HTTP 429, or 5xx. The confirm step offers Try again.
     pub offer_retry: bool,
 }
 
@@ -103,7 +107,7 @@ pub struct DeleteDataForm {
 /// in place, including the sync token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WipeFailure {
-    /// Network error, 5xx, or a 200 body that was not JSON. Offer retry.
+    /// Network error, HTTP 429, 5xx, or a 200 body that was not JSON. Offer retry.
     SiteRetry(String),
     /// 401 or 403. [`SITE_REJECTED`] is the only copy.
     SiteRejected,
@@ -376,7 +380,9 @@ async fn delete_site_stats(server_url: &str, token: &str) -> Result<SiteCall, Wi
 /// Only `scheduled: true` continues the wipe. A 409 whose `code` is
 /// `stats_delete_pending` is the same schedule. 404 and 405 are
 /// [`WipeFailure::SiteKept`]. 401 and 403 are [`WipeFailure::SiteRejected`].
-/// 5xx, other statuses, and a non-JSON 200 are [`WipeFailure::SiteRetry`].
+/// 400, 415, and 422 are [`WipeFailure::SiteKept`]: the same request would
+/// fail again, so there is no Try again. HTTP 429, 5xx, other statuses, and
+/// a non-JSON 200 are [`WipeFailure::SiteRetry`].
 fn interpret_site_response(status: u16, body: &str) -> Result<SiteCall, WipeFailure> {
     match status {
         200 => match serde_json::from_str::<serde_json::Value>(body) {
@@ -406,6 +412,7 @@ fn interpret_site_response(status: u16, body: &str) -> Result<SiteCall, WipeFail
         },
         404 | 405 => Err(WipeFailure::SiteKept(SITE_UNSUPPORTED.into())),
         401 | 403 => Err(WipeFailure::SiteRejected),
+        400 | 415 | 422 => Err(WipeFailure::SiteKept(SITE_BAD_REQUEST.into())),
         _ => Err(WipeFailure::SiteRetry(SITE_RETRY.into())),
     }
 }
@@ -763,6 +770,7 @@ token = \"synthetic-token-value\"
             SITE_REJECTED,
             SITE_UNSUPPORTED,
             SITE_NOT_SCHEDULED,
+            SITE_BAD_REQUEST,
             SITE_RETRY,
         ] {
             assert!(!copy.contains('\u{2014}'), "{copy}");
@@ -770,9 +778,15 @@ token = \"synthetic-token-value\"
         }
         assert_eq!(
             SITE_CONFIRM_COPY,
-            "Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also removes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. Local stats on this computer are deleted now. Your account, forum posts, wiki edits and messages are not affected."
+            "Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes local stats, saved crops, debug screenshots, logs, report kits, and the sync token now. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected."
         );
-        assert!(SITE_CONFIRM_COPY.contains("sync tokens"));
+        assert!(!SITE_BAD_REQUEST.contains("Try again"));
+        assert!(SITE_CONFIRM_COPY.contains("revokes your tracker sync tokens"));
+        assert!(SITE_CONFIRM_COPY.contains("saved crops"));
+        assert!(SITE_CONFIRM_COPY.contains("debug screenshots"));
+        assert!(SITE_CONFIRM_COPY.contains("report kits"));
+        assert!(SITE_CONFIRM_COPY.contains("Keep my settings"));
+        assert!(!SITE_CONFIRM_COPY.contains("removes your tracker sync tokens"));
         assert!(!SITE_CONFIRM_COPY.contains("Deleted member"));
         assert!(!SITE_CONFIRM_COPY.contains("Direct messages you sent are deleted"));
         assert_eq!(
@@ -878,6 +892,18 @@ token = \"synthetic-token-value\"
         );
         assert_eq!(
             interpret_site_response(400, "bad"),
+            Err(WipeFailure::SiteKept(SITE_BAD_REQUEST.into()))
+        );
+        assert_eq!(
+            interpret_site_response(415, "type"),
+            Err(WipeFailure::SiteKept(SITE_BAD_REQUEST.into()))
+        );
+        assert_eq!(
+            interpret_site_response(422, "no"),
+            Err(WipeFailure::SiteKept(SITE_BAD_REQUEST.into()))
+        );
+        assert_eq!(
+            interpret_site_response(429, "slow"),
             Err(WipeFailure::SiteRetry(SITE_RETRY.into()))
         );
     }
@@ -1154,9 +1180,9 @@ token = \"synthetic-token-value\"
         let status = stat_tracker::sync::auth_pause_status(&fix.data, None).unwrap();
         assert_eq!(
             status,
-            stat_tracker::sync::stats_delete_pending_status(when.as_deref())
+            stat_tracker::sync::stats_delete_pending_status(Some("2026-10-26T15:04:05Z"))
         );
-        assert!(status.contains("scheduled for deletion on "));
+        assert!(status.contains("Sync Tokens"), "{status}");
         assert!(status.contains("make a new sync token"));
         assert_eq!(
             stat_tracker::sync::auth_pause_status(
@@ -1265,7 +1291,7 @@ token = \"synthetic-token-value\"
             assert_site_delete(raw);
             (
                 409,
-                r#"{"code":"stats_delete_pending","stats_delete_scheduled_at":"2026-10-26T15:04:05Z"}"#,
+                r#"{"code":"stats_delete_pending","stats_delete_scheduled_at":"2099-10-26T15:04:05Z"}"#,
             )
         });
         let mut req = request(&fix, "DELETE", true);
@@ -1284,7 +1310,7 @@ token = \"synthetic-token-value\"
         .unwrap();
 
         let copy = wipe_local_data(req).await.expect("wipe");
-        let when = scheduled_local_date("2026-10-26T15:04:05Z");
+        let when = scheduled_local_date("2099-10-26T15:04:05Z");
         assert_eq!(copy, wiped_with_site(when.as_deref()));
         let stop_log = fs::read_to_string(&fix.log).unwrap();
         assert!(
@@ -1294,12 +1320,12 @@ token = \"synthetic-token-value\"
         assert_member_data_gone(&fix);
         let pause = fs::read_to_string(fix.data.join("sync_auth.json")).unwrap();
         assert!(pause.contains("stats_delete_pending"), "{pause}");
-        assert!(pause.contains("2026-10-26T15:04:05Z"), "{pause}");
+        assert!(pause.contains("2099-10-26T15:04:05Z"), "{pause}");
         assert!(!pause.contains("synthetic-token-value"), "{pause}");
         let status = stat_tracker::sync::auth_pause_status(&fix.data, None).unwrap();
         assert_eq!(
             status,
-            stat_tracker::sync::stats_delete_pending_status(when.as_deref())
+            stat_tracker::sync::stats_delete_pending_status(Some("2099-10-26T15:04:05Z"))
         );
         assert!(status.contains("October"), "{status}");
         assert!(status.contains("Edit Profile"), "{status}");
@@ -1375,23 +1401,59 @@ token = \"synthetic-token-value\"
 
     #[tokio::test]
     async fn site_server_error_keeps_local_data_for_retry() {
-        let dir = tempfile::tempdir().unwrap();
-        let fix = fixture(dir.path());
-        seed_member_data(&fix);
-        seed_packs_and_app(&fix);
-        let base = spawn_mock(|raw| {
-            assert_site_delete(raw);
-            (500, "down")
-        });
-        let mut req = request(&fix, "DELETE", false);
-        req.also_delete_site = true;
-        req.server_url = base;
-        req.sync_token = "synthetic-token-value".into();
+        for status in [429, 500] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = fixture(dir.path());
+            seed_member_data(&fix);
+            seed_packs_and_app(&fix);
+            let base = spawn_mock(move |raw| {
+                assert_site_delete(raw);
+                (status, "down")
+            });
+            let mut req = request(&fix, "DELETE", false);
+            req.also_delete_site = true;
+            req.server_url = base;
+            req.sync_token = "synthetic-token-value".into();
 
-        let err = wipe_local_data(req).await.expect_err("retry");
-        assert_eq!(err, WipeFailure::SiteRetry(SITE_RETRY.into()));
-        assert_local_kept(&fix);
-        assert_packs_and_app(&fix);
+            let err = wipe_local_data(req).await.expect_err("retry");
+            assert_eq!(err, WipeFailure::SiteRetry(SITE_RETRY.into()), "{status}");
+            assert!(err.message().contains("Try again"), "{status}");
+            assert_local_kept(&fix);
+            assert_packs_and_app(&fix);
+        }
+    }
+
+    #[tokio::test]
+    async fn site_bad_request_keeps_local_data_without_retry() {
+        for status in [400, 415, 422] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = fixture(dir.path());
+            seed_member_data(&fix);
+            seed_packs_and_app(&fix);
+            let base = spawn_mock(move |raw| {
+                assert_site_delete(raw);
+                (status, "bad request")
+            });
+            let mut req = request(&fix, "DELETE", false);
+            req.also_delete_site = true;
+            req.server_url = base;
+            req.sync_token = "synthetic-token-value".into();
+
+            let err = wipe_local_data(req).await.expect_err("bad request");
+            assert_eq!(
+                err,
+                WipeFailure::SiteKept(SITE_BAD_REQUEST.into()),
+                "{status}"
+            );
+            assert!(!matches!(err, WipeFailure::SiteRetry(_)), "{status}");
+            assert!(
+                !err.message().contains("Try again"),
+                "{status} {}",
+                err.message()
+            );
+            assert_local_kept(&fix);
+            assert_packs_and_app(&fix);
+        }
     }
 
     #[tokio::test]
@@ -1442,6 +1504,70 @@ token = \"synthetic-token-value\"
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         let config = fs::read_to_string(fix.config.join("config.toml")).unwrap();
         assert!(config.contains("synthetic-token-value"), "{config}");
+    }
+
+    #[test]
+    fn pending_status_switches_after_the_scheduled_instant() {
+        let when = "2026-10-26T15:04:05Z";
+        let date = stat_tracker::sync::scheduled_delete_local_date(when).unwrap();
+        assert_eq!(date, "October 26, 2026");
+        let before = chrono::DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let after = chrono::DateTime::parse_from_rfc3339("2026-10-27T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let exact = chrono::DateTime::parse_from_rfc3339(when)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let scheduled = stat_tracker::sync::stats_delete_pending_status_at(Some(when), before);
+        let deleted = stat_tracker::sync::stats_delete_pending_status_at(Some(when), after);
+        assert_eq!(
+            scheduled,
+            format!(
+                "Your site stats are scheduled for deletion on {date}. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app."
+            )
+        );
+        assert_eq!(
+            deleted,
+            "Your site stats were deleted on October 26, 2026. Make a new sync token on the Sync Tokens page and paste it into the app to sync new games."
+        );
+        assert_eq!(
+            stat_tracker::sync::stats_delete_pending_status_at(Some(when), exact),
+            deleted,
+            "the scheduled instant itself is already past"
+        );
+        assert!(scheduled.contains("Undo"), "{scheduled}");
+        assert!(scheduled.contains("Edit Profile"), "{scheduled}");
+        assert!(!deleted.contains("Undo"), "{deleted}");
+        assert!(!deleted.contains("scheduled for deletion"), "{deleted}");
+        assert!(deleted.contains("Sync Tokens"), "{deleted}");
+        assert!(deleted.contains("sync new games"), "{deleted}");
+        assert!(!scheduled.contains('\u{2014}') && !deleted.contains('\u{2014}'));
+        let formatted = stat_tracker::sync::stats_delete_pending_status_at(Some(&date), before);
+        assert_eq!(
+            formatted,
+            "Your site stats are scheduled for deletion in 7 days. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app."
+        );
+    }
+
+    #[test]
+    fn try_again_is_only_the_site_retry_arm() {
+        let app = include_str!("app.rs");
+        let start = app
+            .find("Message::DeleteDataFinished(result)")
+            .expect("finished handler");
+        let rest = &app[start..];
+        let end = rest.find("Message::UpdateChecked").expect("next message");
+        let window = &rest[..end];
+        assert_eq!(window.matches("offer_retry = true").count(), 1, "{window}");
+        let retry = window.find("WipeFailure::SiteRetry").expect("retry arm");
+        let kept = window.find("WipeFailure::SiteKept").expect("kept arm");
+        assert!(retry < kept);
+        assert!(window[retry..kept].contains("offer_retry = true"));
+        let kept_arm = &window[kept..];
+        assert!(kept_arm.contains("offer_retry = false"), "{kept_arm}");
+        assert!(!kept_arm.contains("offer_retry = true"));
     }
 
     #[test]

@@ -3582,13 +3582,14 @@ token = \"secret-token-must-stay\"
             &dir,
             "https://crew.example",
             "old-token",
-            Some("2026-10-26T15:04:05Z"),
+            Some("2099-10-26T15:04:05Z"),
         )
         .unwrap();
-        let when = stat_tracker::sync::scheduled_delete_local_date("2026-10-26T15:04:05Z");
-        let deletion = stat_tracker::sync::stats_delete_pending_status(when.as_deref());
+        let when = stat_tracker::sync::scheduled_delete_local_date("2099-10-26T15:04:05Z");
+        let deletion =
+            stat_tracker::sync::stats_delete_pending_status(Some("2099-10-26T15:04:05Z"));
         assert!(when.as_deref().unwrap().contains("October"), "{when:?}");
-        assert!(when.as_deref().unwrap().contains(", 2026"), "{when:?}");
+        assert!(when.as_deref().unwrap().contains(", 2099"), "{when:?}");
         assert!(deletion.contains("Edit Profile"), "{deletion}");
         assert!(deletion.contains("Sync Tokens"), "{deletion}");
         assert!(!deletion.contains("account page"), "{deletion}");
