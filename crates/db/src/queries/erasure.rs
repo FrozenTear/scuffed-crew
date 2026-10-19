@@ -259,7 +259,7 @@ impl Database {
                 )
                 .bind(("rid", RecordId::new("member", member_id)))
                 .await?;
-            let rows: Vec<Row> = result.take(0).unwrap_or_default();
+            let rows: Vec<Row> = result.take(0)?;
             Ok(!rows.is_empty())
         })
         .await

@@ -1007,6 +1007,41 @@ async fn stats_delete_and_restore_share_a_rate_limit() {
     assert_ne!(body["error"], "rate_limited");
 }
 
+#[tokio::test]
+async fn restore_database_error_is_500_not_no_pending_delete() {
+    let state = test_state().await;
+    let (member_id, session) = member_with_session(&state, "boom", OrgRole::Member).await;
+    state
+        .db
+        .schedule_stats_delete(&member_id, Utc::now())
+        .await
+        .unwrap();
+    state
+        .db
+        .client
+        .query(
+            "DEFINE EVENT OVERWRITE restore_boom ON TABLE member \
+             WHEN $event = 'UPDATE' THEN { THROW 'restore_boom' }",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (status, body, _) = call(
+        &state,
+        "POST",
+        "/api/stats/me/restore",
+        None,
+        Some(&session),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(body.get("code").is_none(), "{body}");
+    assert_eq!(body["error"], "Internal error");
+}
+
 fn sample(member_id: &str, session_id: &str) -> scuffed_db::PersonalMatch {
     scuffed_db::PersonalMatch {
         id: String::new(),
