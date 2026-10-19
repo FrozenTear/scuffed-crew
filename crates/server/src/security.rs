@@ -110,10 +110,11 @@ impl SecurityPolicy {
         }
         connect.extend(self.connect_extras.iter().cloned());
         // Preconnect hints in `crates/app/index.html` are connection hints.
-        // Chrome checks preconnect against connect-src. The font stylesheet
-        // is loaded from `index.html` and the app head (`crates/app/src/head.rs`
-        // and `document::Link` in `crates/app/src/main.rs`). style-src allows
-        // the stylesheet host; font files are font-src.
+        // Chrome checks preconnect against connect-src. `index.html` preloads
+        // the font stylesheet; `document::Link` in `crates/app/src/main.rs`
+        // applies it after boot (URL in `crates/app/src/head.rs`
+        // `FONT_STYLESHEET` once #385 lands). style-src allows the stylesheet
+        // host; font files are font-src.
         connect.push("https://fonts.googleapis.com".to_string());
         connect.push("https://fonts.gstatic.com".to_string());
         dedupe(&mut connect);
@@ -141,10 +142,11 @@ impl SecurityPolicy {
         // 'unsafe-inline' then. Do not add it to script-src.
         //
         // https://fonts.googleapis.com is the Inter / Space Grotesk / JetBrains
-        // Mono stylesheet. It is loaded from `crates/app/index.html` and the
-        // app head (`crates/app/src/head.rs`, `document::Link` in
-        // `crates/app/src/main.rs`). Preconnect in index.html is only a
-        // connection hint. Font files load from fonts.gstatic.com (font-src below).
+        // Mono stylesheet. `index.html` preloads the font stylesheet;
+        // `document::Link` in `crates/app/src/main.rs` applies it after boot
+        // (URL in `crates/app/src/head.rs` `FONT_STYLESHEET` once #385 lands).
+        // Preconnect in index.html is only a connection hint. Font files load
+        // from fonts.gstatic.com (font-src below).
         let script_src = script.join(" ");
         let img_src = img.join(" ");
         let connect_src = connect.join(" ");
