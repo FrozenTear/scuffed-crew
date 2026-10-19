@@ -36,6 +36,9 @@ impl Database {
         raw_token: &str,
         duration_hours: i64,
     ) -> DbResult<()> {
+        if crate::is_tombstone_user(user_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
         with_timeout(async {
             let uid = user_id.to_string();
 
@@ -162,6 +165,9 @@ impl Database {
             let Some(uid) = sessions.into_iter().next().map(|s| s.user_id) else {
                 return Ok(None);
             };
+            if crate::is_tombstone_user(&uid) {
+                return Ok(None);
+            }
             // Inline user select (do not call get_user — that wraps another timeout).
             self.get_user_without_timeout(&uid).await
         })

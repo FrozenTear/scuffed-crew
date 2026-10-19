@@ -102,6 +102,27 @@ pub const DELETED_MEMBER_NAME: &str = "Deleted member";
 /// User row for the tombstone. It has no password and cannot sign in.
 pub const DELETED_USER_ID: &str = "deleteduser";
 
+/// Usernames `deleted` and `deleteduser`, compared after trim and ASCII case fold.
+pub fn is_reserved_username(raw: &str) -> bool {
+    let name = raw.trim().to_ascii_lowercase();
+    name == "deleted" || name == DELETED_USER_ID
+}
+
+pub fn is_tombstone_member(id: &str) -> bool {
+    id == DELETED_MEMBER_ID
+}
+
+pub fn is_tombstone_user(id: &str) -> bool {
+    id == DELETED_USER_ID
+}
+
+/// SurrealQL predicate for a real member.
+///
+/// The erasure tombstone is `is_tombstone = true` and id `deleted`. A missing
+/// flag is not the tombstone, so rows from before the column stay visible.
+/// `!= true` keeps both `false` and `NONE`.
+pub const REAL_MEMBER_SQL: &str = "is_tombstone != true AND meta::id(id) != 'deleted'";
+
 /// A game/title that teams can play.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Game {

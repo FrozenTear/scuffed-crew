@@ -36,10 +36,13 @@ pub struct MeResponse {
     /// what produced identities pointing at a domain we do not own.
     #[serde(default)]
     pub nip05: Option<String>,
-    /// True when the account has a local password, so account delete must
-    /// send `password`. False for OAuth-only accounts. Never a hash.
-    #[serde(default)]
-    pub has_password: bool,
+    /// `Some(true)` when the account has a local password, so account delete
+    /// must send `password`. `Some(false)` for OAuth-only accounts. The
+    /// server sets this on a signed-in `GET /api/auth/me`, at this level
+    /// only, never on `user`. Absent when an older payload omits it. Never a
+    /// hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

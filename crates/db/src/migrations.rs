@@ -82,6 +82,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
             ASSERT $value IN [NONE, 'server_managed', 'external'];
         DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE;
         DEFINE FIELD OVERWRITE is_active ON member TYPE bool DEFAULT true;
+        -- Account-erasure placeholder. Real members stay false. Listings,
+        -- counts, setup, and last-admin all require this to be not true.
+        DEFINE FIELD OVERWRITE is_tombstone ON member TYPE bool DEFAULT false;
         -- Tracker soft-delete. NONE means stats are live. A datetime hides
         -- reads and blocks uploads until the purge task hard-deletes the rows.
         DEFINE FIELD OVERWRITE stats_delete_scheduled_at ON member TYPE option<datetime> DEFAULT NONE;
@@ -863,8 +866,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // unkeyable stored name fails startup and does not rewrite display_name.
     crate::display_name::backfill_display_name_keys(client).await?;
 
-    // Reserved "Deleted member" row. Shared records point here after an account erase.
-    crate::queries::erasure::ensure_deleted_member(client).await?;
+    // The "Deleted member" tombstone is not created here. A fresh database
+    // must still look empty to first-run setup. The first account erase
+    // creates the row, with is_tombstone = true.
 
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement

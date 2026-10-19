@@ -579,6 +579,8 @@ async fn auth_me_reports_local_password_presence_without_the_hash() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["has_password"], true);
+    assert!(body["user"].get("has_password").is_none());
+    assert!(body["member"].get("has_password").is_none());
     let rendered = body.to_string();
     assert!(!rendered.contains("password_hash"), "{rendered}");
     assert!(!rendered.contains(&hash), "{rendered}");
@@ -619,9 +621,224 @@ async fn auth_me_reports_local_password_presence_without_the_hash() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["has_password"], false);
+    assert!(body["user"].get("has_password").is_none());
+    assert!(
+        body.get("member")
+            .and_then(|m| m.get("has_password"))
+            .is_none()
+    );
     let rendered = body.to_string();
     assert!(!rendered.contains("password_hash"), "{rendered}");
     assert!(!rendered.contains("placeholder-secret"), "{rendered}");
+}
+
+async fn call_raw(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    bearer: Option<&str>,
+    cookie: Option<&str>,
+    content_type: &str,
+    body: &'static [u8],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
+    if let Some(token) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(token) = cookie {
+        builder = builder.header(header::COOKIE, format!("sc_session={token}"));
+    }
+    let req = builder.body(Body::from(body)).unwrap();
+    let response = create_router(state.clone()).oneshot(req).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, parsed)
+}
+
+#[tokio::test]
+async fn fresh_setup_stays_open_and_member_lists_omit_the_tombstone() {
+    let state = test_state().await;
+    let (status, body, _) = call(
+        &state,
+        "POST",
+        "/api/auth/setup",
+        None,
+        None,
+        Some(json!({ "username": "firstadmin", "password": "short" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_ne!(body["error"], "setup already completed");
+
+    let (_admin_id, admin_session) = member_with_session(&state, "keeper", OrgRole::Admin).await;
+    let (leaver_id, _) = member_with_session(&state, "leaver", OrgRole::Member).await;
+    let leaver = state.db.get_member(&leaver_id).await.unwrap().unwrap();
+    state
+        .db
+        .erase_account(&leaver_id, &leaver.user_id, None, None)
+        .await
+        .unwrap();
+
+    let (status, listed, _) = call(
+        &state,
+        "GET",
+        "/api/members?include_inactive=true&limit=50",
+        None,
+        Some(&admin_session),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let names: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["display_name"].as_str())
+        .collect();
+    assert!(names.contains(&"keeper"), "{names:?}");
+    assert!(!names.contains(&"Deleted member"), "{names:?}");
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "deleted"),
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn pending_delete_rejects_garbage_uploads_revoked_tokens_and_new_tokens() {
+    let state = test_state().await;
+    let (member_id, session) = member_with_session(&state, "tracker", OrgRole::Member).await;
+    state
+        .db
+        .create_daemon_token(&member_id, "daemon-old", "pc")
+        .await
+        .unwrap();
+    let (status, body, _) = call(
+        &state,
+        "DELETE",
+        "/api/stats/me",
+        Some("daemon-old"),
+        None,
+        Some(json!({ "confirm": "delete my stats" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let deadline = body["stats_delete_scheduled_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, garbage) = call_raw(
+        &state,
+        "POST",
+        "/api/stats/upload",
+        Some("daemon-old"),
+        None,
+        "application/json",
+        b"not-json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{garbage}");
+    assert_eq!(garbage["code"], "stats_delete_pending");
+    assert_eq!(garbage["stats_delete_scheduled_at"], deadline);
+    assert!(garbage.get("error").is_none(), "{garbage}");
+
+    state
+        .db
+        .create_daemon_token(&member_id, "daemon-live", "still-active")
+        .await
+        .unwrap();
+    let (status, live_garbage) = call_raw(
+        &state,
+        "POST",
+        "/api/stats/upload",
+        Some("daemon-live"),
+        None,
+        "text/plain",
+        b"not-json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{live_garbage}");
+    assert_eq!(live_garbage["code"], "stats_delete_pending");
+    assert!(live_garbage.get("error").is_none(), "{live_garbage}");
+
+    let (status, minted, _) = call(
+        &state,
+        "POST",
+        "/api/stats/tokens",
+        None,
+        Some(&session),
+        Some(json!({ "label": "new-pc" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{minted}");
+    assert_eq!(minted["code"], "stats_delete_pending");
+    assert_eq!(minted["stats_delete_scheduled_at"], deadline);
+    assert!(minted.get("error").is_none(), "{minted}");
+    assert!(minted.get("token").is_none(), "{minted}");
+
+    let (status, report) = call_raw(
+        &state,
+        "POST",
+        "/api/stat-reports",
+        None,
+        Some(&session),
+        "application/zip",
+        b"not-a-zip",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{report}");
+    assert_eq!(report["code"], "stats_delete_pending");
+    assert_eq!(report["stats_delete_scheduled_at"], deadline);
+    assert!(report.get("error").is_none(), "{report}");
+
+    let (status, restored, _) = call(
+        &state,
+        "POST",
+        "/api/stats/me/restore",
+        None,
+        Some(&session),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+
+    let (status, after) = call_raw(
+        &state,
+        "POST",
+        "/api/stats/upload",
+        Some("daemon-old"),
+        None,
+        "application/json",
+        b"not-json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{after}");
+    assert_eq!(after["error"], "Invalid or revoked daemon token");
+    assert!(after.get("code").is_none(), "{after}");
+
+    let (status, minted, _) = call(
+        &state,
+        "POST",
+        "/api/stats/tokens",
+        None,
+        Some(&session),
+        Some(json!({ "label": "after-restore" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{minted}");
+    assert!(minted["token"].as_str().is_some(), "{minted}");
 }
 
 fn sample(member_id: &str, session_id: &str) -> scuffed_db::PersonalMatch {

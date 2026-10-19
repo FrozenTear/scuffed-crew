@@ -77,6 +77,8 @@ fn map_erase_error(err: surrealdb::Error) -> DbError {
 
 /// Same actionable-admin predicate as `count_actionable_admins`.
 const ACTIONABLE_ADMIN: &str = "is_active = true AND org_role = 'admin' \
+     AND is_tombstone != true \
+     AND meta::id(id) != 'deleted' \
      AND meta::id(id) NOT IN ( \
          SELECT VALUE member_id FROM moderation_action \
          WHERE is_active = true \
@@ -84,13 +86,26 @@ const ACTIONABLE_ADMIN: &str = "is_active = true AND org_role = 'admin' \
          AND (expires_at IS NONE OR expires_at > time::now()) \
      )";
 
-/// Create the reserved member once. Later calls leave an existing row alone.
+/// Create the reserved member once. An existing row is forced back to the
+/// lowest role and inactive, and its user username is `deleteduser`.
 pub async fn ensure_deleted_member(client: &Surreal<Any>) -> DbResult<()> {
     let existing: Option<serde_json::Value> = client
         .select(("member", DELETED_MEMBER_ID))
         .await
         .map_err(DbError::Surreal)?;
     if existing.is_some() {
+        client
+            .query(
+                "UPDATE $member SET org_role = 'recruit', is_active = false, is_tombstone = true; \
+                 UPDATE $user SET username = $username, provider = 'local'",
+            )
+            .bind(("member", RecordId::new("member", DELETED_MEMBER_ID)))
+            .bind(("user", RecordId::new("user", DELETED_USER_ID)))
+            .bind(("username", DELETED_USER_ID.to_string()))
+            .await
+            .map_err(DbError::Surreal)?
+            .check()
+            .map_err(DbError::Surreal)?;
         return Ok(());
     }
 
@@ -112,7 +127,7 @@ pub async fn ensure_deleted_member(client: &Surreal<Any>) -> DbResult<()> {
                 created_at = time::now()",
         )
         .bind(("user", RecordId::new("user", DELETED_USER_ID)))
-        .bind(("username", "deleted-member".to_string()))
+        .bind(("username", DELETED_USER_ID.to_string()))
         .bind(("pid", DELETED_USER_ID.to_string()))
         .bind(("hash", pid_hash))
         .await
@@ -124,10 +139,11 @@ pub async fn ensure_deleted_member(client: &Surreal<Any>) -> DbResult<()> {
         .query(
             "CREATE $member SET \
                 user_id = $uid, \
-                org_role = 'member', \
+                org_role = 'recruit', \
                 display_name = $name, \
                 display_name_key = $key, \
                 is_active = false, \
+                is_tombstone = true, \
                 joined_at = time::now(), \
                 stats_delete_scheduled_at = NONE, \
                 bio = NONE, \
@@ -165,6 +181,9 @@ pub async fn ensure_deleted_member(client: &Surreal<Any>) -> DbResult<()> {
 impl Database {
     /// True when removing this member would leave the org with no actionable admin.
     pub async fn member_is_last_actionable_admin(&self, member_id: &str) -> DbResult<bool> {
+        if member_id == DELETED_MEMBER_ID {
+            return Ok(false);
+        }
         let Some(member) = self.get_member(member_id).await? else {
             return Ok(false);
         };
@@ -313,6 +332,7 @@ impl Database {
                     "SELECT meta::id(id) AS member_id FROM member \
                      WHERE stats_delete_scheduled_at IS NOT NONE \
                      AND stats_delete_scheduled_at <= $now \
+                     AND is_tombstone != true \
                      AND meta::id(id) != $tomb",
                 )
                 .bind(("now", SurrealDatetime::from(now)))
@@ -390,6 +410,11 @@ impl Database {
         if member_id == DELETED_MEMBER_ID || user_id == DELETED_USER_ID {
             return Err(DbError::Config("tombstone member cannot be erased".into()));
         }
+        let tomb_key =
+            crate::display_name::display_name_key(DELETED_MEMBER_NAME).map_err(|_| {
+                DbError::Config("reserved Deleted member name has no comparison key".into())
+            })?;
+        let tomb_hash = hash_provider_id("local", DELETED_USER_ID);
         let stat_report_ids = self.stat_report_ids_for(member_id).await?;
         let personal_match = count_where(
             &self.client,
@@ -405,6 +430,13 @@ impl Database {
                 .bind(("mid", member_id.to_string()))
                 .bind(("uid", user_id.to_string()))
                 .bind(("tomb", DELETED_MEMBER_ID.to_string()))
+                .bind(("tomb_member", RecordId::new("member", DELETED_MEMBER_ID)))
+                .bind(("tomb_user", RecordId::new("user", DELETED_USER_ID)))
+                .bind(("tomb_username", DELETED_USER_ID.to_string()))
+                .bind(("tomb_pid", DELETED_USER_ID.to_string()))
+                .bind(("tomb_hash", tomb_hash))
+                .bind(("tomb_name", DELETED_MEMBER_NAME.to_string()))
+                .bind(("tomb_key", tomb_key))
                 .bind(("pk", pubkey.to_string()))
                 .bind(("member_rid", RecordId::new("member", member_id)))
                 .bind(("user_rid", RecordId::new("user", user_id)));
@@ -528,6 +560,40 @@ fn account_erase_sql(store_deletion_event: bool) -> String {
         LET $other_count = IF array::len($other_n) = 0 THEN 0 ELSE $other_n[0].count END;
         IF $self_count > 0 AND $other_count = 0 {{
             THROW "last_admin";
+        }};
+        -- First successful account delete creates the placeholder. A refused
+        -- last-admin delete rolls this back with the rest of the transaction.
+        LET $tomb_hit = (SELECT id FROM $tomb_member LIMIT 1);
+        IF array::len($tomb_hit) = 0 {{
+            CREATE $tomb_user SET
+                provider = 'local',
+                username = $tomb_username,
+                provider_id = $tomb_pid,
+                provider_id_hash = $tomb_hash,
+                password_hash = NONE,
+                avatar_url = NONE,
+                provider_id_encrypted = NONE,
+                created_at = time::now();
+            CREATE $tomb_member SET
+                user_id = $tomb_username,
+                org_role = 'recruit',
+                display_name = $tomb_name,
+                display_name_key = $tomb_key,
+                is_active = false,
+                is_tombstone = true,
+                joined_at = time::now(),
+                stats_delete_scheduled_at = NONE,
+                bio = NONE,
+                avatar_url = NONE,
+                timezone = NONE,
+                pronouns = NONE,
+                availability_status = NONE,
+                nostr_pubkey = NONE,
+                nostr_key_mode = NONE,
+                nostr_secret_key_encrypted = NONE,
+                main_role = NONE,
+                twitch = NONE,
+                twitter = NONE;
         }};
         -- audit_log is append-only (THROW on UPDATE/DELETE). actor_id stays.
         -- tournament_participant has no member or user column. Left unchanged.
@@ -1106,6 +1172,316 @@ mod tests {
         let entries = db.list_audit_log(10, 0).await.unwrap();
         let row = entries.iter().find(|e| e.actor_id == mid).unwrap();
         assert_eq!(row.actor_name, DELETED_MEMBER_NAME);
+    }
+
+    async fn seed_tombstone(db: &Database) {
+        ensure_deleted_member(&db.client).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_db_allows_setup_and_lists_omit_the_tombstone() {
+        let db = test_db().await;
+        assert!(
+            !db.has_any_member().await.unwrap(),
+            "a fresh database has no tombstone and setup stays open"
+        );
+        assert!(db.get_member(DELETED_MEMBER_ID).await.unwrap().is_none());
+        assert!(db.claim_bootstrap_lock().await.is_ok());
+
+        let admin = db.create_local_user("keeper", "hash").await.unwrap();
+        let admin_member = db
+            .create_member(&admin.id, "Keeper", OrgRole::Admin)
+            .await
+            .unwrap();
+        let leaver = db.create_local_user("leaver", "hash").await.unwrap();
+        let leaver_member = db
+            .create_member(&leaver.id, "Leaver", OrgRole::Member)
+            .await
+            .unwrap();
+        db.erase_account(&leaver_member.id, &leaver.id, None, None)
+            .await
+            .unwrap();
+
+        #[derive(Deserialize, SurrealValue)]
+        struct Flag {
+            is_tombstone: bool,
+        }
+        let mut flagged = db
+            .client
+            .query("SELECT is_tombstone FROM $rid")
+            .bind(("rid", RecordId::new("member", DELETED_MEMBER_ID)))
+            .await
+            .unwrap();
+        let flags: Vec<Flag> = flagged.take(0).unwrap();
+        assert_eq!(flags.len(), 1);
+        assert!(flags[0].is_tombstone);
+
+        let listed = db
+            .list_members_paginated_filtered(50, 0, true)
+            .await
+            .unwrap();
+        assert!(
+            listed.iter().all(|row| row.id != DELETED_MEMBER_ID),
+            "member list: {listed:?}"
+        );
+        assert!(listed
+            .iter()
+            .all(|row| row.display_name != DELETED_MEMBER_NAME));
+        assert!(listed.iter().any(|row| row.id == admin_member.id));
+        assert_eq!(db.count_active_members().await.unwrap(), 1);
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 1);
+        assert!(db.has_any_member().await.unwrap());
+
+        db.client
+            .query("DELETE $member; DELETE $user;")
+            .bind(("member", RecordId::new("member", admin_member.id.as_str())))
+            .bind(("user", RecordId::new("user", admin.id.as_str())))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            !db.has_any_member().await.unwrap(),
+            "the tombstone alone must not close first-run setup"
+        );
+        assert_eq!(db.count_active_members().await.unwrap(), 0);
+        assert_eq!(db.count_active_admins().await.unwrap(), 0);
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn oauth_link_cannot_sign_in_as_the_tombstone() {
+        let db = test_db().await;
+        seed_tombstone(&db).await;
+        db.client
+            .query(
+                "UPDATE $rid SET provider = 'discord', provider_id = 'discord-tomb', \
+                 provider_id_hash = NONE",
+            )
+            .bind(("rid", RecordId::new("user", DELETED_USER_ID)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let err = db
+            .upsert_user_from_oauth(
+                scuffed_auth::AuthProvider::Discord,
+                "discord-tomb".into(),
+                "someone".into(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(ref code) if code == "tombstone"),
+            "{err}"
+        );
+        let err = db
+            .upsert_user_from_oauth(
+                scuffed_auth::AuthProvider::Discord,
+                "brand-new".into(),
+                " DeletedUser ".into(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::ReservedName), "{err}");
+    }
+
+    #[tokio::test]
+    async fn device_link_cannot_hand_the_tombstone_a_token() {
+        let db = test_db().await;
+        db.insert_device_link("USERCODE1", "DEVICECODE1", "pc", "1")
+            .await
+            .unwrap();
+        let err = db
+            .approve_device_link("USERCODE1", DELETED_MEMBER_ID, "tid", "secret")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(ref code) if code == "tombstone"),
+            "{err}"
+        );
+        let info = db.lookup_device_link("USERCODE1").await.unwrap();
+        assert!(info.is_some(), "refused approve leaves the code pending");
+
+        let device_hash = scuffed_auth::crypto::hash_session_token("DEVICECODE2");
+        let user_hash = scuffed_auth::crypto::hash_session_token("USERCODE2");
+        db.client
+            .query(
+                "CREATE device_link SET \
+                    user_code_hash = $uh, \
+                    device_code_hash = $dh, \
+                    device_label = 'pc', \
+                    app_version = '1', \
+                    status = 'approved', \
+                    member_id = $mid, \
+                    daemon_token_id = 'tid', \
+                    handover_token = 'super-secret', \
+                    created_at = time::now(), \
+                    expires_at = time::now() + 10m, \
+                    last_poll_at = NONE",
+            )
+            .bind(("uh", user_hash))
+            .bind(("dh", device_hash))
+            .bind(("mid", DELETED_MEMBER_ID.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let polled = db
+            .poll_device_link("DEVICECODE2", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            !matches!(
+                polled,
+                crate::queries::device_link::DeviceLinkPoll::Approved(_)
+            ),
+            "a forged approval does not return a daemon secret: {polled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_admin_count_skips_the_tombstone_even_if_it_is_marked_admin() {
+        let db = test_db().await;
+        seed_tombstone(&db).await;
+        db.client
+            .query("UPDATE $rid SET org_role = 'admin', is_active = true")
+            .bind(("rid", RecordId::new("member", DELETED_MEMBER_ID)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let admin = db.create_local_user("realadmin", "hash").await.unwrap();
+        let admin_member = db
+            .create_member(&admin.id, "Real Admin", OrgRole::Admin)
+            .await
+            .unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 1);
+        assert_eq!(db.count_active_admins().await.unwrap(), 1);
+        assert!(db
+            .member_is_last_actionable_admin(&admin_member.id)
+            .await
+            .unwrap());
+        assert!(!db
+            .member_is_last_actionable_admin(DELETED_MEMBER_ID)
+            .await
+            .unwrap());
+        let err = db
+            .erase_account(&admin_member.id, &admin.id, None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(ref code) if code == "last_admin"),
+            "{err}"
+        );
+        assert!(db.get_member(&admin_member.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_member_rejects_the_reserved_display_name() {
+        let db = test_db().await;
+        for name in ["Deleted member", " deleted member ", "DELETED  MEMBER"] {
+            let err = db
+                .create_member("user-reg", name, OrgRole::Member)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, DbError::ReservedName), "{name}: {err}");
+        }
+        let err = db.create_local_user(" Deleted ", "hash").await.unwrap_err();
+        assert!(matches!(err, DbError::ReservedName), "{err}");
+        let err = db
+            .create_local_user("DeletedUser", "hash")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::ReservedName), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tombstone_is_hidden_from_roster_leaderboard_and_chat() {
+        let db = test_db().await;
+        seed_tombstone(&db).await;
+        let game = db.create_game("Overwatch", Some("OW")).await.unwrap();
+        let team = db
+            .create_team("Night", &game.id, None, None, None)
+            .await
+            .unwrap();
+        db.client
+            .query(
+                "UPDATE $rid SET is_active = true, org_role = 'officer', \
+                 nostr_pubkey = 'pk-tomb'",
+            )
+            .bind(("rid", RecordId::new("member", DELETED_MEMBER_ID)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let add = db
+            .add_to_roster(DELETED_MEMBER_ID, &team.id, crate::TeamRole::Player)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(add, DbError::Conflict(ref code) if code == "tombstone"),
+            "{add}"
+        );
+        db.client
+            .query(
+                "RELATE $member -> plays_on -> $team \
+                 SET team_role = 'player', joined_at = time::now(), is_active = true",
+            )
+            .bind(("member", RecordId::new("member", DELETED_MEMBER_ID)))
+            .bind(("team", RecordId::new("team", team.id.as_str())))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let roster = db.get_team_roster(&team.id).await.unwrap();
+        assert!(
+            roster.iter().all(|row| row.member_id != DELETED_MEMBER_ID),
+            "roster: {roster:?}"
+        );
+        let named = db.get_team_roster_named(&team.id).await.unwrap();
+        assert!(named.iter().all(|row| row.member_id != DELETED_MEMBER_ID));
+        let identities = db.list_nostr_identities().await.unwrap();
+        assert!(identities.iter().all(|row| row.id != DELETED_MEMBER_ID));
+
+        let other = db.create_local_user("listed", "hash").await.unwrap();
+        let other_member = db
+            .create_member(&other.id, "Listed", OrgRole::Member)
+            .await
+            .unwrap();
+        db.upsert_personal_matches(
+            DELETED_MEMBER_ID,
+            &[sample_match(DELETED_MEMBER_ID, "s-tomb")],
+        )
+        .await
+        .unwrap();
+        db.upsert_personal_matches(
+            &other_member.id,
+            &[sample_match(&other_member.id, "s-live")],
+        )
+        .await
+        .unwrap();
+        let rows = db
+            .leaderboard_snapshot(None)
+            .await
+            .unwrap()
+            .project("games", "", 25);
+        assert!(
+            rows.iter().any(|row| row.member_id == other_member.id),
+            "a real member still ranks"
+        );
+        assert!(
+            rows.iter().all(|row| row.member_id != DELETED_MEMBER_ID),
+            "leaderboard: {rows:?}"
+        );
+
+        let listed = db
+            .list_members_paginated_filtered(50, 0, true)
+            .await
+            .unwrap();
+        assert!(listed.iter().all(|row| row.id != DELETED_MEMBER_ID));
     }
 
     async fn count_sql(db: &Database, sql: &str, id: &str) -> i64 {

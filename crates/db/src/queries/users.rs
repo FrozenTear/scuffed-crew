@@ -52,7 +52,13 @@ impl Database {
         avatar_url: Option<String>,
     ) -> DbResult<User> {
         with_timeout(async {
+            if crate::is_reserved_username(&username) {
+                return Err(crate::DbError::ReservedName);
+            }
             if let Some(mut existing) = self.get_user_by_provider(provider, &provider_id).await? {
+                if crate::is_tombstone_user(&existing.id) {
+                    return Err(crate::DbError::Conflict("tombstone".into()));
+                }
                 if existing.username != username || existing.avatar_url != avatar_url {
                     existing.username = username;
                     existing.avatar_url = avatar_url;
@@ -282,6 +288,9 @@ impl Database {
         let username = Self::normalize_local_username(username);
         if username.is_empty() {
             return Err(DbError::Config("username required".into()));
+        }
+        if crate::is_reserved_username(&username) {
+            return Err(crate::DbError::ReservedName);
         }
 
         if self.get_local_user_by_username(&username).await?.is_some() {

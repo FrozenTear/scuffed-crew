@@ -14,7 +14,7 @@ use scuffed_db::{
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SUSPECT_FIELDS_ERROR,
-    SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
+    SeasonQuery, StatsUploadBody, StatsUploadMatch, StatsUploadResponse, TokenCheckResponse,
     UpdateMemberSettingsRequest, resolve_recognizer, resolve_suspect_fields,
 };
 use scuffed_types::{hero_key_to_name, role_for_hero_name};
@@ -43,38 +43,103 @@ fn normalize_hero(hero: String, role: String) -> (String, String) {
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 ///
 /// A pending stats soft delete is a 409 for the whole body, before JSON or
-/// row checks. The tracker quarantines a batch on 400 or 422.
+/// row checks. The tracker quarantines a batch on 400 or 422 when the body
+/// names `matches[i]`.
 pub async fn upload_stats(
     State(state): State<AppState>,
     daemon: DaemonUser,
     body_bytes: Bytes,
 ) -> Response {
     if let Some(at) = daemon.member.stats_delete_scheduled_at {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "code": "stats_delete_pending",
-                "stats_delete_scheduled_at": at.to_rfc3339(),
-            })),
-        )
-            .into_response();
+        return crate::extractors::stats_delete_pending_response(at);
     }
-    let body: StatsUploadBody = match serde_json::from_slice(&body_bytes) {
+    let body = match parse_stats_upload(&body_bytes) {
         Ok(body) => body,
-        Err(_) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse {
-                    error: "Failed to parse the request body as JSON".into(),
-                }),
-            )
-                .into_response();
-        }
+        Err(response) => return *response,
     };
     match upload_stats_parsed(state, daemon, body).await {
         Ok(body) => body.into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
+}
+
+fn upload_parse_error(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+/// Outer object first, then each match on its own.
+///
+/// A body that is not JSON at all keeps the generic parse message, with the
+/// serde detail after the prefix. A bad row is `matches[i]: <reason>` so the
+/// tracker can name that row. Recognizer and suspect-field checks still run
+/// after this, on the parsed batch.
+fn parse_stats_upload(bytes: &[u8]) -> Result<StatsUploadBody, Box<Response>> {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(Box::new(upload_parse_error(format!(
+                "Failed to parse the request body as JSON: {err}"
+            ))));
+        }
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(Box::new(upload_parse_error(
+            "Failed to deserialize the JSON body into the target type: expected a JSON object",
+        )));
+    };
+    let Some(matches_value) = obj.get("matches") else {
+        return Err(Box::new(upload_parse_error(
+            "Failed to deserialize the JSON body into the target type: missing field `matches`",
+        )));
+    };
+    let Some(rows) = matches_value.as_array() else {
+        return Err(Box::new(upload_parse_error(
+            "Failed to deserialize the JSON body into the target type: matches: expected an array",
+        )));
+    };
+    let mut matches = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        match StatsUploadMatch::try_from(row.clone()) {
+            Ok(parsed) => matches.push(parsed),
+            Err(reason) => {
+                return Err(Box::new(upload_parse_error(format!(
+                    "matches[{index}]: {reason}"
+                ))));
+            }
+        }
+    }
+    let deleted_sessions = match obj.get("deleted_sessions") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(items)) => {
+            let mut ids = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                match item.as_str() {
+                    Some(id) => ids.push(id.to_string()),
+                    None => {
+                        return Err(Box::new(upload_parse_error(format!(
+                            "deleted_sessions[{index}]: expected a string"
+                        ))));
+                    }
+                }
+            }
+            ids
+        }
+        Some(_) => {
+            return Err(Box::new(upload_parse_error(
+                "Failed to deserialize the JSON body into the target type: deleted_sessions: expected an array of strings",
+            )));
+        }
+    };
+    Ok(StatsUploadBody {
+        matches,
+        deleted_sessions,
+    })
 }
 
 async fn upload_stats_parsed(
@@ -377,6 +442,7 @@ fn stats_db_kind(error: &scuffed_db::DbError) -> &'static str {
         scuffed_db::DbError::Crypto(_) => "crypto",
         scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
         scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+        scuffed_db::DbError::ReservedName => "reserved_name",
     }
 }
 
@@ -584,6 +650,20 @@ pub async fn create_daemon_token(
     State(state): State<AppState>,
     member: OrgMember,
     Json(body): Json<CreateDaemonTokenRequest>,
+) -> Response {
+    if let Some(at) = member.member.stats_delete_scheduled_at {
+        return crate::extractors::stats_delete_pending_response(at);
+    }
+    match create_daemon_token_inner(state, member, body).await {
+        Ok(created) => created.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_daemon_token_inner(
+    state: AppState,
+    member: OrgMember,
+    body: CreateDaemonTokenRequest,
 ) -> Result<(StatusCode, Json<CreateDaemonTokenResponse>), (StatusCode, Json<ErrorResponse>)> {
     let raw_token = generate_token();
 
@@ -1088,6 +1168,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows[0].recognizer, "ocr-v1");
+    }
+
+    async fn post_bytes(
+        app: axum::Router,
+        token: &str,
+        body: &'static [u8],
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn upload_parse_names_the_bad_row_and_keeps_json_syntax_detail() {
+        let (state, member_id, token) = daemon().await;
+        let (status, parsed) = post_bytes(
+            create_router(state.clone()),
+            &token,
+            br#"{"matches":[{"not":"a match"},{"hero":1}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        let message = parsed["error"].as_str().unwrap();
+        assert!(
+            message.starts_with("matches[0]:"),
+            "first bad row is named: {message}"
+        );
+
+        let (status, parsed) = post_bytes(create_router(state.clone()), &token, b"not-json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        let message = parsed["error"].as_str().unwrap();
+        assert!(
+            message.starts_with("Failed to parse the request body as JSON:"),
+            "{message}"
+        );
+        assert!(
+            message.len() > "Failed to parse the request body as JSON:".len(),
+            "syntax errors keep the serde detail: {message}"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ use scuffed_types::{
     SetupStatusResponse,
 };
 
-use crate::extractors::{OrgMember, presented_session_token};
+use crate::extractors::presented_session_token;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -37,6 +37,9 @@ fn validate_local_username(username: &str) -> Result<String, &'static str> {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return Err("username may only contain letters, digits, _ and -");
+    }
+    if scuffed_db::is_reserved_username(&u) {
+        return Err("reserved_name");
     }
     Ok(u)
 }
@@ -196,6 +199,9 @@ pub async fn callback(
         // login page can show a banner. Other callback failures stay plain text.
         Err((status, msg)) => return oauth_callback_refusal(status, msg),
     };
+    if scuffed_db::is_tombstone_user(&user.id) {
+        return oauth_callback_refusal(StatusCode::FORBIDDEN, "tombstone");
+    }
 
     // Create session
     let session_token = generate_session_token();
@@ -294,6 +300,12 @@ async fn upsert_oauth_user_if_allowed(
     db.upsert_user_from_oauth(provider, provider_id, username, avatar_url)
         .await
         .map_err(|e| {
+            if matches!(e, scuffed_db::DbError::ReservedName) {
+                return (StatusCode::BAD_REQUEST, "reserved_name");
+            }
+            if matches!(e, scuffed_db::DbError::Conflict(ref code) if code == "tombstone") {
+                return (StatusCode::FORBIDDEN, "tombstone");
+            }
             tracing::error!("Failed to upsert user: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })
@@ -307,9 +319,11 @@ pub struct MeResponse {
     /// no valid public NIP-05 domain configured. Computed here so the client
     /// never guesses the domain. Mirrors `scuffed_types::MeResponse::nip05`.
     pub nip05: Option<String>,
-    /// True when a local password is set. Account delete then requires
-    /// `password`. OAuth-only accounts are false. The hash is not returned.
-    pub has_password: bool,
+    /// `Some` for every signed-in response. `true` when a local password is
+    /// set, so account delete requires `password`. OAuth-only accounts are
+    /// `Some(false)`. Never set on `user`. The hash is not returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 /// GET /api/auth/me — return current user + member info
@@ -352,7 +366,7 @@ pub async fn me(
                 user: info,
                 member,
                 nip05,
-                has_password,
+                has_password: Some(has_password),
             })
             .into_response()
         }
@@ -382,19 +396,111 @@ fn account_code(status: StatusCode, code: &'static str) -> Response {
     (status, Json(serde_json::json!({ "code": code }))).into_response()
 }
 
+struct AccountCaller {
+    user: scuffed_auth::User,
+    member: Member,
+}
+
+fn account_unauthorized(error: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+        .into_response()
+}
+
+/// Session for account delete. A tombstone session is 403 and is not a login.
+#[allow(clippy::result_large_err)]
+async fn load_account_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<AccountCaller, Response> {
+    let Some(token) = presented_session_token(&state.session_config.cookie_name, headers, jar)
+    else {
+        return Err(account_unauthorized("Authentication required"));
+    };
+    let user_id = match state.db.get_session(&token).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return Err(account_unauthorized("Session expired or invalid")),
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "session lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_user(&user_id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    let user = match state.db.get_user(&user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(account_unauthorized("Session expired or invalid")),
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "user lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_user(&user.id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    let (member, suspended) = match state.db.get_member_auth_by_user(&user.id).await {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not an org member".into(),
+                }),
+            )
+                .into_response());
+        }
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "member auth lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_member(&member.id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    if !member.is_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Membership inactive".into(),
+            }),
+        )
+            .into_response());
+    }
+    if suspended {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Account suspended".into(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(AccountCaller { user, member })
+}
+
 /// DELETE /api/auth/me — erase the signed-in account. Session only.
 ///
 /// `confirm` must equal the display name or the username after trimming.
 /// The match is case-sensitive. A local account (password hash present)
 /// must send that password. An OAuth-only account must present a session
 /// created within the last 10 minutes. Tracker daemon tokens are 401.
+/// The tombstone account is 403.
 pub async fn delete_account(
     State(state): State<AppState>,
-    member: OrgMember,
     jar: CookieJar,
     headers: HeaderMap,
     Json(body): Json<DeleteAccountBody>,
 ) -> Response {
+    let member = match load_account_caller(&state, &headers, &jar).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
     let confirm = body.confirm.trim();
     let name_ok =
         confirm == member.member.display_name.trim() || confirm == member.user.username.trim();
@@ -521,6 +627,7 @@ fn account_db_kind(error: &scuffed_db::DbError) -> &'static str {
         scuffed_db::DbError::Crypto(_) => "crypto",
         scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
         scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+        scuffed_db::DbError::ReservedName => "reserved_name",
     }
 }
 
@@ -730,6 +837,15 @@ pub async fn local_register(
     // create_local_user re-checks uniqueness; surface it as a clean 409.
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,
+        Err(scuffed_db::DbError::ReservedName) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "reserved_name".into(),
+                }),
+            )
+                .into_response();
+        }
         Err(e) if e.to_string().contains("already taken") => {
             // Same blandness as login: do not say whether this username exists.
             return (
@@ -896,6 +1012,15 @@ pub async fn setup(
 
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,
+        Err(scuffed_db::DbError::ReservedName) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "reserved_name".into(),
+                }),
+            )
+                .into_response();
+        }
         Err(e) => {
             tracing::error!("setup create_local_user: {e}");
             return (
@@ -1108,7 +1233,11 @@ pub async fn local_login(
     };
 
     match verify_password(&body.password, &hash) {
-        Ok(true) => {}
+        Ok(true) => {
+            if scuffed_db::is_tombstone_user(&user.id) {
+                return invalid();
+            }
+        }
         Ok(false) => {
             if let Some(secs) = state.login_lockout.record_failure(&username) {
                 return too_many_logins(secs);
@@ -1327,6 +1456,16 @@ pub async fn nostr_login_verify(
             }
         }
     };
+
+    if scuffed_db::is_tombstone_user(&user_id) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "invalid credentials".into(),
+            }),
+        )
+            .into_response();
+    }
 
     let session_token = generate_session_token();
     if let Err(e) = state

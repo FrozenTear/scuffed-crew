@@ -18,7 +18,7 @@ use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
@@ -181,6 +181,20 @@ async fn load_owned(
 /// that member's rows whichever credential sent them.
 pub async fn create_stat_report(
     State(state): State<AppState>,
+    creator: ReportCreator,
+    body: Bytes,
+) -> Response {
+    if let Some(at) = creator.member.stats_delete_scheduled_at {
+        return crate::extractors::stats_delete_pending_response(at);
+    }
+    match create_stat_report_inner(state, creator, body).await {
+        Ok(created) => created.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_stat_report_inner(
+    state: AppState,
     creator: ReportCreator,
     body: Bytes,
 ) -> Result<(StatusCode, Json<StatReportCreated>), (StatusCode, Json<ErrorResponse>)> {

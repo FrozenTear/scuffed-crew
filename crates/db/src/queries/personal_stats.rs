@@ -818,7 +818,8 @@ impl Database {
                 .client
                 .query(
                     "SELECT id, display_name FROM member \
-                     WHERE is_active = true AND stats_delete_scheduled_at IS NONE",
+                     WHERE is_active = true AND stats_delete_scheduled_at IS NONE \
+                     AND is_tombstone != true AND meta::id(id) != 'deleted'",
                 )
                 .await?;
             let active_rows: Vec<ActiveName> = active_q.take(0)?;
@@ -896,6 +897,8 @@ impl Database {
                       AND member_id NOT IN (
                         SELECT VALUE meta::id(id) FROM member
                         WHERE stats_delete_scheduled_at IS NOT NONE
+                           OR is_tombstone = true
+                           OR meta::id(id) = 'deleted'
                       )
                     GROUP BY member_id
                     "#,

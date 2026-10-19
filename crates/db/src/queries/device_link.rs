@@ -206,6 +206,9 @@ impl Database {
         daemon_token_id: &str,
         handover_token: &str,
     ) -> DbResult<bool> {
+        if crate::is_tombstone_member(member_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
         let user_code_hash = hash_session_token(user_code);
         // Not `with_timeout`'s raw driver error: that Display can echo `$secret`.
         let queried = self
@@ -529,6 +532,12 @@ impl Database {
         let Some(mut row) = rows.into_iter().next() else {
             return Ok(Consume::Lost);
         };
+        if row.member_id.as_deref() == Some(crate::DELETED_MEMBER_ID) {
+            if let Some(token) = row.handover_token.as_mut() {
+                token.zeroize();
+            }
+            return Ok(Consume::Empty);
+        }
         match row.handover_token.take() {
             Some(token) if !token.is_empty() => Ok(Consume::Token(token)),
             Some(mut token) => {

@@ -75,6 +75,14 @@ pub async fn get_member(
     caller: OrgMember,
     Path(id): Path<String>,
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
+    if scuffed_db::is_tombstone_member(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
     let member = state
         .db
         .get_member_safe(&id)
@@ -209,6 +217,12 @@ pub(crate) fn display_name_write_error(
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: "display_name_taken".into(),
+            }),
+        )),
+        scuffed_db::DbError::ReservedName => Some((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "reserved_name".into(),
             }),
         )),
         _ => None,
@@ -587,6 +601,15 @@ pub async fn change_role(
                 }),
             )
         })?;
+
+    if scuffed_db::is_tombstone_member(&target.id) && body.role != OrgRole::Recruit {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "tombstone".into(),
+            }),
+        ));
+    }
 
     let admin_count = state.db.count_actionable_admins().await.map_err(|e| {
         tracing::error!(error = %e, "count_actionable_admins");

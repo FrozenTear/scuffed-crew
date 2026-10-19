@@ -157,7 +157,9 @@ async fn rewrap_members(db: &Database, current: u32, stats: &mut RewrapStats) ->
             "SELECT id, nostr_pubkey, nostr_secret_key_encrypted FROM member \
              WHERE nostr_key_mode = 'server_managed' \
              AND nostr_secret_key_encrypted != NONE \
-             AND nostr_pubkey != NONE",
+             AND nostr_pubkey != NONE \
+             AND is_tombstone != true \
+             AND meta::id(id) != 'deleted'",
         )
         .await?;
     let rows: Vec<MemberEncRow> = result.take(0)?;

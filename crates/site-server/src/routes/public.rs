@@ -417,6 +417,14 @@ pub async fn public_member_profile(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PublicMemberProfile>, (StatusCode, Json<ErrorResponse>)> {
+    if scuffed_db::is_tombstone_member(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
     let member = state
         .db
         .get_member_safe(&id)

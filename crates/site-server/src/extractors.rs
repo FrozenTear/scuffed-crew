@@ -235,6 +235,21 @@ fn unauthorized(error: &str) -> Box<Response> {
     )
 }
 
+/// 409 for a tracker whose stats delete is still inside the grace window.
+///
+/// No `error` key. The timestamp is the stored deadline, not a new one.
+pub(crate) fn stats_delete_pending_response(at: chrono::DateTime<chrono::Utc>) -> Response {
+    (
+        StatusCode::CONFLICT,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "code": "stats_delete_pending",
+            "stats_delete_scheduled_at": at.to_rfc3339(),
+        })),
+    )
+        .into_response()
+}
+
 fn internal_error() -> Box<Response> {
     Box::new(
         (
@@ -293,9 +308,24 @@ async fn authenticate_daemon(
         DaemonLookup::StampLastUsed => state.db.validate_daemon_token(auth_header).await,
         DaemonLookup::ReadOnly => state.db.lookup_daemon_token(auth_header).await,
     };
-    let member_id = lookup_result
-        .map_err(|_e| internal_error())?
-        .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?;
+    let member_id = match lookup_result.map_err(|_e| internal_error())? {
+        Some(member_id) => member_id,
+        None => {
+            // A token revoked by schedule_stats_delete is inactive, so the
+            // active lookup misses it. While the deadline is still set, the
+            // second PC needs 409 rather than a plain 401. After restore the
+            // deadline is gone and this stays a 401.
+            if let Some(at) = state
+                .db
+                .stats_delete_deadline_for_token(auth_header)
+                .await
+                .map_err(|_e| internal_error())?
+            {
+                return Err(Box::new(stats_delete_pending_response(at)));
+            }
+            return Err(unauthorized(unauthorized_mode.rejected()));
+        }
+    };
 
     let member = state
         .db

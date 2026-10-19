@@ -68,6 +68,14 @@ pub async fn public_member_heroes(
     Query(q): Query<HeroesQuery>,
 ) -> Result<Json<Vec<HeroAgg>>, (StatusCode, Json<ErrorResponse>)> {
     let top = if q.top == 0 { 0 } else { q.top.clamp(1, 50) };
+    if scuffed_db::is_tombstone_member(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
     // Same visibility as the public profile: missing and inactive are both 404.
     let member = state
         .db
