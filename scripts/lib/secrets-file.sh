@@ -7,6 +7,10 @@
 #
 # stdout is only "Appended KEY" or "Replaced blank KEY". The value is not printed.
 # The file mode is set to 0600 on every call.
+#
+# A rewrite passes the new value to awk through the environment, not argv.
+# The temporary file is created in the secrets file's own directory, mode 0600,
+# and renamed over the original. It is not written under /tmp.
 
 # 0 when the key is missing or every value for it is blank.
 secret_needs_value() {
@@ -66,9 +70,18 @@ upsert_generated_secret() {
             chmod 600 "$file"
             return 0
         fi
-        tmp="$(mktemp)"
-        awk -v key="$key" -v value="$value" '
-            BEGIN { done = 0; blank = 0 }
+        dir="$(dirname "$file")"
+        tmp="$(mktemp "${dir}/.secrets-rewrite.XXXXXX")"
+        chmod 600 "$tmp"
+        # ENVIRON, not -v: -v puts the secret on awk's command line.
+        if ! SCUFFED_SECRET_KEY="$key" SCUFFED_SECRET_VALUE="$value" awk '
+            BEGIN {
+                key = ENVIRON["SCUFFED_SECRET_KEY"]
+                value = ENVIRON["SCUFFED_SECRET_VALUE"]
+                if (key == "" || value == "") exit 2
+                done = 0
+                blank = 0
+            }
             $0 ~ ("^" key "=") {
                 if (!done) {
                     print key "=" value
@@ -85,8 +98,12 @@ upsert_generated_secret() {
             }
             { blank = 0; print }
             END { if (!done) print key "=" value }
-        ' "$file" > "$tmp"
-        mv "$tmp" "$file"
+        ' "$file" > "$tmp"; then
+            rm -f "$tmp"
+            echo "error: failed to rewrite secrets file for ${key}" >&2
+            return 1
+        fi
+        mv -f "$tmp" "$file"
         chmod 600 "$file"
         echo "Replaced blank ${key}"
         return 0

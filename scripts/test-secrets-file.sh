@@ -13,7 +13,12 @@ fail() {
 }
 
 tmp="$(mktemp)"
-cleanup() { rm -f "$tmp"; }
+cleanup() {
+    rm -f "$tmp"
+    if [[ -n "${work:-}" ]]; then
+        rm -rf "$work"
+    fi
+}
 trap cleanup EXIT
 
 printf 'SURREALDB_RELAY_PASSWORD=\n\nSURREALDB_PASSWORD=keep-me\nENCRYPTION_KEY=keep-key\n' > "$tmp"
@@ -51,5 +56,30 @@ out4="$(upsert_generated_secret "$tmp" SURREALDB_RELAY_USER "scuffed_relay")"
 mode="$(stat -c %a "$tmp")"
 [[ "$mode" == "600" ]] || fail "mode after append is ${mode}"
 grep -q '^NOSTR_CHALLENGE_SECRET=already$' "$tmp" || fail "append clobbered a neighbor"
+
+# A value with shell metacharacters must round-trip, and the rewrite file
+# must not be left next to the secrets file or under /tmp.
+work="$(mktemp -d)"
+printf 'SURREALDB_RELAY_PASSWORD=\n' > "$work/secrets.env"
+odd='p@ss=word/with$dollar'\''quote'
+out5="$(upsert_generated_secret "$work/secrets.env" SURREALDB_RELAY_PASSWORD "$odd")"
+[[ "$out5" == "Replaced blank SURREALDB_RELAY_PASSWORD" ]] || fail "odd replace: ${out5}"
+[[ "$out5" != *"$odd"* ]] || fail "stdout contained the odd secret"
+got="$(grep -F 'SURREALDB_RELAY_PASSWORD=' "$work/secrets.env")"
+[[ "$got" == "SURREALDB_RELAY_PASSWORD=${odd}" ]] || fail "odd value was not stored exactly"
+if find "$work" -name '.secrets-rewrite.*' | grep -q .; then
+    fail "rewrite file was left behind"
+fi
+mode="$(stat -c %a "$work/secrets.env")"
+[[ "$mode" == "600" ]] || fail "mode after odd replace is ${mode}"
+
+lib="${SCRIPT_DIR}/lib/secrets-file.sh"
+if grep -q 'awk -v' "$lib"; then
+    fail "awk receives the secret with -v"
+fi
+grep -q 'mktemp "${dir}/.secrets-rewrite.XXXXXX"' "$lib" || fail "rewrite is not created beside the secrets file"
+if grep -E 'mktemp\)|mktemp"' "$lib" | grep -v '.secrets-rewrite' | grep -q mktemp; then
+    fail "a mktemp still targets the default temporary directory"
+fi
 
 echo "secrets file checks passed"
