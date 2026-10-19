@@ -13,7 +13,7 @@
 //! present value into the same sentence as its pinned fallback.
 
 use dioxus::prelude::*;
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use serde::Deserialize;
 
 /// Settled answer of `GET /api/nostr/health` field `configured`.
@@ -81,12 +81,30 @@ pub(crate) const HEALTH_FETCH_ATTEMPTS: u32 = 3;
 /// Pause between those tries. Short, so a blip does not sit on the check.
 pub(crate) const HEALTH_RETRY_BACKOFF_MS: u32 = 400;
 
-/// Backoff after `failed_attempts` failures. `None` means stop.
-pub(crate) fn health_retry_backoff_ms(failed_attempts: u32) -> Option<u32> {
-    if failed_attempts < HEALTH_FETCH_ATTEMPTS {
-        Some(HEALTH_RETRY_BACKOFF_MS)
-    } else {
-        None
+/// Milliseconds before another health fetch. `None` means stop.
+///
+/// `failed_attempts` counts this failure. Network errors and HTTP 5xx use
+/// the short pause. HTTP 429 waits for the `Retry-After` delay-seconds
+/// header and never the short pause. Other 4xx responses, a parse error,
+/// and a 429 with no usable `Retry-After` stop on the first failure.
+pub(crate) fn health_retry_delay_ms(error: &ClientError, failed_attempts: u32) -> Option<u32> {
+    if failed_attempts == 0 || failed_attempts >= HEALTH_FETCH_ATTEMPTS {
+        return None;
+    }
+    match error {
+        ClientError::Network(_) => Some(HEALTH_RETRY_BACKOFF_MS),
+        ClientError::Http {
+            status: 429,
+            retry_after,
+            ..
+        } => {
+            let seconds = (*retry_after)?;
+            u32::try_from(seconds.saturating_mul(1_000)).ok()
+        }
+        ClientError::Http { status, .. } if (500..600).contains(status) => {
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        }
+        _ => None,
     }
 }
 
@@ -137,18 +155,20 @@ fn test_fixed() -> Option<RelayAvailability> {
     TEST_FIXED.with(|slot| slot.get())
 }
 
-async fn pause_health_retry() {
+async fn pause_health_retry(delay_ms: u32) {
     #[cfg(target_arch = "wasm32")]
-    gloo_timers::future::TimeoutFuture::new(HEALTH_RETRY_BACKOFF_MS).await;
+    gloo_timers::future::TimeoutFuture::new(delay_ms).await;
     #[cfg(not(target_arch = "wasm32"))]
-    std::future::ready(()).await;
+    {
+        let _ = delay_ms;
+        std::future::ready(()).await;
+    }
 }
 
-async fn fetch_relay_health_once() -> Result<RelayHealthConfigured, String> {
+async fn fetch_relay_health_once() -> Result<RelayHealthConfigured, ClientError> {
     ApiClient::web()
         .fetch::<RelayHealthConfigured>("/api/nostr/health")
         .await
-        .map_err(|err| err.to_string())
 }
 
 async fn load_relay_health() -> Result<RelayHealthSnapshot, String> {
@@ -158,10 +178,10 @@ async fn load_relay_health() -> Result<RelayHealthSnapshot, String> {
             Ok(body) => return Ok(snapshot_from_body(body)),
             Err(err) => {
                 failed_attempts += 1;
-                if health_retry_backoff_ms(failed_attempts).is_none() {
-                    return Err(err);
-                }
-                pause_health_retry().await;
+                let Some(delay_ms) = health_retry_delay_ms(&err, failed_attempts) else {
+                    return Err(err.to_string());
+                };
+                pause_health_retry(delay_ms).await;
             }
         }
     }
@@ -258,13 +278,18 @@ mod tests {
         assert!(dm_may_sync(RelayAvailability::On, true));
     }
 
+    fn network_blip() -> ClientError {
+        ClientError::Network("offline".into())
+    }
+
     #[test]
     fn health_fetch_retries_a_few_times_then_stops() {
         let mut failures = 0u32;
         let mut pauses = Vec::new();
+        let blip = network_blip();
         loop {
             failures += 1;
-            match health_retry_backoff_ms(failures) {
+            match health_retry_delay_ms(&blip, failures) {
                 Some(ms) => pauses.push(ms),
                 None => break,
             }
@@ -272,6 +297,54 @@ mod tests {
         assert_eq!(failures, HEALTH_FETCH_ATTEMPTS);
         assert_eq!(pauses.len(), (HEALTH_FETCH_ATTEMPTS - 1) as usize);
         assert!(pauses.iter().all(|ms| *ms == HEALTH_RETRY_BACKOFF_MS));
+    }
+
+    #[test]
+    fn health_retry_skips_4xx_and_honors_retry_after_on_429() {
+        let server = |status, retry_after| ClientError::http(status, "nope", retry_after);
+
+        assert_eq!(
+            health_retry_delay_ms(&network_blip(), 1),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(500, None), 1),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(503, Some("9")), 2),
+            Some(HEALTH_RETRY_BACKOFF_MS)
+        );
+
+        for status in [400u16, 401, 403, 404, 409, 422] {
+            assert_eq!(
+                health_retry_delay_ms(&server(status, Some("5")), 1),
+                None,
+                "HTTP {status} is not retried"
+            );
+        }
+
+        let limited = health_retry_delay_ms(&server(429, Some("12")), 1);
+        assert_eq!(limited, Some(12_000));
+        assert_ne!(limited, Some(HEALTH_RETRY_BACKOFF_MS));
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("1")), 2),
+            Some(1_000)
+        );
+        assert_eq!(health_retry_delay_ms(&server(429, None), 1), None);
+        assert_eq!(health_retry_delay_ms(&server(429, Some("0")), 1), None);
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("Thu, 24 Sep 2026 08:02:00 GMT")), 1),
+            None
+        );
+        assert_eq!(
+            health_retry_delay_ms(&server(429, Some("12")), HEALTH_FETCH_ATTEMPTS),
+            None
+        );
+        assert_eq!(
+            health_retry_delay_ms(&ClientError::Deserialize("bad json".into()), 1),
+            None
+        );
     }
 
     #[test]
