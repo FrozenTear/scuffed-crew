@@ -194,6 +194,7 @@ async fn main() {
         nip05_republish_enabled: scuffed_site_server::state::nip05_republish_enabled_from_env(),
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
         leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+        nostr_status: scuffed_site_server::nostr_status::NostrStatus::new(),
     };
 
     // F-API-003: existing teams have no team_channel rows until backfill.
@@ -340,6 +341,7 @@ mod compression_shell {
             nip05_republish_enabled: false,
             public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
             leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+            nostr_status: scuffed_site_server::nostr_status::NostrStatus::new(),
         };
         // Same layer `main` puts around the router (`CompressionLayer::new()`).
         let app = create_router_with_dist(state, root.join("dist")).layer(CompressionLayer::new());

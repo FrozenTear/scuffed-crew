@@ -1541,6 +1541,10 @@ pub struct RelayHealthResponse {
     pub extra_relay_urls: Vec<String>,
     pub relay_info: Option<RelayInfoResponse>,
     pub forum_backend: String,
+    /// Highest published `stat-tracker-v*` version, prefix removed.
+    /// Omitted until a lookup has succeeded with a matching tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracker_latest: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1549,8 +1553,46 @@ pub struct RelayInfoResponse {
     pub description: Option<String>,
 }
 
-/// GET /api/nostr/health — relay connectivity and configuration status.
+/// GET /api/nostr/health: relay connectivity and configuration status.
+///
+/// The relay probe is cached for 30 seconds. `tracker_latest` comes from its
+/// own one-hour cache and is never awaited here.
 pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResponse> {
+    let now = std::time::Instant::now();
+    let snap = if let Some(hit) = state.nostr_status.cached_relay(now) {
+        hit
+    } else {
+        let fresh = load_relay_health(&state).await;
+        state
+            .nostr_status
+            .store_relay(std::time::Instant::now(), fresh.clone());
+        fresh
+    };
+    Json(relay_health_response(
+        snap,
+        state.nostr_status.tracker_latest(),
+    ))
+}
+
+fn relay_health_response(
+    snap: crate::nostr_status::RelayHealthSnapshot,
+    tracker_latest: Option<String>,
+) -> RelayHealthResponse {
+    RelayHealthResponse {
+        configured: snap.configured,
+        reachable: snap.reachable,
+        relay_url: snap.relay_url,
+        extra_relay_urls: snap.extra_relay_urls,
+        relay_info: snap.relay_info.map(|info| RelayInfoResponse {
+            name: info.name,
+            description: info.description,
+        }),
+        forum_backend: snap.forum_backend,
+        tracker_latest,
+    }
+}
+
+async fn load_relay_health(state: &AppState) -> crate::nostr_status::RelayHealthSnapshot {
     let settings = state.db.get_settings().await.ok();
     let forum_backend = settings
         .as_ref()
@@ -1569,18 +1611,15 @@ pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResp
 
     // Defense in depth: blank `Some("")` from a stale process or mis-set env
     // must not report configured (F-AUI-003). Prefer `relay_url_from_env` at boot.
-    let relay_url = match crate::state::normalize_relay_url(state.relay_url.clone()) {
-        Some(url) => url,
-        None => {
-            return Json(RelayHealthResponse {
-                configured: false,
-                reachable: false,
-                relay_url: None,
-                extra_relay_urls,
-                relay_info: None,
-                forum_backend,
-            });
-        }
+    let Some(relay_url) = crate::state::normalize_relay_url(state.relay_url.clone()) else {
+        return crate::nostr_status::RelayHealthSnapshot {
+            configured: false,
+            reachable: false,
+            relay_url: None,
+            extra_relay_urls,
+            relay_info: None,
+            forum_backend,
+        };
     };
 
     let http_url = relay_url
@@ -1598,14 +1637,14 @@ pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResp
         Err(_) => false,
     };
 
-    Json(RelayHealthResponse {
+    crate::nostr_status::RelayHealthSnapshot {
         configured: true,
         reachable,
         relay_url: Some(relay_url),
         extra_relay_urls,
         relay_info: None,
         forum_backend,
-    })
+    }
 }
 
 // ─── Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59) ───
