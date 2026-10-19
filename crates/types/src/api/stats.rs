@@ -128,8 +128,10 @@ pub const NAME_RECOGNIZER_ID_ERROR: &str =
 ///
 /// Omitted and `null` are unknown (`None`, stored as NONE). A string is kept
 /// only when [`is_recognizer_id`] accepts it. There is no allowlist and no
-/// default reader id. Expected values are `names-v1` and `ocr-v1`, but any
-/// later id of the same shape is stored.
+/// default reader id. The check is format only (`[a-z0-9.-]`, 1 to 32
+/// characters). Capitals and spaces are rejected, but a short lowercase token
+/// such as `player1` passes, so clients must send only reader ids such as
+/// `names-v1` or `ocr-v1`.
 pub fn resolve_name_recognizer(input: &RecognizerInput) -> Result<Option<String>, &'static str> {
     match input {
         RecognizerInput::Absent => Ok(None),
@@ -264,14 +266,12 @@ pub struct StatsUploadMatch {
     pub recognizer: RecognizerInput,
     /// Which reader found this player's own scoreboard row.
     ///
-    /// Expected values are `names-v1` and `ocr-v1`. The check is
-    /// [`is_recognizer_id`]: a format check, not an allowlist, and there is
-    /// no default. Omitted or null means the reader is unknown and is stored
-    /// as NONE.
-    ///
-    /// It accepts only recognizer ids in `[a-z0-9.-]`, 1 to 32 characters,
-    /// so free-form name text can't be stored. The field identifies only
-    /// which reader found the row.
+    /// Omitted or null means the reader is unknown and is stored as NONE.
+    /// There is no default. The check is format only (`[a-z0-9.-]`, 1 to 32
+    /// characters). Capitals and spaces are rejected, but a short lowercase
+    /// token such as `player1` passes, so clients must send only reader ids
+    /// such as `names-v1` or `ocr-v1`. The field identifies only which reader
+    /// found the row.
     pub name_recognizer: RecognizerInput,
     pub suspect_fields: SuspectFieldsInput,
 }
@@ -484,8 +484,8 @@ mod tests {
             resolve_name_recognizer(&RecognizerInput::Value("reader-v2".into())).unwrap(),
             Some("reader-v2".to_string())
         );
-        // Format only. A short lowercase token is stored, even when it
-        // looks like a name. Free-form text (spaces, capitals) is not.
+        // Format only. Capitals and spaces are rejected. A short lowercase
+        // token such as player1 passes.
         assert_eq!(
             resolve_name_recognizer(&RecognizerInput::Value("player1".into())).unwrap(),
             Some("player1".to_string())

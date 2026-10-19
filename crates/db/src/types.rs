@@ -551,9 +551,11 @@ pub struct PersonalMatch {
     ///
     /// `None` is unknown: the upload omitted `name_recognizer`, sent null, or
     /// the row was written before the column existed. JSON is null in that
-    /// case. The upload accepts only recognizer ids in `[a-z0-9.-]`, 1 to 32
-    /// characters, so free-form name text can't be stored. Returned on the
-    /// member's own match list, beside `recognizer`.
+    /// case. The check is format only (`[a-z0-9.-]`, 1 to 32 characters).
+    /// Capitals and spaces are rejected, but a short lowercase token such as
+    /// `player1` passes, so clients must send only reader ids such as
+    /// `names-v1` or `ocr-v1`. Returned on the member's own match list, beside
+    /// `recognizer`.
     #[serde(default)]
     pub name_recognizer: Option<String>,
     /// Names the tracker flagged as unsure on this player's own row.
