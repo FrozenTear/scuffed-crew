@@ -948,33 +948,43 @@ async fn repeated_wrong_account_delete_passwords_hit_429() {
         .unwrap();
     let app = create_router(state);
 
-    let mut invalid = 0;
-    for _ in 0..5 {
-        let (status, body, _) = oneshot(
-            &app,
-            "DELETE",
-            "/api/auth/me",
-            Some("pw-session"),
-            Some(json!({ "password": "wrong-password", "confirm": "Pw User" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-        assert_eq!(body["code"], "invalid_password");
-        invalid += 1;
+    // Burst is 5 and the bucket refills at 2 per second. A serial loop spends
+    // that refill inside argon2, so a slow hash lets the sixth request through
+    // as 401. These six start together, before any refill.
+    let barrier = Arc::new(tokio::sync::Barrier::new(6));
+    let mut tasks = Vec::with_capacity(6);
+    for _ in 0..6 {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            oneshot(
+                &app,
+                "DELETE",
+                "/api/auth/me",
+                Some("pw-session"),
+                Some(json!({ "password": "wrong-password", "confirm": "Pw User" })),
+            )
+            .await
+        }));
     }
-    let (status, body, retry_after) = oneshot(
-        &app,
-        "DELETE",
-        "/api/auth/me",
-        Some("pw-session"),
-        Some(json!({ "password": "wrong-password", "confirm": "Pw User" })),
-    )
-    .await;
+    let mut invalid = 0;
+    let mut limited = 0;
+    for task in tasks {
+        let (status, body, retry_after) = task.await.unwrap();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            limited += 1;
+            assert_eq!(body["error"], "rate_limited");
+            assert!(retry_after.unwrap_or(0) >= 1, "{body}");
+            assert!(body["retry_after"].as_u64().unwrap_or(0) >= 1, "{body}");
+        } else {
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body["code"], "invalid_password");
+            invalid += 1;
+        }
+    }
     assert_eq!(invalid, 5);
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert_eq!(body["error"], "rate_limited");
-    assert!(retry_after.unwrap_or(0) >= 1, "{body}");
-    assert!(body["retry_after"].as_u64().unwrap_or(0) >= 1, "{body}");
+    assert_eq!(limited, 1);
 
     // GET stays off the login governor, so a full bucket does not 429 the poll.
     let (status, body, _) = oneshot(&app, "GET", "/api/auth/me", Some("pw-session"), None).await;
