@@ -3203,8 +3203,10 @@ struct FrameAnalysis {
     map_panel_raw: Option<String>,
     /// `map_from_panel` is a sure banner read (`reader = "new"`).
     map_from_banner: bool,
-    /// Cropped scoreboard (portrait auto-collection reads from it). Shared
-    /// with the shadow worker when it is on, never copied.
+    /// Cropped scoreboard the portrait auto-collection reads from. On 5v5
+    /// this includes the downward pad so the bottom portrait fits. The
+    /// shadow worker gets the unpadded crop, and `debug/accepted` writes
+    /// that same unpadded crop ([`debug_accepted_board`]).
     scoreboard: Arc<image::DynamicImage>,
     /// The player's row index. ocr-v1: by name match or brightness
     /// highlight. `reader = "new"`: by the own-name seeds, the highlight
@@ -4880,9 +4882,20 @@ fn analyze_frame(
         }
         detect::hero_portrait::ScoreboardPreflight::Ready(team_size) => team_size,
     };
+    // 5v5's bottom portrait ends 7 px past the 1440p crop (y 1014 on a
+    // 1007 px image), so the slot code skips that row. The portrait match
+    // and the hero icon read use a crop extended downward, scaled from
+    // 1440p and clamped to the frame. Stat rows, the row scan and the
+    // digit reader keep `scoreboard`: they place rows from its height.
+    // 6v6 uses the same unpadded crop for both.
+    let portrait_board = if team_size == 5 {
+        Arc::new(ocr::preprocess::crop_scoreboard_for(&img, team_size))
+    } else {
+        Arc::clone(&scoreboard)
+    };
     // Pass team_size into portrait match + cell OCR so neither re-detects
     // size or re-crops the full scoreboard (P7).
-    let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
+    let player_match = matcher.match_player_hero_with_team_size(&portrait_board, team_size);
     let portrait_match = player_match
         .as_ref()
         .map(|(name, conf, _)| (name.clone(), *conf));
@@ -4923,7 +4936,7 @@ fn analyze_frame(
     // career hero's row is one of the own row's voices, and the same read
     // is the hero authority below. Never read under ocr-v1.
     let tab_heroes = read_tab_heroes(use_new_reader, || {
-        shadow::read_heroes(&img, &scoreboard, team_size)
+        shadow::read_heroes(&img, &portrait_board, team_size)
     });
     let OwnRowChoice {
         row_idx,
@@ -5075,7 +5088,7 @@ fn analyze_frame(
             team_size,
             img.height(),
         ),
-        scoreboard,
+        scoreboard: portrait_board,
         player_row_idx: row_idx,
         name_match,
         own_row,
@@ -7269,7 +7282,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             // Only with debug_ocr on: the crop shows other players' names.
-            save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img);
+            // The unpadded crop, not the 5v5 recognition image: offline
+            // replay places rows from crop height, and these files are the
+            // benchmark boards.
+            save_accepted_frame(ctx.debug_ocr, data_dir, debug_accepted_board(&frame_img));
             record_report_kit(
                 data_dir,
                 &target_session,
@@ -7579,11 +7595,21 @@ fn record_report_kit(
     });
 }
 
+/// The board written to `debug/accepted`: the unpadded scoreboard crop
+/// (1007 px tall at 1440p, 756 px at 1080p), taken from the same origin as
+/// [`ocr::preprocess::crop_scoreboard`]. Offline digit and ocr-v1 replay
+/// place rows from this height, and the saved boards are the benchmark
+/// source. The 5v5 bottom pad stays on the recognition image only.
+fn debug_accepted_board(frame: &image::DynamicImage) -> Arc<image::DynamicImage> {
+    Arc::new(ocr::preprocess::crop_scoreboard(frame))
+}
+
 /// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
 /// the only way to retune calibration). Only with `debug_ocr` on (`debug`):
-/// the crop is unblanked and shows other players' names. Fire-and-forget;
+/// the crop is unblanked and shows other players' names. Callers pass
+/// [`debug_accepted_board`], the unpadded crop. Fire-and-forget;
 /// encode off-runtime. The handle is for tests.
 fn save_accepted_frame(
     debug: bool,
@@ -11280,9 +11306,10 @@ mod tests {
         );
         // the icons are read once, behind the switch, before the own row
         // (O9b: the career hero's row is one of its voices), and that one
-        // read is the hero authority
+        // read is the hero authority. The image is the portrait crop: the
+        // 5v5 bottom pad, or the unpadded crop for 6v6.
         assert!(body.contains(
-            "let tab_heroes = read_tab_heroes(use_new_reader, || { shadow::read_heroes(&img, &scoreboard, team_size) });"
+            "let tab_heroes = read_tab_heroes(use_new_reader, || { shadow::read_heroes(&img, &portrait_board, team_size) });"
         ));
         assert!(body.contains("tab_heroes, row_idx, );"));
         assert!(
@@ -11858,6 +11885,88 @@ mod tests {
             rejected.len() == 1 && rejected[0].starts_with("rejected_unreadable_"),
             "rejected={rejected:?}"
         );
+    }
+
+    /// debug/accepted stores the unpadded crop. A 5v5 recognition image is
+    /// taller (1014 px at 1440p, 761 px at 1080p), and replaying that height
+    /// moves every row. The saved board keeps the unpadded size and the
+    /// same top-left pixel as the frame at the crop origin.
+    #[tokio::test]
+    async fn accepted_debug_board_saves_the_unpadded_crop() {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = include_str!("main.rs");
+        let prod = norm(src.split("\nmod tests {").next().unwrap());
+        assert!(
+            prod.contains(
+                "save_accepted_frame(ctx.debug_ocr, data_dir, debug_accepted_board(&frame_img))"
+            ),
+            "debug/accepted must save the unpadded crop"
+        );
+        assert!(
+            !prod.contains("save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img)"),
+            "the padded recognition image must not be the debug board"
+        );
+
+        for (w, h, origin, size) in [
+            (2560u32, 1440u32, (448u32, 216u32), (1664u32, 1007u32)),
+            (1920, 1080, (336, 162), (1248, 756)),
+        ] {
+            let (ox, oy) = origin;
+            let (cw, ch) = size;
+            assert_eq!(
+                stat_tracker::ocr::preprocess::crop_scoreboard_rect(w, h),
+                (ox, oy, cw, ch),
+                "{w}x{h}"
+            );
+            let padded = stat_tracker::ocr::preprocess::crop_scoreboard_rect_for(w, h, 5);
+            assert!(padded.3 > ch, "{w}x{h} 5v5 pad missing");
+
+            let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
+            img.put_pixel(ox, oy, image::Rgb([10, 20, 30]));
+            img.put_pixel(ox + cw - 1, oy + ch - 1, image::Rgb([40, 50, 60]));
+            // First row of the 5v5 pad, just under the unpadded crop.
+            img.put_pixel(ox, oy + ch, image::Rgb([255, 0, 0]));
+            let frame = image::DynamicImage::ImageRgb8(img);
+            let board = debug_accepted_board(&frame);
+            assert_eq!((board.width(), board.height()), (cw, ch), "{w}x{h}");
+            assert_eq!(
+                board.to_rgb8().get_pixel(0, 0).0,
+                [10, 20, 30],
+                "{w}x{h} origin"
+            );
+            assert_eq!(
+                board.to_rgb8().get_pixel(cw - 1, ch - 1).0,
+                [40, 50, 60],
+                "{w}x{h} bottom"
+            );
+
+            let dir = tempfile::tempdir().unwrap();
+            save_accepted_frame(true, dir.path(), std::sync::Arc::clone(&board))
+                .expect("debug on spawns the write")
+                .await
+                .unwrap();
+            let names = png_names(&dir.path().join("debug").join("accepted"));
+            assert_eq!(names.len(), 1, "{w}x{h} {names:?}");
+            let saved = image::open(dir.path().join("debug").join("accepted").join(&names[0]))
+                .unwrap()
+                .to_rgb8();
+            assert_eq!((saved.width(), saved.height()), (cw, ch), "{w}x{h}");
+            assert_eq!(
+                saved.get_pixel(0, 0).0,
+                [10, 20, 30],
+                "{w}x{h} saved origin"
+            );
+            assert_eq!(
+                saved.get_pixel(cw - 1, ch - 1).0,
+                [40, 50, 60],
+                "{w}x{h} saved bottom"
+            );
+            assert_ne!(
+                saved.get_pixel(0, ch - 1).0,
+                [255, 0, 0],
+                "{w}x{h} saved board includes the 5v5 pad"
+            );
+        }
     }
 
     #[test]
