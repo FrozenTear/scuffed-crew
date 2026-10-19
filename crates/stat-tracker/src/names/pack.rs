@@ -83,7 +83,9 @@ pub struct Params {
 impl Params {
     /// What the reader uses when the pack does not say: a gap of 0.25 to
     /// 0.40 cap heights makes the row abstain, 0.40 and wider is a space,
-    /// and a read needs a margin of at least 0.0125.
+    /// and a read needs a margin of at least 0.016 (on the labelled boards
+    /// 0.0125 fills more names but reads some wrong; a wrong name is worse
+    /// than none).
     pub const DEFAULT: Params = Params {
         rw: 0.15,
         slant: 0.22,
@@ -91,7 +93,7 @@ impl Params {
         mark_margin: 0.05,
         space_lo: 0.25,
         space_hi: 0.40,
-        min_confidence: 0.0125,
+        min_confidence: 0.016,
     };
 }
 
