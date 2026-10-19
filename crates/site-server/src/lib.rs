@@ -142,9 +142,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
-    // extractor the other governors use. POST /api/stats/upload is not on
-    // this IP bucket. It has its own governor, keyed by daemon token hash,
-    // wired on that route.
+    // extractor the other governors use.
     let token_check_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
@@ -159,6 +157,24 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             GovernorLayer::new(token_check_governor_config)
                 .error_handler(rate_limit::governor_error_response),
         );
+
+    // Same budget and the same trusted-proxy key extractor as the upload
+    // routes above, on its own bucket. A client cannot spray bearers faster
+    // than this. After the token is validated, the route also spends a
+    // per-token cell keyed by token id.
+    let stats_upload_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid stats upload ip governor config"),
+    );
+    #[cfg(test)]
+    let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
+        .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
+    #[cfg(not(test))]
+    let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
     // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
     // 10s). Filling this bucket does not block uploads or token-check.
@@ -472,10 +488,17 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Personal stats routes
         .route(
             "/api/stats/upload",
-            post(routes::stats::upload_stats).layer(middleware::from_fn_with_state(
-                stats_upload_limits::StatsUploadGovernor::new(),
-                stats_upload_limits::limit_stats_upload,
-            )),
+            post(routes::stats::upload_stats)
+                .layer::<_, std::convert::Infallible>(middleware::from_fn_with_state(
+                    stats_token_governor,
+                    stats_upload_limits::attach_stats_upload_governor,
+                ))
+                // Outer layer: refuse a hot IP before the handler validates
+                // the bearer or spends a per-token cell.
+                .layer::<_, std::convert::Infallible>(
+                    GovernorLayer::new(stats_upload_ip_config)
+                        .error_handler(rate_limit::governor_error_response),
+                ),
         )
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))

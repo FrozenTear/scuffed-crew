@@ -10,7 +10,6 @@ use crate::{with_timeout, Database, DbResult};
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbDaemonToken {
     #[surreal(default)]
-    #[allow(dead_code)]
     id: Option<RecordId>,
     member_id: String,
     token_hash: String,
@@ -24,13 +23,24 @@ struct DbDaemonToken {
     expires_at: Option<SurrealDatetime>,
 }
 
+fn daemon_token_id(id: Option<RecordId>) -> String {
+    id.map(|record| crate::record_id_key_to_string(record.key))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn expires_at_utc(value: Option<SurrealDatetime>) -> Option<chrono::DateTime<chrono::Utc>> {
+    value.map(chrono::DateTime::from)
+}
+
+/// Same rule as the list endpoint: a missing expiry is not expired.
+fn expiry_elapsed(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    expires_at.is_some_and(|at| at <= chrono::Utc::now())
+}
+
 fn db_to_token(db: DbDaemonToken) -> DaemonToken {
-    let id = db
-        .id
-        .map(|r| crate::record_id_key_to_string(r.key))
-        .unwrap_or_else(|| "unknown".to_string());
-    let expires_at = db.expires_at.map(chrono::DateTime::<chrono::Utc>::from);
-    let expired = expires_at.is_some_and(|at| at <= chrono::Utc::now());
+    let id = daemon_token_id(db.id);
+    let expires_at = expires_at_utc(db.expires_at);
+    let expired = expiry_elapsed(expires_at);
     DaemonToken {
         id,
         member_id: db.member_id,
@@ -48,17 +58,11 @@ const ACTIVE_DAEMON_SQL: &str =
     "SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true \
      AND (expires_at IS NONE OR expires_at > time::now())";
 
-/// Active token whose `expires_at` is set and not in the future.
-/// `NONE` is not expired. Does not include revoked rows.
-const EXPIRED_DAEMON_SQL: &str =
-    "SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true \
-     AND expires_at IS NOT NONE AND expires_at <= time::now()";
-
 /// Result of checking a presented daemon token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonTokenAuth {
-    /// Active member id. `last_used_at` was stamped.
-    Active(String),
+    /// Active token. `last_used_at` was stamped.
+    Active { member_id: String, token_id: String },
     /// Active row with `expires_at` at or before now. `last_used_at` was not stamped.
     Expired,
     /// Unknown, inactive, or otherwise not a usable token.
@@ -99,37 +103,36 @@ impl Database {
     pub async fn validate_daemon_token(&self, raw_token: &str) -> DbResult<DaemonTokenAuth> {
         with_timeout(async {
             let token_hash = hash_session_token(raw_token);
+            // One read. Expiry is decided in Rust from that row, so a token
+            // that crosses `expires_at` cannot come back as missing.
             let mut result = self
                 .client
-                .query(ACTIVE_DAEMON_SQL)
+                .query("SELECT * FROM daemon_token WHERE token_hash = $tok AND is_active = true")
                 .bind(("tok", token_hash.clone()))
                 .await?;
             let tokens: Vec<DbDaemonToken> = result.take(0)?;
-            if let Some(tok) = tokens.into_iter().next() {
-                self.client
-                    .query("UPDATE daemon_token SET last_used_at = time::now() WHERE token_hash = $tok")
-                    .bind(("tok", token_hash))
-                    .await?;
-                return Ok(DaemonTokenAuth::Active(tok.member_id));
+            let Some(tok) = tokens.into_iter().next() else {
+                return Ok(DaemonTokenAuth::Missing);
+            };
+            if expiry_elapsed(expires_at_utc(tok.expires_at)) {
+                return Ok(DaemonTokenAuth::Expired);
             }
-            let mut expired = self
-                .client
-                .query(EXPIRED_DAEMON_SQL)
+            self.client
+                .query("UPDATE daemon_token SET last_used_at = time::now() WHERE token_hash = $tok")
                 .bind(("tok", token_hash))
                 .await?;
-            let expired_rows: Vec<DbDaemonToken> = expired.take(0)?;
-            if expired_rows.is_empty() {
-                Ok(DaemonTokenAuth::Missing)
-            } else {
-                Ok(DaemonTokenAuth::Expired)
-            }
+            Ok(DaemonTokenAuth::Active {
+                member_id: tok.member_id,
+                token_id: daemon_token_id(tok.id),
+            })
         })
         .await
     }
 
-    /// Same match as [`Database::validate_daemon_token`] without writing `last_used_at`.
+    /// Active, unexpired token, without writing `last_used_at`.
     ///
     /// Pack downloads use this so a file fetch does not touch the database.
+    /// An expired token looks the same as a missing one.
     pub async fn lookup_daemon_token(&self, raw_token: &str) -> DbResult<Option<String>> {
         with_timeout(async {
             let token_hash = hash_session_token(raw_token);
@@ -235,10 +238,16 @@ mod tests {
             expires <= after + ttl + Duration::seconds(2),
             "expires {expires} is late"
         );
-        assert_eq!(
-            db.validate_daemon_token("fresh-token").await.unwrap(),
-            DaemonTokenAuth::Active("member-1".into())
-        );
+        match db.validate_daemon_token("fresh-token").await.unwrap() {
+            DaemonTokenAuth::Active {
+                member_id,
+                token_id,
+            } => {
+                assert_eq!(member_id, "member-1");
+                assert!(!token_id.is_empty());
+            }
+            other => panic!("expected active, got {other:?}"),
+        }
     }
 
     async fn insert_raw(db: &Database, raw: &str, label: &str, expires_sql: &str) {
@@ -267,10 +276,10 @@ mod tests {
         insert_raw(&db, "none-token", "none", "NONE").await;
         insert_raw(&db, "old-token", "old", "time::now() - 1d").await;
 
-        assert_eq!(
-            db.validate_daemon_token("none-token").await.unwrap(),
-            DaemonTokenAuth::Active("member-1".into())
-        );
+        match db.validate_daemon_token("none-token").await.unwrap() {
+            DaemonTokenAuth::Active { member_id, .. } => assert_eq!(member_id, "member-1"),
+            other => panic!("expected active, got {other:?}"),
+        }
         assert!(expiry_row(&db, "none").await.last_used_at.is_some());
         assert_eq!(
             db.validate_daemon_token("old-token").await.unwrap(),

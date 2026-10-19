@@ -34,7 +34,7 @@ Never ship with `root`/`root`. Migrations run as root during bootstrap only; the
 
 ## Stats upload limits
 
-`POST /api/stats/upload` always rate-limits each daemon token on its own: 10 requests, then one more every 6 seconds. The bucket is the token hash, not the client IP. Over the limit the response is `429` with `Retry-After` (seconds) and `{"code":"rate_limited"}`.
+`POST /api/stats/upload` has two always-on rate limits. Per client IP, the budget matches the other upload routes: 8 requests, then one more every 10 seconds. The key is the trusted-proxy client IP. Over that limit the response is `429` with `Retry-After` (seconds), `Cache-Control: no-store`, and `{"error":"rate_limited","retry_after":N}`. Per daemon token, after the token is validated: 10 requests, then one more every 6 seconds. The bucket is the token id. Unknown bearers do not create buckets, and idle buckets are pruned every 60 seconds. Over that limit the response is `429` with `Retry-After`, `Cache-Control: no-store`, and `{"code":"rate_limited"}`. The batch-cap `413` also sends `Cache-Control: no-store`.
 
 New daemon tokens expire 180 days after they are created. A token already stored with `expires_at` NONE keeps working. An expired token on upload or daemon-config is `401` `{"code":"token_expired"}`. Token-check and pack downloads still use one shared unauthorized body. These two limits are always on. They do not follow `STATS_UPLOAD_BATCH_CAP`.
 

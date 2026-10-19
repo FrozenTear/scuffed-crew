@@ -1,10 +1,10 @@
 //! Per-token governor and batch-cap flag for `POST /api/stats/upload`.
 //!
-//! The governor is always on. It is separate from the per-IP buckets: the
-//! key is the BLAKE3 hash of the bearer token, the same hash stored on
-//! `daemon_token`. Burst and replenish come from [`scuffed_types`]. A
-//! request with no `Bearer` token is not counted; the handler still returns
-//! the existing 401.
+//! The per-token governor is always on, and it is separate from the per-IP
+//! bucket on that route. A cell is spent only after `validate_daemon_token`
+//! returns an active token, and the key is that token's id. Unknown bearers
+//! do not create entries. Idle entries are pruned every 60 seconds. Burst
+//! and replenish come from [`scuffed_types`].
 //!
 //! The batch cap is off unless `STATS_UPLOAD_BATCH_CAP` classifies the same
 //! way as `PRODUCTION` ([`scuffed_auth::production_value_enabled`]).
@@ -18,13 +18,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use axum::Json;
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::Request;
+use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use governor::clock::Clock;
-use governor::{Quota, RateLimiter};
-use scuffed_auth::crypto::hash_session_token;
+use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use scuffed_types::{STATS_UPLOAD_TOKEN_BURST, STATS_UPLOAD_TOKEN_REPLENISH_SECS};
 
 /// `0` follows the env var, `1` forces the cap off, `2` forces it on.
@@ -84,39 +83,77 @@ pub fn stats_upload_batch_cap_enabled() -> bool {
     }
 }
 
-/// One decision of the upload governor: `Ok` spends a cell, `Err` is `Retry-After` seconds.
-type TokenAllowance = dyn Fn(&str) -> Result<(), u64> + Send + Sync;
+/// How often idle per-token buckets are dropped.
+const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
-/// Keyed governor for upload requests. Cloned cheaply; buckets are shared.
+fn token_quota() -> Quota {
+    let burst = std::num::NonZeroU32::new(STATS_UPLOAD_TOKEN_BURST).expect("burst is non-zero");
+    Quota::with_period(Duration::from_secs(STATS_UPLOAD_TOKEN_REPLENISH_SECS))
+        .expect("replenish period is non-zero")
+        .allow_burst(burst)
+}
+
+/// Keyed governor for validated daemon tokens. Cloned cheaply; buckets are shared.
 #[derive(Clone)]
 pub struct StatsUploadGovernor {
-    check: Arc<TokenAllowance>,
+    limiter: Arc<DefaultKeyedRateLimiter<String>>,
 }
 
 impl StatsUploadGovernor {
     pub fn new() -> Self {
-        let burst = std::num::NonZeroU32::new(STATS_UPLOAD_TOKEN_BURST).expect("burst is non-zero");
-        let quota = Quota::with_period(Duration::from_secs(STATS_UPLOAD_TOKEN_REPLENISH_SECS))
-            .expect("replenish period is non-zero")
-            .allow_burst(burst);
-        let limiter = RateLimiter::keyed(quota);
-        Self {
-            check: Arc::new(move |token_hash: &str| {
-                let key = token_hash.to_owned();
-                match limiter.check_key(&key) {
-                    Ok(_) => Ok(()),
-                    Err(not_until) => {
-                        let wait = not_until.wait_time_from(limiter.clock().now());
-                        Err(retry_after_secs(wait))
-                    }
-                }
-            }),
+        let limiter = Arc::new(RateLimiter::keyed(token_quota()));
+        spawn_prune(Arc::downgrade(&limiter));
+        Self { limiter }
+    }
+
+    /// Spend one cell for a token id that has already been validated.
+    pub(crate) fn allow(&self, token_id: &str) -> Result<(), u64> {
+        let key = token_id.to_owned();
+        match self.limiter.check_key(&key) {
+            Ok(_) => Ok(()),
+            Err(not_until) => {
+                let wait = not_until.wait_time_from(self.limiter.clock().now());
+                Err(retry_after_secs(wait))
+            }
         }
     }
 
-    fn allow(&self, token_hash: &str) -> Result<(), u64> {
-        (self.check)(token_hash)
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.limiter.len()
     }
+}
+
+fn spawn_prune(limiter: std::sync::Weak<DefaultKeyedRateLimiter<String>>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(PRUNE_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static GOVERNOR_OVERRIDE: std::cell::Cell<Option<StatsUploadGovernor>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Next `create_router` call uses this governor instead of a fresh one.
+#[cfg(test)]
+pub(crate) fn override_stats_upload_governor(governor: StatsUploadGovernor) {
+    GOVERNOR_OVERRIDE.with(|slot| slot.set(Some(governor)));
+}
+
+#[cfg(test)]
+pub(crate) fn take_stats_upload_governor_override() -> Option<StatsUploadGovernor> {
+    GOVERNOR_OVERRIDE.with(|slot| slot.take())
 }
 
 /// Whole seconds until one cell is free. A fractional wait rounds up so a
@@ -131,35 +168,27 @@ fn retry_after_secs(wait: Duration) -> u64 {
     rounded.max(1)
 }
 
-fn bearer_token_hash(headers: &HeaderMap) -> Option<String> {
-    let raw = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| !token.is_empty())?;
-    Some(hash_session_token(raw))
-}
-
-/// Axum layer state for [`limit_stats_upload`].
-pub async fn limit_stats_upload(
-    State(governor): State<StatsUploadGovernor>,
-    request: Request,
+/// Puts the per-token governor on the request for [`crate::routes::stats::upload_stats`].
+///
+/// This does not spend a cell. The handler spends one only after the bearer
+/// has been validated, keyed by token id.
+pub async fn attach_stats_upload_governor(
+    axum::extract::State(governor): axum::extract::State<StatsUploadGovernor>,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(token_hash) = bearer_token_hash(request.headers()) else {
-        return next.run(request).await;
-    };
-    match governor.allow(&token_hash) {
-        Ok(()) => next.run(request).await,
-        Err(secs) => rate_limited_response(secs),
-    }
+    request.extensions_mut().insert(governor);
+    next.run(request).await
 }
 
-fn rate_limited_response(secs: u64) -> Response {
+pub(crate) fn token_rate_limited_response(secs: u64) -> Response {
     let secs = secs.max(1);
     (
         StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, secs.to_string())],
+        [
+            (header::RETRY_AFTER, secs.to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
         Json(serde_json::json!({"code": "rate_limited"})),
     )
         .into_response()
@@ -167,7 +196,14 @@ fn rate_limited_response(secs: u64) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use governor::RateLimiter;
+    use governor::clock::FakeRelativeClock;
+    use scuffed_types::STATS_UPLOAD_TOKEN_REPLENISH_SECS;
+
     use super::batch_cap_from_env_value;
+    use super::token_quota;
 
     #[test]
     fn batch_cap_flag_matches_production_parsing() {
@@ -186,5 +222,22 @@ mod tests {
                 "expected on for {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn idle_token_key_is_pruned_once_the_bucket_is_full() {
+        let clock = FakeRelativeClock::default();
+        let limiter = RateLimiter::dashmap_with_clock(token_quota(), clock.clone());
+        limiter.check_key(&"token-id".to_string()).unwrap();
+        assert_eq!(limiter.len(), 1);
+        limiter.retain_recent();
+        assert_eq!(limiter.len(), 1, "a key that just spent a cell stays");
+        clock.advance(Duration::from_secs(STATS_UPLOAD_TOKEN_REPLENISH_SECS));
+        limiter.retain_recent();
+        assert_eq!(limiter.len(), 1, "one replenish period is not idle yet");
+        clock.advance(Duration::from_secs(STATS_UPLOAD_TOKEN_REPLENISH_SECS));
+        limiter.retain_recent();
+        limiter.shrink_to_fit();
+        assert_eq!(limiter.len(), 0, "an idle key is dropped");
     }
 }

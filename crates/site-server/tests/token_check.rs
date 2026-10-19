@@ -439,7 +439,15 @@ async fn upload_daemon_401_is_not_stored() {
         }
         let response = app
             .clone()
-            .oneshot(builder.body(Body::from("{}")).unwrap())
+            .oneshot(
+                builder
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [203, 0, 113, 77],
+                        9,
+                    ))))
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(

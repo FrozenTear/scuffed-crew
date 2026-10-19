@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -71,6 +71,7 @@ fn batch_too_large() -> UploadReject {
         Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
             .body(axum::body::Body::from(body))
             .expect("batch_too_large response"),
     ))
@@ -79,9 +80,16 @@ fn batch_too_large() -> UploadReject {
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 pub(crate) async fn upload_stats(
     State(state): State<AppState>,
+    Extension(governor): Extension<crate::stats_upload_limits::StatsUploadGovernor>,
     daemon: DaemonUser,
     Json(body): Json<StatsUploadBody>,
 ) -> Result<Json<StatsUploadResponse>, UploadReject> {
+    if let Err(secs) = governor.allow(&daemon.token_id) {
+        return Err(UploadReject(Box::new(
+            crate::stats_upload_limits::token_rate_limited_response(secs),
+        )));
+    }
+
     if crate::stats_upload_limits::stats_upload_batch_cap_enabled() && batch_over_cap(&body) {
         return Err(batch_too_large());
     }
@@ -646,7 +654,10 @@ fn generate_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode, header};
     use chrono::{TimeZone, Utc};
     use http_body_util::BodyExt;
@@ -681,18 +692,27 @@ mod tests {
         }
     }
 
+    fn upload_request(token: &str, body: Vec<u8>, peer: Ipv4Addr) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(ConnectInfo(SocketAddr::new(IpAddr::V4(peer), 9)))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
     async fn post_upload(
         app: axum::Router,
         token: &str,
         body: &StatsUploadRequest,
     ) -> (StatusCode, StatsUploadResponse) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap();
+        let req = upload_request(
+            token,
+            serde_json::to_vec(body).unwrap(),
+            Ipv4Addr::LOCALHOST,
+        );
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -788,13 +808,11 @@ mod tests {
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+        let req = upload_request(
+            token,
+            serde_json::to_vec(&body).unwrap(),
+            Ipv4Addr::LOCALHOST,
+        );
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1582,13 +1600,16 @@ mod tests {
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, axum::http::HeaderMap, String) {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/stats/upload")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
+        post_text_from(app, token, body, Ipv4Addr::LOCALHOST).await
+    }
+
+    async fn post_text_from(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+        peer: Ipv4Addr,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let req = upload_request(token, serde_json::to_vec(&body).unwrap(), peer);
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -1667,9 +1688,16 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{text}");
             assert_eq!(state.db.count_table("personal_match").await.unwrap(), 1);
 
-            let (status, _, text) = post_text(app.clone(), &token, matches_body("over", 201)).await;
+            let (status, headers, text) =
+                post_text(app.clone(), &token, matches_body("over", 201)).await;
             assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
             assert_eq!(text, BATCH_TOO_LARGE);
+            assert_eq!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store")
+            );
             assert_eq!(
                 state.db.count_table("personal_match").await.unwrap(),
                 1,
@@ -1679,7 +1707,7 @@ mod tests {
             let mut deleted: Vec<String> = (0..500).map(|i| format!("gone-{i}")).collect();
             deleted.push("keep-0".into());
             assert_eq!(deleted.len(), 501);
-            let (status, _, text) = post_text(
+            let (status, headers, text) = post_text(
                 app,
                 &token,
                 serde_json::json!({ "matches": [], "deleted_sessions": deleted }),
@@ -1687,6 +1715,12 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{text}");
             assert_eq!(text, BATCH_TOO_LARGE);
+            assert_eq!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store")
+            );
             let rows = state
                 .db
                 .list_personal_matches(&member_id, 10, 0)
@@ -1720,15 +1754,31 @@ mod tests {
         let app = create_router(state.clone());
 
         for i in 0..10 {
-            let (status, _, text) =
-                post_text(app.clone(), token, matches_body(&format!("b{i}"), 1)).await;
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                token,
+                matches_body(&format!("b{i}"), 1),
+                Ipv4Addr::new(10, 2, 0, i + 1),
+            )
+            .await;
             assert_eq!(status, StatusCode::OK, "request {i}: {text}");
         }
 
-        let (status, headers, text) =
-            post_text(app.clone(), token, matches_body("blocked", 1)).await;
+        let (status, headers, text) = post_text_from(
+            app.clone(),
+            token,
+            matches_body("blocked", 1),
+            Ipv4Addr::new(10, 2, 0, 11),
+        )
+        .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
         assert_eq!(text, r#"{"code":"rate_limited"}"#);
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
         let retry = headers
             .get(header::RETRY_AFTER)
             .expect("Retry-After")
@@ -1742,9 +1792,90 @@ mod tests {
             "the limited request must not write"
         );
 
-        let (status, _, text) = post_text(app, other, matches_body("other", 1)).await;
+        let (status, _, text) = post_text_from(
+            app,
+            other,
+            matches_body("other", 1),
+            Ipv4Addr::new(10, 2, 0, 12),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "other token: {text}");
         assert_eq!(state.db.count_table("personal_match").await.unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn fake_bearers_leave_the_token_limiter_empty() {
+        let (state, _member_id, live, _session) = member_reader().await;
+        let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
+        crate::stats_upload_limits::override_stats_upload_governor(governor.clone());
+        let app = create_router(state);
+
+        for i in 1..=30u8 {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                &format!("made-up-{i}"),
+                matches_body("nope", 1),
+                Ipv4Addr::new(198, 51, 100, i),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+        }
+        assert_eq!(
+            governor.len(),
+            0,
+            "unknown bearers must not create limiter entries"
+        );
+
+        let (status, _, text) = post_text_from(
+            app,
+            &live,
+            matches_body("live", 1),
+            Ipv4Addr::new(203, 0, 113, 20),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(governor.len(), 1, "one validated token id is one entry");
+    }
+
+    #[tokio::test]
+    async fn upload_ip_limit_returns_governor_429() {
+        let (state, _member_id, token) = daemon().await;
+        let governor = crate::stats_upload_limits::StatsUploadGovernor::new();
+        crate::stats_upload_limits::override_stats_upload_governor(governor.clone());
+        let app = create_router(state);
+        let peer = Ipv4Addr::new(203, 0, 113, 40);
+
+        for i in 0..8 {
+            let (status, _, text) = post_text_from(
+                app.clone(),
+                &token,
+                matches_body(&format!("ip{i}"), 1),
+                peer,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "request {i}: {text}");
+        }
+
+        let (status, headers, text) =
+            post_text_from(app, &token, matches_body("ip-blocked", 1), peer).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"], "rate_limited");
+        let retry = body["retry_after"].as_u64().expect("retry_after");
+        assert!(retry >= 1, "retry_after={retry}");
+        assert_eq!(
+            headers
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(retry.to_string().as_str())
+        );
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(governor.len(), 1);
     }
 
     #[tokio::test]

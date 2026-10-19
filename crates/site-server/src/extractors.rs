@@ -186,6 +186,8 @@ impl FromRequestParts<AppState> for AdminUser {
 /// Extractor: daemon token authentication (stat-tracker uploads).
 pub struct DaemonUser {
     pub member: Member,
+    /// Record id of the validated daemon token. Empty for the read-only pack lookup.
+    pub token_id: String,
 }
 
 /// 401 body for `GET /api/stats/token-check`.
@@ -311,21 +313,27 @@ async fn authenticate_daemon(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| unauthorized(unauthorized_mode.missing()))?;
 
-    let member_id = match lookup {
+    let (member_id, token_id) = match lookup {
         DaemonLookup::StampLastUsed => match state.db.validate_daemon_token(auth_header).await {
-            Ok(DaemonTokenAuth::Active(id)) => id,
+            Ok(DaemonTokenAuth::Active {
+                member_id,
+                token_id,
+            }) => (member_id, token_id),
             Ok(DaemonTokenAuth::Expired) => return Err(expired_unauthorized(unauthorized_mode)),
             Ok(DaemonTokenAuth::Missing) => {
                 return Err(unauthorized(unauthorized_mode.rejected()));
             }
             Err(_e) => return Err(internal_error()),
         },
-        DaemonLookup::ReadOnly => state
-            .db
-            .lookup_daemon_token(auth_header)
-            .await
-            .map_err(|_e| internal_error())?
-            .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?,
+        DaemonLookup::ReadOnly => (
+            state
+                .db
+                .lookup_daemon_token(auth_header)
+                .await
+                .map_err(|_e| internal_error())?
+                .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?,
+            String::new(),
+        ),
     };
 
     let member = state
@@ -349,7 +357,7 @@ async fn authenticate_daemon(
         return Err(forbidden("Member is suspended or banned"));
     }
 
-    Ok(DaemonUser { member })
+    Ok(DaemonUser { member, token_id })
 }
 
 impl FromRequestParts<AppState> for DaemonUser {
@@ -384,7 +392,7 @@ impl FromRequestParts<AppState> for OpaqueDaemonUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let DaemonUser { member } = authenticate_daemon(
+        let DaemonUser { member, .. } = authenticate_daemon(
             parts,
             state,
             DaemonUnauthorized::Opaque,
@@ -480,7 +488,7 @@ impl FromRequestParts<AppState> for ReportCreator {
         if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
             return Err(session_reject.into_response());
         }
-        let DaemonUser { member } = authenticate_daemon(
+        let DaemonUser { member, .. } = authenticate_daemon(
             parts,
             state,
             DaemonUnauthorized::Opaque,
