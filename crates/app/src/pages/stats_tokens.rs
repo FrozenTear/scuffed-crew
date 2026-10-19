@@ -15,7 +15,7 @@ use crate::state::use_auth;
 
 const TOKEN_EXPIRY_NOTE: &str = "New sync tokens expire after 180 days.";
 
-const PENDING_TOKEN_COPY: &str = "Your tracker stats are set to be deleted. Undo that on your account settings page first, then create a new token.";
+const PENDING_TOKEN_COPY: &str = "Your tracker stats are set to be deleted. Undo that on your Edit Profile page first, then create a new token.";
 
 fn token_create_is_stats_delete_pending(err: &ClientError) -> bool {
     err.http_status() == Some(409)
@@ -24,7 +24,7 @@ fn token_create_is_stats_delete_pending(err: &ClientError) -> bool {
 
 fn pending_token_parts() -> (&'static str, &'static str) {
     PENDING_TOKEN_COPY
-        .split_once("account settings")
+        .split_once("Edit Profile")
         .unwrap_or((PENDING_TOKEN_COPY, ""))
 }
 
@@ -333,7 +333,7 @@ pub fn StatsTokens() -> Element {
 
         div { class: "tokens-page",
             div { class: "admin-toolbar",
-                h1 { "Daemon Tokens" }
+                h1 { "Sync Tokens" }
                 button {
                     class: "btn-add",
                     disabled: block_create,
@@ -345,7 +345,7 @@ pub fn StatsTokens() -> Element {
             if block_create {
                 p { class: "tokens-note", role: "alert",
                     "{pending_before}"
-                    Link { to: Route::ProfileSettings {}, "account settings" }
+                    Link { to: Route::ProfileSettings {}, "Edit Profile" }
                     "{pending_after}"
                 }
             }
@@ -360,9 +360,9 @@ pub fn StatsTokens() -> Element {
                 let data = tokens.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => member_pending(&auth(), &tokens, "daemon tokens"),
+                    None => member_pending(&auth(), &tokens, "sync tokens"),
                     Some(list) if list.is_empty() => rsx! {
-                        p { class: "empty-state", "No daemon tokens yet. Create one to start uploading stats." }
+                        p { class: "empty-state", "No sync tokens yet. Create one to start uploading stats." }
                     },
                     Some(list) => rsx! {
                         DataTable { headers: vec!["Label", "Status", "Created", "Last Used", "Actions"],
@@ -400,7 +400,7 @@ pub fn StatsTokens() -> Element {
             }
 
             FormModal {
-                title: "Create Daemon Token".to_string(),
+                title: "Create Sync Token".to_string(),
                 open: modal.is_open(),
                 submitting: modal.is_submitting(),
                 on_close: on_close,
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_stats_delete_maps_to_the_account_settings_notice() {
+    fn pending_stats_delete_maps_to_the_edit_profile_notice() {
         let pending = ClientError::http(409, r#"{"code":"stats_delete_pending"}"#, None);
         assert!(token_create_is_stats_delete_pending(&pending));
         assert!(!token_create_is_stats_delete_pending(&ClientError::http(
@@ -566,18 +566,24 @@ mod tests {
         )));
         assert_eq!(
             PENDING_TOKEN_COPY,
-            "Your tracker stats are set to be deleted. Undo that on your account settings page first, then create a new token."
+            "Your tracker stats are set to be deleted. Undo that on your Edit Profile page first, then create a new token."
         );
         let (before, after) = pending_token_parts();
-        assert_eq!(
-            format!("{before}account settings{after}"),
-            PENDING_TOKEN_COPY
-        );
+        assert_eq!(format!("{before}Edit Profile{after}"), PENDING_TOKEN_COPY);
         assert_plain_copy(PENDING_TOKEN_COPY);
         assert_eq!(TOKEN_EXPIRY_NOTE, "New sync tokens expire after 180 days.");
         assert_plain_copy(TOKEN_EXPIRY_NOTE);
         let src = include_str!("stats_tokens.rs");
-        assert!(src.contains("Route::ProfileSettings"));
-        assert!(src.contains("disabled: block_create"));
+        let ui = src.split("mod tests").next().unwrap_or(src);
+        assert!(ui.contains("Route::ProfileSettings"));
+        assert!(ui.contains("disabled: block_create"));
+        assert!(ui.contains("Sync Tokens"));
+        assert!(ui.contains("Create Sync Token"));
+        assert!(!ui.contains("Daemon Token"));
+        assert!(include_str!("../routes.rs").contains("#[route(\"/stats/tokens\")]"));
+        let stats = include_str!("stats/mod.rs");
+        let stats_ui = stats.split("mod tests").next().unwrap_or(stats);
+        assert_eq!(stats_ui.matches("\"Sync Tokens\"").count(), 2);
+        assert!(!stats_ui.contains("Daemon Tokens"));
     }
 }

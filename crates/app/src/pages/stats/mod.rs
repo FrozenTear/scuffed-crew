@@ -1251,7 +1251,7 @@ pub fn Stats() -> Element {
                         if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
                     }
                     Link { to: Route::Leaderboards {}, "Leaderboards" }
-                    Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                    Link { to: Route::StatsTokens {}, "Sync Tokens" }
                 }
             }
 
@@ -1271,7 +1271,7 @@ pub fn Stats() -> Element {
                             onclick: move |_| setup_open.toggle(),
                             if setup_open() { "Hide instructions" } else { "Reinstall instructions" }
                         }
-                        Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                        Link { to: Route::StatsTokens {}, "Sync Tokens" }
                     }
                 }
             }

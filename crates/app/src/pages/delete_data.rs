@@ -41,8 +41,7 @@ pub(crate) const LAST_ADMIN_COPY: &str =
 
 pub(crate) const ACCOUNT_DELETED_COPY: &str = "Your account was deleted.";
 
-pub(crate) const STATS_RESTORED_COPY: &str =
-    "Your stats are back. Your tracker was signed out, so create a new sync token to keep syncing.";
+pub(crate) const STATS_RESTORED_COPY: &str = "Your stats are back. Undo did not restore your sync tokens. Make a new one on the Sync Tokens page.";
 
 const INVALID_PASSWORD_COPY: &str = "That password is wrong.";
 const REAUTH_COPY: &str = "For safety, sign out and sign in again, then delete within 10 minutes.";
@@ -73,13 +72,12 @@ struct DeleteDialogCopy {
 const DELETE_LISTS: DeleteDialogCopy = DeleteDialogCopy {
     stats: DeleteLists {
         removes: &[
-            "Personal tracker matches",
-            "Hero, role, and map rows",
-            "Tracker tokens",
+            "Tracker stats are hidden now and deleted in 7 days, along with stat reports and their files.",
+            "Every sync token on every PC is revoked now. Undo does not restore them. After you undo, make a new one on the Sync Tokens page.",
         ],
         stays: &[
             "Your account",
-            "Your profile, game accounts, and the rest of the site",
+            "Forum posts, the wiki, direct messages, and game accounts",
             TRACKER_LOCAL_COPY,
         ],
     },
@@ -497,10 +495,20 @@ pub(crate) fn format_deletion_date(iso: &str) -> String {
 }
 
 pub(crate) fn pending_delete_banner_text(iso: &str) -> String {
+    let dated = if utc_calendar_date(iso).is_some() {
+        format!(", on {}", format_deletion_date(iso))
+    } else {
+        String::new()
+    };
     format!(
-        "Your tracker stats are hidden and set to be deleted on {}.",
-        format_deletion_date(iso)
+        "Your tracker stats are hidden now and will be deleted in 7 days{dated}, along with stat reports and their files. Every sync token on every PC was revoked now. Undo does not restore them. After you undo, make a new one on the Sync Tokens page."
     )
+}
+
+fn restored_copy_parts() -> (&'static str, &'static str) {
+    STATS_RESTORED_COPY
+        .split_once("Sync Tokens")
+        .unwrap_or((STATS_RESTORED_COPY, ""))
 }
 
 fn count_label(key: &str) -> &str {
@@ -515,7 +523,7 @@ pub(crate) fn stats_delete_notice(resp: &DeleteMyStatsResponse) -> String {
     if resp.is_scheduled() {
         let mut message = match present_schedule(resp.stats_delete_scheduled_at.as_deref()) {
             Some(iso) => pending_delete_banner_text(&iso),
-            None => "Your tracker stats are hidden and set to be deleted.".to_string(),
+            None => pending_delete_banner_text(""),
         };
         if let Some(tokens) = resp.tokens_revoked {
             message.push_str(&format!(" Tokens revoked: {tokens}."));
@@ -639,6 +647,7 @@ pub fn PendingStatsDeletionBanner(
     let pending = present_schedule(scheduled_at.as_deref());
     let show_pending = phase() == BannerPhase::Follow && pending.is_some();
     let show_restored = phase() == BannerPhase::Restored;
+    let (restored_before, restored_after) = restored_copy_parts();
     let undo = move |_| {
         if busy() {
             return;
@@ -682,9 +691,9 @@ pub fn PendingStatsDeletionBanner(
         div { class: "delete-data-banner", role: "region", aria_label: "Tracker stats deletion",
             if show_restored {
                 p { role: "status",
-                    "Your stats are back. Your tracker was signed out, so create a new "
-                    Link { to: Route::StatsTokens {}, "sync token" }
-                    " to keep syncing."
+                    "{restored_before}"
+                    Link { to: Route::StatsTokens {}, "Sync Tokens" }
+                    "{restored_after}"
                 }
             } else if let Some(iso) = pending.filter(|_| show_pending) {
                 p { role: "status", "{pending_delete_banner_text(&iso)}" }
@@ -1346,13 +1355,18 @@ mod tests {
             r#"{"scheduled":true,"stats_delete_scheduled_at":"2026-10-26T15:04:05Z","tokens_revoked":1}"#,
         )
         .unwrap();
+        let scheduled_copy = "Your tracker stats are hidden now and will be deleted in 7 days, on October 26, 2026, along with stat reports and their files. Every sync token on every PC was revoked now. Undo does not restore them. After you undo, make a new one on the Sync Tokens page.";
         assert_eq!(
             stats_delete_notice(&scheduled),
-            "Your tracker stats are hidden and set to be deleted on October 26, 2026. Tokens revoked: 1."
+            format!("{scheduled_copy} Tokens revoked: 1.")
         );
         assert_eq!(
             pending_delete_banner_text("2026-10-26T15:04:05Z"),
-            "Your tracker stats are hidden and set to be deleted on October 26, 2026."
+            scheduled_copy
+        );
+        assert_eq!(
+            pending_delete_banner_text("not-a-date"),
+            "Your tracker stats are hidden now and will be deleted in 7 days, along with stat reports and their files. Every sync token on every PC was revoked now. Undo does not restore them. After you undo, make a new one on the Sync Tokens page."
         );
         assert_eq!(present_schedule(Some("  ")), None);
         assert_eq!(present_schedule(None), None);
@@ -1410,6 +1424,35 @@ mod tests {
             assert!(stays.contains(phrase), "kept copy missing {phrase}");
         }
         assert!(DELETE_LISTS.stats.stays.contains(&TRACKER_LOCAL_COPY));
+        let stats_removes = DELETE_LISTS.stats.removes.join(" ");
+        let stats_stays = DELETE_LISTS.stats.stays.join(" ");
+        assert!(stats_removes.contains("hidden now"));
+        assert!(stats_removes.contains("deleted in 7 days"));
+        assert!(stats_removes.contains("stat reports and their files"));
+        assert!(stats_removes.contains("revoked now"));
+        assert!(stats_removes.contains("Undo does not restore them"));
+        assert!(stats_removes.contains("Sync Tokens page"));
+        for phrase in ["forum", "direct message", "wiki", "game account"] {
+            assert!(
+                !stats_removes.to_ascii_lowercase().contains(phrase),
+                "stats delete must not list {phrase} as removed"
+            );
+        }
+        for phrase in [
+            "Your account",
+            "Forum posts",
+            "the wiki",
+            "direct messages",
+            "game accounts",
+        ] {
+            assert!(stats_stays.contains(phrase), "stats stays missing {phrase}");
+        }
+        assert_eq!(
+            STATS_RESTORED_COPY,
+            "Your stats are back. Undo did not restore your sync tokens. Make a new one on the Sync Tokens page."
+        );
+        let (before, after) = restored_copy_parts();
+        assert_eq!(format!("{before}Sync Tokens{after}"), STATS_RESTORED_COPY);
         assert_plain(STATS_RESTORED_COPY);
         assert_plain(ACCOUNT_DELETED_COPY);
         assert_plain(LAST_ADMIN_COPY);
