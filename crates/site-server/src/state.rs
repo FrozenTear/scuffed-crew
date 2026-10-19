@@ -79,6 +79,9 @@ pub struct AppState {
     pub public_settings: PublicSettingsCache,
     /// In-process public leaderboard cache. See [`crate::leaderboard_cache`].
     pub leaderboard_cache: crate::leaderboard_cache::LeaderboardCache,
+    /// Relay-health cache (30s) and stat-tracker release cache (1h).
+    /// See [`crate::nostr_status`].
+    pub nostr_status: crate::nostr_status::NostrStatus,
 }
 
 /// How long a cached public-settings blob may be served before a re-read.

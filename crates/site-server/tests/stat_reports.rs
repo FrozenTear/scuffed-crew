@@ -109,6 +109,7 @@ async fn harness_enabled(reports_enabled: bool) -> Harness {
         nip05_republish_enabled: false,
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
         leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+        nostr_status: scuffed_site_server::nostr_status::NostrStatus::new(),
     };
     let app = create_router(state.clone());
     Harness {

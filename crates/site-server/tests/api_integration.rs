@@ -60,6 +60,7 @@ async fn test_state() -> AppState {
         nip05_republish_enabled: false,
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
         leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+        nostr_status: scuffed_site_server::nostr_status::NostrStatus::new(),
     }
 }
 
@@ -208,25 +209,33 @@ async fn seed_all_roles(db: &Database) {
 }
 
 /// Build a request with Bearer token authentication.
+///
+/// ConnectInfo matches production (`into_make_service_with_connect_info`).
+/// Anonymous-capable GETs sit on the public governor, so a signed-in caller
+/// still needs a peer or the limiter answers 500.
 fn authed_request(method: Method, uri: &str, token: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::empty())
-        .unwrap()
+    rate_limit_ip(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json"),
+    )
+    .body(Body::empty())
+    .unwrap()
 }
 
 /// Build a JSON request with body and Bearer token authentication.
 fn authed_json_request(method: Method, uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
+    rate_limit_ip(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json"),
+    )
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap()
 }
 
 /// Build an unauthenticated request.
@@ -2483,6 +2492,53 @@ async fn health_is_never_rate_limited() {
     assert!(
         !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
         "health must stay outside every governor (liveness probes)"
+    );
+}
+
+/// Anonymous content GETs share the public bucket. Health does not, and a
+/// spent bucket must not turn an authenticated write into 429.
+#[tokio::test]
+async fn anonymous_content_get_is_governed_and_health_is_not() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/api/settings", 80).await;
+    assert_eq!(
+        seen[0],
+        StatusCode::OK,
+        "the first settings read must not be throttled"
+    );
+    assert!(
+        seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "GET /api/settings must hit the public governor, saw {:?}",
+        seen.last()
+    );
+
+    let health = hammer(&app, "/api/health", 80).await;
+    assert!(
+        !health.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "health stays outside the public governor after that bucket is spent"
+    );
+
+    let write = app
+        .clone()
+        .oneshot(unauthed_request(Method::PUT, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(
+        write.status(),
+        StatusCode::UNAUTHORIZED,
+        "PUT /api/settings stays on the auth router"
+    );
+
+    let admin_list = app
+        .oneshot(unauthed_request(Method::GET, "/api/articles/admin/all"))
+        .await
+        .unwrap();
+    assert_eq!(
+        admin_list.status(),
+        StatusCode::UNAUTHORIZED,
+        "officer article list must not share the public bucket"
     );
 }
 
@@ -7328,6 +7384,10 @@ async fn nostr_health_unconfigured_when_relay_url_none() {
     assert_eq!(json["configured"], false);
     assert_eq!(json["reachable"], false);
     assert!(json["relay_url"].is_null());
+    assert!(
+        json.get("tracker_latest").is_none(),
+        "a cold tracker cache omits tracker_latest: {json}"
+    );
 }
 
 #[tokio::test]

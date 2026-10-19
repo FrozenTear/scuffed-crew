@@ -102,6 +102,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
         nip05_republish_enabled: false,
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
         leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
+        nostr_status: scuffed_site_server::nostr_status::NostrStatus::new(),
     }
 }
 
@@ -119,6 +120,10 @@ async fn exchange_bytes(
             Request::builder()
                 .method(method)
                 .uri(uri)
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    9,
+                ))))
                 .body(Body::empty())
                 .unwrap(),
         )
