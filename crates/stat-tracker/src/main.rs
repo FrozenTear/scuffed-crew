@@ -22161,35 +22161,54 @@ mod tests {
         tabs: Vec<(u64, O10Cells, Option<detect::own_row::OwnRow>)>,
     ) -> (SessionState, Vec<O10Tab>) {
         let mut now = test_now();
+        let mut st = o10_session(now);
+        let mut seen = Vec::new();
+        for (gap, cells, own_row) in tabs {
+            seen.push(o10_tab(ctx, &mut st, &mut now, gap, cells, own_row).await);
+        }
+        (st, seen)
+    }
+
+    /// The session [`o10_run_rows`] starts from: a game open as "o10" on
+    /// Busan.
+    fn o10_session(now: Instant) -> SessionState {
         let mut active = game(detect::MatchOutcome::Unknown, None, now);
         active.session_id = "o10".into();
         active.map = Some("Busan".into());
         active.map_source = Some(boundary::MapSource::TopBar);
         active.session_created = false;
-        let mut st = session(Some(active), now);
-        let mut seen = Vec::new();
-        for (gap, cells, own_row) in tabs {
-            now += Duration::from_secs(gap);
-            let mut analysis = o8_analysis(None, Some("ana"));
-            analysis.own_row = own_row;
-            *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
-                analysis,
-                board: Some(o10_board(cells)),
-            });
-            let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
-            let sid = req.session_id.clone();
-            let report = handle_capture(ctx, req).await.unwrap();
-            seen.push(O10Tab {
-                recorded: report.recorded,
-                pending: report.pending(),
-                split: report.split,
-                deferred: report.armed_reset,
-                refresh_baseline: report.refresh_baseline,
-                session_id: report.session_id.clone(),
-            });
-            apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, &sid, Ok(report), now).await;
-        }
-        (st, seen)
+        session(Some(active), now)
+    }
+
+    /// One Tab of [`o10_run_rows`], `gap` seconds after the one before it.
+    async fn o10_tab(
+        ctx: &DaemonCtx,
+        st: &mut SessionState,
+        now: &mut Instant,
+        gap: u64,
+        cells: O10Cells,
+        own_row: Option<detect::own_row::OwnRow>,
+    ) -> O10Tab {
+        *now += Duration::from_secs(gap);
+        let mut analysis = o8_analysis(None, Some("ana"));
+        analysis.own_row = own_row;
+        *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+            analysis,
+            board: Some(o10_board(cells)),
+        });
+        let req = build_capture_request(st.active_game.as_ref().unwrap(), false, *now);
+        let sid = req.session_id.clone();
+        let report = handle_capture(ctx, req).await.unwrap();
+        let tab = O10Tab {
+            recorded: report.recorded,
+            pending: report.pending(),
+            split: report.split,
+            deferred: report.armed_reset,
+            refresh_baseline: report.refresh_baseline,
+            session_id: report.session_id.clone(),
+        };
+        apply_capture_report(st, &ctx.store, &ctx.data_dir, &sid, Ok(report), *now).await;
+        tab
     }
 
     async fn o10_rows(ctx: &DaemonCtx, session_id: &str) -> Vec<[u32; 6]> {
@@ -22303,38 +22322,128 @@ mod tests {
         let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(dir.path(), true).await;
+        let mut now = test_now();
+        let mut st = o10_session(now);
+        let mut seen = Vec::new();
+        seen.push(
+            o10_tab(
+                &ctx,
+                &mut st,
+                &mut now,
+                0,
+                all_sure([4, 6, 2, 900, 3143, 300]),
+                None,
+            )
+            .await,
+        );
+        let held_h = [
+            sure(5),
+            sure(7),
+            sure(2),
+            sure(1000),
+            Some((5298, true)),
+            sure(320),
+        ];
+        seen.push(o10_tab(&ctx, &mut st, &mut now, 60, held_h, None).await);
+        // read 2 stored the unsure 5298, flagged, and the game remembers it
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(o10_stats(&rows[1]), [5, 7, 2, 1000, 5298, 320]);
+        assert_eq!(rows[1].suspect_fields, vec!["h".to_string()]);
+        let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+        assert_eq!(
+            gate.accepted.healing, 3143,
+            "the gate keeps its accepted value"
+        );
+        assert!(gate.has_unsure_shown[4]);
+        assert_eq!(gate.unsure_shown[4], 5298);
+        assert!(!gate.has_unsure_shown[..4].iter().any(|&shown| shown));
+        assert!(!gate.has_unsure_shown[5]);
+        // a restart between reads 2 and 3: the saved game is reloaded with
+        // the shown value
+        let recovered = recover_active_game(dir.path()).expect("the saved game reloads");
+        let gate = recovered.gate.expect("the reloaded game keeps its gate");
+        assert!(gate.has_unsure_shown[4]);
+        assert_eq!(gate.unsure_shown[4], 5298);
+        assert_eq!(gate.accepted.healing, 3143);
+        st.active_game = Some(recovered);
+        // read 3 is all sure, with healing below the stored 5298 (still
+        // above the accepted 3143): stored, and flagged as lowered
+        seen.push(
+            o10_tab(
+                &ctx,
+                &mut st,
+                &mut now,
+                20,
+                all_sure([5, 7, 2, 1050, 5200, 330]),
+                None,
+            )
+            .await,
+        );
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        assert!(seen.iter().all(|tab| !tab.split), "{seen:?}");
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(o10_stats(&rows[2]), [5, 7, 2, 1050, 5200, 330]);
+        assert_eq!(rows[2].suspect_fields, vec!["h".to_string()]);
+        // a sure read clears the mark
+        let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+        assert!(!gate.has_unsure_shown.iter().any(|&shown| shown));
+    }
+
+    /// Unsure reads stored for held deaths and damage sit above the game's
+    /// accepted values. A later sure board below them, still at or above the
+    /// accepted values, is the same game: no split, one session, and the
+    /// sure row names the stats that went down from the stored row.
+    #[tokio::test]
+    async fn a_sure_board_below_stored_unsure_reads_stays_one_game_and_is_flagged() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
         let (st, seen) = o10_run(
             &ctx,
             vec![
-                (0, all_sure([4, 6, 2, 900, 3143, 300])),
+                (0, all_sure([4, 6, 2, 900, 3000, 300])),
                 (
                     60,
                     [
                         sure(5),
                         sure(7),
-                        sure(2),
-                        sure(1000),
-                        Some((5298, true)),
+                        Some((3, true)),
+                        Some((1500, true)),
+                        sure(3100),
                         sure(320),
                     ],
                 ),
-                (20, all_sure([5, 7, 2, 1050, 5200, 330])),
+                (20, all_sure([5, 7, 2, 1200, 3150, 330])),
             ],
         )
         .await;
         assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
-        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
-        assert_eq!(o10_stats(&rows[1])[4], 5298);
-        assert_eq!(o10_stats(&rows[2])[4], 5200);
-        assert_eq!(rows[2].suspect_fields, vec!["h".to_string()]);
-        // the shown value survives a restart with the persisted game
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(active_game_path(dir.path())).unwrap()).unwrap();
+        assert!(seen.iter().all(|tab| !tab.split), "{seen:?}");
+        assert!(seen.iter().all(|tab| !tab.deferred), "{seen:?}");
+        assert!(seen.iter().all(|tab| tab.session_id == "o10"), "{seen:?}");
         assert_eq!(
-            persisted["gate"]["has_unsure_shown"],
-            serde_json::json!([false, false, false, false, false, false])
+            st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            Some("o10")
         );
-        let _ = st;
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        let stats: Vec<[u32; 6]> = rows.iter().map(o10_stats).collect();
+        assert_eq!(
+            stats,
+            vec![
+                [4, 6, 2, 900, 3000, 300],
+                [5, 7, 3, 1500, 3100, 320],
+                [5, 7, 2, 1200, 3150, 330],
+            ]
+        );
+        assert_eq!(
+            rows[1].suspect_fields,
+            vec!["d".to_string(), "dmg".to_string()]
+        );
+        assert_eq!(
+            rows[2].suspect_fields,
+            vec!["d".to_string(), "dmg".to_string()]
+        );
     }
 
     /// F266-1: a stat column the game has never read is a placeholder, and a
