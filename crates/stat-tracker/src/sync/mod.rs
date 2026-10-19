@@ -18,18 +18,14 @@ pub const SYNC_TOKEN_EXPIRED_STATUS: &str = "Sync token expired, relink in Setti
 
 /// Matches per stats upload. The server rejects a larger body with HTTP 413
 /// `batch_too_large`. This client stays at or under the cap, and shrinks
-/// further when a 413 names a smaller one.
-///
-/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_MATCHES` once that PR is
-/// on main, so this cap cannot drift from the server.
-pub const SYNC_UPLOAD_MAX_MATCHES: usize = 200;
+/// further when a 413 names a smaller one. Same value as
+/// [`scuffed_types::STATS_UPLOAD_MAX_MATCHES`].
+pub const SYNC_UPLOAD_MAX_MATCHES: usize = scuffed_types::STATS_UPLOAD_MAX_MATCHES;
 
 /// Deleted session ids per stats upload. Same 413 path as
-/// [`SYNC_UPLOAD_MAX_MATCHES`].
-///
-/// TODO(#372): use `scuffed_types::STATS_UPLOAD_MAX_DELETED_SESSIONS` once
-/// that PR is on main.
-pub const SYNC_UPLOAD_MAX_DELETES: usize = 500;
+/// [`SYNC_UPLOAD_MAX_MATCHES`]. Same value as
+/// [`scuffed_types::STATS_UPLOAD_MAX_DELETED_SESSIONS`].
+pub const SYNC_UPLOAD_MAX_DELETES: usize = scuffed_types::STATS_UPLOAD_MAX_DELETED_SESSIONS;
 
 /// Upload chunk sizes for one process. Starts at the client caps and only
 /// falls, for the life of the [`SyncClient`] that holds them.
