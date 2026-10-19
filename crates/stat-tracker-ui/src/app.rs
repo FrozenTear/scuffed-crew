@@ -2729,18 +2729,28 @@ fn uninstall_dialog_escape(
     notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
 }
 
+/// A pid that is already gone, or that is not the tracker, is not a running
+/// tracker. Killing it was refused on purpose. Uninstall can continue.
+/// `disable --now` inside [`crate::uninstall::apply`] is what stops a unit
+/// systemd restarted after the old pid exited. Aborting on that new pid
+/// skipped the disable and removed nothing.
+fn uninstall_stop_is_already_stopped(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("not running")
+        || lower.contains("not the tracker")
+        || lower.contains("this window")
+        || lower.contains("no such process")
+}
+
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
 ) -> Result<crate::uninstall::UninstallReport, String> {
     match daemon::stop_daemon(&req.data_dir).await {
         Ok(()) => {}
-        Err(err) if err == "Tracker is not running" => {}
+        Err(err) if uninstall_stop_is_already_stopped(&err) => {}
         Err(_) => {
             return Err("Could not stop the tracker. Nothing was removed.".into());
         }
-    }
-    if daemon::daemon_running(&req.data_dir).is_some() {
-        return Err("The tracker is still running. Nothing was removed.".into());
     }
     crate::uninstall::apply(&req)
 }
@@ -2872,6 +2882,28 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
+        assert!(super::uninstall_stop_is_already_stopped(
+            "Tracker is not running"
+        ));
+        assert!(super::uninstall_stop_is_already_stopped(
+            "Saved process id is not the tracker, not stopping it"
+        ));
+        assert!(super::uninstall_stop_is_already_stopped(
+            "Refusing to stop this window's process"
+        ));
+        assert!(super::uninstall_stop_is_already_stopped(
+            "Could not stop the tracker: No such process"
+        ));
+        assert!(!super::uninstall_stop_is_already_stopped(
+            "Tracker is still shutting down, not starting another copy"
+        ));
+        assert!(!super::uninstall_stop_is_already_stopped(
+            "Could not stop the tracker: Permission denied"
+        ));
+    }
 
     #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {

@@ -14,6 +14,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use iced::widget::{button, checkbox, column, container, opaque, row, scrollable, text};
 use iced::{Alignment, Element, Fill, Length, Padding};
@@ -669,7 +670,7 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
     }
 
     // Stop the service and any timer before any file is unlinked.
-    stop_units(&req.systemctl)?;
+    stop_units(&req.systemctl, &req.home)?;
 
     let plan = removal_plan(&req.home, &req.prefix, req.appimage.as_deref());
     let mut removed: Vec<PathBuf> = Vec::new();
@@ -773,31 +774,84 @@ fn plain_list(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-fn stop_units(systemctl: &Path) -> Result<(), String> {
-    if !systemctl_exists(systemctl) {
-        return Err("Could not stop the tracker. Nothing was removed.".into());
-    }
+const STOP_FAILED: &str = "Could not stop the tracker. Nothing was removed.";
+const STILL_RUNNING: &str = "The tracker is still running. Nothing was removed.";
+/// Internal only. `stop_units` turns this into success when no unit file exists.
+const STOP_NOT_INSTALLED: &str = "systemctl-not-installed";
+
+/// Spawn glitches and a unit that is briefly still active. `disable --now`
+/// itself waits for the unit; this only covers a failed spawn or a second
+/// look at `is-active`.
+const STOP_ATTEMPTS: u32 = 6;
+const STOP_PAUSE: Duration = Duration::from_millis(40);
+
+fn stop_units(systemctl: &Path, home: &Path) -> Result<(), String> {
     for unit in units_to_disable() {
-        let output = run_systemctl(systemctl, &["--user", "disable", "--now", unit.as_str()])?;
-        if !output.status.success() && !unit_is_missing(&output) {
-            return Err("Could not stop the tracker. Nothing was removed.".into());
-        }
-        if unit == "scuffed-stat-tracker.service" {
-            let active = run_systemctl(systemctl, &["--user", "is-active", unit.as_str()])?;
-            let state = String::from_utf8_lossy(&active.stdout);
-            if active.status.success() && state.trim() == "active" {
-                return Err("The tracker is still running. Nothing was removed.".into());
+        match stop_one_unit(systemctl, &unit) {
+            Ok(()) => {}
+            Err(err) if err == STOP_NOT_INSTALLED => {
+                // No systemctl binary. A confirmed-absent unit file means
+                // nothing is installed to stop. Any other stat result (the
+                // file is there, or the stat itself failed) refuses removal.
+                if unit_file_is_absent(&user_unit_file(home)) {
+                    return Ok(());
+                }
+                return Err(STOP_FAILED.into());
             }
+            Err(err) => return Err(err),
         }
     }
     Ok(())
 }
 
-fn systemctl_exists(path: &Path) -> bool {
-    if path.components().count() == 1 {
-        return Command::new(path).arg("--version").output().is_ok();
+fn user_unit_file(home: &Path) -> PathBuf {
+    home.join(".config/systemd/user/scuffed-stat-tracker.service")
+}
+
+/// True only when the path is confirmed missing. A stat error is not absence.
+fn unit_file_is_absent(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+fn stop_one_unit(systemctl: &Path, unit: &str) -> Result<(), String> {
+    let mut saw_active = false;
+    for attempt in 0..STOP_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(STOP_PAUSE);
+        }
+        // `STOP_NOT_INSTALLED` propagates so `stop_units` can allow a
+        // machine with no unit file through.
+        let output = run_systemctl(systemctl, &["--user", "disable", "--now", unit])?;
+        if output.status.success() || unit_is_missing(&output) {
+            if unit == "scuffed-stat-tracker.service" && service_is_active(systemctl, unit) {
+                saw_active = true;
+                continue;
+            }
+            return Ok(());
+        }
+        if output_is_transient(&output) {
+            continue;
+        }
+        return Err(STOP_FAILED.into());
     }
-    path.is_file()
+    if saw_active {
+        Err(STILL_RUNNING.into())
+    } else {
+        Err(STOP_FAILED.into())
+    }
+}
+
+/// `is-active` prints `active` only while the service is still up.
+/// A missing binary, a missing unit, or any other answer is not active.
+fn service_is_active(systemctl: &Path, unit: &str) -> bool {
+    let Ok(active) = run_systemctl(systemctl, &["--user", "is-active", unit]) else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&active.stdout);
+    matches!(state.trim(), "active" | "activating" | "reloading")
 }
 
 fn unit_is_missing(output: &std::process::Output) -> bool {
@@ -817,11 +871,56 @@ fn unit_is_missing(output: &std::process::Output) -> bool {
         || lower.contains("failed to connect to user scope")
 }
 
+fn output_is_transient(output: &std::process::Output) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let lower = text.to_ascii_lowercase();
+    lower.contains("temporarily unavailable")
+        || lower.contains("text file busy")
+        || lower.contains("too many open files")
+        || lower.contains("transaction is destructive")
+        || lower.contains("connection timed out")
+        || lower.contains("connection reset")
+}
+
+fn io_is_transient(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ExecutableFileBusy
+    ) || matches!(err.raw_os_error(), Some(10 | 11 | 23 | 24 | 26))
+}
+
+/// A one-component name is a PATH lookup. An absolute stand-in is present
+/// only when its inode can be stat'd.
+fn binary_is_present(path: &Path) -> bool {
+    path.components().count() > 1 && fs::symlink_metadata(path).is_ok()
+}
+
 fn run_systemctl(bin: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(bin)
-        .args(args)
-        .output()
-        .map_err(|_| "Could not stop the tracker. Nothing was removed.".to_string())
+    for attempt in 0..STOP_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(STOP_PAUSE);
+        }
+        match Command::new(bin).args(args).output() {
+            Ok(output) => return Ok(output),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && !binary_is_present(bin) => {
+                return Err(STOP_NOT_INSTALLED.into());
+            }
+            Err(err) if io_is_transient(&err) || err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(STOP_FAILED.into()),
+        }
+    }
+    if binary_is_present(bin) {
+        Err(STOP_FAILED.into())
+    } else {
+        Err(STOP_NOT_INSTALLED.into())
+    }
 }
 
 fn lib_dir(home: &Path, prefix: &Path) -> Option<PathBuf> {
@@ -1379,7 +1478,7 @@ mod tests {
         write(
             &systemctl,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$2\" = disable ]; then\n  if [ ! -f '{}' ]; then echo UNIT_MISSING >> '{}'; exit 1; fi\nfi\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$2\" = disable ]; then\n  if [ ! -f '{}' ]; then echo UNIT_MISSING >> '{}'; echo 'Unit not found' >&2; exit 1; fi\nfi\nexit 0\n",
                 log.display(),
                 unit.display(),
                 log.display()
@@ -2047,6 +2146,132 @@ mod tests {
         let err = apply(&req).unwrap_err();
         assert!(err.contains("still running"), "{err}");
         assert!(prefix.join("bin/stat-tracker-gui").is_file());
+    }
+
+    /// The checkbox test's stand-in used to exit 1 with an empty stderr when
+    /// the unit file was already gone. That is "not installed", and it must
+    /// not block removal. This is the failure CI hit.
+    #[test]
+    fn missing_unit_file_does_not_block_uninstall() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let unit = spec_path(&home, &prefix, PathClass::Unit);
+        fs::remove_file(&unit).unwrap();
+        let exe = prefix.join("bin/stat-tracker-gui");
+        apply(&request(&home, &prefix, false, decide(&exe, &home, None))).unwrap();
+        assert!(!exe.exists());
+        let log = fs::read_to_string(home.join("systemctl.log")).unwrap();
+        assert!(log.contains("UNIT_MISSING"), "{log}");
+    }
+
+    /// A one-shot "text file busy" / "temporarily unavailable" from systemctl
+    /// used to abort the uninstall. The stop is retried, then files go.
+    #[test]
+    fn transient_stop_failure_is_retried_then_files_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        let count = home.join("systemctl.count");
+        write(
+            &req.systemctl,
+            &format!(
+                "#!/bin/sh\nn=0\nif [ -f '{count}' ]; then n=$(cat '{count}'); fi\nn=$((n + 1))\nprintf '%s\\n' \"$n\" > '{count}'\nif [ \"$2\" = disable ] && [ \"$n\" -eq 1 ]; then echo 'Resource temporarily unavailable' >&2; exit 1; fi\nexit 0\n",
+                count = count.display()
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&req.systemctl, perms).unwrap();
+        }
+        apply(&req).unwrap();
+        let attempts: u32 = fs::read_to_string(&count).unwrap().trim().parse().unwrap();
+        assert!(
+            attempts > 1,
+            "a transient systemctl failure must be retried, attempts={attempts}"
+        );
+        assert!(!prefix.join("bin/stat-tracker-gui").exists());
+    }
+
+    #[test]
+    fn permission_denied_from_systemctl_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        write(
+            &req.systemctl,
+            "#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&req.systemctl, perms).unwrap();
+        }
+        let err = apply(&req).unwrap_err();
+        assert!(err.contains("Could not stop the tracker"), "{err}");
+        assert!(prefix.join("bin/stat-tracker-gui").is_file());
+    }
+
+    #[test]
+    fn missing_systemctl_with_no_unit_file_still_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        fs::remove_file(&req.systemctl).unwrap();
+        fs::remove_file(user_unit_file(&home)).unwrap();
+        apply(&req).unwrap();
+        assert!(!prefix.join("bin/stat-tracker-gui").exists());
+    }
+
+    #[test]
+    fn missing_systemctl_with_a_unit_file_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        fs::remove_file(&req.systemctl).unwrap();
+        let err = apply(&req).unwrap_err();
+        assert!(err.contains("Could not stop the tracker"), "{err}");
+        assert!(prefix.join("bin/stat-tracker-gui").is_file());
+        assert!(user_unit_file(&home).is_file());
     }
 
     #[test]
