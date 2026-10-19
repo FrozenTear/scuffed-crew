@@ -1296,6 +1296,108 @@ mod game {
         assert!(zip.images.is_empty());
     }
 
+    /// The kit is saved at Tab time, before the result screen, so its own
+    /// result read is unknown. The stored game later says defeat. The
+    /// manifest must say defeat. alpha.10 copied the Tab read; #316 fills
+    /// the result from the stored row when the report is built.
+    #[test]
+    fn a_kit_with_an_unknown_result_reports_the_stored_defeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut kit_reads = reads(Some(6));
+        kit_reads.result = Some("unknown".into());
+        let result = kit_reads.reads.get_mut("result").unwrap();
+        result.value = Some("unknown".into());
+        result.ocr_v1 = Some("unknown".into());
+        result.suspect = true;
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &kit_reads).unwrap();
+        let on_disk = kit::load(tmp.path(), "sess-1");
+        assert_eq!(
+            on_disk.reads.as_ref().and_then(|r| r.result.as_deref()),
+            Some("unknown"),
+            "the kit still holds the Tab read"
+        );
+
+        let played = surrealdb_types::Datetime::from(t("2026-10-09T12:05:00Z"));
+        let snapshot = crate::storage::Snapshot {
+            matches: vec![crate::storage::PersonalMatch {
+                id: None,
+                hero: "Ana".into(),
+                map_name: "Ilios".into(),
+                game_mode: "Control".into(),
+                role: "Support".into(),
+                outcome: "defeat".into(),
+                elims: 7,
+                deaths: 3,
+                assists: 4,
+                damage: 1000,
+                healing: 2000,
+                mitigation: 0,
+                played_at: played,
+                synced: false,
+                sync_rev: 0,
+                upload_reject: None,
+                session_id: "sess-1".into(),
+                corrected_hero: None,
+                corrected_role: None,
+                corrected_map_name: None,
+                corrected_outcome: None,
+                corrected_elims: None,
+                corrected_deaths: None,
+                corrected_assists: None,
+                corrected_damage: None,
+                corrected_healing: None,
+                corrected_mitigation: None,
+                edited_fields: Vec::new(),
+                edited_at: None,
+                heroes_played: Vec::new(),
+                segment_resolutions: Vec::new(),
+                recognizer: "cv-v7".into(),
+                suspect_fields: Vec::new(),
+            }],
+            sessions: Vec::new(),
+        };
+        std::fs::write(
+            tmp.path().join("live_snapshot.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+
+        let config = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::Config::default()
+        };
+        let input = GameReportInput::from_config(
+            &config,
+            "sess-1",
+            GameCategory::WrongResult,
+            String::new(),
+            CaptureBackend::None,
+            false,
+            Vec::new(),
+            t("2026-10-09T13:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            kit::load(tmp.path(), "sess-1")
+                .reads
+                .as_ref()
+                .and_then(|r| r.result.as_deref()),
+            Some("unknown"),
+            "building the report does not rewrite the Tab kit"
+        );
+
+        let zip = build_game_report(&input).unwrap();
+        let files = unzip(&zip.bytes);
+        let m: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+        assert_eq!(m["game"]["result"], "defeat");
+        assert_eq!(m["reads"]["result"]["value"], "defeat");
+        assert_eq!(
+            m["reads"]["result"]["ocr_v1"], "unknown",
+            "the Tab read stays beside the stored result"
+        );
+        assert_eq!(m["session_id"], "sess-1");
+    }
+
     #[test]
     fn categories_match_the_validator_list() {
         let ids: Vec<_> = GameCategory::ALL.iter().map(|c| c.as_str()).collect();

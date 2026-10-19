@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use image::{DynamicImage, ImageEncoder};
@@ -72,10 +72,13 @@ fn layouts_match(
 
 /// Drop a below-floor column calibration. Above-floor entries stay.
 /// Called when a game ends so the next game can calibrate a clean board.
+/// A poisoned lock still clears: the guard is recovered and the entry is
+/// dropped.
 pub fn clear_below_floor_column_cache() {
-    if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock()
-        && guard.as_ref().is_some_and(|cached| cached.below_floor)
-    {
+    let mut guard = COLUMN_OFFSET_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if guard.as_ref().is_some_and(|cached| cached.below_floor) {
         *guard = None;
     }
 }
@@ -244,9 +247,28 @@ fn ocr_pool() -> Result<&'static rayon::ThreadPool, gate::OcrOff> {
 // 20-30s of CPU and lagged the game. Reusing one instance per (thread, lang)
 // drops each call to ~6ms. PSM, whitelist and image are reset on every call,
 // so a prior call's settings never leak into the next.
+//
+// This process asks for `eng` and, when the custom tessdata is installed,
+// `koverwatch`. [`TESS_CACHE_CAP`] is both of those. A further language
+// replaces one already stored so the map cannot grow.
+const TESS_CACHE_CAP: usize = 2;
+
 thread_local! {
     static TESS_CACHE: RefCell<HashMap<&'static str, leptess::LepTess>> =
         RefCell::new(HashMap::new());
+}
+
+/// Make room for `lang` when the per-thread cache is already full. A language
+/// that is already stored is left in place. `eng` is never dropped: the
+/// other entry goes instead. The caller inserts `lang` next.
+fn reserve_tess_slot<T>(cache: &mut HashMap<&'static str, T>, lang: &'static str) {
+    if cache.contains_key(lang) || cache.len() < TESS_CACHE_CAP {
+        return;
+    }
+    let drop_key = cache.keys().copied().find(|key| *key != "eng");
+    if let Some(drop_key) = drop_key {
+        cache.remove(drop_key);
+    }
 }
 
 /// Tesseract calls made on this thread so far (tests). A path that must run
@@ -284,6 +306,7 @@ fn ocr_with(
     TESS_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if !cache.contains_key(lang) {
+            reserve_tess_slot(&mut cache, lang);
             let path = tessdata_path_for_lang(lang);
             let path_str = path.as_ref().and_then(|p| p.to_str());
             let mut lt = leptess::LepTess::new(path_str, lang)?;
@@ -2603,6 +2626,99 @@ mod tests {
             .and_then(|guard| guard.as_ref().map(|cached| cached.below_floor));
         assert_eq!(kept, Some(false), "an above-floor entry stays");
         FORCED_CELL_SCORE.with(|slot| slot.set(None));
+    }
+
+    /// A panicked calibration poisons the cache lock. Game end still drops
+    /// the below-floor entry.
+    #[test]
+    fn a_poisoned_column_cache_lock_still_clears_a_below_floor_entry() {
+        let _hold = calib_test_guard();
+        {
+            let mut guard = COLUMN_OFFSET_CACHE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = Some(CalibCache {
+                width: 1400,
+                height: 860,
+                team_size: 5,
+                offset: 0.0,
+                below_floor: true,
+                anchored: false,
+                score: 0,
+                layout: None,
+            });
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = COLUMN_OFFSET_CACHE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("poison the column cache");
+        }));
+        assert!(COLUMN_OFFSET_CACHE.lock().is_err(), "the lock is poisoned");
+        clear_below_floor_column_cache();
+        let cleared = COLUMN_OFFSET_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            cleared.is_none(),
+            "a poisoned lock still drops the below-floor entry"
+        );
+        drop(cleared);
+        COLUMN_OFFSET_CACHE.clear_poison();
+    }
+
+    /// `eng` and `koverwatch` are the only languages this process asks for.
+    /// A third language replaces one already stored. The cap is pinned so a
+    /// larger pool cannot land without this test changing.
+    #[test]
+    fn tess_cache_pool_stays_at_two_languages() {
+        assert_eq!(TESS_CACHE_CAP, 2);
+        let mut cache = std::collections::HashMap::new();
+        for (i, lang) in ["eng", "koverwatch", "osd"].into_iter().enumerate() {
+            reserve_tess_slot(&mut cache, lang);
+            cache.insert(lang, i as u8);
+        }
+        assert_eq!(cache.len(), TESS_CACHE_CAP);
+        assert!(cache.contains_key("osd"), "the newest language is kept");
+        let before = cache.clone();
+        reserve_tess_slot(&mut cache, "osd");
+        cache.insert("osd", 9);
+        assert_eq!(
+            cache.len(),
+            TESS_CACHE_CAP,
+            "a repeat does not grow the pool"
+        );
+        assert_eq!(cache["osd"], 9);
+        assert_eq!(
+            cache.keys().filter(|k| **k != "osd").count(),
+            before.keys().filter(|k| **k != "osd").count()
+        );
+    }
+
+    /// `eng` is the language every read can fall back to. A full cache drops
+    /// the other entry and leaves `eng` in place.
+    #[test]
+    fn eng_stays_when_the_tess_cache_is_full() {
+        let mut cache = std::collections::HashMap::new();
+        for (i, lang) in ["eng", "koverwatch"].into_iter().enumerate() {
+            reserve_tess_slot(&mut cache, lang);
+            cache.insert(lang, i as u8);
+        }
+        assert_eq!(cache.len(), TESS_CACHE_CAP);
+        reserve_tess_slot(&mut cache, "osd");
+        cache.insert("osd", 2);
+        assert_eq!(cache.len(), TESS_CACHE_CAP);
+        assert!(
+            cache.contains_key("eng"),
+            "eng is kept when a third language arrives"
+        );
+        assert!(
+            !cache.contains_key("koverwatch"),
+            "the other language is the one that leaves"
+        );
+        assert!(cache.contains_key("osd"));
+        reserve_tess_slot(&mut cache, "eng");
+        assert_eq!(cache["eng"], 0, "a repeat of eng does not replace it");
     }
 }
 

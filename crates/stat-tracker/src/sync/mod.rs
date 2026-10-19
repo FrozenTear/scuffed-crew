@@ -1070,7 +1070,7 @@ mod tests {
             }
         }
 
-        fn board() -> BoardRead {
+        fn board(header_dimmed: bool) -> BoardRead {
             let mut fields = vec![
                 text("map", "Ilios"),
                 text("mode", "Control"),
@@ -1092,11 +1092,11 @@ mod tests {
                 team_size: Some(6),
                 fields,
                 elapsed_ms: 1,
-                header_dimmed: false,
+                header_dimmed,
             }
         }
 
-        let read = board();
+        let read = board(false);
         let fallback = merge_saved(&snap(), OwnRow::Uncertain, Some(&read));
         let named = own_row(Some("Ada"), None, Some(0), 6);
         let kept = merge_saved(&snap(), named, Some(&read));
@@ -1166,6 +1166,28 @@ mod tests {
         assert!(!raw.contains("\"recognizer\":null"));
         assert!(raw.contains("\"recognizer\":\"ocr-v1\""));
         assert!(raw.contains("\"recognizer\":\"cv-v8\""));
+
+        // The same agreeing board, with the header found only on the dimmed
+        // strip. The upload carries that mark as own-row suspects. A clean
+        // board of the same read lists none.
+        let dimmed = merge_saved(&agreeing, named, Some(&board(true)));
+        assert_eq!(dimmed.recognizer, RECOGNIZER_ID);
+        assert!(
+            saved[2].suspect_fields.is_empty(),
+            "the clean board stays unmarked"
+        );
+        let mut dimmed_row = row(&dimmed.hero, &dimmed.map, &dimmed.mode);
+        dimmed_row.session_id = "sess-dimmed".into();
+        dimmed_row.elims = dimmed.elims;
+        dimmed_row.recognizer = dimmed.recognizer.to_string();
+        dimmed_row.suspect_fields = dimmed.suspect_fields.clone();
+        let dimmed_json = serde_json::to_value(upload_request(&[dimmed_row], &[])).unwrap();
+        let names = dimmed_json["matches"][0]["suspect_fields"]
+            .as_array()
+            .expect("dimmed row sends suspect_fields");
+        for name in ["hero", "e", "a", "d", "dmg", "h", "mit"] {
+            assert!(names.iter().any(|n| n == name), "{name} missing: {names:?}");
+        }
     }
 
     #[test]
@@ -1207,7 +1229,7 @@ mod tests {
             }
         }
 
-        fn board(elims_suspect: bool) -> BoardRead {
+        fn board(elims_suspect: bool, header_dimmed: bool) -> BoardRead {
             BoardRead {
                 status: BoardStatus::Read,
                 team_size: Some(6),
@@ -1224,7 +1246,7 @@ mod tests {
                     number("r0.h", 1, true),
                     number("r0.mit", 1, true),
                 ],
-                header_dimmed: false,
+                header_dimmed,
             }
         }
 
@@ -1233,7 +1255,7 @@ mod tests {
             team_size: 6,
         };
         let policy = snap();
-        let mixed = merge_saved(&policy, own, Some(&board(false)));
+        let mixed = merge_saved(&policy, own, Some(&board(false, false)));
         assert_eq!(
             mixed.elims, 21,
             "the confident elim came from the new reader"
@@ -1248,7 +1270,7 @@ mod tests {
         assert!(mixed.suspect_fields.iter().any(|name| name == "d"));
         assert!(!mixed.suspect_fields.iter().any(|name| name == "e"));
 
-        let all_fallback = merge_saved(&policy, own, Some(&board(true)));
+        let all_fallback = merge_saved(&policy, own, Some(&board(true, false)));
         assert_eq!(all_fallback.elims, policy.elims);
         assert_eq!(all_fallback.deaths, policy.deaths);
         assert_eq!(all_fallback.hero, policy.hero);
@@ -1289,6 +1311,38 @@ mod tests {
         assert_eq!(matches[1]["deaths"], policy.deaths);
         assert!(matches[1]["recognizer"].is_string());
         assert!(matches[0]["recognizer"].is_string());
+
+        // Every cv field fell back, and the hero cell was not read. The
+        // dimmed header still marks the own row, and the upload carries it.
+        let mut dimmed_board = board(true, true);
+        if let Some(hero) = dimmed_board.fields.iter_mut().find(|f| f.name == "r0.hero") {
+            *hero = FieldRead {
+                name: "r0.hero".into(),
+                value: None,
+                confidence: 0.0,
+                suspect: true,
+            };
+        }
+        let dimmed_fallback = merge_saved(&policy, own, Some(&dimmed_board));
+        assert_eq!(dimmed_fallback.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+        assert_eq!(dimmed_fallback.hero, policy.hero);
+        let mut dimmed_row = row(
+            &dimmed_fallback.hero,
+            &dimmed_fallback.map,
+            &dimmed_fallback.mode,
+        );
+        dimmed_row.session_id = "sess-dimmed-fallback".into();
+        dimmed_row.recognizer = dimmed_fallback.recognizer.to_string();
+        dimmed_row.suspect_fields = dimmed_fallback.suspect_fields.clone();
+        let dimmed_json = serde_json::to_value(upload_request(&[dimmed_row], &[])).unwrap();
+        assert_eq!(dimmed_json["matches"][0]["recognizer"], "ocr-v1");
+        let names = dimmed_json["matches"][0]["suspect_fields"]
+            .as_array()
+            .expect("dimmed ocr-v1 row sends suspect_fields");
+        assert!(
+            names.iter().any(|name| name == "hero"),
+            "dimmed ocr-v1 fallback dropped the own-row mark: {names:?}"
+        );
     }
 
     #[test]
