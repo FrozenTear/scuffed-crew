@@ -274,7 +274,7 @@ async fn upload_while_soft_delete_pending_is_409_for_the_whole_batch() {
 }
 
 #[tokio::test]
-async fn session_hard_delete_is_scoped_and_restore_is_session_only() {
+async fn session_delete_schedules_and_restore_brings_stats_back() {
     let state = test_state().await;
     let (member_id, session) = member_with_session(&state, "ada", OrgRole::Member).await;
     let (other_id, _) = member_with_session(&state, "bea", OrgRole::Member).await;
@@ -361,9 +361,28 @@ async fn session_hard_delete_is_scoped_and_restore_is_session_only() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["deleted"]["personal_match"], 2);
-    assert_eq!(body["deleted"]["stat_report"], 0);
+    assert_eq!(body["scheduled"], true);
+    assert!(body.get("deleted").is_none(), "{body}");
+    let deadline = body["stats_delete_scheduled_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    DateTime::parse_from_rfc3339(&deadline).unwrap();
     assert_eq!(body["tokens_revoked"], 1);
+
+    let (again_status, again, _) = call(
+        &state,
+        "DELETE",
+        "/api/stats/me",
+        None,
+        Some(&session),
+        Some(json!({ "confirm": "delete my stats" })),
+    )
+    .await;
+    assert_eq!(again_status, StatusCode::OK, "{again}");
+    assert_eq!(again["stats_delete_scheduled_at"], deadline);
+    assert_eq!(again["tokens_revoked"], 0);
+
     assert!(
         state
             .db
@@ -388,7 +407,38 @@ async fn session_hard_delete_is_scoped_and_restore_is_session_only() {
             .await
             .unwrap()
             .total_matches,
-        0
+        0,
+        "a session delete hides reads immediately"
+    );
+    assert!(
+        state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let (status, restored, _) = call(
+        &state,
+        "POST",
+        "/api/stats/me/restore",
+        None,
+        Some(&session),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["restored"], true);
+    assert_eq!(
+        state
+            .db
+            .get_personal_stats(&member_id)
+            .await
+            .unwrap()
+            .total_matches,
+        2,
+        "restore after a session delete brings the rows back"
     );
 }
 

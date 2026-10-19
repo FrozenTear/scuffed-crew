@@ -496,13 +496,12 @@ impl FromRequestParts<AppState> for ReportCreator {
 
 /// Auth for `DELETE /api/stats/me`.
 ///
-/// Site session: immediate hard delete. A 401 plus `Authorization: Bearer`
-/// falls through to the same daemon-token check as stats upload. Any other
-/// session failure is returned as-is, so a daemon token is not tried for a
-/// suspended session member.
+/// A site session and a daemon token schedule the same soft delete. A 401
+/// plus `Authorization: Bearer` falls through to the same daemon-token check
+/// as stats upload. Any other session failure is returned as-is, so a daemon
+/// token is not tried for a suspended session member.
 pub struct StatsEraseCaller {
     pub member: Member,
-    pub via_session: bool,
 }
 
 impl FromRequestParts<AppState> for StatsEraseCaller {
@@ -514,10 +513,7 @@ impl FromRequestParts<AppState> for StatsEraseCaller {
     ) -> Result<Self, Self::Rejection> {
         let session_reject = match OrgMember::from_request_parts(parts, state).await {
             Ok(org) => {
-                return Ok(StatsEraseCaller {
-                    member: org.member,
-                    via_session: true,
-                });
+                return Ok(StatsEraseCaller { member: org.member });
             }
             Err(reject) => reject,
         };
@@ -537,10 +533,7 @@ impl FromRequestParts<AppState> for StatsEraseCaller {
         )
         .await
         .map_err(|err| *err)?;
-        Ok(StatsEraseCaller {
-            member,
-            via_session: false,
-        })
+        Ok(StatsEraseCaller { member })
     }
 }
 

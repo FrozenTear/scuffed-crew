@@ -323,9 +323,11 @@ fn stats_internal() -> Response {
 
 /// DELETE /api/stats/me
 ///
-/// A site session hard-deletes personal stats now. A tracker daemon token
-/// schedules a soft delete (7 days), hides reads immediately, and revokes
-/// every daemon token for that member. Repeat calls keep the original deadline.
+/// A site session and a tracker daemon token both schedule a soft delete
+/// (7 days), hide reads immediately, and revoke every daemon token for that
+/// member. Repeat calls keep the original deadline. The purge task hard-deletes
+/// the rows and report files after the deadline. Account delete still removes
+/// stats immediately.
 pub async fn delete_my_stats(
     State(state): State<AppState>,
     caller: StatsEraseCaller,
@@ -334,77 +336,33 @@ pub async fn delete_my_stats(
     if body.confirm.trim() != "delete my stats" {
         return coded(StatusCode::BAD_REQUEST, "confirm_mismatch");
     }
-    if caller.via_session {
-        let wipe = match state.db.hard_delete_personal_stats(&caller.member.id).await {
-            Ok(wipe) => wipe,
-            Err(error) => {
-                tracing::error!(
-                    error_kind = stats_db_kind(&error),
-                    "hard delete personal stats"
-                );
-                return stats_internal();
-            }
-        };
-        state.leaderboard_cache.invalidate_all();
-        for id in &wipe.stat_report_ids {
-            if let Err(error) =
-                crate::stat_reports::remove_report_files(&state.reports_dir, id).await
-            {
-                tracing::warn!(
-                    error_kind = ?error.kind(),
-                    "stat report file remove after hard delete"
-                );
-            }
+    let (deadline, tokens_revoked) = match state
+        .db
+        .schedule_stats_delete(&caller.member.id, chrono::Utc::now())
+        .await
+    {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::error!(error_kind = stats_db_kind(&error), "schedule stats delete");
+            return stats_internal();
         }
-        audit(
-            &state.db,
-            &caller.member.id,
-            AuditAction::DeletedPersonalStats,
-            AuditTargetType::PersonalStats,
-            &caller.member.id,
-            Some(&format!(
-                "personal_match={} stat_report={} tokens_revoked={}",
-                wipe.personal_match, wipe.stat_report, wipe.tokens_revoked
-            )),
-        )
-        .await;
-        Json(serde_json::json!({
-            "deleted": {
-                "personal_match": wipe.personal_match,
-                "stat_report": wipe.stat_report,
-            },
-            "tokens_revoked": wipe.tokens_revoked,
-        }))
-        .into_response()
-    } else {
-        let (deadline, tokens_revoked) = match state
-            .db
-            .schedule_stats_delete(&caller.member.id, chrono::Utc::now())
-            .await
-        {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::error!(error_kind = stats_db_kind(&error), "schedule stats delete");
-                return stats_internal();
-            }
-        };
-        state.leaderboard_cache.invalidate_all();
-        audit(
-            &state.db,
-            &caller.member.id,
-            AuditAction::ScheduledStatsDeletion,
-            AuditTargetType::PersonalStats,
-            &caller.member.id,
-            Some(&format!("tokens_revoked={tokens_revoked}")),
-        )
-        .await;
-        Json(serde_json::json!({
-            "scheduled": true,
-            "stats_delete_scheduled_at": deadline.to_rfc3339(),
-            "tokens_revoked": tokens_revoked,
-        }))
-        .into_response()
-    }
+    };
+    state.leaderboard_cache.invalidate_all();
+    audit(
+        &state.db,
+        &caller.member.id,
+        AuditAction::ScheduledStatsDeletion,
+        AuditTargetType::PersonalStats,
+        &caller.member.id,
+        Some(&format!("tokens_revoked={tokens_revoked}")),
+    )
+    .await;
+    Json(serde_json::json!({
+        "scheduled": true,
+        "stats_delete_scheduled_at": deadline.to_rfc3339(),
+        "tokens_revoked": tokens_revoked,
+    }))
+    .into_response()
 }
 
 /// POST /api/stats/me/restore. Session only. Tokens stay revoked.

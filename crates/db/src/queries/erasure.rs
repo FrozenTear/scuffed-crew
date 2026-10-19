@@ -1,10 +1,11 @@
 //! Member stats erasure and full account erasure.
 //!
-//! Tracker-token stats deletion is a soft delete: the deadline is stored on
-//! the member, reads hide the rows, and [`Database::purge_scheduled_stats`]
-//! hard-deletes them once the deadline has passed. A site session hard-deletes
-//! immediately. Account erasure removes the user and points shared author
-//! fields at the tombstone member ([`crate::DELETED_MEMBER_ID`]).
+//! Stats deletion from a site session or a tracker token is a soft delete: the
+//! deadline is stored on the member, reads hide the rows, and
+//! [`Database::purge_scheduled_stats`] hard-deletes them once the deadline has
+//! passed. [`Database::hard_delete_personal_stats`] is that purge. Account
+//! erasure removes the user immediately and points shared author fields at the
+//! tombstone member ([`crate::DELETED_MEMBER_ID`]).
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -266,8 +267,10 @@ impl Database {
 
     /// Hard-delete this member's personal stats and revoke tracker tokens.
     ///
-    /// Hero, role, and map figures are aggregates over `personal_match`, so
-    /// removing those rows drops them from leaderboards on the next read.
+    /// The hourly purge calls this after the 7-day deadline. Account erase
+    /// deletes the same rows inside its own transaction. Hero, role, and map
+    /// figures are aggregates over `personal_match`, so removing those rows
+    /// drops them from leaderboards on the next read.
     pub async fn hard_delete_personal_stats(&self, member_id: &str) -> DbResult<StatsWipe> {
         if member_id == DELETED_MEMBER_ID {
             return Err(DbError::Config("tombstone member cannot be erased".into()));
