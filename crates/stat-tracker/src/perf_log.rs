@@ -2,14 +2,20 @@
 //!
 //! Each closed [`crate::perf`] window appends one line: the daemon's CPU%
 //! and RSS for that window, capture and OCR timing, and the X11 grab
-//! details (size, full screen or one output, and that no shm is used). The
-//! first line after start is a header with the setup: session type, kernel,
-//! CPU model and count, RAM and the Proton version seen running. Overhead is one small
-//! write a minute. The file rotates at [`MAX_BYTES`] into `perf.log.1`, so
-//! at most twice that is kept. A Performance report sends only this log.
+//! details (size, full screen or one output, and that no shm is used).
+//! The same line also carries the thread count, anonymous RSS, and how many
+//! debug-save jobs were dropped. A second line names Tab sub-stage p50s, the
+//! post-grab image conversion, and debug-save job time, when any of those
+//! ran. The first line after start
+//! is a header with the setup: session type, kernel, CPU model and count,
+//! RAM and the Proton version seen running. Overhead is one small read of
+//! `/proc/self/status` and one or two writes a minute. The file rotates at
+//! [`MAX_BYTES`] into `perf.log.1`, so at most twice that is kept. A
+//! Performance report sends only this log.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::perf::Summary;
@@ -21,6 +27,17 @@ pub const MAX_BYTES: u64 = 256 * 1024;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 static LAST_CPU: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+static DEBUG_SAVE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Count one debug-save job the bounded queue refused.
+pub fn note_debug_save_drop() {
+    DEBUG_SAVE_DROPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many debug-save jobs have been dropped in this process.
+pub fn debug_save_drops() -> u64 {
+    DEBUG_SAVE_DROPS.load(Ordering::Relaxed)
+}
 
 /// Start the log in `data_dir` and write the setup header. Call once.
 pub fn init(data_dir: &Path) {
@@ -48,8 +65,19 @@ pub fn write_summary(s: &Summary) {
         *last = ticks.map(|t| (t, now));
         pct
     };
-    let line = sample_line(s, cpu_pct, proc_rss_kb());
+    let (threads, rss_anon_kb) = proc_status_pair();
+    let line = sample_line(
+        s,
+        cpu_pct,
+        proc_rss_kb(),
+        threads,
+        rss_anon_kb,
+        debug_save_drops(),
+    );
     append_to(dir, &line, MAX_BYTES);
+    if let Some(stages) = tab_stages_line(s) {
+        append_to(dir, &stages, MAX_BYTES);
+    }
 }
 
 /// `perf.log.1` then `perf.log`, as text. Empty when neither exists.
@@ -135,9 +163,17 @@ pub fn header_line(s: &SetupInfo) -> String {
     )
 }
 
-pub fn sample_line(s: &Summary, cpu_pct: Option<f64>, rss_kb: Option<u64>) -> String {
+pub fn sample_line(
+    s: &Summary,
+    cpu_pct: Option<f64>,
+    rss_kb: Option<u64>,
+    threads: Option<u64>,
+    rss_anon_kb: Option<u64>,
+    debug_save_drops: u64,
+) -> String {
     let mut line = format!(
-        "{} sample window_s={} cpu_pct={} rss_kb={} backend={} \
+        "{} sample window_s={} cpu_pct={} rss_kb={} threads={} rss_anon_kb={} \
+         debug_save_drops={} backend={} \
          captures={} capture_p50_ms={} capture_max_ms={} capture_cpu_ms={} \
          polls={} poll_p50_ms={} poll_max_ms={} \
          ocr_runs={} ocr_p50_ms={} ocr_max_ms={} ocr_cpu_ms={}",
@@ -145,6 +181,9 @@ pub fn sample_line(s: &Summary, cpu_pct: Option<f64>, rss_kb: Option<u64>) -> St
         s.window_secs,
         cpu_pct.map_or("na".into(), |p| format!("{p:.1}")),
         rss_kb.map_or("na".into(), |k| k.to_string()),
+        threads.map_or("na".into(), |n| n.to_string()),
+        rss_anon_kb.map_or("na".into(), |k| k.to_string()),
+        debug_save_drops,
         s.backend,
         s.capture.count,
         s.capture.p50_ms,
@@ -166,6 +205,39 @@ pub fn sample_line(s: &Summary, cpu_pct: Option<f64>, rss_kb: Option<u64>) -> St
         ));
     }
     line
+}
+
+/// Second perf line when a Tab sub-stage, a grab conversion, or a debug-save
+/// job was recorded. `None` when every count is zero, so an idle minute stays
+/// one line. Values are p50 milliseconds. A stage that did not run is `0`.
+/// `save_p50` is the debug-save worker. Existing names stay where they are.
+pub fn tab_stages_line(s: &Summary) -> Option<String> {
+    let t = &s.tab_stages;
+    let ran = t.to_rgb.count
+        + t.detect.count
+        + t.portraits.count
+        + t.digits.count
+        + t.map.count
+        + t.outcome.count
+        + t.shadow.count
+        + t.grab_convert.count
+        + t.save.count;
+    if ran == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} tab_stages to_rgb={} detect={} portraits={} digits={} map={} outcome={} shadow={} grab_convert={} save_p50={}",
+        now_stamp(),
+        t.to_rgb.p50_ms,
+        t.detect.p50_ms,
+        t.portraits.p50_ms,
+        t.digits.p50_ms,
+        t.map.p50_ms,
+        t.outcome.p50_ms,
+        t.shadow.p50_ms,
+        t.grab_convert.p50_ms,
+        t.save.p50_ms,
+    ))
 }
 
 pub fn cpu_percent(ticks: u64, hz: u64, secs: f64) -> Option<f64> {
@@ -228,6 +300,37 @@ pub fn parse_stat_ticks(stat: &str) -> Option<u64> {
     let rest = &stat[stat.rfind(')')? + 2..];
     let f: Vec<&str> = rest.split_whitespace().collect();
     Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+}
+
+/// `Threads` and `RssAnon` from `/proc/self/status`. `(None, None)` when the
+/// file is missing or this is not Linux. One read, two field scans.
+fn proc_status_pair() -> (Option<u64>, Option<u64>) {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+            return (None, None);
+        };
+        (
+            status_field(&text, "Threads:"),
+            status_field(&text, "RssAnon:"),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (None, None)
+    }
+}
+
+/// Anonymous RSS in kB, or `None` when `/proc/self/status` has no `RssAnon`.
+pub fn rss_anon_kb() -> Option<u64> {
+    proc_status_pair().1
+}
+
+/// The second whitespace field of a `/proc/self/status` line, such as
+/// `Threads: 55` or `RssAnon: 102400 kB`.
+pub fn status_field(text: &str, key: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.starts_with(key))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn proc_rss_kb() -> Option<u64> {
@@ -316,6 +419,7 @@ mod tests {
             capture_cpu_ms: 420,
             tab_cpu_ms: 1700,
             x11,
+            tab_stages: crate::perf::TabStageSummary::default(),
         }
     }
 
@@ -350,10 +454,20 @@ mod tests {
                 total_ms: 480,
             },
         };
-        let line = sample_line(&summary(Some(x)), Some(3.25), Some(81234));
+        let line = sample_line(
+            &summary(Some(x)),
+            Some(3.25),
+            Some(81234),
+            Some(55),
+            Some(102_400),
+            3,
+        );
         for f in [
             "cpu_pct=3.2",
             "rss_kb=81234",
+            "threads=55",
+            "rss_anon_kb=102400",
+            "debug_save_drops=3",
             "backend=x11",
             "capture_p50_ms=38",
             "capture_cpu_ms=420",
@@ -370,7 +484,52 @@ mod tests {
         ] {
             assert!(line.contains(f), "{f} missing from {line}");
         }
-        assert!(!sample_line(&summary(None), None, None).contains("x11_"));
+        let bare = sample_line(&summary(None), None, None, None, None, 0);
+        assert!(!bare.contains("x11_"));
+        assert!(bare.contains("threads=na"));
+        assert!(bare.contains("rss_anon_kb=na"));
+        assert!(bare.contains("debug_save_drops=0"));
+        assert!(bare.contains("ocr_p50_ms="));
+    }
+
+    #[test]
+    fn tab_stages_line_is_p50_and_absent_without_a_tab() {
+        let mut s = summary(None);
+        assert!(tab_stages_line(&s).is_none());
+        s.tab_stages.digits = crate::perf::StageStats {
+            count: 2,
+            p50_ms: 80,
+            max_ms: 90,
+            total_ms: 150,
+        };
+        let line = tab_stages_line(&s).unwrap();
+        assert!(
+            line.contains(
+                "tab_stages to_rgb=0 detect=0 portraits=0 digits=80 map=0 outcome=0 shadow=0 grab_convert=0 save_p50=0"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains("ocr_p50_ms"), "{line}");
+    }
+
+    #[test]
+    fn status_fields_read_threads_and_rss_anon() {
+        let text = "\
+Name:\tscuffed-stat-tracker\n\
+VmRSS:\t  900000 kB\n\
+RssAnon:\t  102400 kB\n\
+Threads:\t55\n";
+        assert_eq!(status_field(text, "Threads:"), Some(55));
+        assert_eq!(status_field(text, "RssAnon:"), Some(102_400));
+        assert_eq!(status_field(text, "Missing:"), None);
+        assert_eq!(status_field("Threads:\n", "Threads:"), None);
+    }
+
+    #[test]
+    fn debug_save_drop_counter_only_grows() {
+        let before = debug_save_drops();
+        note_debug_save_drop();
+        assert!(debug_save_drops() > before);
     }
 
     #[test]

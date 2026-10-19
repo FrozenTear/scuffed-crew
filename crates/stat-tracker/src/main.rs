@@ -385,7 +385,12 @@ fn package_version() -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
-    // First, before any thread, log line or Tesseract use: libgomp reads
+    // Before any thread the runtime would start. Each glibc arena is about
+    // 64 MiB, and Tab captures were leaving about 19 of them resident.
+    // The systemd unit sets MALLOC_ARENA_MAX as well, so a unit start is
+    // capped before the first allocation. This call covers every other start.
+    limit_glibc_arenas();
+    // Before any thread, log line or Tesseract use: libgomp reads
     // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
     // app with no unit installed) is replaced here by the same binary with
     // it set.
@@ -393,9 +398,33 @@ fn main() -> anyhow::Result<()> {
     let omp = stat_tracker::omp::ensure_thread_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        // Short-lived spawn_blocking threads were the arena source. Four
+        // stay up for about a minute instead of exiting after 10 seconds.
+        .max_blocking_threads(4)
+        .thread_keep_alive(std::time::Duration::from_secs(60))
         .build()
         .context("failed to start the async runtime")?
         .block_on(run(omp))
+}
+
+/// `M_ARENA_MAX=2` on glibc. Other libcs ignore the request.
+fn limit_glibc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: mallopt takes two integers and has no pointer arguments.
+        // Called once, before the runtime starts threads.
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+}
+
+/// Return free heap pages after a Tab capture. glibc otherwise keeps them
+/// on the arenas those short-lived threads allocated.
+fn release_glibc_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        // SAFETY: malloc_trim(0) walks this process's heap. No pointers.
+        libc::malloc_trim(0);
+    }
 }
 
 async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
@@ -4398,6 +4427,10 @@ async fn run_loop(
                                 .await
                                 // `{:#}` keeps anyhow's context chain in the string.
                                 .map_err(|e| format!("{e:#}"));
+                            // The capture's frames and OCR buffers are dropped
+                            // with `result`. Hand the unused pages back before
+                            // the next Tab.
+                            release_glibc_heap();
                             let _ = tx.send((sid, result));
                         }));
                     }
@@ -4804,6 +4837,46 @@ struct FrameFlags {
     use_new_reader: bool,
 }
 
+/// Wall-clock slices of one [`analyze_frame`], minus RGB copies counted by
+/// [`stat_tracker::perf::to_rgb8`]. Drop stashes them for the following
+/// `TabAnalyze` record.
+struct TabTiming {
+    rgb: stat_tracker::perf::RgbTiming,
+    lap_at: Instant,
+    rgb_mark: u128,
+    samples: [Option<std::time::Duration>; stat_tracker::perf::TAB_STAGES],
+}
+
+impl TabTiming {
+    fn enter() -> Self {
+        Self {
+            rgb: stat_tracker::perf::RgbTiming::enter(),
+            lap_at: Instant::now(),
+            rgb_mark: 0,
+            samples: [None; stat_tracker::perf::TAB_STAGES],
+        }
+    }
+
+    fn lap(&mut self, stage: stat_tracker::perf::TabStage) {
+        let wall = self.lap_at.elapsed();
+        let rgb_now = self.rgb.micros();
+        let rgb_delta = rgb_now.saturating_sub(self.rgb_mark);
+        let rgb = std::time::Duration::from_micros(u64::try_from(rgb_delta).unwrap_or(u64::MAX));
+        self.samples[stage as usize] = Some(wall.saturating_sub(rgb));
+        self.lap_at = Instant::now();
+        self.rgb_mark = rgb_now;
+    }
+}
+
+impl Drop for TabTiming {
+    fn drop(&mut self) {
+        let rgb =
+            std::time::Duration::from_micros(u64::try_from(self.rgb.micros()).unwrap_or(u64::MAX));
+        self.samples[stat_tracker::perf::TabStage::ToRgb as usize] = Some(rgb);
+        stat_tracker::perf::stash_tab_stages(self.samples);
+    }
+}
+
 /// The blocking vision/OCR pass over one Tab frame, extracted from
 /// `handle_capture` so the async orchestration reads as a straight line
 /// (QUAL-001). Pure function of its inputs: decides the outcome, runs the
@@ -4824,6 +4897,7 @@ fn analyze_frame(
         shadow_on,
         use_new_reader,
     } = flags;
+    let mut stages = TabTiming::enter();
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection plus the word reads
     // (only when the caller deems a banner plausible, see
@@ -4854,6 +4928,7 @@ fn analyze_frame(
     } else {
         frame_outcome
     };
+    stages.lap(stat_tracker::perf::TabStage::Outcome);
 
     let scoreboard = Arc::new(ocr::preprocess::crop_scoreboard(&img));
     // Pre-OCR preflight. Row dips or header stat labels accept a board, then
@@ -4863,6 +4938,7 @@ fn analyze_frame(
     // "team size unsure". The OCR gate downstream stays the final check for
     // frames that pass.
     let (preflight, row_scan) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
+    stages.lap(stat_tracker::perf::TabStage::Detect);
     let team_size = match preflight {
         detect::hero_portrait::ScoreboardPreflight::NotAScoreboard => {
             return FrameAnalysisOutcome::NotAScoreboard {
@@ -4993,6 +5069,7 @@ fn analyze_frame(
             tab_heroes.as_ref(),
         )
     });
+    stages.lap(stat_tracker::perf::TabStage::Portraits);
     // The top-bar OCR label is the banner read's fallback (O6). With OCR
     // off there is no fallback: the banner read is the top-bar map or
     // nothing is, and the label is not asked for.
@@ -5013,6 +5090,7 @@ fn analyze_frame(
     );
     let map_from_panel = top_bar.map;
     let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);
+    stages.lap(stat_tracker::perf::TabStage::Map);
 
     // Full-board OCR exists only to supply raw text for hero/map name
     // lookup and the name-in-raw-text stats fallback. On the happy path,
@@ -5056,6 +5134,11 @@ fn analyze_frame(
         );
         rows = read_cells();
     }
+    stages.lap(stat_tracker::perf::TabStage::Digits);
+
+    let shadow_input =
+        shadow::worker::ShadowInput::when(shadow_on, &scoreboard, team_size, img.height());
+    stages.lap(stat_tracker::perf::TabStage::Shadow);
 
     FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
         frame_outcome,
@@ -5069,12 +5152,7 @@ fn analyze_frame(
         map_from_panel,
         map_panel_raw,
         map_from_banner: top_bar.from_banner,
-        shadow_input: shadow::worker::ShadowInput::when(
-            shadow_on,
-            &scoreboard,
-            team_size,
-            img.height(),
-        ),
+        shadow_input,
         scoreboard,
         player_row_idx: row_idx,
         name_match,
@@ -7103,10 +7181,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // was undiagnosable because only rejected frames were ever saved.
             // Only with debug_ocr on: the crop shows other players' names.
             save_accepted_frame(ctx.debug_ocr, data_dir, scoreboard_img);
+            let frame_for_kit = Arc::new(frame_img);
             record_report_kit(
                 data_dir,
                 &target_session,
-                &frame_img,
+                Arc::clone(&frame_for_kit),
                 team_size,
                 &ocr_parsed,
                 &parsed,
@@ -7137,7 +7216,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let n = ctx.empty_map_reads.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= EMPTY_MAP_DUMP_THRESHOLD {
                     ctx.empty_map_reads.store(0, Ordering::Relaxed);
-                    let region = ocr::preprocess::crop_map_name(&frame_img);
+                    let region = ocr::preprocess::crop_map_name(&frame_for_kit);
                     let dir = data_dir.join("debug").join("mapmiss");
                     tracing::warn!(
                         consecutive = n,
@@ -7324,22 +7403,314 @@ fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImag
 /// Written only while `debug_ocr` is on.
 const BOARD_PIXEL_DEBUG_DIRS: [&str; 2] = ["accepted", "rejected"];
 
+/// How many unblanked debug-ring PNGs may wait. Past this, another ring
+/// picture is dropped. Report kits and map crops do not use this queue.
+const DEBUG_RING_QUEUE: usize = 4;
+
+/// How many report kits and map crops may wait. Each job holds a full frame
+/// (about 8 MB at 1440p). Two covers the capture in flight and one more.
+/// The next sender blocks, so a stalled disk cannot pile frames up, and a
+/// kit is never dropped.
+const REPORT_SAVE_QUEUE: usize = 2;
+
+/// Tests that fill the ring queue hold this so a parallel test cannot
+/// enqueue a ring picture into the full queue and observe a drop.
+#[cfg(test)]
+static DEBUG_RING_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// While set, the ring worker parks before taking the next picture.
+#[cfg(test)]
+static DEBUG_RING_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set while the ring worker is parked on [`DEBUG_RING_HOLD`].
+#[cfg(test)]
+static DEBUG_RING_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests that fill the report queue hold this so a parallel test cannot
+/// sneak a kit into the same slots.
+#[cfg(test)]
+static REPORT_SAVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// While set, the report worker parks before taking the next job.
+#[cfg(test)]
+static REPORT_SAVE_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set while the report worker is parked on [`REPORT_SAVE_HOLD`].
+#[cfg(test)]
+static REPORT_SAVE_PARKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct DebugReportSave {
+    data_dir: std::path::PathBuf,
+    session_id: String,
+    frame: Arc<image::DynamicImage>,
+    team_size: usize,
+    reads: stat_tracker::report::kit::KitReads,
+    tab_at: stat_tracker::report::blank::CaptureTime,
+    board_names: Vec<String>,
+}
+
+struct DebugRingJob {
+    dir: std::path::PathBuf,
+    prefix: String,
+    img: Arc<image::DynamicImage>,
+    keep: usize,
+    done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+enum KeptSave {
+    Report(Box<DebugReportSave>),
+    MapCrop(mapcrops::MapcropJob),
+}
+
+struct KeptSaveJob {
+    kind: KeptSave,
+    done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+fn park_debug_ring() {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        if !DEBUG_RING_HOLD.load(Ordering::SeqCst) {
+            return;
+        }
+        DEBUG_RING_PARKED.store(true, Ordering::SeqCst);
+        while DEBUG_RING_HOLD.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        DEBUG_RING_PARKED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn debug_ring_sender() -> &'static std::sync::mpsc::SyncSender<DebugRingJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<DebugRingJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(DEBUG_RING_QUEUE);
+        std::thread::Builder::new()
+            .name("debug-save".into())
+            .spawn(move || debug_ring_loop(rx))
+            .expect("debug-save thread");
+        tx
+    })
+}
+
+fn debug_ring_loop(rx: std::sync::mpsc::Receiver<DebugRingJob>) {
+    loop {
+        park_debug_ring();
+        let Ok(job) = rx.recv() else {
+            break;
+        };
+        let DebugRingJob {
+            dir,
+            prefix,
+            img,
+            keep,
+            done,
+        } = job;
+        let started = Instant::now();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            save_frame_ring(&dir, &prefix, &img, keep);
+        }));
+        stat_tracker::perf::record_debug_save(started.elapsed());
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+    }
+}
+
+fn park_report_save() {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+        if !REPORT_SAVE_HOLD.load(Ordering::SeqCst) {
+            return;
+        }
+        REPORT_SAVE_PARKED.store(true, Ordering::SeqCst);
+        while REPORT_SAVE_HOLD.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        REPORT_SAVE_PARKED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn kept_save_sender() -> &'static std::sync::mpsc::SyncSender<KeptSaveJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<KeptSaveJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(REPORT_SAVE_QUEUE);
+        std::thread::Builder::new()
+            .name("report-save".into())
+            .spawn(move || kept_save_loop(rx))
+            .expect("report-save thread");
+        tx
+    })
+}
+
+fn kept_save_loop(rx: std::sync::mpsc::Receiver<KeptSaveJob>) {
+    loop {
+        park_report_save();
+        let Ok(job) = rx.recv() else {
+            break;
+        };
+        let KeptSaveJob { kind, done } = job;
+        let started = Instant::now();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_kept_save(kind)));
+        stat_tracker::perf::record_debug_save(started.elapsed());
+        if let Some(done) = done {
+            let _ = done.send(());
+        }
+    }
+}
+
+fn run_kept_save(kind: KeptSave) {
+    match kind {
+        KeptSave::Report(report) => {
+            if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
+                &report.data_dir,
+                &report.session_id,
+                &report.frame,
+                Some(report.team_size),
+                &report.reads,
+                report.tab_at,
+            ) {
+                tracing::debug!(error = %e, "report kit: scoreboard not written");
+            }
+            // The board's names stay on this PC; a report hands them to the
+            // log scrubber.
+            if !report.board_names.is_empty()
+                && let Err(e) = stat_tracker::report::kit::record_names(
+                    &report.data_dir,
+                    &report.session_id,
+                    &report.board_names,
+                )
+            {
+                tracing::debug!(error = %e, "report kit: names not written");
+            }
+        }
+        KeptSave::MapCrop(job) => mapcrops::commit_mapcrop(job),
+    }
+}
+
+fn oneshot_pair(
+    wait: bool,
+) -> (
+    Option<tokio::sync::oneshot::Sender<()>>,
+    Option<tokio::sync::oneshot::Receiver<()>>,
+) {
+    if wait {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    }
+}
+
+/// Queue one debug-ring PNG. `Ok(None)` is queued without a waiter.
+/// `Ok(Some)` is queued and the handle finishes when the worker has written
+/// it. `Err` means the queue was full: the picture was dropped and counted.
+/// Report kits never go through here.
+fn enqueue_debug_ring(
+    dir: std::path::PathBuf,
+    prefix: String,
+    img: Arc<image::DynamicImage>,
+    keep: usize,
+    wait: bool,
+) -> Result<Option<tokio::task::JoinHandle<()>>, ()> {
+    let (done, wait_rx) = oneshot_pair(wait);
+    match debug_ring_sender().try_send(DebugRingJob {
+        dir,
+        prefix,
+        img,
+        keep,
+        done,
+    }) {
+        Ok(()) => Ok(wait_rx.map(|rx| {
+            tokio::spawn(async move {
+                let _ = rx.await;
+            })
+        })),
+        Err(_) => {
+            stat_tracker::perf_log::note_debug_save_drop();
+            tracing::debug!("debug ring queue full, dropping picture");
+            Err(())
+        }
+    }
+}
+
+/// Queue a report kit or a map crop. A full queue blocks the sender. The
+/// kit is never dropped. `wait` is for tests.
+fn enqueue_kept_save(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
+    #[cfg(test)]
+    let _report_tests = REPORT_SAVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_kept_save_unlocked(kind, wait)
+}
+
+fn enqueue_kept_save_unlocked(kind: KeptSave, wait: bool) -> Option<tokio::task::JoinHandle<()>> {
+    let (done, wait_rx) = oneshot_pair(wait);
+    let job = KeptSaveJob { kind, done };
+    // Each job holds a full frame (about 8 MB at 1440p). The queue is a
+    // bounded sync_channel, so a stalled disk blocks the sender instead of
+    // dropping the kit or stacking frames. That block must not run on a
+    // tokio worker: the worker would stall the runtime until the disk
+    // moved. The multi-thread runtime marks this thread blocking
+    // (block_in_place) and the caller waits, so the frame is not queued
+    // again outside the channel. A current-thread runtime cannot do that,
+    // so the send moves to spawn_blocking. A thread with no runtime (a
+    // test, or code already off the worker) sends here.
+    let send = move || match kept_save_sender().send(job) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::SendError(job)) => {
+            // The worker is gone. Write it here so the report is not lost,
+            // and do not count a debug-ring drop.
+            let KeptSaveJob { kind, done } = job;
+            run_kept_save(kind);
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(send);
+        }
+        Ok(_) => {
+            let _queued = tokio::task::spawn_blocking(send);
+        }
+        Err(_) => send(),
+    }
+    wait_rx.map(|rx| {
+        tokio::spawn(async move {
+            let _ = rx.await;
+        })
+    })
+}
+
 /// Archive a frame whose capture was rejected by a trust gate, for diagnosis.
-/// Only with `debug_ocr` on (`debug`): the frame is unblanked. Runs the PNG
-/// encode off the async runtime; fire-and-forget. The handle is for tests.
+/// Only with `debug_ocr` on (`debug`): the frame is unblanked. The PNG encode
+/// runs on the debug-save thread. The handle is for tests.
 fn save_rejected_frame(
     debug: bool,
     data_dir: &std::path::Path,
-    img: image::DynamicImage,
+    img: impl Into<Arc<image::DynamicImage>>,
     reason: &'static str,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !debug {
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
-    Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
-    }))
+    #[cfg(test)]
+    let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_debug_ring(
+        dir,
+        format!("rejected_{reason}"),
+        img.into(),
+        REJECTED_KEEP,
+        true,
+    )
+    .ok()
+    .flatten()
 }
 
 /// A rank screen's `outcome.png` goes to the active game only when that game
@@ -7357,13 +7728,15 @@ fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
 }
 
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
-/// accepted capture. Written off the capture path; a failure is logged and
-/// never touches the stored match.
+/// accepted capture. Written on the report-save thread, which does not drop
+/// work when the debug-ring queue is full. A failure is logged and never
+/// touches the stored match. `frame` is a refcount clone of the capture,
+/// not a pixel copy.
 #[allow(clippy::too_many_arguments)]
 fn record_report_kit(
     data_dir: &std::path::Path,
     session_id: &str,
-    frame: &image::DynamicImage,
+    frame: Arc<image::DynamicImage>,
     team_size: usize,
     ocr_parsed: &storage::PersonalMatch,
     stored: &storage::PersonalMatch,
@@ -7385,39 +7758,26 @@ fn record_report_kit(
         captured_at,
     )
     .with_confidences(confidences);
-    let (data_dir, session_id, frame) = (
-        data_dir.to_path_buf(),
-        session_id.to_string(),
-        frame.clone(),
-    );
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
-            &data_dir,
-            &session_id,
-            &frame,
-            Some(team_size),
-            &reads,
+    enqueue_kept_save(
+        KeptSave::Report(Box::new(DebugReportSave {
+            data_dir: data_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+            frame,
+            team_size,
+            reads,
             tab_at,
-        ) {
-            tracing::debug!(error = %e, "report kit: scoreboard not written");
-        }
-        // The board's names stay on this PC; a report hands them to the
-        // log scrubber.
-        if !board_names.is_empty()
-            && let Err(e) =
-                stat_tracker::report::kit::record_names(&data_dir, &session_id, &board_names)
-        {
-            tracing::debug!(error = %e, "report kit: names not written");
-        }
-    });
+            board_names,
+        })),
+        false,
+    );
 }
 
 /// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
 /// the only way to retune calibration). Only with `debug_ocr` on (`debug`):
-/// the crop is unblanked and shows other players' names. Fire-and-forget;
-/// encode off-runtime. The handle is for tests.
+/// the crop is unblanked and shows other players' names. The PNG encode runs
+/// on the debug-save thread. The handle is for tests.
 fn save_accepted_frame(
     debug: bool,
     data_dir: &std::path::Path,
@@ -7427,9 +7787,11 @@ fn save_accepted_frame(
         return None;
     }
     let dir = data_dir.join("debug").join("accepted");
-    Some(tokio::task::spawn_blocking(move || {
-        save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
-    }))
+    #[cfg(test)]
+    let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    enqueue_debug_ring(dir, "accepted".to_string(), board, ACCEPTED_KEEP, true)
+        .ok()
+        .flatten()
 }
 
 /// Board-pixel debug folders left over on disk while `debug_ocr` is off.
@@ -7463,9 +7825,7 @@ fn archive_map_label_crop(
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
-    Some(tokio::task::spawn_blocking(move || {
-        mapcrops::commit_mapcrop(job)
-    }))
+    enqueue_kept_save(KeptSave::MapCrop(job), true)
 }
 
 /// [`archive_map_label_crop`] for a capture a trust gate rejected: only with
@@ -11690,6 +12050,425 @@ mod tests {
         assert!(
             rejected.len() == 1 && rejected[0].starts_with("rejected_unreadable_"),
             "rejected={rejected:?}"
+        );
+    }
+
+    fn kept_report(
+        data_dir: &std::path::Path,
+        session_id: &str,
+        frame: &Arc<image::DynamicImage>,
+        row: &storage::PersonalMatch,
+    ) -> KeptSave {
+        let layout =
+            stat_tracker::report::blank::TeamLayout::from_team_size(Some(5)).expect("team size 5");
+        let reads = stat_tracker::report::kit::KitReads::from_capture(
+            row,
+            row,
+            frame.width(),
+            frame.height(),
+            layout,
+            Utc::now(),
+        );
+        KeptSave::Report(Box::new(DebugReportSave {
+            data_dir: data_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+            frame: Arc::clone(frame),
+            team_size: 5,
+            reads,
+            tab_at: stat_tracker::report::blank::CaptureTime::now(),
+            board_names: vec!["KeptName".into()],
+        }))
+    }
+
+    /// A full debug-ring queue drops ring pictures only. The report kit for
+    /// that Tab still lands, and the drop counter does not move for it.
+    /// A full report queue blocks the sender instead of dropping the kit.
+    #[test]
+    fn a_full_debug_ring_still_saves_the_report_kit() {
+        let _ring_tests = DEBUG_RING_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        DEBUG_RING_HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+        struct ReleaseHold;
+        impl Drop for ReleaseHold {
+            fn drop(&mut self) {
+                DEBUG_RING_HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let hold = ReleaseHold;
+
+        let dir = tempfile::tempdir().unwrap();
+        let img = Arc::new(tiny_board());
+        enqueue_debug_ring(
+            dir.path().join("debug").join("accepted"),
+            "poke".to_string(),
+            Arc::clone(&img),
+            ACCEPTED_KEEP,
+            false,
+        )
+        .expect("the poke picture has a free slot");
+        let parked = Instant::now();
+        while !DEBUG_RING_PARKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                parked.elapsed() < std::time::Duration::from_secs(2),
+                "debug ring worker did not park"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let before = stat_tracker::perf_log::debug_save_drops();
+        let mut queued = Vec::new();
+        let mut dropped = 0u64;
+        for i in 0..(DEBUG_RING_QUEUE + 2) {
+            let prefix = format!("fill{i}");
+            if enqueue_debug_ring(
+                dir.path().join("debug").join("accepted"),
+                prefix.clone(),
+                Arc::clone(&img),
+                ACCEPTED_KEEP,
+                false,
+            )
+            .is_ok()
+            {
+                queued.push(prefix);
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(dropped >= 1, "the ring queue never filled");
+        assert!(queued.len() <= DEBUG_RING_QUEUE, "{queued:?}");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "debug_save_drops counts only dropped ring pictures"
+        );
+
+        let session = "kept-report";
+        let row = test_match(session, "victory");
+        record_report_kit(
+            dir.path(),
+            session,
+            Arc::clone(&img),
+            5,
+            &row,
+            &row,
+            Utc::now(),
+            stat_tracker::report::blank::CaptureTime::now(),
+            vec!["KeptName".into()],
+            &std::collections::BTreeMap::new(),
+        );
+        let kit = dir.path().join("report-kit").join(session);
+        let started = Instant::now();
+        while !kit.join("reads.json").is_file() || !kit.join("names.json").is_file() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "report kit did not land while the debug ring queue was full"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let names = std::fs::read_to_string(kit.join("names.json")).unwrap();
+        assert!(names.contains("KeptName"), "{names}");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "the report save was counted as a debug drop"
+        );
+
+        // Park the report worker, then send one more job than the queue
+        // holds. The extra send stays blocked until the worker runs again.
+        // A drop would return immediately and skip the kit.
+        let _report_tests = REPORT_SAVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        REPORT_SAVE_HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+        struct ReleaseReportHold;
+        impl Drop for ReleaseReportHold {
+            fn drop(&mut self) {
+                REPORT_SAVE_HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let report_hold = ReleaseReportHold;
+
+        let (poke_done, poke_rx) = std::sync::mpsc::channel();
+        let poke_dir = dir.path().to_path_buf();
+        let poke_img = Arc::clone(&img);
+        let poke_thread = std::thread::spawn(move || {
+            let row = test_match("qpoke", "victory");
+            enqueue_kept_save_unlocked(kept_report(&poke_dir, "qpoke", &poke_img, &row), false);
+            let _ = poke_done.send(());
+        });
+        let report_parked = Instant::now();
+        while !REPORT_SAVE_PARKED.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                report_parked.elapsed() < std::time::Duration::from_secs(2),
+                "report worker did not park"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let blockers = REPORT_SAVE_QUEUE + 1;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut joins = Vec::new();
+        for i in 0..blockers {
+            let started_tx = started_tx.clone();
+            let done_tx = done_tx.clone();
+            let block_dir = dir.path().to_path_buf();
+            let frame = Arc::clone(&img);
+            joins.push(std::thread::spawn(move || {
+                let session = format!("qblock{i}");
+                let row = test_match(&session, "victory");
+                let job = kept_report(&block_dir, &session, &frame, &row);
+                let _ = started_tx.send(());
+                enqueue_kept_save_unlocked(job, false);
+                let _ = done_tx.send(i);
+            }));
+        }
+        drop(started_tx);
+        drop(done_tx);
+        for _ in 0..blockers {
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("report send thread did not start");
+        }
+        // Long enough that a send which is not blocked would have returned.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut finished = Vec::new();
+        while let Ok(i) = done_rx.try_recv() {
+            finished.push(i);
+        }
+        assert!(
+            finished.len() < blockers,
+            "a full report queue returned every send ({finished:?}); it should block"
+        );
+        assert!(
+            finished.len() <= REPORT_SAVE_QUEUE,
+            "more sends returned than the report queue can hold ({finished:?})"
+        );
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "a blocked report save was counted as a debug drop"
+        );
+
+        drop(report_hold);
+        let released = Instant::now();
+        while finished.len() < blockers {
+            match done_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(i) => finished.push(i),
+                Err(_) => panic!(
+                    "blocked report send did not finish after the worker was released ({finished:?})"
+                ),
+            }
+            assert!(
+                released.elapsed() < std::time::Duration::from_secs(2),
+                "blocked report sends took too long"
+            );
+        }
+        poke_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("report poke send did not finish");
+        poke_thread.join().expect("report poke thread");
+        assert_eq!(
+            stat_tracker::perf_log::debug_save_drops() - before,
+            dropped,
+            "a finished report save was counted as a debug drop"
+        );
+        for i in 0..blockers {
+            let session = format!("qblock{i}");
+            let reads = dir
+                .path()
+                .join("report-kit")
+                .join(&session)
+                .join("reads.json");
+            let started = Instant::now();
+            while !reads.is_file() {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(2),
+                    "report kit {session} did not land after the blocked send"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let poke_reads = dir
+            .path()
+            .join("report-kit")
+            .join("qpoke")
+            .join("reads.json");
+        let poke_written = Instant::now();
+        while !poke_reads.is_file() {
+            assert!(
+                poke_written.elapsed() < std::time::Duration::from_secs(2),
+                "report poke kit did not land"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for join in joins {
+            join.join().expect("report block thread");
+        }
+
+        drop(hold);
+        let drained = Instant::now();
+        let accepted = dir.path().join("debug").join("accepted");
+        while queued.iter().any(|prefix| {
+            png_names(&accepted)
+                .iter()
+                .all(|name| !name.starts_with(prefix))
+        }) {
+            assert!(
+                drained.elapsed() < std::time::Duration::from_secs(2),
+                "queued ring pictures did not flush"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Release soak for the arena cap. Synthetic Tab frames only, no captured boards.
+    ///
+    /// Each read is one `spawn_blocking` of [`analyze_frame`], the same shape
+    /// as a Tab capture. The frame is a 1920x1080 board from the blanker
+    /// generator, and the portrait matcher loads a synthetic hero-icon pack.
+    /// RssAnon is printed after each wave.
+    ///
+    /// `cargo test --release --bin scuffed-stat-tracker ram_plateau_soak -- --ignored --test-threads 1 --nocapture`
+    #[test]
+    #[ignore = "release soak: synthetic Tab bursts, asserts RssAnon under 400 MB"]
+    fn ram_plateau_soak() {
+        // Before any of this test's threads, same place as `main`.
+        limit_glibc_arenas();
+        // Process-wide, so the blocking threads see it. A scoped mode would not.
+        ocr::gate::set_mode(ocr::gate::OcrMode::Off);
+        struct RestoreOcr;
+        impl Drop for RestoreOcr {
+            fn drop(&mut self) {
+                ocr::gate::set_mode(ocr::gate::OcrMode::On);
+            }
+        }
+        let _ocr = RestoreOcr;
+
+        let data = tempfile::tempdir().unwrap();
+        let pack = data.path().join("templates/heroes-v2-1080");
+        let icons = stat_tracker::shadow::heroes::write_synthetic_hero_icons(&pack, 40);
+        let loaded =
+            stat_tracker::shadow::heroes::HeroTemplates::load_dir(&pack).expect("hero-icon pack");
+        assert!(
+            icons >= 32 && loaded.hero_count() >= 32,
+            "hero icon pack has {icons} written, {} loaded",
+            loaded.hero_count()
+        );
+        let matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load_installed(
+            data.path(),
+        ));
+        assert!(
+            !matcher.is_empty(),
+            "portrait templates from the hero-icon pack did not load"
+        );
+        assert!(
+            stat_tracker::shadow::init(&stat_tracker::shadow::ReaderConfig::from_data_dir(
+                data.path()
+            )),
+            "hero-icon pack was not installed on the reader"
+        );
+
+        let tab_flags = || FrameFlags {
+            allow_banner_recovery: false,
+            session_map_known: true,
+            shadow_on: true,
+            use_new_reader: true,
+        };
+        let probe = analyze_frame(
+            stat_tracker::report::blank::synthetic_tab_frame(1920),
+            Arc::clone(&matcher),
+            None,
+            detect::MatchOutcome::Unknown,
+            tab_flags(),
+            Vec::new(),
+        );
+        let FrameAnalysisOutcome::Analyzed(probe) = probe else {
+            panic!("synthetic 1920x1080 Tab did not pass the scoreboard gate");
+        };
+        assert_eq!(probe.frame.width(), 1920);
+        assert_eq!(probe.frame.height(), 1080);
+        assert_eq!(
+            probe.board.as_ref().map(|b| b.status),
+            Some(shadow::reader::BoardStatus::Read),
+            "the digit reader did not run on the synthetic Tab"
+        );
+
+        fn rss(tag: &str) -> Option<u64> {
+            let kb = stat_tracker::perf_log::rss_anon_kb();
+            match kb {
+                Some(kb) => eprintln!("rss_anon_kb {tag}={kb}"),
+                None => eprintln!("rss_anon_kb {tag}=na"),
+            }
+            kb
+        }
+
+        // Hundreds of Tabs, each on its own short-lived blocking thread,
+        // the way a capture hands `analyze_frame` to `spawn_blocking`.
+        const READS: usize = 256;
+        const BATCH: usize = 32;
+        rss("before");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(64)
+            .thread_keep_alive(std::time::Duration::from_millis(200))
+            .enable_all()
+            .build()
+            .expect("soak runtime");
+        let mut analyzed = 0usize;
+        let mut with_board = 0usize;
+        for wave in 0..(READS / BATCH) {
+            let (ok, boards) = rt.block_on(async {
+                let mut tasks = Vec::with_capacity(BATCH);
+                for _ in 0..BATCH {
+                    let matcher = Arc::clone(&matcher);
+                    tasks.push(tokio::task::spawn_blocking(move || {
+                        let frame = stat_tracker::report::blank::synthetic_tab_frame(1920);
+                        analyze_frame(
+                            frame,
+                            matcher,
+                            None,
+                            detect::MatchOutcome::Unknown,
+                            FrameFlags {
+                                allow_banner_recovery: false,
+                                session_map_known: true,
+                                shadow_on: true,
+                                use_new_reader: true,
+                            },
+                            Vec::new(),
+                        )
+                    }));
+                }
+                let mut ok = 0usize;
+                let mut boards = 0usize;
+                for task in tasks {
+                    if let FrameAnalysisOutcome::Analyzed(a) = task.await.expect("analyze task") {
+                        ok += 1;
+                        if a.board
+                            .as_ref()
+                            .is_some_and(|b| b.status == shadow::reader::BoardStatus::Read)
+                        {
+                            boards += 1;
+                        }
+                    }
+                }
+                (ok, boards)
+            });
+            analyzed += ok;
+            with_board += boards;
+            rss(&format!("wave{wave}"));
+        }
+        drop(rt);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        rss("threads_gone");
+        release_glibc_heap();
+        let trimmed = rss("trimmed");
+        assert_eq!(analyzed, READS, "Tab reads that passed the scoreboard gate");
+        assert!(
+            with_board * 2 >= READS,
+            "digit reader ran on {with_board} of {READS} Tabs"
+        );
+        let rss = trimmed.expect("RssAnon from /proc/self/status");
+        assert!(
+            rss < 400 * 1024,
+            "RssAnon {rss} kB after {READS} synthetic Tab reads"
         );
     }
 

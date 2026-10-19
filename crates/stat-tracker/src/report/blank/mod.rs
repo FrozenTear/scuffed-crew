@@ -28,12 +28,19 @@ mod letters;
 mod port_check;
 mod portrait;
 mod reader;
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod synth;
 #[cfg(test)]
 mod tests_measured;
 
 pub use chat::{Chat, chat_over_board};
+
+/// A synthetic 16:9 Tab frame from the blanker generator. `width` 1920 is
+/// 1080p and 2560 is 1440p. The scoreboard crop is a full 5v5 board. No
+/// captured pixels.
+pub fn synthetic_tab_frame(width: u32) -> DynamicImage {
+    synth::tab_frame(synth::Teams::Five, width, 5)
+}
 
 use std::collections::VecDeque;
 

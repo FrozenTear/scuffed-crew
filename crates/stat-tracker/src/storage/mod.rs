@@ -1471,23 +1471,44 @@ impl LocalStore {
 
     /// Export all matches and sessions to `live_snapshot.json` (atomic via
     /// tmp+rename). SurrealKV is single-process, so while the daemon holds the
-    /// store open the GUI cannot read it — this snapshot is the GUI's live
+    /// store open the GUI cannot read it. This snapshot is the GUI's live
     /// data source, refreshed by the daemon after every mutation. Unlike
     /// `matches.jsonl` (append-only insert log), it reflects back-filled
     /// outcomes and sync-state changes.
+    ///
+    /// The queries name the fields the GUI reads. They do not use `SELECT *`,
+    /// which also pulled the record id and any extra columns on every change.
+    /// The JSON is written with `serde_json::to_writer` into a `BufWriter`,
+    /// so the file is not also held as one `Vec<u8>`.
     pub async fn export_snapshot(
         &self,
         data_dir: &Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let snapshot = Snapshot {
-            matches: self.get_all_matches().await?,
-            sessions: self.get_all_sessions().await?,
-        };
-        let json = serde_json::to_vec(&snapshot)?;
+        let matches = self.snapshot_matches().await?;
+        let sessions = self.snapshot_sessions().await?;
         let tmp = data_dir.join("live_snapshot.json.tmp");
-        std::fs::write(&tmp, &json)?;
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &Snapshot { matches, sessions })?;
+        std::io::Write::flush(&mut writer)?;
         std::fs::rename(&tmp, snapshot_path(data_dir))?;
         Ok(())
+    }
+
+    async fn snapshot_matches(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self.db.query(SNAPSHOT_MATCH_QUERY).await?;
+        let matches: Vec<PersonalMatch> = result.take(0)?;
+        Ok(matches)
+    }
+
+    async fn snapshot_sessions(
+        &self,
+    ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self.db.query(SNAPSHOT_SESSION_QUERY).await?;
+        let sessions: Vec<MatchSession> = result.take(0)?;
+        Ok(sessions)
     }
 
     pub async fn last_capture_time(&self) -> Option<String> {
@@ -1515,6 +1536,23 @@ struct CountRow {
 struct LastCaptureRow {
     played_at: SurrealDatetime,
 }
+
+/// Fields the live snapshot reads from `personal_match`. Not `SELECT *`:
+/// the record id is skipped (the JSON omits it) and extra columns are not
+/// decoded on every refresh.
+const SNAPSHOT_MATCH_QUERY: &str = "\
+SELECT hero, map_name, game_mode, role, outcome, elims, deaths, assists, \
+damage, healing, mitigation, played_at, synced, sync_rev, upload_reject, \
+session_id, corrected_hero, corrected_role, corrected_map_name, corrected_outcome, \
+corrected_elims, corrected_deaths, corrected_assists, corrected_damage, \
+corrected_healing, corrected_mitigation, edited_fields, edited_at, heroes_played, \
+segment_resolutions, recognizer, suspect_fields \
+FROM personal_match ORDER BY played_at DESC";
+
+/// Fields the live snapshot reads from `match_session`.
+const SNAPSHOT_SESSION_QUERY: &str = "\
+SELECT session_id, hero, map_name, role, started_at, last_capture_at, \
+capture_count, final_outcome FROM match_session ORDER BY last_capture_at DESC";
 
 /// The daemon's live export of the full store, for readers (the GUI) that
 /// can't open SurrealKV while the daemon has it locked.
@@ -2167,6 +2205,65 @@ mod tests {
     async fn mark_current(store: &LocalStore) {
         let rows = store.get_all_matches().await.unwrap();
         store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_snapshot_selects_fields_and_round_trips() {
+        assert!(
+            !SNAPSHOT_MATCH_QUERY.contains('*'),
+            "snapshot matches must not SELECT *"
+        );
+        assert!(
+            !SNAPSHOT_SESSION_QUERY.contains('*'),
+            "snapshot sessions must not SELECT *"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        let when = Utc::now();
+        let mut row = snap("snap-fields", 14);
+        row.upload_reject = Some("held".into());
+        row.corrected_elims = Some(9);
+        row.edited_fields = vec!["elims".into()];
+        row.recognizer = "cv-v5".into();
+        row.suspect_fields = vec!["healing".into()];
+        row.heroes_played = vec![HeroSegment {
+            hero: "Ana".into(),
+            role: "Support".into(),
+            first_seen: SurrealDatetime::from(when),
+            last_seen: SurrealDatetime::from(when),
+            snapshots: 2,
+            confirmed: true,
+            resolution: None,
+        }];
+        row.segment_resolutions = vec![SegmentResolution {
+            segment: 0,
+            action: SEGMENT_CONFIRM.into(),
+        }];
+        store.insert_match(row).await.unwrap();
+        store
+            .create_session(&MatchSession {
+                session_id: "snap-fields".into(),
+                hero: "Ana".into(),
+                map_name: "Busan".into(),
+                role: "Support".into(),
+                started_at: SurrealDatetime::from(when),
+                last_capture_at: SurrealDatetime::from(when),
+                capture_count: 1,
+                final_outcome: "victory".into(),
+            })
+            .await
+            .unwrap();
+        store.export_snapshot(dir.path()).await.unwrap();
+        let snap = read_snapshot(dir.path()).unwrap();
+        let mut stored = store.get_all_matches().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        stored[0].id = None;
+        assert_eq!(snap.matches, stored);
+        let sessions = store.get_all_sessions().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&snap.sessions).unwrap(),
+            serde_json::to_value(&sessions).unwrap()
+        );
     }
 
     #[test]

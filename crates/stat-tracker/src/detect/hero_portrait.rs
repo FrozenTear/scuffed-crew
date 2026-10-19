@@ -658,7 +658,7 @@ pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
 /// method). Callers that need both the preflight verdict and the team size
 /// should call this once and derive both from the returned [`RowScan`].
 pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
-    let rgb = scoreboard.to_rgb8();
+    let rgb = crate::perf::to_rgb8(scoreboard);
     let (w, h) = rgb.dimensions();
     if w == 0 || h == 0 {
         return RowScan {

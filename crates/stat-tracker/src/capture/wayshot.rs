@@ -82,6 +82,9 @@ pub async fn capture_with_output(
             };
 
             tracing::debug!(output = %output.name, "capturing");
+            // libwayshot returns the image from this call. The shm copy is
+            // inside it, so there is no separate post-grab conversion to time.
+            // X11 and the portal record that step as grab_convert.
             let img = wayshot.screenshot_single_output(output, false)?;
             tracing::debug!(
                 output = %output.name,

@@ -1372,7 +1372,7 @@ pub(crate) fn map_label_retry_image(img: &DynamicImage) -> Option<GrayImage> {
 /// or any other recolour still counts. A death cam with a killfeed and HUD
 /// does not.
 pub fn scoreboard_table_present(board: &DynamicImage) -> bool {
-    let Some(m) = measure_table(&board.to_rgb8()) else {
+    let Some(m) = measure_table(&crate::perf::to_rgb8(board)) else {
         return false;
     };
     // Header: light bar. Each stack: most scanlines are one brightness.
