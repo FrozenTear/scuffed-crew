@@ -1116,3 +1116,68 @@ fn a_version_only_record_is_checked_with_the_folder_manifest() {
     assert_eq!(switch.reload_spawns(), spawns);
     assert_eq!(switch.pack().unwrap().templates(), 6);
 }
+
+/// The record states a daemon can find right after the app's swap.
+#[derive(Clone, Copy, Debug)]
+enum RecordBefore {
+    /// The previous install's version and manifest sha.
+    Old,
+    /// The previous version only, no `pack-manifests.json` (an rc.1 install).
+    VersionOnly,
+    /// No record files at all.
+    Missing,
+}
+
+/// API's review: the app swaps the folder first and writes the records
+/// after. A name read in that window must not mark the new folder as
+/// handled; the later record write starts one checked reload.
+#[test]
+fn a_record_written_after_the_swap_and_a_read_still_reloads() {
+    for before in [
+        RecordBefore::Old,
+        RecordBefore::VersionOnly,
+        RecordBefore::Missing,
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = crate::names::pack::dir_in(tmp.path());
+        write_pack(&live, &["ABC"]);
+        match before {
+            RecordBefore::Old => record_install(tmp.path(), &installed(&live, "test")),
+            RecordBefore::VersionOnly => record_version(tmp.path(), "test"),
+            RecordBefore::Missing => {}
+        }
+        let switch = NameSwitch::load(true, tmp.path());
+        switch.wait_reload();
+        let a = switch.pack().expect("startup pack");
+        let spawns = switch.reload_spawns();
+
+        // The app swaps in a newer pack; its records are not written yet.
+        let staging = tmp.path().join("templates").join(".names-v1-next-1-2");
+        write_pack(&staging, &["ABC", "CBA"]);
+        set_version(&staging, Some("full-20990101"));
+        crate::packs::swap_dir(&staging, &live).unwrap();
+        for _ in 0..5 {
+            assert!(
+                std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()),
+                "{before:?}: read in the window keeps the pack"
+            );
+        }
+        assert_eq!(switch.reload_spawns(), spawns, "{before:?}: no reload yet");
+
+        record_install(tmp.path(), &installed(&live, "full-20990101"));
+        let _ = switch.pack();
+        assert_eq!(
+            switch.reload_spawns(),
+            spawns + 1,
+            "{before:?}: record re-arms"
+        );
+        switch.wait_reload();
+        assert_eq!(
+            switch.pack().unwrap().templates(),
+            6,
+            "{before:?}: new pack"
+        );
+        let _ = switch.pack();
+        assert_eq!(switch.reload_spawns(), spawns + 1, "{before:?}: once");
+    }
+}
