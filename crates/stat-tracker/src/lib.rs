@@ -6,6 +6,7 @@ pub mod detect;
 pub mod fs_mode;
 pub mod hero_auth;
 pub mod mapcrops;
+pub mod names;
 pub mod ocr;
 pub mod ocr_switch;
 pub mod omp;
