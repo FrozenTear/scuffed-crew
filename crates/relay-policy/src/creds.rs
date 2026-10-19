@@ -5,7 +5,10 @@
 //! a missing relay password falls back to `SURREALDB_USER` /
 //! `SURREALDB_PASSWORD` (`SURREALDB_PASS` is an alias). When `PRODUCTION=1`,
 //! a missing or blank relay password is an error. There is no fallback to
-//! `SURREALDB_USER` or `SURREALDB_PASSWORD`.
+//! `SURREALDB_USER` or `SURREALDB_PASSWORD`. A dev fallback that is still
+//! the legacy root password logs a startup warning and does not print the
+//! password. The surrealdb client replays a record sign-in after reconnect.
+//! Session duration is NONE, so the process does not sign in on a timer.
 
 use scuffed_db::DbConfig;
 

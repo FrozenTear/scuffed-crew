@@ -44,7 +44,7 @@ Switch the relay only after that:
 ./scripts/relay-up.sh
 ```
 
-`update.sh` waits for `/api/ready`, and falls back to `/api/health` when `/api/ready` returns 404. `relay-up.sh` checks `/api/ready` again and signs in as the relay user. It rebuilds strfry only after that sign-in returns 200. A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. The sign-in inside `relay-up.sh` is what proves the login. The result is cached for 2 seconds.
+`update.sh` waits for `/api/ready`, and falls back to `/api/health` when `/api/ready` returns 404. `relay-up.sh` checks `/api/ready` again and signs in as the relay user. It rebuilds strfry only after that sign-in returns 200. A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. The sign-in inside `relay-up.sh` is what proves the login. The result is cached for 2 seconds, and concurrent misses share one probe.
 
 Compose passes `SURREALDB_RELAY_PASSWORD` into the relay container and does not copy `SURREALDB_PASSWORD` into it. When `PRODUCTION=1`, the relay requires a non-blank relay password and does not fall back to `SURREALDB_USER`.
 
@@ -479,7 +479,9 @@ to the v3.0 index digest
 The relay builder is `rust:1.92-alpine` pinned to
 `sha256:f6c22e0a256c05d44fca23bf530120b5d4a6249a393734884281ca80782329bc`.
 `update.sh` does not bump either pin. A glibc build of those plugins does not
-load there. CI builds this image, seeds team channel rows the same way
+load there. CI starts Surreal from that same digest, signs in as the relay
+record user, and checks that the secret column and `audit_log` stay hidden.
+It then builds this image, seeds team channel rows the same way
 `ensure_team_channel_rows` does, and walks the site chat path: NIP-42 AUTH
 on the gate, `get_team_channels` (the query behind
 `GET /api/teams/:id/channels`), a kind 9 `#h` subscription, a kind 9 publish
