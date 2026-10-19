@@ -280,46 +280,52 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     // cell per second (see `link_poll`) so three devices can sit on the
     // 5 second interval for the whole code lifetime.
     let link_period = 30;
-    let link_start_routes = Router::new()
-        .route("/api/link/start", post(routes::link::start))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor.clone())
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_START_BURST)
-                    .finish()
-                    .expect("valid device link start governor"),
+    let link_start_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/start", post(routes::link::start))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor.clone())
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_START_BURST)
+                        .finish()
+                        .expect("valid device link start governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_poll_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/poll", post(routes::link::poll))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                routes::link::limit_link_poll,
             ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_poll_routes = Router::new()
-        .route("/api/link/poll", post(routes::link::poll))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            routes::link::limit_link_poll,
-        ))
-        .layer(middleware::from_fn(routes::link::no_store_link));
-    let link_user_routes = Router::new()
-        .route("/api/link/lookup", post(routes::link::lookup))
-        .route("/api/link/approve", post(routes::link::approve))
-        .route("/api/link/deny", post(routes::link::deny))
-        .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
-        .layer(
-            GovernorLayer::new(std::sync::Arc::new(
-                GovernorConfigBuilder::default()
-                    .key_extractor(key_extractor)
-                    .per_second(link_period)
-                    .burst_size(routes::link::LINK_USER_BURST)
-                    .finish()
-                    .expect("valid device link user governor"),
-            ))
-            .error_handler(rate_limit::governor_error_response),
-        )
-        .layer(middleware::from_fn(routes::link::no_store_link));
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
+    let link_user_routes = routes::link::method_not_allowed_outside_limit(
+        Router::new()
+            .route("/api/link/lookup", post(routes::link::lookup))
+            .route("/api/link/approve", post(routes::link::approve))
+            .route("/api/link/deny", post(routes::link::deny))
+            .layer(middleware::from_fn(routes::link::reject_link_query_secrets))
+            .layer(
+                GovernorLayer::new(std::sync::Arc::new(
+                    GovernorConfigBuilder::default()
+                        .key_extractor(key_extractor)
+                        .per_second(link_period)
+                        .burst_size(routes::link::LINK_USER_BURST)
+                        .finish()
+                        .expect("valid device link user governor"),
+                ))
+                .error_handler(rate_limit::governor_error_response),
+            )
+            .layer(middleware::from_fn(routes::link::no_store_link)),
+    );
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
