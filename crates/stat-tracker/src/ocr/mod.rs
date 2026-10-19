@@ -259,13 +259,13 @@ thread_local! {
 }
 
 /// Make room for `lang` when the per-thread cache is already full. A language
-/// that is already stored is left in place. The dropped key is whichever the
-/// map yields first; the caller inserts `lang` next.
+/// that is already stored is left in place. `eng` is never dropped: the
+/// other entry goes instead. The caller inserts `lang` next.
 fn reserve_tess_slot<T>(cache: &mut HashMap<&'static str, T>, lang: &'static str) {
     if cache.contains_key(lang) || cache.len() < TESS_CACHE_CAP {
         return;
     }
-    let drop_key = cache.keys().copied().next();
+    let drop_key = cache.keys().copied().find(|key| *key != "eng");
     if let Some(drop_key) = drop_key {
         cache.remove(drop_key);
     }
@@ -2693,6 +2693,32 @@ mod tests {
             cache.keys().filter(|k| **k != "osd").count(),
             before.keys().filter(|k| **k != "osd").count()
         );
+    }
+
+    /// `eng` is the language every read can fall back to. A full cache drops
+    /// the other entry and leaves `eng` in place.
+    #[test]
+    fn eng_stays_when_the_tess_cache_is_full() {
+        let mut cache = std::collections::HashMap::new();
+        for (i, lang) in ["eng", "koverwatch"].into_iter().enumerate() {
+            reserve_tess_slot(&mut cache, lang);
+            cache.insert(lang, i as u8);
+        }
+        assert_eq!(cache.len(), TESS_CACHE_CAP);
+        reserve_tess_slot(&mut cache, "osd");
+        cache.insert("osd", 2);
+        assert_eq!(cache.len(), TESS_CACHE_CAP);
+        assert!(
+            cache.contains_key("eng"),
+            "eng is kept when a third language arrives"
+        );
+        assert!(
+            !cache.contains_key("koverwatch"),
+            "the other language is the one that leaves"
+        );
+        assert!(cache.contains_key("osd"));
+        reserve_tess_slot(&mut cache, "eng");
+        assert_eq!(cache["eng"], 0, "a repeat of eng does not replace it");
     }
 }
 

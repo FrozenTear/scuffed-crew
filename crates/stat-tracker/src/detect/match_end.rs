@@ -316,14 +316,76 @@ fn rank_result_should_log(previous: Option<MatchOutcome>, next: MatchOutcome) ->
     previous != Some(next)
 }
 
+/// Last rank-screen outcome this process logged. Poll ticks can move
+/// threads, so this is process-wide. Cleared when a game ends
+/// ([`clear_rank_result_log`]) so the next game logs its first result
+/// even when that result matches the game before it.
+static RANK_RESULT_LOG: Mutex<Option<MatchOutcome>> = Mutex::new(None);
+
+/// Forget the last rank-screen result. A game that ends on defeat must
+/// still log defeat when the next game ends the same way.
+pub fn clear_rank_result_log() {
+    #[cfg(test)]
+    let _hold = rank_log_test_guard();
+    let mut last = RANK_RESULT_LOG
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *last = None;
+}
+
 fn rank_result_is_new(outcome: MatchOutcome) -> bool {
-    static LAST: Mutex<Option<MatchOutcome>> = Mutex::new(None);
-    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    #[cfg(test)]
+    let _hold = rank_log_test_guard();
+    let mut last = RANK_RESULT_LOG
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let due = rank_result_should_log(*last, outcome);
     if due {
         *last = Some(outcome);
     }
     due
+}
+
+/// One test owns the rank-log memory while it plays two games. Other tests
+/// that read a rank screen block until it finishes, so a parallel poll
+/// cannot change what this test logged.
+#[cfg(test)]
+static RANK_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static RANK_LOG_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct RankLogTestGuard {
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+impl Drop for RankLogTestGuard {
+    fn drop(&mut self) {
+        if self._guard.is_some() {
+            RANK_LOG_LOCK_HELD.with(|held| held.set(false));
+        }
+    }
+}
+
+/// Lock the rank-log memory for this thread. A caller that already holds it
+/// gets a no-op guard, so [`rank_result_is_new`] can take the same lock
+/// from inside a test without deadlocking.
+#[cfg(test)]
+fn rank_log_test_guard() -> RankLogTestGuard {
+    if RANK_LOG_LOCK_HELD.with(|held| held.get()) {
+        return RankLogTestGuard { _guard: None };
+    }
+    let guard = RANK_LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    RANK_LOG_LOCK_HELD.with(|held| held.set(true));
+    RankLogTestGuard {
+        _guard: Some(guard),
+    }
 }
 
 /// Under `reader = "new"`, a result word fell back to OCR because the
@@ -3625,6 +3687,30 @@ mod tests {
             "a repeat of the same rank result stays quiet"
         );
         assert!(rank_result_should_log(None, MatchOutcome::Draw));
+    }
+
+    /// Two games in a row can finish with the same rank result. Each game
+    /// logs that result on its first poll. A second poll of the same game
+    /// stays quiet. Game end clears the memory, the same clear
+    /// [`clear_rank_result_log`] the session close runs beside the column
+    /// cache reset.
+    #[test]
+    fn the_same_rank_result_is_logged_in_both_games() {
+        let _hold = rank_log_test_guard();
+        clear_rank_result_log();
+        let mut logged = Vec::new();
+        for game in 0..2 {
+            for outcome in [MatchOutcome::Defeat, MatchOutcome::Defeat] {
+                if rank_result_is_new(outcome) {
+                    logged.push((game, outcome));
+                }
+            }
+            clear_rank_result_log();
+        }
+        assert_eq!(
+            logged,
+            vec![(0, MatchOutcome::Defeat), (1, MatchOutcome::Defeat),]
+        );
     }
 
     /// Under `reader = "new"`, a result word that falls back to OCR (no

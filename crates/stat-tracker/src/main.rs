@@ -1750,9 +1750,11 @@ async fn retire_active_game(
     let Some(mut g) = st.active_game.take() else {
         return;
     };
-    // The game is over: its unblanked portrait cells leave memory, and a
-    // below-floor column calibration must not stick into the next game.
+    // The game is over: its unblanked portrait cells leave memory, a
+    // below-floor column calibration must not stick into the next game,
+    // and the rank-screen log must not hide the next game's same result.
     stat_tracker::ocr::clear_below_floor_column_cache();
+    stat_tracker::detect::match_end::clear_rank_result_log();
     stat_tracker::report::kit::forget_portraits(data_dir, &g.session_id);
     let had_outcome = g.finished();
     if !had_outcome {
