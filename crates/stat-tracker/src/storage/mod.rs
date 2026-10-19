@@ -3403,7 +3403,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
-        store.clear_rejected_uploads().await.unwrap();
+        store
+            .apply_command(&StoreCommand::RetryRejectedUploads)
+            .await
+            .unwrap();
         let again = store.get_unsynced().await.unwrap();
         assert_eq!(again.len(), 4);
         assert!(again.iter().all(|row| row.upload_rejection().is_none()));
