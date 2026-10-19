@@ -67,7 +67,11 @@ pub fn accept_bundle(input: &[u8]) -> Result<AcceptedBundle, BundleReject> {
                 ));
             }
         }
-        let name = file.name().to_string();
+        // `ZipFile::name` is a Result as of zip 9. Non-UTF-8 is not a safe path.
+        let name = file
+            .name()
+            .map_err(|_| BundleReject::Invalid("zip path is not allowed".into()))?
+            .into_owned();
         if !safe_entry_name(&name) {
             return Err(BundleReject::Invalid("zip path is not allowed".into()));
         }
@@ -315,10 +319,19 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
 
+    use scuffed_types::MAX_BUNDLE_BYTES;
+
     fn entry_names(bytes: &[u8]) -> Vec<String> {
         let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
         (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
             .collect()
     }
 
@@ -447,5 +460,57 @@ mod tests {
             Ok(_) => panic!("a listed mapcrop was stored"),
             Err(BundleReject::TooLarge) => panic!("report bundle was too large"),
         }
+    }
+
+    /// A tiny deflate stream whose uncompressed size is over the cap, and
+    /// names that leave the archive root. All are rejected. The caps themselves
+    /// are unchanged: entry count, total uncompressed size, and the
+    /// compression-ratio bound that follows from refusing to inflate past that
+    /// size. `../log.txt` fails the leading-dot check. `logs/../log.txt` fails
+    /// the `..` segment check. `/log.txt` fails the absolute-path check.
+    #[test]
+    fn zip_bomb_and_path_traversal_are_rejected() {
+        let payload = vec![b'a'; (MAX_BUNDLE_BYTES as usize) + 1];
+        let bomb = stored_zip_deflated(&[("log.txt", &payload)]);
+        assert!(
+            (bomb.len() as u64) < MAX_BUNDLE_BYTES / 50,
+            "fixture should be a high-ratio bomb, compressed {} bytes",
+            bomb.len()
+        );
+        match accept_bundle(&bomb) {
+            Err(BundleReject::TooLarge) => {}
+            Err(BundleReject::Invalid(reason)) => {
+                panic!("zip bomb rejected as invalid: {reason}")
+            }
+            Ok(_) => panic!("zip bomb was accepted"),
+        }
+
+        let log = b"synthetic log line\n";
+        let manifest = log_manifest(log);
+        for bad in ["../log.txt", "logs/../log.txt", "/log.txt"] {
+            let traversal = stored_zip(&[("manifest.json", manifest.as_slice()), (bad, log)]);
+            let names = entry_names(&traversal);
+            assert!(
+                names.iter().any(|name| name == bad),
+                "fixture must keep {bad}, got {names:?}"
+            );
+            match accept_bundle(&traversal) {
+                Err(BundleReject::Invalid(reason)) => {
+                    assert_eq!(reason, "zip path is not allowed", "{bad}")
+                }
+                Err(BundleReject::TooLarge) => panic!("{bad} was too large"),
+                Ok(_) => panic!("{bad} was accepted"),
+            }
+        }
+    }
+
+    fn stored_zip_deflated(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, bytes) in files {
+            writer.start_file(*name, opts).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
     }
 }
