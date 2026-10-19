@@ -57,7 +57,7 @@ pub const SITE_DELETE_LABEL: &str = "Also delete my stats on the site";
 /// This button calls `DELETE /api/stats/me` only. It does not delete the
 /// account, so it does not use the website's account-delete list.
 pub const SITE_CONFIRM_COPY: &str = "\
-Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes local stats, saved crops, debug screenshots, logs, report kits, and the sync token now. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected.";
+Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes, right away, your local stats, saved crops, debug screenshots, logs, report kits and the sync token. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected.";
 
 /// 401 or 403 from `DELETE /api/stats/me`. Local data stays.
 pub const SITE_REJECTED: &str = "\
@@ -778,7 +778,7 @@ token = \"synthetic-token-value\"
         }
         assert_eq!(
             SITE_CONFIRM_COPY,
-            "Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes local stats, saved crops, debug screenshots, logs, report kits, and the sync token now. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected."
+            "Your tracker stats are hidden on the site right away and deleted after 7 days. Stat reports you sent from the tracker are deleted too. It also revokes your tracker sync tokens. To undo the site delete, use Undo on the Edit Profile page on the website. Sync stops on every PC, and after an undo you need a new sync token. On this computer it deletes, right away, your local stats, saved crops, debug screenshots, logs, report kits and the sync token. Tracker settings are deleted too, unless you choose Keep my settings. Your account, forum posts, wiki edits and messages are not affected."
         );
         assert!(!SITE_BAD_REQUEST.contains("Try again"));
         assert!(SITE_CONFIRM_COPY.contains("revokes your tracker sync tokens"));
