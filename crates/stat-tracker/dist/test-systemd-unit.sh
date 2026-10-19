@@ -212,6 +212,75 @@ grep -qx 'WAYLAND_DISPLAY=wayland-1' "$ENV_FILE" \
     || fail "session.env missing after systemctl failure"
 pass "systemctl failure still writes session.env"
 
+# A busy desktop: thousands of processes, one compositor. The scan reads
+# each comm once with no command per process, so it stays fast, finds
+# niri, and says nothing about processes it cannot read or that are gone.
+BUSY="$TMP/busy-proc"
+mkdir -p "$BUSY"
+for ((n = 1000; n < 4000; n++)); do
+    mkdir "$BUSY/$n"
+    printf 'kworker\n' > "$BUSY/$n/comm"
+done
+mkdir -p "$BUSY/4242" "$BUSY/4243" "$BUSY/4244"
+printf 'niri\n' > "$BUSY/4242/comm"
+write_environ "$BUSY/4242/environ" "WAYLAND_DISPLAY=wayland-1" "XDG_CURRENT_DESKTOP=niri"
+# 4243 exited mid-scan (no comm); 4244 cannot be read.
+printf 'niri\n' > "$BUSY/4244/comm"
+chmod 000 "$BUSY/4244/comm"
+rm -f "$ENV_FILE"
+ERR="$TMP/busy.err"
+start_ns="$(date +%s%N)"
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+    HOME="$TMP/home" \
+    SCUFFED_PROC_ROOT="$BUSY" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    SCUFFED_SESSION_ENV_FILE="$ENV_FILE" \
+    bash "$HELPER" 2> "$ERR"
+took_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+chmod 600 "$BUSY/4244/comm"
+grep -qx 'WAYLAND_DISPLAY=wayland-1' "$ENV_FILE" \
+    || fail "niri not found in a busy process table. file: $(cat "$ENV_FILE")"
+grep -qi 'no such file\|permission denied' "$ERR" \
+    && fail "the scan was not quiet about unreadable processes: $(cat "$ERR")"
+[[ "$took_ms" -lt 5000 ]] || fail "scan of 3000 processes took ${took_ms} ms"
+grep -q 'session source: compositor pid 4242 (niri); scanned [0-9]* processes in [0-9]* ms' "$ERR" \
+    || fail "no session source line for QA: $(cat "$ERR")"
+pass "busy process table scanned in ${took_ms} ms, quietly"
+
+# Mint Cinnamon on X11: Xorg has DISPLAY only, cinnamon has the desktop.
+MINT="$TMP/mint-proc"
+mkdir -p "$MINT/300" "$MINT/301"
+printf 'Xorg\n' > "$MINT/300/comm"
+printf 'cinnamon\n' > "$MINT/301/comm"
+write_environ "$MINT/300/environ" "DISPLAY=:1"
+write_environ "$MINT/301/environ" "DISPLAY=:0" "XDG_CURRENT_DESKTOP=X-Cinnamon" "XDG_SESSION_TYPE=x11"
+rm -f "$ENV_FILE"
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+    HOME="$TMP/home" \
+    SCUFFED_PROC_ROOT="$MINT" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    SCUFFED_SESSION_ENV_FILE="$ENV_FILE" \
+    bash "$HELPER" 2> "$ERR"
+grep -qx 'DISPLAY=:0' "$ENV_FILE" || fail "cinnamon DISPLAY did not win over Xorg: $(cat "$ENV_FILE")"
+grep -qx 'XDG_CURRENT_DESKTOP=X-Cinnamon' "$ENV_FILE" || fail "Cinnamon desktop lost: $(cat "$ENV_FILE")"
+grep -q 'session source: compositor pid 301 (cinnamon)' "$ERR" || fail "Mint source line: $(cat "$ERR")"
+pass "Mint Cinnamon X11 session is read from cinnamon"
+
+# The overall limit: a scan past it stops and keeps what it found.
+rm -f "$ENV_FILE"
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+    WAYLAND_DISPLAY=wayland-3 \
+    HOME="$TMP/home" \
+    SCUFFED_PROC_ROOT="$BUSY" \
+    SCUFFED_SCAN_LIMIT_SECS=0 \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    SCUFFED_SESSION_ENV_FILE="$ENV_FILE" \
+    bash "$HELPER" 2> "$ERR"
+grep -q 'compositor scan stopped' "$ERR" || fail "scan limit was not logged: $(cat "$ERR")"
+grep -qx 'WAYLAND_DISPLAY=wayland-3' "$ENV_FILE" \
+    || fail "process environment fallback lost after the scan limit: $(cat "$ENV_FILE")"
+pass "scan limit falls back to the process environment"
+
 # Restore a recording systemctl for the installer tests. The daemon unit
 # reads as running only when FAKE_ACTIVE=1.
 cat > "$FAKE_CTL" << EOF

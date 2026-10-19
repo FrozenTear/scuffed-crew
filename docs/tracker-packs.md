@@ -603,7 +603,7 @@ inside `PACKS_DIR`.
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
-| `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32` | name reader. Optional. Single-letter templates only, no member data. Loaded once at startup or when the folder first appears, then kept. Until that load finishes, names fall back to Tesseract |
+| `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -652,15 +652,37 @@ stored).
 
 The name reader reads the player's own row from `names-v1.tar` when that
 pack is loaded. The pack is optional and holds single-letter templates
-only, never a member's name. It is loaded once, on a background thread:
-at startup when the folder is already there, or when sync installs it
-later. That load is kept for the rest of the run. Daemon startup does not
-wait for it. A name read before the load finishes reuses the Tesseract
-rows already in hand (ocr-v1's cell rows, or the new reader's one name
-window read) and tags them `ocr-v1`. It does not start a second Tesseract
-name read. The next read after the load uses the cached pack. A folder
-swapped in after that load is left until the next tracker start. With the
-switch off, the name read is those same Tesseract rows.
+only, never a member's name. It is loaded on a background thread: at
+startup when the folder is already there, and again each time the
+daemon's pack sync installs a names-v1 pack (a first start, or a newer
+pack). That reload checks the folder's `manifest.json` is the one sync
+verified the files against, checks every file against it and the version
+against the list, and only then swaps the pack in. A pack that fails the
+check leaves the current one in use. Daemon startup does not wait for a
+load. A name read before the load finishes reuses the Tesseract rows
+already in hand (ocr-v1's cell rows, or the new reader's one name window
+read) and tags them `ocr-v1`. It does not start a second Tesseract name
+read. When the desktop app's setup guide installs names-v1 while the
+daemon runs, the daemon's next name read sees the change: it looks at the
+live folder's `manifest.json` and the two record files only, never at a
+`.names-v1-next-*` staging or `-prev-` backup folder. It starts the same
+checked reload once the install is complete: the live manifest's version
+is the one in `pack-versions.json` and, when sync recorded one in
+`templates/pack-manifests.json` (pack name to manifest sha256, written
+right after `pack-versions.json`), the live manifest hashes to it. Between
+the swap and those writes nothing reloads. A record with the version only
+(written by a tracker before 0.5.0-rc.2) is checked with every file
+against the folder's manifest and the version. A pack that fails a check
+keeps the current one. A folder changed by hand with no matching record
+is left until the next tracker start. With the switch off, the name
+read is those same Tesseract rows.
+
+Unlike the other packs, names-v1 keeps its inner `manifest.json` in
+`templates/names-v1/`: the name reader reads the canvas, the glyph and
+mark counts, the params and every file's sha256 from it. 0.5.0-rc.1
+installed the six files without it, so the reader refused the pack
+(`names-v1 pack refused: missing manifest.json`). A tracker with this fix
+treats such a folder as not installed and downloads the pack again.
 
 The new reader reads the end title (VICTORY!, DEFEAT or DRAW over the world
 at the end of a match) from the end-title templates of `words-v1.tar`:
