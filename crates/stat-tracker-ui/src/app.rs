@@ -1422,6 +1422,10 @@ impl TrackerApp {
                                 self.delete_data.notice =
                                     Some(crate::delete_data::SITE_REJECTED.to_string());
                             }
+                            crate::delete_data::WipeFailure::SiteKept(msg) => {
+                                self.delete_data.offer_retry = false;
+                                self.delete_data.notice = Some(msg.clone());
+                            }
                             crate::delete_data::WipeFailure::Local { unlinked, .. } => {
                                 self.delete_data.offer_retry = false;
                                 if *unlinked {
@@ -3583,6 +3587,11 @@ token = \"secret-token-must-stay\"
         .unwrap();
         let when = stat_tracker::sync::scheduled_delete_local_date("2026-10-26T15:04:05Z");
         let deletion = stat_tracker::sync::stats_delete_pending_status(when.as_deref());
+        assert!(when.as_deref().unwrap().contains("October"), "{when:?}");
+        assert!(when.as_deref().unwrap().contains(", 2026"), "{when:?}");
+        assert!(deletion.contains("Edit Profile"), "{deletion}");
+        assert!(deletion.contains("Sync Tokens"), "{deletion}");
+        assert!(!deletion.contains("account page"), "{deletion}");
         assert_eq!(
             super::health_status_for(&dir, &[], None),
             deletion,

@@ -17,7 +17,7 @@ pub const SYNC_TOKEN_REJECTED_STATUS: &str = "Sync token rejected: update the to
 /// [`SYNC_STATS_DELETE_FALLBACK_WHEN`]. Undo is on the website and does not
 /// restore the old token.
 pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "\
-Your site stats are scheduled for deletion on {date}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.";
+Your site stats are scheduled for deletion on {date}. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app.";
 
 /// Used when a pending stats delete has no usable timestamp.
 pub const SYNC_STATS_DELETE_FALLBACK_WHEN: &str = "in 7 days";
@@ -581,13 +581,13 @@ struct AuthPauseFile {
     stats_delete_scheduled_at: Option<String>,
 }
 
-/// `stats_delete_scheduled_at` as a local calendar date (`26 Oct 2026`).
+/// `stats_delete_scheduled_at` as a local calendar date (`October 26, 2026`).
 pub fn scheduled_delete_local_date(raw: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
     Some(
         parsed
             .with_timezone(&chrono::Local)
-            .format("%d %b %Y")
+            .format("%B %-d, %Y")
             .to_string(),
     )
 }
@@ -1628,11 +1628,14 @@ mod tests {
         assert_eq!(
             expected,
             format!(
-                "Your site stats are scheduled for deletion on {}. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app.",
+                "Your site stats are scheduled for deletion on {}. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app.",
                 when.as_deref().unwrap()
             )
         );
+        assert!(when.as_deref().unwrap().contains("October"), "{when:?}");
+        assert!(when.as_deref().unwrap().contains(", 2026"), "{when:?}");
         assert!(!expected.contains('\u{2014}'));
+        assert!(!expected.contains("account page"), "{expected}");
         assert_eq!(
             auth_pause_status(dir.path(), Some(("https://crew.example", "old-token"))).as_deref(),
             Some(expected.as_str())
@@ -1667,7 +1670,7 @@ mod tests {
         let fallback = auth_pause_status(dir.path(), None).unwrap();
         assert_eq!(
             fallback,
-            "Your site stats are scheduled for deletion in 7 days. To resume syncing, undo it on the website account page, then make a new sync token there and paste it into the app."
+            "Your site stats are scheduled for deletion in 7 days. To resume syncing, use Undo on the Edit Profile page on the website, then make a new sync token on the Sync Tokens page and paste it into the app."
         );
         assert!(!fallback.contains('\u{2014}'), "{fallback}");
     }
