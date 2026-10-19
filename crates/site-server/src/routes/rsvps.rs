@@ -64,27 +64,13 @@ pub async fn rsvp_event(
     Path(event_id): Path<String>,
     Json(body): Json<RsvpRequest>,
 ) -> Result<Json<EventRsvp>, (StatusCode, Json<ErrorResponse>)> {
-    let event = state
-        .db
-        .get_event(&event_id)
-        .await
-        .map_err(|_| internal_err())?
-        .ok_or_else(not_found)?;
-    if !event.is_active {
-        return Err(not_found());
-    }
-
     let rsvp = state
         .db
         .upsert_rsvp(&event_id, &member.member.id, body.status)
         .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
+        .map_err(|err| match err {
+            scuffed_db::DbError::NotFound(msg) if msg == "Event not found" => not_found(),
+            _ => internal_err(),
         })?;
 
     Ok(Json(rsvp))

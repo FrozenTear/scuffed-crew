@@ -9324,6 +9324,30 @@ async fn event_day_of_week_is_bounded_and_rsvp_requires_an_active_event() {
         );
     }
 
+    for day in [-1_i64, 256, 1_000_000] {
+        let resp = app
+            .clone()
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/events",
+                OFFICER_TOKEN,
+                json!({
+                    "title": format!("Day {day}"),
+                    "day_of_week": day,
+                    "time": "19:00",
+                    "timezone": "UTC",
+                    "is_public": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "day {day}");
+        assert_eq!(
+            body_json(resp).await["error"],
+            "day_of_week must be from 0 to 6"
+        );
+    }
+
     let created = create(&app, 0).await;
     assert_eq!(created.status(), StatusCode::CREATED);
     let created_body = body_json(created).await;
@@ -9346,6 +9370,22 @@ async fn event_day_of_week_is_bounded_and_rsvp_requires_an_active_event() {
     assert_eq!(bad_update.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         body_json(bad_update).await["error"],
+        "day_of_week must be from 0 to 6"
+    );
+
+    let negative_update = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/events/{event_id}"),
+            OFFICER_TOKEN,
+            json!({ "day_of_week": -1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(negative_update.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(negative_update).await["error"],
         "day_of_week must be from 0 to 6"
     );
 

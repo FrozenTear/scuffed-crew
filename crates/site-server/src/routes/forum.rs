@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use axum::{
     Json,
@@ -23,25 +24,50 @@ use crate::extractors::{OfficerUser, OptionalOrgMember, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
+fn normalized_min(min_role: Option<&str>) -> Option<&str> {
+    min_role.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn required_role(min: &str) -> Option<OrgRole> {
+    match min.to_ascii_lowercase().as_str() {
+        "admin" => Some(OrgRole::Admin),
+        "officer" => Some(OrgRole::Officer),
+        "member" => Some(OrgRole::Member),
+        "recruit" => Some(OrgRole::Recruit),
+        _ => None,
+    }
+}
+
 /// Whether `role` meets board `min_role` (`admin`/`officer`/`member`/`recruit`).
 ///
 /// Blank stays public. Any other string that is not one of those four roles
 /// denies every caller, including admin (W1019-9).
 fn role_meets_min(role: OrgRole, min_role: Option<&str>) -> bool {
-    let Some(min) = min_role.map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(min) = normalized_min(min_role) else {
         return true;
     };
-    let required = match min.to_ascii_lowercase().as_str() {
-        "admin" => OrgRole::Admin,
-        "officer" => OrgRole::Officer,
-        "member" => OrgRole::Member,
-        "recruit" => OrgRole::Recruit,
-        _ => {
-            tracing::warn!(min_role = min, "unknown forum min_role; denying access");
-            return false;
-        }
+    required_role(min).is_some_and(|required| role.is_at_least(required))
+}
+
+/// One warning per board for a typo'd `min_role`. Later checks on that board
+/// are debug, so a forum tree reload does not spam the log.
+fn warn_unknown_min_role_once(board_id: &str, min_role: &str) {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = match seen.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     };
-    role.is_at_least(required)
+    let key = if board_id.is_empty() {
+        format!("min_role:{min_role}")
+    } else {
+        board_id.to_string()
+    };
+    if guard.insert(key) {
+        tracing::warn!(board_id, min_role, "unknown forum min_role; denying access");
+    } else {
+        tracing::debug!(board_id, min_role, "unknown forum min_role; denying access");
+    }
 }
 
 fn err_forbidden_role() -> (StatusCode, Json<ErrorResponse>) {
@@ -68,14 +94,15 @@ fn enforce_board_access(
     board: &ForumBoard,
     caller_role: Option<OrgRole>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let min = board.min_role.as_deref();
-    let restricted = min.map(str::trim).filter(|s| !s.is_empty()).is_some();
-    if !restricted {
+    let Some(min) = normalized_min(board.min_role.as_deref()) else {
         return Ok(());
+    };
+    if required_role(min).is_none() {
+        warn_unknown_min_role_once(&board.id, min);
     }
     match caller_role {
         None => Err(err_login_required()),
-        Some(role) if role_meets_min(role, min) => Ok(()),
+        Some(role) if role_meets_min(role, Some(min)) => Ok(()),
         Some(_) => Err(err_forbidden_role()),
     }
 }
