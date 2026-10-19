@@ -1,6 +1,11 @@
 pub mod gate;
 pub mod preprocess;
 
+mod own_row_replay;
+pub use own_row_replay::{
+    OwnRowCounts, format_own_row_counts, own_row_on_scoreboard, tally_own_row_dir,
+};
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
