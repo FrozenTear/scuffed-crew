@@ -1332,6 +1332,11 @@ pub fn Stats() -> Element {
                         code { "scuffed-stat-tracker-uninstall" }
                         " first. It keeps your saved games and settings; the tracker relearns your name crops over a few games."
                     }
+                    p {
+                        "AUR installs update with "
+                        code { "paru -Syu" }
+                        ". Script installs keep updating from inside the app."
+                    }
                     p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
