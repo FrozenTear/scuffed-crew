@@ -14634,6 +14634,13 @@ mod tests {
             (Some(0), None, Some(0), true, false),
             // a seed the career hero contradicts: the seed's row, marked
             (Some(0), None, Some(2), true, true),
+            // no seed named a row, and a strong highlight the career hero
+            // is read on (two of the member's accounts in one lobby, the
+            // 2026-10-19 boards): nothing is marked
+            (None, o9_lit(0, 1.5), Some(0), true, false),
+            // a weak highlight, or the career hero on another row: marked
+            (None, o9_lit(0, 1.1), Some(0), true, true),
+            (None, o9_lit(0, 1.5), Some(2), true, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let ctx = o8_ctx(dir.path(), true).await;
