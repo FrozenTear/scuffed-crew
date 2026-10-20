@@ -150,7 +150,7 @@ const TRACKER_PLATFORM_COPY: &str =
 /// Stat-tracker build named in the install note on `/stats` when health
 /// does not send `tracker_latest`. One constant, so the banner tracks the
 /// current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "rc.2";
+const TRACKER_RELEASE: &str = "rc.3";
 
 /// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
 fn is_release_core(core: &str) -> bool {
@@ -1780,7 +1780,7 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "rc.2");
+        assert_eq!(TRACKER_RELEASE, "rc.3");
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
             pinned,
@@ -1796,6 +1796,7 @@ mod tracker_platform_copy_tests {
             ["alpha", "10"],
             ["alpha", "12"],
             ["rc", "1"],
+            ["rc", "2"],
         ] {
             let label = previous.join(".");
             assert!(
@@ -1805,7 +1806,7 @@ mod tracker_platform_copy_tests {
         }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         assert_eq!(
-            prod.matches("rc.2").count(),
+            prod.matches("rc.3").count(),
             1,
             "the build name lives only on TRACKER_RELEASE"
         );
@@ -1842,7 +1843,7 @@ mod tracker_platform_copy_tests {
     fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(Some("0.5.0-rc.2")),
+            tracker_release_notice_text(Some("0.5.0-rc.3")),
             pinned,
             "the current bare version reads the same as the pin"
         );
@@ -1853,7 +1854,7 @@ mod tracker_platform_copy_tests {
         assert_eq!(tracker_release_notice_text(Some("")), pinned);
         assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
         assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
-        let shown = tracker_release_notice_text(Some("0.5.0-rc.2"));
+        let shown = tracker_release_notice_text(Some("0.5.0-rc.3"));
         assert!(!shown.contains("0.5.0-"));
         assert!(!shown.contains("stat-tracker-v"));
         assert!(!shown.contains('\u{2014}'));
