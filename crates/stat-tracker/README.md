@@ -63,6 +63,44 @@ same way; the bundled copy is canonical and replaces an older one (a `.bak` is
 kept), since most hosts cannot regenerate it locally (`text2image`
 hangs/segfaults with pango ≥ 1.56).
 
+**Arch, CachyOS and other Arch-based distros (AUR):**
+
+The [`scuffed-stat-tracker-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)
+package installs the same release tarball, checked against its sha256.
+
+```sh
+paru -S scuffed-stat-tracker-bin        # or: yay -S scuffed-stat-tracker-bin
+sudo usermod -aG input "$USER"          # Tab hotkey; log out and back in once
+systemctl --user daemon-reload
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+Then open Scuffed Stat Tracker from the app menu. The programs go to
+`/usr/bin`, the bundled libraries (Tesseract included) to
+`/usr/lib/scuffed-stat-tracker`, and the OCR models to
+`/usr/share/scuffed-stat-tracker/tessdata`. Saved games and settings stay in
+`~/.local/share/scuffed-stat-tracker`, the same folder the curl install uses.
+
+Updates come through your AUR helper (`paru -Syu`). Ignore the update command
+the app shows for now; a later release points package installs to the package
+manager instead.
+
+Switching from the curl install: run `scuffed-stat-tracker-uninstall` first.
+It keeps saved games and settings, and removes only the files the curl
+installer wrote, plus `private/own-name/` (see Uninstall below; the tracker
+learns those crops again). If you skip it, the old service file in
+`~/.config/systemd/user` overrides the package's and the old copy keeps
+running.
+
+Removing the package:
+
+```sh
+systemctl --user disable --now scuffed-stat-tracker.service
+sudo pacman -R scuffed-stat-tracker-bin
+```
+
+Saved games and settings stay in `~/.local/share/scuffed-stat-tracker`.
+
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
 
