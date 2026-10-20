@@ -1330,7 +1330,7 @@ pub fn Stats() -> Element {
                     p {
                         "Switching from the install script? Run "
                         code { "scuffed-stat-tracker-uninstall" }
-                        " first. It keeps your saved games and settings."
+                        " first. It keeps your saved games and settings; the tracker relearns your name crops over a few games."
                     }
                     p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
