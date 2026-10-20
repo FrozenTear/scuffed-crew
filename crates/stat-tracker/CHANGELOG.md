@@ -15,6 +15,27 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-rc.2
+
+The name reader now really switches on after you update: once the `names-v1` pack downloads, from the tracker itself or from the app's setup guide, the tracker starts reading names with it right away, with no restart. Starting or restarting the tracker takes a few seconds again instead of about a minute (#401). When two of your accounts are in the same lobby, games show fewer unsure stats (#404).
+
+### Highlights
+
+- When two of your accounts are in the same lobby, games show fewer unsure stats: a clear highlight on your row that matches your hero now counts as sure (#404).
+- If you updated to rc.1, you do not need to do anything. The tracker sees that the name pack was saved without one of its files and downloads it again by itself (#401).
+- A pack that does not check out is never switched in. The tracker keeps reading with what it has (#401).
+- Fixed the slow start on Wayland and X11 desktops: the step that finds your desktop session runs in under a second, and its log line now says which session it found and how long that took (#401).
+
+### Technical detail
+
+- names-v1 manifest (#401): rc.1 unpacked `names-v1.tar` without its inner `manifest.json`, which the name reader needs (canvas, glyph and mark counts, params, per-file sha256). It logged `names-v1 pack refused: missing manifest.json` and stayed on `ocr-v1`. Pack sync now keeps the verified manifest in `templates/names-v1/`. The other packs' folders are unchanged.
+- rc.1 folders (#401): a names-v1 folder without `manifest.json` counts as not installed, so the next sync downloads the pack again, even though `pack-versions.json` already names it.
+- Reload after install (#401): the name reader loaded once at startup, about a second before the pack keeper installed names-v1. The keeper now reports each install, and the daemon reloads the name reader on a background thread. Before the swap it checks that the manifest sha256 on disk is the one sync verified (before and after the load), every file against that manifest, and the version against the server list. The cached pack is then replaced in one step, so a scoreboard read in flight keeps the pack it started with. A pack that fails a check leaves the current reader running. The next game after the pack lands is stored with `name_recognizer = names-v1`.
+- App installs (#401): when the app's setup guide installs names-v1 while the tracker runs, the tracker reloads it with the same checked path once the install is complete: the live folder's manifest version matches `pack-versions.json` and its sha256 matches the one pack sync now records in `templates/pack-manifests.json`. Staging and backup folders are ignored, nothing reloads between the swap and the record writes, and a version-only record still has every file checked against the folder's manifest. A failed check keeps the current pack. A folder changed by hand with no matching record is used from the next start.
+- Session environment (#401): `import-session-env.sh`, the oneshot before every daemon start, walked all of `/proc` once per compositor name with two commands per process (about 60 s on a busy niri desktop). It now reads each process name once with the shell's own `read`, skips unreadable or exited processes without a message, stops after 5 s and falls back to the process environment as before.
+- Own row with several accounts (#404): when two or more rows match saved names (several of the member's accounts in one lobby), no single row leads by 0.10, so before this every board fell back to the highlight alone and marked all 7 own-row fields. Now a strong highlight (lead at least 1.30) with the career hero read on that row is a sure own row (`highlight_and_hero`). A weak highlight, the hero on another row, or no career panel stays unsure. A seed that leads by the margin (0.97 vs 0.84) is still a normal seed match. Learning a new name crop from the career hero alone needs 4 boards, 3 games and 2 heroes, and only on boards where no row matches a saved name. Games already stored keep their flags.
+- Session lookup (#401): `plasmashell`, `kwin_x11` and `cinnamon` are added, so Mint Cinnamon on X11 takes `DISPLAY` and `XDG_CURRENT_DESKTOP` from the Cinnamon session. One log line names the session source, the processes scanned and the time taken.
+
 ## 0.5.0-rc.1
 
 This is the first release candidate for 0.5.0. The name reader is on by default and is used once the `names-v1` pack has downloaded from the site; until then the tracker keeps using the current reader. Syncing sends a big backlog in smaller batches. If the site refuses one game, only that game is set aside, marked "Upload rejected by server" on its card with a Retry button, and the rest still upload (#386, #370, #378).
