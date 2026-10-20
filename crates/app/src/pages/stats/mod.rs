@@ -1325,6 +1325,9 @@ pub fn Stats() -> Element {
                         "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
                         {TRACKER_PLATFORM_COPY}
                     }
+                    p { "On Arch or CachyOS, install it from the AUR (yay -S works too):" }
+                    code { class: "tracker-install", "paru -S scuffed-stat-tracker-bin" }
+                    p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
                     }
