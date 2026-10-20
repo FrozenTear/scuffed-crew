@@ -63,6 +63,27 @@ same way; the bundled copy is canonical and replaces an older one (a `.bak` is
 kept), since most hosts cannot regenerate it locally (`text2image`
 hangs/segfaults with pango ≥ 1.56).
 
+**Arch or CachyOS (AUR):** install the prebuilt release from the
+[AUR package](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)
+with any AUR helper (`yay -S` works too):
+
+```sh
+paru -S scuffed-stat-tracker-bin
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+Updates then come through your package manager, not the in-app updater.
+
+**Switching from the install script to the AUR package:** run the script's
+uninstaller first. It keeps your saved games and settings (only `--purge`
+deletes them, so leave that flag off):
+
+```sh
+scuffed-stat-tracker-uninstall
+paru -S scuffed-stat-tracker-bin
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
 

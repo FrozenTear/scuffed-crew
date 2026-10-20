@@ -1327,6 +1327,11 @@ pub fn Stats() -> Element {
                     }
                     p { "On Arch or CachyOS, install it from the AUR (yay -S works too):" }
                     code { class: "tracker-install", "paru -S scuffed-stat-tracker-bin" }
+                    p {
+                        "Switching from the install script? Run "
+                        code { "scuffed-stat-tracker-uninstall" }
+                        " first. It keeps your saved games and settings."
+                    }
                     p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
