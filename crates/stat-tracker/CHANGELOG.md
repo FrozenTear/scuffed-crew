@@ -15,6 +15,21 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-rc.3
+
+Screen capture now works on KDE Plasma and GNOME on Wayland. The tracker used to pick a capture method that cannot see the screen there, so setup said "Could not capture the screen". It now asks your desktop for a screenshot instead, and KDE shows an Allow prompt the first time (#411). If capture still fails, setup shows the reason so you can send it to us.
+
+### Highlights
+
+- Fixed screen capture on KDE Plasma and GNOME Wayland desktops. Allow the screenshot prompt once (#411).
+- niri, Hyprland and Sway on Wayland, and X11 desktops like Linux Mint, keep the capture method they used before (#411).
+- When the capture test in setup fails, the message now ends with the real reason (#411).
+- If you added a `STAT_TRACKER_CAPTURE=portal` override as a workaround, you can keep it or remove it. It picks the same method (#411).
+
+### Technical detail
+
+- Backend order (#411): on a Wayland session (`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` when the type is missing) the automatic order is wayshot, portal, then X11 as a last resort. KWin and Mutter have no wlr-screencopy, and the X11 probe passed through XWayland, so X11 was picked and could not see the screen. X11 sessions keep wayshot, X11, portal. `STAT_TRACKER_CAPTURE` still forces a backend. The daemon and the app share `detect_backend`, so both get the fix.
+
 ## 0.5.0-rc.2
 
 The name reader now really switches on after you update: once the `names-v1` pack downloads, from the tracker itself or from the app's setup guide, the tracker starts reading names with it right away, with no restart. Starting or restarting the tracker takes a few seconds again instead of about a minute (#401). When two of your accounts are in the same lobby, games show fewer unsure stats (#404).

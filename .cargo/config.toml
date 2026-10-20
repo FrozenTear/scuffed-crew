@@ -1,0 +1,8 @@
+# leptonica 1.85+ (Ubuntu 26.04 runners) typedefs `l_atomic` as `atomic_int`
+# from <stdatomic.h>, which libclang in leptonica-sys bindgen cannot resolve.
+# Telling bindgen there are no C11 atomics makes the header use its own
+# `typedef int l_atomic` fallback (same size and alignment). Only bindgen's
+# parse sees this; the C library itself is unchanged. Harmless on older
+# leptonica, which has no l_atomic at all.
+[env]
+BINDGEN_EXTRA_CLANG_ARGS = "-D__STDC_NO_ATOMICS__=1"

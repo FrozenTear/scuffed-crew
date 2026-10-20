@@ -2202,8 +2202,8 @@ impl TrackerApp {
         }
         let backend = match capture::backend_ready(self.backend) {
             Ok(backend) => backend,
-            Err(_) => {
-                let message = crate::setup_guide::CAPTURE_FAILED.to_string();
+            Err(e) => {
+                let message = crate::setup_guide::capture_failed_with(&e);
                 if tab {
                     self.setup.tab_ready(Err(message));
                 } else {
