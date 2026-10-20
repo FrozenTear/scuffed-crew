@@ -1455,6 +1455,30 @@ mod tests {
     }
 
     #[test]
+    fn rc3_is_offered_rc4_on_the_prerelease_channel_and_stable_is_not() {
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-rc.4", true, "rc4"),
+            gh_release("stat-tracker-v0.5.0-rc.3", true, "rc3"),
+            gh_release("stat-tracker-v0.4.24", false, "stable"),
+        ];
+        let from_rc3 = select_newer_release_on(
+            effective_update_channel("", "0.5.0-rc.3"),
+            "0.5.0-rc.3",
+            &releases,
+        )
+        .expect("an rc.3 install on the default channel is offered rc.4");
+        assert_eq!(from_rc3.latest, "0.5.0-rc.4");
+        assert!(
+            select_newer_release("0.4.24", &releases).is_none(),
+            "stable must not be offered rc.4"
+        );
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-rc.4", &releases).is_none(),
+            "rc.4 is not offered itself or older rcs"
+        );
+    }
+
+    #[test]
     fn rc2_is_offered_rc3_on_the_prerelease_channel_and_stable_is_not() {
         let releases = vec![
             gh_release("stat-tracker-v0.5.0-rc.3", true, "rc3"),

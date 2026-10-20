@@ -150,27 +150,72 @@ pub async fn detect_backend() -> CaptureBackend {
                 select_backend(Some(raw), false, false, false, false)
             }
         },
-        // Automatic probe order (R1-2): real connect + ≥1 output per candidate;
+        // Automatic probe order (R1-2): a real check per candidate (Wayland takes
+        // one test screenshot, so KDE without screencopy fails here);
         // a failed candidate falls through. Short-circuit, a winning probe
         // skips the rest.
         None => {
-            let wayland = is_wayland_session(
-                std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-                std::env::var_os("WAYLAND_DISPLAY").is_some(),
-            );
+            let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+            let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
+            let wayland = is_wayland_session(session_type.as_deref(), wayland_display);
             let wayshot_ok = wayshot::probe().await.is_ok();
             // On Wayland the portal is asked before X11, because the X11
-            // probe passes through XWayland without seeing the screen.
-            let portal_ok = !wayshot_ok && wayland && portal::is_available().await;
+            // probe passes through XWayland without seeing the screen. The
+            // portal is checked at most once.
+            let mut portal_checked = false;
+            let mut portal_ok = false;
+            if !wayshot_ok && wayland {
+                portal_ok = portal::is_available().await;
+                portal_checked = true;
+            }
             let x11_ok = !wayshot_ok && !portal_ok && x11::probe().await.is_ok();
-            let portal_ok = portal_ok || (!wayshot_ok && !x11_ok && portal::is_available().await);
+            if !wayshot_ok && !x11_ok && !portal_checked {
+                portal_ok = portal::is_available().await;
+            }
             let backend = select_backend(None, wayland, wayshot_ok, x11_ok, portal_ok);
+            tracing::info!(
+                backend = perf_backend_label(&backend).unwrap_or("none"),
+                session_type = session_type.as_deref().unwrap_or("unset"),
+                wayland_display,
+                "capture method chosen"
+            );
             if backend == CaptureBackend::None {
                 tracing::warn!("no capture backend available");
             }
             backend
         }
     }
+}
+
+/// Built-in panels (laptop screens). On Auto these lose to an external
+/// monitor, since a player with a monitor plugged in plays on it.
+fn is_builtin_panel(name: &str) -> bool {
+    ["eDP", "LVDS", "DSI"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Which output Auto (no `capture_output`) captures, given each output's
+/// name and real pixel area, in compositor order. One output is always that
+/// output. With several, external monitors win over built-in panels (eDP,
+/// LVDS, DSI), then the largest area wins, and a tie keeps list order.
+/// `None` only for an empty list.
+pub fn auto_output_index<'a>(outputs: impl IntoIterator<Item = (&'a str, u64)>) -> Option<usize> {
+    let outputs: Vec<(&str, u64)> = outputs.into_iter().collect();
+    if outputs.len() <= 1 {
+        return if outputs.is_empty() { None } else { Some(0) };
+    }
+    let any_external = outputs.iter().any(|(name, _)| !is_builtin_panel(name));
+    let mut best: Option<(usize, u64)> = None;
+    for (i, (name, area)) in outputs.iter().enumerate() {
+        if any_external && is_builtin_panel(name) {
+            continue;
+        }
+        if best.is_none_or(|(_, best_area)| *area > best_area) {
+            best = Some((i, *area));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// The name a backend's captures carry in the perf summary
@@ -196,7 +241,7 @@ pub async fn capture_screen_output(
     let result = match backend {
         CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
         CaptureBackend::X11 => x11::capture_with_output(output_name).await,
-        CaptureBackend::Portal => portal::capture().await,
+        CaptureBackend::Portal => portal::capture(output_name).await,
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -220,7 +265,10 @@ pub async fn list_outputs(
         }
         // x11::list_outputs is already async + Send (spawn_blocking internally).
         CaptureBackend::X11 => x11::list_outputs().await,
-        CaptureBackend::Portal | CaptureBackend::None => Ok(Vec::new()),
+        // The portal shoots the whole desktop and is cropped to one output
+        // afterwards, so the picker lists the Wayland outputs it can crop to.
+        CaptureBackend::Portal => Ok(portal::list_outputs().await),
+        CaptureBackend::None => Ok(Vec::new()),
     }
 }
 
@@ -440,5 +488,47 @@ mod tests {
         assert!(!is_wayland_session(None, false));
         assert!(is_wayland_session(Some("tty"), true));
         assert!(!is_wayland_session(Some(""), false));
+    }
+
+    #[test]
+    fn auto_output_prefers_the_external_monitor() {
+        // eDP-1 left, DP-1 right: DP-1, even when the panel is bigger.
+        assert_eq!(
+            auto_output_index([("eDP-1", 2560 * 1600), ("DP-1", 1920 * 1080)]),
+            Some(1)
+        );
+        assert_eq!(
+            auto_output_index([("DP-1", 1920 * 1080), ("LVDS-1", 1366 * 768)]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn auto_output_with_one_screen_is_that_screen() {
+        assert_eq!(auto_output_index([("eDP-1", 1920 * 1200)]), Some(0));
+        assert_eq!(auto_output_index([("DP-1", 2560 * 1440)]), Some(0));
+        assert_eq!(auto_output_index(std::iter::empty::<(&str, u64)>()), None);
+    }
+
+    #[test]
+    fn auto_output_picks_the_bigger_external_monitor() {
+        assert_eq!(
+            auto_output_index([("DP-1", 1920 * 1080), ("HDMI-A-1", 2560 * 1440)]),
+            Some(1)
+        );
+        // A tie keeps list order.
+        assert_eq!(
+            auto_output_index([
+                ("eDP-1", 1920 * 1080),
+                ("DP-2", 1920 * 1080),
+                ("DP-1", 1920 * 1080)
+            ]),
+            Some(1)
+        );
+        // Only built-in panels: the largest of them.
+        assert_eq!(
+            auto_output_index([("eDP-1", 1920 * 1080), ("eDP-2", 2560 * 1600)]),
+            Some(1)
+        );
     }
 }

@@ -134,6 +134,16 @@ fn update_channel_switched(before: &Config, after: &Config, installed: Option<&s
         != update::prerelease_updates_effective(&after.update_channel, installed)
 }
 
+/// True when the save changed which screen the tracker captures. The
+/// tracker reads `capture_output` once at start, so the app restarts a
+/// running tracker after such a save instead of asking the player to.
+fn capture_output_changed(before: &Config, after: &Config) -> bool {
+    before.capture_output != after.capture_output
+}
+
+const SETTINGS_SAVED_RESTARTING: &str =
+    "Settings saved. Restarting the tracker to use the new screen.";
+
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
     if daemon_up {
         SETTINGS_SAVED_RESTART
@@ -1132,6 +1142,9 @@ impl TrackerApp {
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
                         let gui_only = only_update_channel_changed(&self.saved_config, &config);
+                        let restart_for_screen = daemon_up
+                            && !self.daemon_busy
+                            && capture_output_changed(&self.saved_config, &config);
                         let recheck = update_channel_switched(
                             &self.saved_config,
                             &config,
@@ -1148,15 +1161,36 @@ impl TrackerApp {
                             );
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.replace_toast(toast_after_successful_save(daemon_up && !gui_only));
+                        self.replace_toast(if restart_for_screen {
+                            SETTINGS_SAVED_RESTARTING
+                        } else {
+                            toast_after_successful_save(daemon_up && !gui_only)
+                        });
                         self.toast_shown_at = None;
+                        let mut tasks = Vec::new();
+                        if restart_for_screen {
+                            // Same path as the Restart button, so the unit or
+                            // the spawned tracker is restarted the usual way.
+                            self.daemon_busy = true;
+                            tasks.push(Task::perform(
+                                daemon::run_verb(
+                                    self.data_dir.clone(),
+                                    DaemonVerb::Restart,
+                                    self.daemon.service_installed,
+                                ),
+                                Message::DaemonDone,
+                            ));
+                        }
                         if recheck {
                             // `check_for_update` reads the channel from config.toml,
                             // which now holds the new value.
-                            return Task::perform(
+                            tasks.push(Task::perform(
                                 update::check_for_update(),
                                 Message::UpdateChecked,
-                            );
+                            ));
+                        }
+                        if !tasks.is_empty() {
+                            return Task::batch(tasks);
                         }
                     }
                     Err(SettingsSaveError::Blocked(message)) => {
@@ -2882,6 +2916,22 @@ fn health_status_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_capture_screen_restarts_the_tracker_and_other_saves_do_not() {
+        let before = super::Config::default();
+        let mut picked = before.clone();
+        picked.capture_output = Some("DP-1".into());
+        assert!(super::capture_output_changed(&before, &picked));
+        assert!(super::capture_output_changed(&picked, &before));
+        let mut other = picked.clone();
+        other.capture_output = Some("eDP-1".into());
+        assert!(super::capture_output_changed(&picked, &other));
+        let mut same = picked.clone();
+        same.update_channel = "prerelease".into();
+        assert!(!super::capture_output_changed(&picked, &same));
+        assert!(!super::capture_output_changed(&picked, &picked));
+    }
+
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
     use stat_tracker::config::Config;
