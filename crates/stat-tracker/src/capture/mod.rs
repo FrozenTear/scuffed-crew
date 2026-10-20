@@ -40,8 +40,14 @@ fn force_target(raw: &str) -> ForceTarget {
 /// `force` is the raw `STAT_TRACKER_CAPTURE` value (or `None`), normalized here
 /// via `force_target` so the keyword set exists once. A forced backend never
 /// silently falls back (R1-3): unavailable/unknown force → `None`.
+///
+/// `wayland_session` is true when the desktop itself is Wayland. There the
+/// X11 probe can pass through XWayland (KDE, GNOME) even though X11 cannot
+/// see the real screen, so the portal goes ahead of X11 and X11 is only a
+/// last resort.
 fn select_backend(
     force: Option<&str>,
+    wayland_session: bool,
     wayshot_ok: bool,
     x11_ok: bool,
     portal_ok: bool,
@@ -72,10 +78,13 @@ fn select_backend(
             // Unknown forced value, fail closed, no fallback.
             ForceTarget::Unknown => CaptureBackend::None,
         },
-        // Automatic priority: usable Wayshot → X11 → Portal → None.
+        // Automatic priority: usable Wayshot, then X11, then Portal. On a
+        // Wayland session: Wayshot, then Portal, then X11.
         None => {
             if wayshot_ok {
                 CaptureBackend::Wayshot
+            } else if wayland_session && portal_ok {
+                CaptureBackend::Portal
             } else if x11_ok {
                 CaptureBackend::X11
             } else if portal_ok {
@@ -84,6 +93,17 @@ fn select_backend(
                 CaptureBackend::None
             }
         }
+    }
+}
+
+/// True when the desktop session is Wayland, from `XDG_SESSION_TYPE`, or from
+/// `WAYLAND_DISPLAY` when the session type is missing. A session that says
+/// `x11` stays X11 even if a stray `WAYLAND_DISPLAY` is set.
+fn is_wayland_session(session_type: Option<&str>, wayland_display: bool) -> bool {
+    match session_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("wayland") => true,
+        Some("x11") => false,
+        _ => wayland_display,
     }
 }
 
@@ -100,7 +120,7 @@ pub async fn detect_backend() -> CaptureBackend {
         Some(raw) => match force_target(raw) {
             ForceTarget::Wayshot => {
                 let ok = wayshot::probe().await.is_ok();
-                let backend = select_backend(Some(raw), ok, false, false);
+                let backend = select_backend(Some(raw), false, ok, false, false);
                 if backend == CaptureBackend::None {
                     tracing::warn!("STAT_TRACKER_CAPTURE=wayshot is not usable");
                 }
@@ -108,7 +128,7 @@ pub async fn detect_backend() -> CaptureBackend {
             }
             ForceTarget::X11 => {
                 let ok = x11::probe().await.is_ok();
-                let backend = select_backend(Some(raw), false, ok, false);
+                let backend = select_backend(Some(raw), false, false, ok, false);
                 if backend == CaptureBackend::None {
                     tracing::warn!("STAT_TRACKER_CAPTURE=x11 is not usable");
                 }
@@ -116,7 +136,7 @@ pub async fn detect_backend() -> CaptureBackend {
             }
             ForceTarget::Portal => {
                 let ok = portal::is_available().await;
-                let backend = select_backend(Some(raw), false, false, ok);
+                let backend = select_backend(Some(raw), false, false, false, ok);
                 if backend == CaptureBackend::None {
                     tracing::warn!("STAT_TRACKER_CAPTURE=portal not available");
                 }
@@ -127,17 +147,24 @@ pub async fn detect_backend() -> CaptureBackend {
             // returning inline, so the tested policy owns the outcome.
             ForceTarget::Unknown => {
                 tracing::warn!(%raw, "unknown STAT_TRACKER_CAPTURE value");
-                select_backend(Some(raw), false, false, false)
+                select_backend(Some(raw), false, false, false, false)
             }
         },
         // Automatic probe order (R1-2): real connect + ≥1 output per candidate;
         // a failed candidate falls through. Short-circuit, a winning probe
         // skips the rest.
         None => {
+            let wayland = is_wayland_session(
+                std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+                std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            );
             let wayshot_ok = wayshot::probe().await.is_ok();
-            let x11_ok = !wayshot_ok && x11::probe().await.is_ok();
-            let portal_ok = !wayshot_ok && !x11_ok && portal::is_available().await;
-            let backend = select_backend(None, wayshot_ok, x11_ok, portal_ok);
+            // On Wayland the portal is asked before X11, because the X11
+            // probe passes through XWayland without seeing the screen.
+            let portal_ok = !wayshot_ok && wayland && portal::is_available().await;
+            let x11_ok = !wayshot_ok && !portal_ok && x11::probe().await.is_ok();
+            let portal_ok = portal_ok || (!wayshot_ok && !x11_ok && portal::is_available().await);
+            let backend = select_backend(None, wayland, wayshot_ok, x11_ok, portal_ok);
             if backend == CaptureBackend::None {
                 tracing::warn!("no capture backend available");
             }
@@ -222,20 +249,23 @@ mod tests {
     fn auto_priority_wayshot_first() {
         // Wayshot wins whenever usable, regardless of the others.
         assert_eq!(
-            select_backend(None, true, true, true),
+            select_backend(None, false, true, true, true),
             CaptureBackend::Wayshot
         );
         assert_eq!(
-            select_backend(None, true, false, false),
+            select_backend(None, false, true, false, false),
             CaptureBackend::Wayshot
         );
     }
 
     #[test]
     fn auto_failed_wayshot_falls_to_x11() {
-        assert_eq!(select_backend(None, false, true, true), CaptureBackend::X11);
         assert_eq!(
-            select_backend(None, false, true, false),
+            select_backend(None, false, false, true, true),
+            CaptureBackend::X11
+        );
+        assert_eq!(
+            select_backend(None, false, false, true, false),
             CaptureBackend::X11
         );
     }
@@ -243,7 +273,7 @@ mod tests {
     #[test]
     fn auto_failed_x11_falls_to_portal() {
         assert_eq!(
-            select_backend(None, false, false, true),
+            select_backend(None, false, false, false, true),
             CaptureBackend::Portal
         );
     }
@@ -251,7 +281,7 @@ mod tests {
     #[test]
     fn auto_none_available() {
         assert_eq!(
-            select_backend(None, false, false, false),
+            select_backend(None, false, false, false, false),
             CaptureBackend::None
         );
     }
@@ -259,12 +289,12 @@ mod tests {
     #[test]
     fn forced_wayshot_available() {
         assert_eq!(
-            select_backend(Some("wayshot"), true, false, false),
+            select_backend(Some("wayshot"), false, true, false, false),
             CaptureBackend::Wayshot
         );
         // `wayland` is an accepted alias for the Wayshot force.
         assert_eq!(
-            select_backend(Some("wayland"), true, false, false),
+            select_backend(Some("wayland"), false, true, false, false),
             CaptureBackend::Wayshot
         );
     }
@@ -272,7 +302,7 @@ mod tests {
     #[test]
     fn forced_x11_available() {
         assert_eq!(
-            select_backend(Some("x11"), false, true, false),
+            select_backend(Some("x11"), false, false, true, false),
             CaptureBackend::X11
         );
     }
@@ -280,7 +310,7 @@ mod tests {
     #[test]
     fn forced_portal_available() {
         assert_eq!(
-            select_backend(Some("portal"), false, false, true),
+            select_backend(Some("portal"), false, false, false, true),
             CaptureBackend::Portal
         );
     }
@@ -290,19 +320,19 @@ mod tests {
         // Each of the four force values, unavailable, must return None even when
         // other backends are usable, force means force (R1-3).
         assert_eq!(
-            select_backend(Some("wayshot"), false, true, true),
+            select_backend(Some("wayshot"), false, false, true, true),
             CaptureBackend::None
         );
         assert_eq!(
-            select_backend(Some("wayland"), false, true, true),
+            select_backend(Some("wayland"), false, false, true, true),
             CaptureBackend::None
         );
         assert_eq!(
-            select_backend(Some("x11"), true, false, true),
+            select_backend(Some("x11"), false, true, false, true),
             CaptureBackend::None
         );
         assert_eq!(
-            select_backend(Some("portal"), true, true, false),
+            select_backend(Some("portal"), false, true, true, false),
             CaptureBackend::None
         );
     }
@@ -311,11 +341,11 @@ mod tests {
     fn unknown_force_is_none() {
         // Unknown value → None even with every backend available.
         assert_eq!(
-            select_backend(Some("garbage"), true, true, true),
+            select_backend(Some("garbage"), false, true, true, true),
             CaptureBackend::None
         );
         assert_eq!(
-            select_backend(Some(""), true, true, true),
+            select_backend(Some(""), false, true, true, true),
             CaptureBackend::None
         );
     }
@@ -347,13 +377,68 @@ mod tests {
     fn forced_backend_beats_higher_priority_available() {
         // Forced x11 with the higher-priority Wayshot ALSO usable → still X11.
         assert_eq!(
-            select_backend(Some("x11"), true, true, false),
+            select_backend(Some("x11"), false, true, true, false),
             CaptureBackend::X11
         );
         // Forced portal with both higher-priority backends usable → still Portal.
         assert_eq!(
-            select_backend(Some("portal"), true, true, true),
+            select_backend(Some("portal"), false, true, true, true),
             CaptureBackend::Portal
         );
+    }
+
+    // --- Wayland sessions (KDE, GNOME): X11 passes through XWayland but cannot
+    // see the screen, so the portal must win over X11 there. ---
+
+    #[test]
+    fn wayland_session_prefers_portal_over_xwayland() {
+        assert_eq!(
+            select_backend(None, true, false, true, true),
+            CaptureBackend::Portal
+        );
+    }
+
+    #[test]
+    fn wayland_session_still_prefers_wayshot() {
+        assert_eq!(
+            select_backend(None, true, true, true, true),
+            CaptureBackend::Wayshot
+        );
+    }
+
+    #[test]
+    fn wayland_session_without_portal_keeps_x11_as_last_resort() {
+        assert_eq!(
+            select_backend(None, true, false, true, false),
+            CaptureBackend::X11
+        );
+    }
+
+    #[test]
+    fn x11_session_keeps_x11_before_portal() {
+        // Mint X11: unchanged order.
+        assert_eq!(
+            select_backend(None, false, false, true, true),
+            CaptureBackend::X11
+        );
+    }
+
+    #[test]
+    fn force_ignores_session_type() {
+        assert_eq!(
+            select_backend(Some("x11"), true, false, true, true),
+            CaptureBackend::X11
+        );
+    }
+
+    #[test]
+    fn session_type_detection() {
+        assert!(is_wayland_session(Some("wayland"), false));
+        assert!(is_wayland_session(Some("Wayland"), true));
+        assert!(!is_wayland_session(Some("x11"), true));
+        assert!(is_wayland_session(None, true));
+        assert!(!is_wayland_session(None, false));
+        assert!(is_wayland_session(Some("tty"), true));
+        assert!(!is_wayland_session(Some(""), false));
     }
 }
