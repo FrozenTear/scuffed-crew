@@ -1,0 +1,5 @@
+# leptonica 1.85+ (Ubuntu 26.04 runners) declares `atomic_int` in environ.h
+# without including <stdatomic.h>, which breaks leptonica-sys bindgen.
+# Pre-including it is harmless on older leptonica.
+[env]
+BINDGEN_EXTRA_CLANG_ARGS = "-include stdatomic.h"
