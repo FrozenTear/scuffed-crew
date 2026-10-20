@@ -8,7 +8,8 @@ pub async fn is_available() -> bool {
 
 /// Takes a portal screenshot and, on a multi-monitor desktop, crops it to one
 /// output. The portal always returns the whole desktop, so `output_name`
-/// picks the monitor (Auto, `None`, takes the first output, as wayshot does).
+/// picks the monitor. Auto (`None`) prefers an external monitor, then the
+/// largest, as wayshot does (see `auto_output_index`).
 /// Output geometry is read from Wayland (xdg-output), which KDE exposes even
 /// though it has no screencopy. With one output, or when the geometry can't
 /// be read, the full image is kept.
@@ -40,13 +41,40 @@ pub async fn capture(
     );
 
     let outputs = output_rects().await;
-    match crop_rect(&outputs, output_name, img.width(), img.height())? {
-        Some(rect) => {
-            tracing::debug!(?rect, "cropped portal screenshot to one output");
-            Ok(img.crop_imm(rect.x, rect.y, rect.width, rect.height))
+    let Some((index, rect)) = crop_rect(&outputs, output_name, img.width(), img.height())? else {
+        return Ok(img);
+    };
+    let output = &outputs[index];
+    tracing::debug!(output = %output.name, ?rect, "cropped portal screenshot to one output");
+    let cut = img.crop_imm(rect.x, rect.y, rect.width, rect.height);
+    match native_size(rect, output.real_width, output.real_height) {
+        Some((width, height)) => {
+            // The portal draws the whole desktop at one scale, so an output
+            // at a lower scale than its neighbour comes out larger than its
+            // real mode. The recognizers expect the size the game renders.
+            tracing::debug!(
+                width,
+                height,
+                "resized the cut-out to the output's real size"
+            );
+            Ok(cut.resize_exact(width, height, image::imageops::FilterType::Lanczos3))
         }
-        None => Ok(img),
+        None => Ok(cut),
     }
+}
+
+/// The size to resize a portal cut-out to, or `None` to keep it. Only a
+/// cut-out larger than the output's real mode is scaled down, and only when
+/// it is more than 1px off in either direction. An unknown real size (0)
+/// keeps the cut-out.
+pub fn native_size(cut: PixelRect, real_width: u32, real_height: u32) -> Option<(u32, u32)> {
+    if real_width == 0 || real_height == 0 {
+        return None;
+    }
+    let off = |a: u32, b: u32| a.abs_diff(b) > 1;
+    let larger = cut.width >= real_width && cut.height >= real_height;
+    (larger && (off(cut.width, real_width) || off(cut.height, real_height)))
+        .then_some((real_width, real_height))
 }
 
 /// Output names for the monitor picker. Empty when the geometry can't be
@@ -80,6 +108,20 @@ pub struct OutputRect {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Real pixel size (the mode, rotation applied). 0 when unknown.
+    pub real_width: u32,
+    pub real_height: u32,
+}
+
+impl OutputRect {
+    /// Pixel area for the Auto choice: the real size, else the logical one.
+    fn area(&self) -> u64 {
+        if self.real_width > 0 && self.real_height > 0 {
+            u64::from(self.real_width) * u64::from(self.real_height)
+        } else {
+            u64::from(self.width) * u64::from(self.height)
+        }
+    }
 }
 
 /// A crop rectangle in image pixels.
@@ -94,7 +136,9 @@ pub struct PixelRect {
 /// Where in a whole-desktop portal image the chosen output sits. Logical
 /// coordinates map to image pixels by the ratio of image size to the
 /// logical desktop's bounding box, so a desktop rendered at scale 2 maps
-/// each logical pixel to 2 image pixels. `Ok(None)` keeps the full image
+/// each logical pixel to 2 image pixels. Returns the chosen output's index
+/// in `outputs` and its rectangle. Auto (`None`) uses `auto_output_index`.
+/// `Ok(None)` keeps the full image
 /// (one output, no geometry, or a degenerate layout). A named output that
 /// isn't there is an error, as it is for wayshot.
 pub fn crop_rect(
@@ -102,12 +146,12 @@ pub fn crop_rect(
     output_name: Option<&str>,
     img_width: u32,
     img_height: u32,
-) -> Result<Option<PixelRect>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<(usize, PixelRect)>, Box<dyn std::error::Error + Send + Sync>> {
     if outputs.len() < 2 || img_width == 0 || img_height == 0 {
         return Ok(None);
     }
-    let output = match output_name {
-        Some(name) => outputs.iter().find(|o| o.name == name).ok_or_else(|| {
+    let index = match output_name {
+        Some(name) => outputs.iter().position(|o| o.name == name).ok_or_else(|| {
             let available: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
             format!(
                 "output '{}' not found: available: {}",
@@ -115,8 +159,10 @@ pub fn crop_rect(
                 available.join(", ")
             )
         })?,
-        None => &outputs[0],
+        None => super::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area())))
+            .unwrap_or(0),
     };
+    let output = &outputs[index];
 
     let min_x = outputs.iter().map(|o| i64::from(o.x)).min().unwrap_or(0);
     let min_y = outputs.iter().map(|o| i64::from(o.y)).min().unwrap_or(0);
@@ -156,12 +202,15 @@ pub fn crop_rect(
     if right <= left || bottom <= top {
         return Ok(None);
     }
-    Ok(Some(PixelRect {
-        x: left,
-        y: top,
-        width: right - left,
-        height: bottom - top,
-    }))
+    Ok(Some((
+        index,
+        PixelRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        },
+    )))
 }
 
 /// Deletes the file when dropped.
@@ -268,6 +317,7 @@ mod tests {
         drop(RemoveOnDrop(path));
     }
 
+    /// An output at scale 1: the real size is the logical size.
     fn rect(name: &str, x: i32, y: i32, width: u32, height: u32) -> OutputRect {
         OutputRect {
             name: name.to_string(),
@@ -275,7 +325,33 @@ mod tests {
             y,
             width,
             height,
+            real_width: width,
+            real_height: height,
         }
+    }
+
+    fn scaled(name: &str, x: i32, y: i32, real: (u32, u32), scale: f64) -> OutputRect {
+        OutputRect {
+            name: name.to_string(),
+            x,
+            y,
+            width: (f64::from(real.0) / scale).round() as u32,
+            height: (f64::from(real.1) / scale).round() as u32,
+            real_width: real.0,
+            real_height: real.1,
+        }
+    }
+
+    /// `crop_rect` without the index, for the geometry tests.
+    fn crop(
+        outputs: &[OutputRect],
+        name: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<PixelRect> {
+        crop_rect(outputs, name, width, height)
+            .unwrap()
+            .map(|(_, rect)| rect)
     }
 
     #[test]
@@ -291,17 +367,17 @@ mod tests {
             height,
         };
         assert_eq!(
-            crop_rect(&outputs, Some("DP-1"), 3840, 1080).unwrap(),
+            crop(&outputs, Some("DP-1"), 3840, 1080),
             Some(px(1920, 0, 1920, 1080))
         );
         assert_eq!(
-            crop_rect(&outputs, Some("eDP-1"), 3840, 1080).unwrap(),
+            crop(&outputs, Some("eDP-1"), 3840, 1080),
             Some(px(0, 0, 1920, 1080))
         );
-        // Auto takes the first output, as wayshot does.
+        // Auto takes the external monitor, as wayshot does.
         assert_eq!(
             crop_rect(&outputs, None, 3840, 1080).unwrap(),
-            Some(px(0, 0, 1920, 1080))
+            Some((1, px(1920, 0, 1920, 1080)))
         );
     }
 
@@ -316,7 +392,7 @@ mod tests {
             rect("DP-1", 1280, 0, 1920, 1080),
         ];
         assert_eq!(
-            crop_rect(&outputs, Some("DP-1"), 6400, 2160).unwrap(),
+            crop(&outputs, Some("DP-1"), 6400, 2160),
             Some(PixelRect {
                 x: 2560,
                 y: 0,
@@ -325,7 +401,7 @@ mod tests {
             })
         );
         assert_eq!(
-            crop_rect(&outputs, Some("eDP-1"), 6400, 2160).unwrap(),
+            crop(&outputs, Some("eDP-1"), 6400, 2160),
             Some(PixelRect {
                 x: 0,
                 y: 0,
@@ -342,7 +418,7 @@ mod tests {
             rect("HDMI-A-1", -1920, 200, 1920, 1080),
         ];
         assert_eq!(
-            crop_rect(&outputs, Some("DP-1"), 3840, 1280).unwrap(),
+            crop(&outputs, Some("DP-1"), 3840, 1280),
             Some(PixelRect {
                 x: 1920,
                 y: 0,
@@ -355,10 +431,10 @@ mod tests {
     #[test]
     fn one_output_or_no_geometry_keeps_the_full_image() {
         let one = [rect("eDP-1", 0, 0, 1920, 1080)];
-        assert_eq!(crop_rect(&one, None, 1920, 1080).unwrap(), None);
-        assert_eq!(crop_rect(&one, Some("eDP-1"), 1920, 1080).unwrap(), None);
-        assert_eq!(crop_rect(&[], None, 1920, 1080).unwrap(), None);
-        assert_eq!(crop_rect(&[], Some("DP-1"), 1920, 1080).unwrap(), None);
+        assert_eq!(crop(&one, None, 1920, 1080), None);
+        assert_eq!(crop(&one, Some("eDP-1"), 1920, 1080), None);
+        assert_eq!(crop(&[], None, 1920, 1080), None);
+        assert_eq!(crop(&[], Some("DP-1"), 1920, 1080), None);
     }
 
     #[test]
@@ -384,7 +460,7 @@ mod tests {
         // Logical desktop 4096x1440; the portal image at scale 1.25 is
         // 5120x1800.
         assert_eq!(
-            crop_rect(&outputs, Some("eDP-1"), 5120, 1800).unwrap(),
+            crop(&outputs, Some("eDP-1"), 5120, 1800),
             Some(PixelRect {
                 x: 0,
                 y: 375,
@@ -393,7 +469,7 @@ mod tests {
             })
         );
         assert_eq!(
-            crop_rect(&outputs, Some("DP-1"), 5120, 1800).unwrap(),
+            crop(&outputs, Some("DP-1"), 5120, 1800),
             Some(PixelRect {
                 x: 1920,
                 y: 0,
@@ -403,7 +479,7 @@ mod tests {
         );
         // Same layout, image at logical size (scale 1): no stretch.
         assert_eq!(
-            crop_rect(&outputs, Some("eDP-1"), 4096, 1440).unwrap(),
+            crop(&outputs, Some("eDP-1"), 4096, 1440),
             Some(PixelRect {
                 x: 0,
                 y: 300,
@@ -421,13 +497,101 @@ mod tests {
             rect("eDP-1", 0, 0, 1229, 691),
             rect("DP-1", 1229, 0, 1229, 691),
         ];
-        let r = crop_rect(&outputs, Some("DP-1"), 3072, 864)
-            .unwrap()
-            .unwrap();
+        let r = crop(&outputs, Some("DP-1"), 3072, 864).unwrap();
         assert!(r.x + r.width <= 3072, "{r:?}");
         assert!(r.y + r.height <= 864, "{r:?}");
         assert_eq!(r.x, 1536);
         assert_eq!(r.width, 1536);
         assert_eq!(r.height, 864);
+    }
+
+    #[test]
+    fn auto_prefers_the_external_monitor_and_one_output_keeps_the_image() {
+        let outputs = [
+            rect("eDP-1", 0, 0, 1920, 1080),
+            rect("DP-1", 1920, 0, 1920, 1080),
+        ];
+        let (index, _) = crop_rect(&outputs, None, 3840, 1080).unwrap().unwrap();
+        assert_eq!(outputs[index].name, "DP-1");
+        // eDP-1 alone: no crop, the full image is that screen.
+        assert_eq!(
+            crop_rect(&[rect("eDP-1", 0, 0, 1920, 1080)], None, 1920, 1080).unwrap(),
+            None
+        );
+        // Two external monitors: the bigger one.
+        let two = [
+            rect("DP-1", 0, 0, 1920, 1080),
+            rect("HDMI-A-1", 1920, 0, 2560, 1440),
+        ];
+        let (index, rect) = crop_rect(&two, None, 4480, 1440).unwrap().unwrap();
+        assert_eq!(two[index].name, "HDMI-A-1");
+        assert_eq!(
+            rect,
+            PixelRect {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440
+            }
+        );
+    }
+
+    #[test]
+    fn a_monitor_drawn_above_its_real_size_is_resized_back() {
+        // Laptop 1920x1200 at 1.25 (1536x960 logical) next to a 1920x1080
+        // monitor at 1.0. The portal draws the desktop at 1.25, so DP-1
+        // comes out 2400x1350 and goes back to 1920x1080.
+        let outputs = [
+            scaled("eDP-1", 0, 0, (1920, 1200), 1.25),
+            scaled("DP-1", 1536, 0, (1920, 1080), 1.0),
+        ];
+        let (index, cut) = crop_rect(&outputs, Some("DP-1"), 4320, 1350)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cut,
+            PixelRect {
+                x: 1920,
+                y: 0,
+                width: 2400,
+                height: 1350
+            }
+        );
+        let o = &outputs[index];
+        assert_eq!(
+            native_size(cut, o.real_width, o.real_height),
+            Some((1920, 1080))
+        );
+        // The laptop itself is drawn at its own scale: no resize.
+        let (index, cut) = crop_rect(&outputs, Some("eDP-1"), 4320, 1350)
+            .unwrap()
+            .unwrap();
+        let o = &outputs[index];
+        assert_eq!((cut.width, cut.height), (1920, 1200));
+        assert_eq!(native_size(cut, o.real_width, o.real_height), None);
+    }
+
+    #[test]
+    fn same_scale_or_unknown_size_is_not_resized() {
+        let outputs = [
+            rect("eDP-1", 0, 0, 1920, 1080),
+            rect("DP-1", 1920, 0, 2560, 1440),
+        ];
+        let (index, cut) = crop_rect(&outputs, Some("DP-1"), 4480, 1440)
+            .unwrap()
+            .unwrap();
+        let o = &outputs[index];
+        assert_eq!(native_size(cut, o.real_width, o.real_height), None);
+        let px = |width, height| PixelRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        // Within 1px is the same size.
+        assert_eq!(native_size(px(1921, 1081), 1920, 1080), None);
+        // Unknown real size, or a cut-out smaller than the mode, is kept.
+        assert_eq!(native_size(px(2400, 1350), 0, 0), None);
+        assert_eq!(native_size(px(1536, 864), 1920, 1080), None);
     }
 }

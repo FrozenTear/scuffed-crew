@@ -187,6 +187,37 @@ pub async fn detect_backend() -> CaptureBackend {
     }
 }
 
+/// Built-in panels (laptop screens). On Auto these lose to an external
+/// monitor, since a player with a monitor plugged in plays on it.
+fn is_builtin_panel(name: &str) -> bool {
+    ["eDP", "LVDS", "DSI"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Which output Auto (no `capture_output`) captures, given each output's
+/// name and real pixel area, in compositor order. One output is always that
+/// output. With several, external monitors win over built-in panels (eDP,
+/// LVDS, DSI), then the largest area wins, and a tie keeps list order.
+/// `None` only for an empty list.
+pub fn auto_output_index<'a>(outputs: impl IntoIterator<Item = (&'a str, u64)>) -> Option<usize> {
+    let outputs: Vec<(&str, u64)> = outputs.into_iter().collect();
+    if outputs.len() <= 1 {
+        return if outputs.is_empty() { None } else { Some(0) };
+    }
+    let any_external = outputs.iter().any(|(name, _)| !is_builtin_panel(name));
+    let mut best: Option<(usize, u64)> = None;
+    for (i, (name, area)) in outputs.iter().enumerate() {
+        if any_external && is_builtin_panel(name) {
+            continue;
+        }
+        if best.is_none_or(|(_, best_area)| *area > best_area) {
+            best = Some((i, *area));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// The name a backend's captures carry in the perf summary
 /// (`backend = ...`, with `capture_p50_ms`). Every backend that can capture
 /// has one, so X11, Wayland and the portal report the same timing line.
@@ -457,5 +488,47 @@ mod tests {
         assert!(!is_wayland_session(None, false));
         assert!(is_wayland_session(Some("tty"), true));
         assert!(!is_wayland_session(Some(""), false));
+    }
+
+    #[test]
+    fn auto_output_prefers_the_external_monitor() {
+        // eDP-1 left, DP-1 right: DP-1, even when the panel is bigger.
+        assert_eq!(
+            auto_output_index([("eDP-1", 2560 * 1600), ("DP-1", 1920 * 1080)]),
+            Some(1)
+        );
+        assert_eq!(
+            auto_output_index([("DP-1", 1920 * 1080), ("LVDS-1", 1366 * 768)]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn auto_output_with_one_screen_is_that_screen() {
+        assert_eq!(auto_output_index([("eDP-1", 1920 * 1200)]), Some(0));
+        assert_eq!(auto_output_index([("DP-1", 2560 * 1440)]), Some(0));
+        assert_eq!(auto_output_index(std::iter::empty::<(&str, u64)>()), None);
+    }
+
+    #[test]
+    fn auto_output_picks_the_bigger_external_monitor() {
+        assert_eq!(
+            auto_output_index([("DP-1", 1920 * 1080), ("HDMI-A-1", 2560 * 1440)]),
+            Some(1)
+        );
+        // A tie keeps list order.
+        assert_eq!(
+            auto_output_index([
+                ("eDP-1", 1920 * 1080),
+                ("DP-2", 1920 * 1080),
+                ("DP-1", 1920 * 1080)
+            ]),
+            Some(1)
+        );
+        // Only built-in panels: the largest of them.
+        assert_eq!(
+            auto_output_index([("eDP-1", 1920 * 1080), ("eDP-2", 2560 * 1600)]),
+            Some(1)
+        );
     }
 }

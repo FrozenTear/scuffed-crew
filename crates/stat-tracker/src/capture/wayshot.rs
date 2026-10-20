@@ -67,16 +67,37 @@ pub fn output_rects()
             .iter()
             .map(|o| {
                 let r = o.logical_region.inner;
+                let (real_width, real_height) = real_size(o);
                 super::portal::OutputRect {
                     name: o.name.clone(),
                     x: r.position.x,
                     y: r.position.y,
                     width: r.size.width,
                     height: r.size.height,
+                    real_width,
+                    real_height,
                 }
             })
             .collect())
     })
+}
+
+/// An output's real pixel size as it shows on screen: the mode size, with
+/// width and height swapped for a rotated output. Falls back to the logical
+/// size when the compositor sent no mode.
+fn real_size(output: &libwayshot::output::OutputInfo) -> (u32, u32) {
+    use libwayshot::reexport::Transform;
+    let mode = output.physical_size;
+    if mode.width == 0 || mode.height == 0 {
+        let logical = output.logical_region.inner.size;
+        return (logical.width, logical.height);
+    }
+    match output.transform {
+        Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270 => {
+            (mode.height, mode.width)
+        }
+        _ => (mode.width, mode.height),
+    }
 }
 
 // One Wayshot connection per call, dropped when the call returns.
@@ -122,9 +143,16 @@ pub async fn capture_with_output(
                     ))
                 })?
             } else {
-                outputs.first().ok_or_else(|| {
+                // Auto: the external monitor, then the largest (see
+                // `auto_output_index`). One output is that output, as before.
+                let index = super::auto_output_index(outputs.iter().map(|o| {
+                    let (w, h) = real_size(o);
+                    (o.name.as_str(), u64::from(w) * u64::from(h))
+                }))
+                .ok_or_else(|| {
                     Box::<dyn std::error::Error + Send + Sync>::from("no Wayland outputs found")
-                })?
+                })?;
+                &outputs[index]
             };
 
             tracing::debug!(output = %output.name, "capturing");

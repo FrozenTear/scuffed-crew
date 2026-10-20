@@ -24,12 +24,16 @@ Screen capture now works on KDE Plasma on Wayland without any workaround. In rc.
 - Fixed screen capture on KDE Plasma Wayland. The tracker uses your desktop's screenshot prompt, so allow it once.
 - With two or more monitors on KDE or GNOME Wayland, the monitor picker now lists your screens, and the tracker only reads the one you chose (Auto uses the first one).
 - If you added a `STAT_TRACKER_CAPTURE=portal` override for rc.3, you can keep it or remove it. It picks the same method.
+- On Auto, the tracker now prefers the external monitor. You can still pick one in Capture.
+- Picking another screen in Capture and saving now restarts the tracker for you, so the new screen is used right away.
 - When a capture fails because the desktop lacks wlroots screenshots, the message now names the missing protocol and the portal override.
 
 ### Technical detail
 
 - wayshot probe: KWin exposes wl_outputs but neither wlr-screencopy nor ext-image-copy-capture, so the old probe (connect and require one output) passed and every real capture failed with libwayshot `ProtocolNotFound`. The probe now takes one real screenshot of the first output on a short-lived connection and discards it, so auto-detect falls through to the portal. The portal is probed at most once, and the chosen method is logged as "capture method chosen". The daemon and the app share `detect_backend`, so both get the fix.
-- Portal crop: the XDG screenshot portal returns the whole desktop. Output names and logical rectangles come from xdg-output (via libwayshot, which KWin serves without screencopy). The chosen output's rectangle is mapped into image pixels by the ratio of image size to the logical desktop's bounding box, which covers outputs at different heights and offsets and fractional scales, and is clamped to the image. One output, or no readable geometry, keeps the full image. `list_outputs` now returns those names for the portal backend.
+- Portal crop: the XDG screenshot portal returns the whole desktop. Output names and logical rectangles come from xdg-output (via libwayshot, which KWin serves without screencopy). The chosen output's rectangle is mapped into image pixels by the ratio of image size to the logical desktop's bounding box, which covers outputs at different heights and offsets and fractional scales, and is clamped to the image. One output, or no readable geometry, keeps the full image. `list_outputs` now returns those names for the portal backend. When the portal draws the desktop above an output's real mode (a 1920x1080 monitor at scale 1 next to a laptop at 1.25 comes out 2400x1350), the cut-out is resized back to the mode size with Lanczos3; within 1px it is left alone.
+- Auto output (portal and wayshot): with several outputs, external monitors win over built-in panels (eDP, LVDS, DSI), then the largest real pixel area, ties in list order. A single output is unchanged. X11 Auto is unchanged.
+- The tracker reads `capture_output` only at start, so the app now restarts a running tracker (through the same path as the Restart button) when a save changes it.
 
 ## 0.5.0-rc.3
 
