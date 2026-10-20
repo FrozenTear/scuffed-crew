@@ -150,7 +150,7 @@ const TRACKER_PLATFORM_COPY: &str =
 /// Stat-tracker build named in the install note on `/stats` when health
 /// does not send `tracker_latest`. One constant, so the banner tracks the
 /// current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "alpha.12";
+const TRACKER_RELEASE: &str = "rc.2";
 
 /// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
 fn is_release_core(core: &str) -> bool {
@@ -1765,7 +1765,7 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "alpha.12");
+        assert_eq!(TRACKER_RELEASE, "rc.2");
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
             pinned,
@@ -1776,7 +1776,12 @@ mod tracker_platform_copy_tests {
         assert!(pinned.contains(TRACKER_RELEASE));
         let src = include_str!("mod.rs");
         // Built here so this test file does not itself contain the old labels.
-        for previous in [["alpha", "8"], ["alpha", "10"]] {
+        for previous in [
+            ["alpha", "8"],
+            ["alpha", "10"],
+            ["alpha", "12"],
+            ["rc", "1"],
+        ] {
             let label = previous.join(".");
             assert!(
                 !src.contains(&label),
@@ -1785,7 +1790,7 @@ mod tracker_platform_copy_tests {
         }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         assert_eq!(
-            prod.matches("alpha.12").count(),
+            prod.matches("rc.2").count(),
             1,
             "the build name lives only on TRACKER_RELEASE"
         );
@@ -1822,7 +1827,7 @@ mod tracker_platform_copy_tests {
     fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(Some("0.5.0-alpha.12")),
+            tracker_release_notice_text(Some("0.5.0-rc.2")),
             pinned,
             "the current bare version reads the same as the pin"
         );
@@ -1833,7 +1838,7 @@ mod tracker_platform_copy_tests {
         assert_eq!(tracker_release_notice_text(Some("")), pinned);
         assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
         assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
-        let shown = tracker_release_notice_text(Some("0.5.0-alpha.12"));
+        let shown = tracker_release_notice_text(Some("0.5.0-rc.2"));
         assert!(!shown.contains("0.5.0-"));
         assert!(!shown.contains("stat-tracker-v"));
         assert!(!shown.contains('\u{2014}'));
