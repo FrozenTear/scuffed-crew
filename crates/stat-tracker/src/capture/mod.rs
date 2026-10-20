@@ -150,21 +150,35 @@ pub async fn detect_backend() -> CaptureBackend {
                 select_backend(Some(raw), false, false, false, false)
             }
         },
-        // Automatic probe order (R1-2): real connect + ≥1 output per candidate;
+        // Automatic probe order (R1-2): a real check per candidate (Wayland takes
+        // one test screenshot, so KDE without screencopy fails here);
         // a failed candidate falls through. Short-circuit, a winning probe
         // skips the rest.
         None => {
-            let wayland = is_wayland_session(
-                std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-                std::env::var_os("WAYLAND_DISPLAY").is_some(),
-            );
+            let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+            let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
+            let wayland = is_wayland_session(session_type.as_deref(), wayland_display);
             let wayshot_ok = wayshot::probe().await.is_ok();
             // On Wayland the portal is asked before X11, because the X11
-            // probe passes through XWayland without seeing the screen.
-            let portal_ok = !wayshot_ok && wayland && portal::is_available().await;
+            // probe passes through XWayland without seeing the screen. The
+            // portal is checked at most once.
+            let mut portal_checked = false;
+            let mut portal_ok = false;
+            if !wayshot_ok && wayland {
+                portal_ok = portal::is_available().await;
+                portal_checked = true;
+            }
             let x11_ok = !wayshot_ok && !portal_ok && x11::probe().await.is_ok();
-            let portal_ok = portal_ok || (!wayshot_ok && !x11_ok && portal::is_available().await);
+            if !wayshot_ok && !x11_ok && !portal_checked {
+                portal_ok = portal::is_available().await;
+            }
             let backend = select_backend(None, wayland, wayshot_ok, x11_ok, portal_ok);
+            tracing::info!(
+                backend = perf_backend_label(&backend).unwrap_or("none"),
+                session_type = session_type.as_deref().unwrap_or("unset"),
+                wayland_display,
+                "capture method chosen"
+            );
             if backend == CaptureBackend::None {
                 tracing::warn!("no capture backend available");
             }
@@ -196,7 +210,7 @@ pub async fn capture_screen_output(
     let result = match backend {
         CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
         CaptureBackend::X11 => x11::capture_with_output(output_name).await,
-        CaptureBackend::Portal => portal::capture().await,
+        CaptureBackend::Portal => portal::capture(output_name).await,
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -220,7 +234,10 @@ pub async fn list_outputs(
         }
         // x11::list_outputs is already async + Send (spawn_blocking internally).
         CaptureBackend::X11 => x11::list_outputs().await,
-        CaptureBackend::Portal | CaptureBackend::None => Ok(Vec::new()),
+        // The portal shoots the whole desktop and is cropped to one output
+        // afterwards, so the picker lists the Wayland outputs it can crop to.
+        CaptureBackend::Portal => Ok(portal::list_outputs().await),
+        CaptureBackend::None => Ok(Vec::new()),
     }
 }
 

@@ -15,6 +15,22 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-rc.4
+
+Screen capture now works on KDE Plasma on Wayland without any workaround. In rc.3 the tracker still tried a capture method that KDE does not support, so "Capture now" and game recording failed with "Cannot find required wayland protocol". It now tests that method with a real screenshot and moves on to your desktop's screenshot prompt when it fails. With two monitors on KDE you can pick which one the tracker watches, instead of getting both screens in one image.
+
+### Highlights
+
+- Fixed screen capture on KDE Plasma Wayland. The tracker uses your desktop's screenshot prompt, so allow it once.
+- With two or more monitors on KDE or GNOME Wayland, the monitor picker now lists your screens, and the tracker only reads the one you chose (Auto uses the first one).
+- If you added a `STAT_TRACKER_CAPTURE=portal` override for rc.3, you can keep it or remove it. It picks the same method.
+- When a capture fails because the desktop lacks wlroots screenshots, the message now names the missing protocol and the portal override.
+
+### Technical detail
+
+- wayshot probe: KWin exposes wl_outputs but neither wlr-screencopy nor ext-image-copy-capture, so the old probe (connect and require one output) passed and every real capture failed with libwayshot `ProtocolNotFound`. The probe now takes one real screenshot of the first output on a short-lived connection and discards it, so auto-detect falls through to the portal. The portal is probed at most once, and the chosen method is logged as "capture method chosen". The daemon and the app share `detect_backend`, so both get the fix.
+- Portal crop: the XDG screenshot portal returns the whole desktop. Output names and logical rectangles come from xdg-output (via libwayshot, which KWin serves without screencopy). The chosen output's rectangle is mapped into image pixels by the ratio of image size to the logical desktop's bounding box, which covers outputs at different heights and offsets and fractional scales, and is clamped to the image. One output, or no readable geometry, keeps the full image. `list_outputs` now returns those names for the portal backend.
+
 ## 0.5.0-rc.3
 
 Screen capture now works on KDE Plasma and GNOME on Wayland. The tracker used to pick a capture method that cannot see the screen there, so setup said "Could not capture the screen". It now asks your desktop for a screenshot instead, and KDE shows an Allow prompt the first time (#411). If capture still fails, setup shows the reason so you can send it to us.
