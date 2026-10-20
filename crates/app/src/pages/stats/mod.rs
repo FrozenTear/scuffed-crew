@@ -1327,6 +1327,8 @@ pub fn Stats() -> Element {
                     }
                     p { "On Arch or CachyOS, install it from the AUR (yay -S works too):" }
                     code { class: "tracker-install", "paru -S scuffed-stat-tracker-bin" }
+                    p { "Then turn on the background service:" }
+                    code { class: "tracker-install", "systemctl --user enable --now scuffed-stat-tracker.service" }
                     p {
                         "Switching from the install script? Run "
                         code { "scuffed-stat-tracker-uninstall" }
