@@ -2158,6 +2158,24 @@ impl TrackerApp {
                 }
                 Task::none()
             }
+            Step::CopyCode => {
+                let Some(code) = self.setup.code_to_copy() else {
+                    return Task::none();
+                };
+                match crate::clipboard::copy_text(&code) {
+                    Ok(_) => {
+                        self.setup
+                            .code_copied("Copied. Paste it on the site.".to_string());
+                        Task::none()
+                    }
+                    Err(_) => {
+                        self.setup.code_copied(
+                            "Copied with the app clipboard. If paste is empty, install wl-clipboard (Wayland) or xclip (X11).".to_string(),
+                        );
+                        iced::clipboard::write(code)
+                    }
+                }
+            }
             Step::DownloadPack => {
                 let Some(sync) = self.saved_config.sync.clone().filter(|sync| {
                     !sync.token.trim().is_empty() && !sync.server_url.trim().is_empty()
