@@ -10,11 +10,10 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_site_server::apply_api_method_not_allowed;
-use scuffed_site_server::extractors::OfficerUser;
+use scuffed_site_server::extractors::{OfficerUser, OrgMember};
 use scuffed_site_server::routes::audit_log::audit;
 use scuffed_site_server::state::AppState;
 use scuffed_types::api::ApiSuccess;
@@ -115,6 +114,69 @@ struct CreateStrategyRequest {
     team_id: Option<String>,
     #[serde(default = "default_visibility")]
     visibility: String,
+    /// Drawing made before the first save. Same caps as update.
+    #[serde(default)]
+    elements: Option<Vec<StrategyElement>>,
+    #[serde(default)]
+    phases: Option<Vec<TimelinePhase>>,
+}
+
+/// Longest strategy name, in characters.
+pub(crate) const MAX_STRATEGY_NAME_CHARS: usize = 100;
+/// Longest strategy description, in characters.
+pub(crate) const MAX_STRATEGY_DESCRIPTION_CHARS: usize = 2_000;
+/// Most elements one strategy may hold (REST saves and WebSocket adds).
+pub(crate) const MAX_STRATEGY_ELEMENTS: usize = 1_000;
+/// Most timeline phases one strategy may hold (REST saves and WebSocket adds).
+pub(crate) const MAX_STRATEGY_PHASES: usize = 50;
+
+fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": msg.into() })),
+    )
+}
+
+/// Trimmed name, or 400 when it is empty or too long.
+fn validate_strategy_name(name: &str) -> Result<&str, (StatusCode, Json<Value>)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(bad_request("Name is required"));
+    }
+    if name.chars().count() > MAX_STRATEGY_NAME_CHARS {
+        return Err(bad_request(format!(
+            "Name must be at most {MAX_STRATEGY_NAME_CHARS} characters"
+        )));
+    }
+    Ok(name)
+}
+
+fn validate_strategy_description(
+    description: Option<&str>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if description.is_some_and(|d| d.chars().count() > MAX_STRATEGY_DESCRIPTION_CHARS) {
+        return Err(bad_request(format!(
+            "Description must be at most {MAX_STRATEGY_DESCRIPTION_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_strategy_content(
+    elements: Option<&[StrategyElement]>,
+    phases: Option<&[TimelinePhase]>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if elements.is_some_and(|e| e.len() > MAX_STRATEGY_ELEMENTS) {
+        return Err(bad_request(format!(
+            "A strategy can hold at most {MAX_STRATEGY_ELEMENTS} elements"
+        )));
+    }
+    if phases.is_some_and(|p| p.len() > MAX_STRATEGY_PHASES) {
+        return Err(bad_request(format!(
+            "A strategy can hold at most {MAX_STRATEGY_PHASES} phases"
+        )));
+    }
+    Ok(())
 }
 
 fn default_visibility() -> String {
@@ -187,39 +249,60 @@ async fn list_strategies(
     ))
 }
 
-/// POST /api/strategy/strategies — create a new strategy
+/// POST /api/strategy/strategies: create a new strategy (org members only).
+///
+/// The editor sends its drawing (`elements`, `phases`) with the first save, so
+/// a new strategy is not created empty.
 async fn create_strategy(
     State(state): State<AppState>,
-    user: AuthUser<AppState>,
+    caller: OrgMember,
     Json(body): Json<CreateStrategyRequest>,
 ) -> Result<(StatusCode, Json<Strategy>), (StatusCode, Json<Value>)> {
-    // Validate
-    if body.name.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Name is required" })),
-        ));
-    }
+    let name = validate_strategy_name(&body.name)?;
     if body.map_id.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Map ID is required" })),
-        ));
+        return Err(bad_request("Map ID is required"));
+    }
+    validate_strategy_description(body.description.as_deref())?;
+    validate_strategy_content(body.elements.as_deref(), body.phases.as_deref())?;
+
+    let team_id = body
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    if let Some(team_id) = team_id {
+        let on_team = state
+            .db
+            .is_on_team_roster(&caller.member.id, team_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Team roster check failed: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "Internal error" })),
+                )
+            })?;
+        if !on_team {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "You are not on that team" })),
+            ));
+        }
     }
 
     let game_mode = parse_game_mode_str(&body.game_mode);
     let visibility = parse_visibility_str(&body.visibility);
 
-    let strategy = state
+    let mut strategy = state
         .db
         .create_strategy(
-            body.name.trim(),
+            name,
             body.description.as_deref(),
             &body.map_id,
             body.sub_map_id.as_deref(),
             game_mode,
-            &user.id,
-            body.team_id.as_deref(),
+            &caller.user.id,
+            team_id,
             visibility,
         )
         .await
@@ -231,18 +314,46 @@ async fn create_strategy(
             )
         })?;
 
+    let elements = body.elements.filter(|e| !e.is_empty());
+    let phases = body.phases.filter(|p| !p.is_empty());
+    if elements.is_some() || phases.is_some() {
+        let elements = elements.unwrap_or_else(|| strategy.elements.clone());
+        let phases = phases.unwrap_or_else(|| strategy.phases.clone());
+        if let Err(e) = state
+            .db
+            .save_full_strategy(&strategy.id, &elements, &phases)
+            .await
+        {
+            tracing::error!("Failed to save new strategy content: {e}");
+            // Do not leave an empty strategy behind after reporting a failure.
+            if let Err(e) = state.db.delete_strategy(&strategy.id).await {
+                tracing::error!("Failed to remove half-created strategy: {e}");
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to save strategy content" })),
+            ));
+        }
+        strategy.elements = elements;
+        strategy.phases = phases;
+    }
+
     Ok((StatusCode::CREATED, Json(strategy)))
 }
 
-/// GET /api/strategy/strategies/mine — list current user's strategies
+/// GET /api/strategy/strategies/mine: list the caller's strategies (org members only).
 async fn list_my_strategies(
     State(state): State<AppState>,
-    user: AuthUser<AppState>,
+    caller: OrgMember,
 ) -> Result<Json<Value>, StatusCode> {
-    let data = state.db.get_user_strategies(&user.id).await.map_err(|e| {
-        tracing::error!("Failed to list user strategies: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let data = state
+        .db
+        .get_user_strategies(&caller.user.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list user strategies: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(json!({ "data": data })))
 }
@@ -302,17 +413,25 @@ async fn get_strategy(
     Ok(Json(strategy))
 }
 
-/// PUT /api/strategy/strategies/:id — update a strategy (owner only)
+/// PUT /api/strategy/strategies/:id: update a strategy (owner, who must be an org member)
 async fn update_strategy(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    user: AuthUser<AppState>,
+    caller: OrgMember,
     Json(body): Json<UpdateStrategyRequest>,
 ) -> Result<Json<Strategy>, (StatusCode, Json<Value>)> {
+    let name = body
+        .name
+        .as_deref()
+        .map(validate_strategy_name)
+        .transpose()?;
+    validate_strategy_description(body.description.as_ref().and_then(|d| d.as_deref()))?;
+    validate_strategy_content(body.elements.as_deref(), body.phases.as_deref())?;
+
     // Check ownership
     let can_edit = state
         .db
-        .can_edit_strategy(&id, &user.id)
+        .can_edit_strategy(&id, &caller.user.id)
         .await
         .map_err(|e| {
             tracing::error!("Edit check failed: {e}");
@@ -368,7 +487,7 @@ async fn update_strategy(
 
     let strategy = state
         .db
-        .update_strategy(&id, body.name.as_deref(), description, visibility)
+        .update_strategy(&id, name, description, visibility)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update strategy: {e}");
@@ -381,15 +500,15 @@ async fn update_strategy(
     Ok(Json(strategy))
 }
 
-/// DELETE /api/strategy/strategies/:id — delete a strategy (owner only)
+/// DELETE /api/strategy/strategies/:id: delete a strategy (owner, who must be an org member)
 async fn delete_strategy(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    user: AuthUser<AppState>,
+    caller: OrgMember,
 ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
     let can_edit = state
         .db
-        .can_edit_strategy(&id, &user.id)
+        .can_edit_strategy(&id, &caller.user.id)
         .await
         .map_err(|e| {
             tracing::error!("Edit check failed: {e}");
@@ -780,7 +899,7 @@ fn parse_visibility_str(s: &str) -> Visibility {
     }
 }
 
-/// Optional session, using the same bearer-then-cookie order as [`AuthUser`].
+/// Optional session, using the same bearer-then-cookie order as `AuthUser`.
 async fn try_get_user(
     state: &AppState,
     headers: &HeaderMap,
@@ -846,7 +965,7 @@ mod tests {
         }
     }
 
-    async fn seed_role(state: &AppState, username: &str, role: OrgRole, token: &str) {
+    async fn seed_role(state: &AppState, username: &str, role: OrgRole, token: &str) -> String {
         let user = state
             .db
             .create_local_user(username, "unused-hash")
@@ -862,6 +981,7 @@ mod tests {
             .create_session(&user.id, token, 24)
             .await
             .expect("session");
+        user.id
     }
 
     async fn call_json(
@@ -911,7 +1031,7 @@ mod tests {
     }
 
     /// Local account plus a session, with no org membership row.
-    async fn seed_session(state: &AppState, username: &str, token: &str) {
+    async fn seed_session(state: &AppState, username: &str, token: &str) -> String {
         let user = state
             .db
             .create_local_user(username, "unused-hash")
@@ -922,6 +1042,7 @@ mod tests {
             .create_session(&user.id, token, 24)
             .await
             .expect("session");
+        user.id
     }
 
     async fn create_private_strategy(state: &AppState, token: &str) -> String {
@@ -1608,5 +1729,274 @@ mod tests {
             outsider.get("personal").is_none(),
             "non-member bearer must not receive personal meta, got {outsider}"
         );
+    }
+
+    fn sample_element() -> StrategyElement {
+        StrategyElement::new(
+            scuffed_types::strategy::ElementType::PlayerMarker,
+            scuffed_types::strategy::Position::new(12.0, 34.0),
+        )
+        .with_label("Tank here".into())
+    }
+
+    /// APP2: the first save of a new strategy carries the drawing. It used to
+    /// be dropped because create ignored elements and phases.
+    #[tokio::test]
+    async fn create_with_elements_and_phases_returns_them_on_read() {
+        let state = test_state().await;
+        seed_role(&state, "drawer", OrgRole::Member, MEMBER_TOKEN).await;
+        let element = sample_element();
+        let phases = vec![
+            TimelinePhase::new("Setup".into(), 0),
+            TimelinePhase::new("Push".into(), 1),
+        ];
+
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(json!({
+                "name": "Drawn before save",
+                "map_id": "kings-row",
+                "game_mode": "hybrid",
+                "visibility": "private",
+                "elements": [element],
+                "phases": phases,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("id").to_string();
+        assert_eq!(created["elements"].as_array().map(Vec::len), Some(1));
+
+        let (status, read) = read_strategy(&state, &id, Some(MEMBER_TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        let stored: Strategy = serde_json::from_value(read).expect("strategy");
+        assert_eq!(stored.elements, vec![element]);
+        assert_eq!(stored.phases, phases);
+    }
+
+    /// Without content the server still seeds its default phase.
+    #[tokio::test]
+    async fn create_without_content_keeps_default_phase() {
+        let state = test_state().await;
+        seed_role(&state, "drawer", OrgRole::Member, MEMBER_TOKEN).await;
+        let id = create_private_strategy(&state, MEMBER_TOKEN).await;
+        let (status, read) = read_strategy(&state, &id, Some(MEMBER_TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["elements"].as_array().map(Vec::len), Some(0));
+        assert_eq!(read["phases"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// SEC-4: a session without an org membership cannot create, list "mine",
+    /// update or delete strategies, even one it owns from before the fix.
+    #[tokio::test]
+    async fn non_member_session_cannot_write_strategies() {
+        let state = test_state().await;
+        let outsider_id = seed_session(&state, "outsider", "outsider-token").await;
+        let owned = state
+            .db
+            .create_strategy(
+                "Legacy plan",
+                None,
+                "kings-row",
+                None,
+                GameMode::Hybrid,
+                &outsider_id,
+                None,
+                Visibility::Public,
+            )
+            .await
+            .expect("legacy strategy")
+            .id;
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some("outsider-token"),
+            Some(sample_strategy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::GET,
+            "/api/strategy/strategies/mine",
+            Some("outsider-token"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::PUT,
+            &format!("/api/strategy/strategies/{owned}"),
+            Some("outsider-token"),
+            Some(json!({ "name": "Defaced" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::DELETE,
+            &format!("/api/strategy/strategies/{owned}"),
+            Some("outsider-token"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            None,
+            Some(sample_strategy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        let stored = state
+            .db
+            .get_strategy(&owned)
+            .await
+            .expect("read")
+            .expect("legacy strategy still exists");
+        assert_eq!(stored.name, "Legacy plan");
+    }
+
+    #[tokio::test]
+    async fn oversized_strategy_input_is_rejected_with_400() {
+        let state = test_state().await;
+        seed_role(&state, "member", OrgRole::Member, MEMBER_TOKEN).await;
+
+        let mut long_name = sample_strategy();
+        long_name["name"] = json!("n".repeat(MAX_STRATEGY_NAME_CHARS + 1));
+        let mut long_description = sample_strategy();
+        long_description["description"] = json!("d".repeat(MAX_STRATEGY_DESCRIPTION_CHARS + 1));
+        let mut too_many_elements = sample_strategy();
+        too_many_elements["elements"] = json!(
+            (0..=MAX_STRATEGY_ELEMENTS)
+                .map(|_| sample_element())
+                .collect::<Vec<_>>()
+        );
+        let mut too_many_phases = sample_strategy();
+        too_many_phases["phases"] = json!(
+            (0..=MAX_STRATEGY_PHASES as u32)
+                .map(|i| TimelinePhase::new(format!("P{i}"), i))
+                .collect::<Vec<_>>()
+        );
+
+        for body in [
+            long_name,
+            long_description,
+            too_many_elements,
+            too_many_phases,
+        ] {
+            let (status, resp) = call_json(
+                strategy_routes(state.clone()),
+                Method::POST,
+                "/api/strategy/strategies",
+                Some(MEMBER_TOKEN),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+        }
+
+        // A name at the limit is fine.
+        let mut at_limit = sample_strategy();
+        at_limit["name"] = json!("n".repeat(MAX_STRATEGY_NAME_CHARS));
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(at_limit),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("id").to_string();
+        let path = format!("/api/strategy/strategies/{id}");
+
+        for body in [
+            json!({ "name": "n".repeat(MAX_STRATEGY_NAME_CHARS + 1) }),
+            json!({ "name": "   " }),
+            json!({ "description": "d".repeat(MAX_STRATEGY_DESCRIPTION_CHARS + 1) }),
+            json!({ "elements": (0..=MAX_STRATEGY_ELEMENTS).map(|_| sample_element()).collect::<Vec<_>>() }),
+            json!({ "phases": (0..=MAX_STRATEGY_PHASES as u32).map(|i| TimelinePhase::new(format!("P{i}"), i)).collect::<Vec<_>>() }),
+        ] {
+            let (status, resp) = call_json(
+                strategy_routes(state.clone()),
+                Method::PUT,
+                &path,
+                Some(MEMBER_TOKEN),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+        }
+
+        let (status, read) = read_strategy(&state, &id, Some(MEMBER_TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["name"], "n".repeat(MAX_STRATEGY_NAME_CHARS));
+        assert_eq!(read["elements"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn create_team_id_must_be_one_of_the_callers_teams() {
+        let state = test_state().await;
+        let member = seed_role(&state, "member", OrgRole::Member, MEMBER_TOKEN).await;
+        let member = state
+            .db
+            .get_member_by_user(&member)
+            .await
+            .expect("member lookup")
+            .expect("member row");
+        let mine = state
+            .db
+            .create_team("Mine", "overwatch", None, None, None)
+            .await
+            .expect("team");
+        let other = state
+            .db
+            .create_team("Other", "overwatch", None, None, None)
+            .await
+            .expect("team");
+        state
+            .db
+            .add_to_roster(&member.id, &mine.id, scuffed_db::types::TeamRole::Player)
+            .await
+            .expect("roster");
+
+        let mut foreign = sample_strategy();
+        foreign["team_id"] = json!(other.id);
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(foreign),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let mut own = sample_strategy();
+        own["team_id"] = json!(mine.id);
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(own),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["team_id"], json!(mine.id));
     }
 }

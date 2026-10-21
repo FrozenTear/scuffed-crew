@@ -218,6 +218,9 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn StrategyBrowse() -> Element {
+    // Saving needs an org membership; non-members would draw and then get 403.
+    let can_create = try_use_context::<Signal<crate::state::auth::AuthState>>()
+        .is_some_and(|auth| auth.read().is_org_member());
     let mut search_input = use_signal(String::new);
     let mut debounced_search = use_signal(String::new);
     let mut selected_mode = use_signal(|| "All".to_string());
@@ -270,8 +273,10 @@ pub fn StrategyBrowse() -> Element {
             // Header
             div { class: "strategy-browse-header",
                 h1 { class: "strategy-browse-title", "Browse Strategies" }
-                Link { to: Route::StrategyEditorNew {}, class: "btn-create",
-                    "+ Create New"
+                if can_create {
+                    Link { to: Route::StrategyEditorNew {}, class: "btn-create",
+                        "+ Create New"
+                    }
                 }
             }
 

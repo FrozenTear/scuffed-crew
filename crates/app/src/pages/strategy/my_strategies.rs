@@ -255,6 +255,8 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn StrategyMy() -> Element {
     let auth = use_auth();
+    // Saving needs an org membership; non-members would draw and then get 403.
+    let can_create = auth.read().is_org_member();
     let mut toast = use_toast();
     let mut strategies = use_api::<ListResponse>("/api/strategy/strategies/mine");
 
@@ -328,8 +330,10 @@ pub fn StrategyMy() -> Element {
             // Header
             div { class: "my-strategies-header",
                 h1 { class: "my-strategies-title", "My Strategies" }
-                Link { to: Route::StrategyEditorNew {}, class: "btn-create",
-                    "+ Create New"
+                if can_create {
+                    Link { to: Route::StrategyEditorNew {}, class: "btn-create",
+                        "+ Create New"
+                    }
                 }
             }
 
@@ -357,9 +361,11 @@ pub fn StrategyMy() -> Element {
                         Some(resp) if resp.data.is_empty() => rsx! {
                             div { class: "my-strategies-empty",
                                 p { "No strategies yet. Create your first!" }
-                                div { style: "margin-top:1rem;",
-                                    Link { to: Route::StrategyEditorNew {}, class: "btn-create",
-                                        "+ Create Strategy"
+                                if can_create {
+                                    div { style: "margin-top:1rem;",
+                                        Link { to: Route::StrategyEditorNew {}, class: "btn-create",
+                                            "+ Create Strategy"
+                                        }
                                     }
                                 }
                             }

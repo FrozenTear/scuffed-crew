@@ -387,6 +387,44 @@ impl StrategyState {
         self.phases = strategy.phases;
         self.has_unsaved_changes = false;
     }
+
+    /// One playback step, run when a phase's time is up: go to the next
+    /// phase, or stop at the last one (or when no phase is selected).
+    /// Does nothing unless playback is running.
+    pub fn playback_tick(&mut self) {
+        if self.playback_state != PlaybackState::Playing {
+            return;
+        }
+        let at_end = match self.current_phase_index() {
+            Some(idx) => idx + 1 >= self.phases.len(),
+            None => true,
+        };
+        if at_end {
+            self.playback_state = PlaybackState::Stopped;
+        } else {
+            self.next_phase();
+        }
+    }
+
+    /// Record a successful save of `snapshot` (the state sent to the server).
+    ///
+    /// The id and owner always come from the server. The unsaved flag is
+    /// cleared only when the saved fields still match the editor, so edits
+    /// made while the request was in flight stay marked unsaved.
+    /// Returns true when the editor is now clean.
+    pub fn mark_saved(&mut self, snapshot: &StrategyState, id: String, owner_id: String) -> bool {
+        self.strategy_id = Some(id);
+        self.owner_id = Some(owner_id);
+        let unchanged = self.name == snapshot.name
+            && self.description == snapshot.description
+            && self.visibility == snapshot.visibility
+            && self.elements == snapshot.elements
+            && self.phases == snapshot.phases;
+        if unchanged {
+            self.has_unsaved_changes = false;
+        }
+        !self.has_unsaved_changes
+    }
 }
 
 // =============================================================================
@@ -768,5 +806,79 @@ mod tests {
         canvas.select_map("busan".to_string(), None);
         assert_eq!(canvas.current_map.as_deref(), Some("busan"));
         assert!(canvas.selected_sub_map.is_none());
+    }
+
+    fn three_phases_playing() -> StrategyState {
+        let mut state = StrategyState::default();
+        state.phases.push(TimelinePhase::new("Push".into(), 1));
+        state.phases.push(TimelinePhase::new("Fight".into(), 2));
+        state.selected_phase = Some(state.phases[0].id);
+        state.playback_state = PlaybackState::Playing;
+        state
+    }
+
+    #[test]
+    fn playback_tick_advances_then_stops_at_last_phase() {
+        let mut state = three_phases_playing();
+        state.playback_tick();
+        assert_eq!(state.current_phase_index(), Some(1));
+        assert_eq!(state.playback_state, PlaybackState::Playing);
+        state.playback_tick();
+        assert_eq!(state.current_phase_index(), Some(2));
+        state.playback_tick();
+        assert_eq!(state.current_phase_index(), Some(2));
+        assert_eq!(state.playback_state, PlaybackState::Stopped);
+    }
+
+    /// A tick that lands after pause (a timer that was not cancelled) must
+    /// not move the timeline.
+    #[test]
+    fn playback_tick_is_a_no_op_unless_playing() {
+        let mut state = three_phases_playing();
+        state.playback_state = PlaybackState::Paused;
+        state.playback_tick();
+        assert_eq!(state.current_phase_index(), Some(0));
+        assert_eq!(state.playback_state, PlaybackState::Paused);
+    }
+
+    #[test]
+    fn playback_tick_without_selection_stops() {
+        let mut state = three_phases_playing();
+        state.selected_phase = None;
+        state.playback_tick();
+        assert_eq!(state.playback_state, PlaybackState::Stopped);
+    }
+
+    #[test]
+    fn mark_saved_clears_dirty_when_nothing_changed_since_snapshot() {
+        let mut state = StrategyState::default();
+        state.add_element(StrategyElement::new(
+            ElementType::PlayerMarker,
+            Position::new(1.0, 2.0),
+        ));
+        let snapshot = state.clone();
+        assert!(state.mark_saved(&snapshot, "s1".into(), "u1".into()));
+        assert!(!state.has_unsaved_changes);
+        assert_eq!(state.strategy_id.as_deref(), Some("s1"));
+        assert_eq!(state.owner_id.as_deref(), Some("u1"));
+    }
+
+    /// APP2: an edit made while the save request was in flight is not in the
+    /// saved copy, so it must stay marked unsaved.
+    #[test]
+    fn mark_saved_keeps_dirty_for_edits_made_during_the_save() {
+        let mut state = StrategyState::default();
+        state.add_element(StrategyElement::new(
+            ElementType::PlayerMarker,
+            Position::new(1.0, 2.0),
+        ));
+        let snapshot = state.clone();
+        state.add_element(StrategyElement::new(
+            ElementType::PlayerMarker,
+            Position::new(3.0, 4.0),
+        ));
+        assert!(!state.mark_saved(&snapshot, "s1".into(), "u1".into()));
+        assert!(state.has_unsaved_changes);
+        assert_eq!(state.strategy_id.as_deref(), Some("s1"));
     }
 }
