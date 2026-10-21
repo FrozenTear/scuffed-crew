@@ -364,7 +364,8 @@ impl Database {
                 .bind(("mid", mid))
                 .bind(("peer", peer))
                 .bind(("ts", ts))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

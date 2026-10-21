@@ -123,7 +123,8 @@ impl Database {
                 .bind(("rank", next_rank))
                 .bind(("sr", next_sr))
                 .bind(("role", next_role))
-                .await?;
+                .await?
+                .check()?;
 
             // The result of the IF/ELSE is at index 1
             let accounts: Vec<DbGameAccount> = result.take(1)?;

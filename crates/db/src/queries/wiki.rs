@@ -288,7 +288,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET is_active = false")
                 .bind(("rid", rid))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

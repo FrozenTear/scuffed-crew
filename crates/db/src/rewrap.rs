@@ -126,6 +126,7 @@ async fn rewrap_users(db: &Database, current: u32, stats: &mut RewrapStats) -> D
             .bind(("rid", rid))
             .bind(("enc", enc))
             .await
+            .and_then(|r| r.check())
             .map_err(|e| {
                 DbError::Config(format!(
                     "user {user_id}: UPDATE provider_id_encrypted failed: {e}"
@@ -210,6 +211,7 @@ async fn rewrap_members(db: &Database, current: u32, stats: &mut RewrapStats) ->
             .bind(("rid", rid))
             .bind(("enc", enc))
             .await
+            .and_then(|r| r.check())
             .map_err(|e| {
                 DbError::Config(format!(
                     "member {member_id}: UPDATE nostr_secret_key_encrypted failed: {e}"
@@ -294,6 +296,7 @@ async fn rewrap_dm_messages(db: &Database, current: u32, stats: &mut RewrapStats
             .bind(("rid", rid))
             .bind(("content", stored))
             .await
+            .and_then(|r| r.check())
             .map_err(|e| {
                 DbError::Config(format!(
                     "dm {msg_id} (gw={}): UPDATE content failed: {e}",

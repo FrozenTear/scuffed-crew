@@ -132,7 +132,8 @@ impl Database {
                 .bind(("member_rid", member_rid(member_id)))
                 .bind(("team_rid", team_rid(team_id)))
                 .bind(("role", role.to_string()))
-                .await?;
+                .await?
+                .check()?;
             let entries: Vec<DbRosterEntry> = result.take(1)?;
             entries
                 .into_iter()
@@ -292,7 +293,8 @@ impl Database {
                 .bind(("role", new_role.to_string()))
                 .bind(("member_rid", member_rid(member_id)))
                 .bind(("team_rid", team_rid(team_id)))
-                .await?;
+                .await?
+                .check()?;
             let entries: Vec<DbRosterEntry> = result.take(1)?;
             Ok(entries.into_iter().next().map(db_to_roster_entry))
         })
@@ -310,7 +312,8 @@ impl Database {
                 )
                 .bind(("member_rid", member_rid(member_id)))
                 .bind(("team_rid", team_rid(team_id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

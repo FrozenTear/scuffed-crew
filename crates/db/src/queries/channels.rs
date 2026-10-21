@@ -135,7 +135,8 @@ impl Database {
             self.client
                 .query("UPDATE team_channel SET synced_at = time::now() WHERE group_id = $gid")
                 .bind(("gid", gid))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -178,7 +179,8 @@ impl Database {
             self.client
                 .query("UPDATE team_channel SET is_active = false WHERE group_id = $gid")
                 .bind(("gid", gid))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -198,7 +200,8 @@ impl Database {
                 )
                 .bind(("mid", mid))
                 .bind(("gid", gid))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

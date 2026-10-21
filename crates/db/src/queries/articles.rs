@@ -176,7 +176,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET published = true, published_at = time::now(), updated_at = time::now()")
                 .bind(("rid", RecordId::new("article", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -188,7 +189,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET published = false, updated_at = time::now()")
                 .bind(("rid", RecordId::new("article", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

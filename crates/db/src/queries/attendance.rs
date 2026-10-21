@@ -86,7 +86,8 @@ impl Database {
                 .bind(("st", status.to_string()))
                 .bind(("mb", marked_by.to_string()))
                 .bind(("mat", now))
-                .await?;
+                .await?
+                .check()?;
 
             let records: Vec<DbEventAttendance> = result.take(1)?;
             records

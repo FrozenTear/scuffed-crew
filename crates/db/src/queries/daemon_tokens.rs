@@ -117,10 +117,18 @@ impl Database {
             if expiry_elapsed(expires_at_utc(tok.expires_at)) {
                 return Ok(DaemonTokenAuth::Expired);
             }
-            self.client
+            // The token is valid; `last_used_at` is bookkeeping. A failed
+            // touch (e.g. a transaction conflict between two uploads on one
+            // token) is logged, not turned into an auth failure.
+            if let Err(e) = self
+                .client
                 .query("UPDATE daemon_token SET last_used_at = time::now() WHERE token_hash = $tok")
                 .bind(("tok", token_hash))
-                .await?;
+                .await?
+                .check()
+            {
+                tracing::warn!(member_id = %tok.member_id, "daemon token last_used_at touch failed: {e}");
+            }
             Ok(DaemonTokenAuth::Active {
                 member_id: tok.member_id,
                 token_id: daemon_token_id(tok.id),
