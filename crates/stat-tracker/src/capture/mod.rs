@@ -61,6 +61,17 @@ pub async fn with_tab_press<T>(
     TAB_PRESS.scope(press, fut).await
 }
 
+/// The first attempt uses the key instant. A retry starts its own
+/// press-relative deadline at `now`, so it is not already past the first
+/// attempt's hard stop.
+pub fn tab_attempt_press(
+    original: std::time::Instant,
+    attempt: usize,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    if attempt == 0 { original } else { now }
+}
+
 pub fn set_prefs(prefs: CapturePrefs) {
     *PREFS.lock().unwrap_or_else(|err| err.into_inner()) = Some(prefs);
 }
@@ -367,7 +378,20 @@ pub async fn capture_screen_oneshot(
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     match backend {
-        CaptureBackend::Portal => portal::capture(output_name).await,
+        CaptureBackend::Portal => {
+            let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+            if screencast::oneshot_blocked_by_share(
+                &desktop,
+                stream_was_forced(),
+                screencast::session_is_open(),
+            ) {
+                tracing::warn!(
+                    "Capture now skipped: a screen share is open, and a screenshot beside it can crash KWin"
+                );
+                return Err("capture now skipped while a screen share is open".into());
+            }
+            portal::capture(output_name).await
+        }
         _ => capture_screen_output(backend, output_name).await,
     }
 }
@@ -439,6 +463,11 @@ mod tests {
         );
         assert_eq!(perf_backend_label(&CaptureBackend::Portal), Some("portal"));
         assert_eq!(perf_backend_label(&CaptureBackend::None), None);
+        let key = std::time::Instant::now();
+        let later = key + std::time::Duration::from_millis(800);
+        assert_eq!(tab_attempt_press(key, 0, later), key);
+        assert_eq!(tab_attempt_press(key, 1, later), later);
+        assert_eq!(tab_attempt_press(key, 2, later), later);
     }
 
     // Pure selection-policy tests (R1-6). No `std::env::set_var`, process-global

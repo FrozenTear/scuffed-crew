@@ -5,8 +5,10 @@
 //! restore token is stored in the data dir so the prompt is once per
 //! machine, not once per boot. A backend that rejects the token is asked
 //! again without it. If the session cannot start, or a grab sees no frame
-//! within [`SCREENCAST_FRAME_WAIT`], the screenshot portal is used and a
-//! warning is logged. A failed start is not retried for [`START_BACKOFF`].
+//! within [`SCREENCAST_FRAME_WAIT`], a screenshot is used only where that
+//! is safe (niri, wlroots, forced GNOME). KDE skips it and logs. A failed
+//! start is not retried for [`START_BACKOFF`]. The permission dialog times
+//! out, and shutdown aborts it.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -29,16 +31,25 @@ use super::pw;
 /// is not on this timer.
 pub const SCREENCAST_FRAME_WAIT: Duration = Duration::from_secs(2);
 
-/// After a failed start or a grab with no frame, use the screenshot portal
-/// until this elapses, then try the stream again.
+/// After a failed start or a grab with no frame, wait this long before
+/// opening the stream again. A screenshot in that window is only taken
+/// where [`screenshot_fallback_is_safe`] is true.
 pub const START_BACKOFF: Duration = Duration::from_secs(30);
+
+/// A session that never reaches STREAMING is closed after this, then
+/// [`START_BACKOFF`] applies. Grabs before the bound still wait for a frame.
+pub const NEVER_STREAMING_WAIT: Duration = Duration::from_secs(6);
+
+/// The permission dialog is closed after this. Shutdown aborts the open
+/// sooner, and dropping that task closes the portal session.
+pub const PERMISSION_DIALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
 const TOKEN_FILE: &str = "screencast-restore-token";
 const COMPARE_LIMIT: u32 = 4;
 
 struct Live {
     _fd: std::os::fd::OwnedFd,
-    stream: std::sync::Arc<pw::Handle>,
+    stream: Option<std::sync::Arc<pw::Handle>>,
     /// Dropping this asks the task that owns the portal session to call
     /// `Session::close`. Drop alone does not close it.
     close_session: Option<tokio::sync::oneshot::Sender<()>>,
@@ -46,6 +57,9 @@ struct Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
+        // Quit and join the PipeWire thread before Session.Close, so the
+        // consumer is gone before the portal session ends.
+        drop(self.stream.take());
         if let Some(tx) = self.close_session.take() {
             let _ = tx.send(());
         }
@@ -71,6 +85,8 @@ struct CastState {
     compare_saved: u32,
     compare_warned: bool,
     last_timing_log: Instant,
+    /// The task that is waiting on the permission dialog. Shutdown aborts it.
+    open_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for CastState {
@@ -84,6 +100,7 @@ impl Default for CastState {
             compare_saved: 0,
             compare_warned: false,
             last_timing_log: Instant::now(),
+            open_task: None,
         }
     }
 }
@@ -195,6 +212,17 @@ pub fn screenshot_fallback_is_safe(desktop: &str, stream_forced: bool) -> bool {
     desktop_has(desktop, &["gnome"]) && stream_forced
 }
 
+/// True when a session that has never reached STREAMING should be closed.
+pub fn drop_unstarted_stream(has_streamed: bool, uptime: Duration, bound: Duration) -> bool {
+    !has_streamed && uptime >= bound
+}
+
+/// Capture now must not open the screenshot portal beside a live share on
+/// a desktop where that combination is unsafe.
+pub fn oneshot_blocked_by_share(desktop: &str, stream_forced: bool, share_open: bool) -> bool {
+    share_open && !screenshot_fallback_is_safe(desktop, stream_forced)
+}
+
 pub fn tab_timeout_action(desktop: &str, stream_forced: bool) -> TabTimeoutAction {
     if screenshot_fallback_is_safe(desktop, stream_forced) {
         TabTimeoutAction::Screenshot
@@ -225,6 +253,9 @@ pub async fn close_if_open() {
     let had = state.live.is_some() || state.opening;
     state.open_gen = state.open_gen.wrapping_add(1);
     state.opening = false;
+    if let Some(task) = state.open_task.take() {
+        task.abort();
+    }
     let live = state.live.take();
     let _ = last_fail_after_deliberate_close(state.last_fail.map(|at| at.elapsed()));
     drop(state);
@@ -246,14 +277,17 @@ pub async fn capture(
     let age = state.last_fail.map(|at| at.elapsed());
     if !should_try_stream(age, START_BACKOFF) {
         drop(state);
-        return screenshot(output_name, "screencast backoff").await;
+        return screenshot_if_safe(output_name, "screencast backoff").await;
     }
     let restart = match open_permit(state.opening, state.live.is_some()) {
         OpenPermit::Busy => {
             drop(state);
             return while_opening(output_name).await;
         }
-        OpenPermit::Reuse => state.live.as_ref().is_some_and(|live| !live.stream.alive()),
+        OpenPermit::Reuse => state
+            .live
+            .as_ref()
+            .is_some_and(|live| live.stream.as_ref().is_some_and(|stream| !stream.alive())),
         OpenPermit::Open => true,
     };
     if restart {
@@ -265,11 +299,27 @@ pub async fn capture(
         state.open_gen = state.open_gen.wrapping_add(1);
         let generation = state.open_gen;
         state.opening = true;
-        drop(state);
         let data_dir = data_dir.to_path_buf();
         let output = output_name.map(str::to_string);
-        tokio::spawn(async move {
-            let result = open_session(&data_dir, output.as_deref(), max_fps).await;
+        if let Some(task) = state.open_task.take() {
+            task.abort();
+        }
+        let task = tokio::spawn(async move {
+            let result = match tokio::time::timeout(
+                PERMISSION_DIALOG_TIMEOUT,
+                open_session(&data_dir, output.as_deref(), max_fps),
+            )
+            .await
+            {
+                Ok(inner) => inner,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_secs = PERMISSION_DIALOG_TIMEOUT.as_secs(),
+                        "screencast permission dialog timed out"
+                    );
+                    Err("screencast permission dialog timed out".into())
+                }
+            };
             let mut state = CAST.lock().await;
             if state.open_gen != generation {
                 drop(result);
@@ -290,40 +340,47 @@ pub async fn capture(
                     state.last_fail = Some(Instant::now());
                     state.live = None;
                     SESSION_OPEN.store(false, Ordering::Release);
-                    note_fallback(
-                        &mut state,
-                        &format!(
-                            "screencast session failed ({err}); falling back to the screenshot portal"
-                        ),
-                    );
+                    let line = fallback_line(&format!("screencast session failed ({err})"));
+                    note_fallback(&mut state, &line);
                 }
             }
         });
+        state.open_task = Some(task);
+        drop(state);
         return while_opening(output_name).await;
     }
     let Some(stream) = state
         .live
         .as_ref()
-        .map(|live| std::sync::Arc::clone(&live.stream))
+        .and_then(|live| live.stream.as_ref().map(std::sync::Arc::clone))
     else {
         state.last_fail = Some(Instant::now());
-        note_fallback(
-            &mut state,
-            "screencast stream is not running; falling back to the screenshot portal",
-        );
+        let line = fallback_line("screencast stream is not running");
+        note_fallback(&mut state, &line);
         drop(state);
-        return portal::capture(output_name).await;
+        return screenshot_if_safe(output_name, "screencast stream is not running").await;
     };
     if !stream.alive() {
         state.last_fail = Some(Instant::now());
         state.live = None;
         SESSION_OPEN.store(false, Ordering::Release);
-        note_fallback(
-            &mut state,
-            "screencast stream is not running; falling back to the screenshot portal",
-        );
+        let line = fallback_line("screencast stream is not running");
+        note_fallback(&mut state, &line);
         drop(state);
-        return portal::capture(output_name).await;
+        return screenshot_if_safe(output_name, "screencast stream is not running").await;
+    }
+    if drop_unstarted_stream(
+        stream.has_streamed(),
+        stream.running_for(),
+        NEVER_STREAMING_WAIT,
+    ) {
+        state.last_fail = Some(Instant::now());
+        state.live = None;
+        SESSION_OPEN.store(false, Ordering::Release);
+        let line = fallback_line("screencast never reached streaming");
+        note_fallback(&mut state, &line);
+        drop(state);
+        return screenshot_if_safe(output_name, "screencast never reached streaming").await;
     }
     let tab_press = match kind {
         CaptureKind::Tab => Some(super::tab_press().unwrap_or_else(Instant::now)),
@@ -387,14 +444,23 @@ pub async fn capture(
                 state.last_fail = Some(Instant::now());
                 state.live = None;
                 SESSION_OPEN.store(false, Ordering::Release);
-                note_fallback(
-                    &mut state,
-                    &format!(
-                        "screencast stream ended ({err}); falling back to the screenshot portal"
-                    ),
-                );
+                let line = fallback_line(&format!("screencast stream ended ({err})"));
+                note_fallback(&mut state, &line);
                 drop(state);
-                return portal::capture(output_name).await;
+                return screenshot_if_safe(output_name, "screencast stream ended").await;
+            }
+            if drop_unstarted_stream(
+                stream.has_streamed(),
+                stream.running_for(),
+                NEVER_STREAMING_WAIT,
+            ) {
+                state.last_fail = Some(Instant::now());
+                state.live = None;
+                SESSION_OPEN.store(false, Ordering::Release);
+                let line = fallback_line("screencast never reached streaming");
+                note_fallback(&mut state, &line);
+                drop(state);
+                return screenshot_if_safe(output_name, "screencast never reached streaming").await;
             }
             drop(state);
             Err(err.into())
@@ -419,7 +485,7 @@ async fn tab_timeout(
         }
         TabTimeoutAction::Skip => {
             let count = TAB_MISS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(count, "Tab grab: no fresh stream frame (timeout)");
+            tracing::info!(delay_ms, count, "Tab grab: no fresh stream frame (timeout)");
             Err("no fresh stream frame".into())
         }
     }
@@ -446,12 +512,39 @@ async fn while_opening(
     Err("screencast open in progress".into())
 }
 
+fn fallback_is_safe() -> bool {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    screenshot_fallback_is_safe(&desktop, super::stream_was_forced())
+}
+
+fn fallback_line(why: &str) -> String {
+    if fallback_is_safe() {
+        format!("{why}; falling back to the screenshot portal")
+    } else {
+        format!("{why}; screenshot skipped")
+    }
+}
+
 async fn screenshot(
     output_name: Option<&str>,
     why: &str,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     tracing::debug!(why, "screencast skipped; using the screenshot portal");
     portal::capture(output_name).await
+}
+
+/// Screenshot only on niri, wlroots, and forced GNOME. KDE skips and logs,
+/// the same rule as a Tab timeout.
+async fn screenshot_if_safe(
+    output_name: Option<&str>,
+    why: &str,
+) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    if fallback_is_safe() {
+        screenshot(output_name, why).await
+    } else {
+        tracing::info!(why, "screencast screenshot skipped");
+        Err(why.into())
+    }
 }
 
 enum OpenFail {
@@ -635,7 +728,7 @@ async fn open_once(
     });
     Ok(Live {
         _fd: fd,
-        stream: std::sync::Arc::new(handle),
+        stream: Some(std::sync::Arc::new(handle)),
         close_session: Some(hold),
     })
 }
@@ -734,16 +827,27 @@ fn write_token(data_dir: &Path, token: &str) {
         return;
     }
     let path = token_path(data_dir);
+    let tmp = data_dir.join(format!("{TOKEN_FILE}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    if let Ok(mut file) = options.open(&path) {
-        let _ = file.write_all(token.as_bytes());
+    let Ok(mut file) = options.open(&tmp) else {
+        return;
+    };
+    if file.write_all(token.as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let _ = file.sync_all();
+    drop(file);
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -940,5 +1044,60 @@ mod tests {
         assert!(screenshot_fallback_is_safe("sway", true));
         assert!(!screenshot_fallback_is_safe("ubuntu:GNOME", false));
         let _ = tab_timeout_counts();
+        assert_eq!(PERMISSION_DIALOG_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(NEVER_STREAMING_WAIT, Duration::from_secs(6));
+        assert!(!drop_unstarted_stream(
+            false,
+            Duration::from_secs(2),
+            NEVER_STREAMING_WAIT
+        ));
+        assert!(drop_unstarted_stream(
+            false,
+            NEVER_STREAMING_WAIT,
+            NEVER_STREAMING_WAIT
+        ));
+        assert!(!drop_unstarted_stream(
+            true,
+            Duration::from_secs(30),
+            NEVER_STREAMING_WAIT
+        ));
+        assert!(oneshot_blocked_by_share("KDE", true, true));
+        assert!(!oneshot_blocked_by_share("KDE", true, false));
+        assert!(!oneshot_blocked_by_share("niri", false, true));
+        assert_eq!(
+            fallback_line("screencast backoff"),
+            if fallback_is_safe() {
+                "screencast backoff; falling back to the screenshot portal".to_string()
+            } else {
+                "screencast backoff; screenshot skipped".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn restore_token_is_replaced_atomically_and_private() {
+        let dir = tempfile::tempdir().unwrap();
+        write_token(dir.path(), "secret-token");
+        let path = token_path(dir.path());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret-token");
+        assert!(!dir.path().join(format!("{TOKEN_FILE}.tmp")).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        write_token(dir.path(), "next-token");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next-token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(!dir.path().join(format!("{TOKEN_FILE}.tmp")).exists());
     }
 }

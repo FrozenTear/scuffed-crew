@@ -395,11 +395,15 @@ fn main() -> anyhow::Result<()> {
     // it set.
     // Under the systemd unit the variable is already there and this returns.
     let omp = stat_tracker::omp::ensure_thread_limit();
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("failed to start the async runtime")?
-        .block_on(run(omp))
+        .context("failed to start the async runtime")?;
+    let result = runtime.block_on(run(omp));
+    // Dropping the runtime waits with no bound for blocking tasks. This
+    // stops waiting after the same deadline as a signal shutdown.
+    runtime.shutdown_timeout(stat_tracker::replace::SHUTDOWN_DEADLINE);
+    result
 }
 
 async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
@@ -4455,12 +4459,17 @@ async fn run_loop(
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
+    let mut exec_failed_at: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
+                        // The key instant, before the game-gate read and the
+                        // store await. The stream deadline is measured from
+                        // this, not from when the session row is ready.
+                        let press = Instant::now();
                         let running = game_gate.is_running();
                         if capture::should_close_share(
                             capture::stream_route_active(),
@@ -4488,18 +4497,17 @@ async fn run_loop(
                             tracing::debug!("Tab ignored: a capture is already in progress");
                             continue;
                         }
-                        st.last_tab_capture = Some(Instant::now());
+                        st.last_tab_capture = Some(press);
 
                         // Session choice: reuse the active game (mid-game, or
                         // post-match scoreboard within the grace window), or
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
-                        let now = Instant::now();
                         let opened_by_this_tab = open_fresh_for_tab_and_sync(
                             &mut st,
                             store,
                             data_dir,
-                            now,
+                            press,
                             || {
                                 schedule_store_sync(
                                     &mut sync_task,
@@ -4516,9 +4524,8 @@ async fn run_loop(
                         let req = build_capture_request(
                             st.active_game.as_ref().expect("active_game set above"),
                             opened_by_this_tab,
-                            now,
+                            press,
                         );
-                        let press = now;
                         let on_stream = capture::stream_route_active();
                         let sid = req.session_id.clone();
                         let tx = capture_tx.clone();
@@ -4843,6 +4850,19 @@ async fn run_loop(
                 }
             }
             _ = cmd_timer.tick() => {
+                // Auto-detect off never ticks the poll arm, so the share
+                // still closes here when the game stops. The same edge, and
+                // only when a restore token can reopen it.
+                let running = game_gate.is_running();
+                if capture::should_close_share(
+                    capture::stream_route_active(),
+                    game_was_running,
+                    running,
+                    capture::share_restorable(data_dir),
+                ) {
+                    capture::close_if_open().await;
+                }
+                game_was_running = running;
                 if binary_checked.elapsed() >= std::time::Duration::from_secs(60) {
                     binary_checked = tokio::time::Instant::now();
                     if let Some(path) = stat_tracker::replace::replaced_binary_path() {
@@ -4853,6 +4873,14 @@ async fn run_loop(
                                 );
                                 logged_binary_wait = true;
                             }
+                        } else if !stat_tracker::replace::exec_retry_due(
+                            exec_failed_at,
+                            std::time::Instant::now(),
+                            stat_tracker::replace::EXEC_RETRY_BACKOFF,
+                        ) {
+                            tracing::debug!(
+                                "tracker binary on disk was replaced; waiting after a failed re-exec"
+                            );
                         } else {
                             shutdown_from_signal(
                                 &mut st,
@@ -4875,6 +4903,7 @@ async fn run_loop(
                                     error = %err,
                                     "could not re-exec the new tracker; keeping this process"
                                 );
+                                exec_failed_at = Some(std::time::Instant::now());
                                 if released_pid {
                                     stat_tracker::replace::restore_own_pid_file(data_dir);
                                 }
@@ -4888,6 +4917,7 @@ async fn run_loop(
                         }
                     } else {
                         logged_binary_wait = false;
+                        exec_failed_at = None;
                     }
                 }
                 // Quiet-session timer. Runs on this existing tick so it does
@@ -6695,7 +6725,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             &stat_tracker::tab_retry::TAB_RETRY_WAITS,
             tab_capture_should_retry,
             tab_outcome_rank,
-            |_| {
+            |attempt| {
                 let matcher = Arc::clone(&ctx.portrait_matcher);
                 // Clone player_name so the blocking closure can own it.
                 let player_name_owned = player_name.map(|s| s.to_string());
@@ -6708,13 +6738,21 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
-                    let img = match capture::capture_screen_output_for(
+                    let grab = capture::capture_screen_output_for(
                         backend,
                         capture_output,
                         capture::CaptureKind::Tab,
-                    )
-                    .await
-                    {
+                    );
+                    // Attempt 0 keeps the key press from the outer task.
+                    // Each retry gets a new press-relative deadline.
+                    let grabbed = if attempt == 0 {
+                        grab.await
+                    } else {
+                        let now = std::time::Instant::now();
+                        capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab)
+                            .await
+                    };
+                    let img = match grabbed {
                         Ok(img) => img,
                         Err(err) if err.to_string().contains("no fresh stream frame") => {
                             return Ok(FrameAnalysisOutcome::NotAScoreboard {
@@ -8744,6 +8782,9 @@ async fn shutdown_from_signal(
             flush_snapshot_if_dirty(store, data_dir).await;
         } => {}
         _ = tokio::time::sleep(stat_tracker::replace::SHUTDOWN_DEADLINE) => {
+            // Returning here used to leave the runtime drop waiting on
+            // blocking tasks. `main` calls `Runtime::shutdown_timeout` with
+            // this same deadline, so those tasks cannot hold the exit.
             tracing::error!(
                 "{}",
                 stat_tracker::replace::shutdown_overrun_line(capture_busy, sync_busy, cast_open)

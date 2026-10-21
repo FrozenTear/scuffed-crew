@@ -119,6 +119,10 @@ struct State {
     stream: AtomicPtr<c_void>,
     loop_: AtomicPtr<c_void>,
     loop_lock: Mutex<()>,
+    /// Set by Drop before `quit`. The thread checks this under `loop_lock`
+    /// before `pw_main_loop_run`, so a quit that landed before the loop
+    /// pointer was published still stops the thread.
+    quit_requested: AtomicBool,
     dequeue: DequeueFn,
     queue: QueueFn,
     update_params: UpdateFn,
@@ -194,6 +198,18 @@ impl Handle {
         !self.state.fresh_done.load(Ordering::Acquire)
     }
 
+    /// True once PipeWire has reported STREAMING. A pause before that is
+    /// negotiation, not a user stop.
+    pub fn has_streamed(&self) -> bool {
+        self.state.seen_streaming.load(Ordering::Acquire)
+    }
+
+    /// How long this stream object has existed. A session that never
+    /// reaches STREAMING is closed after a bound on this clock.
+    pub fn running_for(&self) -> Duration {
+        self.state.started.elapsed()
+    }
+
     pub fn open_marker(&self) -> framebuf::OpenMarker {
         framebuf::OpenMarker {
             seq: self.state.dequeue_seq.load(Ordering::Acquire),
@@ -209,7 +225,7 @@ impl Handle {
     ///
     /// `tab_press` is the evdev Tab instant. The grab then takes the first
     /// buffer that arrived at or after press + 300 ms, and gives up at
-    /// press + 1000 ms. Poll grabs pass `None` and keep the newest frame.
+    /// press + 1200 ms. Poll grabs pass `None` and keep the newest frame.
     pub async fn grab(
         &self,
         timeout: Duration,
@@ -238,6 +254,10 @@ impl Handle {
         let started = std::time::Instant::now();
         let poll_deadline = started + timeout;
         loop {
+            // Arm the waiter before reading the slot. A frame that arrives
+            // between the check and the wait is then still observed.
+            let notified = self.state.notify.notified();
+            tokio::pin!(notified);
             if let Some(press) = tab_press {
                 let press_ms = rel_ms(self.state.started, press);
                 let now_ms = rel_ms(self.state.started, std::time::Instant::now());
@@ -277,7 +297,7 @@ impl Handle {
             }
             let left = deadline - now;
             tokio::select! {
-                _ = self.state.notify.notified() => {}
+                _ = &mut notified => {}
                 _ = tokio::time::sleep(left) => {}
             }
         }
@@ -297,6 +317,11 @@ impl Handle {
             return Ok(GrabOutcome::TabMiss {
                 delay_ms: now_ms.saturating_sub(press_ms),
             });
+        }
+        // A frame that landed as the deadline passed is newer than the
+        // reused one. Take it first.
+        if let Some(frame) = take_frame(&self.state, fresh, marker) {
+            return Ok(self.finish_frame(frame, fresh, started));
         }
         if !fresh
             && self.state.streaming.load(Ordering::Acquire)
@@ -383,13 +408,10 @@ impl Drop for Handle {
     fn drop(&mut self) {
         self.state.alive.store(false, Ordering::Release);
         self.state.want.store(false, Ordering::Release);
-        let loop_ = take_loop(&self.state);
-        if !loop_.is_null() {
-            // SAFETY: `loop_` was stored by the stream thread and cleared
-            // here before that thread destroys it. `pw_main_loop_quit` only
-            // wakes the loop.
-            unsafe { (self.state.quit)(loop_) };
-        }
+        // Quit while the thread still owns the loop. Do not drop the
+        // pointer here: the thread nulls it and destroys the loop under
+        // the same lock, after `pw_main_loop_run` has returned.
+        request_quit(&self.state);
         self.state.notify.notify_waiters();
         if let Some(join) = self.join.take() {
             // Bound the join so a stuck PipeWire loop cannot hold process
@@ -404,15 +426,41 @@ impl Drop for Handle {
     }
 }
 
-fn take_loop(state: &State) -> *mut c_void {
+fn request_quit(state: &State) {
     let _guard = state
         .loop_lock
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    state.loop_.swap(std::ptr::null_mut(), Ordering::AcqRel)
+    state.quit_requested.store(true, Ordering::Release);
+    let loop_ = state.loop_.load(Ordering::Acquire);
+    if !loop_.is_null() {
+        // SAFETY: the pointer is still published. The thread nulls it and
+        // destroys the loop under this same lock, so quit cannot run after
+        // the loop is freed. `pw_main_loop_quit` only wakes the loop.
+        unsafe { (state.quit)(loop_) };
+    }
 }
 
-fn clear_loop_ptr(state: &State, main: *mut c_void) {
+/// Publish `main` unless Drop already asked the thread to stop.
+/// The check and the store share `loop_lock`, so a quit that arrived
+/// before the pointer was visible cannot be missed.
+fn begin_loop(state: &State, main: *mut c_void) -> bool {
+    let _guard = state
+        .loop_lock
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if state.quit_requested.load(Ordering::Acquire) {
+        return false;
+    }
+    state.loop_.store(main, Ordering::Release);
+    true
+}
+
+/// Null the published pointer and destroy `main` while holding `loop_lock`.
+fn destroy_loop(state: &State, destroy: unsafe extern "C" fn(*mut c_void), main: *mut c_void) {
+    if main.is_null() {
+        return;
+    }
     let _guard = state
         .loop_lock
         .lock()
@@ -420,6 +468,9 @@ fn clear_loop_ptr(state: &State, main: *mut c_void) {
     if state.loop_.load(Ordering::Acquire) == main {
         state.loop_.store(std::ptr::null_mut(), Ordering::Release);
     }
+    // SAFETY: `main` was created on this thread and is destroyed once, under
+    // the lock that `request_quit` needs before it may call quit.
+    unsafe { destroy(main) };
 }
 
 /// Closes the duplicated portal fd unless the stream thread takes it.
@@ -551,6 +602,7 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
             info_secs: 0,
         }),
         loop_lock: Mutex::new(()),
+        quit_requested: AtomicBool::new(false),
     });
     let thread_state = Arc::clone(&state);
     let join = std::thread::Builder::new()
@@ -633,7 +685,6 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             state.notify.notify_waiters();
             return;
         }
-        state.loop_.store(main, Ordering::Release);
         let pw_loop = (symbols.main_loop_get_loop)(main);
         let context = (symbols.context_new)(pw_loop, std::ptr::null_mut(), 0);
         let core = if context.is_null() {
@@ -647,8 +698,7 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             if !context.is_null() {
                 (symbols.context_destroy)(context);
             }
-            clear_loop_ptr(&state, main);
-            (symbols.main_loop_destroy)(main);
+            destroy_loop(&state, symbols.main_loop_destroy, main);
             return;
         }
         let link = stream_link_plan(node_id, None);
@@ -672,7 +722,8 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
         } else {
             // The hook must outlive the loop. It sits on this stack until
             // the stream is destroyed below.
-            let mut hook = [0u8; 64];
+            // spa_hook is pointer-aligned. A byte array is only align 1.
+            let mut hook = [0u64; 8];
             (symbols.add_listener)(stream, hook.as_mut_ptr() as *mut c_void, &events, data);
             let pod_ptr = format.as_ptr() as *const SpaPod;
             let params = [pod_ptr];
@@ -687,14 +738,13 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             if rc < 0 {
                 state.alive.store(false, Ordering::Release);
                 state.notify.notify_waiters();
-            } else {
+            } else if begin_loop(&state, main) {
                 (symbols.main_loop_run)(main);
             }
             (symbols.stream_destroy)(stream);
         }
-        clear_loop_ptr(&state, main);
         (symbols.context_destroy)(context);
-        (symbols.main_loop_destroy)(main);
+        destroy_loop(&state, symbols.main_loop_destroy, main);
         state.alive.store(false, Ordering::Release);
         state.notify.notify_waiters();
     }
@@ -856,17 +906,22 @@ extern "C" fn on_process(data: *mut c_void) {
         state.notify.notify_waiters();
         return;
     }
-    // Clear want only after we accept a frame, so a black buffer does not
-    // end the grab. A second callback inside the throttle gap is dropped.
-    state.want.store(false, Ordering::Release);
+    // A black buffer does not end the grab. An early Tab buffer does not
+    // either: the request stays up until a frame at or after the overlay
+    // delay is stored, so the stream keeps delivering the next one.
     let copied = copy_buffer(state, newest, newest_seq, newest_pts, now_ms);
     unsafe { (state.queue)(stream, newest) };
     match copied {
         Some(frame) if !framebuf::frame_is_blank(&frame) => {
-            state.last_copy_ms.store(now_ms, Ordering::Release);
+            let need = state.need_arrived_ms.load(Ordering::Acquire);
+            let ends = copy_ends_request(need, frame.arrived_ms);
+            if ends {
+                state.last_copy_ms.store(now_ms, Ordering::Release);
+            }
             let mut slot = state.latest.lock().unwrap_or_else(|err| err.into_inner());
             *slot = Some(frame);
             drop(slot);
+            state.want.store(!ends, Ordering::Release);
             state.notify.notify_waiters();
         }
         _ => {
@@ -1092,6 +1147,24 @@ pub fn copy_for_wait(
     copy_due(last_ms, now_ms, gap_ms)
 }
 
+/// A stored frame ends the grab's request when this is a poll, or when the
+/// buffer arrived at or after the Tab overlay. An earlier Tab frame is kept
+/// and the stream is asked for another.
+pub fn copy_ends_request(need_arrived_ms: u64, arrived_ms: u64) -> bool {
+    need_arrived_ms == NO_TAB_NEED || arrived_ms >= need_arrived_ms
+}
+
+/// One step of a Tab grab. `want` is whether the stream is still being
+/// asked for frames. Returns `(still_want, captured)`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn tab_request_step(want: bool, need_arrived_ms: u64, arrived_ms: u64) -> (bool, bool) {
+    if !want {
+        return (false, false);
+    }
+    let captured = copy_ends_request(need_arrived_ms, arrived_ms);
+    (!captured, captured)
+}
+
 /// ERROR is always dead. UNCONNECTED and PAUSED count only after the stream
 /// has reached STREAMING, so negotiation's pause is not a user stop.
 pub fn stream_state_is_dead(state: i32, seen_streaming: bool) -> bool {
@@ -1240,10 +1313,60 @@ mod tests {
         assert!(!copy_for_wait(1000, 1200, 500, 1500, 1500));
         assert!(!copy_for_wait(1000, 1200, 500, 0, NO_TAB_NEED));
         assert!(copy_for_wait(0, 10, 500, 0, NO_TAB_NEED));
+        assert!(copy_ends_request(NO_TAB_NEED, 10));
+        assert!(!copy_ends_request(300, 100));
+        assert!(copy_ends_request(300, 300));
         let line = fps_line(8, 4, 4);
         assert_eq!(
             line,
             "screencast frames received per second: 2 (configured 4 fps)"
+        );
+    }
+
+    #[test]
+    fn an_early_frame_then_a_two_fps_frame_is_captured() {
+        let press = 1_000u64;
+        let need = press + framebuf::TAB_OVERLAY_AFTER_PRESS_MS;
+        let early = press + 100;
+        let gap = throttle_gap_ms(2);
+        assert_eq!(gap, 500);
+        // The next buffer at 2 fps lands after the overlay delay, and
+        // before the hard stop.
+        let fresh = early + gap;
+        assert!(fresh >= need);
+        assert!(fresh < press + framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+
+        let (want, captured) = tab_request_step(true, need, early);
+        assert!(
+            !captured,
+            "a frame inside the first 300 ms must not end the request"
+        );
+        assert!(want);
+        assert_eq!(
+            framebuf::select_tab_frame(Some(early), press, early),
+            framebuf::TabFrameChoice::Wait
+        );
+
+        let (want, captured) = tab_request_step(want, need, fresh);
+        assert!(captured, "the next 2 fps frame is the capture");
+        assert!(!want);
+        assert_eq!(
+            framebuf::select_tab_frame(Some(fresh), press, fresh),
+            framebuf::TabFrameChoice::Take
+        );
+
+        // Ending the request on the early frame drops the later one, and
+        // the grab then misses at the hard stop.
+        let (stuck, captured) = tab_request_step(false, need, fresh);
+        assert!(!captured);
+        assert!(!stuck);
+        assert_eq!(
+            framebuf::select_tab_frame(
+                Some(early),
+                press,
+                press + framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS
+            ),
+            framebuf::TabFrameChoice::Miss
         );
     }
 }

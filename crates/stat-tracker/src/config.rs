@@ -184,8 +184,9 @@ pub enum CaptureRoute {
 
 impl CaptureRoute {
     /// `auto`, `screencast`, `screenshot`, and the env names `portal` and
-    /// `portal-screenshot`. Case does not matter. An unknown word is refused
-    /// so a typo does not silently change the route.
+    /// `portal-screenshot`. Case does not matter. [`Self::parse`] returns
+    /// `None` for an unknown word. Config load does not: an unknown
+    /// `capture_route` falls back to automatic so the daemon still starts.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
@@ -214,11 +215,13 @@ impl<'de> Deserialize<'de> for CaptureRoute {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        Self::parse(&raw).ok_or_else(|| {
-            D::Error::custom(format!(
-                "capture_route must be auto, screencast, or screenshot (got {raw})"
-            ))
-        })
+        Ok(Self::parse(&raw).unwrap_or_else(|| {
+            tracing::warn!(
+                capture_route = %raw,
+                "unknown capture_route; using auto"
+            );
+            Self::Auto
+        }))
     }
 }
 
@@ -2888,5 +2891,7 @@ cooldown_secs = 120
         }
         let parsed: Wrap = toml::from_str("capture_route = \"Screencast\"\n").unwrap();
         assert_eq!(parsed.capture_route, CaptureRoute::Screencast);
+        let unknown: Wrap = toml::from_str("capture_route = \"nope\"\n").unwrap();
+        assert_eq!(unknown.capture_route, CaptureRoute::Auto);
     }
 }

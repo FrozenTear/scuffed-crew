@@ -201,6 +201,25 @@ pub struct RunMarkerGuard {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// What one heartbeat tick does. A released marker is skipped, not an exit:
+/// a failed re-exec restores the marker and the loop must still be running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatStep {
+    Stop,
+    Skip,
+    Touch,
+}
+
+fn heartbeat_step(stopped: bool, held: bool) -> HeartbeatStep {
+    if stopped {
+        HeartbeatStep::Stop
+    } else if !held {
+        HeartbeatStep::Skip
+    } else {
+        HeartbeatStep::Touch
+    }
+}
+
 /// Rewrites `last_seen` in this run's marker. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct MarkerHeartbeat {
@@ -232,11 +251,17 @@ impl MarkerHeartbeat {
         tick.tick().await; // the first tick is immediate; the file is fresh
         loop {
             tick.tick().await;
-            if !marker_is_held() || self.shared.lock().map(|s| s.stopped).unwrap_or(true) {
-                return;
-            }
-            if let Err(e) = self.touch(Utc::now()) {
-                tracing::warn!(error = %e, "could not update run.marker");
+            match heartbeat_step(
+                self.shared.lock().map(|s| s.stopped).unwrap_or(true),
+                marker_is_held(),
+            ) {
+                HeartbeatStep::Stop => return,
+                HeartbeatStep::Skip => continue,
+                HeartbeatStep::Touch => {
+                    if let Err(e) = self.touch(Utc::now()) {
+                        tracing::warn!(error = %e, "could not update run.marker");
+                    }
+                }
             }
         }
     }
@@ -523,6 +548,14 @@ mod tests {
         tokio::time::sleep(HEARTBEAT_INTERVAL * 2).await;
         assert!(task.is_finished(), "the task stops after a clean finish");
         assert!(!run_marker_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_released_marker_skips_a_tick_and_a_stopped_one_ends_it() {
+        assert_eq!(heartbeat_step(true, true), HeartbeatStep::Stop);
+        assert_eq!(heartbeat_step(true, false), HeartbeatStep::Stop);
+        assert_eq!(heartbeat_step(false, false), HeartbeatStep::Skip);
+        assert_eq!(heartbeat_step(false, true), HeartbeatStep::Touch);
     }
 
     #[test]

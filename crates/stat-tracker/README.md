@@ -227,12 +227,17 @@ so quitting the game does not ask again. Other
 desktops (niri, Sway, Hyprland, X11) keep their direct capture unless you
 force the stream.
 
-If the share cannot start, the tracker logs a warning and uses the older
-screenshot portal for that grab. A failed start is not retried for 30
-seconds. On KDE a Tab that sees no frame from after the key press does not
-fall back to that portal. A Tab on a direct capture or the screenshot portal
+If the share cannot start, the tracker logs a warning. On niri, wlroots,
+and GNOME when the stream was forced, that grab uses the older screenshot
+portal. On KDE it skips the screenshot, including while backing off or
+after the stream dies. A failed start is not retried for 30 seconds. A
+share that never starts streaming is closed and then waits out that same
+backoff. The permission dialog times out, and stopping the tracker cancels
+it. On KDE a Tab that sees no frame from after the key press does not fall
+back to that portal. A Tab on a direct capture or the screenshot portal
 still waits 400 ms for the overlay. On the stream it waits for a buffer at
-least 300 ms after the key, and gives up 1000 ms after the key.
+least 300 ms after the key, and gives up 1200 ms after the key. A buffer
+from those first 300 ms does not finish the wait.
 
 `STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
 For the systemd service, put it in `~/.config/environment.d/` (for example

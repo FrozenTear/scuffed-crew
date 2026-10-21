@@ -354,6 +354,22 @@ pub fn under_systemd() -> bool {
 /// anyway. The log names what was still in flight.
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
+/// After a failed re-exec, wait this long before shutting down to try again.
+pub const EXEC_RETRY_BACKOFF: Duration = Duration::from_secs(600);
+
+/// True when a failed re-exec may be tried again. `None` means there has
+/// not been a failure.
+pub fn exec_retry_due(
+    last_failure: Option<std::time::Instant>,
+    now: std::time::Instant,
+    backoff: Duration,
+) -> bool {
+    match last_failure {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= backoff,
+    }
+}
+
 pub fn shutdown_overrun_line(capture: bool, sync: bool, screencast: bool) -> String {
     let mut parts = Vec::new();
     if capture {
@@ -672,6 +688,15 @@ not a lock line
         assert!(keeps_running_after_restart(RestartHow::Reexec, true));
         assert!(!keeps_running_after_restart(RestartHow::Reexec, false));
         assert_eq!(SHUTDOWN_DEADLINE, Duration::from_secs(5));
+        assert_eq!(EXEC_RETRY_BACKOFF, Duration::from_secs(600));
+        let now = std::time::Instant::now();
+        assert!(exec_retry_due(None, now, EXEC_RETRY_BACKOFF));
+        assert!(!exec_retry_due(Some(now), now, EXEC_RETRY_BACKOFF));
+        assert!(exec_retry_due(
+            Some(now - EXEC_RETRY_BACKOFF),
+            now,
+            EXEC_RETRY_BACKOFF
+        ));
         assert!(shutdown_overrun_line(true, false, true).contains("in-flight capture"));
         assert!(cmdline_is_vacuum(b"scuffed-stat-tracker\0--vacuum\0"));
         assert!(!cmdline_is_vacuum(b"scuffed-stat-tracker\0"));

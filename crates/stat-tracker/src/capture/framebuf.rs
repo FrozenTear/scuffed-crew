@@ -124,11 +124,12 @@ pub enum RowCopy {
 /// sleeping a fixed 400 ms.
 pub const TAB_OVERLAY_AFTER_PRESS_MS: u64 = 300;
 
-/// Hard stop for that wait, measured from the same press. A 2 fps cap can
-/// leave a gap of about 2 seconds, so a miss is not a frame from before
-/// the overlay. A later check still accepts a buffer that arrived in the gap
-/// once its arrival is at or after the overlay delay.
-pub const TAB_GRAB_TIMEOUT_AFTER_PRESS_MS: u64 = 1000;
+/// Hard stop for that wait, measured from the same press. This is a
+/// constant, not a config key. A 2 fps cap can leave about half a second
+/// between buffers, so the stop sits past one of those gaps. A later check
+/// still accepts a buffer that arrived in the gap once its arrival is at or
+/// after the overlay delay.
+pub const TAB_GRAB_TIMEOUT_AFTER_PRESS_MS: u64 = 1200;
 
 /// What to do with the newest stream buffer for one Tab press.
 ///
@@ -533,7 +534,7 @@ mod tests {
         let before_deadline = press + 700;
         let deadline = press + TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
         assert_eq!(TAB_OVERLAY_AFTER_PRESS_MS, 300);
-        assert_eq!(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, 1000);
+        assert_eq!(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, 1200);
         assert_eq!(
             select_tab_frame(None, press, before_deadline),
             TabFrameChoice::Wait
