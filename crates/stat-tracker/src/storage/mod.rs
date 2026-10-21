@@ -987,22 +987,39 @@ impl LocalStore {
     /// junk/misdetected game). Records a tombstone so the next sync deletes
     /// the game server-side too, and drops the session from `matches.jsonl`
     /// so the GUI's log fallback stops showing it.
+    ///
+    /// The three writes run in one transaction and every statement is
+    /// checked. Unchecked, a failed tombstone write still returned Ok after
+    /// the local rows were gone: the game vanished from the app but nothing
+    /// was left to delete it from the site.
     pub async fn delete_session(
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Marked before the delete, so a capture insert cannot land between
-        // the delete and the mark. A failed delete unmarks it.
+        // the delete and the mark. A failed delete (the query or any checked
+        // statement) unmarks it, or every later row of that game would be
+        // dropped for the rest of the process.
         let newly_marked = self
             .deleted_here
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.to_string());
-        let deleted = self
+        let deleted = match self
             .db
-            .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid; CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
+            .query(
+                "BEGIN TRANSACTION; \
+                 DELETE match_session WHERE session_id = $sid; \
+                 DELETE personal_match WHERE session_id = $sid; \
+                 CREATE deleted_session SET session_id = $sid, deleted_at = time::now(); \
+                 COMMIT TRANSACTION;",
+            )
             .bind(("sid", session_id.to_string()))
-            .await;
+            .await
+        {
+            Ok(response) => response.check().map(|_| ()),
+            Err(e) => Err(e),
+        };
         if let Err(e) = deleted {
             if newly_marked {
                 self.deleted_here
@@ -1013,6 +1030,37 @@ impl LocalStore {
             return Err(e.into());
         }
         rewrite_match_log_session(&self.data_dir, session_id, None);
+        Ok(())
+    }
+
+    /// Queue server deletes for sessions that stay local from now on (an
+    /// untracked map or mode after a re-read or an edit). An earlier snapshot
+    /// of such a game may already be on the site; the tombstone removes it.
+    /// A session that already has a pending tombstone is not queued twice.
+    /// A server delete of a session it never stored is a no-op.
+    pub async fn queue_tombstones(
+        &self,
+        session_ids: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut sids: Vec<String> = session_ids
+            .iter()
+            .filter(|sid| !sid.is_empty())
+            .cloned()
+            .collect();
+        sids.sort();
+        sids.dedup();
+        if sids.is_empty() {
+            return Ok(());
+        }
+        let pending = self.get_pending_tombstones().await?;
+        sids.retain(|sid| !pending.contains(sid));
+        for sid in sids {
+            self.db
+                .query("CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
+                .bind(("sid", sid))
+                .await?
+                .check()?;
+        }
         Ok(())
     }
 
@@ -2807,6 +2855,63 @@ mod tests {
         // Clearing all data never leaks tombstones either.
         store.clear_all_data().await.unwrap();
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    /// O3: a tombstone write that fails must fail the delete and leave the
+    /// game in place. Before the fix the three statements ran unchecked and
+    /// outside a transaction, so the local rows went, no tombstone was
+    /// stored, the call returned Ok, and the site copy was never deleted.
+    #[tokio::test]
+    async fn delete_session_is_atomic_when_the_tombstone_write_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 1)).await.unwrap();
+        store.insert_match(snap("s1", 2)).await.unwrap();
+        // Make the tombstone CREATE fail for this one session.
+        store
+            .db
+            .query("DEFINE FIELD OVERWRITE session_id ON deleted_session ASSERT $value != 's1'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        assert!(
+            store.delete_session("s1").await.is_err(),
+            "a failed tombstone write must surface as an error"
+        );
+        assert_eq!(
+            store.match_count().await.unwrap(),
+            2,
+            "the local rows stay when the tombstone could not be written"
+        );
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    /// DATA-4: tombstones queued for sessions that turn local-only are
+    /// stored once per session and ride the next sync like a GUI delete.
+    #[tokio::test]
+    async fn queue_tombstones_dedups_and_skips_pending_and_blank_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("gone", 1)).await.unwrap();
+        store.delete_session("gone").await.unwrap();
+
+        store
+            .queue_tombstones(&[
+                "dm".to_string(),
+                "dm".to_string(),
+                String::new(),
+                "gone".to_string(),
+            ])
+            .await
+            .unwrap();
+        let mut pending = store.get_pending_tombstones().await.unwrap();
+        pending.sort();
+        assert_eq!(pending, vec!["dm".to_string(), "gone".to_string()]);
+
+        store.queue_tombstones(&["dm".to_string()]).await.unwrap();
+        assert_eq!(store.get_pending_tombstones().await.unwrap().len(), 2);
     }
 
     #[tokio::test]

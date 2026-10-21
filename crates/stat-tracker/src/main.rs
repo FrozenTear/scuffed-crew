@@ -15,6 +15,10 @@ use surrealdb_types::Datetime as SurrealDatetime;
 use tracing_subscriber::EnvFilter;
 
 const SYNC_EVERY_N_CAPTURES: u32 = 5;
+/// How often the command tick looks for unsent rows or tombstones and
+/// starts a sync on its own (DATA-2), so an upload that failed after the
+/// evening's last game is retried without a Tab or a restart.
+const IDLE_SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Window for two word-OCR outcome reads to confirm each other. Sized to span
 /// the accolade → rank-screen transition under a starved poller (measured 45s
@@ -4666,6 +4670,7 @@ async fn run_loop(
     // its own timer so edits apply even while no game is running.
     let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut idle_sync_checked = Instant::now();
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
     let mut exec_failed_at: Option<std::time::Instant> = None;
@@ -5355,6 +5360,16 @@ async fn run_loop(
                     &mut sync_task,
                     &sync_backoff,
                     sync_client,
+                )
+                .await;
+                maybe_spawn_idle_sync(
+                    &mut sync_task,
+                    &sync_backoff,
+                    store,
+                    sync_client,
+                    data_dir,
+                    &mut idle_sync_checked,
+                    Instant::now(),
                 )
                 .await;
             }
@@ -8639,6 +8654,58 @@ fn periodic_sync_due(capture_count: u32, task_in_flight: bool, backoff_allows: b
     capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !task_in_flight && backoff_allows
 }
 
+/// True when the idle tick should start a sync (DATA-2): at least
+/// [`IDLE_SYNC_EVERY`] since the last idle check, no sync in flight, the
+/// backoff window open, and something left to send.
+fn idle_sync_due(
+    since_last_check: std::time::Duration,
+    task_in_flight: bool,
+    backoff_allows: bool,
+    has_pending: bool,
+) -> bool {
+    since_last_check >= IDLE_SYNC_EVERY && !task_in_flight && backoff_allows && has_pending
+}
+
+/// The idle retry on the command tick. Without it an upload started only on
+/// every fifth Tab, a game close, a GUI command, startup, or shutdown, so a
+/// game whose upload failed while the site was down waited for the next
+/// session. Single-flight: a sync already running is never doubled.
+async fn maybe_spawn_idle_sync(
+    sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
+    store: &storage::LocalStore,
+    client: Option<&sync::SyncClient>,
+    data_dir: &std::path::Path,
+    last_check: &mut Instant,
+    now: Instant,
+) {
+    if client.is_none() || now.saturating_duration_since(*last_check) < IDLE_SYNC_EVERY {
+        return;
+    }
+    let since = now.saturating_duration_since(*last_check);
+    *last_check = now;
+    let in_flight = sync_task.as_ref().is_some_and(|t| !t.is_finished());
+    let allow = backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .should_attempt(now);
+    if in_flight || !allow {
+        return;
+    }
+    let has_pending = match (
+        store.get_unsynced().await,
+        store.get_pending_tombstones().await,
+    ) {
+        (Ok(rows), Ok(tombstones)) => !rows.is_empty() || !tombstones.is_empty(),
+        // A failed local read leaves the decision to try_sync, which logs it.
+        _ => true,
+    };
+    if idle_sync_due(since, in_flight, allow, has_pending) {
+        tracing::debug!("idle sync: unsent rows or deletes are waiting");
+        schedule_store_sync(sync_task, backoff, store, client, data_dir, None);
+    }
+}
+
 fn maybe_spawn_periodic_sync(
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
     backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
@@ -8945,8 +9012,10 @@ fn schedule_settled_unknown(
     }
 }
 
-/// One command tick of the GUI queue. A SetOutcome schedules an upload
-/// on this same tick. A delete or an edit does not.
+/// One command tick of the GUI queue. A SetOutcome or a delete schedules
+/// an upload on this same tick, so a deleted game leaves the site right
+/// away instead of at the next Tab sync or daemon restart (O3). An edit
+/// does not; the idle sync tick picks it up.
 async fn apply_queued_commands(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -9005,6 +9074,7 @@ async fn apply_queued_commands(
                 if matches!(
                     cmd,
                     storage::StoreCommand::SetOutcome { .. }
+                        | storage::StoreCommand::DeleteSession { .. }
                         | storage::StoreCommand::RetryUpload { .. }
                         | storage::StoreCommand::RetryRejectedUploads
                 ) {
@@ -9568,15 +9638,52 @@ where
             return sync::SyncAttempt::NoServerCall;
         }
     };
-    let (local_only, unsynced): (Vec<_>, Vec<_>) = unsynced.into_iter().partition(|row| {
-        let sent = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
-        !parse::stats_row_is_tracked(row.display_map_name(), &row.game_mode)
-            || !parse::stats_row_is_tracked(row.display_map_name(), &sent)
-    });
+    let LocalOnlySplit {
+        local_only,
+        send: unsynced,
+        retire,
+    } = split_local_only(unsynced);
+    // Only a session that was ever read as a tracked game can be on the
+    // site. A plain Deathmatch game sends no delete, so its periodic syncs
+    // stay request-free.
+    let mut retire_checked = Vec::with_capacity(retire.len());
+    for session_id in retire {
+        match store.get_session_snapshots(&session_id).await {
+            Ok(rows) if !session_may_be_on_site(&rows) => {}
+            // A read error queues the delete anyway: an extra no-op delete
+            // is harmless, a missed one leaves the game on the site.
+            _ => retire_checked.push(session_id),
+        }
+    }
+    let retire = retire_checked;
     if !local_only.is_empty() {
-        let claims = storage::SyncClaim::capture(&local_only);
-        if let Err(e) = store.mark_synced(&claims).await.map_err(|e| e.to_string()) {
-            tracing::error!(error = %e, "failed to keep a deathmatch row local");
+        // The tombstone is stored before the rows are marked synced. If the
+        // tombstone write fails the rows stay queued and the next pass tries
+        // again; the other order could lose the server delete for good.
+        let queued = if retire.is_empty() {
+            Ok(())
+        } else {
+            store
+                .queue_tombstones(&retire)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        match queued {
+            Ok(()) => {
+                if !retire.is_empty() {
+                    tracing::info!(
+                        sessions = retire.len(),
+                        "queued server deletes for games that are now local-only"
+                    );
+                }
+                let claims = storage::SyncClaim::capture(&local_only);
+                if let Err(e) = store.mark_synced(&claims).await.map_err(|e| e.to_string()) {
+                    tracing::error!(error = %e, "failed to keep a deathmatch row local");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to queue a server delete for a local-only game");
+            }
         }
     }
     // Locally-deleted sessions whose server rows must go too.
@@ -9633,6 +9740,73 @@ where
         &mut upload,
     )
     .await
+}
+
+/// A row the site does not store: an untracked map or mode (Deathmatch,
+/// Workshop, Château Guillard, ...), judged on the displayed map and on the
+/// mode that would be uploaded.
+fn row_is_local_only(row: &storage::PersonalMatch) -> bool {
+    let sent = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
+    !parse::stats_row_is_tracked(row.display_map_name(), &row.game_mode)
+        || !parse::stats_row_is_tracked(row.display_map_name(), &sent)
+}
+
+/// True when any snapshot of a session was read, or is shown, as a tracked
+/// game, so an upload of it may have reached the site. Raw fields count as
+/// well as the edited ones: a GUI map edit rewrites the displayed map of
+/// every snapshot, but the uploaded copy was the raw read.
+fn session_may_be_on_site(snapshots: &[storage::PersonalMatch]) -> bool {
+    snapshots.iter().any(|row| {
+        !row_is_local_only(row) || parse::stats_row_is_tracked(&row.map_name, &row.game_mode)
+    })
+}
+
+/// Unsynced rows split for one sync pass. See [`split_local_only`].
+#[derive(Debug, Default)]
+struct LocalOnlySplit {
+    /// Rows marked synced locally and never sent.
+    local_only: Vec<storage::PersonalMatch>,
+    /// Rows that go to the upload path.
+    send: Vec<storage::PersonalMatch>,
+    /// Sessions that need a server delete (DATA-4).
+    retire: Vec<String>,
+}
+
+/// Split unsynced rows (`played_at` ASC, as `get_unsynced` returns them)
+/// into rows to keep local and rows to upload.
+///
+/// The newest unsynced row of a session decides that session. When it is
+/// local-only (a game first read as Control and later re-read or edited to
+/// a Deathmatch map), every unsynced row of the session stays local and the
+/// session is queued for a server delete, because an earlier snapshot may
+/// already be on the site. When the newest row is tracked, older local-only
+/// snapshots of the same session stay local without a tombstone and the
+/// tracked rows upload as before. Rows without a session id are judged one
+/// by one and are never tombstoned.
+fn split_local_only(rows: Vec<storage::PersonalMatch>) -> LocalOnlySplit {
+    let mut newest_local: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        if !row.session_id.is_empty() {
+            // ASC order: the last row seen per session is the newest.
+            newest_local.insert(row.session_id.clone(), row_is_local_only(row));
+        }
+    }
+    let mut split = LocalOnlySplit::default();
+    for row in rows {
+        let retired = newest_local.get(&row.session_id).copied().unwrap_or(false);
+        if retired {
+            if !split.retire.contains(&row.session_id) {
+                split.retire.push(row.session_id.clone());
+            }
+            split.local_only.push(row);
+        } else if row_is_local_only(&row) {
+            split.local_only.push(row);
+        } else {
+            split.send.push(row);
+        }
+    }
+    split
 }
 
 /// Send `to_upload` and `tombstones` in capped requests.
@@ -24293,24 +24467,31 @@ mod tests {
         assert!(body.contains("\"edited\":true"), "{body}");
     }
 
+    /// O3: a GUI delete sends its tombstone on the same command tick. It
+    /// used to wait for the next Tab sync or a daemon restart (owner's
+    /// journal: delete applied 15:47, tombstone sent 18:27), so the game
+    /// stayed on the site for hours after it vanished from the app.
     #[tokio::test]
-    async fn a_delete_command_does_not_schedule_an_upload() {
+    async fn a_delete_command_sends_its_tombstone_on_the_same_tick() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
-        store
-            .insert_match(test_match("do-not-upload", "victory"))
-            .await
-            .unwrap();
+        let mut row = test_match("delete-me", "victory");
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        store.insert_match(row).await.unwrap();
+        let claims = storage::SyncClaim::capture(&store.get_unsynced().await.unwrap());
+        store.mark_synced(&claims).await.unwrap();
         let now = test_now();
         let mut st = session(None, now);
         storage::queue_command(
             dir.path(),
             &storage::StoreCommand::DeleteSession {
-                session_id: "do-not-upload".into(),
+                session_id: "delete-me".into(),
             },
         )
         .unwrap();
-        let client = loopback_client(9);
+        let (port, rx) = spawn_upload_sink();
+        let client = loopback_client(port);
         let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
         let mut sync_task = None;
         apply_queued_commands(
@@ -24320,6 +24501,223 @@ mod tests {
             &mut sync_task,
             &backoff,
             Some(&client),
+        )
+        .await;
+        let handle = sync_task.expect("a delete schedules an upload");
+        handle.await.unwrap();
+        let body = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            body.contains("\"deleted_sessions\":[\"delete-me\"]"),
+            "{body}"
+        );
+        assert!(
+            store.get_pending_tombstones().await.unwrap().is_empty(),
+            "the acknowledged tombstone is cleared"
+        );
+    }
+
+    fn tracked_row(session_id: &str, secs: i64) -> storage::PersonalMatch {
+        let mut row = test_match(session_id, "victory");
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(secs));
+        row
+    }
+
+    fn deathmatch_row(session_id: &str, secs: i64) -> storage::PersonalMatch {
+        let mut row = tracked_row(session_id, secs);
+        row.map_name = "Château Guillard".into();
+        row.game_mode = "Deathmatch".into();
+        row
+    }
+
+    /// DATA-4: a game uploaded as Control and later re-read as a Deathmatch
+    /// map must be deleted on the site. Before the fix the new snapshot was
+    /// only marked synced locally and the Control copy stayed online.
+    #[tokio::test]
+    async fn a_game_reclassified_as_untracked_sends_a_server_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(tracked_row("reclass", 0)).await.unwrap();
+        let first = try_sync_with(&store, dir.path(), None, |matches, tombstones| async move {
+            assert_eq!(matches.len(), 1);
+            assert!(tombstones.is_empty());
+            Ok(upload_ok())
+        })
+        .await;
+        assert!(matches!(first, sync::SyncAttempt::Uploaded));
+
+        store
+            .insert_match(deathmatch_row("reclass", 60))
+            .await
+            .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() = Some((matches.len(), tombstones));
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some((0, vec!["reclass".to_string()])),
+            "the reclassified game is deleted on the site and not re-uploaded"
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    /// A game that was never a tracked read sends no delete, so a
+    /// Deathmatch evening does not post a request on every sync.
+    #[tokio::test]
+    async fn a_plain_deathmatch_game_sends_no_server_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(deathmatch_row("dm", 0)).await.unwrap();
+        store.insert_match(deathmatch_row("dm", 30)).await.unwrap();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_upload = std::sync::Arc::clone(&called);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _tombstones| {
+            let called_upload = std::sync::Arc::clone(&called_upload);
+            async move {
+                called_upload.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "a deathmatch-only game must not call upload"
+        );
+        assert!(matches!(attempt, sync::SyncAttempt::NoServerCall));
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_local_only_lets_the_newest_row_decide_the_session() {
+        let rows = vec![
+            // Session a: Control, then re-read as Deathmatch -> retired.
+            tracked_row("a", 0),
+            deathmatch_row("a", 10),
+            // Session b: a stray Deathmatch read, then Control -> uploaded.
+            deathmatch_row("b", 0),
+            tracked_row("b", 10),
+            // Legacy rows with no session id are judged one by one.
+            deathmatch_row("", 0),
+            tracked_row("", 5),
+        ];
+        let split = split_local_only(rows);
+        assert_eq!(split.retire, vec!["a".to_string()]);
+        let local: Vec<(&str, &str)> = split
+            .local_only
+            .iter()
+            .map(|r| (r.session_id.as_str(), r.map_name.as_str()))
+            .collect();
+        assert_eq!(
+            local,
+            vec![
+                ("a", "Busan"),
+                ("a", "Château Guillard"),
+                ("b", "Château Guillard"),
+                ("", "Château Guillard"),
+            ]
+        );
+        let send: Vec<(&str, &str)> = split
+            .send
+            .iter()
+            .map(|r| (r.session_id.as_str(), r.map_name.as_str()))
+            .collect();
+        assert_eq!(send, vec![("b", "Busan"), ("", "Busan")]);
+    }
+
+    #[test]
+    fn session_may_be_on_site_counts_raw_and_edited_reads() {
+        assert!(!session_may_be_on_site(&[deathmatch_row("s", 0)]));
+        assert!(session_may_be_on_site(&[
+            deathmatch_row("s", 0),
+            tracked_row("s", 1)
+        ]));
+        // A GUI edit to a Deathmatch map: the upload was the raw Control read.
+        let mut edited = tracked_row("s", 0);
+        edited.corrected_map_name = Some("Château Guillard".into());
+        assert!(session_may_be_on_site(&[edited]));
+    }
+
+    #[test]
+    fn idle_sync_due_needs_the_interval_an_open_backoff_and_pending_work() {
+        let due = IDLE_SYNC_EVERY;
+        let early = IDLE_SYNC_EVERY - std::time::Duration::from_secs(1);
+        assert!(idle_sync_due(due, false, true, true));
+        assert!(!idle_sync_due(early, false, true, true), "too soon");
+        assert!(!idle_sync_due(due, true, true, true), "never a second sync");
+        assert!(!idle_sync_due(due, false, false, true), "backoff closed");
+        assert!(!idle_sync_due(due, false, true, false), "nothing to send");
+    }
+
+    /// DATA-2: a game left unsent (site down at the last game close) goes
+    /// out on the idle tick without a Tab, a GUI command, or a restart.
+    #[tokio::test]
+    async fn idle_tick_retries_an_unsent_game() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(tracked_row("left-over", 0))
+            .await
+            .unwrap();
+        let (port, rx) = spawn_upload_sink();
+        let client = loopback_client(port);
+        let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+        let mut sync_task = None;
+        let now = Instant::now();
+
+        // Inside the interval: nothing starts.
+        let mut checked = now;
+        maybe_spawn_idle_sync(
+            &mut sync_task,
+            &backoff,
+            &store,
+            Some(&client),
+            dir.path(),
+            &mut checked,
+            now,
+        )
+        .await;
+        assert!(sync_task.is_none());
+
+        let later = now + IDLE_SYNC_EVERY;
+        maybe_spawn_idle_sync(
+            &mut sync_task,
+            &backoff,
+            &store,
+            Some(&client),
+            dir.path(),
+            &mut checked,
+            later,
+        )
+        .await;
+        assert_eq!(checked, later);
+        sync_task
+            .take()
+            .expect("the idle tick schedules the upload")
+            .await
+            .unwrap();
+        let body = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(body.contains("left-over"), "{body}");
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+
+        // Nothing left: the next idle check starts no task.
+        maybe_spawn_idle_sync(
+            &mut sync_task,
+            &backoff,
+            &store,
+            Some(&client),
+            dir.path(),
+            &mut checked,
+            later + IDLE_SYNC_EVERY,
         )
         .await;
         assert!(sync_task.is_none());
