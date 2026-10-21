@@ -27,7 +27,6 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
@@ -63,6 +62,9 @@ struct CreateStrategyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     team_id: Option<String>,
     visibility: String,
+    /// The drawing made before the first save, so it is not thrown away.
+    elements: Vec<StrategyElement>,
+    phases: Vec<TimelinePhase>,
 }
 
 /// Subset of `/api/strategy/meta` consumed by the editor for inline winrate badges.
@@ -510,6 +512,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // Save status
     let save_in_progress = use_signal(|| false);
     let toast = use_toast();
+    let navigator = use_navigator();
 
     // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
     // None while loading or when the user is not an authed org member.
@@ -531,230 +534,195 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         )
     });
 
+    let save_ctx = SaveContext {
+        strategy_state,
+        canvas_state,
+        save_in_progress,
+        show_map_picker,
+        map_picker_error,
+        toast,
+        navigator,
+        opened_as_new: initial_strategy.is_none(),
+    };
+
     // Track previous tool for space-to-pan behavior
     let _prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
 
     // =========================================================================
-    // Playback auto-advance effect
+    // Playback auto-advance
     // =========================================================================
-    use_effect(move || {
-        let playback = strategy_state.read().playback_state;
-        if playback == PlaybackState::Playing {
-            // Schedule next advance after 3 seconds
-            let callback = Closure::once(Box::new(move || {
-                let current = strategy_state.read().playback_state;
-                if current == PlaybackState::Playing {
-                    let is_last = {
-                        let s = strategy_state.read();
-                        match s.current_phase_index() {
-                            Some(idx) => idx + 1 >= s.phases.len(),
-                            None => true,
-                        }
-                    };
-                    if is_last {
-                        strategy_state.with_mut(|s| s.playback_state = PlaybackState::Stopped);
-                    } else {
-                        strategy_state.with_mut(|s| s.next_phase());
-                    }
-                }
-            }) as Box<dyn FnOnce()>);
-
-            let window = web_sys::window().expect("no window");
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.as_ref().unchecked_ref(),
-                3000,
-            );
-            callback.forget();
+    // One scope-owned timer, keyed on (playback state, selected phase). Pausing,
+    // stopping, changing phase or leaving the editor drops the pending future,
+    // so no timer outlives the editor or runs twice.
+    let playback_key = use_memo(move || {
+        let s = strategy_state.read();
+        (s.playback_state, s.selected_phase)
+    });
+    let _playback_timer = use_resource(move || {
+        let (playback, _phase) = playback_key();
+        async move {
+            if playback != PlaybackState::Playing {
+                return;
+            }
+            playback_pause(PLAYBACK_PHASE_MS).await;
+            strategy_state.with_mut(|s| s.playback_tick());
         }
     });
 
     // =========================================================================
-    // Keyboard shortcuts effect — registers global listeners once
+    // Keyboard shortcuts: document keydown, capture phase (so Tab is seen
+    // before the browser moves focus). Removed when the editor unmounts.
     // =========================================================================
-    {
-        let listeners_registered = use_hook(|| std::cell::Cell::new(false));
-
-        use_effect(move || {
-            if listeners_registered.get() {
+    crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
+        // Don't handle shortcuts when typing in an input
+        if let Some(target) = event.target()
+            && let Ok(element) = target.dyn_into::<web_sys::HtmlElement>()
+        {
+            let tag = element.tag_name().to_lowercase();
+            if tag == "input" || tag == "textarea" || tag == "select" {
                 return;
             }
-            listeners_registered.set(true);
+        }
 
-            let window = web_sys::window().expect("no window");
-            let document = window.document().expect("no document");
+        let Some(action) = keybindings::from_keyboard_event(&event) else {
+            return;
+        };
 
-            // Keydown handler
-            let keydown_handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
-                move |event: web_sys::KeyboardEvent| {
-                    // Don't handle shortcuts when typing in an input
-                    if let Some(target) = event.target()
-                        && let Ok(element) = target.dyn_into::<web_sys::HtmlElement>()
-                    {
-                        let tag = element.tag_name().to_lowercase();
-                        if tag == "input" || tag == "textarea" || tag == "select" {
-                            return;
-                        }
+        match action {
+            // Tool selection
+            EditorAction::SelectTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Select);
+            }
+            EditorAction::PanTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Pan);
+            }
+            EditorAction::MarkerTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::PlayerMarker);
+            }
+            EditorAction::RouteTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Route);
+            }
+            EditorAction::AreaTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Area);
+            }
+            EditorAction::ArrowTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Arrow);
+            }
+            EditorAction::TextTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Text);
+            }
+            EditorAction::EraserTool => {
+                drawing_state.with_mut(|d| d.active_tool = Tool::Eraser);
+            }
+
+            // Panel toggles
+            EditorAction::ToggleLeftPanel => {
+                event.prevent_default();
+                left_open.with_mut(|v| *v = !*v);
+            }
+            EditorAction::ToggleRightPanel => {
+                event.prevent_default();
+                right_open.with_mut(|v| *v = !*v);
+            }
+            EditorAction::ToggleBottomPanel => {
+                event.prevent_default();
+                bottom_open.with_mut(|v| *v = !*v);
+            }
+            EditorAction::ToggleHealthPacks => {
+                event.prevent_default();
+                canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
+            }
+
+            // Element actions
+            EditorAction::Delete => {
+                let sel = strategy_state.read().selected_element;
+                if let Some(id) = sel {
+                    let removed = strategy_state.with_mut(|s| s.remove_element(id));
+                    if let Some((idx, elem)) = removed {
+                        undo_manager.with_mut(|u| {
+                            u.push(UndoableAction::RemoveElement {
+                                element: elem,
+                                index: idx,
+                            });
+                        });
                     }
+                }
+            }
 
-                    let Some(action) = keybindings::from_keyboard_event(&event) else {
-                        return;
+            // Zoom
+            EditorAction::ZoomIn => {
+                event.prevent_default();
+                canvas_state.with_mut(|c| {
+                    c.zoom = (c.zoom * 1.2).clamp(0.03, 4.0);
+                });
+            }
+            EditorAction::ZoomOut => {
+                event.prevent_default();
+                canvas_state.with_mut(|c| {
+                    c.zoom = (c.zoom / 1.2).clamp(0.03, 4.0);
+                });
+            }
+            EditorAction::ZoomReset => {
+                event.prevent_default();
+                canvas_state.with_mut(|c| {
+                    c.zoom = 1.0;
+                    c.pan_offset = Position::new(0.0, 0.0);
+                });
+            }
+
+            // Playback
+            EditorAction::PlayPause => {
+                strategy_state.with_mut(|s| {
+                    s.playback_state = match s.playback_state {
+                        PlaybackState::Playing => PlaybackState::Paused,
+                        _ => PlaybackState::Playing,
                     };
-
-                    match action {
-                        // Tool selection
-                        EditorAction::SelectTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Select);
-                        }
-                        EditorAction::PanTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Pan);
-                        }
-                        EditorAction::MarkerTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::PlayerMarker);
-                        }
-                        EditorAction::RouteTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Route);
-                        }
-                        EditorAction::AreaTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Area);
-                        }
-                        EditorAction::ArrowTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Arrow);
-                        }
-                        EditorAction::TextTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Text);
-                        }
-                        EditorAction::EraserTool => {
-                            drawing_state.with_mut(|d| d.active_tool = Tool::Eraser);
-                        }
-
-                        // Panel toggles
-                        EditorAction::ToggleLeftPanel => {
-                            event.prevent_default();
-                            left_open.with_mut(|v| *v = !*v);
-                        }
-                        EditorAction::ToggleRightPanel => {
-                            event.prevent_default();
-                            right_open.with_mut(|v| *v = !*v);
-                        }
-                        EditorAction::ToggleBottomPanel => {
-                            event.prevent_default();
-                            bottom_open.with_mut(|v| *v = !*v);
-                        }
-                        EditorAction::ToggleHealthPacks => {
-                            event.prevent_default();
-                            canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
-                        }
-
-                        // Element actions
-                        EditorAction::Delete => {
-                            let sel = strategy_state.read().selected_element;
-                            if let Some(id) = sel {
-                                let removed = strategy_state.with_mut(|s| s.remove_element(id));
-                                if let Some((idx, elem)) = removed {
-                                    undo_manager.with_mut(|u| {
-                                        u.push(UndoableAction::RemoveElement {
-                                            element: elem,
-                                            index: idx,
-                                        });
-                                    });
-                                }
-                            }
-                        }
-
-                        // Zoom
-                        EditorAction::ZoomIn => {
-                            event.prevent_default();
-                            canvas_state.with_mut(|c| {
-                                c.zoom = (c.zoom * 1.2).clamp(0.03, 4.0);
-                            });
-                        }
-                        EditorAction::ZoomOut => {
-                            event.prevent_default();
-                            canvas_state.with_mut(|c| {
-                                c.zoom = (c.zoom / 1.2).clamp(0.03, 4.0);
-                            });
-                        }
-                        EditorAction::ZoomReset => {
-                            event.prevent_default();
-                            canvas_state.with_mut(|c| {
-                                c.zoom = 1.0;
-                                c.pan_offset = Position::new(0.0, 0.0);
-                            });
-                        }
-
-                        // Playback
-                        EditorAction::PlayPause => {
-                            strategy_state.with_mut(|s| {
-                                s.playback_state = match s.playback_state {
-                                    PlaybackState::Playing => PlaybackState::Paused,
-                                    _ => PlaybackState::Playing,
-                                };
-                            });
-                        }
-                        EditorAction::NextPhase => {
-                            strategy_state.with_mut(|s| s.next_phase());
-                        }
-                        EditorAction::PrevPhase => {
-                            strategy_state.with_mut(|s| s.prev_phase());
-                        }
-                        EditorAction::FirstPhase => {
-                            strategy_state.with_mut(|s| {
-                                if let Some(phase) = s.phases.first() {
-                                    s.selected_phase = Some(phase.id);
-                                }
-                            });
-                        }
-                        EditorAction::LastPhase => {
-                            strategy_state.with_mut(|s| {
-                                if let Some(phase) = s.phases.last() {
-                                    s.selected_phase = Some(phase.id);
-                                }
-                            });
-                        }
-
-                        // Undo/Redo
-                        EditorAction::Undo => {
-                            event.prevent_default();
-                            let action = undo_manager.with_mut(|u| u.undo());
-                            if let Some(action) = action {
-                                apply_undo(&mut strategy_state, action);
-                            }
-                        }
-                        EditorAction::Redo => {
-                            event.prevent_default();
-                            let action = undo_manager.with_mut(|u| u.redo());
-                            if let Some(action) = action {
-                                apply_redo(&mut strategy_state, action);
-                            }
-                        }
-
-                        // Save
-                        EditorAction::Save => {
-                            event.prevent_default();
-                            save_strategy(
-                                strategy_state,
-                                canvas_state,
-                                save_in_progress,
-                                show_map_picker,
-                                map_picker_error,
-                                toast,
-                            );
-                        }
+                });
+            }
+            EditorAction::NextPhase => {
+                strategy_state.with_mut(|s| s.next_phase());
+            }
+            EditorAction::PrevPhase => {
+                strategy_state.with_mut(|s| s.prev_phase());
+            }
+            EditorAction::FirstPhase => {
+                strategy_state.with_mut(|s| {
+                    if let Some(phase) = s.phases.first() {
+                        s.selected_phase = Some(phase.id);
                     }
-                },
-            );
+                });
+            }
+            EditorAction::LastPhase => {
+                strategy_state.with_mut(|s| {
+                    if let Some(phase) = s.phases.last() {
+                        s.selected_phase = Some(phase.id);
+                    }
+                });
+            }
 
-            // Use capture phase so we intercept Tab before browser focus navigation
-            document
-                .add_event_listener_with_callback_and_bool(
-                    "keydown",
-                    keydown_handler.as_ref().unchecked_ref(),
-                    true,
-                )
-                .expect("failed to add keydown listener");
-            keydown_handler.forget();
-        });
-    }
+            // Undo/Redo
+            EditorAction::Undo => {
+                event.prevent_default();
+                let action = undo_manager.with_mut(|u| u.undo());
+                if let Some(action) = action {
+                    apply_undo(&mut strategy_state, action);
+                }
+            }
+            EditorAction::Redo => {
+                event.prevent_default();
+                let action = undo_manager.with_mut(|u| u.redo());
+                if let Some(action) = action {
+                    apply_redo(&mut strategy_state, action);
+                }
+            }
+
+            // Save
+            EditorAction::Save => {
+                event.prevent_default();
+                save_strategy(save_ctx);
+            }
+        }
+    });
 
     // =========================================================================
     // Read state for rendering
@@ -992,14 +960,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         },
                         has_unsaved_changes: has_unsaved,
                         on_save: move |_| {
-                            save_strategy(
-                                strategy_state,
-                                canvas_state,
-                                save_in_progress,
-                                show_map_picker,
-                                map_picker_error,
-                                toast,
-                            );
+                            save_strategy(save_ctx);
                         },
                         saving: saving_val,
                         visibility: visibility_val,
@@ -1487,16 +1448,52 @@ fn update_element_field(
     }
 }
 
+/// Seconds a phase shows during playback before the next one.
+const PLAYBACK_PHASE_MS: u32 = 3_000;
+
+async fn playback_pause(ms: u32) {
+    #[cfg(feature = "web")]
+    {
+        gloo_timers::future::TimeoutFuture::new(ms).await;
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(u64::from(ms))).await;
+    }
+}
+
+/// Everything a save needs. Copy, so the Save shortcut and the toolbar button
+/// can both hold one.
+#[derive(Clone, Copy)]
+struct SaveContext {
+    strategy_state: Signal<StrategyState>,
+    canvas_state: Signal<CanvasState>,
+    save_in_progress: Signal<bool>,
+    show_map_picker: Signal<bool>,
+    map_picker_error: Signal<Option<String>>,
+    toast: crate::components::ToastState,
+    navigator: dioxus::router::Navigator,
+    /// Mounted at `/strategy/editor` (no strategy yet). After the first save
+    /// the editor moves to the saved strategy's own route.
+    opened_as_new: bool,
+}
+
 /// Persist the strategy to the API. Shared by the Save keybinding and the
 /// Toolbar's save button. No-op while a save is already in flight.
-fn save_strategy(
-    mut strategy_state: Signal<StrategyState>,
-    canvas_state: Signal<CanvasState>,
-    mut save_in_progress: Signal<bool>,
-    mut show_map_picker: Signal<bool>,
-    mut map_picker_error: Signal<Option<String>>,
-    mut toast: crate::components::ToastState,
-) {
+///
+/// A new strategy is created with its drawing in one request. The dirty flag
+/// is cleared only when the saved snapshot still matches the editor.
+fn save_strategy(ctx: SaveContext) {
+    let SaveContext {
+        mut strategy_state,
+        canvas_state,
+        mut save_in_progress,
+        mut show_map_picker,
+        mut map_picker_error,
+        mut toast,
+        navigator,
+        opened_as_new,
+    } = ctx;
     if *save_in_progress.peek() {
         return;
     }
@@ -1550,6 +1547,8 @@ fn save_strategy(
                 game_mode,
                 team_id: None,
                 visibility: visibility_to_str(snapshot.visibility).to_string(),
+                elements: snapshot.elements.clone(),
+                phases: snapshot.phases.clone(),
             };
             client
                 .post_json::<_, Strategy>("/api/strategy/strategies", &body)
@@ -1558,13 +1557,16 @@ fn save_strategy(
 
         match result {
             Ok(saved) => {
-                strategy_state.with_mut(|s| {
-                    s.strategy_id = Some(saved.id);
-                    s.owner_id = Some(saved.owner_id);
-                    s.has_unsaved_changes = false;
-                });
+                let id = saved.id.clone();
+                let clean =
+                    strategy_state.with_mut(|s| s.mark_saved(&snapshot, saved.id, saved.owner_id));
                 tracing::info!("Strategy saved successfully");
                 toast.show(Toast::success("Strategy saved."));
+                if opened_as_new && clean {
+                    // Leave `/strategy/editor` so a reload or a second save
+                    // works on this strategy instead of creating another.
+                    navigator.replace(crate::routes::Route::StrategyEditor { id });
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to save strategy: {e}");
