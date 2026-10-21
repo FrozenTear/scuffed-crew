@@ -924,13 +924,17 @@ async fn run_planned_update(
         }
     }
 
+    // The sequence number keeps two runs in the same millisecond (parallel
+    // tests) from sharing, and then deleting, one backup folder.
+    static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let work = std::env::temp_dir().join(format!(
-        "sst-gui-update-{}-{}",
+        "sst-gui-update-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     if let Err(e) = std::fs::create_dir_all(&work) {
         return note_daemon_left_stopped(
@@ -2604,8 +2608,9 @@ mod tests {
             "sleep 60 & echo $! > '{}'; wait",
             pidfile.display()
         ));
-        let run = run_logged(cmd, &log);
-        tokio::pin!(run);
+        // Boxed so `drop` below really drops the future (a stack pin would
+        // only drop the reference).
+        let mut run = Box::pin(run_logged(cmd, &log));
         let mut child_pid = None;
         for _ in 0..200 {
             tokio::select! {

@@ -706,7 +706,9 @@ impl TrackerApp {
             quit_gate: QuitGate::default(),
             window_id: Some(window_id),
             tick_count: 0,
-            tray: tray::try_create(),
+            // Unit tests build several apps on parallel threads, and GTK's
+            // tray is not thread-safe (SIGSEGV). Tests never need it.
+            tray: if cfg!(test) { None } else { tray::try_create() },
             overlay_hold,
             overlay_child: None,
             overlay_spawn_blocked: false,
@@ -3542,7 +3544,7 @@ token = \"secret-token-must-stay\"
         let tmp = tempfile::tempdir().unwrap();
         let mut app = fixture_app(tmp.path());
         app.update_progress = UpdateProgress::Running;
-        let _ = app.update(super::Message::Tray(TrayAction::Quit));
+        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
         assert!(app.quit_gate.deferred, "the quit waits for the update");
         assert!(app.window_id.is_none(), "the window is hidden meanwhile");
         let _ = app.update(super::Message::UpdateFinished(Ok("Installed.".into())));
@@ -3552,7 +3554,7 @@ token = \"secret-token-must-stay\"
         );
 
         app.update_progress = UpdateProgress::Idle;
-        let _ = app.update(super::Message::Tray(TrayAction::Quit));
+        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
         assert!(!app.quit_gate.deferred, "no update: quit at once");
     }
 
