@@ -24,7 +24,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_portal_frames: bool,
     /// Cap on the screen-stream rate, in frames per second. Missing means
-    /// 2. Values outside 1..=5 are clamped. This is the PipeWire
+    /// [`SCREENCAST_MAX_FPS_DEFAULT`] (4). Values outside 1..=5 are clamped. This is the PipeWire
     /// max-framerate and the tracker's own throttle. Not written unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_max_fps: Option<u32>,
