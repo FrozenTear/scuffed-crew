@@ -984,6 +984,7 @@ pub enum SetupMessage {
     CheckToken,
     TokenChecked(Result<TokenCheckResult, String>),
     OpenSite,
+    CopyCode,
     DownloadPack,
     PackReady(Result<String, String>),
 }
@@ -1015,6 +1016,7 @@ impl std::fmt::Debug for SetupMessage {
             Self::TokenChecked(Ok(result)) => f.debug_tuple("TokenChecked").field(result).finish(),
             Self::TokenChecked(Err(_)) => f.write_str("TokenChecked(Err([redacted]))"),
             Self::OpenSite => f.write_str("OpenSite"),
+            Self::CopyCode => f.write_str("CopyCode"),
             Self::DownloadPack => f.write_str("DownloadPack"),
             Self::PackReady(Ok(message)) => f.debug_tuple("PackReady").field(message).finish(),
             Self::PackReady(Err(_)) => f.write_str("PackReady(Err([redacted]))"),
@@ -1049,6 +1051,8 @@ pub struct GuideUi {
     link_unsupported: bool,
     link: Option<LinkMachine>,
     link_message: Option<String>,
+    /// Result of the last Copy code press. Never holds the code itself.
+    copy_note: Option<String>,
     poll_inflight: bool,
     next_poll_at: Option<Instant>,
     check_inflight: bool,
@@ -1083,6 +1087,7 @@ impl GuideUi {
             link_unsupported: false,
             link: None,
             link_message: None,
+            copy_note: None,
             poll_inflight: false,
             next_poll_at: None,
             check_inflight: false,
@@ -1269,6 +1274,7 @@ impl GuideUi {
                     start.machine.user_code()
                 ));
                 self.link = Some(start.machine);
+                self.copy_note = None;
                 self.next_poll_at = Some(Instant::now() + Duration::from_secs(interval));
             }
             Ok(LinkStartOutcome::Unsupported) => {
@@ -1432,6 +1438,19 @@ impl GuideUi {
             setup_completed: None,
             sync: Some(SyncConfig { server_url, token }),
         })
+    }
+
+    /// The sign-in code to copy, if one is showing. Clears the last copy note.
+    pub fn code_to_copy(&mut self) -> Option<String> {
+        self.copy_note = None;
+        self.link
+            .as_ref()
+            .map(|machine| machine.user_code().to_string())
+    }
+
+    /// Record how the Copy code press went, shown under the code.
+    pub fn code_copied(&mut self, note: String) {
+        self.copy_note = Some(note);
     }
 
     pub fn prepare_site_url(&mut self) -> Option<String> {
@@ -1680,6 +1699,14 @@ fn sync_body(guide: &GuideUi) -> Element<'_, Message> {
                 .color(TEXT),
         );
         col = col.push(guide_button(
+            "Copy code",
+            true,
+            Some(Message::Setup(SetupMessage::CopyCode)),
+        ));
+        if let Some(note) = &guide.copy_note {
+            col = col.push(body_text(note));
+        }
+        col = col.push(guide_button(
             "Open the site",
             false,
             Some(Message::Setup(SetupMessage::OpenSite)),
@@ -1809,6 +1836,35 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn copy_code_returns_only_the_user_code() {
+        let config = Config::default();
+        let mut guide = GuideUi::startup(true, &config, Some("0.4.24"));
+        assert_eq!(guide.code_to_copy(), None);
+        let secret = "synthetic-device-secret";
+        guide.link_started(Ok(LinkStartOutcome::Ready(LinkStart {
+            machine: LinkMachine::start(
+                secret.into(),
+                "ABCD-EFGH".into(),
+                "https://example.test".into(),
+                5,
+                600,
+            ),
+        })));
+        assert_eq!(guide.code_to_copy().as_deref(), Some("ABCD-EFGH"));
+        guide.code_copied("Copied. Paste it on the site.".into());
+        assert!(
+            guide
+                .copy_note
+                .as_deref()
+                .is_some_and(|n| !n.contains(secret))
+        );
+        assert_eq!(format!("{:?}", SetupMessage::CopyCode), "CopyCode");
+        // A fresh press clears the old note before copying again.
+        let _ = guide.code_to_copy();
+        assert_eq!(guide.copy_note, None);
+    }
 
     fn no_dash(text: &str) -> bool {
         !text.contains('\u{2014}') && !text.contains('\u{2013}')
