@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 use axum::Json;
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -59,8 +59,6 @@ fn health_response(sha: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(sha) {
         headers.insert(GIT_SHA_HEADER, value);
     }
-    // The point of the SHA is to say which build answers right now.
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }
 
@@ -72,7 +70,7 @@ pub async fn health() -> Response {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Request, header};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
@@ -101,7 +99,9 @@ mod tests {
         let resp = health_response(sha);
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()[&GIT_SHA_HEADER], sha);
-        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store");
+        // API responses carry no Cache-Control (tests/seo.rs checks this
+        // on /api/health).
+        assert!(resp.headers().get(header::CACHE_CONTROL).is_none());
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
         let body = json_of(resp).await;
         assert_eq!(body["status"], "ok");
