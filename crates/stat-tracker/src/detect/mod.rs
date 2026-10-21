@@ -144,6 +144,62 @@ struct KeyboardState {
 
 type Registry = Arc<Mutex<HashMap<PathBuf, KeyboardState>>>;
 
+/// One Tab key event from any keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabKey {
+    /// `true` for the key going down, `false` for its release. Auto-repeat
+    /// is not sent.
+    pub down: bool,
+    /// When the key event happened, on the monotonic clock. This is the
+    /// kernel's event time, not the time the daemon loop got round to it.
+    pub at: Instant,
+}
+
+/// The oldest a key event's age is taken to be. A larger age is clamped
+/// here, so a wall-clock step cannot push a press far into the past.
+pub const MAX_KEY_EVENT_AGE: Duration = Duration::from_secs(3);
+
+/// Turn an evdev event time into a monotonic instant.
+///
+/// evdev stamps events on CLOCK_REALTIME by default. The event's age is
+/// `now_real - event_time`, clamped to `0..=MAX_KEY_EVENT_AGE` (an event
+/// stamped in the future counts as now), and the instant is `now_mono`
+/// minus that age. `now_real` and `now_mono` are read together.
+pub fn key_event_instant(
+    event_time: std::time::SystemTime,
+    now_real: std::time::SystemTime,
+    now_mono: Instant,
+) -> Instant {
+    let age = now_real
+        .duration_since(event_time)
+        .unwrap_or(Duration::ZERO)
+        .min(MAX_KEY_EVENT_AGE);
+    now_mono.checked_sub(age).unwrap_or(now_mono)
+}
+
+/// The Tab event for one key event: a press (value 1) or a release
+/// (value 0). Auto-repeat (value 2) and other keys are `None`.
+pub fn tab_key_event(
+    code: KeyCode,
+    value: i32,
+    event_time: std::time::SystemTime,
+    now_real: std::time::SystemTime,
+    now_mono: Instant,
+) -> Option<TabKey> {
+    if code != KeyCode::KEY_TAB {
+        return None;
+    }
+    let down = match value {
+        1 => true,
+        0 => false,
+        _ => return None,
+    };
+    Some(TabKey {
+        down,
+        at: key_event_instant(event_time, now_real, now_mono),
+    })
+}
+
 /// Tab presses from every keyboard-like input device, merged into one stream.
 ///
 /// **Why hotplug + grab detection (2026-09-01 zero-games night):** the first
@@ -156,7 +212,7 @@ type Registry = Arc<Mutex<HashMap<PathBuf, KeyboardState>>>;
 /// picked up within seconds, and a grabbed device is logged at WARN so the
 /// journal names the cause.
 pub struct MultiKeyboardStream {
-    rx: mpsc::UnboundedReceiver<()>,
+    rx: mpsc::UnboundedReceiver<TabKey>,
 }
 
 impl MultiKeyboardStream {
@@ -178,7 +234,8 @@ impl MultiKeyboardStream {
         Ok(MultiKeyboardStream { rx })
     }
 
-    pub async fn wait_tab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// The next Tab press or release, with the time the key event happened.
+    pub async fn wait_tab(&mut self) -> Result<TabKey, Box<dyn std::error::Error>> {
         self.rx
             .recv()
             .await
@@ -217,7 +274,7 @@ fn probe_grabbed(device: &mut Device) -> bool {
 
 /// Enumerate `/dev/input`, open every keyboard not already tracked, spawn its
 /// reader task. Returns how many devices are open afterwards.
-fn scan_and_open(registry: &Registry, tx: &mpsc::UnboundedSender<()>) -> usize {
+fn scan_and_open(registry: &Registry, tx: &mpsc::UnboundedSender<TabKey>) -> usize {
     let mut devices: Vec<(PathBuf, Device)> = evdev::enumerate().collect();
     devices.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -276,7 +333,7 @@ async fn run_device(
     path: PathBuf,
     device: Device,
     registry: Registry,
-    tx: mpsc::UnboundedSender<()>,
+    tx: mpsc::UnboundedSender<TabKey>,
 ) {
     let name = device.name().unwrap_or("unknown").to_string();
     let mut stream = match device.into_event_stream() {
@@ -297,8 +354,13 @@ async fn run_device(
         tokio::select! {
             ev = stream.next_event() => match ev {
                 Ok(event) => {
-                    if let EventSummary::Key(_, KeyCode::KEY_TAB, 1) = event.destructure()
-                        && tx.send(()).is_err()
+                    // Read both clocks together so the event's age converts
+                    // cleanly to the monotonic clock the capture uses.
+                    let (now_real, now_mono) = (std::time::SystemTime::now(), Instant::now());
+                    if let EventSummary::Key(_, code, value) = event.destructure()
+                        && let Some(key) =
+                            tab_key_event(code, value, event.timestamp(), now_real, now_mono)
+                        && tx.send(key).is_err()
                     {
                         break;
                     }
@@ -341,7 +403,7 @@ async fn run_device(
 /// slow full-rescan timer fired. Duplicate Tab events (a physical key echoed
 /// by a non-grabbing pass-through device) are absorbed by the main loop's Tab
 /// debounce.
-async fn hotplug_scanner(registry: Registry, tx: mpsc::UnboundedSender<()>) {
+async fn hotplug_scanner(registry: Registry, tx: mpsc::UnboundedSender<TabKey>) {
     let dir = std::path::Path::new("/dev/input");
     let mut last_mtime = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
     let mut last_full = Instant::now();
@@ -362,5 +424,62 @@ async fn hotplug_scanner(registry: Registry, tx: mpsc::UnboundedSender<()>) {
             tracing::info!(device_count = after, "keyboard set changed");
             log_all_grabbed(&registry, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    /// 2026-10-21 (rc.5, niri): a Tab that landed while the loop was busy
+    /// with a poll was stamped when the loop got to it, not when the key
+    /// went down. The press now carries the kernel's event time.
+    #[test]
+    fn tab_press_is_stamped_with_the_key_event_time() {
+        let now_real = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now_mono = Instant::now() + Duration::from_secs(60);
+        let pressed = now_real - Duration::from_millis(823);
+        let key = tab_key_event(KeyCode::KEY_TAB, 1, pressed, now_real, now_mono)
+            .expect("Tab down is sent");
+        assert!(key.down);
+        assert_eq!(now_mono - key.at, Duration::from_millis(823));
+    }
+
+    #[test]
+    fn release_is_sent_and_repeat_and_other_keys_are_not() {
+        let now_real = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now_mono = Instant::now() + Duration::from_secs(60);
+        let released = tab_key_event(KeyCode::KEY_TAB, 0, now_real, now_real, now_mono);
+        assert_eq!(
+            released,
+            Some(TabKey {
+                down: false,
+                at: now_mono
+            })
+        );
+        assert_eq!(
+            tab_key_event(KeyCode::KEY_TAB, 2, now_real, now_real, now_mono),
+            None
+        );
+        assert_eq!(
+            tab_key_event(KeyCode::KEY_A, 1, now_real, now_real, now_mono),
+            None
+        );
+    }
+
+    #[test]
+    fn event_age_is_clamped_to_zero_and_three_seconds() {
+        let now_real = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let now_mono = Instant::now() + Duration::from_secs(60);
+        // Stamped in the future (wall clock stepped back): counts as now.
+        let future = now_real + Duration::from_secs(5);
+        assert_eq!(key_event_instant(future, now_real, now_mono), now_mono);
+        // Far in the past (wall clock stepped forward): at most 3 s old.
+        let past = now_real - Duration::from_secs(3600);
+        assert_eq!(
+            now_mono - key_event_instant(past, now_real, now_mono),
+            MAX_KEY_EVENT_AGE
+        );
     }
 }

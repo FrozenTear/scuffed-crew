@@ -1,29 +1,194 @@
-//! Retries for Tab captures that the scoreboard preflight rejected.
+//! Retries for Tab captures that the scoreboard preflight rejected, and
+//! what a new Tab press does while a capture is still running.
 //!
-//! On 2026-10-15 several Tab frames were taken while the game was still
-//! drawing the scoreboard. The preflight found only one or two rows
-//! (`dip_count` 1 to 2) and rejected them as "not a scoreboard". A later Tab
-//! press was accepted, but one game got no accepted board at all and was
-//! lost. A rejected Tab capture now captures again after a short wait, at
-//! about 300 ms and about 700 ms after the first rejection, before giving up.
-//! Each retry is one screen grab plus the cheap preflight, so CPU stays light.
+//! A rejected Tab capture captures again after a short wait, at about
+//! 300 ms and about 700 ms after the first rejection, before giving up. Each
+//! retry is one screen grab plus the cheap preflight, so CPU stays light.
+//! On the screen stream a retry takes the next buffer that arrives, with no
+//! second overlay delay (`capture::tab_retry_press`).
+//!
+//! The rejected frames saved so far (2026-10-15 to 2026-10-21) showed
+//! gameplay, a killcam, the VICTORY banner, chat or the desktop: the board
+//! was already closed or not open, not half drawn. The player's own next
+//! Tab is then the best chance of a board, so a new press stops the
+//! running capture's retries and runs as soon as that capture reports
+//! ([`tab_press_action`], [`next_press_after_report`]). The 3 s debounce
+//! applies only after a board was accepted.
 
 use std::future::Future;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::{Duration, Instant};
 
 /// Waits before each retry, counted from the previous attempt. The retries
 /// land about 300 ms and about 700 ms after the first rejection.
 pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration::from_millis(400)];
 
+/// After an accepted board, Tab presses this soon after its press are
+/// ignored. A rejected capture sets no debounce.
+pub const TAB_DEBOUNCE_AFTER_ACCEPT: Duration = Duration::from_secs(3);
+
+/// Where one Tab capture is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TabFlightPhase {
+    /// The first grab, before any verdict.
+    Grabbing = 0,
+    /// The first grab was rejected and retries are pending or running.
+    Retrying = 1,
+    /// A frame passed the scoreboard check and is being read.
+    Accepted = 2,
+    /// The capture ended without an accepted board.
+    Rejected = 3,
+}
+
+impl TabFlightPhase {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Grabbing,
+            1 => Self::Retrying,
+            2 => Self::Accepted,
+            _ => Self::Rejected,
+        }
+    }
+}
+
+/// Shared between the daemon loop and one Tab capture task.
+#[derive(Debug)]
+pub struct TabFlight {
+    /// The key press this capture is for.
+    pub press: Instant,
+    phase: AtomicU8,
+    cancel: AtomicBool,
+    wake: tokio::sync::Notify,
+}
+
+impl TabFlight {
+    pub fn new(press: Instant) -> Arc<Self> {
+        Arc::new(Self {
+            press,
+            phase: AtomicU8::new(TabFlightPhase::Grabbing as u8),
+            cancel: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub fn phase(&self) -> TabFlightPhase {
+        TabFlightPhase::from_u8(self.phase.load(Ordering::Acquire))
+    }
+
+    pub fn set_phase(&self, phase: TabFlightPhase) {
+        self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// Record how the capture ended: `accepted` when a frame passed the
+    /// scoreboard check.
+    pub fn finish(&self, accepted: bool) {
+        self.set_phase(if accepted {
+            TabFlightPhase::Accepted
+        } else {
+            TabFlightPhase::Rejected
+        });
+    }
+
+    /// A newer Tab press takes over: no further retry starts, and a retry
+    /// wait that is running ends now. A grab already running finishes.
+    pub fn cancel_retries(&self) {
+        self.cancel.store(true, Ordering::Release);
+        // `notify_one` keeps a permit when nothing waits yet.
+        self.wake.notify_one();
+    }
+
+    pub fn retries_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        while !self.retries_cancelled() {
+            self.wake.notified().await;
+        }
+    }
+}
+
+tokio::task_local! {
+    static TAB_FLIGHT: Arc<TabFlight>;
+}
+
+/// Run `fut` as the capture task of `flight`.
+pub async fn with_flight<T>(flight: Arc<TabFlight>, fut: impl Future<Output = T>) -> T {
+    TAB_FLIGHT.scope(flight, fut).await
+}
+
+/// The flight of the current capture task. Outside one (a test harness
+/// calling the capture directly) this is a fresh flight nobody cancels.
+pub fn current_flight() -> Arc<TabFlight> {
+    TAB_FLIGHT
+        .try_with(Arc::clone)
+        .unwrap_or_else(|_| TabFlight::new(Instant::now()))
+}
+
+/// What the daemon does with one Tab press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabPressAction {
+    /// Start a capture for this press now.
+    Start,
+    /// Within [`TAB_DEBOUNCE_AFTER_ACCEPT`] of an accepted board's press.
+    Debounced,
+    /// A capture is running and has no accepted board: stop its retries
+    /// and run this press as soon as it reports.
+    Queue,
+    /// The running capture already accepted a board.
+    Ignore,
+}
+
+/// `last_accepted` is the press of the last accepted board. `in_flight` is
+/// the phase of the capture still running (its report not yet handled).
+pub fn tab_press_action(
+    press: Instant,
+    last_accepted: Option<Instant>,
+    in_flight: Option<TabFlightPhase>,
+) -> TabPressAction {
+    if last_accepted
+        .is_some_and(|at| press.saturating_duration_since(at) < TAB_DEBOUNCE_AFTER_ACCEPT)
+    {
+        return TabPressAction::Debounced;
+    }
+    match in_flight {
+        None => TabPressAction::Start,
+        Some(TabFlightPhase::Accepted) => TabPressAction::Ignore,
+        Some(_) => TabPressAction::Queue,
+    }
+}
+
+/// A capture reported. An accepted board starts the debounce from its
+/// press, and a press queued behind it is dropped (it would read the same
+/// board). Otherwise the queued press, if any, runs now.
+pub fn next_press_after_report(
+    flight: &TabFlight,
+    queued: Option<Instant>,
+    last_accepted: &mut Option<Instant>,
+) -> Option<Instant> {
+    if flight.phase() == TabFlightPhase::Accepted {
+        *last_accepted = Some(flight.press);
+        return None;
+    }
+    queued
+}
+
 /// Runs `attempt` once, and again after each wait in `waits` for as long as
 /// `retry` says the best result so far should be tried again. `why` names
-/// that result for the log: a scoreboard that is still drawing, a missing
-/// stream frame, and a share that is still opening are not the same line.
+/// that result for the log: a frame with no scoreboard, a missing stream
+/// frame, and a share that is still opening are not the same line.
 /// A later result replaces the kept one only when `rank` scores it higher,
 /// so a rejected grab never replaces a more useful one. Returns the best
 /// result and how many retries ran. An error from `attempt` (a failed
 /// screen grab) ends the loop at once.
+///
+/// `flight` moves to [`TabFlightPhase::Retrying`] before the first retry.
+/// Once [`TabFlight::cancel_retries`] is called, no further retry starts
+/// and a wait that is running ends, and the best result so far is returned.
 pub async fn with_retries<T, E, A, AF, S, SF>(
+    flight: &TabFlight,
     waits: &[Duration],
     retry: impl Fn(&T) -> bool,
     rank: impl Fn(&T) -> u8,
@@ -39,10 +204,16 @@ where
 {
     let mut best = attempt(0).await?;
     let mut retries = 0;
+    let mut stopped = false;
     for &wait in waits {
         if !retry(&best) {
             break;
         }
+        if flight.retries_cancelled() {
+            stopped = true;
+            break;
+        }
+        flight.set_phase(TabFlightPhase::Retrying);
         retries += 1;
         let reason = why(&best);
         tracing::info!(
@@ -51,13 +222,26 @@ where
             wait_ms = wait.as_millis() as u64,
             "Tab capture will try again: {reason}"
         );
-        sleep(wait).await;
+        tokio::select! {
+            biased;
+            _ = flight.cancelled() => {}
+            _ = sleep(wait) => {}
+        }
+        if flight.retries_cancelled() {
+            stopped = true;
+            break;
+        }
         let next = attempt(retries).await?;
         if rank(&next) > rank(&best) {
             best = next;
         }
     }
-    if retries > 0 {
+    if stopped {
+        tracing::info!(
+            retries,
+            "Tab capture retries stopped: a newer Tab press takes over"
+        );
+    } else if retries > 0 {
         if retry(&best) {
             let reason = why(&best);
             tracing::warn!(retries, "Tab capture gave up after retries: {reason}");
@@ -164,6 +348,7 @@ mod tests {
         let grabs = RefCell::new(0usize);
         let slept = RefCell::new(Vec::new());
         let (verdict, retries) = block_on(with_retries(
+            &TabFlight::new(Instant::now()),
             &TAB_RETRY_WAITS,
             |p: &ScoreboardPreflight| *p == ScoreboardPreflight::NotAScoreboard,
             |p: &ScoreboardPreflight| match p {
@@ -171,7 +356,7 @@ mod tests {
                 ScoreboardPreflight::TeamSizeUncertain => 1,
                 ScoreboardPreflight::Ready(_) => 2,
             },
-            |_| "rejected by the scoreboard check (the board may still be drawing)",
+            |_| "rejected by the scoreboard check",
             |_| {
                 *grabs.borrow_mut() += 1;
                 let f = frames.borrow_mut().next().expect("a frame per grab");
@@ -243,10 +428,11 @@ mod tests {
     fn a_later_rejected_grab_never_replaces_a_better_result() {
         // 0 = rejected (retry), 1 = useful but not retried, 2 = accepted.
         let (best, retries) = block_on(with_retries(
+            &TabFlight::new(Instant::now()),
             &TAB_RETRY_WAITS,
             |v: &u8| *v == 0,
             |v: &u8| *v,
-            |_| "rejected by the scoreboard check (the board may still be drawing)",
+            |_| "rejected by the scoreboard check",
             |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
             |_| async {},
         ))
@@ -256,6 +442,7 @@ mod tests {
         // Even if the predicate kept retrying, rank keeps the best result.
         let seq = RefCell::new(vec![1u8, 0, 0].into_iter());
         let (best, retries) = block_on(with_retries(
+            &TabFlight::new(Instant::now()),
             &TAB_RETRY_WAITS,
             |_: &u8| true,
             |v: &u8| *v,
@@ -284,6 +471,7 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(sub, || {
             let _ = block_on(with_retries(
+                &TabFlight::new(Instant::now()),
                 &TAB_RETRY_WAITS,
                 |_: &u8| true,
                 |v: &u8| *v,
@@ -292,6 +480,7 @@ mod tests {
                 |_| async {},
             ));
             let _ = block_on(with_retries(
+                &TabFlight::new(Instant::now()),
                 &[Duration::from_millis(1)],
                 |v: &u8| *v == 0,
                 |v: &u8| *v,
@@ -299,14 +488,183 @@ mod tests {
                 |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
                 |_| async {},
             ));
+            let flight = TabFlight::new(Instant::now());
+            flight.cancel_retries();
+            let _ = block_on(with_retries(
+                &flight,
+                &TAB_RETRY_WAITS,
+                |_: &u8| true,
+                |v: &u8| *v,
+                |_| "rejected by the scoreboard check",
+                |_| async { Ok::<_, ()>(0u8) },
+                |_| async {},
+            ));
         });
         let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("Tab capture retries stopped: a newer Tab press takes over"));
         assert!(text.contains("Tab capture will try again: no fresh stream frame arrived"));
         assert!(text.contains("Tab capture gave up after retries: no fresh stream frame arrived"));
         assert!(text.contains("Tab capture will try again: the share is still opening"));
         assert!(text.contains("Tab capture accepted on retry"));
         assert!(!text.contains("rejected by the scoreboard check: capturing again"));
         assert!(!text.contains("still rejected"));
+    }
+
+    /// 2026-10-21: the player's second Tab came while the first capture was
+    /// still retrying and was dropped as "a capture is already in
+    /// progress". A new press now stops the pending retries.
+    #[test]
+    fn a_new_press_before_a_retry_stops_it() {
+        let flight = TabFlight::new(Instant::now());
+        let grabs = RefCell::new(0usize);
+        let slept = RefCell::new(0usize);
+        let (best, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| {
+                *grabs.borrow_mut() += 1;
+                // The new press lands while the first grab runs.
+                flight.cancel_retries();
+                async { Ok::<_, ()>(0u8) }
+            },
+            |_| {
+                *slept.borrow_mut() += 1;
+                async {}
+            },
+        ))
+        .unwrap();
+        assert_eq!((best, retries), (0, 0));
+        assert_eq!((grabs.into_inner(), slept.into_inner()), (1, 0));
+    }
+
+    #[test]
+    fn a_new_press_during_a_retry_wait_ends_the_wait_and_takes_no_frame() {
+        let flight = TabFlight::new(Instant::now());
+        let grabs = RefCell::new(0usize);
+        let (best, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| {
+                *grabs.borrow_mut() += 1;
+                async { Ok::<_, ()>(0u8) }
+            },
+            |_| {
+                // The press lands mid-wait. The wait itself would never end.
+                assert_eq!(flight.phase(), TabFlightPhase::Retrying);
+                flight.cancel_retries();
+                std::future::pending::<()>()
+            },
+        ))
+        .unwrap();
+        assert_eq!((best, retries), (0, 1));
+        assert_eq!(grabs.into_inner(), 1, "no retry grab after the new press");
+    }
+
+    #[test]
+    fn retries_still_run_when_no_new_press_comes() {
+        let flight = TabFlight::new(Instant::now());
+        let (best, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |i| async move { Ok::<_, ()>(if i == 2 { 2u8 } else { 0 }) },
+            |_| async {},
+        ))
+        .unwrap();
+        assert_eq!((best, retries), (2, 2));
+        assert_eq!(flight.phase(), TabFlightPhase::Retrying);
+        flight.finish(true);
+        assert_eq!(flight.phase(), TabFlightPhase::Accepted);
+    }
+
+    /// The 3 s debounce used to start at every press, so a rejected
+    /// capture blocked the player's next Tab for 3 s. It now starts only
+    /// at an accepted board.
+    #[test]
+    fn debounce_applies_only_after_an_accepted_board() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        // Nothing running, nothing accepted.
+        assert_eq!(tab_press_action(at(0), None, None), TabPressAction::Start);
+        // A rejected capture finished at once: the next press runs.
+        let rejected = TabFlight::new(at(0));
+        rejected.finish(false);
+        let mut last_accepted = None;
+        assert_eq!(
+            next_press_after_report(&rejected, None, &mut last_accepted),
+            None
+        );
+        assert_eq!(last_accepted, None);
+        assert_eq!(
+            tab_press_action(at(1_000), last_accepted, None),
+            TabPressAction::Start
+        );
+        // An accepted board debounces presses within 3 s of its press.
+        let accepted = TabFlight::new(at(1_000));
+        accepted.finish(true);
+        assert_eq!(
+            next_press_after_report(&accepted, None, &mut last_accepted),
+            None
+        );
+        assert_eq!(last_accepted, Some(at(1_000)));
+        assert_eq!(
+            tab_press_action(at(3_999), last_accepted, None),
+            TabPressAction::Debounced
+        );
+        assert_eq!(
+            tab_press_action(at(4_000), last_accepted, None),
+            TabPressAction::Start
+        );
+    }
+
+    #[test]
+    fn a_press_during_a_capture_queues_unless_a_board_was_accepted() {
+        let t0 = Instant::now();
+        for phase in [
+            TabFlightPhase::Grabbing,
+            TabFlightPhase::Retrying,
+            TabFlightPhase::Rejected,
+        ] {
+            assert_eq!(
+                tab_press_action(t0, None, Some(phase)),
+                TabPressAction::Queue,
+                "{phase:?}"
+            );
+        }
+        assert_eq!(
+            tab_press_action(t0, None, Some(TabFlightPhase::Accepted)),
+            TabPressAction::Ignore
+        );
+
+        // The queued press runs when a capture without a board reports.
+        let queued = t0 + Duration::from_millis(1_500);
+        let flight = TabFlight::new(t0);
+        flight.set_phase(TabFlightPhase::Retrying);
+        flight.cancel_retries();
+        flight.finish(false);
+        let mut last_accepted = None;
+        assert_eq!(
+            next_press_after_report(&flight, Some(queued), &mut last_accepted),
+            Some(queued)
+        );
+        assert_eq!(last_accepted, None);
+
+        // Behind an accepted board it would read the same board: dropped.
+        let flight = TabFlight::new(t0);
+        flight.finish(true);
+        assert_eq!(
+            next_press_after_report(&flight, Some(queued), &mut last_accepted),
+            None
+        );
+        assert_eq!(last_accepted, Some(t0));
     }
 
     #[derive(Clone, Default)]
