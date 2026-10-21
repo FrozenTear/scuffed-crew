@@ -31,7 +31,7 @@ pub async fn optional_session_user(
 }
 
 /// Bearer token when `Authorization` is present, otherwise the session cookie.
-fn presented_session_token(
+pub(crate) fn presented_session_token(
     cookie_name: &str,
     headers: &HeaderMap,
     jar: &CookieJar,
@@ -239,6 +239,21 @@ fn unauthorized(error: &str) -> Box<Response> {
     )
 }
 
+/// 409 for a tracker whose stats delete is still inside the grace window.
+///
+/// No `error` key. The timestamp is the stored deadline, not a new one.
+pub(crate) fn stats_delete_pending_response(at: chrono::DateTime<chrono::Utc>) -> Response {
+    (
+        StatusCode::CONFLICT,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "code": "stats_delete_pending",
+            "stats_delete_scheduled_at": at.to_rfc3339(),
+        })),
+    )
+        .into_response()
+}
+
 fn token_expired() -> Box<Response> {
     Box::new(
         Response::builder()
@@ -298,8 +313,26 @@ enum DaemonLookup {
 /// revoked and expired ones, do not update `last_used_at`. An expired token
 /// on upload and daemon-config is 401 `{"code":"token_expired"}`.
 /// Token-check and pack downloads keep one shared 401 body.
+/// A revoked token whose member still has a stats-delete deadline is 409
+/// `stats_delete_pending`, not 401. After restore the deadline is gone and
+/// the same token is 401. An expired token stays on the expiry 401.
 ///
 /// The raw bearer value is hashed and then dropped. It is not logged.
+async fn revoked_or_pending_delete(
+    state: &AppState,
+    raw_token: &str,
+    unauthorized_mode: DaemonUnauthorized,
+) -> Box<Response> {
+    // A token revoked by schedule_stats_delete is inactive, so the active
+    // lookup misses it. While the deadline is still set, the second PC needs
+    // 409 rather than a plain 401.
+    match state.db.stats_delete_deadline_for_token(raw_token).await {
+        Ok(Some(at)) => Box::new(stats_delete_pending_response(at)),
+        Ok(None) => unauthorized(unauthorized_mode.rejected()),
+        Err(_e) => internal_error(),
+    }
+}
+
 async fn authenticate_daemon(
     parts: &mut Parts,
     state: &AppState,
@@ -321,19 +354,17 @@ async fn authenticate_daemon(
             }) => (member_id, token_id),
             Ok(DaemonTokenAuth::Expired) => return Err(expired_unauthorized(unauthorized_mode)),
             Ok(DaemonTokenAuth::Missing) => {
-                return Err(unauthorized(unauthorized_mode.rejected()));
+                return Err(revoked_or_pending_delete(state, auth_header, unauthorized_mode).await);
             }
             Err(_e) => return Err(internal_error()),
         },
-        DaemonLookup::ReadOnly => (
-            state
-                .db
-                .lookup_daemon_token(auth_header)
-                .await
-                .map_err(|_e| internal_error())?
-                .ok_or_else(|| unauthorized(unauthorized_mode.rejected()))?,
-            String::new(),
-        ),
+        DaemonLookup::ReadOnly => match state.db.lookup_daemon_token(auth_header).await {
+            Ok(Some(member_id)) => (member_id, String::new()),
+            Ok(None) => {
+                return Err(revoked_or_pending_delete(state, auth_header, unauthorized_mode).await);
+            }
+            Err(_e) => return Err(internal_error()),
+        },
     };
 
     let member = state
@@ -539,6 +570,49 @@ impl FromRequestParts<AppState> for ReportCreator {
             member,
             credential: ReportCredential::SyncToken,
         })
+    }
+}
+
+/// Auth for `DELETE /api/stats/me`.
+///
+/// A site session and a daemon token schedule the same soft delete. A 401
+/// plus `Authorization: Bearer` falls through to the same daemon-token check
+/// as stats upload. Any other session failure is returned as-is, so a daemon
+/// token is not tried for a suspended session member.
+pub struct StatsEraseCaller {
+    pub member: Member,
+}
+
+impl FromRequestParts<AppState> for StatsEraseCaller {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let session_reject = match OrgMember::from_request_parts(parts, state).await {
+            Ok(org) => {
+                return Ok(StatsEraseCaller { member: org.member });
+            }
+            Err(reject) => reject,
+        };
+        let has_bearer = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Bearer "));
+        if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
+            return Err(session_reject.into_response());
+        }
+        let DaemonUser { member, .. } = authenticate_daemon(
+            parts,
+            state,
+            DaemonUnauthorized::Distinct,
+            DaemonLookup::StampLastUsed,
+        )
+        .await
+        .map_err(|err| *err)?;
+        Ok(StatsEraseCaller { member })
     }
 }
 

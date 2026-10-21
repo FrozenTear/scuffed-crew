@@ -36,6 +36,9 @@ impl Database {
         raw_token: &str,
         duration_hours: i64,
     ) -> DbResult<()> {
+        if crate::is_tombstone_user(user_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
         with_timeout(async {
             let uid = user_id.to_string();
 
@@ -162,8 +165,35 @@ impl Database {
             let Some(uid) = sessions.into_iter().next().map(|s| s.user_id) else {
                 return Ok(None);
             };
+            if crate::is_tombstone_user(&uid) {
+                return Ok(None);
+            }
             // Inline user select (do not call get_user — that wraps another timeout).
             self.get_user_without_timeout(&uid).await
+        })
+        .await
+    }
+
+    /// When the presented session was created. Used for the OAuth re-auth window.
+    pub async fn session_created_at(
+        &self,
+        raw_token: &str,
+    ) -> DbResult<Option<chrono::DateTime<Utc>>> {
+        with_timeout(async {
+            let token_hash = hash_session_token(raw_token);
+            let mut result = self
+                .client
+                .query(
+                    "SELECT created_at FROM session WHERE token = $tok AND expires_at > time::now() LIMIT 1",
+                )
+                .bind(("tok", token_hash))
+                .await?;
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                created_at: SurrealDatetime,
+            }
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().next().map(|row| row.created_at.into()))
         })
         .await
     }

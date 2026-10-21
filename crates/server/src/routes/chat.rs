@@ -495,6 +495,9 @@ pub async fn send_encrypted(
             )
         })?;
         if let Some(m) = m {
+            if m.id == scuffed_db::DELETED_MEMBER_ID {
+                continue;
+            }
             // Same rule as `get_team_roster`: active and not banned. The query
             // already drops them; this skips a row that is still on the edge.
             let banned = state.db.is_member_banned(&m.id).await.map_err(|e| {

@@ -735,6 +735,11 @@ impl LeaderboardCache {
             .map(|entry| entry.board.as_ref().clone())
     }
 
+    /// Drop every cached board so a delete cannot leave a warm snapshot behind.
+    pub fn invalidate_all(&self) {
+        self.lock().entries.clear();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|err| err.into_inner())
     }

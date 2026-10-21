@@ -277,12 +277,18 @@ pub async fn list_moderation(
     let entries: Vec<ModerationListEntry> = entries
         .into_iter()
         .map(|action| ModerationListEntry {
-            member_name: names
-                .get(action.member_id.as_str())
-                .map(|n| (*n).to_string()),
-            issued_by_name: names
-                .get(action.issued_by.as_str())
-                .map(|n| (*n).to_string()),
+            member_name: Some(
+                names
+                    .get(action.member_id.as_str())
+                    .map(|n| (*n).to_string())
+                    .unwrap_or_else(|| scuffed_db::DELETED_MEMBER_NAME.to_string()),
+            ),
+            issued_by_name: Some(
+                names
+                    .get(action.issued_by.as_str())
+                    .map(|n| (*n).to_string())
+                    .unwrap_or_else(|| scuffed_db::DELETED_MEMBER_NAME.to_string()),
+            ),
             action,
         })
         .collect();

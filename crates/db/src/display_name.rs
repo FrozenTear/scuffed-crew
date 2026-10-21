@@ -55,6 +55,20 @@ impl std::fmt::Display for DisplayNameError {
     }
 }
 
+/// True when `raw` is the reserved tombstone display name.
+///
+/// Comparison uses the same key as uniqueness: trim, case fold, and the
+/// whitespace collapse already applied by [`display_name_key`].
+pub fn is_reserved_display_name(raw: &str) -> bool {
+    let Ok(key) = display_name_key(raw) else {
+        return false;
+    };
+    let Ok(reserved) = display_name_key(crate::DELETED_MEMBER_NAME) else {
+        return false;
+    };
+    key == reserved
+}
+
 /// Build the uniqueness key for `raw`. See the module docs for the rules.
 pub fn display_name_key(raw: &str) -> Result<String, DisplayNameError> {
     if raw.chars().any(is_rejected_control) {
@@ -223,7 +237,10 @@ struct NameRow {
 /// missing key as NONE and then skip the clash check.
 pub(crate) async fn backfill_display_name_keys(client: &Surreal<Any>) -> DbResult<()> {
     let mut response = client
-        .query("SELECT id, display_name, display_name_key FROM member")
+        .query(
+            "SELECT id, display_name, display_name_key FROM member \
+             WHERE is_tombstone != true",
+        )
         .await?
         .check()?;
     let rows: Vec<NameRow> = response.take(0)?;

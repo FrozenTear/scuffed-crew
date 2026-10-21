@@ -417,6 +417,14 @@ pub async fn public_member_profile(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PublicMemberProfile>, (StatusCode, Json<ErrorResponse>)> {
+    if scuffed_db::is_tombstone_member(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
     let member = state
         .db
         .get_member_safe(&id)
@@ -703,7 +711,7 @@ pub async fn public_team_detail(
                     team_id = %id,
                     "roster references a member with no row (dangling plays_on edge)"
                 );
-                "Unknown".to_string()
+                scuffed_db::DELETED_MEMBER_NAME.to_string()
             });
             TeamRosterMember {
                 member_id,

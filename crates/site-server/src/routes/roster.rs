@@ -33,7 +33,7 @@ fn to_response(entry: NamedRosterEntry) -> RosterMemberResponse {
             member_id = %member_id,
             "roster references a member with no row (dangling plays_on edge)"
         );
-        "Unknown".to_string()
+        scuffed_db::DELETED_MEMBER_NAME.to_string()
     });
     RosterMemberResponse {
         member_id,
@@ -52,7 +52,7 @@ async fn enrich(state: &AppState, entry: RosterEntry) -> RosterMemberResponse {
                 member_id = %entry.member_id,
                 "roster member row not found after add"
             );
-            "Unknown".to_string()
+            scuffed_db::DELETED_MEMBER_NAME.to_string()
         }
         Err(e) => {
             tracing::warn!(

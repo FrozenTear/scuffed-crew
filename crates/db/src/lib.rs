@@ -15,7 +15,7 @@ pub use client::{
     resolve_database_boot_mode, resolve_database_boot_mode_from_env, surrealdb_url_from_env,
     Database, DatabaseBootMode, DbConfig, SurrealAuthMode, PRODUCTION_WITHOUT_DATABASE_URL,
 };
-pub use display_name::{display_name_key, DisplayNameError};
+pub use display_name::{display_name_key, is_reserved_display_name, DisplayNameError};
 pub use queries::daemon_tokens::DaemonTokenAuth;
 pub use queries::stat_reports::{retention_deadline, utc_day_start};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
@@ -47,6 +47,10 @@ pub enum DbError {
     /// HTTP 409 `{"error":"display_name_taken"}`.
     #[error("display_name_taken")]
     DisplayNameTaken,
+    /// Username or display name is reserved for the deleted-member tombstone.
+    /// HTTP 400 `{"error":"reserved_name"}`.
+    #[error("reserved_name")]
+    ReservedName,
 }
 
 pub type DbResult<T> = Result<T, DbError>;

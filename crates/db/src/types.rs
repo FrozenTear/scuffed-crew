@@ -86,7 +86,42 @@ pub struct Member {
     /// X/Twitter handle (not URL).
     #[serde(default)]
     pub twitter: Option<String>,
+    /// Tracker soft-delete deadline. While this is set, personal stats reads
+    /// are empty and uploads are refused. The purge task hard-deletes the rows
+    /// once the instant has passed.
+    #[serde(default)]
+    pub stats_delete_scheduled_at: Option<DateTime<Utc>>,
 }
+
+/// Record id of the inactive member left behind so shared rows can still show a name.
+pub const DELETED_MEMBER_ID: &str = "deleted";
+
+/// Name rendered for [`DELETED_MEMBER_ID`] and for any shared row whose member is gone.
+pub const DELETED_MEMBER_NAME: &str = "Deleted member";
+
+/// User row for the tombstone. It has no password and cannot sign in.
+pub const DELETED_USER_ID: &str = "deleteduser";
+
+/// Usernames `deleted` and `deleteduser`, compared after trim and ASCII case fold.
+pub fn is_reserved_username(raw: &str) -> bool {
+    let name = raw.trim().to_ascii_lowercase();
+    name == "deleted" || name == DELETED_USER_ID
+}
+
+pub fn is_tombstone_member(id: &str) -> bool {
+    id == DELETED_MEMBER_ID
+}
+
+pub fn is_tombstone_user(id: &str) -> bool {
+    id == DELETED_USER_ID
+}
+
+/// SurrealQL predicate for a real member.
+///
+/// The erasure tombstone is `is_tombstone = true` and id `deleted`. A missing
+/// flag is not the tombstone, so rows from before the column stay visible.
+/// `!= true` keeps both `false` and `NONE`.
+pub const REAL_MEMBER_SQL: &str = "is_tombstone != true AND meta::id(id) != 'deleted'";
 
 /// A game/title that teams can play.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -573,6 +608,10 @@ pub struct PersonalStats {
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
+    /// RFC3339 instant while a tracker soft delete is pending. Null otherwise.
+    /// Always serialized so `GET /api/stats/me` can show either value.
+    #[serde(default)]
+    pub stats_delete_scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// Aggregated stats per hero.
@@ -964,6 +1003,10 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    ScheduledStatsDeletion,
+    DeletedPersonalStats,
+    RestoredPersonalStats,
+    DeletedAccount,
 }
 
 impl std::fmt::Display for AuditAction {

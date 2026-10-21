@@ -2656,6 +2656,7 @@ mod feed_acl_tests {
             main_role: None,
             twitch: None,
             twitter: None,
+            stats_delete_scheduled_at: None,
         }
     }
 
