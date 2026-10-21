@@ -198,32 +198,10 @@ describe_port_holders() {
 # Volume names already match across both tools; that shared name is why
 # the twin is dangerous. Relay bring-up is scripts/relay-up.sh (--no-deps).
 # strfry has no depends_on, so `up strfry` does not create this service.
-is_our_surreal() {
-    local name="$1"
-    case "${name}" in
-        "${PROJECT_NAME}"-surrealdb|"${PROJECT_NAME}"-surrealdb-*|\
-        "${PROJECT_NAME}"_surrealdb|"${PROJECT_NAME}"_surrealdb_*)
-            return 0
-            ;;
-    esac
-    return 1
-}
-
-# Prints: cid<TAB>name<TAB>status  for this project's Surreal containers.
-list_project_surreal() {
-    local cid name status
-    while IFS=$'\t' read -r cid name status; do
-        [[ -n "${cid}" && -n "${name}" ]] || continue
-        if is_our_surreal "${name}"; then
-            printf '%s\t%s\t%s\n' "${cid}" "${name}" "${status}"
-        fi
-    done < <(podman ps -a --format '{{.ID}}\t{{.Names}}\t{{.Status}}' 2>/dev/null || true)
-}
-
-surreal_is_up() {
-    local status="$1"
-    [[ "${status}" == Up* ]]
-}
+# is_our_surreal, list_project_surreal, surreal_is_up and the guard that
+# keeps this script from creating or recreating the database container.
+# shellcheck source=lib/surreal-guard.sh
+source "$ROOT/scripts/lib/surreal-guard.sh"
 
 # Sets CANONICAL_SURREAL_CID / CANONICAL_SURREAL_NAME from an Up container.
 # Prefer hyphen (especially …-surrealdb-1) when both hyphen and underscore exist.
@@ -345,6 +323,15 @@ set +a
 # before compose. Shell values win over --env-file in podman-compose 1.5.
 export_compose_fallbacks
 
+# Decide how to start site-server before taking the old one down, so a
+# refusal leaves the site running. This script never creates or recreates
+# the SurrealDB container while one exists or its volume holds data, and it
+# never changes the database image. See scripts/lib/surreal-guard.sh.
+if ! surreal_guard_plan; then
+    echo "update.sh stopped before touching any container." >&2
+    exit 1
+fi
+
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
 
@@ -381,14 +368,22 @@ fi
 CANONICAL_SURREAL_CID=""
 CANONICAL_SURREAL_NAME=""
 used_no_deps=0
+# A stopped project DB container is started as it is (same image), never
+# recreated through depends_on.
+surreal_guard_apply
 if pick_canonical_up_surreal; then
     echo "Existing Surreal is Up: ${CANONICAL_SURREAL_NAME} (canonical; hyphen preferred when both exist)."
     stop_noncanonical_up_surreal "${CANONICAL_SURREAL_NAME}"
     start_site_server --no-deps
     used_no_deps=1
-else
-    echo "No project Surreal is Up — starting site-server with dependencies (fresh install)."
+elif [[ "${SURREAL_GUARD_ACTION}" == "with-deps" ]]; then
+    echo "No project Surreal container or volume — starting site-server with dependencies (fresh install)."
     start_site_server
+else
+    echo "error: no project Surreal container is Up after starting ${SURREAL_GUARD_NAME:-it}." >&2
+    echo "  Not starting site-server with dependencies: that would recreate the database." >&2
+    echo "  Check: podman ps -a | grep surrealdb; podman logs <name>" >&2
+    exit 1
 fi
 
 # Verify the new container actually serves before declaring success — a

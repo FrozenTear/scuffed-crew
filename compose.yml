@@ -13,10 +13,14 @@ services:
     # Exact version, equal to the surrealdb crate in Cargo.lock
     # (scripts/check-surrealdb-version.sh fails CI otherwise). A floating
     # tag such as v3.0 hid that production stayed on 3.0.5 after the crate
-    # moved past the 3.1.0 / 3.1.5 security fixes. scripts/update.sh never
-    # recreates this container, so a new tag here takes effect only when the
-    # owner follows "Upgrading the SurrealDB server" in docs/deploy.md
-    # (backup first).
+    # moved past the 3.1.0 / 3.1.5 security fixes.
+    # Any `up` of site-server without --no-deps, or a plain `up -d`, follows
+    # depends_on and recreates this container on the tag below when the
+    # running one differs, over the live volume, with no backup. A newer
+    # SurrealDB rewrites the datastore so the older one cannot open it.
+    # update.sh, install.sh and reset-local-admin.sh refuse that
+    # (scripts/lib/surreal-guard.sh). Change the database image only with
+    # "Upgrading the SurrealDB server" in docs/deploy.md (backup first).
     image: docker.io/surrealdb/surrealdb:v3.2.3
     # Image runs as non-root by default; Podman named volumes are root-owned,
     # which causes: Failed to create RocksDB directory: Permission denied.
@@ -160,8 +164,9 @@ services:
       # Root bootstrap on start. Off only for 0/false/no/off; blank or unset
       # bootstraps (today's behaviour). SURREALDB_MIGRATE_ONLY is left out on
       # purpose: it makes the server exit after migrating, which would loop
-      # under `restart: unless-stopped`. Use
-      #   compose run --rm -e SURREALDB_MIGRATE_ONLY=1 site-server
+      # under `restart: unless-stopped`. Use (--no-deps, or compose starts and
+      # may recreate surrealdb first):
+      #   compose run --rm --no-deps -e SURREALDB_MIGRATE_ONLY=1 site-server
       SURREALDB_BOOTSTRAP: ${SURREALDB_BOOTSTRAP:-}
       # Exactly "1" re-DEFINEs the app DB user's password on every boot (to
       # push a changed SURREALDB_APP_PASSWORD). Blank or unset: define only

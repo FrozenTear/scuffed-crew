@@ -17,7 +17,7 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`) — **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
 | `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
 | `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
-| `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs. `compose.yml` does not forward it (the service would exit and restart in a loop); run it as `podman compose --env-file data/secrets.env run --rm -e SURREALDB_MIGRATE_ONLY=1 site-server` |
+| `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs. `compose.yml` does not forward it (the service would exit and restart in a loop); run it as `podman compose --env-file data/secrets.env run --rm --no-deps -e SURREALDB_MIGRATE_ONLY=1 site-server` (without `--no-deps`, compose starts and may recreate `surrealdb` first) |
 | `ENCRYPTION_KEY` | **Required** for remote DB — OAuth IDs, Nostr keys, DM at rest (AES-256-GCM + AAD) |
 | `ENCRYPTION_KEY_VERSION` | Current key version (default `1`) |
 | `ENCRYPTION_KEY_PREVIOUS` | Optional `ver:base64,ver:base64` for rotation reads |
@@ -46,19 +46,21 @@ Leave the flag off until a tracker release that sends at most 200 matches and 50
 
 Single-container install keeps default bootstrap on every start (root session is short-lived, then EDITOR). For a stricter split:
 
-1. **Init job:** `SURREALDB_MIGRATE_ONLY=1` (needs root + app passwords) — migrate, ensure app user, exit.
+1. **Init job:** `SURREALDB_MIGRATE_ONLY=1` (needs root + app passwords) — migrate, ensure app user, exit. With this compose file: `podman compose --env-file data/secrets.env run --rm --no-deps -e SURREALDB_MIGRATE_ONLY=1 site-server`.
 2. **App:** `SURREALDB_BOOTSTRAP=0` + app credentials only — never signs in as root.
 
 Kubernetes is out of scope. **Quadlet** (systemd-native containers) is an optional later migration if you want boot integration without Compose — no Quadlet units ship yet.
 
 ## Prebuilt images (recommended)
 
-GitHub Actions builds the `site-server` image on every push to `main` and publishes to GHCR:
+GitHub Actions publishes the `site-server` image to GHCR only after CI passes on `main`. The **Publish image** workflow runs when a CI run for a push to `main` completes, and builds the newest `main` commit whose CI succeeded. It skips a run when `:main` already carries that commit or a newer one, or when nothing the image is built from (`Cargo.*`, `Containerfile`, `Dioxus.toml`, `crates/`, `scripts/build.sh`, `scripts/site-entrypoint.sh`, the workflow) changed since the commit `:main` was built from. So not every commit gets an image:
 
 | Tag | Image |
 |-----|--------|
-| `main` / `latest` | `ghcr.io/frozentear/scuffed-crew:main` |
-| commit | `ghcr.io/frozentear/scuffed-crew:sha-<short>` |
+| `main` / `latest` | `ghcr.io/frozentear/scuffed-crew:main`, the newest published commit |
+| commit | `ghcr.io/frozentear/scuffed-crew:sha-<short>`, only for commits that were published. A skipped commit (docs-only, red CI, or overtaken by a newer green commit) has no `sha-` tag |
+
+Check what is live: `curl -s https://ow.scuffedcrew.no/api/health` returns `{"status":"ok","git_sha":"<commit>"}`, and the response carries the same commit in the `x-scuffed-git-sha` header. `unknown` means an image built without the commit stamp (a local `--build`, or an image published before this was added).
 
 **Do not compile on the VPS** unless you must. First CI run can take a while; later runs use Buildx cache.
 
@@ -83,7 +85,7 @@ Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS
 
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
-`update.sh` never recreates the `surrealdb` container, so a new SurrealDB image tag in `compose.yml` does nothing until you follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
+`update.sh` never creates or recreates the `surrealdb` container while one exists or its volume holds data. It starts `site-server` with `--no-deps` (starting a stopped database container as it is), and it stops with an error when the database container runs another image than `compose.yml` names. A new SurrealDB tag in `compose.yml` is applied only by [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server). `SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1 ./scripts/update.sh` updates the app and leaves the database on its current image.
 
 ### Which variables reach the server
 
@@ -103,7 +105,7 @@ Optional names passed through as blank when unset. For each one the server treat
 | `DISCORD_WEBHOOK_OFFICERS`, `DISCORD_WEBHOOK_GENERAL`, `DISCORD_WEBHOOKS_ENABLED` | Discord notifications. A blank URL skips that channel. `DISCORD_WEBHOOKS_ENABLED=0` turns both off |
 | `MATRIX_HOMESERVER_URL`, `MATRIX_BOT_ACCESS_TOKEN`, `MATRIX_OFFICER_ROOM_ID`, `MATRIX_GENERAL_ROOM_ID` | Matrix notifications. Off unless all four are non-empty |
 
-Before these names were forwarded (up to rc.5), they were ignored even when present in `secrets.env`. If one of them is already in your `secrets.env`, it takes effect on the next `update.sh`.
+Before these names were forwarded (up to rc.5), they were ignored even when present in `secrets.env`. If one of them is already in your `secrets.env`, it takes effect on the next `update.sh`. Check them first: [Phase A](#phase-a-app-update-database-unchanged).
 
 Override image pin in `data/secrets.env` if needed:
 
@@ -116,7 +118,8 @@ SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:main
 
 ```bash
 BUILD_FROM_SOURCE=1 ./scripts/install.sh
-# or: podman compose --env-file data/secrets.env up --build -d
+# or, with a database container already running:
+#   podman compose --env-file data/secrets.env up --build -d --no-deps site-server
 ```
 
 ## Troubleshooting
@@ -133,6 +136,8 @@ podman compose --env-file data/secrets.env down
 # podman volume rm scuffed-crew_surrealdb-data
 podman compose --env-file data/secrets.env up -d
 ```
+
+This `up -d` creates the database container on the image `compose.yml` names. If an older SurrealDB wrote that volume, that is an upgrade with no backup and no rollback: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server) instead.
 
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
@@ -189,7 +194,7 @@ What install does:
    - Random **encryption key**
    - Free **`HOST_PORT`** (tries 3000, 8080, … then a high random port)
    - Optional prompt for public site URL → `REDIRECT_BASE_URL`
-2. Runs `podman compose --env-file data/secrets.env up --build -d`
+2. Runs `podman compose --env-file data/secrets.env up --build -d` on a new host. On a host that already has a database container it starts only `site-server`, with `--no-deps`, and stops if that container runs another image than `compose.yml` names
 3. Prints the bound address: `127.0.0.1:$HOST_PORT`
 
 Then:
@@ -399,7 +404,7 @@ cd /root/github/scuffed-crew   # your clone path
 #   # (F-API-004). Do not leave it empty thinking it means "allow all".
 #   NIP05_DOMAIN=ow.scuffedcrew.no      # see "NIP-05 domain" below
 
-podman compose --env-file data/secrets.env up -d --force-recreate site-server
+podman compose --env-file data/secrets.env up -d --force-recreate --no-deps site-server
 ```
 
 **4. From home PC:** open `https://ow.scuffedcrew.no`  
@@ -429,7 +434,7 @@ The cache key for this route is the season id and a public audience tag. Metric,
 
 ## Power-user path
 
-Copy `.env.example` → `data/secrets.env` (or `.env`), set values yourself, then:
+Copy `.env.example` → `data/secrets.env` (or `.env`), set values yourself, then (first install only; later, use `update.sh` or `up -d --no-deps site-server`):
 
 ```bash
 podman compose --env-file data/secrets.env up --build -d
@@ -768,48 +773,136 @@ folder on the operator's machine.
 ## Upgrading the SurrealDB server
 
 `compose.yml` pins the server image to an exact tag equal to the `surrealdb`
-crate in `Cargo.lock` (CI runs `scripts/check-surrealdb-version.sh`).
-`update.sh` does not touch the database container, so a new tag is applied
-only by the steps below. They take the site down for a few minutes.
+crate in `Cargo.lock` (CI runs `scripts/check-surrealdb-version.sh`). Changing
+that tag in `compose.yml` does not upgrade the database by itself, and must
+not do so by accident:
+
+- Any `compose up` of `site-server` **without `--no-deps`**, a plain `up -d`,
+  or `compose run` without `--no-deps` follows `depends_on`. When the running
+  database container's image differs from `compose.yml`, or no database
+  container is Up, compose creates the database container on the new tag
+  over the live volume. That is an upgrade with no backup.
+- `update.sh`, `install.sh` and `reset-local-admin.sh` refuse to do that
+  (`scripts/lib/surreal-guard.sh`, tested by `scripts/test-surreal-guard.sh`).
+  They start `site-server` with `--no-deps` whenever a project database
+  container exists, start a stopped one as it is, and stop with an error
+  when that container runs another image than `compose.yml` names, or when
+  no container exists but the data volume does.
+- `SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1` lets them go on and leave the
+  database on its current image. `SCUFFED_ALLOW_DB_CREATE=1` lets compose
+  create the database container over an existing volume. Use the second
+  only after a backup, or when the `compose.yml` image wrote that data.
 
 **There is no tag-only rollback.** Measured on a scratch datastore: 3.0.5
 data opens in place on 3.2.3, but once 3.2.3 has opened it, 3.0.5 no longer
 starts on it (its log repeats ``A deserialization error occured: Invalid
-revision `2` for type `Node` `` and `is-ready` never succeeds). Rolling back means restoring the
-copy of the volume taken in step 4. Do not skip it.
+revision `2` for type `Node` `` and `is-ready` never succeeds). Rolling back
+means restoring the cold copy of the volume taken in step B5, and loses
+every write made after it.
 
 SurrealDB's notes say 3.0.x → 3.1.0 and 3.1.x → 3.2.x upgrade in place with
 unchanged catalog and on-disk layouts. 3.2.5 and later write data an earlier
 3.2 binary cannot read, so do not jump past the crate version.
 
-The names below are examples. Find yours first:
+**Crate bumps.** Dependabot security updates are on for this repository. A
+Dependabot PR that moves the `surrealdb` crate fails
+`scripts/check-surrealdb-version.sh` on purpose. Merge it only together with
+the matching `compose.yml` tag, and treat that merge as the start of a Phase B
+window: until it is done, `update.sh` refuses (or needs
+`SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1`). Read the release notes of the new
+version for one-way format changes (3.2.5 and later) before you merge.
+
+The upgrade from rc.5 has two phases. Do Phase A first and let it run. Do
+Phase B as its own maintenance window.
+
+### Phase A: app update, database unchanged
+
+rc.6 also starts passing 17 variables from `data/secrets.env` to the server
+(see [Which variables reach the server](#which-variables-reach-the-server)).
+Until now they were ignored. Any of them already in your `secrets.env` takes
+effect in this phase.
+
+1. Pull and list which of them you have (names only, values stay hidden):
+
+   ```bash
+   cd /path/to/scuffed-crew
+   git pull --ff-only
+   grep -nE '^(ENCRYPTION_KEY_PREVIOUS|CRYPTO_STRICT_AAD|ALLOW_PLAINTEXT_PROVIDER_IDS|SURREALDB_BOOTSTRAP|FORCE_APP_PASSWORD_SYNC|CSP_|LEADERBOARD_CACHE_|DISCORD_WEBHOOK|MATRIX_)' data/secrets.env | cut -d= -f1
+   ```
+
+2. For each name printed, decide whether you want it now. Delete or comment
+   the line if not:
+   - `SURREALDB_BOOTSTRAP=0`: migrations stop running on start. Remove it
+     unless you run a separate migrate job.
+   - `CSP_ENFORCE=0`: the CSP becomes report-only. Remove it unless intended.
+   - `DISCORD_WEBHOOK_*`, `MATRIX_*`: notifications start posting. Check the
+     webhook and room are still the right ones.
+   - `ENCRYPTION_KEY_PREVIOUS`: must be `ver:base64[,ver:base64]` with no
+     version equal to `ENCRYPTION_KEY_VERSION`, or the server refuses to boot.
+   - `FORCE_APP_PASSWORD_SYNC=1`: re-defines the app DB password on every boot.
+   - The others (`CRYPTO_STRICT_AAD`, `ALLOW_PLAINTEXT_PROVIDER_IDS`) change
+     nothing while `PRODUCTION=1`. `LEADERBOARD_CACHE_*` only tune the cache.
+
+3. Update the app and leave the database where it is:
+
+   ```bash
+   SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1 ./scripts/update.sh
+   ```
+
+   Without the variable, `update.sh` stops before touching any container,
+   because the database runs `surrealdb:v3.0` and `compose.yml` names the new
+   tag. That refusal is expected until Phase B is done; it is the reminder.
+
+4. Check: `curl -fsS http://127.0.0.1:$HOST_PORT/api/health`, no errors in
+   `podman logs <site-server>`, admin login, `/stats`, and the CSP header
+   (`curl -sI https://<site>/ | grep -i content-security-policy` shows
+   `Content-Security-Policy:` unless you kept `CSP_ENFORCE=0`).
+
+### Phase B: database upgrade (own maintenance window)
+
+The site is down for a few minutes. The names below are examples. Find yours
+first:
 
 ```bash
 cd /path/to/scuffed-crew
-podman ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'surrealdb|site-server'
+podman ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'surrealdb|site-server|strfry'
 podman volume ls | grep surrealdb-data
 DB=scuffed-crew-surrealdb-1          # the one Up container (see Troubleshooting if there are two)
 APP=scuffed-crew-site-server-1
 VOL=scuffed-crew_surrealdb-data
+RELAY=                               # strfry container name, if the relay is deployed
 set -a; . data/secrets.env; set +a
 ```
 
-### 1. Record what runs now
+#### B1. Record what runs now
 
 ```bash
-git pull --ff-only                    # compose.yml now names the new tag
+git pull --ff-only
 podman exec "$DB" /surreal version    # e.g. 3.0.5 for linux on x86_64
-podman inspect "$DB" --format '{{.ImageName}} {{.Image}}'
+podman inspect "$DB" --format '{{.ImageName}}' | tee /root/scuffed-surrealdb-old-image.txt
+podman inspect "$DB" --format '{{.Image}}'          # image ID
 ```
 
-Write down the version and image ID. That image is the rollback target. Do
-not run `podman image prune` until the upgrade has held for a week.
+That image is the rollback target. Do not run `podman image prune` until the
+upgrade has held for a week.
 
-### 2. Back up
+#### B2. Pause the backup timer and check its path
+
+```bash
+systemctl stop scuffed-backup.timer
+systemctl cat scuffed-backup.service | grep ExecStart
+```
+
+The shipped unit runs `/opt/scuffed-crew/scripts/backup.sh`. If this checkout
+lives elsewhere (for example `/root/github/scuffed-crew`), the timer has been
+running another copy, or nothing. Run the backup below from this checkout
+either way, and fix the unit's `ExecStart` after the upgrade.
+
+#### B3. Back up
 
 ```bash
 set -a; . /etc/scuffed-crew/backup.env; set +a
-./scripts/backup.sh                   # or: systemctl start scuffed-backup.service
+./scripts/backup.sh
 restic snapshots --tag scuffed-crew | tail -3   # a snapshot from just now
 ```
 
@@ -824,16 +917,18 @@ podman cp "$DB":/tmp/pre-upgrade.surql /root/scuffed-pre-upgrade-$(date +%F).sur
 ls -lh /root/scuffed-pre-upgrade-*.surql
 ```
 
-### 3. Pull the new image before the downtime
+#### B4. Pull the new image before the downtime
 
 ```bash
-podman pull docker.io/surrealdb/surrealdb:v3.2.3
+NEW_IMAGE="$(awk '/^  surrealdb:/{s=1} s && /^    image:/{print $2; exit}' compose.yml)"
+echo "$NEW_IMAGE"
+podman pull "$NEW_IMAGE"
 ```
 
-### 4. Stop, copy the volume cold, remove only the DB container
+#### B5. Stop, copy the volume cold, remove the containers
 
 ```bash
-podman stop "$APP"
+podman stop "$APP"; podman rm "$APP"  # first: podman-compose may have made it depend on $DB
 podman stop "$DB"
 podman volume export "$VOL" -o /root/scuffed-surrealdb-pre-upgrade-$(date +%F).tar
 tar tf /root/scuffed-surrealdb-pre-upgrade-*.tar | head    # scuffed.db/...
@@ -841,17 +936,17 @@ podman rm "$DB"                       # the container only; never `podman volume
 podman ps -a | grep surrealdb         # must print nothing
 ```
 
-The copy is taken with the database stopped, so it is consistent. The
-restic snapshot's volume copy is taken while it runs; the logical export is
-the consistent part of that snapshot.
+The copy is taken with the database stopped, so it is consistent. The restic
+snapshot's volume copy is taken while it runs; the logical export is the
+consistent part of that snapshot.
 
-### 5. Start the new server
+#### B6. Start the new server
 
 ```bash
 podman compose --env-file data/secrets.env up -d --no-deps surrealdb
-podman ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep surrealdb   # exactly one, v3.2.3
+podman ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep surrealdb   # exactly one, the new tag
 DB=<the name printed above>
-podman exec "$DB" /surreal version    # 3.2.3...
+podman exec "$DB" /surreal version
 podman exec "$DB" /surreal is-ready --endpoint http://127.0.0.1:8000 && echo ready
 podman logs "$DB" 2>&1 | grep -iE 'error|panic' | head
 ```
@@ -859,10 +954,20 @@ podman logs "$DB" 2>&1 | grep -iE 'error|panic' | head
 If there are two surreal containers, stop the new one and see Troubleshooting
 (duplicate `_` vs `-`) before going on.
 
-### 6. Start the app and check it
+#### B7. Start the app and the relay
 
 ```bash
-./scripts/update.sh                   # sees Surreal Up, recreates site-server with --no-deps
+./scripts/update.sh                   # images match now; no flag needed
+[ -n "$RELAY" ] && podman restart "$RELAY"
+```
+
+The relay policy and read gate inside the strfry container connect to
+SurrealDB once at startup, so they need the restart after the database was
+replaced.
+
+#### B8. Check, then resume backups
+
+```bash
 curl -fsS "http://127.0.0.1:${HOST_PORT:-3000}/api/health"; echo
 podman logs "$APP" 2>&1 | grep -iE 'error|panic|migrat' | head
 ```
@@ -870,9 +975,15 @@ podman logs "$APP" 2>&1 | grep -iE 'error|panic|migrat' | head
 In a browser: log in as an admin (checks the app DB user and sessions), open
 `/stats` and one member's stats page, the public leaderboard, and the admin
 audit log. Send one chat message if the relay is on. Wait for the surrealdb
-container to show `healthy` in `podman ps`.
+container to show `healthy` in `podman ps`. Then:
 
-Keep the `.tar`, the `.surql` export, and the old image for at least a week.
+```bash
+systemctl start scuffed-backup.timer
+./scripts/backup.sh                   # first snapshot on the new version
+```
+
+Keep the `.tar`, the `.surql` export, `/root/scuffed-surrealdb-old-image.txt`
+and the old image for at least a week.
 
 ### Optional later: rebuild compound unique indexes
 
@@ -888,29 +999,36 @@ Do not run `REBUILD INDEX` across a version change.
 
 ### Roll back
 
-Do this if step 5 or 6 fails and the cause is not obvious in a few minutes.
+Do this if B6 or B8 fails and the cause is not obvious in a few minutes.
+**Everything written to the database after B5 is lost**: new games, chat,
+sign-ups, admin changes. Decide quickly, or fix forward.
 
 ```bash
-podman stop "$APP"; podman stop "$DB"; podman rm "$DB"
+podman stop "$APP"; podman rm "$APP"
+podman stop "$DB"; podman rm "$DB"
 # Keep the failed state for later diagnosis:
 podman volume export "$VOL" -o /root/scuffed-surrealdb-failed-$(date +%F).tar
-# Replace the datastore with the cold copy from step 4:
+# Replace the datastore with the cold copy from B5:
 rm -rf "$(podman volume inspect "$VOL" --format '{{.Mountpoint}}')/scuffed.db"
 podman volume import "$VOL" /root/scuffed-surrealdb-pre-upgrade-<date>.tar
-# Point compose at the old version (a local edit; undo it before the next upgrade):
-sed -i 's#surrealdb:v3.2.3#surrealdb:v3.0.5#' compose.yml
+# Point compose at the image recorded in B1 (a local edit; undo it before the next upgrade):
+OLD_IMAGE="$(cat /root/scuffed-surrealdb-old-image.txt)"
+sed -i -E "s#^(    image: )docker\.io/surrealdb/surrealdb:[^[:space:]]+#\1${OLD_IMAGE}#" compose.yml
+grep -n 'image:' compose.yml | head -3   # the surrealdb line shows the old image
 podman compose --env-file data/secrets.env up -d --no-deps surrealdb
-podman exec <new surreal name> /surreal version   # 3.0.5
+podman exec <new surreal name> /surreal version   # the old version
 ./scripts/update.sh
+[ -n "$RELAY" ] && podman restart "$RELAY"
+systemctl start scuffed-backup.timer
 ```
 
-Use the version you wrote down in step 1 if it was not 3.0.5. `update.sh`
-runs `git pull --ff-only`, which keeps the local `compose.yml` edit unless
-`main` changed that file. If the `.tar` is unusable, restore the restic
-snapshot (`./scripts/restore.sh`, see [Restore](#restore)) and load the
+`update.sh` runs `git pull --ff-only`, which keeps the local `compose.yml`
+edit unless `main` changed that file. If the `.tar` is unusable, restore the
+restic snapshot (`./scripts/restore.sh`, see [Restore](#restore)) and load the
 logical export into an empty volume on the old version with
 `podman exec ... /surreal import --endpoint http://127.0.0.1:8000 --username root --namespace scuffed_crew --database main /tmp/pre-upgrade.surql`
-(after `podman cp` of the `.surql` into the container).
+(after `podman cp` of the `.surql` into the container). **Do not** start the
+old version on a volume the new one has opened.
 
 ## Backups
 

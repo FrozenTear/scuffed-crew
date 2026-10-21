@@ -9,10 +9,16 @@
 # and the Discord/Matrix notifiers.
 #
 # Names are collected from the crates linked into scuffed-server:
-#   env::var("NAME") / env::var_os("NAME")
+#   env::var("NAME") / env::var_os("NAME"), and bare var("NAME") after a `use`
 #   any helper whose name contains "env" called with a literal: env_usize("NAME", ..)
 # Each must appear as a key under services.site-server.environment, or in
-# ALLOWED_OMISSIONS below with a reason.
+# ALLOWED_OMISSIONS below with a reason. env::vars() / vars_os() fail the
+# check: the names they read cannot be listed.
+#
+# Not seen: a name held in a constant (`const X: &str = "NAME"; env::var(X)`).
+# A variable the image sets itself with ENV (for example a build stamp such
+# as SCUFFED_GIT_SHA) must NOT be added to compose: `NAME: ${NAME:-}` would
+# replace the image's value with an empty string.
 #
 # Usage: scripts/check-compose-env.sh [repo-root] [compose-file]
 set -euo pipefail
@@ -27,8 +33,9 @@ declare -A ALLOWED_OMISSIONS=(
     [PORT]="container port is fixed at 3000; HOST_PORT picks the host side"
     # One-shot init job. Forwarding it from secrets.env would make the
     # long-running service migrate and exit on every restart. Run it as
-    # `compose run --rm -e SURREALDB_MIGRATE_ONLY=1 site-server` instead.
-    [SURREALDB_MIGRATE_ONLY]="one-shot job flag; pass with compose run -e"
+    # `compose run --rm --no-deps -e SURREALDB_MIGRATE_ONLY=1 site-server`
+    # instead (--no-deps, or compose starts and may recreate surrealdb).
+    [SURREALDB_MIGRATE_ONLY]="one-shot job flag; pass with compose run --no-deps -e"
     # Read only inside #[cfg(test)] in routes/seo.rs.
     [SCUFFED_EXTRA_INDEX]="test-only"
 )
@@ -42,7 +49,7 @@ fi
 # lines by rustfmt are still found).
 extract_names() {
     perl -0777 -ne '
-        while (/\b(?:env::var(?:_os)?|[A-Za-z_]*env[A-Za-z_]*)\s*\(\s*"([A-Z][A-Z0-9_]*)"/g) {
+        while (/\b(?:env::var(?:_os)?|var(?:_os)?|[A-Za-z_]*env[A-Za-z_]*)\s*\(\s*"([A-Z][A-Z0-9_]*)"/g) {
             print "$1\n";
         }
     '
@@ -70,8 +77,9 @@ fixture_names="$(printf '%s\n' \
     'let c = env_usize("CHARLIE", 3);' \
     'let d = non_empty_env("DELTA_X");' \
     'let e = std::env::var_os("ECHO");' \
+    'use std::env::var; let g = var("FOXTROT");' \
     'let f = "NOT_AN_ENV";' | extract_names | sort | tr '\n' ' ')"
-if [[ "${fixture_names}" != "ALPHA_ONE BRAVO_TWO CHARLIE DELTA_X ECHO " ]]; then
+if [[ "${fixture_names}" != "ALPHA_ONE BRAVO_TWO CHARLIE DELTA_X ECHO FOXTROT " ]]; then
     echo "error: env-name extractor self-test failed: got '${fixture_names}'" >&2
     exit 1
 fi
@@ -120,6 +128,13 @@ mapfile -t code_names < <(
         | extract_names | sort -u
 )
 mapfile -t compose_keys < <(compose_site_env_keys "${COMPOSE}" | sort -u)
+
+# Whole-environment reads cannot be checked name by name.
+if vars_hits="$(grep -rnE '\benv::vars(_os)?\s*\(' "${src_dirs[@]}" --include='*.rs')"; then
+    echo "ERROR: the server reads the whole environment; compose cannot be checked for those names:" >&2
+    printf '%s\n' "${vars_hits}" >&2
+    exit 1
+fi
 
 if [[ "${#code_names[@]}" -eq 0 ]]; then
     echo "error: found no env var reads in ${CRATES[*]}; the extractor is broken" >&2

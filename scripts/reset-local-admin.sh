@@ -43,8 +43,22 @@ else
     exit 1
 fi
 
+# Never let this recreate the database: without --no-deps, compose follows
+# depends_on and recreates surrealdb when compose.yml names another image
+# than the running one (an upgrade with no backup). See lib/surreal-guard.sh.
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}"
+# shellcheck source=lib/surreal-guard.sh
+source "$ROOT/scripts/lib/surreal-guard.sh"
+surreal_guard_plan
+if [[ "${SURREAL_GUARD_ACTION}" == "with-deps" ]]; then
+    echo "error: no ${PROJECT_NAME} SurrealDB container exists. There is no admin to reset." >&2
+    echo "  Run ./scripts/install.sh or ./scripts/update.sh first." >&2
+    exit 1
+fi
+surreal_guard_apply
+
 echo "Recreating site-server with BOOTSTRAP_ADMIN_RESET=1 for user ${BOOTSTRAP_ADMIN_USERNAME}..."
-"${COMPOSE[@]}" --env-file "$SECRETS" up -d --force-recreate site-server
+"${COMPOSE[@]}" --env-file "$SECRETS" up -d --force-recreate --no-deps site-server
 
 echo
 echo "If the server log shows the reset applied, remove BOOTSTRAP_ADMIN_RESET from the environment"

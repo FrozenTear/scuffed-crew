@@ -27,6 +27,8 @@ jobs:
         run: bash scripts/check-surrealdb-version.sh
       - name: Check compose passes every server env var to site-server
         run: bash scripts/check-compose-env.sh
+      - name: Deploy scripts never recreate the database (stubbed podman)
+        run: bash scripts/test-surreal-guard.sh
       - name: Backup secret restore checks
         run: |
           bash scripts/test-backup-secrets.sh
