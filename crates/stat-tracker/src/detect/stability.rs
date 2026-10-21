@@ -36,7 +36,7 @@ const STABLE_MAX_MEAN_DIFF: f32 = 6.0;
 /// Per-region thumbnail history across poll ticks. One instance lives in the
 /// poller's session state and travels through the tick's `spawn_blocking`
 /// closure; each gated OCR region uses its own key.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FrameStability {
     prev: HashMap<&'static str, Vec<u8>>,
     /// The value each [`Self::repeats`] key held on the previous tick.

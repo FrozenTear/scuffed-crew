@@ -191,7 +191,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `debug_portal_frames` | Off by default. Saves up to four Tab pairs under `{data_dir}/debug/portal-compare/` (`0001-stream.png` and `0001-screenshot.png`). Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not written to this file. The pictures stay on this machine and are not uploaded. Leave it off while a voice app is sharing the screen: the screenshot half can hit the KWin cursor crash |
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
-| `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 2. Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
+| `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 4 (2 before 0.5.0-rc.6; set 2 to go back). Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`). It also turns on `debug/accepted/` (the last 60 accepted scoreboard crops) and `debug/rejected/` (the last 30 rejected frames). Those images are not blanked and show other players' names, so they are off by default. Settings toggle: Save debug images from each capture. With it off, an existing folder is left as it is and the daemon logs once at start that it is no longer written. `debug/mapcrops/` and `debug/mapmiss/` hold only the map-name box and stay on |
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
@@ -218,7 +218,7 @@ hides the cursor, instead of taking a new screenshot for every frame. You
 are asked to allow that share once. The permission is remembered in
 `screencast-restore-token` inside the data directory, so it is not asked
 again after a reboot. The compositor is offered a variable framerate with
-a cap of `screencast_max_fps` frames per second (2 when that key is unset).
+a cap of `screencast_max_fps` frames per second (4 when that key is unset).
 A frame is copied only when the tracker needs one. A later poll that sees
 no new buffer does not count as a read, so a reused picture cannot confirm
 Victory or Defeat by itself. The share closes when Overwatch quits, once
@@ -265,7 +265,7 @@ on a direct capture or the screenshot portal still waits 400 ms for the
 overlay. On the stream it waits for a buffer at least 300 ms after the
 key, and gives up 1200 ms after the key. A buffer from those first 300 ms
 does not finish the wait. A poll waits one frame period plus 100 ms before
-it reuses the previous frame (600 ms at 2 fps).
+it reuses the previous frame (350 ms at the default 4 fps, 600 ms at 2 fps).
 
 `STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
 For the systemd service, put it in `~/.config/environment.d/` (for example

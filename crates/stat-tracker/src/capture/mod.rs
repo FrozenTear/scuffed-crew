@@ -222,7 +222,7 @@ pub use screencast::{
     note_game_running, note_game_seen, session_is_open, share_close_due, should_close_share,
 };
 
-pub use framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
+pub use framebuf::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
 
 /// One captured image plus whether the stream had not already handed it out.
 /// Screenshots are always new and have no sequence.

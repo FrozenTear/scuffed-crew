@@ -125,8 +125,8 @@ pub enum RowCopy {
 pub const TAB_OVERLAY_AFTER_PRESS_MS: u64 = 300;
 
 /// Hard stop for that wait, measured from the same press. This is a
-/// constant, not a config key. A 2 fps cap can leave about half a second
-/// between buffers, so the stop sits past one of those gaps. A later check
+/// constant, not a config key. A 2 fps cap (the default is 4, a member can
+/// set 2) can leave about half a second between buffers, so the stop sits past one of those gaps. A later check
 /// still accepts a buffer that arrived in the gap once its arrival is at or
 /// after the overlay delay.
 pub const TAB_GRAB_TIMEOUT_AFTER_PRESS_MS: u64 = 1200;
@@ -157,6 +157,25 @@ pub fn select_tab_frame(arrived_ms: Option<u64>, press_ms: u64, now_ms: u64) -> 
     } else {
         TabFrameChoice::Wait
     }
+}
+
+/// The press a Tab retry hands the stream grab, given the instant the retry
+/// starts. A retry is not a new key press: the overlay delay already passed
+/// for the real press, so the grab takes the next buffer that arrives from
+/// `now` on instead of waiting another 300 ms on top. The hard stop is then
+/// 900 ms after `now`, still past one 2 fps gap.
+pub fn tab_retry_press(now: std::time::Instant) -> std::time::Instant {
+    now.checked_sub(std::time::Duration::from_millis(TAB_OVERLAY_AFTER_PRESS_MS))
+        .unwrap_or(now)
+}
+
+/// The press the first Tab grab hands the stream, given the key-event time
+/// and the instant the grab starts. Normally the key time. A grab that
+/// starts late (a press queued behind a running capture) would already be
+/// past the key's 1200 ms hard stop and miss at once, counting as a soft
+/// miss; it then takes the next buffer from `now` on, as a retry does.
+pub fn first_grab_press(key: std::time::Instant, now: std::time::Instant) -> std::time::Instant {
+    key.max(tab_retry_press(now))
 }
 
 /// Delay from the Tab press to the chosen frame, in milliseconds.
@@ -550,5 +569,60 @@ mod tests {
         );
         assert_eq!(tab_frame_delay_ms(press, late), 2_000);
         assert_eq!(tab_frame_delay_ms(press, ready), 300);
+    }
+    /// 2026-10-21 (rc.5, niri, 2 fps): each retry faked a new press at
+    /// `now`, so it waited another 300 ms plus the 2 fps grid and its
+    /// frames landed a full 1 s and 2 s after the first. A retry now takes
+    /// the first buffer that arrives after it starts.
+    #[test]
+    fn a_retry_takes_the_next_buffer_without_another_overlay_delay() {
+        let base = std::time::Instant::now();
+        let now = base + std::time::Duration::from_secs(10);
+        let ms = |at: std::time::Instant| at.duration_since(base).as_millis() as u64;
+        let press = ms(tab_retry_press(now));
+        let now_ms = ms(now);
+        assert_eq!(now_ms - press, TAB_OVERLAY_AFTER_PRESS_MS);
+        // A buffer 1 ms after the retry starts is taken.
+        assert_eq!(
+            select_tab_frame(Some(now_ms + 1), press, now_ms + 1),
+            TabFrameChoice::Take
+        );
+        // A buffer from before the retry (the rejected frame) is not.
+        assert_eq!(
+            select_tab_frame(Some(now_ms - 1), press, now_ms + 1),
+            TabFrameChoice::Wait
+        );
+        // The grab still waits across one 2 fps gap (500 ms) for it.
+        assert_eq!(
+            select_tab_frame(None, press, now_ms + 600),
+            TabFrameChoice::Wait
+        );
+        // Right after process start the subtraction cannot underflow.
+        let _ = tab_retry_press(std::time::Instant::now());
+    }
+    #[test]
+    fn a_first_grab_that_starts_late_does_not_miss_at_once() {
+        let key = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // On time: the key time.
+        assert_eq!(first_grab_press(key, key + ms(50)), key);
+        assert_eq!(first_grab_press(key, key + ms(300)), key);
+        // A queued press that starts 2 s after its key: measured from the
+        // grab start minus the overlay delay, so the hard stop is ahead.
+        let late = key + ms(2_000);
+        let press = first_grab_press(key, late);
+        assert_eq!(press, tab_retry_press(late));
+        let base = key;
+        let rel = |at: std::time::Instant| at.duration_since(base).as_millis() as u64;
+        assert_eq!(
+            select_tab_frame(None, rel(press), rel(late) + 1),
+            TabFrameChoice::Wait,
+            "not an instant miss"
+        );
+        // With the key time it would have been one.
+        assert_eq!(
+            select_tab_frame(None, rel(key), rel(late) + 1),
+            TabFrameChoice::Miss
+        );
     }
 }
