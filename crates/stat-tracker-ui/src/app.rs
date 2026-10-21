@@ -2293,10 +2293,10 @@ impl TrackerApp {
                             .code_copied("Copied. Paste it on the site.".to_string());
                         Task::none()
                     }
-                    Err(_) => {
-                        self.setup.code_copied(
-                            "Copied with the app clipboard. If paste is empty, install wl-clipboard (Wayland) or xclip (X11).".to_string(),
-                        );
+                    Err(e) => {
+                        self.setup.code_copied(format!(
+                            "Copied with the app clipboard. If paste is empty, {e}"
+                        ));
                         iced::clipboard::write(code)
                     }
                 }
