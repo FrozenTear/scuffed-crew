@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to a PR cancels that PR's older run. Pushes to main group by
+# commit SHA and never cancel: publish-image.yml publishes only main commits
+# whose CI push run succeeded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -177,23 +184,5 @@ jobs:
           test -f target/dx/scuffed-app/release/web/public/assets/favicon.ico
           test -f target/dx/scuffed-app/release/web/public/assets/apple-touch-icon.png
 
-  # Builds the relay image and walks the site chat path against it.
-  # A write plugin that exits (the old strfry29 command) fails this job:
-  # the kind 9 publish is rejected and never comes back on the subscription.
-  relay-policy:
-    name: Relay policy
-    runs-on: ubuntu-latest
-    # Slowest green run on this branch was 27m06s (actions run 39151255510,
-    # head 7f995aa, 2026-10-18). The two runs before it were 23m16s and
-    # 24m36s. 40 minutes is that measurement plus about 13 minutes for a
-    # cold cache. 30 is only three minutes over the slowest run.
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Kind 9 chat flow through the relay image
-        run: bash relay/ci-chat-flow.sh
+  # The "Relay policy" job moved to relay.yml (OPS14) so it runs only when
+  # the relay or a crate it compiles changes.
