@@ -1,0 +1,78 @@
+# Builds the relay image and walks the site chat path against it.
+# A write plugin that exits (the old strfry29 command) fails this job:
+# the kind 9 publish is rejected and never comes back on the subscription.
+#
+# Split out of ci.yml (OPS14). The image build is a 20-minute cold release
+# compile inside docker, and it ran on every PR even when nothing it builds
+# changed. It now runs only when the relay or a crate it compiles changes.
+# publish-image.yml waits on the "CI" workflow only; the relay image is not
+# part of the site image, so publishing does not wait for this one.
+name: Relay
+
+# Inputs of the job: relay/ (Containerfile, entrypoint, strfry.conf, this
+# script), relay-policy and its path deps (relay-policy -> db -> auth,
+# types; it does not depend on crates/chat), the workspace manifest and
+# lockfile, cargo config, and the docker build context filter.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "relay/**"
+      - "crates/relay-policy/**"
+      - "crates/db/**"
+      - "crates/auth/**"
+      - "crates/types/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".dockerignore"
+      - ".github/workflows/relay.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "relay/**"
+      - "crates/relay-policy/**"
+      - "crates/db/**"
+      - "crates/auth/**"
+      - "crates/types/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - ".dockerignore"
+      - ".github/workflows/relay.yml"
+
+# A new push to a PR cancels that PR's older run. Pushes to main group by
+# commit SHA and never cancel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  relay-policy:
+    name: Relay policy
+    runs-on: ubuntu-latest
+    # Slowest green run on this branch was 27m06s (actions run 39151255510,
+    # head 7f995aa, 2026-10-18). The two runs before it were 23m16s and
+    # 24m36s. 40 minutes is that measurement plus about 13 minutes for a
+    # cold cache. 30 is only three minutes over the slowest run.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Kind 9 chat flow through the relay image
+        run: bash relay/ci-chat-flow.sh
