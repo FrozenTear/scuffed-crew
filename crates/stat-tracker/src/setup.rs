@@ -239,9 +239,15 @@ pub fn find_system_traineddata(lang: &str) -> Option<PathBuf> {
         .find(|dir| dir.join(&file).is_file())
 }
 
+/// File name of the game-font model, in [`tessdata_dir`] and in a release.
+pub const KOVERWATCH_MODEL: &str = "koverwatch.traineddata";
+
+/// Train the model on this host when none is installed (`--generate-tessdata`).
+/// An installed model is kept as it is. Releases ship a CI-trained model, so
+/// this is a developer path: on pango >= 1.56 hosts text2image hangs or
+/// segfaults.
 pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let tessdata = tessdata_dir();
-    let traineddata = tessdata.join("koverwatch.traineddata");
+    let traineddata = tessdata_dir().join(KOVERWATCH_MODEL);
 
     if traineddata.exists() {
         tracing::debug!("koverwatch.traineddata already present");
@@ -249,40 +255,126 @@ pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Se
     }
 
     tracing::info!("koverwatch.traineddata not found: generating via LSTM fine-tuning");
+    retrain_model_into(&traineddata, train_koverwatch_model)
+}
 
+/// Train the model again and replace the installed one. The training runs
+/// into a temp dir and the result replaces the model only once it exists, so
+/// a failed or killed training leaves the installed model as it was. It
+/// used to delete the model first and leave nothing on a failure.
+pub fn regenerate_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    retrain_model_into(
+        &tessdata_dir().join(KOVERWATCH_MODEL),
+        train_koverwatch_model,
+    )
+}
+
+type TrainError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Run `train` in a fresh temp dir; it returns the path of the model it made
+/// there. Only then is `dest` replaced, through a temp file and a rename.
+fn retrain_model_into(
+    dest: &Path,
+    train: impl FnOnce(&Path) -> Result<PathBuf, TrainError>,
+) -> Result<(), TrainError> {
     let tmp = tempfile::tempdir()?;
-    let tmp_path = tmp.path();
-
-    download_and_extract_font(tmp_path)?;
-    install_font(tmp_path)?;
-
-    let lstm_available = generate_tessdata_lstm(tmp_path);
-    if let Err(e) = &lstm_available {
-        tracing::warn!(error = %e, "LSTM training failed, falling back to legacy pipeline");
-        generate_tessdata_legacy(tmp_path)?;
-    }
-
-    std::fs::create_dir_all(&tessdata)?;
-    let generated = tmp_path.join("koverwatch.traineddata");
-    if !generated.exists() {
+    let generated = train(tmp.path())?;
+    if !generated.is_file() {
         return Err("training pipeline produced no output".into());
     }
-    std::fs::copy(&generated, &traineddata)?;
-    tracing::info!(path = %traineddata.display(), "koverwatch.traineddata installed");
-
+    replace_file_atomically(&generated, dest)?;
+    tracing::info!(path = %dest.display(), "koverwatch.traineddata installed");
     Ok(())
 }
 
-pub fn regenerate_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let tessdata = tessdata_dir();
-    let traineddata = tessdata.join("koverwatch.traineddata");
+fn train_koverwatch_model(dir: &Path) -> Result<PathBuf, TrainError> {
+    download_and_extract_font(dir)?;
+    install_font(dir)?;
 
-    if traineddata.exists() {
-        std::fs::remove_file(&traineddata)?;
-        tracing::info!("removed existing koverwatch.traineddata for regeneration");
+    let lstm_available = generate_tessdata_lstm(dir);
+    if let Err(e) = &lstm_available {
+        tracing::warn!(error = %e, "LSTM training failed, falling back to legacy pipeline");
+        generate_tessdata_legacy(dir)?;
     }
+    Ok(dir.join(KOVERWATCH_MODEL))
+}
 
-    ensure_koverwatch_tessdata()
+/// Copy `src` to `dest` through a temp file in `dest`'s folder and a
+/// rename, so `dest` is never half written.
+fn replace_file_atomically(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| KOVERWATCH_MODEL.to_string());
+    let tmp = dir.join(format!(".{name}.tmp"));
+    std::fs::copy(src, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Folders a release keeps its bundled models in, best first:
+/// `PREFIX/share/scuffed-stat-tracker/tessdata` for the install prefix the
+/// app runs from, then the system package's
+/// `/usr/share/scuffed-stat-tracker/tessdata`.
+pub fn bundled_tessdata_dirs(install_prefix: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(prefix) = install_prefix {
+        dirs.push(prefix.join("share/scuffed-stat-tracker/tessdata"));
+    }
+    let system = PathBuf::from("/usr/share/scuffed-stat-tracker/tessdata");
+    if !dirs.contains(&system) {
+        dirs.push(system);
+    }
+    dirs
+}
+
+/// What [`restore_bundled_koverwatch`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModelRestore {
+    /// The installed model already matched the bundled one.
+    AlreadyCurrent,
+    /// The bundled model was copied in. `backup` holds a different model
+    /// that was there before (`koverwatch.traineddata.bak`).
+    Restored {
+        from: PathBuf,
+        backup: Option<PathBuf>,
+    },
+    /// No bundled copy in any of the folders looked at.
+    NoBundledCopy,
+}
+
+/// Put the model that ships with the release back into `dest_dir`, from the
+/// first of `bundled_dirs` that has one. Same rule as install.sh: a
+/// different existing model is kept as `.bak`. Never trains on this host.
+pub fn restore_bundled_koverwatch(
+    bundled_dirs: &[PathBuf],
+    dest_dir: &Path,
+) -> std::io::Result<ModelRestore> {
+    let Some(src) = bundled_dirs
+        .iter()
+        .map(|dir| dir.join(KOVERWATCH_MODEL))
+        .find(|path| path.is_file())
+    else {
+        return Ok(ModelRestore::NoBundledCopy);
+    };
+    let dest = dest_dir.join(KOVERWATCH_MODEL);
+    let mut backup = None;
+    if dest.is_file() {
+        if std::fs::read(&dest)? == std::fs::read(&src)? {
+            return Ok(ModelRestore::AlreadyCurrent);
+        }
+        let bak = dest_dir.join(format!("{KOVERWATCH_MODEL}.bak"));
+        replace_file_atomically(&dest, &bak)?;
+        backup = Some(bak);
+    }
+    replace_file_atomically(&src, &dest)?;
+    tracing::info!(from = %src.display(), to = %dest.display(), "restored the bundled koverwatch model");
+    Ok(ModelRestore::Restored { from: src, backup })
 }
 
 fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -794,5 +886,142 @@ mod training_maps_tests {
             .collect();
         assert_eq!(lijiang_title.len(), 1);
         assert!(!gibraltar.contains("Grimsvotn"));
+    }
+}
+
+#[cfg(test)]
+mod model_file_tests {
+    use super::{
+        KOVERWATCH_MODEL, ModelRestore, bundled_tessdata_dirs, restore_bundled_koverwatch,
+        retrain_model_into,
+    };
+    use std::path::{Path, PathBuf};
+
+    /// READ-1: Rebuild deleted the CI-trained model first, then trained on
+    /// the host, which hangs or fails on most machines. A failed training
+    /// must leave the installed model alone.
+    #[test]
+    fn a_failed_retrain_keeps_the_installed_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(KOVERWATCH_MODEL);
+        std::fs::write(&dest, b"bundled").unwrap();
+        let err = retrain_model_into(&dest, |_tmp: &Path| -> Result<PathBuf, super::TrainError> {
+            Err("text2image segfaulted".into())
+        })
+        .expect_err("training failed");
+        assert!(err.to_string().contains("segfaulted"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"bundled");
+    }
+
+    #[test]
+    fn a_retrain_with_no_output_keeps_the_installed_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(KOVERWATCH_MODEL);
+        std::fs::write(&dest, b"bundled").unwrap();
+        retrain_model_into(&dest, |tmp: &Path| Ok(tmp.join(KOVERWATCH_MODEL)))
+            .expect_err("no output");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"bundled");
+    }
+
+    #[test]
+    fn a_good_retrain_replaces_the_model_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("tessdata").join(KOVERWATCH_MODEL);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        retrain_model_into(&dest, |tmp: &Path| {
+            let out = tmp.join(KOVERWATCH_MODEL);
+            std::fs::write(&out, b"trained").unwrap();
+            Ok(out)
+        })
+        .expect("trained");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"trained");
+        let names: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+    }
+
+    #[test]
+    fn restore_copies_the_bundled_model_when_missing() {
+        let bundle = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join(KOVERWATCH_MODEL), b"ci-trained").unwrap();
+        let dirs = vec![
+            PathBuf::from("/nonexistent/sst"),
+            bundle.path().to_path_buf(),
+        ];
+        let dest_dir = user.path().join("tessdata");
+        let got = restore_bundled_koverwatch(&dirs, &dest_dir).unwrap();
+        assert_eq!(
+            got,
+            ModelRestore::Restored {
+                from: bundle.path().join(KOVERWATCH_MODEL),
+                backup: None
+            }
+        );
+        assert_eq!(
+            std::fs::read(dest_dir.join(KOVERWATCH_MODEL)).unwrap(),
+            b"ci-trained"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_different_model_as_bak() {
+        let bundle = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join(KOVERWATCH_MODEL), b"ci-trained").unwrap();
+        std::fs::write(user.path().join(KOVERWATCH_MODEL), b"self-trained").unwrap();
+        let got = restore_bundled_koverwatch(&[bundle.path().to_path_buf()], user.path()).unwrap();
+        let bak = user.path().join(format!("{KOVERWATCH_MODEL}.bak"));
+        assert!(matches!(got, ModelRestore::Restored { backup: Some(ref b), .. } if *b == bak));
+        assert_eq!(std::fs::read(&bak).unwrap(), b"self-trained");
+        assert_eq!(
+            std::fs::read(user.path().join(KOVERWATCH_MODEL)).unwrap(),
+            b"ci-trained"
+        );
+    }
+
+    #[test]
+    fn restore_leaves_a_current_model_alone() {
+        let bundle = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join(KOVERWATCH_MODEL), b"ci-trained").unwrap();
+        std::fs::write(user.path().join(KOVERWATCH_MODEL), b"ci-trained").unwrap();
+        assert_eq!(
+            restore_bundled_koverwatch(&[bundle.path().to_path_buf()], user.path()).unwrap(),
+            ModelRestore::AlreadyCurrent
+        );
+        assert!(!user.path().join(format!("{KOVERWATCH_MODEL}.bak")).exists());
+    }
+
+    #[test]
+    fn restore_without_a_bundled_copy_changes_nothing() {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join(KOVERWATCH_MODEL), b"mine").unwrap();
+        assert_eq!(
+            restore_bundled_koverwatch(&[PathBuf::from("/nonexistent/sst")], user.path()).unwrap(),
+            ModelRestore::NoBundledCopy
+        );
+        assert_eq!(
+            std::fs::read(user.path().join(KOVERWATCH_MODEL)).unwrap(),
+            b"mine"
+        );
+    }
+
+    #[test]
+    fn bundled_dirs_try_the_install_prefix_then_the_system_package() {
+        assert_eq!(
+            bundled_tessdata_dirs(Some(Path::new("/home/u/.local"))),
+            vec![
+                PathBuf::from("/home/u/.local/share/scuffed-stat-tracker/tessdata"),
+                PathBuf::from("/usr/share/scuffed-stat-tracker/tessdata"),
+            ]
+        );
+        assert_eq!(
+            bundled_tessdata_dirs(Some(Path::new("/usr"))),
+            vec![PathBuf::from("/usr/share/scuffed-stat-tracker/tessdata")]
+        );
     }
 }

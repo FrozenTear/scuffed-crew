@@ -11022,6 +11022,7 @@ dependencies = [
  "iced",
  "iced_layershell",
  "image",
+ "libc",
  "libloading 0.7.4",
  "reqwest 0.12.28",
  "scuffed-stat-tracker",

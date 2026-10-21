@@ -358,7 +358,7 @@ pub(crate) fn pack_status_line(packs: Option<&PackReadiness>) -> String {
 /// Which parts of the Scoreboard reading card are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OcrCardBlocks {
-    /// "Install reading model" / "Rebuild reading model" and the model
+    /// "Install reading model" and the model
     /// status. Tesseract's model: of no use to a tracker that runs with
     /// classic OCR off.
     pub reading_model: bool,
@@ -1298,25 +1298,29 @@ fn classic_ocr_block(app: &TrackerApp) -> Element<'_, Message> {
     body.into()
 }
 
-fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let installed = if app.tessdata_installed {
+/// READ-1: the model is not needed to read the scoreboard under the default
+/// new reader. Without it, classic Tesseract reads fall back to `eng`.
+pub(crate) fn reading_model_status(installed: bool) -> &'static str {
+    if installed {
         "Reading model is installed"
     } else {
-        "Reading model is missing. Install it to read the scoreboard"
-    };
+        "Reading model is missing. Classic OCR reads use the generic English model, which is less accurate"
+    }
+}
+
+pub(crate) const READING_MODEL_HINT: &str = "\
+Install puts back the game-font model that ships with the tracker. It does not \
+train one on this computer.";
+
+fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let installed = reading_model_status(app.tessdata_installed);
     let mut actions = row![].spacing(8);
     if !demo && !app.tessdata_busy {
-        actions = actions
-            .push(action_btn(
-                "Install reading model",
-                true,
-                Message::InstallModel,
-            ))
-            .push(action_btn(
-                "Rebuild reading model",
-                false,
-                Message::RebuildModel,
-            ));
+        actions = actions.push(action_btn(
+            "Install reading model",
+            true,
+            Message::InstallModel,
+        ));
     }
     let mut body = column![
         text(installed)
@@ -1327,7 +1331,7 @@ fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             } else {
                 theme::WARN
             }),
-        hint("Install if missing. Rebuild retrains (needs network, a few minutes)."),
+        hint(READING_MODEL_HINT),
     ]
     .spacing(6);
     if app.tessdata_busy {
@@ -1718,6 +1722,20 @@ fn checkbox_style(
 
 #[cfg(test)]
 mod tests {
+    /// READ-1: the default new reader does not need the model, so a missing
+    /// model must not say the scoreboard cannot be read.
+    #[test]
+    fn a_missing_reading_model_does_not_claim_the_scoreboard_is_unreadable() {
+        let missing = super::reading_model_status(false);
+        assert!(!missing.contains("to read the scoreboard"), "{missing}");
+        assert!(missing.contains("less accurate"), "{missing}");
+        assert_eq!(
+            super::reading_model_status(true),
+            "Reading model is installed"
+        );
+        assert!(!super::READING_MODEL_HINT.contains("retrain"));
+    }
+
     #[test]
     fn debug_images_help_names_the_scoreboard_frames_and_where_they_stay() {
         // R2 on #244: the setting also saves unblanked scoreboard frames.

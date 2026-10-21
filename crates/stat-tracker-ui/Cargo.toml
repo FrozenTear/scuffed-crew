@@ -30,6 +30,7 @@ gtk = "0.18"
 iced = { version = "0.14", features = ["tokio", "advanced", "image", "markdown"] }
 iced_layershell = { version = "0.19", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+libc = "0.2"
 libloading = "0.7"
 reqwest = { workspace = true }
 serde = { workspace = true }

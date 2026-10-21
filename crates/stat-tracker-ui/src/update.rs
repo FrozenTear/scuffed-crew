@@ -722,6 +722,33 @@ pub fn select_newer_release_on(
     })
 }
 
+/// How often a running app checks for a new release (GUI-7). The app lives
+/// in the tray for days; a check at start only never showed a new rc.
+pub const UPDATE_RECHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// True when this Tick should check for an update again. Never in fixture
+/// mode, never while an update runs, and never before the first check
+/// (the one at start) was made.
+pub fn update_recheck_due(
+    live: bool,
+    progress: &UpdateProgress,
+    last_check: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    live && !matches!(progress, UpdateProgress::Running)
+        && last_check.is_some_and(|at| now.saturating_duration_since(at) >= UPDATE_RECHECK_EVERY)
+}
+
+/// A re-check replaces the offer only with a different version. A failed
+/// check (`None`) keeps the banner; the same version keeps the open notes.
+pub fn recheck_applies(shown: Option<&UpdateInfo>, fetched: Option<&UpdateInfo>) -> bool {
+    match (shown, fetched) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(shown), Some(fetched)) => shown.latest != fetched.latest,
+    }
+}
+
 pub fn open_release_page(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
@@ -762,8 +789,23 @@ fn tail_useful(output: &str) -> String {
         .to_string()
 }
 
+/// The longest an in-app install may run. The tracker is stopped while it
+/// runs, so an installer that hangs (a stalled download) is stopped here,
+/// the previous binaries are put back and the tracker is started again.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// The installer's stdout and stderr go to this file in the data dir, not to
+/// pipes. A pipe closes when this app exits and the next line the installer
+/// writes kills it with SIGPIPE, mid-install.
+pub const INSTALL_LOG: &str = "update-install.log";
+
 trait UpdateIo {
-    async fn control_daemon(&self, data_dir: &Path, verb: DaemonVerb, service_installed: bool);
+    async fn control_daemon(
+        &self,
+        data_dir: &Path,
+        verb: DaemonVerb,
+        service_installed: bool,
+    ) -> Result<String, String>;
     /// Sleep between checks for a game in progress.
     async fn pause(&self, d: std::time::Duration);
     async fn install(
@@ -773,14 +815,24 @@ trait UpdateIo {
         latest: &str,
         prefix: &Path,
         tag: &str,
+        log: &Path,
     ) -> Result<String, String>;
+    /// How long [`UpdateIo::install`] may run before it is dropped.
+    fn install_timeout(&self) -> Duration {
+        INSTALL_TIMEOUT
+    }
 }
 
 struct LiveUpdateIo;
 
 impl UpdateIo for LiveUpdateIo {
-    async fn control_daemon(&self, data_dir: &Path, verb: DaemonVerb, service_installed: bool) {
-        let _ = crate::daemon::run_verb(data_dir.to_path_buf(), verb, service_installed).await;
+    async fn control_daemon(
+        &self,
+        data_dir: &Path,
+        verb: DaemonVerb,
+        service_installed: bool,
+    ) -> Result<String, String> {
+        crate::daemon::run_verb(data_dir.to_path_buf(), verb, service_installed).await
     }
 
     async fn pause(&self, d: std::time::Duration) {
@@ -794,8 +846,9 @@ impl UpdateIo for LiveUpdateIo {
         latest: &str,
         prefix: &Path,
         tag: &str,
+        log: &Path,
     ) -> Result<String, String> {
-        download_and_run_bootstrap(url, script, latest, prefix, tag).await
+        download_and_run_bootstrap(url, script, latest, prefix, tag, log).await
     }
 }
 
@@ -863,8 +916,12 @@ async fn run_planned_update(
         if wait_for_game_saved(&req.data_dir, io).await {
             tracing::info!("update waited for the game in progress to be saved");
         }
-        io.control_daemon(&req.data_dir, DaemonVerb::Stop, req.service_installed)
-            .await;
+        if let Err(e) = io
+            .control_daemon(&req.data_dir, DaemonVerb::Stop, req.service_installed)
+            .await
+        {
+            tracing::warn!(error = %e, "update: stopping the tracker failed; installing anyway");
+        }
     }
 
     let work = std::env::temp_dir().join(format!(
@@ -886,18 +943,37 @@ async fn run_planned_update(
         Ok(saved) => saved,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&work);
-            if req.stop_daemon {
-                io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
-                    .await;
-            }
-            return Err(format!(
+            let mut msg = format!(
                 "Could not save the current version before updating, so nothing was changed: {e}"
-            ));
+            );
+            if req.stop_daemon {
+                let start = io
+                    .control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
+                    .await;
+                append_start_failure(&mut msg, start);
+            }
+            return Err(msg);
         }
     };
     let script = work.join("bootstrap.sh");
     let url = bootstrap_raw_url(&tag);
-    let install = io.install(&url, &script, &req.latest, &prefix, &tag).await;
+    let log = install_log_path(&req.data_dir, &work);
+    let limit = io.install_timeout();
+    // Dropping the install future on timeout kills the installer and its
+    // children (kill_on_drop plus a process-group kill in the live IO), so
+    // nothing is still writing to PREFIX/bin when the rollback below runs.
+    let install = match tokio::time::timeout(
+        limit,
+        io.install(&url, &script, &req.latest, &prefix, &tag, &log),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(?limit, "update: installer timed out and was stopped");
+            Err(install_timeout_message(limit))
+        }
+    };
     let mut rolled_back = false;
     let install = match install {
         Ok(msg) => Ok(msg),
@@ -906,14 +982,7 @@ async fn run_planned_update(
                 Ok(()) => {
                     rolled_back = true;
                     tracing::warn!(error = %msg, "update failed: previous binaries restored");
-                    Err(format!(
-                        "{msg} The previous version was put back{}.",
-                        if req.stop_daemon {
-                            " and the tracker was started again"
-                        } else {
-                            ""
-                        }
-                    ))
+                    Err(format!("{msg} The previous version was put back."))
                 }
                 Err(e) => Err(format!(
                     "{msg} Putting the previous version back failed too: {e}."
@@ -923,14 +992,65 @@ async fn run_planned_update(
         Err(msg) => Err(msg),
     };
     let _ = std::fs::remove_dir_all(&work);
-    if should_restart_daemon(req.stop_daemon, install.is_ok(), rolled_back) {
-        io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
-            .await;
-    }
+    let start = if should_restart_daemon(req.stop_daemon, install.is_ok(), rolled_back) {
+        Some(
+            io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
+                .await,
+        )
+    } else {
+        None
+    };
+    let install = match start {
+        Some(start) => match install {
+            Ok(mut msg) => {
+                append_start_failure(&mut msg, start);
+                Ok(msg)
+            }
+            Err(mut msg) => {
+                if start.is_ok() && rolled_back {
+                    msg.push_str(" The tracker was started again.");
+                }
+                append_start_failure(&mut msg, start);
+                Err(msg)
+            }
+        },
+        None => install,
+    };
     if rolled_back {
         return install;
     }
     note_daemon_left_stopped(req.stop_daemon, install)
+}
+
+/// The installer log in the data dir, or in the update's temp dir when the
+/// data dir is missing.
+fn install_log_path(data_dir: &Path, work: &Path) -> PathBuf {
+    if data_dir.is_dir() {
+        data_dir.join(INSTALL_LOG)
+    } else {
+        work.join(INSTALL_LOG)
+    }
+}
+
+pub fn install_timeout_message(limit: Duration) -> String {
+    let secs = limit.as_secs();
+    let took = if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{} minutes", secs / 60)
+    } else {
+        format!("{secs} seconds")
+    };
+    format!("The installer did not finish within {took}, so it was stopped.")
+}
+
+/// A Start that failed after an update is said in the result, so the
+/// player knows the tracker is not running.
+fn append_start_failure(msg: &mut String, start: Result<String, String>) {
+    if let Err(e) = start {
+        tracing::warn!(error = %e, "update: starting the tracker again failed");
+        msg.push_str(&format!(
+            " Starting the tracker again failed ({e}). Press Start in Settings, under Tracker."
+        ));
+    }
 }
 
 fn note_daemon_left_stopped(
@@ -951,6 +1071,7 @@ async fn download_and_run_bootstrap(
     latest: &str,
     prefix: &Path,
     tag: &str,
+    log: &Path,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("scuffed-stat-tracker-gui")
@@ -977,14 +1098,9 @@ async fn download_and_run_bootstrap(
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg(script);
     apply_installer_env(&mut cmd, latest, prefix);
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Could not run bootstrap.sh: {e}"))?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let combined = format!("{stderr}\n{stdout}");
-    if !out.status.success() {
+    let status = run_logged(cmd, log).await?;
+    let combined = std::fs::read_to_string(log).unwrap_or_default();
+    if !status.success() {
         return Err(format!(
             "Installer failed ({tag}): {}. Copy the command and run it in a terminal if this keeps failing.",
             tail_useful(&combined)
@@ -993,6 +1109,55 @@ async fn download_and_run_bootstrap(
     // The restart hint is added where the message is shown, once the GUI
     // knows whether this install changed the app (G3).
     Ok(format!("Installed {tag}. {}", tail_useful(&combined)))
+}
+
+/// Runs `cmd` with stdout and stderr appended to a fresh `log` and stdin
+/// closed. The child gets its own process group. Dropping the returned
+/// future (the install timeout) kills the whole group, so a curl that bash
+/// started does not keep running. A clean exit leaves the group alone.
+async fn run_logged(
+    mut cmd: tokio::process::Command,
+    log: &Path,
+) -> Result<std::process::ExitStatus, String> {
+    let out = std::fs::File::create(log)
+        .map_err(|e| format!("Could not create the installer log {}: {e}", log.display()))?;
+    let err = out
+        .try_clone()
+        .map_err(|e| format!("Could not open the installer log: {e}"))?;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not run bootstrap.sh: {e}"))?;
+    let mut group = KillGroupOnDrop(child.id());
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Could not wait for bootstrap.sh: {e}"));
+    group.0 = None;
+    status
+}
+
+/// SIGKILLs a process group when dropped while armed. The leader is not
+/// reaped before this runs (the drop happens before `Child`'s), so its pid,
+/// which is the group id, cannot have been reused.
+struct KillGroupOnDrop(Option<u32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.take().and_then(|p| i32::try_from(p).ok())
+            && pgid > 0
+        {
+            // SAFETY: kill(2) with a negative pid signals that group; no
+            // memory is touched.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// Notes stay closed until the player presses What's new.
@@ -2090,6 +2255,25 @@ mod tests {
         verbs: std::sync::Mutex<Vec<DaemonVerb>>,
         urls: std::sync::Mutex<Vec<String>>,
         install_result: Result<String, String>,
+        /// The installer replaces the binaries, then never returns.
+        install_hangs: bool,
+        start_result: Result<String, String>,
+        timeout: Duration,
+    }
+
+    impl FakeIo {
+        fn new(install_result: Result<String, String>) -> Self {
+            Self {
+                pauses: Default::default(),
+                game_dir: None,
+                verbs: std::sync::Mutex::new(Vec::new()),
+                urls: std::sync::Mutex::new(Vec::new()),
+                install_result,
+                install_hangs: false,
+                start_result: Ok("Tracker started".into()),
+                timeout: INSTALL_TIMEOUT,
+            }
+        }
     }
 
     impl UpdateIo for FakeIo {
@@ -2098,8 +2282,12 @@ mod tests {
             _data_dir: &Path,
             verb: DaemonVerb,
             _service_installed: bool,
-        ) {
+        ) -> Result<String, String> {
             self.verbs.lock().expect("verbs").push(verb);
+            match verb {
+                DaemonVerb::Start => self.start_result.clone(),
+                _ => Ok("ok".into()),
+            }
         }
 
         async fn pause(&self, _d: std::time::Duration) {
@@ -2120,6 +2308,7 @@ mod tests {
             _latest: &str,
             prefix: &Path,
             _tag: &str,
+            _log: &Path,
         ) -> Result<String, String> {
             self.urls.lock().expect("urls").push(url.to_string());
             // The installer got as far as replacing the binaries.
@@ -2129,7 +2318,14 @@ mod tests {
                     std::fs::write(&live, b"new").unwrap();
                 }
             }
+            if self.install_hangs {
+                std::future::pending::<()>().await;
+            }
             self.install_result.clone()
+        }
+
+        fn install_timeout(&self) -> Duration {
+            self.timeout
         }
     }
 
@@ -2172,11 +2368,8 @@ mod tests {
         std::fs::write(data.path().join("active_game.json"), "{}").unwrap();
         let prefix = tempfile::tempdir().expect("tempdir");
         let io = FakeIo {
-            pauses: Default::default(),
             game_dir: Some(data.path().to_path_buf()),
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Ok("Installed.".into()),
+            ..FakeIo::new(Ok("Installed.".into()))
         };
         let mut req = run_request(true);
         req.data_dir = data.path().to_path_buf();
@@ -2195,13 +2388,7 @@ mod tests {
     #[tokio::test]
     async fn failed_install_stops_and_does_not_start() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let io = FakeIo {
-            pauses: Default::default(),
-            game_dir: None,
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Err("disk full".into()),
-        };
+        let io = FakeIo::new(Err("disk full".into()));
         let err = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
             .await
             .expect_err("install failed");
@@ -2222,13 +2409,7 @@ mod tests {
     #[tokio::test]
     async fn successful_install_restarts_from_the_tag_url() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let io = FakeIo {
-            pauses: Default::default(),
-            game_dir: None,
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Ok("installed".into()),
-        };
+        let io = FakeIo::new(Ok("installed".into()));
         let msg = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
             .await
             .expect("install ok");
@@ -2242,13 +2423,7 @@ mod tests {
     #[tokio::test]
     async fn install_without_a_running_daemon_does_not_start_one() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let io = FakeIo {
-            pauses: Default::default(),
-            game_dir: None,
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Err("nope".into()),
-        };
+        let io = FakeIo::new(Err("nope".into()));
         let err = run_planned_update(&run_request(false), ready_plan(dir.path()), &io)
             .await
             .expect_err("install failed");
@@ -2268,18 +2443,13 @@ mod tests {
     #[tokio::test]
     async fn a_failed_update_puts_the_previous_version_back_and_restarts() {
         let prefix = prefix_with_binaries();
-        let io = FakeIo {
-            pauses: Default::default(),
-            game_dir: None,
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Err("tessdata download failed".into()),
-        };
+        let io = FakeIo::new(Err("tessdata download failed".into()));
         let err = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
             .await
             .expect_err("install failed");
         assert!(err.contains("tessdata download failed"), "{err}");
         assert!(err.contains("previous version was put back"), "{err}");
+        assert!(err.contains("tracker was started again"), "{err}");
         assert!(!err.contains("left stopped"), "{err}");
         for name in ROLLBACK_BINARIES {
             assert_eq!(
@@ -2303,13 +2473,7 @@ mod tests {
     #[tokio::test]
     async fn a_successful_update_keeps_the_new_binaries() {
         let prefix = prefix_with_binaries();
-        let io = FakeIo {
-            pauses: Default::default(),
-            game_dir: None,
-            verbs: std::sync::Mutex::new(Vec::new()),
-            urls: std::sync::Mutex::new(Vec::new()),
-            install_result: Ok("installed".into()),
-        };
+        let io = FakeIo::new(Ok("installed".into()));
         run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
             .await
             .expect("install ok");
@@ -2319,6 +2483,214 @@ mod tests {
                 b"new"
             );
         }
+    }
+
+    /// GUI-1: a stalled installer used to leave the tracker stopped and the
+    /// banner on "updating" forever. It is stopped at the timeout, the old
+    /// binaries go back and the tracker is started again.
+    #[tokio::test]
+    async fn a_hanging_installer_times_out_restores_and_restarts() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            install_hangs: true,
+            timeout: Duration::from_millis(50),
+            ..FakeIo::new(Ok("never".into()))
+        };
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_planned_update(&run_request(true), ready_plan(prefix.path()), &io),
+        )
+        .await
+        .expect("the update must not hang with the installer")
+        .expect_err("a timed-out install is a failure");
+        assert!(err.contains("did not finish"), "{err}");
+        assert!(err.contains("previous version was put back"), "{err}");
+        assert!(err.contains("tracker was started again"), "{err}");
+        for name in ROLLBACK_BINARIES {
+            assert_eq!(
+                std::fs::read(prefix.path().join("bin").join(name)).unwrap(),
+                b"old",
+                "{name} restored after the timeout"
+            );
+        }
+        assert_eq!(
+            io.verbs.lock().expect("verbs").as_slice(),
+            &[DaemonVerb::Stop, DaemonVerb::Start],
+            "the tracker is not left stopped"
+        );
+    }
+
+    #[test]
+    fn install_timeout_message_names_the_limit() {
+        assert_eq!(
+            install_timeout_message(INSTALL_TIMEOUT),
+            "The installer did not finish within 10 minutes, so it was stopped."
+        );
+        assert_eq!(
+            install_timeout_message(Duration::from_secs(45)),
+            "The installer did not finish within 45 seconds, so it was stopped."
+        );
+    }
+
+    /// The Start result used to be dropped, so a tracker that did not come
+    /// back after an update looked like a clean update.
+    #[tokio::test]
+    async fn a_failed_start_after_a_good_update_is_reported() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            start_result: Err("unit failed".into()),
+            ..FakeIo::new(Ok("Installed stat-tracker-v0.4.15.".into()))
+        };
+        let msg = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
+            .await
+            .expect("the install itself worked");
+        assert!(msg.starts_with("Installed stat-tracker-v0.4.15."), "{msg}");
+        assert!(
+            msg.contains("Starting the tracker again failed (unit failed)"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_after_a_rollback_is_reported() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            start_result: Err("unit failed".into()),
+            ..FakeIo::new(Err("Installer failed".into()))
+        };
+        let err = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
+            .await
+            .expect_err("install failed");
+        assert!(err.contains("previous version was put back"), "{err}");
+        assert!(!err.contains("tracker was started again"), "{err}");
+        assert!(
+            err.contains("Starting the tracker again failed (unit failed)"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn installer_output_goes_to_the_log_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(INSTALL_LOG);
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg("echo to-stdout; echo to-stderr >&2");
+        let status = run_logged(cmd, &log).await.expect("ran");
+        assert!(status.success());
+        let text = std::fs::read_to_string(&log).expect("log");
+        assert!(text.contains("to-stdout"), "{text}");
+        assert!(text.contains("to-stderr"), "{text}");
+    }
+
+    fn process_gone(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            // `pid (comm) Z ...`: dead, waiting to be reaped.
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z')),
+        }
+    }
+
+    /// The timeout drops the install future. That must kill the installer's
+    /// children too (curl), not only bash.
+    #[tokio::test]
+    async fn dropping_the_installer_kills_its_children() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join(INSTALL_LOG);
+        let pidfile = dir.path().join("child.pid");
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(format!(
+            "sleep 60 & echo $! > '{}'; wait",
+            pidfile.display()
+        ));
+        let run = run_logged(cmd, &log);
+        tokio::pin!(run);
+        let mut child_pid = None;
+        for _ in 0..200 {
+            tokio::select! {
+                _ = &mut run => panic!("the installer exited early"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+            if let Some(pid) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok())
+            {
+                child_pid = Some(pid);
+                break;
+            }
+        }
+        let pid = child_pid.expect("the child wrote its pid");
+        assert!(!process_gone(pid), "the child runs before the drop");
+        drop(run);
+        let mut gone = false;
+        for _ in 0..300 {
+            if process_gone(pid) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(gone, "child {pid} outlived the dropped installer");
+    }
+
+    #[test]
+    fn update_recheck_is_due_every_six_hours() {
+        let start = std::time::Instant::now();
+        let later = |secs: u64| start + Duration::from_secs(secs);
+        let idle = UpdateProgress::Idle;
+        assert!(!update_recheck_due(true, &idle, Some(start), later(60)));
+        assert!(!update_recheck_due(
+            true,
+            &idle,
+            Some(start),
+            later(6 * 3600 - 1)
+        ));
+        assert!(update_recheck_due(
+            true,
+            &idle,
+            Some(start),
+            later(6 * 3600)
+        ));
+        assert!(update_recheck_due(
+            true,
+            &UpdateProgress::Failed("x".into()),
+            Some(start),
+            later(7 * 3600)
+        ));
+        assert!(
+            !update_recheck_due(true, &UpdateProgress::Running, Some(start), later(7 * 3600)),
+            "not mid-update"
+        );
+        assert!(
+            !update_recheck_due(false, &idle, Some(start), later(7 * 3600)),
+            "not in fixture mode"
+        );
+        assert!(
+            !update_recheck_due(true, &idle, None, later(7 * 3600)),
+            "the start check comes first"
+        );
+    }
+
+    #[test]
+    fn recheck_applies_only_to_a_different_version() {
+        let info = |v: &str| UpdateInfo {
+            latest: v.into(),
+            current: "0.5.0-rc.5".into(),
+            url: String::new(),
+            release_bodies: Vec::new(),
+        };
+        assert!(!recheck_applies(Some(&info("0.5.0-rc.6")), None));
+        assert!(!recheck_applies(None, None));
+        assert!(!recheck_applies(
+            Some(&info("0.5.0-rc.6")),
+            Some(&info("0.5.0-rc.6"))
+        ));
+        assert!(recheck_applies(
+            Some(&info("0.5.0-rc.6")),
+            Some(&info("0.5.0-rc.7"))
+        ));
+        assert!(recheck_applies(None, Some(&info("0.5.0-rc.6"))));
     }
 
     #[test]

@@ -28,6 +28,31 @@ pass "no minisign public key is shipped"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# A stalled download must fail, not hang: the in-app update has the tracker
+# stopped while this script runs. Run the helper against a stand-in curl and
+# check what it was called with.
+mkdir -p "$TMP/fakecurl"
+cat > "$TMP/fakecurl/curl" << EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$TMP/curl-args"
+EOF
+chmod +x "$TMP/fakecurl/curl"
+PATH="$TMP/fakecurl:$PATH" curl_https -o "$TMP/out" "https://example.invalid/x"
+mapfile -t curl_args < "$TMP/curl-args"
+has_pair() {
+    local flag="$1" value="$2" i
+    for ((i = 0; i + 1 < ${#curl_args[@]}; i++)); do
+        [[ "${curl_args[i]}" == "$flag" && "${curl_args[i + 1]}" == "$value" ]] && return 0
+    done
+    return 1
+}
+has_pair --proto '=https' || fail "curl_https dropped --proto =https: ${curl_args[*]}"
+has_pair --connect-timeout 15 || fail "curl_https has no connect timeout: ${curl_args[*]}"
+has_pair --speed-limit 1024 || fail "curl_https has no stall limit: ${curl_args[*]}"
+has_pair --speed-time 60 || fail "curl_https has no stall window: ${curl_args[*]}"
+[[ "${curl_args[-1]}" == "https://example.invalid/x" ]] || fail "curl_https lost the URL: ${curl_args[*]}"
+pass "curl_https gives up on a stalled connect or transfer"
+
 # Already-pinned process must not download again (breaks the re-exec loop).
 cat > "$TMP/fetch-fail" << EOF
 #!/bin/bash

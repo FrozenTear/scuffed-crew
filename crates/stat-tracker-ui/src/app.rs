@@ -167,14 +167,44 @@ fn toast_after_dismiss() -> Option<String> {
 }
 
 /// R2-1 on #241: true when this Tick should act on a quit request. While an
-/// in-app update runs, the installer's stdout and stderr are pipes to this
-/// process; quitting would close them and kill the installer with SIGPIPE
-/// on its next line, mid-install. So the request is not even polled then:
+/// in-app update runs, quitting would drop the update half way, with the
+/// tracker stopped and nothing left to start it again (GUI-2). So the
+/// request is not even polled then:
 /// it stays pending and fires on the first Tick after the update ends, if
 /// the replacing launch is still waiting. A launch that gave up removed the
 /// request and asked this GUI to show instead.
 fn quit_request_due(progress: &UpdateProgress, poll: impl FnOnce() -> bool) -> bool {
     !matches!(progress, UpdateProgress::Running) && poll()
+}
+
+/// GUI-2: tray Quit, or closing the window with no tray, while an in-app
+/// update runs. Exiting then dropped the update half way: the tracker was
+/// stopped and nothing started it again. The quit waits for the update.
+#[derive(Debug, Default)]
+struct QuitGate {
+    deferred: bool,
+}
+
+impl QuitGate {
+    /// True: exit now. False: the quit runs when the update finishes.
+    fn request(&mut self, progress: &UpdateProgress) -> bool {
+        if matches!(progress, UpdateProgress::Running) {
+            self.deferred = true;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// The player showed the window again: they no longer want to quit.
+    fn cancel(&mut self) {
+        self.deferred = false;
+    }
+
+    /// The update ended. True: run the quit that waited for it.
+    fn update_finished(&mut self) -> bool {
+        std::mem::take(&mut self.deferred)
+    }
 }
 
 /// A toast that is not the training prompt. Replacing the text drops the
@@ -245,7 +275,6 @@ pub enum Message {
     CaptureNow,
     CaptureReady(Result<PreviewShot, String>),
     InstallModel,
-    RebuildModel,
     ModelReady(Result<String, String>),
     /// The reader packs in the data dir, looked at off the UI thread.
     /// `turn_off` is a click that asked to turn classic OCR off and waits
@@ -262,6 +291,9 @@ pub enum Message {
     ClearData,
     ClearReady(Result<String, String>),
     UpdateChecked(Option<UpdateInfo>),
+    /// The periodic re-check (GUI-7). Applied only when it offers a
+    /// different version, so a network blip does not hide the banner.
+    UpdateRechecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
     OpenUninstall,
@@ -458,6 +490,9 @@ pub struct TrackerApp {
     snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
+    /// Last update check started (GUI-7). `None` in fixture mode.
+    last_update_check: Option<std::time::Instant>,
+    quit_gate: QuitGate,
     window_id: Option<window::Id>,
     tick_count: u64,
     tray: Option<TrayHandle>,
@@ -667,6 +702,8 @@ impl TrackerApp {
             snapshot_mtime,
             seasons_url,
             last_seasons_attempt,
+            last_update_check: None,
+            quit_gate: QuitGate::default(),
             window_id: Some(window_id),
             tick_count: 0,
             tray: tray::try_create(),
@@ -721,6 +758,7 @@ impl TrackerApp {
                 update::check_for_update(),
                 Message::UpdateChecked,
             ));
+            app.last_update_check = Some(std::time::Instant::now());
             tasks.push(Task::perform(
                 daemon::systemd_enabled(),
                 Message::AutostartReady,
@@ -1225,6 +1263,7 @@ impl TrackerApp {
                                 update::check_for_update(),
                                 Message::UpdateChecked,
                             ));
+                            self.last_update_check = Some(std::time::Instant::now());
                         }
                         if !tasks.is_empty() {
                             return Task::batch(tasks);
@@ -1318,14 +1357,10 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.tessdata_busy = true;
-                Task::perform(capture::install_reading_model(), Message::ModelReady)
-            }
-            Message::RebuildModel => {
-                if self.fixture.is_some() || self.tessdata_busy {
-                    return Task::none();
-                }
-                self.tessdata_busy = true;
-                Task::perform(capture::rebuild_reading_model(), Message::ModelReady)
+                Task::perform(
+                    capture::install_reading_model(update::default_install_prefix()),
+                    Message::ModelReady,
+                )
             }
             Message::ModelReady(result) => {
                 self.tessdata_busy = false;
@@ -1413,6 +1448,16 @@ impl TrackerApp {
                     });
                 self.update = info;
                 Task::none()
+            }
+            Message::UpdateRechecked(info) => {
+                if !update::recheck_applies(self.update.as_ref(), info.as_ref()) {
+                    return Task::none();
+                }
+                if matches!(self.update_progress, UpdateProgress::Failed(_)) {
+                    // The old error was about the version this replaces.
+                    self.update_progress = UpdateProgress::Idle;
+                }
+                self.update(Message::UpdateChecked(info))
             }
             Message::OpenAbout => {
                 let remember = self.notes_dialog.as_ref().and_then(|d| d.remember.clone());
@@ -1647,6 +1692,10 @@ impl TrackerApp {
                     }
                 }
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                if self.quit_gate.update_finished() {
+                    tracing::info!("update finished: running the quit that waited for it");
+                    return self.exit_now();
+                }
                 Task::none()
             }
             Message::GuiBuildProbed { stamp, result } => {
@@ -1728,10 +1777,13 @@ impl TrackerApp {
                 if self.window_id == Some(id) {
                     self.window_id = None;
                 }
-                // No tray and no window: nothing can restore us, exit.
-                if self.window_id.is_none() && self.tray.is_none() {
-                    overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
-                    iced::exit()
+                // No tray and no window: nothing can restore us, exit. During
+                // an update the exit waits for it (GUI-2).
+                if self.window_id.is_none()
+                    && self.tray.is_none()
+                    && self.quit_gate.request(&self.update_progress)
+                {
+                    self.exit_now()
                 } else {
                     Task::none()
                 }
@@ -2508,6 +2560,19 @@ impl TrackerApp {
             ));
         }
 
+        if update::update_recheck_due(
+            self.fixture.is_none(),
+            &self.update_progress,
+            self.last_update_check,
+            std::time::Instant::now(),
+        ) {
+            self.last_update_check = Some(std::time::Instant::now());
+            tasks.push(Task::perform(
+                update::check_for_update(),
+                Message::UpdateRechecked,
+            ));
+        }
+
         let now = Utc::now();
         if seasons::should_refetch(
             self.fixture.is_some(),
@@ -2536,13 +2601,25 @@ impl TrackerApp {
     fn apply_tray(&mut self, action: TrayAction) -> Task<Message> {
         match action {
             TrayAction::Quit => {
-                overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
-                iced::exit()
+                if self.quit_gate.request(&self.update_progress) {
+                    self.exit_now()
+                } else {
+                    tracing::info!("quit waits for the update in progress");
+                    self.hide_window()
+                }
             }
-            TrayAction::Show => self.show_window(),
+            TrayAction::Show => {
+                self.quit_gate.cancel();
+                self.show_window()
+            }
             TrayAction::Hide => self.hide_window(),
             TrayAction::ToggleOverlay => self.toggle_overlay(),
         }
+    }
+
+    fn exit_now(&mut self) -> Task<Message> {
+        overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
+        iced::exit()
     }
 
     fn toggle_overlay(&mut self) -> Task<Message> {
@@ -3415,6 +3492,111 @@ token = \"secret-token-must-stay\"
         }
         assert_eq!(polled.get(), 3);
         assert!(!super::quit_request_due(&UpdateProgress::Idle, || false));
+    }
+
+    #[test]
+    fn quit_gate_defers_a_quit_until_the_update_ends() {
+        use crate::update::UpdateProgress;
+        let mut gate = super::QuitGate::default();
+        assert!(
+            !gate.request(&UpdateProgress::Running),
+            "no exit mid-update"
+        );
+        assert!(gate.update_finished(), "the waiting quit runs");
+        assert!(!gate.update_finished(), "only once");
+
+        for done in [
+            UpdateProgress::Idle,
+            UpdateProgress::Succeeded("ok".into()),
+            UpdateProgress::Failed("no".into()),
+        ] {
+            let mut gate = super::QuitGate::default();
+            assert!(gate.request(&done), "{done:?} exits at once");
+            assert!(!gate.update_finished(), "{done:?} leaves nothing pending");
+        }
+
+        let mut gate = super::QuitGate::default();
+        assert!(!gate.request(&UpdateProgress::Running));
+        gate.cancel();
+        assert!(!gate.update_finished(), "Show cancelled the quit");
+    }
+
+    fn fixture_app(tmp: &std::path::Path) -> super::TrackerApp {
+        let cli = crate::cli::Cli {
+            data_dir: tmp.to_path_buf(),
+            fixture: Some(crate::cli::FixtureKind::Empty),
+            seasons_url: None,
+            companion: false,
+            help: false,
+            version: false,
+            replace: false,
+        };
+        super::TrackerApp::new(cli).0
+    }
+
+    /// GUI-2: tray Quit used to call `iced::exit()` mid-update and drop the
+    /// installer with the tracker stopped.
+    #[test]
+    fn tray_quit_during_an_update_waits_for_it() {
+        use crate::update::UpdateProgress;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.update_progress = UpdateProgress::Running;
+        let _ = app.update(super::Message::Tray(TrayAction::Quit));
+        assert!(app.quit_gate.deferred, "the quit waits for the update");
+        assert!(app.window_id.is_none(), "the window is hidden meanwhile");
+        let _ = app.update(super::Message::UpdateFinished(Ok("Installed.".into())));
+        assert!(
+            !app.quit_gate.deferred,
+            "the quit ran when the update ended"
+        );
+
+        app.update_progress = UpdateProgress::Idle;
+        let _ = app.update(super::Message::Tray(TrayAction::Quit));
+        assert!(!app.quit_gate.deferred, "no update: quit at once");
+    }
+
+    #[test]
+    fn closing_the_last_window_without_a_tray_during_an_update_waits() {
+        use crate::update::UpdateProgress;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.tray = None;
+        let id = app.window_id.expect("window open");
+        app.update_progress = UpdateProgress::Running;
+        let _ = app.update(super::Message::WindowClosed(id));
+        assert!(app.quit_gate.deferred);
+        let _ = app.update(super::Message::UpdateFinished(Err("failed".into())));
+        assert!(!app.quit_gate.deferred);
+    }
+
+    /// GUI-7: a re-check that fails keeps the banner; a new version
+    /// replaces it and clears an old error.
+    #[test]
+    fn a_periodic_recheck_only_replaces_the_offer_with_a_new_version() {
+        use crate::update::{UpdateInfo, UpdateProgress};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        let info = |v: &str| UpdateInfo {
+            latest: v.into(),
+            current: "0.5.0-rc.5".into(),
+            url: String::new(),
+            release_bodies: Vec::new(),
+        };
+        app.update = Some(info("0.5.0-rc.6"));
+        let _ = app.update(super::Message::UpdateRechecked(None));
+        assert_eq!(
+            app.update.as_ref().map(|i| i.latest.as_str()),
+            Some("0.5.0-rc.6")
+        );
+
+        app.update_progress = UpdateProgress::Failed("old error".into());
+        let _ = app.update(super::Message::UpdateRechecked(Some(info("0.5.0-rc.7"))));
+        assert_eq!(
+            app.update.as_ref().map(|i| i.latest.as_str()),
+            Some("0.5.0-rc.7")
+        );
+        assert_eq!(app.update_progress, UpdateProgress::Idle);
     }
 
     #[test]
