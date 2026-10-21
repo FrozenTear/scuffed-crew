@@ -2,9 +2,10 @@
 //!
 //! `libpipewire-0.3.so.0` is opened at runtime. The crate does not link
 //! PipeWire, so a host without it still builds and falls back to the
-//! screenshot portal. The stream asks for at most 2 fps. Buffers are
-//! requeued immediately. A frame is copied only while a grab is waiting,
-//! and only the newest buffer in that callback is copied.
+//! screenshot portal. The stream asks for at most `screencast_max_fps`
+//! frames per second (default 4). Buffers are requeued immediately. A frame
+//! is copied only while a grab is waiting, and only the newest buffer in
+//! that callback is copied.
 
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{

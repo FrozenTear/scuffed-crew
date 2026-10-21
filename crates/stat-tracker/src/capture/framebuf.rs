@@ -125,8 +125,8 @@ pub enum RowCopy {
 pub const TAB_OVERLAY_AFTER_PRESS_MS: u64 = 300;
 
 /// Hard stop for that wait, measured from the same press. This is a
-/// constant, not a config key. A 2 fps cap can leave about half a second
-/// between buffers, so the stop sits past one of those gaps. A later check
+/// constant, not a config key. A 2 fps cap (the default is 4, a member can
+/// set 2) can leave about half a second between buffers, so the stop sits past one of those gaps. A later check
 /// still accepts a buffer that arrived in the gap once its arrival is at or
 /// after the overlay delay.
 pub const TAB_GRAB_TIMEOUT_AFTER_PRESS_MS: u64 = 1200;

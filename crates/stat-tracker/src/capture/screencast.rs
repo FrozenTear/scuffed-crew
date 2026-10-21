@@ -711,9 +711,9 @@ pub fn must_close_session(created: bool, succeeded: bool) -> bool {
 }
 
 /// How long a later grab waits for a new buffer before reusing the last
-/// converted frame. One frame period plus 100 ms, so a 2 fps stream
-/// (frames 500 ms apart) waits 600 ms and does not reuse the one before
-/// it. The new-reader poll is 1.5 s, and this stays under that.
+/// converted frame. One frame period plus 100 ms, so the default 4 fps
+/// stream (frames 250 ms apart) waits 350 ms, and 2 fps waits 600 ms, and
+/// neither reuses the one before it. The new-reader poll is 1.5 s, and this stays under that.
 pub fn reuse_wait(max_fps: u32) -> Duration {
     Duration::from_millis(pw::throttle_gap_ms(max_fps).saturating_add(100))
 }

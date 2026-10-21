@@ -436,7 +436,7 @@ pub const LEGACY_DEFAULT_POLL_SECS: u64 = 4;
 pub const POLL_INTERVAL_MS_MIN: u64 = 500;
 pub const POLL_INTERVAL_MS_MAX: u64 = 10_000;
 /// Default screen-stream cap. QA can set `screencast_max_fps` to compare.
-pub const SCREENCAST_MAX_FPS_DEFAULT: u32 = 2;
+pub const SCREENCAST_MAX_FPS_DEFAULT: u32 = 4;
 pub const SCREENCAST_MAX_FPS_MIN: u32 = 1;
 pub const SCREENCAST_MAX_FPS_MAX: u32 = 5;
 
@@ -2842,9 +2842,15 @@ cooldown_secs = 120
     }
 
     #[test]
-    fn screencast_max_fps_defaults_to_two_and_clamps() {
+    fn screencast_max_fps_defaults_to_four_and_clamps() {
+        // rc.6: 2 fps put a Tab's first usable frame up to 500 ms after the
+        // overlay delay, and a short tap closed the board before it. The
+        // default is now 4. A member can still set 2.
         let cfg = Config::default();
-        assert_eq!(cfg.screencast_max_fps(), 2);
+        assert_eq!(cfg.screencast_max_fps(), 4);
+        let mut two = cfg.clone();
+        two.screencast_max_fps = Some(2);
+        assert_eq!(two.screencast_max_fps(), 2);
         assert!(
             !toml::to_string(&cfg)
                 .unwrap()
