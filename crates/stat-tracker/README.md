@@ -233,9 +233,11 @@ status say why. The saved permission is kept. Other desktops (niri, Sway,
 Hyprland, X11) keep their direct capture unless you force the stream.
 
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
-and GNOME when the stream was forced, that grab uses Older screenshot. On
-KDE, and GNOME on the automatic stream, it skips the screenshot, including
-while backing off or after the stream dies. A failed start is not retried
+and GNOME when the stream was forced, that grab uses Older screenshot, and
+so does a Tab or poll grab while the stream is dead, waiting for its
+reopen, or has sent no new frame for 8 seconds. On KDE, and GNOME on the
+automatic stream, it skips the screenshot, including while backing off or
+after the stream dies. A failed start is not retried
 for 30 seconds. If the portal is down, or its cursor-mode property cannot
 be read, the log says the portal is unavailable and the saved permission
 is kept. The next try after that backoff opens the share again. A share
@@ -245,9 +247,11 @@ and a poll that sees no new buffer does not count. The stream is reopened
 when PipeWire reports an error, when it stays unconnected after it had
 been streaming, when a pause lasts 2 seconds, when the portal session
 closes, or when the connection faults. Two Tab waits that get no PipeWire
-buffer do the same. The reopen runs on the next poll, once per game, and
-at least 5 minutes after the last reopen. A new game clears the miss
-streak and the once-per-game cap. It does not clear the 5 minute clock.
+buffer do the same. The reopen runs on the next poll, at least 1 minute
+after the last reopen. Each further reopen in the same game doubles that
+gap, up to 5 minutes, so a stream that stalls again is reopened again
+rather than left dead. A new game clears the miss streak and drops the gap
+back to 1 minute. It does not clear the clock.
 Without a saved permission the stream stays up and one warning is logged.
 A permission dialog that times out is a No until the next Overwatch
 launch only when no restore token was sent. A timeout after a token was
