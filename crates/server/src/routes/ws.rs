@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use dashmap::DashMap;
 use scuffed_site_server::rate_limit::TrustedProxyIpKeyExtractor;
 
-use crate::collab::{JoinError, RoomManager};
+use crate::collab::{JoinError, PersistError, RoomManager};
 use scuffed_site_server::state::AppState;
 use scuffed_types::strategy::{
     ClientMessage, CollabUserInfo, ServerMessage, StrategyId, WsRequest, WsResponse,
@@ -350,6 +350,41 @@ fn busy_error() -> ServerMessage {
     }
 }
 
+/// Same client string as the strategy content HTTP save, in the socket
+/// `ServerMessage::Error` shape this handler already returns.
+fn save_error() -> ServerMessage {
+    ServerMessage::Error {
+        message: "Failed to save strategy content".into(),
+    }
+}
+
+/// Write first. Broadcast only when that write returns `Ok`.
+async fn persist_edit<F, Fut>(
+    state: &WsState,
+    room_id: &StrategyId,
+    connection_id: &str,
+    message: ServerMessage,
+    what: &str,
+    work: F,
+) -> Option<ServerMessage>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = scuffed_db::DbResult<()>> + Send,
+{
+    match state
+        .rooms
+        .persist_then_broadcast(room_id, connection_id, message, work)
+        .await
+    {
+        Ok(()) => None,
+        Err(PersistError::Busy) => Some(busy_error()),
+        Err(PersistError::Failed(e)) => {
+            tracing::error!("Failed to persist {what} for strategy {room_id}: {e}");
+            Some(save_error())
+        }
+    }
+}
+
 /// Handle a single client message
 async fn handle_message(
     state: &WsState,
@@ -456,23 +491,18 @@ async fn handle_message(
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let elem = element.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Err(e) = db.add_strategy_element(&rid, &elem).await {
-                    tracing::error!("Failed to persist element add for strategy {rid}: {e}");
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::ElementAdded {
                     by: u.id.clone(),
                     element,
                 },
-            );
-            None
+                "element add",
+                move || async move { db.add_strategy_element(&rid, &elem).await },
+            )
+            .await;
         }
 
         ClientMessage::ElementUpdate { id, changes } => {
@@ -500,24 +530,13 @@ async fn handle_message(
                 });
             }
 
-            // Load → patch → save under per-strategy lock (via try_spawn_persist)
+            // Load, patch, then save under the per-strategy lock. Broadcast
+            // only after that write returns Ok.
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let patch = changes.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Ok(Some(strategy)) = db.get_strategy(&rid).await
-                    && let Some(mut elem) = strategy.elements.into_iter().find(|e| e.id == id)
-                {
-                    elem.apply_patch(&patch);
-                    if let Err(e) = db.update_strategy_element(&rid, id, &elem).await {
-                        tracing::error!("Failed to persist element update for strategy {rid}: {e}");
-                    }
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::ElementUpdated {
@@ -525,8 +544,18 @@ async fn handle_message(
                     id,
                     changes,
                 },
-            );
-            None
+                "element update",
+                move || async move {
+                    if let Some(strategy) = db.get_strategy(&rid).await?
+                        && let Some(mut elem) = strategy.elements.into_iter().find(|e| e.id == id)
+                    {
+                        elem.apply_patch(&patch);
+                        db.update_strategy_element(&rid, id, &elem).await?;
+                    }
+                    Ok(())
+                },
+            )
+            .await;
         }
 
         ClientMessage::ElementDelete { id } => {
@@ -556,23 +585,18 @@ async fn handle_message(
 
             let db = state.app.db.clone();
             let rid = room_id.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Err(e) = db.delete_strategy_element(&rid, id).await {
-                    tracing::error!("Failed to persist element delete for strategy {rid}: {e}");
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::ElementDeleted {
                     by: u.id.clone(),
                     id,
                 },
-            );
-            None
+                "element delete",
+                move || async move { db.delete_strategy_element(&rid, id).await },
+            )
+            .await;
         }
 
         ClientMessage::PhaseAdd { phase } => {
@@ -603,23 +627,18 @@ async fn handle_message(
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let p = phase.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Err(e) = db.add_strategy_phase(&rid, &p).await {
-                    tracing::error!("Failed to persist phase add for strategy {rid}: {e}");
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::PhaseAdded {
                     by: u.id.clone(),
                     phase,
                 },
-            );
-            None
+                "phase add",
+                move || async move { db.add_strategy_phase(&rid, &p).await },
+            )
+            .await;
         }
 
         ClientMessage::PhaseUpdate { id, changes } => {
@@ -650,20 +669,8 @@ async fn handle_message(
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let patch = changes.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Ok(Some(strategy)) = db.get_strategy(&rid).await
-                    && let Some(mut phase) = strategy.phases.into_iter().find(|p| p.id == id)
-                {
-                    phase.apply_patch(&patch);
-                    if let Err(e) = db.update_strategy_phase(&rid, id, &phase).await {
-                        tracing::error!("Failed to persist phase update for strategy {rid}: {e}");
-                    }
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::PhaseUpdated {
@@ -671,8 +678,18 @@ async fn handle_message(
                     id,
                     changes,
                 },
-            );
-            None
+                "phase update",
+                move || async move {
+                    if let Some(strategy) = db.get_strategy(&rid).await?
+                        && let Some(mut phase) = strategy.phases.into_iter().find(|p| p.id == id)
+                    {
+                        phase.apply_patch(&patch);
+                        db.update_strategy_phase(&rid, id, &phase).await?;
+                    }
+                    Ok(())
+                },
+            )
+            .await;
         }
 
         ClientMessage::PhaseDelete { id } => {
@@ -702,23 +719,18 @@ async fn handle_message(
 
             let db = state.app.db.clone();
             let rid = room_id.clone();
-            if !state.rooms.try_spawn_persist(room_id, move || async move {
-                if let Err(e) = db.delete_strategy_phase(&rid, id).await {
-                    tracing::error!("Failed to persist phase delete for strategy {rid}: {e}");
-                }
-            }) {
-                return Some(busy_error());
-            }
-
-            state.rooms.broadcast(
+            return persist_edit(
+                state,
                 room_id,
                 connection_id,
                 ServerMessage::PhaseDeleted {
                     by: u.id.clone(),
                     id,
                 },
-            );
-            None
+                "phase delete",
+                move || async move { db.delete_strategy_phase(&rid, id).await },
+            )
+            .await;
         }
 
         ClientMessage::CursorMove { position } => {
@@ -1390,5 +1402,97 @@ mod strategies_gate_tests {
         let body = join_room(&state, addr, &id, Some("other-token"), None).await;
         assert_eq!(body["type"], "error", "{body}");
         assert_eq!(body["message"], "Access denied");
+    }
+
+    /// A rejected content write must not fan the edit out. The sender gets the
+    /// existing socket error shape; the peer channel stays empty.
+    #[tokio::test]
+    async fn failed_element_add_persist_does_not_broadcast() {
+        let app = test_state().await;
+        set_strategies_enabled(&app, true).await;
+        let owner_id = seed_account(&app, "owner", "owner-token", true).await;
+        let strategy_id = insert_private(&app, &owner_id).await;
+
+        // Reads used by the edit check still succeed. The next content UPDATE
+        // writes `name` and fails this ASSERT.
+        app.db
+            .client
+            .query(
+                "DEFINE FIELD OVERWRITE name ON strategy TYPE string \
+                 ASSERT $value = 'reject-writes'",
+            )
+            .await
+            .expect("define field")
+            .check()
+            .expect("schema assert");
+
+        let can_edit = app
+            .db
+            .can_edit_strategy(&strategy_id, &owner_id)
+            .await
+            .expect("edit check still reads");
+        assert!(can_edit, "owner can still edit before the rejected write");
+
+        let state = test_ws_state(app.clone(), 8, 32, WS_JOIN_TIMEOUT);
+        let (sender_tx, _sender_rx) = tokio::sync::mpsc::channel(8);
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(8);
+        let owner = CollabUserInfo {
+            id: owner_id.clone(),
+            username: "owner".into(),
+            avatar_url: None,
+        };
+        state
+            .rooms
+            .join_room(
+                &strategy_id,
+                "sender".into(),
+                owner.clone(),
+                sender_tx.clone(),
+            )
+            .expect("sender join");
+        state
+            .rooms
+            .join_room(&strategy_id, "peer".into(), owner.clone(), peer_tx)
+            .expect("peer join");
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "peer should have no message before the edit"
+        );
+
+        let element = scuffed_types::strategy::StrategyElement::new(
+            scuffed_types::strategy::ElementType::PlayerMarker,
+            scuffed_types::strategy::Position::new(1.0, 2.0),
+        );
+        let mut room = Some(strategy_id.clone());
+        let reply = handle_message(
+            &state,
+            ClientMessage::ElementAdd { element },
+            &Some(owner),
+            "sender",
+            &mut room,
+            sender_tx,
+        )
+        .await;
+
+        match reply {
+            Some(ServerMessage::Error { message }) => {
+                assert_eq!(message, "Failed to save strategy content");
+            }
+            other => panic!("expected save error, got {other:?}"),
+        }
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "failed persist must not broadcast to the peer"
+        );
+        let stored = app
+            .db
+            .get_strategy(&strategy_id)
+            .await
+            .expect("read strategy")
+            .expect("strategy remains");
+        assert!(
+            stored.elements.is_empty(),
+            "rejected write must not store the element"
+        );
     }
 }
