@@ -1317,10 +1317,10 @@ async fn wrong_method_does_not_spend_the_rate_limit() {
     let state = test_state(tree.uploads()).await;
     let app = create_router_with_dist(state, tree.dist());
 
-    // Public governor: 40 burst, then one request every 200ms. More wrong
+    // Public governor: 100 burst, then one request every 100ms. More wrong
     // methods than that burst must stay 405, and the following GET must run.
     let public_peer = [203, 0, 113, 44];
-    for n in 0..45 {
+    for n in 0..110 {
         let (status, headers, body) = exchange_from(
             app.clone(),
             Method::POST,

@@ -24,7 +24,7 @@ use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 
 /// Public governor budget from `create_router_with_dist`.
-const PUBLIC_BURST: usize = 40;
+const PUBLIC_BURST: usize = 100;
 
 async fn test_state(relay_url: Option<String>) -> AppState {
     let db = Database::connect_memory().await.expect("in-memory DB");
@@ -124,15 +124,32 @@ const ANONYMOUS_READS: &[&str] = &[
     "/sitemap.xml",
 ];
 
+/// Spend `peer`'s public budget: GET `/api/teams` until the first 429.
+/// Returns how many requests succeeded first.
+///
+/// The bucket refills one token per 100 ms while the loop runs, so the count
+/// can exceed the burst slightly; it can never be below it.
+async fn drain(app: &axum::Router, peer: [u8; 4]) -> usize {
+    for ok in 0..(PUBLIC_BURST * 4) {
+        let (status, _, body) = call(app, Method::GET, "/api/teams", peer).await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return ok;
+        }
+        assert_eq!(status, StatusCode::OK, "request {ok}: {body}");
+    }
+    panic!("GET /api/teams was never rate limited");
+}
+
 #[tokio::test]
 async fn anonymous_reads_share_the_public_per_ip_budget() {
     let app = create_router(test_state(None).await);
     let peer = [203, 0, 113, 77];
 
-    for i in 0..PUBLIC_BURST {
-        let (status, _, body) = call(&app, Method::GET, "/api/teams", peer).await;
-        assert_eq!(status, StatusCode::OK, "burst {i}: {body}");
-    }
+    let allowed = drain(&app, peer).await;
+    assert!(
+        (PUBLIC_BURST..PUBLIC_BURST * 2).contains(&allowed),
+        "expected the {PUBLIC_BURST} burst before the first 429, got {allowed}"
+    );
     let (status, headers, body) = call(&app, Method::GET, "/api/teams", peer).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert!(headers.get(header::RETRY_AFTER).is_some());
@@ -144,8 +161,11 @@ async fn anonymous_reads_share_the_public_per_ip_budget() {
         "{headers:?}"
     );
 
-    // One bucket for every anonymous read: the spent budget blocks them all.
+    // One bucket for every anonymous read: once `/api/teams` has spent it,
+    // each of them is refused. Re-drain first so a token that refilled in
+    // the meantime cannot let one through.
     for path in ANONYMOUS_READS {
+        drain(&app, peer).await;
         let (status, _, body) = call(&app, Method::GET, path, peer).await;
         assert_eq!(
             status,

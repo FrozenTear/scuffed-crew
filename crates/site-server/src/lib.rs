@@ -219,30 +219,39 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
-    // Per-IP rate limit for anonymous reads (HS-DR P1): 40-burst, then 1 every
-    // 200ms (≈5/s sustained). Hero-filter aggregates made DoS amplification
-    // cheap while these were unthrottled.
+    // Per-IP rate limit for anonymous reads (HS-DR P1): 100-burst, then 1
+    // every 100ms (≈10/s sustained). Hero-filter aggregates made DoS
+    // amplification cheap while these were unthrottled.
     //
-    // One shared per-IP bucket covers every GET in `public_routes`: the
+    // One shared per-IP bucket covers every site-server GET in `public_routes`: the
     // `/api/public/*` aggregates, ICS feeds, NIP-05, the auth probes (NS2-6),
     // and the anonymous reads of the main API plus `/sitemap.xml` (API-9 /
     // SEC-5). NS2-6 claimed to cover every unauthenticated route but left
     // the main API reads outside; API-9 moved them in. An attacker does not
     // care *which* endpoint amplifies for them, so one bucket is the honest
     // boundary; a per-group budget would hand the same source several
-    // independent ones. 40-burst absorbs a page load that fans out across
-    // several of these, and 5/s sustained is far above any real
-    // calendar-client poll (ICS refresh is measured in minutes, not seconds).
+    // independent ones.
+    //
+    // API-9 raised the budget from 40-burst / 5/s when the main API reads
+    // joined: signed-in members draw on it too, and several members behind
+    // one NAT (a LAN event) share one key. The events page alone fetches an
+    // RSVP summary per event. The bucket cannot be keyed per member because
+    // the key extractor runs before auth. The expensive reads behind it
+    // (sitemap, Nostr feed, relay probe) are cached, so a wider budget no
+    // longer buys an attacker much. 10/s sustained is still far above any
+    // real calendar-client poll (ICS refresh is measured in minutes).
     //
     // Still outside it: `/api/health` (liveness probes, no DB), `/robots.txt`
     // (fixed string), the SPA shell and static files (served by the fallback),
     // and routes with their own limiter (auth, uploads, packs, device link,
-    // stat reports). Authenticated-only routes are not here.
+    // stat reports). Authenticated-only routes are not here, and neither are
+    // the strategy GETs that `crates/server` adds (`/api/strategy/*`), which
+    // have no per-IP limiter yet.
     let public_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_millisecond(200)
-            .burst_size(40)
+            .per_millisecond(100)
+            .burst_size(100)
             .finish()
             .expect("valid public governor config"),
     );
