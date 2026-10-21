@@ -90,8 +90,14 @@ assert_safe_tag() {
 }
 
 # HTTPS only. --proto '=https' refuses http, file, and a redirect onto them.
+# A stalled connection must fail instead of hanging: the in-app update stops
+# the tracker before it runs this script, so a curl that never returns left
+# the tracker stopped. Give up when the connect takes over 15 s, or when the
+# transfer stays under 1 KiB/s for 60 s. A slow download that still moves is
+# not cut off.
+CURL_TIMEOUT_ARGS=(--connect-timeout 15 --speed-limit 1024 --speed-time 60)
 curl_https() {
-    curl --proto '=https' -fsSL "$@"
+    curl --proto '=https' -fsSL "${CURL_TIMEOUT_ARGS[@]}" "$@"
 }
 
 fetch_to() {

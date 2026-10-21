@@ -13,8 +13,8 @@
 //!
 //! The running GUI polls both files on its Tick. `show_window` runs the tray
 //! "Show" path and `quit_window` runs the tray "Quit" path. While an in-app
-//! update runs, the GUI leaves `quit_window` unpolled: the installer writes
-//! to pipes this process holds, and quitting would kill it with SIGPIPE.
+//! update runs, the GUI leaves `quit_window` unpolled: quitting would drop
+//! the update, which stops the installer half way with the tracker stopped.
 //!
 //! A replacing launch removes `quit_window` once its wait ends, whether it
 //! got the lock or not, and a new primary removes both request files left

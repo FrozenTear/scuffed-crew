@@ -58,24 +58,50 @@ pub fn tessdata_installed() -> bool {
         .exists()
 }
 
-pub async fn install_reading_model() -> Result<String, String> {
-    tokio::task::spawn_blocking(|| {
-        stat_tracker::setup::ensure_koverwatch_tessdata()
-            .map(|_| "Reading model is installed".to_string())
-            .map_err(|e| format!("Could not install the reading model: {e}"))
+/// Settings → Install reading model. Puts back the model that ships with
+/// the release (READ-1). It never trains on this host: that needs text2image,
+/// which hangs or segfaults on most current distros.
+pub async fn install_reading_model(install_prefix: std::path::PathBuf) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let dirs = stat_tracker::setup::bundled_tessdata_dirs(Some(&install_prefix));
+        let restored = stat_tracker::setup::restore_bundled_koverwatch(
+            &dirs,
+            &stat_tracker::setup::tessdata_dir(),
+        );
+        model_install_message(restored, &reinstall_command())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-pub async fn rebuild_reading_model() -> Result<String, String> {
-    tokio::task::spawn_blocking(|| {
-        stat_tracker::setup::regenerate_koverwatch_tessdata()
-            .map(|_| "Reading model rebuilt".to_string())
-            .map_err(|e| format!("Could not rebuild the reading model: {e}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+/// The pinned one-liner for the installed version, which ships the model.
+fn reinstall_command() -> String {
+    crate::update::install_command_for(None, crate::update::current_version().as_deref())
+}
+
+pub(crate) fn model_install_message(
+    restored: std::io::Result<stat_tracker::setup::ModelRestore>,
+    reinstall: &str,
+) -> Result<String, String> {
+    use stat_tracker::setup::ModelRestore;
+    match restored {
+        Ok(ModelRestore::AlreadyCurrent) => {
+            Ok("The reading model is installed and matches this release.".into())
+        }
+        Ok(ModelRestore::Restored { backup: None, .. }) => {
+            Ok("Reading model installed from this release.".into())
+        }
+        Ok(ModelRestore::Restored {
+            backup: Some(bak), ..
+        }) => Ok(format!(
+            "Reading model installed from this release. The one that was there is kept at {}.",
+            bak.display()
+        )),
+        Ok(ModelRestore::NoBundledCopy) => Err(format!(
+            "This install has no copy of the reading model to put back. Reinstall the tracker to get it: {reinstall}"
+        )),
+        Err(e) => Err(format!("Could not install the reading model: {e}")),
+    }
 }
 
 pub async fn vacuum_store(data_dir: std::path::PathBuf) -> Result<String, String> {
@@ -122,6 +148,39 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn missing_bundled_model_names_the_reinstall_command() {
+        let err = super::model_install_message(
+            Ok(stat_tracker::setup::ModelRestore::NoBundledCopy),
+            "curl … | bash",
+        )
+        .expect_err("nothing to restore");
+        assert!(err.contains("Reinstall the tracker"), "{err}");
+        assert!(err.ends_with("curl … | bash"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn install_puts_back_the_bundled_model_without_training() {
+        // The live path reads the prefix and the user tessdata dir; this
+        // runs the same pieces on temp dirs.
+        let prefix = tempfile::tempdir().unwrap();
+        let bundle = prefix.path().join("share/scuffed-stat-tracker/tessdata");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("koverwatch.traineddata"), b"ci").unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let dirs = stat_tracker::setup::bundled_tessdata_dirs(Some(prefix.path()));
+        let msg = super::model_install_message(
+            stat_tracker::setup::restore_bundled_koverwatch(&dirs, user.path()),
+            "cmd",
+        )
+        .expect("restored");
+        assert_eq!(msg, "Reading model installed from this release.");
+        assert_eq!(
+            std::fs::read(user.path().join("koverwatch.traineddata")).unwrap(),
+            b"ci"
+        );
+    }
 
     #[test]
     fn backend_ready_rejects_missing_and_none() {
