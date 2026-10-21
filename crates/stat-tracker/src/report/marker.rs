@@ -30,6 +30,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 /// must not write the file back. Restored if the exec fails.
 static MARKER_HELD: AtomicBool = AtomicBool::new(true);
 
+/// The heartbeat's lock. `release_run_marker` takes it before clearing
+/// [`MARKER_HELD`], so a touch that already passed that check cannot
+/// recreate the file afterwards.
+static HEARTBEAT: Mutex<Option<Arc<Mutex<Shared>>>> = Mutex::new(None);
+
 pub fn marker_is_held() -> bool {
     MARKER_HELD.load(Ordering::Acquire)
 }
@@ -37,6 +42,15 @@ pub fn marker_is_held() -> bool {
 /// Delete `run.marker` and stop the heartbeat from recreating it.
 /// Returns the text that was there, so a failed exec can put it back.
 pub fn release_run_marker(data_dir: &Path) -> Option<RunMarker> {
+    let shared = HEARTBEAT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    // Hold the heartbeat lock across the flag and the delete. `touch`
+    // checks the flag under this same lock.
+    let _guard = shared
+        .as_ref()
+        .map(|shared| shared.lock().unwrap_or_else(|err| err.into_inner()));
     MARKER_HELD.store(false, Ordering::Release);
     let path = run_marker_path(data_dir);
     let parsed = std::fs::read_to_string(&path)
@@ -317,13 +331,13 @@ impl Drop for RunMarkerGuard {
 pub fn write_run_marker(data_dir: &Path, marker: RunMarker) -> io::Result<RunMarkerGuard> {
     let path = run_marker_path(data_dir);
     write_atomic(&path, &marker)?;
-    Ok(RunMarkerGuard {
-        shared: Arc::new(Mutex::new(Shared {
-            path,
-            marker,
-            stopped: false,
-        })),
-    })
+    let shared = Arc::new(Mutex::new(Shared {
+        path,
+        marker,
+        stopped: false,
+    }));
+    *HEARTBEAT.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(&shared));
+    Ok(RunMarkerGuard { shared })
 }
 
 /// Daemon startup: recover a stale marker, then write this run's marker.

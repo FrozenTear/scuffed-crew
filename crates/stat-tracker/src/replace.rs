@@ -23,8 +23,9 @@ pub const GAME_WAIT_MAX: Duration = Duration::from_secs(60 * 60);
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
 
 /// Exit status the daemon uses when its binary was replaced and systemd
-/// should start the new one. Non-zero, so `Restart=on-failure` covers it.
-/// `systemctl stop` still exits 0 and stays stopped.
+/// should start the new one. `SuccessExitStatus=75` keeps that exit out of
+/// the failure count. `RestartForceExitStatus=75` is what starts the unit
+/// again. `systemctl stop` still exits 0 and stays stopped.
 pub const RESTART_EXIT_CODE: i32 = 75;
 
 /// Set on the re-exec'd process so a stamp that still looks replaced
@@ -325,8 +326,9 @@ pub fn binary_replaced(running: ExeStamp, on_disk: Option<ExeStamp>) -> bool {
 /// How a replaced binary is picked up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartHow {
-    /// Exit [`RESTART_EXIT_CODE`] so systemd `Restart=on-failure` starts
-    /// the unit's `ExecStart` again.
+    /// Exit [`RESTART_EXIT_CODE`] so systemd `RestartForceExitStatus=75`
+    /// starts the unit's `ExecStart` again. `SuccessExitStatus=75` is set
+    /// on the same unit, so `Restart=on-failure` alone would not.
     SystemdExit,
     /// `exec` the on-disk binary. Used when this process is not a service.
     Reexec,
@@ -351,8 +353,62 @@ pub fn under_systemd() -> bool {
 }
 
 /// How long SIGINT and SIGTERM wait before the process continues the exit
-/// anyway. The log names what was still in flight.
+/// anyway. The clock starts when the signal arrives, and every shutdown
+/// step shares that one deadline. The log names what was still in flight.
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+
+static SHUTDOWN_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static SHUTDOWN_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Record the signal instant once. A second signal does not move the clock.
+pub fn note_shutdown_signal() {
+    let mut slot = SHUTDOWN_AT.lock().unwrap_or_else(|err| err.into_inner());
+    if slot.is_none() {
+        *slot = Some(std::time::Instant::now());
+        SHUTDOWN_NOTIFY.notify_waiters();
+    }
+}
+
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN_AT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .is_some()
+}
+
+/// Time left on one deadline. `now` before `started` still has the full limit.
+pub fn shutdown_budget(
+    started: std::time::Instant,
+    now: std::time::Instant,
+    limit: Duration,
+) -> Duration {
+    limit.saturating_sub(now.saturating_duration_since(started))
+}
+
+/// Remainder of the signal deadline. Zero when no signal has arrived, so a
+/// clean exit does not add another wait, and zero once the deadline has passed.
+pub fn shutdown_time_left() -> Duration {
+    match *SHUTDOWN_AT.lock().unwrap_or_else(|err| err.into_inner()) {
+        Some(started) => shutdown_budget(started, std::time::Instant::now(), SHUTDOWN_DEADLINE),
+        None => Duration::ZERO,
+    }
+}
+
+/// Completes when [`note_shutdown_signal`] runs. A signal that already
+/// arrived completes immediately.
+pub async fn shutdown_notified() {
+    let notified = SHUTDOWN_NOTIFY.notified();
+    tokio::pin!(notified);
+    if shutdown_requested() {
+        return;
+    }
+    notified.await;
+}
+
+/// True once a Restart now wait has used the whole cap.
+pub fn game_wait_should_stop(waited: Duration, max: Duration) -> bool {
+    waited >= max
+}
 
 /// After a failed re-exec, wait this long before shutting down to try again.
 pub const EXEC_RETRY_BACKOFF: Duration = Duration::from_secs(600);
@@ -688,6 +744,24 @@ not a lock line
         assert!(keeps_running_after_restart(RestartHow::Reexec, true));
         assert!(!keeps_running_after_restart(RestartHow::Reexec, false));
         assert_eq!(SHUTDOWN_DEADLINE, Duration::from_secs(5));
+        let start = std::time::Instant::now();
+        assert_eq!(
+            shutdown_budget(start, start, SHUTDOWN_DEADLINE),
+            SHUTDOWN_DEADLINE
+        );
+        assert_eq!(
+            shutdown_budget(start, start + Duration::from_secs(2), SHUTDOWN_DEADLINE),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            shutdown_budget(start, start + Duration::from_secs(9), SHUTDOWN_DEADLINE),
+            Duration::ZERO
+        );
+        assert!(game_wait_should_stop(GAME_WAIT_MAX, GAME_WAIT_MAX));
+        assert!(!game_wait_should_stop(
+            GAME_WAIT_MAX - Duration::from_secs(1),
+            GAME_WAIT_MAX
+        ));
         assert_eq!(EXEC_RETRY_BACKOFF, Duration::from_secs(600));
         let now = std::time::Instant::now();
         assert!(exec_retry_due(None, now, EXEC_RETRY_BACKOFF));

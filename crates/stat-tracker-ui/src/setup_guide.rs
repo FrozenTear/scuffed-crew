@@ -235,10 +235,11 @@ pub fn memory_frame_from_image(img: &::image::DynamicImage) -> MemoryFrame {
 pub async fn capture_test_frame(
     backend: stat_tracker::capture::CaptureBackend,
     output: Option<String>,
+    data_dir: std::path::PathBuf,
 ) -> Result<MemoryFrame, String> {
     let backend =
         crate::capture::backend_ready(Some(backend)).map_err(|e| capture_failed_with(&e))?;
-    let img = stat_tracker::capture::capture_screen_oneshot(&backend, output.as_deref())
+    let img = stat_tracker::capture::capture_screen_oneshot(&backend, output.as_deref(), &data_dir)
         .await
         .map_err(|e| capture_failed_with(&e.to_string()))?;
     let frame = tokio::task::spawn_blocking(move || memory_frame_from_image(&img))

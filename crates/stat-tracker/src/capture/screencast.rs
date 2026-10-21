@@ -9,8 +9,10 @@
 //! If the session cannot start, or a grab sees no frame within
 //! [`SCREENCAST_FRAME_WAIT`], a screenshot is used only where that is safe
 //! (niri, wlroots, forced GNOME). KDE skips it and logs. A failed start is
-//! not retried for [`START_BACKOFF`]. The permission dialog times out, and
-//! shutdown aborts it.
+//! not retried for [`START_BACKOFF`]. Cancelling or closing the permission
+//! dialog is a decline: asking stops until the next Overwatch launch, KDE
+//! takes no captures, and the restore token stays. The permission dialog
+//! times out, and shutdown aborts it.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -89,6 +91,10 @@ struct CastState {
     last_timing_log: Instant,
     /// The task that is waiting on the permission dialog. Shutdown aborts it.
     open_task: Option<tokio::task::JoinHandle<()>>,
+    /// Consecutive grabs that found no usable buffer while the session was up.
+    fresh_misses: u32,
+    /// Data dir for the status file. Set on each capture.
+    data_dir: Option<PathBuf>,
 }
 
 impl Default for CastState {
@@ -103,6 +109,8 @@ impl Default for CastState {
             compare_warned: false,
             last_timing_log: Instant::now(),
             open_task: None,
+            fresh_misses: 0,
+            data_dir: None,
         }
     }
 }
@@ -141,8 +149,193 @@ pub fn restore_token_saved(data_dir: &Path) -> bool {
 /// A deliberate close is not a failed start. The failure clock is left as
 /// it was, which is unset while a session was up, so the next capture
 /// opens immediately.
-pub fn last_fail_after_deliberate_close(last_fail: Option<Duration>) -> Option<Duration> {
+pub fn last_fail_after_deliberate_close(last_fail: Option<Instant>) -> Option<Instant> {
     last_fail
+}
+
+/// How many grabs with no usable buffer close a session that is streaming.
+pub const FRESH_MISS_LIMIT: u32 = 3;
+
+pub fn fresh_miss_should_restart(misses: u32, limit: u32) -> bool {
+    misses >= limit
+}
+
+/// No new stream frame. Retried, and never written into debug/rejected.
+pub const STREAM_MISS: &str = "no fresh stream frame";
+
+/// The share dialog is still up. A Tab waits this out on the original press.
+pub const OPEN_IN_PROGRESS: &str = "screencast open in progress";
+
+pub fn is_stream_miss(err: &str) -> bool {
+    err.contains(STREAM_MISS)
+}
+
+pub fn is_share_opening(err: &str) -> bool {
+    err.contains(OPEN_IN_PROGRESS)
+}
+
+/// Set when the share is closed because the game stopped. Cleared when the
+/// next game is seen, so a Tab retry cannot open the dialog again.
+static REOPEN_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// The user cancelled or closed the permission dialog. In memory for this
+/// process. A new Overwatch launch clears it.
+static SHARE_DECLINED: AtomicBool = AtomicBool::new(false);
+
+/// The one decline warning has been written. Cleared with [`SHARE_DECLINED`].
+static DECLINE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub fn note_game_running(running: bool) {
+    if running {
+        REOPEN_BLOCKED.store(false, Ordering::Release);
+    }
+}
+
+/// The sentence for a declined share. KDE, where a screenshot is not safe,
+/// says captures stop. A desktop that already screenshots does not say that.
+pub const KDE_DECLINE_NOTICE: &str =
+    "KDE screen share was declined: no captures until Overwatch is restarted";
+
+pub const SAFE_DECLINE_NOTICE: &str =
+    "Screen share was declined: screenshots continue until Overwatch is restarted";
+
+pub fn decline_notice(fallback_safe: bool) -> &'static str {
+    if fallback_safe {
+        SAFE_DECLINE_NOTICE
+    } else {
+        KDE_DECLINE_NOTICE
+    }
+}
+
+/// A declined share does not open the portal again.
+pub fn share_prompt_allowed(declined: bool) -> bool {
+    !declined
+}
+
+/// While a share is declined, screenshot only where that fallback is already
+/// safe. KDE does not.
+pub fn capture_while_declined(fallback_safe: bool) -> bool {
+    fallback_safe
+}
+
+/// A decline clears only when the game goes from not running to running.
+/// That is the process-start edge the loop already tracks. Staying running
+/// does not ask again.
+pub fn clears_share_decline(was_running: bool, running: bool) -> bool {
+    !was_running && running
+}
+
+/// The user cancelled or closed the permission dialog. A timeout is not a
+/// decline. Closing the dialog is the portal Cancelled or Dismissed
+/// response, or a line that says the dialog was closed. A session close is
+/// not this.
+pub fn is_share_declined(err: &str) -> bool {
+    if is_user_cancel(err) {
+        return true;
+    }
+    let lower = err.to_ascii_lowercase();
+    lower.contains("dialog") && lower.contains("close")
+}
+
+/// Logs `notice` once. A later call with the flag set does not log again.
+pub fn warn_share_declined(already_logged: &mut bool, notice: &str) -> bool {
+    if *already_logged {
+        return false;
+    }
+    tracing::warn!("{notice}");
+    *already_logged = true;
+    true
+}
+
+/// What a failed open does. A decline does not start the backoff clock, so
+/// the next launch is not stuck waiting, and it does not ask again until
+/// that launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenErrorAction {
+    pub declined: bool,
+    pub arm_backoff: bool,
+    pub notice: Option<&'static str>,
+}
+
+pub fn open_error_action(err: &str, fallback_safe: bool) -> OpenErrorAction {
+    if is_share_declined(err) {
+        OpenErrorAction {
+            declined: true,
+            arm_backoff: false,
+            notice: Some(decline_notice(fallback_safe)),
+        }
+    } else {
+        OpenErrorAction {
+            declined: false,
+            arm_backoff: true,
+            notice: None,
+        }
+    }
+}
+
+pub fn share_is_declined() -> bool {
+    SHARE_DECLINED.load(Ordering::Acquire)
+}
+
+/// Record a decline from a failed open. Other failures are left to the
+/// caller, which arms the backoff when [`OpenErrorAction::arm_backoff`] is
+/// set. The warn is once per decline.
+fn apply_share_decline(
+    err: &str,
+    fallback_safe: bool,
+    data_dir: &Path,
+    last_fail: &mut Option<Instant>,
+) -> OpenErrorAction {
+    let action = open_error_action(err, fallback_safe);
+    if !action.declined {
+        return action;
+    }
+    SHARE_DECLINED.store(true, Ordering::Release);
+    *last_fail = None;
+    if let Some(notice) = action.notice {
+        let mut already = DECLINE_LOGGED.swap(true, Ordering::AcqRel);
+        warn_share_declined(&mut already, notice);
+        crate::ocr_switch::publish_share_notice(data_dir, notice);
+    }
+    action
+}
+
+/// `note_game_running`, and clear a decline on a new Overwatch launch.
+pub fn note_game_seen(was_running: bool, running: bool, data_dir: &Path) {
+    note_game_running(running);
+    if !clears_share_decline(was_running, running) {
+        return;
+    }
+    if !SHARE_DECLINED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    DECLINE_LOGGED.store(false, Ordering::Release);
+    crate::ocr_switch::publish_share_notice(data_dir, "");
+}
+
+/// A new session may start when the game-exit close is not holding the
+/// share shut, or when one is already up.
+pub fn may_open_share(reopen_blocked: bool, live: bool, opening: bool) -> bool {
+    !reopen_blocked || live || opening
+}
+
+/// The token file is read only on the running to not-running edge.
+pub fn share_close_due(
+    stream_route: bool,
+    was_running: bool,
+    running: bool,
+    restorable: impl FnOnce() -> bool,
+) -> bool {
+    if !should_close_share(stream_route, was_running, running, true) {
+        return false;
+    }
+    restorable()
+}
+
+/// Capture now on KDE must not open the screenshot portal while the daemon
+/// says its share is open.
+pub fn capture_now_blocked_by_daemon_share(desktop: &str, daemon_share_open: bool) -> bool {
+    daemon_share_open && desktop_has(desktop, &["kde", "plasma", "kwin"])
 }
 
 /// What a second caller may do while a session open is in progress.
@@ -221,6 +414,7 @@ pub fn drop_unstarted_stream(has_streamed: bool, uptime: Duration, bound: Durati
 
 /// Capture now must not open the screenshot portal beside a live share on
 /// a desktop where that combination is unsafe.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn oneshot_blocked_by_share(desktop: &str, stream_forced: bool, share_open: bool) -> bool {
     share_open && !screenshot_fallback_is_safe(desktop, stream_forced)
 }
@@ -245,8 +439,40 @@ pub fn tab_timeout_counts() -> (u64, u64) {
     )
 }
 
+fn mark_share(open: bool, data_dir: Option<&Path>) {
+    SESSION_OPEN.store(open, Ordering::Release);
+    if let Some(dir) = data_dir {
+        crate::ocr_switch::publish_share_open(dir, open);
+    }
+}
+
+/// Clears `opening` if the open task panics before it can.
+struct ClearOpening {
+    generation: u64,
+}
+
+impl Drop for ClearOpening {
+    fn drop(&mut self) {
+        let Ok(mut state) = CAST.try_lock() else {
+            return;
+        };
+        if state.open_gen == self.generation && state.opening {
+            state.opening = false;
+        }
+    }
+}
+
+fn fresh_capture(image: DynamicImage) -> super::CapturedFrame {
+    super::CapturedFrame {
+        image,
+        seq: None,
+        is_new: true,
+    }
+}
+
 /// Close the live session when one exists and this process is on the stream
-/// route. A no-op otherwise. Does not start the failure backoff.
+/// route. A no-op otherwise. Does not start the failure backoff. The PipeWire
+/// join runs on a blocking thread so a shutdown timer can still fire.
 pub async fn close_if_open() {
     if !super::stream_route_active() {
         return;
@@ -259,10 +485,15 @@ pub async fn close_if_open() {
         task.abort();
     }
     let live = state.live.take();
-    let _ = last_fail_after_deliberate_close(state.last_fail.map(|at| at.elapsed()));
+    state.last_fail = last_fail_after_deliberate_close(state.last_fail);
+    state.fresh_misses = 0;
+    let data_dir = state.data_dir.clone();
+    REOPEN_BLOCKED.store(true, Ordering::Release);
     drop(state);
-    drop(live);
-    SESSION_OPEN.store(false, Ordering::Release);
+    if let Some(live) = live {
+        let _ = tokio::task::spawn_blocking(move || drop(live)).await;
+    }
+    mark_share(false, data_dir.as_deref());
     if had {
         tracing::info!("screencast session closed");
     }
@@ -273,20 +504,41 @@ pub async fn capture(
     kind: CaptureKind,
     data_dir: &Path,
     debug_frames: bool,
-) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
     let max_fps = super::prefs().max_fps.max(1);
     let mut state = CAST.lock().await;
+    state.data_dir = Some(data_dir.to_path_buf());
+    if !share_prompt_allowed(share_is_declined()) {
+        let safe = fallback_is_safe();
+        drop(state);
+        let notice = decline_notice(safe);
+        if capture_while_declined(safe) {
+            return screenshot(output_name, notice).await.map(fresh_capture);
+        }
+        // No screenshot_if_safe: that logs "screenshot skipped" on every poll.
+        return Err(notice.into());
+    }
+    if !may_open_share(
+        REOPEN_BLOCKED.load(Ordering::Acquire),
+        state.live.is_some(),
+        state.opening,
+    ) {
+        drop(state);
+        return Err("screencast share stays closed until the game is running".into());
+    }
     let age = state.last_fail.map(|at| at.elapsed());
     if !should_try_stream(age, START_BACKOFF) {
         drop(state);
         // KDE, Plasma, and KWin stop inside screenshot_if_safe. That path
         // does not call portal::capture.
-        return screenshot_if_safe(output_name, "screencast backoff").await;
+        return screenshot_if_safe(output_name, "screencast backoff")
+            .await
+            .map(fresh_capture);
     }
     let restart = match open_permit(state.opening, state.live.is_some()) {
         OpenPermit::Busy => {
             drop(state);
-            return while_opening(output_name).await;
+            return while_opening(output_name).await.map(fresh_capture);
         }
         OpenPermit::Reuse => state
             .live
@@ -299,7 +551,7 @@ pub async fn capture(
         // not holding two screen shares. The dialog runs in its own task.
         // This grab does not wait on it, and a second grab sees `opening`.
         state.live.take();
-        SESSION_OPEN.store(false, Ordering::Release);
+        mark_share(false, Some(data_dir));
         state.open_gen = state.open_gen.wrapping_add(1);
         let generation = state.open_gen;
         state.opening = true;
@@ -309,6 +561,7 @@ pub async fn capture(
             task.abort();
         }
         let task = tokio::spawn(async move {
+            let _clear = ClearOpening { generation };
             let result = match tokio::time::timeout(
                 PERMISSION_DIALOG_TIMEOUT,
                 open_session(&data_dir, output.as_deref(), max_fps),
@@ -337,21 +590,26 @@ pub async fn capture(
                     } else {
                         state.live = Some(live);
                         state.last_fail = None;
-                        SESSION_OPEN.store(true, Ordering::Release);
+                        mark_share(true, Some(data_dir.as_path()));
                     }
                 }
                 Err(err) => {
-                    state.last_fail = Some(Instant::now());
+                    let safe = fallback_is_safe();
+                    let action =
+                        apply_share_decline(&err, safe, data_dir.as_path(), &mut state.last_fail);
                     state.live = None;
-                    SESSION_OPEN.store(false, Ordering::Release);
-                    let line = fallback_line(&format!("screencast session failed ({err})"));
-                    note_fallback(&mut state, &line);
+                    mark_share(false, Some(data_dir.as_path()));
+                    if action.arm_backoff {
+                        state.last_fail = Some(Instant::now());
+                        let line = fallback_line(&format!("screencast session failed ({err})"));
+                        note_fallback(&mut state, &line);
+                    }
                 }
             }
         });
         state.open_task = Some(task);
         drop(state);
-        return while_opening(output_name).await;
+        return while_opening(output_name).await.map(fresh_capture);
     }
     let Some(stream) = state
         .live
@@ -362,16 +620,20 @@ pub async fn capture(
         let line = fallback_line("screencast stream is not running");
         note_fallback(&mut state, &line);
         drop(state);
-        return screenshot_if_safe(output_name, "screencast stream is not running").await;
+        return screenshot_if_safe(output_name, "screencast stream is not running")
+            .await
+            .map(fresh_capture);
     };
     if !stream.alive() {
         state.last_fail = Some(Instant::now());
         state.live = None;
-        SESSION_OPEN.store(false, Ordering::Release);
+        mark_share(false, Some(data_dir));
         let line = fallback_line("screencast stream is not running");
         note_fallback(&mut state, &line);
         drop(state);
-        return screenshot_if_safe(output_name, "screencast stream is not running").await;
+        return screenshot_if_safe(output_name, "screencast stream is not running")
+            .await
+            .map(fresh_capture);
     }
     if drop_unstarted_stream(
         stream.has_streamed(),
@@ -380,11 +642,13 @@ pub async fn capture(
     ) {
         state.last_fail = Some(Instant::now());
         state.live = None;
-        SESSION_OPEN.store(false, Ordering::Release);
+        mark_share(false, Some(data_dir));
         let line = fallback_line("screencast never reached streaming");
         note_fallback(&mut state, &line);
         drop(state);
-        return screenshot_if_safe(output_name, "screencast never reached streaming").await;
+        return screenshot_if_safe(output_name, "screencast never reached streaming")
+            .await
+            .map(fresh_capture);
     }
     let tab_press = match kind {
         CaptureKind::Tab => Some(super::tab_press().unwrap_or_else(Instant::now)),
@@ -405,10 +669,11 @@ pub async fn capture(
     match grabbed {
         Ok(pw::GrabOutcome::TabMiss { delay_ms }) => {
             drop(state);
-            tab_timeout(output_name, delay_ms).await
+            tab_timeout(output_name, delay_ms).await.map(fresh_capture)
         }
-        Ok(pw::GrabOutcome::Frame(frame)) => {
+        Ok(pw::GrabOutcome::Frame { frame, is_new }) => {
             state.last_fail = None;
+            state.fresh_misses = 0;
             state.warned = false;
             let grab_ms = timing.avg_grab_ms;
             let log_summary = state.last_timing_log.elapsed() >= Duration::from_secs(60);
@@ -436,22 +701,44 @@ pub async fn capture(
             if log_summary {
                 tracing::info!("{}", pw::timing_line(&timing));
             }
+            let seq = frame.clock.seq;
             let img = framebuf::to_dynamic(&frame).ok_or("screencast frame format is not RGB")?;
             let img = fit_stream(img, output_name).await?;
             if compare {
                 save_compare(data_dir, index, &img, output_name).await;
             }
-            Ok(img)
+            Ok(super::CapturedFrame {
+                image: img,
+                seq: Some(seq),
+                is_new,
+            })
         }
         Err(err) => {
+            if err == pw::NO_STREAM_FRAME {
+                state.fresh_misses = state.fresh_misses.saturating_add(1);
+                if fresh_miss_should_restart(state.fresh_misses, FRESH_MISS_LIMIT) {
+                    state.fresh_misses = 0;
+                    state.last_fail = Some(Instant::now());
+                    state.live = None;
+                    mark_share(false, Some(data_dir));
+                    let line = fallback_line("screencast had no usable frame");
+                    note_fallback(&mut state, &line);
+                    drop(state);
+                    return screenshot_if_safe(output_name, "screencast had no usable frame")
+                        .await
+                        .map(fresh_capture);
+                }
+            }
             if !alive {
                 state.last_fail = Some(Instant::now());
                 state.live = None;
-                SESSION_OPEN.store(false, Ordering::Release);
+                mark_share(false, Some(data_dir));
                 let line = fallback_line(&format!("screencast stream ended ({err})"));
                 note_fallback(&mut state, &line);
                 drop(state);
-                return screenshot_if_safe(output_name, "screencast stream ended").await;
+                return screenshot_if_safe(output_name, "screencast stream ended")
+                    .await
+                    .map(fresh_capture);
             }
             if drop_unstarted_stream(
                 stream.has_streamed(),
@@ -460,11 +747,13 @@ pub async fn capture(
             ) {
                 state.last_fail = Some(Instant::now());
                 state.live = None;
-                SESSION_OPEN.store(false, Ordering::Release);
+                mark_share(false, Some(data_dir));
                 let line = fallback_line("screencast never reached streaming");
                 note_fallback(&mut state, &line);
                 drop(state);
-                return screenshot_if_safe(output_name, "screencast never reached streaming").await;
+                return screenshot_if_safe(output_name, "screencast never reached streaming")
+                    .await
+                    .map(fresh_capture);
             }
             drop(state);
             Err(err.into())
@@ -490,7 +779,7 @@ async fn tab_timeout(
         TabTimeoutAction::Skip => {
             let count = TAB_MISS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             tracing::info!(delay_ms, count, "Tab grab: no fresh stream frame (timeout)");
-            Err("no fresh stream frame".into())
+            Err(STREAM_MISS.into())
         }
     }
 }
@@ -511,9 +800,9 @@ async fn while_opening(
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     if screenshot_fallback_is_safe(&desktop, super::stream_was_forced()) {
-        return screenshot(output_name, "screencast open in progress").await;
+        return screenshot(output_name, OPEN_IN_PROGRESS).await;
     }
-    Err("screencast open in progress".into())
+    Err(OPEN_IN_PROGRESS.into())
 }
 
 fn fallback_is_safe() -> bool {
@@ -521,12 +810,16 @@ fn fallback_is_safe() -> bool {
     screenshot_fallback_is_safe(&desktop, super::stream_was_forced())
 }
 
-fn fallback_line(why: &str) -> String {
-    if fallback_is_safe() {
+fn fallback_line_for(why: &str, safe: bool) -> String {
+    if safe {
         format!("{why}; falling back to the screenshot portal")
     } else {
         format!("{why}; screenshot skipped")
     }
+}
+
+fn fallback_line(why: &str) -> String {
+    fallback_line_for(why, fallback_is_safe())
 }
 
 async fn screenshot(
@@ -591,8 +884,24 @@ fn cursor_modes_block(read_failed: bool, modes_empty: bool, has_hidden: bool) ->
     }
 }
 
+fn portal_warn_due(last: Option<Instant>, now: Instant, window: Duration) -> bool {
+    match last {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= window,
+    }
+}
+
+static PORTAL_WARN_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
 fn portal_unavailable(err: &impl std::fmt::Display) -> OpenFail {
-    tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
+    let mut last = PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if portal_warn_due(*last, now, START_BACKOFF) {
+        *last = Some(now);
+        tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
+    } else {
+        tracing::debug!(error = %err, "{PORTAL_UNAVAILABLE}");
+    }
     OpenFail::Other(PORTAL_UNAVAILABLE.into())
 }
 
@@ -785,10 +1094,11 @@ async fn open_once(
 }
 
 fn select_error(err: String, had_token: bool) -> OpenFail {
-    // A cancel waits out the backoff. It is not asked again immediately.
-    // The token must not land in the log. A select failure that had a token
-    // is retried once without it.
-    if is_user_cancel(&err) {
+    // A cancel or a closed dialog is a decline. The token stays, so a later
+    // launch can restore it. KDE invalidates a token by rejecting the select,
+    // which is the branch below. The one warn is logged where the decline is
+    // recorded, not here.
+    if is_share_declined(&err) {
         return OpenFail::Other("select_sources cancelled".into());
     }
     if had_token {
@@ -1051,10 +1361,9 @@ mod tests {
         assert!(!should_close_share(true, true, true, true));
         assert!(!should_close_share(false, true, false, true));
         assert!(last_fail_after_deliberate_close(None).is_none());
-        assert!(should_try_stream(
-            last_fail_after_deliberate_close(None),
-            START_BACKOFF
-        ));
+        let kept = Instant::now();
+        assert_eq!(last_fail_after_deliberate_close(Some(kept)), Some(kept));
+        assert!(should_try_stream(None, START_BACKOFF));
         assert_eq!(open_permit(true, false), OpenPermit::Busy);
         assert_eq!(open_permit(false, true), OpenPermit::Reuse);
         assert_eq!(open_permit(false, false), OpenPermit::Open);
@@ -1115,14 +1424,60 @@ mod tests {
         assert!(oneshot_blocked_by_share("KDE", true, true));
         assert!(!oneshot_blocked_by_share("KDE", true, false));
         assert!(!oneshot_blocked_by_share("niri", false, true));
+        assert!(capture_now_blocked_by_daemon_share("KDE", true));
+        assert!(capture_now_blocked_by_daemon_share("KDE Plasma", true));
+        assert!(capture_now_blocked_by_daemon_share("kwin", true));
+        assert!(!capture_now_blocked_by_daemon_share("KDE", false));
+        assert!(!capture_now_blocked_by_daemon_share("niri", true));
         assert_eq!(
-            fallback_line("screencast backoff"),
-            if fallback_is_safe() {
-                "screencast backoff; falling back to the screenshot portal".to_string()
-            } else {
-                "screencast backoff; screenshot skipped".to_string()
-            }
+            fallback_line_for("screencast backoff", true),
+            "screencast backoff; falling back to the screenshot portal"
         );
+        assert_eq!(
+            fallback_line_for("screencast backoff", false),
+            "screencast backoff; screenshot skipped"
+        );
+        match select_error("org.freedesktop.portal.Error.Cancelled".into(), true) {
+            OpenFail::Other(msg) => assert_eq!(msg, "select_sources cancelled"),
+            OpenFail::Select(_) => panic!("a decline must keep the restore token"),
+        }
+        match select_error("portal rejected the request".into(), true) {
+            OpenFail::Select(_) => {}
+            OpenFail::Other(msg) => panic!("a token failure should retry without it: {msg}"),
+        }
+        assert!(is_stream_miss(STREAM_MISS));
+        assert!(is_share_opening(OPEN_IN_PROGRESS));
+        assert!(!is_stream_miss(OPEN_IN_PROGRESS));
+        assert!(!may_open_share(true, false, false));
+        assert!(may_open_share(true, true, false));
+        assert!(may_open_share(false, false, false));
+        assert!(fresh_miss_should_restart(
+            FRESH_MISS_LIMIT,
+            FRESH_MISS_LIMIT
+        ));
+        assert!(!fresh_miss_should_restart(
+            FRESH_MISS_LIMIT - 1,
+            FRESH_MISS_LIMIT
+        ));
+        let mut reads = 0u32;
+        assert!(!share_close_due(false, true, false, || {
+            reads += 1;
+            true
+        }));
+        assert_eq!(reads, 0);
+        assert!(share_close_due(true, true, false, || {
+            reads += 1;
+            true
+        }));
+        assert_eq!(reads, 1);
+        let now = Instant::now();
+        assert!(portal_warn_due(None, now, START_BACKOFF));
+        assert!(!portal_warn_due(Some(now), now, START_BACKOFF));
+        assert!(portal_warn_due(
+            Some(now - START_BACKOFF),
+            now,
+            START_BACKOFF
+        ));
     }
 
     #[test]
@@ -1179,5 +1534,168 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(!dir.path().join(format!("{TOKEN_FILE}.tmp")).exists());
+    }
+
+    /// Clears the process-wide decline flags if a test stops early.
+    struct DeclineReset;
+
+    impl Drop for DeclineReset {
+        fn drop(&mut self) {
+            SHARE_DECLINED.store(false, Ordering::Release);
+            DECLINE_LOGGED.store(false, Ordering::Release);
+            crate::ocr_switch::set_share_notice("");
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
+    }
+
+    fn with_log(f: impl FnOnce()) -> String {
+        let buf = LogBuf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_declined_share_stops_prompts_and_captures_until_overwatch_starts() {
+        let _reset = DeclineReset;
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            decline_notice(false),
+            "KDE screen share was declined: no captures until Overwatch is restarted"
+        );
+        assert!(!decline_notice(true).contains("no captures"));
+        assert!(!screenshot_fallback_is_safe("KDE", false));
+        assert!(!capture_while_declined(screenshot_fallback_is_safe(
+            "KDE", false
+        )));
+        assert!(capture_while_declined(screenshot_fallback_is_safe(
+            "niri", false
+        )));
+        assert!(!share_prompt_allowed(true));
+        assert!(share_prompt_allowed(false));
+        assert!(is_share_declined("org.freedesktop.portal.Error.Cancelled"));
+        assert!(is_share_declined("Dialog dismissed by the user"));
+        assert!(is_share_declined("Dialog was closed"));
+        assert!(!is_share_declined("screencast session closed"));
+        assert!(!is_share_declined("screencast permission dialog timed out"));
+
+        let declined = open_error_action("select_sources cancelled", false);
+        assert!(declined.declined);
+        assert!(!declined.arm_backoff);
+        assert_eq!(declined.notice, Some(KDE_DECLINE_NOTICE));
+        let timeout = open_error_action("screencast permission dialog timed out", false);
+        assert!(!timeout.declined);
+        assert!(timeout.arm_backoff);
+        assert!(timeout.notice.is_none());
+        let safe = open_error_action("Dialog was closed", true);
+        assert_eq!(safe.notice, Some(SAFE_DECLINE_NOTICE));
+        assert!(!SAFE_DECLINE_NOTICE.contains("no captures"));
+
+        match select_error("Dialog was closed".into(), true) {
+            OpenFail::Other(msg) => assert_eq!(msg, "select_sources cancelled"),
+            OpenFail::Select(_) => panic!("closing the dialog must keep the restore token"),
+        }
+        match select_error("portal rejected the request".into(), true) {
+            OpenFail::Select(_) => {}
+            OpenFail::Other(msg) => panic!("a rejected token is still dropped: {msg}"),
+        }
+
+        let once = with_log(|| {
+            let mut logged = false;
+            assert!(warn_share_declined(&mut logged, KDE_DECLINE_NOTICE));
+            assert!(!warn_share_declined(&mut logged, KDE_DECLINE_NOTICE));
+        });
+        assert_eq!(once.matches(KDE_DECLINE_NOTICE).count(), 1);
+        assert!(once.contains("WARN"));
+
+        let mut last_fail = Some(Instant::now());
+        let first = with_log(|| {
+            let action = apply_share_decline(
+                "select_sources cancelled",
+                false,
+                dir.path(),
+                &mut last_fail,
+            );
+            assert!(action.declined);
+            assert!(!action.arm_backoff);
+            assert!(last_fail.is_none());
+            assert!(should_try_stream(None, START_BACKOFF));
+            assert!(!share_prompt_allowed(share_is_declined()));
+            assert!(!capture_while_declined(false));
+            let mut again = None;
+            assert!(
+                apply_share_decline(
+                    "Dialog dismissed by the user",
+                    false,
+                    dir.path(),
+                    &mut again,
+                )
+                .declined
+            );
+        });
+        assert_eq!(first.matches(KDE_DECLINE_NOTICE).count(), 1);
+        let status = crate::ocr_switch::read_status(dir.path()).unwrap();
+        assert_eq!(status.share_notice, KDE_DECLINE_NOTICE);
+        crate::ocr_switch::publish_share_open(dir.path(), false);
+        assert_eq!(
+            crate::ocr_switch::read_status(dir.path())
+                .unwrap()
+                .share_notice,
+            KDE_DECLINE_NOTICE
+        );
+
+        assert!(!clears_share_decline(true, true));
+        assert!(!clears_share_decline(true, false));
+        assert!(!clears_share_decline(false, false));
+        note_game_seen(true, true, dir.path());
+        assert!(share_is_declined(), "staying in a game does not ask again");
+        assert!(clears_share_decline(false, true));
+        note_game_seen(false, true, dir.path());
+        assert!(!share_is_declined());
+        assert!(share_prompt_allowed(share_is_declined()));
+        assert!(
+            crate::ocr_switch::read_status(dir.path())
+                .unwrap()
+                .share_notice
+                .is_empty()
+        );
+
+        let mut relaunch = Some(Instant::now());
+        let second = with_log(|| {
+            assert!(
+                apply_share_decline("select_sources cancelled", false, dir.path(), &mut relaunch,)
+                    .declined
+            );
+            let mut poll = None;
+            assert!(
+                apply_share_decline("select_sources cancelled", false, dir.path(), &mut poll,)
+                    .declined
+            );
+        });
+        assert_eq!(second.matches(KDE_DECLINE_NOTICE).count(), 1);
+        assert!(relaunch.is_none());
     }
 }

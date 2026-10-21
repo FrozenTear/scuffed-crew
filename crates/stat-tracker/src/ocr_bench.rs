@@ -106,6 +106,9 @@ fn tab(
         FrameAnalysisOutcome::TeamSizeUncertain { outcome, .. } => {
             return json!({"status": "team_size_uncertain", "outcome": outcome.to_string()});
         }
+        FrameAnalysisOutcome::StreamMiss => {
+            return json!({"status": "stream_miss"});
+        }
     };
     let (raw, ocr_conf, ocr_err) = match &a.ocr {
         Ok(text) => (text.raw_text.clone(), text.confidence, None),

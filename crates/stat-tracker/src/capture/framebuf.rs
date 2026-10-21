@@ -99,9 +99,9 @@ pub struct FrameClock {
     pub pts: i64,
 }
 
-/// High-water mark taken when a session open completes. A frame is fresh
-/// only when its sequence (and, when both sides have one, its presentation
-/// time) is strictly newer than this.
+/// High-water mark taken at the start of each grab. A frame is fresh only
+/// when its sequence (and, when both sides have one, its presentation time)
+/// is strictly newer than this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenMarker {
     pub seq: u64,
@@ -340,17 +340,6 @@ pub fn to_dynamic(frame: &PackedFrame) -> Option<DynamicImage> {
     to_rgb(frame).map(DynamicImage::ImageRgb8)
 }
 
-/// Among buffers delivered together, only the last one is copied when a
-/// grab is waiting. The rest are dropped. When no grab is waiting, all of
-/// them are dropped and nothing is copied.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn keep_latest(capture_requested: bool, buffers: usize) -> usize {
-    match buffer_action(capture_requested) {
-        BufferAction::Drop => 0,
-        BufferAction::Copy => usize::from(buffers > 0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,9 +352,6 @@ mod tests {
     fn an_unrequested_buffer_is_not_copied() {
         assert_eq!(buffer_action(false), BufferAction::Drop);
         assert_eq!(buffer_action(true), BufferAction::Copy);
-        assert_eq!(keep_latest(false, 4), 0);
-        assert_eq!(keep_latest(true, 0), 0);
-        assert_eq!(keep_latest(true, 3), 1);
     }
 
     #[test]

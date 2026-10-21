@@ -205,6 +205,9 @@ pub struct OcrSwitchView {
     /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
     /// when this is true, not when the box is merely unticked.
     pub daemon_off: bool,
+    /// Why captures are stopped after a declined screen share. Shown in
+    /// Tracker health, not mixed into the OCR notice.
+    pub share_notice: Option<String>,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
@@ -287,6 +290,20 @@ pub(crate) fn daemon_health_notice(
     daemon_pid: Option<u32>,
 ) -> Option<String> {
     live_status(status, daemon_pid)?.health_notice()
+}
+
+/// The running tracker's declined-share sentence, for Tracker health.
+/// Empty, or a status file from another run, is nothing to show.
+pub(crate) fn daemon_share_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    let notice = live_status(status, daemon_pid)?.share_notice.trim();
+    if notice.is_empty() {
+        None
+    } else {
+        Some(notice.to_string())
+    }
 }
 
 /// The lines under the classic OCR switch that depend on the tracker
@@ -3043,6 +3060,8 @@ token = \"not-a-real-token\"
             blocked_total: 0,
             blocked: Vec::new(),
             leptess_created: 0,
+            share_open: false,
+            share_notice: String::new(),
         }
     }
 
@@ -3069,6 +3088,25 @@ token = \"not-a-real-token\"
         // off with every pack: nothing to show
         let fine = switch_status(41, None, ALL_PACKS);
         assert_eq!(daemon_ocr_notice(Some(&fine), Some(41)), None);
+    }
+
+    #[test]
+    fn a_declined_share_is_shown_for_the_running_tracker() {
+        let mut status = switch_status(41, None, ALL_PACKS);
+        status.share_notice =
+            "KDE screen share was declined: no captures until Overwatch is restarted".into();
+        assert_eq!(
+            daemon_share_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.share_notice.as_str())
+        );
+        assert_eq!(daemon_share_notice(Some(&status), Some(42)), None);
+        assert_eq!(daemon_share_notice(Some(&status), None), None);
+        assert_ne!(
+            daemon_health_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.share_notice.as_str())
+        );
+        status.share_notice.clear();
+        assert_eq!(daemon_share_notice(Some(&status), Some(41)), None);
     }
 
     /// Tracker health takes a hold, not a refusal: a tracker that refused

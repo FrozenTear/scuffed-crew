@@ -103,7 +103,38 @@ pub fn stream_was_forced() -> bool {
     STREAM_FORCED.load(std::sync::atomic::Ordering::Acquire)
 }
 
-pub use screencast::{close_if_open, session_is_open, should_close_share};
+pub use screencast::{
+    close_if_open, is_share_opening, is_stream_miss, note_game_running, note_game_seen,
+    session_is_open, share_close_due, should_close_share,
+};
+
+pub use framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
+
+/// One captured image plus whether the stream had not already handed it out.
+/// Screenshots are always new and have no sequence.
+pub struct CapturedFrame {
+    pub image: image::DynamicImage,
+    pub seq: Option<u64>,
+    pub is_new: bool,
+}
+
+/// A poll may update streaks only for a frame it has not already used.
+/// A reused frame is no read. A new frame whose sequence was already seen
+/// is no read. A screenshot (`seq` none, `is_new`) is a read.
+pub fn poll_uses_frame(is_new: bool, seq: Option<u64>, seen: Option<u64>) -> bool {
+    if !is_new {
+        return false;
+    }
+    !matches!((seq, seen), (Some(seq), Some(seen)) if seq <= seen)
+}
+
+fn as_new_capture(image: image::DynamicImage) -> CapturedFrame {
+    CapturedFrame {
+        image,
+        seq: None,
+        is_new: true,
+    }
+}
 
 /// A saved restore token can reopen the share without a prompt.
 pub fn share_restorable(data_dir: &std::path::Path) -> bool {
@@ -367,28 +398,33 @@ pub async fn capture_screen_output(
     backend: &CaptureBackend,
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    capture_screen_output_for(backend, output_name, CaptureKind::Poll).await
+    capture_screen_output_for(backend, output_name, CaptureKind::Poll)
+        .await
+        .map(|frame| frame.image)
 }
 
 /// One frame for the app's Capture now and the setup guide. A portal
 /// backend uses the screenshot portal and does not open the long-lived
-/// stream or write the restore token.
+/// stream or write the restore token. On KDE it reads the daemon status
+/// file and skips the screenshot while that share is open.
 pub async fn capture_screen_oneshot(
     backend: &CaptureBackend,
     output_name: Option<&str>,
+    data_dir: &std::path::Path,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     match backend {
         CaptureBackend::Portal => {
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-            if screencast::oneshot_blocked_by_share(
-                &desktop,
-                stream_was_forced(),
-                screencast::session_is_open(),
-            ) {
+            let share_open =
+                crate::ocr_switch::read_status(data_dir).is_some_and(|status| status.share_open);
+            if screencast::capture_now_blocked_by_daemon_share(&desktop, share_open) {
                 tracing::warn!(
-                    "Capture now skipped: a screen share is open, and a screenshot beside it can crash KWin"
+                    "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
-                return Err("capture now skipped while a screen share is open".into());
+                return Err(
+                    "The tracker is sharing the screen, so this screenshot was skipped. Stop the share first."
+                        .into(),
+                );
             }
             portal::capture(output_name).await
         }
@@ -403,16 +439,20 @@ pub async fn capture_screen_output_for(
     backend: &CaptureBackend,
     output_name: Option<&str>,
     kind: CaptureKind,
-) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
     let started = std::time::Instant::now();
     let Some(name) = perf_backend_label(backend) else {
         return Err("no capture backend available".into());
     };
     let result = match backend {
-        CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
-        CaptureBackend::X11 => x11::capture_with_output(output_name).await,
+        CaptureBackend::Wayshot => wayshot::capture_with_output(output_name)
+            .await
+            .map(as_new_capture),
+        CaptureBackend::X11 => x11::capture_with_output(output_name)
+            .await
+            .map(as_new_capture),
         CaptureBackend::Portal => match portal_path() {
-            route::PortalPath::Screenshot => portal::capture(output_name).await,
+            route::PortalPath::Screenshot => portal::capture(output_name).await.map(as_new_capture),
             route::PortalPath::Stream => {
                 let prefs = prefs();
                 screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await

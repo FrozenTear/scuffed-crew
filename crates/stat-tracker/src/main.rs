@@ -400,9 +400,9 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("failed to start the async runtime")?;
     let result = runtime.block_on(run(omp));
-    // Dropping the runtime waits with no bound for blocking tasks. This
-    // stops waiting after the same deadline as a signal shutdown.
-    runtime.shutdown_timeout(stat_tracker::replace::SHUTDOWN_DEADLINE);
+    // Whatever is left of the signal's one deadline. A clean exit has no
+    // signal, so this does not add another wait.
+    runtime.shutdown_timeout(stat_tracker::replace::shutdown_time_left());
     result
 }
 
@@ -3357,6 +3357,9 @@ enum FrameAnalysisOutcome {
         frame: image::DynamicImage,
         scan: detect::hero_portrait::RowScan,
     },
+    /// The stream had no new frame. Retried like a drawing board, and never
+    /// written into debug/rejected.
+    StreamMiss,
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
@@ -4163,6 +4166,53 @@ fn resolve_word_tick(
     }
 }
 
+#[cfg(test)]
+#[test]
+fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
+    let mut streak = Some(WordStreak {
+        outcome: detect::MatchOutcome::Victory,
+        seen_at: std::time::Instant::now(),
+        map: None,
+    });
+    assert!(!capture::poll_uses_frame(false, Some(4), Some(4)));
+    let skipped = resolve_word_tick(&mut streak, None, std::time::Instant::now(), None);
+    assert!(skipped.signal.is_none());
+    assert!(!skipped.signal_confirmed);
+    assert_eq!(
+        streak.as_ref().map(|prior| prior.outcome),
+        Some(detect::MatchOutcome::Victory)
+    );
+    let timed_out = resolve_word_tick(&mut streak, None, std::time::Instant::now(), None);
+    assert!(timed_out.signal.is_none());
+    assert!(!timed_out.signal_confirmed);
+
+    assert!(capture::poll_uses_frame(true, Some(5), Some(4)));
+    assert!(!capture::poll_uses_frame(true, Some(5), Some(5)));
+    let mut streak = None;
+    let now = std::time::Instant::now();
+    let first = resolve_word_tick(
+        &mut streak,
+        Some((
+            detect::MatchOutcome::Victory,
+            detect::match_end::OutcomeSource::ResultWord,
+        )),
+        now,
+        None,
+    );
+    assert!(!first.signal_confirmed);
+    let second = resolve_word_tick(
+        &mut streak,
+        Some((
+            detect::MatchOutcome::Victory,
+            detect::match_end::OutcomeSource::ResultWord,
+        )),
+        now,
+        None,
+    );
+    assert!(second.signal_confirmed);
+    assert_eq!(second.signal, Some(detect::MatchOutcome::Victory));
+}
+
 /// The words-pack result read one poll tick adds to the open game's result
 /// evidence (`reader = "new"`, #253). Only a tick with an outcome signal
 /// adds one, as before.
@@ -4365,6 +4415,18 @@ async fn run_loop(
     // From here a SIGTERM is a clean shutdown (run.marker removed). Before
     // this line the default action still applies. Tests wait for it.
     tracing::info!("signal handlers ready");
+    tokio::spawn(async {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(term) => term,
+                Err(_) => return,
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        stat_tracker::replace::note_shutdown_signal();
+    });
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file
@@ -4460,6 +4522,7 @@ async fn run_loop(
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
     let mut exec_failed_at: Option<std::time::Instant> = None;
+    let mut seen_stream_seq: Option<u64> = None;
 
     loop {
         tokio::select! {
@@ -4471,11 +4534,12 @@ async fn run_loop(
                         // this, not from when the session row is ready.
                         let press = Instant::now();
                         let running = game_gate.is_running();
-                        if capture::should_close_share(
+                        capture::note_game_seen(game_was_running, running, data_dir);
+                        if capture::share_close_due(
                             capture::stream_route_active(),
                             game_was_running,
                             running,
-                            capture::share_restorable(data_dir),
+                            || capture::share_restorable(data_dir),
                         ) {
                             capture::close_if_open().await;
                         }
@@ -4611,11 +4675,12 @@ async fn run_loop(
                     );
                 }
                 let running = game_gate.is_running();
-                if capture::should_close_share(
+                capture::note_game_seen(game_was_running, running, data_dir);
+                if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
                     running,
-                    capture::share_restorable(data_dir),
+                    || capture::share_restorable(data_dir),
                 ) {
                     capture::close_if_open().await;
                 }
@@ -4646,7 +4711,19 @@ async fn run_loop(
                 )
                 .await
                 {
-                    Ok(img) => {
+                    Ok(captured) => {
+                        if !capture::poll_uses_frame(
+                            captured.is_new,
+                            captured.seq,
+                            seen_stream_seq,
+                        ) {
+                            tracing::trace!("poll skipped: stream frame already seen");
+                            continue;
+                        }
+                        if let Some(seq) = captured.seq {
+                            seen_stream_seq = Some(seq);
+                        }
+                        let img = captured.image;
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         // On-hit evidence (debug_ocr): confirm + first streak only.
                         // `--dump-poll-frames` still writes every tick as `poll_*`.
@@ -4854,11 +4931,12 @@ async fn run_loop(
                 // still closes here when the game stops. The same edge, and
                 // only when a restore token can reopen it.
                 let running = game_gate.is_running();
-                if capture::should_close_share(
+                capture::note_game_seen(game_was_running, running, data_dir);
+                if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
                     running,
-                    capture::share_restorable(data_dir),
+                    || capture::share_restorable(data_dir),
                 ) {
                     capture::close_if_open().await;
                 }
@@ -4899,19 +4977,27 @@ async fn run_loop(
                             if let Err(err) =
                                 stat_tracker::replace::restart_for_replaced_binary(&path)
                             {
-                                tracing::error!(
-                                    error = %err,
-                                    "could not re-exec the new tracker; keeping this process"
-                                );
-                                exec_failed_at = Some(std::time::Instant::now());
-                                if released_pid {
-                                    stat_tracker::replace::restore_own_pid_file(data_dir);
+                                if stat_tracker::replace::keeps_running_after_restart(
+                                    stat_tracker::replace::RestartHow::Reexec,
+                                    true,
+                                ) {
+                                    tracing::error!(
+                                        error = %err,
+                                        "could not re-exec the new tracker; keeping this process"
+                                    );
+                                    exec_failed_at = Some(std::time::Instant::now());
+                                    if released_pid {
+                                        stat_tracker::replace::restore_own_pid_file(data_dir);
+                                    }
+                                    let _ = stat_tracker::report::marker::restore_run_marker(
+                                        data_dir,
+                                        marker.as_ref(),
+                                    );
                                 }
-                                let _ = stat_tracker::report::marker::restore_run_marker(
-                                    data_dir,
-                                    marker.as_ref(),
-                                );
-                            } else {
+                            } else if !stat_tracker::replace::keeps_running_after_restart(
+                                stat_tracker::replace::RestartHow::Reexec,
+                                false,
+                            ) {
                                 return Ok(());
                             }
                         }
@@ -4992,6 +5078,7 @@ async fn run_loop(
                 .await;
             }
             _ = tokio::signal::ctrl_c() => {
+                stat_tracker::replace::note_shutdown_signal();
                 tracing::info!("shutting down");
                 shutdown_from_signal(
                     &mut st,
@@ -5006,6 +5093,7 @@ async fn run_loop(
                 return Ok(());
             }
             _ = sigterm.recv() => {
+                stat_tracker::replace::note_shutdown_signal();
                 tracing::info!("SIGTERM received, shutting down");
                 shutdown_from_signal(
                     &mut st,
@@ -6682,16 +6770,50 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
 /// rejected the frame as not a scoreboard (a board still drawing). A team
 /// size the pitch does not settle and an analysed frame are not retried.
 fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
-    matches!(outcome, FrameAnalysisOutcome::NotAScoreboard { .. })
+    matches!(
+        outcome,
+        FrameAnalysisOutcome::NotAScoreboard { .. } | FrameAnalysisOutcome::StreamMiss
+    )
 }
 
 /// How useful a Tab outcome is, so a later rejected grab never replaces a
-/// better one: analysed over team size unsure over not a scoreboard.
+/// better one: analysed over team size unsure over not a scoreboard over a
+/// stream miss.
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::NotAScoreboard { .. } => 0,
-        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 1,
-        FrameAnalysisOutcome::Analyzed(_) => 2,
+        FrameAnalysisOutcome::StreamMiss => 0,
+        FrameAnalysisOutcome::NotAScoreboard { .. } => 1,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 2,
+        FrameAnalysisOutcome::Analyzed(_) => 3,
+    }
+}
+
+async fn grab_tab_attempt(
+    backend: &capture::CaptureBackend,
+    output: Option<&str>,
+    attempt: usize,
+) -> Result<capture::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+    if attempt != 0 {
+        let now = std::time::Instant::now();
+        let grab = capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab);
+        return capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab).await;
+    }
+    // The first attempt keeps the original key. If the share is still
+    // opening, wait until it is streaming or the original press is 1200 ms
+    // old, then grab under that same press.
+    let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
+    let deadline =
+        press + std::time::Duration::from_millis(capture::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+    loop {
+        match capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab).await {
+            Err(err)
+                if capture::is_share_opening(&err.to_string())
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -6738,32 +6860,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
-                    let grab = capture::capture_screen_output_for(
-                        backend,
-                        capture_output,
-                        capture::CaptureKind::Tab,
-                    );
-                    // Attempt 0 keeps the key press from the outer task.
-                    // Each retry gets a new press-relative deadline.
-                    let grabbed = if attempt == 0 {
-                        grab.await
-                    } else {
-                        let now = std::time::Instant::now();
-                        capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab)
-                            .await
-                    };
+                    let grabbed = grab_tab_attempt(backend, capture_output, attempt).await;
                     let img = match grabbed {
-                        Ok(img) => img,
-                        Err(err) if err.to_string().contains("no fresh stream frame") => {
-                            return Ok(FrameAnalysisOutcome::NotAScoreboard {
-                                outcome: game_outcome,
-                                frame: image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)),
-                                scan: detect::hero_portrait::RowScan {
-                                    dip_count: 0,
-                                    median_pitch: None,
-                                    spectral_pitch: None,
-                                },
-                            });
+                        Ok(captured) => captured.image,
+                        Err(err) if capture::is_stream_miss(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::StreamMiss);
                         }
                         Err(err) => {
                             return Err(
@@ -6806,6 +6907,36 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
+            FrameAnalysisOutcome::StreamMiss => {
+                tracing::info!("Tab capture missed: no fresh stream frame");
+                return Ok(CaptureReport {
+                    best_guess: None,
+                    recorded: false,
+                    outcome: game_outcome,
+                    map: None,
+                    map_source: None,
+                    session_id: session_id.to_string(),
+                    split: false,
+                    armed_reset: false,
+                    ignore_row: false,
+                    reset_streak: req.reset_streak,
+                    reset_baseline: req.reset_baseline,
+                    baseline_row: req.baseline_row,
+                    refresh_baseline: false,
+                    clear_hint: false,
+                    count_progress: false,
+                    career_panel: false,
+                    held_counters: None,
+                    held_hero: None,
+                    gate_state: None,
+                    hero_auth: req.hero_auth.clone(),
+                    seal: None,
+                    close_reason: None,
+                    held_at: None,
+                    map_replaces_text_fallback: false,
+                    rejoin_carry: None,
+                });
+            }
             FrameAnalysisOutcome::NotAScoreboard {
                 outcome,
                 frame,
@@ -7828,7 +7959,7 @@ fn save_rejected_frame(
     img: image::DynamicImage,
     reason: &'static str,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if !debug {
+    if !debug || img.width() < 2 || img.height() < 2 {
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
@@ -8781,7 +8912,7 @@ async fn shutdown_from_signal(
             finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir).await;
             flush_snapshot_if_dirty(store, data_dir).await;
         } => {}
-        _ = tokio::time::sleep(stat_tracker::replace::SHUTDOWN_DEADLINE) => {
+        _ = tokio::time::sleep(stat_tracker::replace::shutdown_time_left()) => {
             // Returning here used to leave the runtime drop waiting on
             // blocking tasks. `main` calls `Runtime::shutdown_timeout` with
             // this same deadline, so those tasks cannot hold the exit.
@@ -9289,7 +9420,9 @@ mod tests {
             scan,
         };
         assert!(tab_capture_should_retry(&rejected));
+        assert!(tab_capture_should_retry(&FrameAnalysisOutcome::StreamMiss));
         assert!(!tab_capture_should_retry(&unsure));
+        assert!(tab_outcome_rank(&rejected) > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss));
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
     }
 

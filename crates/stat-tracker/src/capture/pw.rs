@@ -21,6 +21,7 @@ const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1;
 const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 4;
 const PW_STREAM_STATE_ERROR: i32 = -1;
 const PW_STREAM_STATE_UNCONNECTED: i32 = 0;
+const PW_STREAM_STATE_CONNECTING: i32 = 1;
 const PW_STREAM_STATE_PAUSED: i32 = 2;
 const PW_STREAM_STATE_STREAMING: i32 = 3;
 const SPA_META_HEADER: u32 = 1;
@@ -72,12 +73,15 @@ struct SpaMeta {
     data: *mut c_void,
 }
 
+/// `spa_meta_header` from libspa. `pts` is at byte 8. A header that ends
+/// before `seq` still has a presentation time.
 #[repr(C)]
 struct SpaMetaHeader {
-    seq: u32,
     flags: u32,
+    offset: u32,
     pts: i64,
     dts_offset: i64,
+    seq: u64,
 }
 
 #[repr(C)]
@@ -138,8 +142,8 @@ struct State {
     loop_: AtomicPtr<c_void>,
     loop_lock: Mutex<()>,
     /// Set by Drop before `quit`. The thread checks this under `loop_lock`
-    /// before `pw_main_loop_run`, so a quit that landed before the loop
-    /// pointer was published still stops the thread.
+    /// after `pw_loop_enter` and before it publishes the loop, so a quit
+    /// that landed early never calls `pw_loop_iterate`.
     quit_requested: AtomicBool,
     dequeue: DequeueFn,
     queue: QueueFn,
@@ -165,8 +169,8 @@ struct State {
     /// [`NO_TAB_NEED`] means a poll grab: the throttle stands.
     need_arrived_ms: AtomicU64,
     started: std::time::Instant,
-    latest: Mutex<Option<PackedFrame>>,
-    last_good: Mutex<Option<PackedFrame>>,
+    latest: Mutex<Option<Arc<PackedFrame>>>,
+    last_good: Mutex<Option<Arc<PackedFrame>>>,
     notify: tokio::sync::Notify,
     buffers_pod: Vec<u8>,
     rate_logged: AtomicBool,
@@ -188,9 +192,17 @@ pub struct Timing {
 /// A finished wait. `TabMiss` means the hard timeout passed with no buffer
 /// at or after the overlay delay. The caller decides whether a screenshot
 /// is safe.
+#[derive(Debug)]
 pub enum GrabOutcome {
-    Frame(PackedFrame),
-    TabMiss { delay_ms: u64 },
+    /// `is_new` is false when this is the previous grab's frame. A poll
+    /// must not treat that as another read.
+    Frame {
+        frame: Arc<PackedFrame>,
+        is_new: bool,
+    },
+    TabMiss {
+        delay_ms: u64,
+    },
 }
 
 /// No Tab threshold. Poll grabs leave this in `need_arrived_ms`.
@@ -241,9 +253,11 @@ impl Handle {
     /// empty. A later poll grab returns the last converted frame when no
     /// new buffer arrives.
     ///
-    /// `tab_press` is the evdev Tab instant. The grab then takes the first
-    /// buffer that arrived at or after press + 300 ms, and gives up at
-    /// press + 1200 ms. Poll grabs pass `None` and keep the newest frame.
+    /// `tab_press` is the instant the loop read the Tab key. The grab then
+    /// takes the first buffer that arrived at or after press + 300 ms, and
+    /// gives up at press + 1200 ms. Poll grabs pass `None`. A poll that
+    /// sees no new buffer returns the previous frame with `is_new` false.
+    /// A wait that ends with nothing returns an error, which is no read.
     pub async fn grab(
         &self,
         timeout: Duration,
@@ -288,7 +302,7 @@ impl Handle {
                         };
                         let delay_ms = framebuf::tab_frame_delay_ms(press_ms, frame.arrived_ms);
                         tracing::info!(delay_ms, "screencast tab frame delay");
-                        return Ok(self.finish_frame(frame, fresh, started));
+                        return Ok(self.finish_frame(frame, fresh, started, true));
                     }
                     framebuf::TabFrameChoice::Miss => {
                         self.state.want.store(false, Ordering::Release);
@@ -297,9 +311,9 @@ impl Handle {
                     }
                 }
             } else if let Some(frame) = take_frame(&self.state, fresh, marker) {
-                return Ok(self.finish_frame(frame, fresh, started));
+                return Ok(self.finish_frame(frame, fresh, started, true));
             }
-            if !self.alive() || stream_died(&self.state) {
+            if !self.alive() || stream_died(&self.state) || crate::replace::shutdown_requested() {
                 self.state.want.store(false, Ordering::Release);
                 return Err("screencast stream ended".into());
             }
@@ -317,6 +331,10 @@ impl Handle {
             tokio::select! {
                 _ = &mut notified => {}
                 _ = tokio::time::sleep(left) => {}
+                _ = crate::replace::shutdown_notified() => {
+                    self.state.want.store(false, Ordering::Release);
+                    return Err("shutting down".into());
+                }
             }
         }
         self.state.want.store(false, Ordering::Release);
@@ -330,7 +348,7 @@ impl Handle {
             {
                 let delay_ms = framebuf::tab_frame_delay_ms(press_ms, frame.arrived_ms);
                 tracing::info!(delay_ms, "screencast tab frame delay");
-                return Ok(self.finish_frame(frame, fresh, started));
+                return Ok(self.finish_frame(frame, fresh, started, true));
             }
             return Ok(GrabOutcome::TabMiss {
                 delay_ms: now_ms.saturating_sub(press_ms),
@@ -339,7 +357,7 @@ impl Handle {
         // A frame that landed as the deadline passed is newer than the
         // reused one. Take it first.
         if let Some(frame) = take_frame(&self.state, fresh, marker) {
-            return Ok(self.finish_frame(frame, fresh, started));
+            return Ok(self.finish_frame(frame, fresh, started, true));
         }
         // Clone into a local before `finish_frame`. An `if let` on the
         // lock guard would keep that guard alive through the then-block
@@ -357,16 +375,17 @@ impl Handle {
             None
         };
         if let Some(frame) = reused {
-            return Ok(self.finish_frame(frame, fresh, started));
+            return Ok(self.finish_frame(frame, fresh, started, false));
         }
-        Err("no screencast frame".into())
+        Err(NO_STREAM_FRAME.into())
     }
 
     fn finish_frame(
         &self,
-        frame: PackedFrame,
+        frame: Arc<PackedFrame>,
         fresh: bool,
         started: std::time::Instant,
+        is_new: bool,
     ) -> GrabOutcome {
         remember_good(&self.state, &frame);
         if fresh {
@@ -376,9 +395,12 @@ impl Handle {
         self.state.grabs.fetch_add(1, Ordering::Relaxed);
         self.state.grab_ns.fetch_add(ns, Ordering::Relaxed);
         self.state.want.store(false, Ordering::Release);
-        GrabOutcome::Frame(frame)
+        GrabOutcome::Frame { frame, is_new }
     }
 }
+
+/// A poll wait that ended with no buffer. Not a frame, and not a confirm.
+pub const NO_STREAM_FRAME: &str = "no screencast frame";
 
 struct NeedReset<'a>(&'a AtomicU64);
 
@@ -397,32 +419,30 @@ fn rel_ms(base: std::time::Instant, at: std::time::Instant) -> u64 {
 fn held_arrival(state: &State, fresh: bool, marker: framebuf::OpenMarker) -> Option<u64> {
     let slot = state.latest.lock().unwrap_or_else(|err| err.into_inner());
     let frame = slot.as_ref()?;
-    if framebuf::frame_is_blank(frame) {
-        return None;
-    }
     if fresh && !framebuf::frame_is_fresh(frame.clock, marker) {
         return None;
     }
     Some(frame.arrived_ms)
 }
 
-fn take_frame(state: &State, fresh: bool, marker: framebuf::OpenMarker) -> Option<PackedFrame> {
+fn take_frame(
+    state: &State,
+    fresh: bool,
+    marker: framebuf::OpenMarker,
+) -> Option<Arc<PackedFrame>> {
     let mut slot = state.latest.lock().unwrap_or_else(|err| err.into_inner());
     let frame = slot.take()?;
-    if framebuf::frame_is_blank(&frame) {
-        return None;
-    }
     if fresh && !framebuf::frame_is_fresh(frame.clock, marker) {
         return None;
     }
     Some(frame)
 }
 
-fn remember_good(state: &State, frame: &PackedFrame) {
+fn remember_good(state: &State, frame: &Arc<PackedFrame>) {
     *state
         .last_good
         .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some(frame.clone());
+        .unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(frame));
 }
 
 fn stream_died(state: &State) -> bool {
@@ -435,7 +455,7 @@ impl Drop for Handle {
         self.state.want.store(false, Ordering::Release);
         // Quit while the thread still owns the loop. Do not drop the
         // pointer here: the thread nulls it and destroys the loop under
-        // the same lock, after `pw_main_loop_run` has returned.
+        // the same lock, after the iterate loop has returned.
         request_quit(&self.state);
         self.state.notify.notify_waiters();
         if let Some(join) = self.join.take() {
@@ -647,7 +667,9 @@ struct Symbols {
     init: unsafe extern "C" fn(*mut i32, *mut *mut *mut c_char),
     main_loop_new: unsafe extern "C" fn(*const c_void) -> *mut c_void,
     main_loop_get_loop: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
-    main_loop_run: unsafe extern "C" fn(*mut c_void) -> i32,
+    loop_enter: unsafe extern "C" fn(*mut c_void),
+    loop_iterate: unsafe extern "C" fn(*mut c_void, i32) -> i32,
+    loop_leave: unsafe extern "C" fn(*mut c_void),
     quit: QuitFn,
     main_loop_destroy: unsafe extern "C" fn(*mut c_void),
     context_new: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void,
@@ -672,7 +694,9 @@ fn load_symbols(lib: &libloading::Library) -> Result<Symbols, String> {
             init: load(lib, b"pw_init\0")?,
             main_loop_new: load(lib, b"pw_main_loop_new\0")?,
             main_loop_get_loop: load(lib, b"pw_main_loop_get_loop\0")?,
-            main_loop_run: load(lib, b"pw_main_loop_run\0")?,
+            loop_enter: load(lib, b"pw_loop_enter\0")?,
+            loop_iterate: load(lib, b"pw_loop_iterate\0")?,
+            loop_leave: load(lib, b"pw_loop_leave\0")?,
             quit: load(lib, b"pw_main_loop_quit\0")?,
             main_loop_destroy: load(lib, b"pw_main_loop_destroy\0")?,
             context_new: load(lib, b"pw_context_new\0")?,
@@ -773,8 +797,19 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             if rc < 0 {
                 state.alive.store(false, Ordering::Release);
                 state.notify.notify_waiters();
-            } else if begin_loop(&state, main) {
-                (symbols.main_loop_run)(main);
+            } else if !pw_loop.is_null() {
+                // Enter before the pointer is published. A quit that lands
+                // in that gap sees `quit_requested` and iterate is never
+                // called, so an early `pw_main_loop_quit` cannot be missed
+                // by a later `pw_main_loop_run`. The short timeout covers a
+                // quit whose wake already ran.
+                (symbols.loop_enter)(pw_loop);
+                if begin_loop(&state, main) {
+                    while !state.quit_requested.load(Ordering::Acquire) {
+                        (symbols.loop_iterate)(pw_loop, 200);
+                    }
+                }
+                (symbols.loop_leave)(pw_loop);
             }
             (symbols.stream_destroy)(stream);
         }
@@ -948,6 +983,7 @@ extern "C" fn on_process(data: *mut c_void) {
     unsafe { (state.queue)(stream, newest) };
     match copied {
         Some(frame) if !framebuf::frame_is_blank(&frame) => {
+            let frame = Arc::new(frame);
             let need = state.need_arrived_ms.load(Ordering::Acquire);
             let ends = copy_ends_request(need, frame.arrived_ms);
             if ends {
@@ -967,6 +1003,17 @@ extern "C" fn on_process(data: *mut c_void) {
     }
 }
 
+fn pts_from_header(bytes: &[u8]) -> Option<i64> {
+    let pts_at = std::mem::offset_of!(SpaMetaHeader, pts);
+    let pts_end = pts_at + std::mem::size_of::<i64>();
+    if bytes.len() < pts_end {
+        return None;
+    }
+    let mut pts = [0u8; 8];
+    pts.copy_from_slice(&bytes[pts_at..pts_end]);
+    Some(i64::from_ne_bytes(pts))
+}
+
 fn header_pts(buf: *mut PwBuffer) -> Option<i64> {
     if buf.is_null() {
         return None;
@@ -982,12 +1029,12 @@ fn header_pts(buf: *mut PwBuffer) -> Option<i64> {
     let metas =
         unsafe { std::slice::from_raw_parts(spa.metas as *const SpaMeta, spa.n_metas as usize) };
     for meta in metas {
-        if meta.type_ == SPA_META_HEADER
-            && !meta.data.is_null()
-            && meta.size as usize >= std::mem::size_of::<SpaMetaHeader>()
-        {
-            let header = unsafe { &*(meta.data as *const SpaMetaHeader) };
-            return Some(header.pts);
+        if meta.type_ == SPA_META_HEADER && !meta.data.is_null() {
+            let len = meta.size as usize;
+            let bytes = unsafe { std::slice::from_raw_parts(meta.data as *const u8, len) };
+            if let Some(pts) = pts_from_header(bytes) {
+                return Some(pts);
+            }
         }
     }
     None
@@ -1176,6 +1223,11 @@ pub fn copy_for_wait(
     latest_arrived_ms: u64,
     need_arrived_ms: u64,
 ) -> bool {
+    // A Tab buffer from before the overlay delay can never be taken.
+    // Requeue it without copying.
+    if need_arrived_ms != NO_TAB_NEED && now_ms < need_arrived_ms {
+        return false;
+    }
     if need_arrived_ms != NO_TAB_NEED && latest_arrived_ms < need_arrived_ms {
         return true;
     }
@@ -1189,23 +1241,14 @@ pub fn copy_ends_request(need_arrived_ms: u64, arrived_ms: u64) -> bool {
     need_arrived_ms == NO_TAB_NEED || arrived_ms >= need_arrived_ms
 }
 
-/// One step of a Tab grab. `want` is whether the stream is still being
-/// asked for frames. Returns `(still_want, captured)`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn tab_request_step(want: bool, need_arrived_ms: u64, arrived_ms: u64) -> (bool, bool) {
-    if !want {
-        return (false, false);
-    }
-    let captured = copy_ends_request(need_arrived_ms, arrived_ms);
-    (!captured, captured)
-}
-
-/// ERROR is always dead. UNCONNECTED and PAUSED count only after the stream
-/// has reached STREAMING, so negotiation's pause is not a user stop.
+/// ERROR is always dead. UNCONNECTED, PAUSED, and CONNECTING count only
+/// after the stream has reached STREAMING, so negotiation is not a user stop.
 pub fn stream_state_is_dead(state: i32, seen_streaming: bool) -> bool {
     match state {
         PW_STREAM_STATE_ERROR => true,
-        PW_STREAM_STATE_UNCONNECTED | PW_STREAM_STATE_PAUSED => seen_streaming,
+        PW_STREAM_STATE_UNCONNECTED | PW_STREAM_STATE_PAUSED | PW_STREAM_STATE_CONNECTING => {
+            seen_streaming
+        }
         _ => false,
     }
 }
@@ -1214,7 +1257,7 @@ pub fn pw_state_name(state: i32) -> &'static str {
     match state {
         PW_STREAM_STATE_ERROR => "error",
         PW_STREAM_STATE_UNCONNECTED => "unconnected",
-        1 => "connecting",
+        PW_STREAM_STATE_CONNECTING => "connecting",
         PW_STREAM_STATE_PAUSED => "paused",
         PW_STREAM_STATE_STREAMING => "streaming",
         _ => "other",
@@ -1224,18 +1267,6 @@ pub fn pw_state_name(state: i32) -> &'static str {
 pub fn fps_line(frames: u64, secs: u64, configured: u32) -> String {
     let per = frames / secs.max(1);
     format!("screencast frames received per second: {per} (configured {configured} fps)")
-}
-
-/// What a grab returns. A fresh wait never reuses the previous frame.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn grab_choice(new_frame: bool, has_last: bool, fresh_wait: bool) -> &'static str {
-    if new_frame {
-        "new"
-    } else if !fresh_wait && has_last {
-        "reuse"
-    } else {
-        "timeout"
-    }
 }
 
 /// Counts only. No paths and no frame bytes.
@@ -1325,16 +1356,11 @@ mod tests {
         assert!(stream_state_is_dead(PW_STREAM_STATE_ERROR, false));
         assert!(stream_state_is_dead(PW_STREAM_STATE_UNCONNECTED, true));
         assert!(stream_state_is_dead(PW_STREAM_STATE_PAUSED, true));
+        assert!(!stream_state_is_dead(PW_STREAM_STATE_CONNECTING, false));
+        assert!(stream_state_is_dead(PW_STREAM_STATE_CONNECTING, true));
         assert!(!stream_state_is_dead(PW_STREAM_STATE_STREAMING, true));
         assert_eq!(pw_state_name(PW_STREAM_STATE_STREAMING), "streaming");
-    }
-
-    #[test]
-    fn a_still_screen_reuses_the_last_frame_and_a_fresh_wait_does_not() {
-        assert_eq!(grab_choice(false, true, false), "reuse");
-        assert_eq!(grab_choice(true, true, false), "new");
-        assert_eq!(grab_choice(false, true, true), "timeout");
-        assert_eq!(grab_choice(false, false, false), "timeout");
+        assert_eq!(pw_state_name(PW_STREAM_STATE_CONNECTING), "connecting");
     }
 
     #[test]
@@ -1344,7 +1370,8 @@ mod tests {
         assert!(copy_due(0, 10, 500));
         assert!(!copy_due(1000, 1400, 500));
         assert!(copy_due(1000, 1500, 500));
-        assert!(copy_for_wait(1000, 1200, 500, 1000, 1500));
+        assert!(!copy_for_wait(1000, 1200, 500, 1000, 1500));
+        assert!(copy_for_wait(1000, 1600, 500, 1000, 1500));
         assert!(!copy_for_wait(1000, 1200, 500, 1500, 1500));
         assert!(!copy_for_wait(1000, 1200, 500, 0, NO_TAB_NEED));
         assert!(copy_for_wait(0, 10, 500, 0, NO_TAB_NEED));
@@ -1371,30 +1398,26 @@ mod tests {
         assert!(fresh >= need);
         assert!(fresh < press + framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
 
-        let (want, captured) = tab_request_step(true, need, early);
         assert!(
-            !captured,
-            "a frame inside the first 300 ms must not end the request"
+            !copy_for_wait(0, early, gap, 0, need),
+            "a buffer before the overlay delay is not copied"
         );
-        assert!(want);
+        assert!(!copy_ends_request(need, early));
         assert_eq!(
             framebuf::select_tab_frame(Some(early), press, early),
             framebuf::TabFrameChoice::Wait
         );
 
-        let (want, captured) = tab_request_step(want, need, fresh);
-        assert!(captured, "the next 2 fps frame is the capture");
-        assert!(!want);
+        assert!(
+            copy_for_wait(early, fresh, gap, early, need),
+            "the next 2 fps frame is copied"
+        );
+        assert!(copy_ends_request(need, fresh));
         assert_eq!(
             framebuf::select_tab_frame(Some(fresh), press, fresh),
             framebuf::TabFrameChoice::Take
         );
 
-        // Ending the request on the early frame drops the later one, and
-        // the grab then misses at the hard stop.
-        let (stuck, captured) = tab_request_step(false, need, fresh);
-        assert!(!captured);
-        assert!(!stuck);
         assert_eq!(
             framebuf::select_tab_frame(
                 Some(early),
@@ -1434,7 +1457,11 @@ mod tests {
         0
     }
 
-    fn reuse_handle(frame: PackedFrame) -> Handle {
+    fn test_handle(
+        latest: Option<PackedFrame>,
+        last_good: Option<PackedFrame>,
+        fresh_done: bool,
+    ) -> Handle {
         Handle {
             state: Arc::new(State {
                 stream: AtomicPtr::new(std::ptr::null_mut()),
@@ -1449,22 +1476,22 @@ mod tests {
                 alive: AtomicBool::new(true),
                 streaming: AtomicBool::new(true),
                 seen_streaming: AtomicBool::new(true),
-                fresh_done: AtomicBool::new(true),
+                fresh_done: AtomicBool::new(fresh_done),
                 dropped: AtomicU64::new(0),
                 received: AtomicU64::new(0),
                 grabs: AtomicU64::new(0),
                 grab_ns: AtomicU64::new(0),
-                width: AtomicU32::new(frame.width),
-                height: AtomicU32::new(frame.height),
-                format: AtomicU32::new(frame.format),
+                width: AtomicU32::new(1),
+                height: AtomicU32::new(1),
+                format: AtomicU32::new(framebuf::FMT_BGRX),
                 max_fps: 2,
                 dequeue_seq: AtomicU64::new(0),
                 max_pts: AtomicI64::new(0),
                 last_copy_ms: AtomicU64::new(0),
                 need_arrived_ms: AtomicU64::new(NO_TAB_NEED),
                 started: std::time::Instant::now(),
-                latest: Mutex::new(None),
-                last_good: Mutex::new(Some(frame)),
+                latest: Mutex::new(latest.map(Arc::new)),
+                last_good: Mutex::new(last_good.map(Arc::new)),
                 notify: tokio::sync::Notify::new(),
                 buffers_pod: pod::buffers_pod(),
                 rate_logged: AtomicBool::new(false),
@@ -1480,18 +1507,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn poll_grab_reuses_last_good_without_relocking() {
-        let frame = framebuf::pack(
-            framebuf::FMT_BGRX,
-            1,
-            1,
-            4,
-            &[0, 0, 255, 0],
-            framebuf::FrameClock { seq: 3, pts: 1 },
-        )
-        .unwrap();
-        let handle = reuse_handle(frame);
+    fn grab_now(handle: Handle) -> Result<GrabOutcome, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1503,21 +1519,64 @@ mod tests {
         });
         let outcome = match rx.recv_timeout(Duration::from_secs(2)) {
             Ok(outcome) => outcome,
-            Err(_) => {
-                // The worker is stuck on the mutex. Joining it would hang
-                // the test. Process exit ends the thread.
-                panic!("poll grab deadlocked while reusing last_good");
-            }
+            Err(_) => panic!("poll grab deadlocked"),
         };
         let _ = worker.join();
-        match outcome.expect("poll grab") {
-            GrabOutcome::Frame(got) => {
+        outcome
+    }
+
+    fn red_frame(seq: u64) -> PackedFrame {
+        framebuf::pack(
+            framebuf::FMT_BGRX,
+            1,
+            1,
+            4,
+            &[0, 0, 255, 0],
+            framebuf::FrameClock { seq, pts: 1 },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn poll_grab_reuses_last_good_without_relocking() {
+        let frame = red_frame(3);
+        let handle = test_handle(None, Some(frame), true);
+        match grab_now(handle).expect("poll grab") {
+            GrabOutcome::Frame { frame, is_new } => {
+                assert!(!is_new, "a reused frame is not a new read");
+                assert_eq!(frame.clock.seq, 3);
                 assert_eq!(
-                    framebuf::to_rgb(&got).unwrap().get_pixel(0, 0).0,
+                    framebuf::to_rgb(&frame).unwrap().get_pixel(0, 0).0,
                     [255, 0, 0]
                 );
             }
             GrabOutcome::TabMiss { .. } => panic!("poll grab returned a tab miss"),
         }
+    }
+
+    #[test]
+    fn a_new_buffer_is_a_new_frame_and_a_fresh_wait_times_out() {
+        let fresh = red_frame(8);
+        let handle = test_handle(Some(fresh), Some(red_frame(3)), true);
+        match grab_now(handle).expect("new frame") {
+            GrabOutcome::Frame { frame, is_new } => {
+                assert!(is_new);
+                assert_eq!(frame.clock.seq, 8);
+            }
+            GrabOutcome::TabMiss { .. } => panic!("poll grab returned a tab miss"),
+        }
+        let handle = test_handle(None, Some(red_frame(3)), false);
+        let err = grab_now(handle).expect_err("fresh wait with no buffer");
+        assert_eq!(err, NO_STREAM_FRAME);
+    }
+
+    #[test]
+    fn a_short_header_still_has_pts() {
+        assert_eq!(std::mem::offset_of!(SpaMetaHeader, pts), 8);
+        assert!(std::mem::size_of::<SpaMetaHeader>() >= 32);
+        let mut bytes = [0u8; 24];
+        bytes[8..16].copy_from_slice(&42i64.to_ne_bytes());
+        assert_eq!(pts_from_header(&bytes), Some(42));
+        assert_eq!(pts_from_header(&bytes[..8]), None);
     }
 }

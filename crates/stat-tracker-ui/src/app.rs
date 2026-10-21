@@ -1293,7 +1293,11 @@ impl TrackerApp {
                 self.capturing = true;
                 self.preview_error = None;
                 let output = settings::nonempty(&self.settings.capture_output);
-                Task::perform(capture::capture_now(backend, output), Message::CaptureReady)
+                let data_dir = self.data_dir.clone();
+                Task::perform(
+                    capture::capture_now(backend, output, data_dir),
+                    Message::CaptureReady,
+                )
             }
             Message::CaptureReady(result) => {
                 self.capturing = false;
@@ -1673,7 +1677,13 @@ impl TrackerApp {
                 self.daemon_busy = true;
                 Task::perform(
                     async move {
-                        while stat_tracker::replace::game_file_in_progress(&data_dir) {
+                        let started = std::time::Instant::now();
+                        while stat_tracker::replace::game_file_in_progress(&data_dir)
+                            && !stat_tracker::replace::game_wait_should_stop(
+                                started.elapsed(),
+                                stat_tracker::replace::GAME_WAIT_MAX,
+                            )
+                        {
                             tokio::time::sleep(stat_tracker::replace::GAME_WAIT_STEP).await;
                         }
                         let stale = pid.is_some_and(|pid| {
@@ -2328,8 +2338,9 @@ impl TrackerApp {
             }
         };
         let output = settings::nonempty(&self.settings.capture_output);
+        let data_dir = self.data_dir.clone();
         Task::perform(
-            crate::setup_guide::capture_test_frame(backend, output),
+            crate::setup_guide::capture_test_frame(backend, output, data_dir),
             move |result| {
                 if tab {
                     Message::Setup(crate::setup_guide::SetupMessage::TabReady(result))
@@ -2432,6 +2443,11 @@ impl TrackerApp {
             let health = settings::daemon_health_notice(status.as_ref(), self.daemon.pid);
             if health != self.ocr_switch.health_notice {
                 self.ocr_switch.health_notice = health;
+                self.health_status = self.health_now();
+            }
+            let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
+            if share != self.ocr_switch.share_notice {
+                self.ocr_switch.share_notice = share;
                 self.health_status = self.health_now();
             }
         }
@@ -2736,7 +2752,7 @@ impl TrackerApp {
     }
 
     fn health_now(&self) -> String {
-        health_with_ocr_notice(
+        let base = health_with_ocr_notice(
             health_status_for(
                 &self.data_dir,
                 &self.games,
@@ -2746,7 +2762,8 @@ impl TrackerApp {
                     .map(|s| (s.server_url.as_str(), s.token.as_str())),
             ),
             self.ocr_switch.health_notice.as_deref(),
-        )
+        );
+        health_with_ocr_notice(base, self.ocr_switch.share_notice.as_deref())
     }
 
     /// A click on "Use classic OCR (Tesseract)". Turning it on is at once.
@@ -3554,6 +3571,13 @@ token = \"secret-token-must-stay\"
             super::health_with_ocr_notice(paused.into(), Some(notice)),
             format!("{paused} {notice}")
         );
+        let declined = "KDE screen share was declined: no captures until Overwatch is restarted";
+        let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);
+        assert_eq!(
+            super::health_with_ocr_notice(idle, Some(declined)),
+            declined
+        );
+        assert!(!declined.contains('\u{2014}'));
     }
 
     #[test]

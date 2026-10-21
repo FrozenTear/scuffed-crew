@@ -219,11 +219,12 @@ are asked to allow that share once. The permission is remembered in
 `screencast-restore-token` inside the data directory, so it is not asked
 again after a reboot. The compositor is offered a variable framerate with
 a cap of `screencast_max_fps` frames per second (2 when that key is unset).
-A frame is copied only when the tracker needs one. A later poll reuses the
-last frame when the screen has not changed. The share closes when Overwatch
+A frame is copied only when the tracker needs one. A later poll that sees
+no new buffer does not count as a read, so a reused picture cannot confirm
+Victory or Defeat by itself. A wait that ends with no new buffer is no read. The share closes when Overwatch
 quits, once the permission has been saved, and the next game opens it again
 with that permission. If the permission was not saved, the share stays up
-so quitting the game does not ask again. Other
+so quitting the game does not ask again. If you cancel or close the share prompt, the tracker does not ask again and does not capture until Overwatch is started again. On KDE it does not fall back to screenshots. One log line and the app status say why. The saved permission is kept. Other
 desktops (niri, Sway, Hyprland, X11) keep their direct capture unless you
 force the stream.
 
