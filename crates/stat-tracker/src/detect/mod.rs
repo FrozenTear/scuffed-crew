@@ -155,16 +155,19 @@ pub struct TabKey {
     pub at: Instant,
 }
 
-/// The oldest a key event's age is taken to be. A larger age is clamped
-/// here, so a wall-clock step cannot push a press far into the past.
-pub const MAX_KEY_EVENT_AGE: Duration = Duration::from_secs(3);
+/// The oldest a key event's age can be and still be trusted. The reader
+/// task stamps events within milliseconds, so a larger age means the wall
+/// clock stepped: that event counts as happening now.
+pub const MAX_KEY_EVENT_AGE: Duration = Duration::from_millis(1500);
 
 /// Turn an evdev event time into a monotonic instant.
 ///
 /// evdev stamps events on CLOCK_REALTIME by default. The event's age is
-/// `now_real - event_time`, clamped to `0..=MAX_KEY_EVENT_AGE` (an event
-/// stamped in the future counts as now), and the instant is `now_mono`
-/// minus that age. `now_real` and `now_mono` are read together.
+/// `now_real - event_time`, and the instant is `now_mono` minus that age.
+/// An event stamped in the future, or older than [`MAX_KEY_EVENT_AGE`],
+/// means a wall-clock step and counts as now. (A clamped old age would be
+/// the worst value: past the stream deadline, and past the draw wait.)
+/// `now_real` and `now_mono` are read together.
 pub fn key_event_instant(
     event_time: std::time::SystemTime,
     now_real: std::time::SystemTime,
@@ -172,8 +175,9 @@ pub fn key_event_instant(
 ) -> Instant {
     let age = now_real
         .duration_since(event_time)
-        .unwrap_or(Duration::ZERO)
-        .min(MAX_KEY_EVENT_AGE);
+        .ok()
+        .filter(|age| *age <= MAX_KEY_EVENT_AGE)
+        .unwrap_or(Duration::ZERO);
     now_mono.checked_sub(age).unwrap_or(now_mono)
 }
 
@@ -469,16 +473,22 @@ mod tests {
     }
 
     #[test]
-    fn event_age_is_clamped_to_zero_and_three_seconds() {
+    fn an_event_age_from_a_clock_step_counts_as_now() {
         let now_real = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let now_mono = Instant::now() + Duration::from_secs(60);
         // Stamped in the future (wall clock stepped back): counts as now.
         let future = now_real + Duration::from_secs(5);
         assert_eq!(key_event_instant(future, now_real, now_mono), now_mono);
-        // Far in the past (wall clock stepped forward): at most 3 s old.
+        // Far in the past (wall clock stepped forward): now, not a press
+        // already past the stream deadline.
         let past = now_real - Duration::from_secs(3600);
+        assert_eq!(key_event_instant(past, now_real, now_mono), now_mono);
+        let just_over = now_real - MAX_KEY_EVENT_AGE - Duration::from_millis(1);
+        assert_eq!(key_event_instant(just_over, now_real, now_mono), now_mono);
+        // Up to the bound the age is trusted.
+        let at_bound = now_real - MAX_KEY_EVENT_AGE;
         assert_eq!(
-            now_mono - key_event_instant(past, now_real, now_mono),
+            now_mono - key_event_instant(at_bound, now_real, now_mono),
             MAX_KEY_EVENT_AGE
         );
     }

@@ -169,6 +169,15 @@ pub fn tab_retry_press(now: std::time::Instant) -> std::time::Instant {
         .unwrap_or(now)
 }
 
+/// The press the first Tab grab hands the stream, given the key-event time
+/// and the instant the grab starts. Normally the key time. A grab that
+/// starts late (a press queued behind a running capture) would already be
+/// past the key's 1200 ms hard stop and miss at once, counting as a soft
+/// miss; it then takes the next buffer from `now` on, as a retry does.
+pub fn first_grab_press(key: std::time::Instant, now: std::time::Instant) -> std::time::Instant {
+    key.max(tab_retry_press(now))
+}
+
 /// Delay from the Tab press to the chosen frame, in milliseconds.
 pub fn tab_frame_delay_ms(press_ms: u64, arrived_ms: u64) -> u64 {
     arrived_ms.saturating_sub(press_ms)
@@ -590,5 +599,30 @@ mod tests {
         );
         // Right after process start the subtraction cannot underflow.
         let _ = tab_retry_press(std::time::Instant::now());
+    }
+    #[test]
+    fn a_first_grab_that_starts_late_does_not_miss_at_once() {
+        let key = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // On time: the key time.
+        assert_eq!(first_grab_press(key, key + ms(50)), key);
+        assert_eq!(first_grab_press(key, key + ms(300)), key);
+        // A queued press that starts 2 s after its key: measured from the
+        // grab start minus the overlay delay, so the hard stop is ahead.
+        let late = key + ms(2_000);
+        let press = first_grab_press(key, late);
+        assert_eq!(press, tab_retry_press(late));
+        let base = key;
+        let rel = |at: std::time::Instant| at.duration_since(base).as_millis() as u64;
+        assert_eq!(
+            select_tab_frame(None, rel(press), rel(late) + 1),
+            TabFrameChoice::Wait,
+            "not an instant miss"
+        );
+        // With the key time it would have been one.
+        assert_eq!(
+            select_tab_frame(None, rel(key), rel(late) + 1),
+            TabFrameChoice::Miss
+        );
     }
 }

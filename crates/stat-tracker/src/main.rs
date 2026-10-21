@@ -4531,7 +4531,6 @@ fn resume_after_suspend(st: &mut SessionState, data_dir: &std::path::Path) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// How long direct capture and the screenshot portal wait after the Tab
 /// press for the game to draw the scoreboard. The screen stream waits for a
 /// buffer instead.
@@ -4594,6 +4593,7 @@ async fn start_tab_capture(
     (task, flight)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     ctx: Arc<DaemonCtx>,
     early_sigterm: Option<tokio::signal::unix::Signal>,
@@ -4719,14 +4719,10 @@ async fn run_loop(
     let (capture_tx, mut capture_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<CaptureReport, String>)>();
     let mut capture_task: Option<tokio::task::JoinHandle<()>> = None;
-    // The running Tab capture's shared state, until its report is handled,
-    // and a newer press waiting for that report.
-    let mut tab_flight: Option<Arc<stat_tracker::tab_retry::TabFlight>> = None;
-    let mut queued_tab: Option<Instant> = None;
-    // The last Tab release. `TabFlight::note_release` ignores one from
-    // before a capture's own press.
-    let mut last_tab_release: Option<Instant> = None;
-    // A key event that preempted a poll, handled by the keyboard arm on the
+    // The running Tab capture until its report is handled, a newer press
+    // waiting for that report, and the last release.
+    let mut tabs = stat_tracker::tab_retry::TabKeys::default();
+    // A Tab press that preempted a poll, handled by the keyboard arm on the
     // next turn of the loop.
     let mut pending_key: Option<Result<detect::TabKey, Box<dyn std::error::Error>>> = None;
 
@@ -4804,12 +4800,7 @@ async fn run_loop(
                     // A release stops the running capture's retries: a
                     // frame after it shows the game, not the board. It is
                     // kept for a press queued behind that capture.
-                    Ok(key) if !key.down => {
-                        last_tab_release = Some(key.at);
-                        if let Some(flight) = &tab_flight {
-                            flight.note_release(key.at);
-                        }
-                    }
+                    Ok(key) if !key.down => tabs.on_release(key.at),
                     Ok(key) => {
                         // The kernel's key-event time, not when this loop got
                         // round to it (a poll can hold the loop for most of a
@@ -4831,55 +4822,24 @@ async fn run_loop(
                             continue;
                         }
 
-                        // A flight whose task is gone without a report (a
+                        // A capture whose task is gone without a report (a
                         // panic) must not hold later presses forever. A task
                         // that finished with its report still queued is still
-                        // in flight: that report lands next.
-                        if tab_flight.is_some()
-                            && capture_task.as_ref().is_none_or(|t| t.is_finished())
-                            && capture_rx.is_empty()
-                        {
-                            tab_flight = None;
-                            queued_tab = None;
-                        }
-                        let in_flight = tab_flight.as_ref().map(|f| f.phase());
-                        match stat_tracker::tab_retry::tab_press_action(
-                            press,
-                            st.last_tab_capture,
-                            in_flight,
-                        ) {
-                            stat_tracker::tab_retry::TabPressAction::Debounced => {
-                                tracing::debug!("Tab debounced: a board was accepted under 3 s ago");
-                            }
-                            stat_tracker::tab_retry::TabPressAction::Ignore => {
-                                tracing::debug!("Tab ignored: the capture in progress already has a board");
-                            }
-                            stat_tracker::tab_retry::TabPressAction::Queue => {
-                                if let Some(flight) = &tab_flight {
-                                    flight.cancel_retries();
-                                }
-                                queued_tab = Some(press);
-                                tracing::info!(
-                                    "Tab pressed again before the capture found a board: its retries stop and this press runs next"
-                                );
-                            }
-                            stat_tracker::tab_retry::TabPressAction::Start => {
-                                queued_tab = None;
-                                let (task, flight) = start_tab_capture(
-                                    &mut st,
-                                    &ctx,
-                                    &mut sync_task,
-                                    &sync_backoff,
-                                    &capture_tx,
-                                    press,
-                                )
-                                .await;
-                                if let Some(at) = last_tab_release {
-                                    flight.note_release(at);
-                                }
-                                capture_task = Some(task);
-                                tab_flight = Some(flight);
-                            }
+                        // running: that report lands next.
+                        let capture_gone = capture_task.as_ref().is_none_or(|t| t.is_finished())
+                            && capture_rx.is_empty();
+                        if let Some(press) = tabs.on_press(press, st.last_tab_capture, capture_gone) {
+                            let (task, flight) = start_tab_capture(
+                                &mut st,
+                                &ctx,
+                                &mut sync_task,
+                                &sync_backoff,
+                                &capture_tx,
+                                press,
+                            )
+                            .await;
+                            tabs.started(flight);
+                            capture_task = Some(task);
                         }
                     }
                     Err(e) => {
@@ -4927,28 +4887,18 @@ async fn run_loop(
                 // A Tab pressed while that capture looked for a board runs
                 // now, unless the capture accepted one (it would read the
                 // same board). An accepted board starts the debounce.
-                if let Some(flight) = tab_flight.take() {
-                    let next = stat_tracker::tab_retry::next_press_after_report(
-                        &flight,
-                        queued_tab.take(),
-                        &mut st.last_tab_capture,
-                    );
-                    if let Some(press) = next {
-                        let (task, flight) = start_tab_capture(
-                            &mut st,
-                            &ctx,
-                            &mut sync_task,
-                            &sync_backoff,
-                            &capture_tx,
-                            press,
-                        )
-                        .await;
-                        if let Some(at) = last_tab_release {
-                            flight.note_release(at);
-                        }
-                        capture_task = Some(task);
-                        tab_flight = Some(flight);
-                    }
+                if let Some(press) = tabs.on_report(&mut st.last_tab_capture) {
+                    let (task, flight) = start_tab_capture(
+                        &mut st,
+                        &ctx,
+                        &mut sync_task,
+                        &sync_backoff,
+                        &capture_tx,
+                        press,
+                    )
+                    .await;
+                    tabs.started(flight);
+                    capture_task = Some(task);
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
@@ -4998,11 +4948,12 @@ async fn run_loop(
                         continue;
                     }
                 }
-                st.poll_ticks_skipped = 0;
 
-                // A Tab key event preempts the poll's grab and analysis: the
-                // poll is dropped (the next tick polls again) and the key is
-                // handled at once by the keyboard arm, never lost.
+                // A Tab press preempts the poll's grab and analysis: the poll
+                // is dropped (the next tick polls again) and the press is
+                // kept for the keyboard arm, never lost. A release does not
+                // preempt (`next_press` records it), so the outcome-only
+                // poll in the ~3 s end-reel window survives letting go of Tab.
                 let grabbed = match stop_for_shutdown_or_key(
                     capture::capture_screen_output_for(
                         backend,
@@ -5010,18 +4961,21 @@ async fn run_loop(
                         capture::CaptureKind::Poll,
                     ),
                     stat_tracker::replace::shutdown_notified(),
-                    kbd.wait_tab(),
+                    stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
+                    &mut pending_key,
                 )
                 .await
                 {
                     PollRace::Done(grabbed) => Ok(grabbed),
                     PollRace::Shutdown => Err(()),
-                    PollRace::Key(key) => {
-                        tracing::debug!("poll dropped during its grab: a Tab key event comes first");
-                        pending_key = Some(key);
+                    PollRace::Preempted => {
+                        tracing::debug!("poll dropped during its grab: a Tab press comes first");
                         continue;
                     }
                 };
+                // Reset only for a poll that got its frame: a dropped one
+                // leaves the slow cadence due on the next tick.
+                st.poll_ticks_skipped = 0;
                 match grabbed {
                     Err(()) => {
                         shutdown_from_signal(
@@ -5178,15 +5132,15 @@ async fn run_loop(
                             (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
                         }),
                             stat_tracker::replace::shutdown_notified(),
-                            kbd.wait_tab(),
+                            stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
+                            &mut pending_key,
                         )
                         .await;
                         let analyzed = match analyzed {
                             PollRace::Done(joined) => Ok(joined),
                             PollRace::Shutdown => Err(()),
-                            PollRace::Key(key) => {
-                                tracing::debug!("poll dropped during its read: a Tab key event comes first");
-                                pending_key = Some(key);
+                            PollRace::Preempted => {
+                                tracing::debug!("poll dropped during its read: a Tab press comes first");
                                 continue;
                             }
                         };
@@ -7143,17 +7097,23 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
-/// The Tab retry predicate. A frame with no full scoreboard, a Tab that
-/// got no fresh stream frame, and a share that is still opening are tried
-/// again. A declined share, a team size the pitch does not settle, and an
-/// analysed frame are not.
-fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
-    matches!(
-        outcome,
-        FrameAnalysisOutcome::NotAScoreboard { .. }
-            | FrameAnalysisOutcome::StreamMiss
-            | FrameAnalysisOutcome::ShareOpening
-    )
+/// How a Tab grab ended, for the retry loop. A frame with no full
+/// scoreboard, a Tab that got no fresh stream frame, and a share that is
+/// still opening are tried again ([`stat_tracker::tab_retry::TabResult::retries`]).
+/// A declined share, a team size the pitch does not settle, and an analysed
+/// frame are not.
+fn tab_result(outcome: &FrameAnalysisOutcome) -> stat_tracker::tab_retry::TabResult {
+    use stat_tracker::tab_retry::TabResult;
+    match outcome {
+        FrameAnalysisOutcome::Analyzed(_) => TabResult::Accepted,
+        FrameAnalysisOutcome::NotAScoreboard { .. } => TabResult::NotAScoreboard,
+        FrameAnalysisOutcome::StreamMiss | FrameAnalysisOutcome::ShareOpening => {
+            TabResult::NoFrameYet
+        }
+        FrameAnalysisOutcome::Declined | FrameAnalysisOutcome::TeamSizeUncertain { .. } => {
+            TabResult::Final
+        }
+    }
 }
 
 /// How useful a Tab outcome is, so a later grab never replaces a better
@@ -7213,17 +7173,23 @@ async fn grab_tab_attempt(
         let grab = capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab);
         return capture::with_tab_press(press, grab).await;
     }
-    // The first attempt keeps the original key. While the share is still
-    // opening it waits up to 5 seconds for a fresh frame, not the 1200 ms
-    // frame budget. If that open uses up the frame budget, the grab runs
-    // again from now.
-    let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
-    capture::first_tab_grab(
+    // The first attempt keeps the original key, unless it starts so late
+    // (a press queued behind another capture) that the key's frame budget
+    // is gone: then it takes the next buffer, as a retry does. While the
+    // share is still opening it waits up to 5 seconds for a fresh frame, not
+    // the 1200 ms frame budget. If that open uses up the frame budget, the
+    // grab runs again from now.
+    let key = capture::tab_press().unwrap_or_else(std::time::Instant::now);
+    let press = capture::first_grab_press(key, std::time::Instant::now());
+    capture::with_tab_press(
         press,
-        || press.elapsed(),
-        std::time::Instant::now,
-        || capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
-        || tokio::time::sleep(std::time::Duration::from_millis(50)),
+        capture::first_tab_grab(
+            press,
+            || press.elapsed(),
+            std::time::Instant::now,
+            || capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
+            || tokio::time::sleep(std::time::Duration::from_millis(50)),
+        ),
     )
     .await
 }
@@ -7258,7 +7224,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         let (analysis, _retries) = stat_tracker::tab_retry::with_retries(
             &flight,
             &stat_tracker::tab_retry::TAB_RETRY_WAITS,
-            tab_capture_should_retry,
+            tab_result,
             tab_outcome_rank,
             tab_retry_reason,
             |attempt| {
@@ -7325,7 +7291,6 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             tokio::time::sleep,
         )
         .await?;
-        flight.finish(matches!(analysis, FrameAnalysisOutcome::Analyzed(_)));
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
             FrameAnalysisOutcome::StreamMiss
@@ -9327,19 +9292,20 @@ async fn close_session_on_shutdown(
 
 /// How a poll's grab or read ended when raced against shutdown and the
 /// keyboard.
-enum PollRace<T, K> {
+enum PollRace<T> {
     Done(T),
     Shutdown,
-    /// A key event arrived first. The work was dropped; the event is the
-    /// caller's to handle.
-    Key(K),
+    /// A Tab press arrived first. The work was dropped and the press is in
+    /// the caller's `pending` slot.
+    Preempted,
 }
 
-/// Race `work` against shutdown and the next Tab key event. Shutdown is
-/// polled first, so a signal that is already waiting wins even when `work`
-/// is also ready. Finished work beats a ready key (its result is applied
-/// and the key waits in the channel). Otherwise the key wins and `work` is
-/// dropped, so a Tab never waits behind a poll.
+/// Race `work` against shutdown and the next Tab press. Shutdown is polled
+/// first, so a signal that is already waiting wins even when `work` is also
+/// ready. Finished work beats a ready key (its result is applied and the
+/// key waits in the channel). Otherwise the key wins, it is stored in
+/// `pending` for the keyboard arm, and `work` is dropped, so a Tab never
+/// waits behind a poll and is never lost.
 ///
 /// This is for the poll's capture grab and OCR only. Dropping `work`
 /// detaches a `spawn_blocking` task. That OCR keeps running and its result
@@ -9350,7 +9316,8 @@ async fn stop_for_shutdown_or_key<T, K, S, KF>(
     work: impl std::future::Future<Output = T>,
     shutdown: S,
     key: KF,
-) -> PollRace<T, K>
+    pending: &mut Option<K>,
+) -> PollRace<T>
 where
     S: std::future::Future<Output = ()>,
     KF: std::future::Future<Output = K>,
@@ -9362,7 +9329,10 @@ where
         biased;
         _ = &mut shutdown => PollRace::Shutdown,
         value = &mut work => PollRace::Done(value),
-        key = &mut key => PollRace::Key(key),
+        key = &mut key => {
+            *pending = Some(key);
+            PollRace::Preempted
+        }
     }
 }
 
@@ -9387,10 +9357,11 @@ async fn stop_for_shutdown<T, S>(
 where
     S: std::future::Future<Output = ()>,
 {
-    match stop_for_shutdown_or_key(work, shutdown, std::future::pending::<()>()).await {
+    let mut never: Option<()> = None;
+    match stop_for_shutdown_or_key(work, shutdown, std::future::pending::<()>(), &mut never).await {
         PollRace::Done(value) => Ok(value),
         PollRace::Shutdown => Err(()),
-        PollRace::Key(()) => unreachable!("a pending key never arrives"),
+        PollRace::Preempted => unreachable!("a pending key never arrives"),
     }
 }
 
@@ -10083,13 +10054,13 @@ mod tests {
             frame: frame(),
             scan,
         };
-        assert!(tab_capture_should_retry(&rejected));
-        assert!(tab_capture_should_retry(&FrameAnalysisOutcome::StreamMiss));
-        assert!(tab_capture_should_retry(
-            &FrameAnalysisOutcome::ShareOpening
-        ));
-        assert!(!tab_capture_should_retry(&FrameAnalysisOutcome::Declined));
-        assert!(!tab_capture_should_retry(&unsure));
+        use stat_tracker::tab_retry::TabResult;
+        assert_eq!(tab_result(&rejected), TabResult::NotAScoreboard);
+        assert!(tab_result(&rejected).retries());
+        assert!(tab_result(&FrameAnalysisOutcome::StreamMiss).retries());
+        assert!(tab_result(&FrameAnalysisOutcome::ShareOpening).retries());
+        assert!(!tab_result(&FrameAnalysisOutcome::Declined).retries());
+        assert!(!tab_result(&unsure).retries());
         assert!(tab_outcome_rank(&rejected) > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss));
         assert!(
             tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
@@ -16947,54 +16918,119 @@ mod tests {
         );
     }
 
+    /// Key events from a list; then nothing more ever arrives.
+    struct ScriptedKeys(std::collections::VecDeque<detect::TabKey>);
+
+    impl stat_tracker::tab_retry::TabKeySource for ScriptedKeys {
+        fn next_key(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<detect::TabKey, Box<dyn std::error::Error>>>
+        {
+            let key = self.0.pop_front();
+            async move {
+                match key {
+                    Some(key) => Ok(key),
+                    None => std::future::pending().await,
+                }
+            }
+        }
+    }
+
+    async fn slow_poll(done: std::sync::Arc<std::sync::atomic::AtomicBool>) -> &'static str {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        "read"
+    }
+
     /// rc.6: a Tab used to wait behind the poll's grab and OCR (the poll ran
     /// up to ~0.8 s inside the loop), so it was stamped and served late. A
-    /// key event now drops the running poll and is handed back intact.
+    /// press now drops the running poll, and the keyboard arm gets it next.
     #[tokio::test]
-    async fn a_tab_key_preempts_a_running_poll_and_is_not_lost() {
+    async fn a_tab_press_preempts_a_running_poll_and_is_not_lost() {
+        let t0 = Instant::now();
+        let press = detect::TabKey { down: true, at: t0 };
+        let mut keys = ScriptedKeys([press].into_iter().collect());
+        let mut tabs = stat_tracker::tab_retry::TabKeys::default();
+        let mut pending = None;
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = std::sync::Arc::clone(&finished);
         let started = std::time::Instant::now();
         let raced = stop_for_shutdown_or_key(
-            async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            },
+            slow_poll(std::sync::Arc::clone(&finished)),
             std::future::pending::<()>(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                "tab"
-            },
+            stat_tracker::tab_retry::next_press(&mut keys, &mut tabs),
+            &mut pending,
         )
         .await;
-        assert!(matches!(raced, PollRace::Key("tab")));
+        assert!(matches!(raced, PollRace::Preempted));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
 
-        // The key the poll kept is what the keyboard arm takes next, before
-        // any new event.
-        let mut pending = match raced {
-            PollRace::Key(key) => Some(key),
-            _ => None,
-        };
+        // The press the poll kept is what the keyboard arm takes next,
+        // before any new event.
         let next = pending_or_next(&mut pending, async { panic!("not read") }).await;
-        assert_eq!(next, "tab");
+        assert_eq!(next.unwrap(), press);
+        assert!(pending.is_none());
+    }
+
+    /// A release must not drop the poll: during the end-reel wake that poll
+    /// is the outcome look in the ~3 s VICTORY window, right when a player
+    /// who held Tab lets go. The release still reaches the capture.
+    #[tokio::test]
+    async fn a_tab_release_does_not_preempt_the_poll() {
+        let t0 = Instant::now();
+        let mut keys = ScriptedKeys(
+            [detect::TabKey {
+                down: false,
+                at: t0 + std::time::Duration::from_millis(400),
+            }]
+            .into_iter()
+            .collect(),
+        );
+        let mut tabs = stat_tracker::tab_retry::TabKeys::default();
+        let flight = stat_tracker::tab_retry::TabFlight::new(t0);
+        tabs.started(Arc::clone(&flight));
+        let mut pending = None;
+        let raced = stop_for_shutdown_or_key(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                "read"
+            },
+            std::future::pending::<()>(),
+            stat_tracker::tab_retry::next_press(&mut keys, &mut tabs),
+            &mut pending,
+        )
+        .await;
+        assert!(matches!(raced, PollRace::Done("read")));
         assert!(pending.is_none());
         assert_eq!(
-            pending_or_next(&mut pending, async { "next" }).await,
-            "next"
+            flight.released_at(),
+            Some(t0 + std::time::Duration::from_millis(400))
         );
     }
 
     #[tokio::test]
     async fn finished_poll_work_beats_a_ready_key_and_shutdown_beats_both() {
-        let raced =
-            stop_for_shutdown_or_key(async { "read" }, std::future::pending::<()>(), async {
-                "tab"
-            })
-            .await;
+        let press = detect::TabKey {
+            down: true,
+            at: Instant::now(),
+        };
+        let mut keys = ScriptedKeys([press].into_iter().collect());
+        let mut tabs = stat_tracker::tab_retry::TabKeys::default();
+        let mut pending = None;
+        let raced = stop_for_shutdown_or_key(
+            async { "read" },
+            std::future::pending::<()>(),
+            stat_tracker::tab_retry::next_press(&mut keys, &mut tabs),
+            &mut pending,
+        )
+        .await;
         assert!(matches!(raced, PollRace::Done("read")));
-        let raced = stop_for_shutdown_or_key(async { "read" }, async {}, async { "tab" }).await;
+        assert!(pending.is_none());
+        assert_eq!(keys.0.len(), 1, "the press waits in the channel");
+        let mut pending = None;
+        let raced =
+            stop_for_shutdown_or_key(async { "read" }, async {}, async { "tab" }, &mut pending)
+                .await;
         assert!(matches!(raced, PollRace::Shutdown));
     }
 
