@@ -61,6 +61,7 @@ echo "Recreating site-server with BOOTSTRAP_ADMIN_RESET=1 for user ${BOOTSTRAP_A
 "${COMPOSE[@]}" --env-file "$SECRETS" up -d --force-recreate --no-deps site-server
 
 echo
-echo "If the server log shows the reset applied, remove BOOTSTRAP_ADMIN_RESET from the environment"
-echo "and recreate site-server again without it (or re-run compose up without those vars)."
+echo "If the server log shows the reset applied, remove BOOTSTRAP_ADMIN_RESET and"
+echo "BOOTSTRAP_ADMIN_PASSWORD from your shell and from data/secrets.env, then run"
+echo "./scripts/update.sh to recreate site-server without them."
 echo "Then sign in at /login with the new password."

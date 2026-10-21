@@ -377,7 +377,11 @@ if pick_canonical_up_surreal; then
     start_site_server --no-deps
     used_no_deps=1
 elif [[ "${SURREAL_GUARD_ACTION}" == "with-deps" ]]; then
-    echo "No project Surreal container or volume — starting site-server with dependencies (fresh install)."
+    if surreal_db_volume_exists; then
+        echo "SCUFFED_ALLOW_DB_CREATE=1: no project Surreal container; compose creates it on $(compose_surreal_image) over the existing ${PROJECT_NAME}_surrealdb-data volume."
+    else
+        echo "No project Surreal container or volume — starting site-server with dependencies (fresh install)."
+    fi
     start_site_server
 else
     echo "error: no project Surreal container is Up after starting ${SURREAL_GUARD_NAME:-it}." >&2

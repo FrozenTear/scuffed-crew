@@ -22,8 +22,9 @@ BIN="${TMP}/bin"
 mkdir -p "${BIN}"
 cat >"${BIN}/podman" <<'STUB'
 #!/usr/bin/env bash
-# State: $STUB_STATE/containers  lines "id<TAB>name<TAB>status<TAB>image"
+# State: $STUB_STATE/containers  lines "id<TAB>name<TAB>status<TAB>image[<TAB>image-id]"
 #        $STUB_STATE/volumes     one name per line
+#        $STUB_STATE/images      lines "ref<TAB>image-id" (pulled images)
 echo "podman $*" >>"${STUB_STATE}/calls"
 cmd="$1"; shift || true
 case "${cmd}" in
@@ -42,7 +43,7 @@ case "${cmd}" in
             case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac
         done
         [[ -f "${STUB_STATE}/containers" ]] || exit 0
-        while IFS=$'\t' read -r id name status image; do
+        while IFS=$'\t' read -r id name status image _imgid; do
             [[ -n "${id}" ]] || continue
             if [[ -f "${STUB_STATE}/started_${id}" && ! -f "${STUB_STATE}/ps_stale" ]]; then
                 status="Up 1 second"
@@ -56,10 +57,11 @@ case "${cmd}" in
         exit 0 ;;
     inspect)
         fmt="$2"; id="$3"
-        while IFS=$'\t' read -r cid name status image; do
+        while IFS=$'\t' read -r cid name status image imgid; do
             [[ "${cid}" == "${id}" || "${name}" == "${id}" ]] || continue
             case "${fmt}" in
                 *ImageName*) echo "${image}" ;;
+                *'.Image}}'*) echo "${imgid:-}" ;;
                 *State.Running*)
                     if [[ "${status}" == Up* || -f "${STUB_STATE}/started_${cid}" ]]; then echo true; else echo false; fi ;;
                 *State.Status*) echo running ;;
@@ -67,6 +69,16 @@ case "${cmd}" in
             exit 0
         done <"${STUB_STATE}/containers"
         exit 1 ;;
+    image)
+        # podman image inspect <ref> --format '{{.Id}}'
+        if [[ "${1:-}" == "inspect" ]]; then
+            while IFS=$'\t' read -r ref imgid; do
+                [[ "${ref}" == "$2" ]] && { echo "${imgid}"; exit 0; }
+            done <"${STUB_STATE}/images"
+            echo "Error: $2: image not known" >&2
+            exit 125
+        fi
+        exit 0 ;;
     volume)
         [[ "${1:-}" == "ls" ]] && { cat "${STUB_STATE}/volumes" 2>/dev/null || true; }
         exit 0 ;;
@@ -106,13 +118,14 @@ IMG_REPO="docker.io/surrealdb/surrealdb"
 OLD="${IMG_REPO}:v3.0"
 P=scuffed-crew
 
-# scenario <name> <containers-lines> <volumes-lines>
+# new_state <name> <containers-lines> <volumes-lines> [<images-lines>]
 new_state() {
     STUB_STATE="${TMP}/state-$1"
     rm -rf "${STUB_STATE}"
     mkdir -p "${STUB_STATE}"
     printf '%b' "$2" >"${STUB_STATE}/containers"
     printf '%b' "$3" >"${STUB_STATE}/volumes"
+    printf '%b' "${4:-}" >"${STUB_STATE}/images"
     : >"${STUB_STATE}/calls"
     export STUB_STATE
 }
@@ -191,10 +204,47 @@ run_script update.sh SCUFFED_ALLOW_DB_CREATE=1 \
     || fail "update.sh with SCUFFED_ALLOW_DB_CREATE=1: exit $?. $(tail -5 "${STUB_STATE}/out")"
 up_calls | grep -q -- '--no-deps' && fail "SCUFFED_ALLOW_DB_CREATE=1 should start with dependencies"
 up_calls | grep -q ' up -d site-server' || fail "SCUFFED_ALLOW_DB_CREATE=1 did not run up -d site-server"
+grep -q 'over the existing' "${STUB_STATE}/out" || fail "SCUFFED_ALLOW_DB_CREATE=1 run does not say it uses the existing volume"
+grep -q 'No project Surreal container or volume' "${STUB_STATE}/out" && fail "SCUFFED_ALLOW_DB_CREATE=1 run claims there is no volume"
 
 new_state fresh "" "other_volume\n"
 run_script update.sh || fail "update.sh fresh host: exit $?. $(tail -5 "${STUB_STATE}/out")"
 up_calls | grep -q ' up -d site-server' || fail "fresh host did not start site-server with dependencies"
+
+# Image identity. podman reports a container created from repo:tag@sha256:d
+# as repo@sha256:d, so a tag+digest pin in compose.yml must still match.
+set_compose_image() {
+    sed -i -E "s#^(    image: )docker\.io/surrealdb/surrealdb[:@][^[:space:]]+#\1$1#" "${FIX}/compose.yml"
+}
+DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+set_compose_image "${WANT}@${DIGEST}"
+new_state digest-pin-not-pulled "c1\t${P}-surrealdb-1\tUp 3 days\t${IMG_REPO}@${DIGEST}\timgA\n" "${P}_surrealdb-data\n"
+run_script update.sh || fail "update.sh refused a tag+digest pin (not pulled): $(tail -5 "${STUB_STATE}/out")"
+expect_no_deps_only "update.sh, tag+digest pin, image not pulled"
+
+new_state digest-pin-pulled "c1\t${P}-surrealdb-1\tUp 3 days\t${IMG_REPO}@${DIGEST}\timgA\n" "${P}_surrealdb-data\n" \
+    "${WANT}@${DIGEST}\timgA\n"
+run_script update.sh || fail "update.sh refused a tag+digest pin (pulled): $(tail -5 "${STUB_STATE}/out")"
+expect_no_deps_only "update.sh, tag+digest pin, image pulled"
+
+new_state digest-pin-other-digest "c1\t${P}-surrealdb-1\tUp 3 days\t${IMG_REPO}@sha256:ffff\timgB\n" "${P}_surrealdb-data\n"
+if run_script update.sh; then fail "update.sh accepted a container on another digest"; fi
+expect_refused "update.sh, other digest"
+set_compose_image "${WANT}"
+grep -q "image: ${WANT}\$" "${FIX}/compose.yml" || fail "fixture compose.yml was not restored"
+
+# Same name, different image ID (a re-pushed tag): compose would recreate.
+new_state same-name-other-id "c1\t${P}-surrealdb-1\tUp 3 days\t${WANT}\timgOld\n" "${P}_surrealdb-data\n" \
+    "${WANT}\timgNew\n"
+if run_script update.sh; then fail "update.sh accepted a container whose image ID differs from the pulled compose image"; fi
+grep -q 'compared by image ID' "${STUB_STATE}/out" || fail "ID refusal does not say it compared image IDs"
+expect_refused "update.sh, same name, other image ID"
+
+# Different name, same image ID: the same image.
+new_state other-name-same-id "c1\t${P}-surrealdb-1\tUp 3 days\t${IMG_REPO}@${DIGEST}\timgA\n" "${P}_surrealdb-data\n" \
+    "${WANT}\timgA\n"
+run_script update.sh || fail "update.sh refused a container on the same image ID: $(tail -5 "${STUB_STATE}/out")"
+expect_no_deps_only "update.sh, same image ID"
 
 new_state other-project "c9\tother-surrealdb-1\tUp 1 day\t${OLD}\n" "other_surrealdb-data\n"
 run_script update.sh || fail "update.sh with only another project's DB: exit $?"
@@ -227,4 +277,4 @@ new_state install-fresh "" ""
 run_script install.sh || fail "install.sh fresh: exit $?. $(tail -5 "${STUB_STATE}/out")"
 up_calls | grep -qE ' up -d$' || fail "install.sh fresh did not run a plain up -d: $(up_calls)"
 
-echo "ok: surreal guard (update.sh, reset-local-admin.sh, install.sh; 16 scenarios)"
+echo "ok: surreal guard (update.sh, reset-local-admin.sh, install.sh; 21 scenarios)"

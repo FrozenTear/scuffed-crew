@@ -141,7 +141,7 @@ This `up -d` creates the database container on the image `compose.yml` names. If
 
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
-DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
+The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` probes with `/surreal is-ready` and a 20 s timeout. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 

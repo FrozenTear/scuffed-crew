@@ -78,11 +78,38 @@ compose_surreal_image() {
     ' "${ROOT}/compose.yml"
 }
 
+# docker.io/x/y:tag -> x/y:tag. With a digest the tag is dropped
+# (x/y:tag@sha256:d -> x/y@sha256:d): podman reports a container created from
+# a tag+digest reference by repository and digest only.
 _surreal_guard_norm_image() {
-    local i="$1"
+    local i="$1" repo digest
     i="${i#docker.io/}"
     i="${i#library/}"
+    if [[ "${i}" == *@* ]]; then
+        repo="${i%%@*}"
+        digest="${i#*@}"
+        if [[ "${repo##*/}" == *:* ]]; then
+            repo="${repo%:*}"
+        fi
+        i="${repo}@${digest}"
+    fi
     printf '%s' "${i}"
+}
+
+# Same image? Compare image IDs when the compose image is present locally
+# (stricter: a re-pushed tag counts as different, as it does for compose).
+# Before it is pulled, compare the normalized names.
+_surreal_guard_same_image() {
+    local cid="$1" want="$2" have_name="$3" have_id want_id
+    have_id="$(podman inspect -f '{{.Image}}' "${cid}" 2>/dev/null || true)"
+    want_id="$(podman image inspect "${want}" --format '{{.Id}}' 2>/dev/null || true)"
+    if [[ -n "${have_id}" && -n "${want_id}" ]]; then
+        SURREAL_GUARD_COMPARED="image ID ${have_id:0:12} vs ${want_id:0:12}"
+        [[ "${have_id}" == "${want_id}" ]]
+        return
+    fi
+    SURREAL_GUARD_COMPARED="image name (${want} is not pulled yet)"
+    [[ "$(_surreal_guard_norm_image "${have_name}")" == "$(_surreal_guard_norm_image "${want}")" ]]
 }
 
 surreal_db_volume_exists() {
@@ -136,9 +163,10 @@ surreal_guard_plan() {
     fi
 
     SURREAL_GUARD_IMAGE="$(podman inspect -f '{{.ImageName}}' "${SURREAL_GUARD_CID}" 2>/dev/null || true)"
-    if [[ "$(_surreal_guard_norm_image "${SURREAL_GUARD_IMAGE}")" != "$(_surreal_guard_norm_image "${want}")" ]]; then
+    if ! _surreal_guard_same_image "${SURREAL_GUARD_CID}" "${want}" "${SURREAL_GUARD_IMAGE}"; then
         if [[ "${SCUFFED_ALLOW_DB_IMAGE_MISMATCH:-}" != "1" ]]; then
-            echo "error: ${SURREAL_GUARD_NAME} runs ${SURREAL_GUARD_IMAGE:-an unknown image}, but compose.yml names ${want}." >&2
+            echo "error: ${SURREAL_GUARD_NAME} runs ${SURREAL_GUARD_IMAGE:-an unknown image}, but compose.yml names ${want}" >&2
+            echo "  (compared by ${SURREAL_GUARD_COMPARED})." >&2
             echo "  This script never changes the database image. To upgrade the database," >&2
             echo "  follow ${SURREAL_GUARD_RUNBOOK} (backup first)." >&2
             echo "  To update only the app and leave the database on its current image," >&2
