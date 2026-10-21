@@ -1839,6 +1839,22 @@ async fn retire_active_game(
     seal: Option<detect::MatchOutcome>,
     reason: &str,
 ) {
+    retire_after_pause(st, store, data_dir, seal, reason, std::future::ready(())).await;
+}
+
+/// Same close as [`retire_active_game`]. `pause` runs after the game has
+/// left memory and before the best-guess or sealed outcome is stored, so a
+/// test can signal shutdown in that window. Production passes a ready future.
+async fn retire_after_pause<P>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    seal: Option<detect::MatchOutcome>,
+    reason: &str,
+    pause: P,
+) where
+    P: std::future::Future<Output = ()>,
+{
     // The rank-screen log must not hide the next game's same result. Clear
     // it before the early return: a Tab-opened game can close while the
     // rank screen is up even when no game is active.
@@ -1864,6 +1880,10 @@ async fn retire_active_game(
             );
         }
     }
+    // The game is already out of state. A shutdown that drops this future
+    // here cancels the best-guess and the sealed outcome, and
+    // close_session_on_shutdown then has nothing left to save.
+    pause.await;
     store_best_guess_on_close(store, data_dir, &mut g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
@@ -4548,7 +4568,9 @@ async fn run_loop(
     loop {
         // `biased` polls in source order. Shutdown is first, so a signal
         // that is already waiting beats a poll tick that is also ready.
-        // Work already inside an arm is raced with `stop_for_shutdown`.
+        // A capture or OCR already running in this arm is raced with
+        // `stop_for_shutdown`. A poll write that has started is not: it
+        // finishes inside the shared deadline (`finish_within_shutdown`).
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
@@ -5017,9 +5039,14 @@ async fn run_loop(
                             detect::GamePhase::HeroBan => Some(boundary::StartScreen::HeroBan),
                             _ => None,
                         };
-                        // A store write this call already started can finish.
-                        // Dropping the rest does not start another row.
-                        if stop_for_shutdown(
+                        // `retire_active_game` takes the game out of memory
+                        // before the store calls return. Dropping this future
+                        // on the signal would cancel the best-guess or the
+                        // sealed outcome, and shutdown would have nothing
+                        // left to save. The write runs to completion inside
+                        // whatever of the shared deadline is left, then the
+                        // loop shuts down.
+                        let wrote = finish_within_shutdown(
                             async {
                                 apply_poll_tick(
                                     &mut st,
@@ -5034,10 +5061,10 @@ async fn run_loop(
                                 .await;
                             },
                             stat_tracker::replace::shutdown_notified(),
+                            stat_tracker::replace::shutdown_time_left,
                         )
-                        .await
-                        .is_err()
-                        {
+                        .await;
+                        if wrote.is_err() || stat_tracker::replace::shutdown_requested() {
                             shutdown_from_signal(
                                 &mut st,
                                 &mut capture_task,
@@ -9033,10 +9060,11 @@ async fn close_session_on_shutdown(
 /// Race `work` against shutdown. Shutdown is polled first, so a signal that
 /// is already waiting wins even when `work` is also ready.
 ///
-/// Dropping `work` detaches a `spawn_blocking` task. That OCR keeps running
-/// and its result is discarded. It does not write a match row. The caller
-/// writes the row only after `Ok`, and skips that write once shutdown has
-/// begun. A store write already started inside `work` can finish.
+/// This is for the capture grab and the OCR only. Dropping `work` detaches
+/// a `spawn_blocking` task. That OCR keeps running and its result is
+/// discarded. It does not write a match row. A future that writes game
+/// state goes through [`finish_within_shutdown`] instead: dropping it would
+/// cancel a store call that had already taken the game out of memory.
 async fn stop_for_shutdown<T, S>(
     work: impl std::future::Future<Output = T>,
     shutdown: S,
@@ -9049,6 +9077,35 @@ where
     tokio::select! {
         biased;
         _ = &mut shutdown => Err(()),
+        value = &mut work => Ok(value),
+    }
+}
+
+/// Let a game-state write finish. If `shutdown` fires first, `work` keeps
+/// running until `budget` elapses. The budget is read when the signal
+/// fires, so it is the shared deadline's remainder (`shutdown_time_left`),
+/// not a zero timeout captured before the signal.
+///
+/// `Err` means the deadline passed with the write still running. That drop
+/// is the same bound as the rest of shutdown. A signal by itself does not
+/// drop the write.
+async fn finish_within_shutdown<T, S, B>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: S,
+    budget: B,
+) -> Result<T, ()>
+where
+    S: std::future::Future<Output = ()>,
+    B: FnOnce() -> std::time::Duration,
+{
+    tokio::pin!(work);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => match tokio::time::timeout(budget(), &mut work).await {
+            Ok(value) => Ok(value),
+            Err(_elapsed) => Err(()),
+        },
         value = &mut work => Ok(value),
     }
 }
@@ -16413,9 +16470,22 @@ mod tests {
                 .is_empty(),
             "spawn_blocking OCR is the future passed to stop_for_shutdown"
         );
+        assert_eq!(
+            run_loop.matches("stop_for_shutdown(").count(),
+            2,
+            "only the capture grab and the OCR are raced against shutdown"
+        );
+        let tick_at = run_loop.find("apply_poll_tick(").expect("poll write");
+        let write_at = run_loop[..tick_at]
+            .rfind("finish_within_shutdown(")
+            .expect("the poll write keeps the shutdown deadline");
+        let bound = tick_at
+            + run_loop[tick_at..]
+                .find("shutdown_time_left")
+                .expect("the poll write is bounded by the shared deadline");
         assert!(
-            run_loop.matches("stop_for_shutdown(").count() >= 3,
-            "capture, analysis, and the row write are each raced against shutdown"
+            !run_loop[write_at..bound].contains("stop_for_shutdown("),
+            "a started poll write is not dropped when the signal wins"
         );
     }
 
@@ -16455,6 +16525,109 @@ mod tests {
             stop_for_shutdown(async { "row" }, async {}).await.is_err(),
             "when both are ready, shutdown is polled first"
         );
+    }
+
+    /// Capture and OCR stay on the immediate race. Neither writes a row, so
+    /// dropping them when the signal wins is safe. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_slow_capture_and_ocr_are_cut_off_promptly() {
+        for label in ["capture", "ocr"] {
+            let waiter = std::sync::Arc::new(tokio::sync::Notify::new());
+            let flag = std::sync::Arc::clone(&waiter);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                flag.notify_one();
+            });
+            let started = std::time::Instant::now();
+            let raced = stop_for_shutdown(
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    label
+                },
+                waiter.notified(),
+            )
+            .await;
+            assert!(raced.is_err(), "{label} must be cut off when shutdown wins");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{label} took {elapsed:?}, inside the 5s deadline"
+            );
+        }
+    }
+
+    /// The signal lands after `retire_active_game` has taken the game out of
+    /// memory and before the sealed outcome is stored. The write is not
+    /// dropped, so the outcome is still in the store. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_shutdown_during_retire_still_persists_the_sealed_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-shutdown-seal", "unknown"))
+            .await
+            .unwrap();
+        let mut sealed = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        sealed.session_id = "sess-shutdown-seal".into();
+        sealed.session_created = true;
+        sealed.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(20),
+        });
+        let mut st = session(Some(sealed), Instant::now());
+
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let entered_w = std::sync::Arc::clone(&entered);
+        let release_w = std::sync::Arc::clone(&release);
+        let shutdown_w = std::sync::Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            entered_w.notified().await;
+            shutdown_w.notify_one();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            release_w.notify_one();
+        });
+
+        let started = Instant::now();
+        let finished = finish_within_shutdown(
+            retire_after_pause(
+                &mut st,
+                &store,
+                dir.path(),
+                Some(detect::MatchOutcome::Defeat),
+                "test: shutdown mid-write",
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                },
+            ),
+            shutdown.notified(),
+            || Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "the seal write must finish inside the deadline"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the seal write took {elapsed:?}"
+        );
+        assert!(
+            st.active_game.is_none(),
+            "the game left memory before the store call"
+        );
+        let snaps = store
+            .get_session_snapshots("sess-shutdown-seal")
+            .await
+            .unwrap();
+        assert_eq!(snaps[0].outcome, "defeat");
     }
 
     /// Production poll cadence. A stable screen is emitted on every tick.
